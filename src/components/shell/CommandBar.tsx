@@ -1,4 +1,5 @@
 import {
+  Command,
   Gauge,
   Pause,
   Play,
@@ -6,6 +7,7 @@ import {
   Search,
   Trash2,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,6 +40,7 @@ export function CommandBar({
   onPause,
   onDelete,
 }: CommandBarProps) {
+  const { t } = useTranslation();
   const search = useTaskStore((s) => s.search);
   const setSearch = useTaskStore((s) => s.setSearch);
   const canStart =
@@ -50,39 +53,81 @@ export function CommandBar({
   const canDelete = !!selectedTask;
 
   return (
-    <div className="flex items-center gap-2 border-b border-border-subtle bg-surface-base px-3 py-2">
+    <div className="flex min-w-0 items-center gap-1 border-b border-border-subtle bg-surface-base px-2 py-1.5 md:gap-2 md:px-3 md:py-2">
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             variant="default"
             size="icon"
-            aria-label="New download"
+            className="h-10 w-10 shrink-0 md:h-8 md:w-8"
+            aria-label={t("commandBar.newDownloadAria")}
             onClick={onNewDownload}
           >
             <Plus className="h-4 w-4" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>New download</TooltipContent>
+        <TooltipContent>{t("commandBar.newDownload")}</TooltipContent>
       </Tooltip>
 
-      <ActionIcon label="Start" icon={Play} onClick={onStart} disabled={!canStart} />
-      <ActionIcon label="Pause" icon={Pause} onClick={onPause} disabled={!canPause} />
-      <ActionIcon label="Delete" icon={Trash2} onClick={onDelete} disabled={!canDelete} />
-      <ActionIcon label="Speed limit" icon={Gauge} />
+      <div className="hidden shrink-0 items-center gap-1 sm:flex md:gap-2">
+        <ActionIcon
+          label={t("commandBar.start")}
+          icon={Play}
+          onClick={onStart}
+          disabled={!canStart}
+        />
+        <ActionIcon
+          label={t("commandBar.pause")}
+          icon={Pause}
+          onClick={onPause}
+          disabled={!canPause}
+        />
+        <ActionIcon
+          label={t("commandBar.delete")}
+          icon={Trash2}
+          onClick={onDelete}
+          disabled={!canDelete}
+        />
+        <ActionIcon
+          label={t("commandBar.speedLimit")}
+          icon={Gauge}
+          className="hidden md:inline-flex"
+        />
+      </div>
 
       <div className="relative min-w-0 flex-1">
         <Search className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
         <Input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search tasks"
-          className="pl-8"
-          aria-label="Search tasks"
+          placeholder={t("commandBar.searchPlaceholder")}
+          className="h-10 pl-8 md:h-8"
+          aria-label={t("commandBar.searchAria")}
         />
       </div>
 
-      <Button variant="outline" size="sm" onClick={onOpenPalette}>
-        Command palette
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-10 w-10 shrink-0 md:hidden"
+            aria-label={t("commandBar.palette")}
+            onClick={onOpenPalette}
+          >
+            <Command className="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{t("commandBar.palette")}</TooltipContent>
+      </Tooltip>
+
+      <Button
+        variant="outline"
+        size="sm"
+        className="hidden shrink-0 md:inline-flex"
+        onClick={onOpenPalette}
+      >
+        {t("commandBar.palette")}
         <kbd className="ml-2 rounded border border-border-subtle px-1.5 py-0.5 font-mono text-[10px] text-text-muted">
           {formatShortcut("mod+K", platform)}
         </kbd>
@@ -96,11 +141,13 @@ function ActionIcon({
   icon: Icon,
   onClick,
   disabled,
+  className,
 }: {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   onClick?: () => void;
   disabled?: boolean;
+  className?: string;
 }) {
   return (
     <Tooltip>
@@ -111,6 +158,7 @@ function ActionIcon({
           aria-label={label}
           onClick={onClick}
           disabled={disabled}
+          className={className}
         >
           <Icon className="h-4 w-4" />
         </Button>

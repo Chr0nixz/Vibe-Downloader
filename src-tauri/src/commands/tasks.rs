@@ -8,14 +8,14 @@ use std::{
 
 use serde::Deserialize;
 use specta::Type;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
     db,
     download::HttpEngine,
-    events::{EVENT_QUEUE_CHANGED, EVENT_TASK_PROGRESS},
-    models::{task::now_iso, ProbeTaskPayload, Task, TaskRecord, TaskStatus},
+    events::{emit_queue_changed, emit_task_progress},
+    models::{task::now_iso, ProbeTaskPayload, Task, TaskRecord, TaskSegment, TaskStatus},
     platform,
     AppState, DownloadControl,
 };
@@ -48,6 +48,17 @@ pub async fn get_task(state: State<'_, AppState>, id: String) -> Result<Option<T
     db::get_task_record(&state.pool, &id)
         .await
         .map(|record| record.map(Task::from))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_task_segments(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<Vec<TaskSegment>, String> {
+    db::list_segment_records(&state.pool, &task_id)
+        .await
+        .map(|records| records.into_iter().map(TaskSegment::from).collect())
 }
 
 #[tauri::command]
@@ -139,7 +150,8 @@ pub async fn create_task(
     };
 
     db::insert_task_record(&state.pool, &record).await?;
-    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+    db::ensure_single_segment_for_task(&state.pool, &record).await?;
+    emit_queue_changed(&app);
     start_task_download(app.clone(), state.inner(), record.clone()).await?;
 
     db::get_task_record(&state.pool, &record.id)
@@ -169,9 +181,19 @@ pub async fn pause_task(
         None,
     )
     .await?;
+    if let Some(segment) = db::get_first_segment_record(&state.pool, &id).await? {
+        db::update_segment_status(
+            &state.pool,
+            &segment.id,
+            crate::models::SegmentStatus::Pending,
+            None,
+            None,
+        )
+        .await?;
+    }
     let task = require_task(&state.pool, &id).await?;
-    emit_task_progress(&app, &task);
-    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+    emit_task_progress_snapshot(&app, &task);
+    emit_queue_changed(&app);
     Ok(Task::from(task))
 }
 
@@ -213,6 +235,16 @@ pub async fn retry_task(
         None,
     )
     .await?;
+    if let Some(segment) = db::get_first_segment_record(&state.pool, &id).await? {
+        db::update_segment_status(
+            &state.pool,
+            &segment.id,
+            crate::models::SegmentStatus::Pending,
+            None,
+            None,
+        )
+        .await?;
+    }
     let task = require_task(&state.pool, &id).await?;
     start_task_download(app.clone(), state.inner(), task).await?;
     let task = require_task(&state.pool, &id).await?;
@@ -240,9 +272,19 @@ pub async fn cancel_task(
         Some("Canceled by user."),
     )
     .await?;
+    if let Some(segment) = db::get_first_segment_record(&state.pool, &id).await? {
+        db::update_segment_status(
+            &state.pool,
+            &segment.id,
+            crate::models::SegmentStatus::Failed,
+            None,
+            Some("Canceled by user."),
+        )
+        .await?;
+    }
     let task = require_task(&state.pool, &id).await?;
-    emit_task_progress(&app, &task);
-    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+    emit_task_progress_snapshot(&app, &task);
+    emit_queue_changed(&app);
     Ok(Task::from(task))
 }
 
@@ -272,7 +314,7 @@ pub async fn delete_task(
     }
 
     db::delete_task_record(&state.pool, &id).await?;
-    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+    emit_queue_changed(&app);
     Ok(())
 }
 
@@ -330,6 +372,7 @@ async fn start_task_download(
     state: &AppState,
     task: TaskRecord,
 ) -> Result<(), String> {
+    let task = prepare_task_for_download(&state.pool, task).await?;
     let mut downloads = state.downloads.lock().await;
     if downloads.contains_key(&task.id) {
         return Ok(());
@@ -385,8 +428,152 @@ async fn start_task_download(
         },
     );
 
-    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+    emit_queue_changed(&app);
     Ok(())
+}
+
+async fn prepare_task_for_download(
+    pool: &sqlx::SqlitePool,
+    task: TaskRecord,
+) -> Result<TaskRecord, String> {
+    if task.status == TaskStatus::NeedsAttention {
+        return Err("Remote file changed. Restart download to avoid corruption.".to_string());
+    }
+
+    let segment = db::ensure_single_segment_for_task(pool, &task).await?;
+    let temp_path = task
+        .temp_path
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| "Task is missing a temporary path.".to_string())?;
+    let temp_exists = temp_path.exists();
+    let temp_size = std::fs::metadata(&temp_path)
+        .map(|metadata| i64::try_from(metadata.len()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    let recorded_progress = task.downloaded_bytes.max(segment.downloaded_until);
+
+    if let Some(message) = local_resume_error(
+        recorded_progress,
+        temp_exists,
+        temp_size,
+        task.total_size,
+        task.supports_range,
+    ) {
+        fail_task_and_segment(pool, &task.id, &segment.id, message, temp_size).await?;
+        return Err(message.to_string());
+    }
+
+    if temp_size > 0 {
+        let probe = HttpEngine::new()?.probe(task.final_url.as_deref().unwrap_or(&task.url)).await?;
+        if let Some(message) = resume_mismatch_message(&task, &probe) {
+            db::update_task_status(
+                pool,
+                &task.id,
+                TaskStatus::NeedsAttention,
+                0,
+                0,
+                Some(&message),
+                Some(&message),
+            )
+            .await?;
+            db::update_segment_status(
+                pool,
+                &segment.id,
+                crate::models::SegmentStatus::Failed,
+                Some(temp_size),
+                Some(&message),
+            )
+            .await?;
+            return Err(message);
+        }
+    }
+
+    if temp_size > segment.downloaded_until {
+        db::update_task_and_segment_progress(
+            pool,
+            &task.id,
+            &segment.id,
+            temp_size,
+            0,
+            0,
+            task.status,
+        )
+        .await?;
+    }
+
+    require_task(pool, &task.id).await
+}
+
+pub fn local_resume_error(
+    recorded_progress: i64,
+    temp_exists: bool,
+    temp_size: i64,
+    total_size: i64,
+    supports_range: bool,
+) -> Option<&'static str> {
+    if temp_size > total_size && total_size > 0 {
+        return Some("Temporary file is larger than the remote file.");
+    }
+    if recorded_progress > 0 && !temp_exists {
+        return Some("Temporary file is missing. Restart this download.");
+    }
+    if recorded_progress > temp_size {
+        return Some("Temporary file is smaller than the recorded progress.");
+    }
+    if temp_size > 0 && !supports_range {
+        return Some("Resume unavailable. Restart this download from the beginning.");
+    }
+    None
+}
+
+pub fn resume_mismatch_message(
+    task: &TaskRecord,
+    probe: &crate::download::ProbeResult,
+) -> Option<String> {
+    if task.total_size != probe.total_size {
+        return Some("Remote file changed. Restart download to avoid corruption.".to_string());
+    }
+    if !probe.supports_range {
+        return Some("Server no longer supports resume. Restart this download.".to_string());
+    }
+    if task.etag.as_deref().is_some_and(|etag| Some(etag) != probe.etag.as_deref()) {
+        return Some("Remote file changed. Restart download to avoid corruption.".to_string());
+    }
+    if task
+        .last_modified
+        .as_deref()
+        .is_some_and(|last_modified| Some(last_modified) != probe.last_modified.as_deref())
+    {
+        return Some("Remote file changed. Restart download to avoid corruption.".to_string());
+    }
+    None
+}
+
+async fn fail_task_and_segment(
+    pool: &sqlx::SqlitePool,
+    task_id: &str,
+    segment_id: &str,
+    message: &str,
+    downloaded_until: i64,
+) -> Result<(), String> {
+    db::update_task_status(
+        pool,
+        task_id,
+        TaskStatus::Failed,
+        0,
+        0,
+        Some(message),
+        Some(message),
+    )
+    .await?;
+    db::update_segment_status(
+        pool,
+        segment_id,
+        crate::models::SegmentStatus::Failed,
+        Some(downloaded_until),
+        Some(message),
+    )
+    .await
 }
 
 async fn mark_download_failed(app: &AppHandle, pool: &sqlx::SqlitePool, task_id: &str, error: String) {
@@ -400,10 +587,20 @@ async fn mark_download_failed(app: &AppHandle, pool: &sqlx::SqlitePool, task_id:
         Some(&error),
     )
     .await;
-    if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
-        emit_task_progress(app, &task);
+    if let Ok(Some(segment)) = db::get_first_segment_record(pool, task_id).await {
+        let _ = db::update_segment_status(
+            pool,
+            &segment.id,
+            crate::models::SegmentStatus::Failed,
+            None,
+            Some(&error),
+        )
+        .await;
     }
-    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+    if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
+        emit_task_progress_snapshot(app, &task);
+    }
+    emit_queue_changed(app);
 }
 
 async fn require_task(pool: &sqlx::SqlitePool, id: &str) -> Result<TaskRecord, String> {
@@ -412,7 +609,7 @@ async fn require_task(pool: &sqlx::SqlitePool, id: &str) -> Result<TaskRecord, S
         .ok_or_else(|| "Task not found.".to_string())
 }
 
-fn emit_task_progress(app: &AppHandle, task: &TaskRecord) {
+fn emit_task_progress_snapshot(app: &AppHandle, task: &TaskRecord) {
     let payload = crate::models::TaskProgressPayload {
         task_id: task.id.clone(),
         downloaded_bytes: task.downloaded_bytes.to_string(),
@@ -421,7 +618,7 @@ fn emit_task_progress(app: &AppHandle, task: &TaskRecord) {
         connection_count: task.connection_count,
         status: task.status,
     };
-    let _ = app.emit(EVENT_TASK_PROGRESS, &payload);
+    emit_task_progress(app, &payload);
 }
 
 fn unique_final_path(save_dir: &Path, requested_file_name: &str) -> PathBuf {

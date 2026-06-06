@@ -94,6 +94,46 @@ pub struct TaskRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSegment {
+    pub id: String,
+    pub task_id: String,
+    pub range_start: String,
+    pub range_end: String,
+    pub downloaded_until: String,
+    pub status: SegmentStatus,
+    pub retry_count: i32,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskSegmentRecord {
+    pub id: String,
+    pub task_id: String,
+    pub range_start: i64,
+    pub range_end: i64,
+    pub downloaded_until: i64,
+    pub status: SegmentStatus,
+    pub retry_count: i32,
+    pub last_error: Option<String>,
+}
+
+impl From<TaskSegmentRecord> for TaskSegment {
+    fn from(record: TaskSegmentRecord) -> Self {
+        Self {
+            id: record.id,
+            task_id: record.task_id,
+            range_start: record.range_start.to_string(),
+            range_end: record.range_end.to_string(),
+            downloaded_until: record.downloaded_until.to_string(),
+            status: record.status,
+            retry_count: record.retry_count,
+            last_error: record.last_error,
+        }
+    }
+}
+
 impl From<TaskRecord> for Task {
     fn from(record: TaskRecord) -> Self {
         Self {
@@ -118,6 +158,35 @@ impl From<TaskRecord> for Task {
             error_message: record.error_message,
             created_at: record.created_at,
             updated_at: record.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentStatus {
+    Pending,
+    Downloading,
+    Completed,
+    Failed,
+}
+
+impl SegmentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Downloading => "downloading",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Self {
+        match value {
+            "downloading" => Self::Downloading,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            _ => Self::Pending,
         }
     }
 }

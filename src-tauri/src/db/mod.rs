@@ -1,6 +1,6 @@
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 
-use crate::models::{TaskRecord, TaskStatus};
+use crate::models::{SegmentStatus, TaskRecord, TaskSegmentRecord, TaskStatus};
 
 pub async fn connect(db_path: &std::path::Path) -> Result<SqlitePool, String> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -131,6 +131,115 @@ pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<
     Ok(())
 }
 
+pub async fn insert_segment_record(
+    pool: &SqlitePool,
+    segment: &TaskSegmentRecord,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        INSERT INTO segments (
+            id, task_id, range_start, range_end, downloaded_until,
+            status, retry_count, last_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&segment.id)
+    .bind(&segment.task_id)
+    .bind(segment.range_start)
+    .bind(segment.range_end)
+    .bind(segment.downloaded_until)
+    .bind(segment.status.as_str())
+    .bind(segment.retry_count)
+    .bind(&segment.last_error)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn ensure_single_segment_for_task(
+    pool: &SqlitePool,
+    task: &TaskRecord,
+) -> Result<TaskSegmentRecord, String> {
+    if let Some(segment) = get_first_segment_record(pool, &task.id).await? {
+        return Ok(segment);
+    }
+
+    let segment = TaskSegmentRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        task_id: task.id.clone(),
+        range_start: 0,
+        range_end: task.total_size.saturating_sub(1).max(0),
+        downloaded_until: task.downloaded_bytes.max(0),
+        status: if task.downloaded_bytes >= task.total_size && task.total_size > 0 {
+            SegmentStatus::Completed
+        } else {
+            SegmentStatus::Pending
+        },
+        retry_count: 0,
+        last_error: None,
+    };
+    insert_segment_record(pool, &segment).await?;
+    Ok(segment)
+}
+
+pub async fn list_segment_records(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Vec<TaskSegmentRecord>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, task_id, range_start, range_end, downloaded_until,
+               status, retry_count, last_error
+        FROM segments
+        WHERE task_id = ?
+        ORDER BY range_start ASC
+        "#,
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    rows.iter().map(row_to_segment).collect()
+}
+
+pub async fn get_first_segment_record(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Option<TaskSegmentRecord>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, task_id, range_start, range_end, downloaded_until,
+               status, retry_count, last_error
+        FROM segments
+        WHERE task_id = ?
+        ORDER BY range_start ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    row.as_ref().map(row_to_segment).transpose()
+}
+
+fn row_to_segment(row: &sqlx::sqlite::SqliteRow) -> Result<TaskSegmentRecord, String> {
+    Ok(TaskSegmentRecord {
+        id: row.get("id"),
+        task_id: row.get("task_id"),
+        range_start: row.get("range_start"),
+        range_end: row.get("range_end"),
+        downloaded_until: row.get("downloaded_until"),
+        status: SegmentStatus::from_db_str(row.get::<String, _>("status").as_str()),
+        retry_count: row.get("retry_count"),
+        last_error: row.get("last_error"),
+    })
+}
+
 pub async fn clear_tasks(pool: &SqlitePool) -> Result<(), String> {
     sqlx::query("DELETE FROM task_events")
         .execute(pool)
@@ -170,6 +279,42 @@ pub async fn update_task_progress(
     .bind(status.as_str())
     .bind(&updated_at)
     .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn update_task_and_segment_progress(
+    pool: &SqlitePool,
+    task_id: &str,
+    segment_id: &str,
+    downloaded_bytes: i64,
+    speed_bps: i64,
+    connection_count: i32,
+    status: TaskStatus,
+) -> Result<(), String> {
+    update_task_progress(
+        pool,
+        task_id,
+        downloaded_bytes,
+        speed_bps,
+        connection_count,
+        status,
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE segments
+        SET downloaded_until = ?, status = ?, last_error = NULL
+        WHERE id = ?
+        "#,
+    )
+    .bind(downloaded_bytes)
+    .bind(SegmentStatus::Downloading.as_str())
+    .bind(segment_id)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -231,6 +376,53 @@ pub async fn complete_task(pool: &SqlitePool, task_id: &str) -> Result<(), Strin
     Ok(())
 }
 
+pub async fn complete_task_segment(
+    pool: &SqlitePool,
+    task_id: &str,
+    segment_id: &str,
+) -> Result<(), String> {
+    complete_task(pool, task_id).await?;
+
+    sqlx::query(
+        r#"
+        UPDATE segments
+        SET downloaded_until = range_end + 1, status = 'completed', last_error = NULL
+        WHERE id = ?
+        "#,
+    )
+    .bind(segment_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn update_segment_status(
+    pool: &SqlitePool,
+    segment_id: &str,
+    status: SegmentStatus,
+    downloaded_until: Option<i64>,
+    last_error: Option<&str>,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE segments
+        SET status = ?, downloaded_until = COALESCE(?, downloaded_until), last_error = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(status.as_str())
+    .bind(downloaded_until)
+    .bind(last_error)
+    .bind(segment_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 pub async fn delete_task_record(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
     sqlx::query("DELETE FROM tasks WHERE id = ?")
         .bind(task_id)
@@ -254,6 +446,17 @@ pub async fn reset_interrupted_tasks(pool: &SqlitePool) -> Result<(), String> {
         "#,
     )
     .bind(&updated_at)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        r#"
+        UPDATE segments
+        SET status = 'pending'
+        WHERE status = 'downloading'
+        "#,
+    )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;

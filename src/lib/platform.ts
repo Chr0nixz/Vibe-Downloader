@@ -1,4 +1,4 @@
-import { type } from "@tauri-apps/plugin-os";
+import { isTauriRuntime } from "@/lib/runtime";
 
 export type Platform = "windows" | "macos" | "linux" | "unknown";
 
@@ -13,7 +13,11 @@ function detectPlatformFallback(): Platform {
 }
 
 export async function getPlatform(): Promise<Platform> {
+  if (!isTauriRuntime()) {
+    return detectPlatformFallback();
+  }
   try {
+    const { type } = await import("@tauri-apps/plugin-os");
     const osType = await type();
     if (osType === "windows") return "windows";
     if (osType === "macos") return "macos";

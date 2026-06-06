@@ -1,6 +1,6 @@
 # Vibe Downloader
 
-Modern desktop download manager (Tauri 2 + React + Rust). This repository currently ships the app shell, design tokens, SQLite schema draft, mock-task dev helper, event bridge, and a stabilized **single-connection HTTP MVP** for creating, probing, pausing, resuming, retrying, deleting, and opening downloads.
+Modern desktop download manager (Tauri 2 + React + Rust). This repository currently ships the app shell, design tokens, SQLite schema draft, mock-task dev helper, event bridge, and a stabilized **single-connection HTTP MVP** with Range resume validation and single-segment progress records.
 
 ## Prerequisites
 
@@ -57,7 +57,7 @@ cargo test
 ## Architecture
 
 - **Frontend**: React, Zustand, Tailwind v4, shadcn-style primitives, Framer Motion (command palette / details).
-- **Backend**: Rust commands + SQLite (`sqlx` runtime queries), single-connection `reqwest` HTTP downloads, startup state reset for interrupted tasks, Tauri events (`task.progress`, `queue.changed`).
+- **Backend**: Rust commands + SQLite (`sqlx` runtime queries), single-connection `reqwest` HTTP downloads, Range resume metadata checks, `segments` progress records, startup state reset for interrupted tasks, Tauri events (`task.progress`, `queue.changed`).
 - **Types**: `tauri-specta` exports to `src/generated/bindings.ts`.
 - **Window API**: `@tauri-apps/api/window` (`getCurrentWindow`) with `core:window:*` capabilities. No `@tauri-apps/plugin-window`.
 

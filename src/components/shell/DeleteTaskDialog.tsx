@@ -1,7 +1,11 @@
+import { useTranslation } from "react-i18next";
+
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -18,30 +22,47 @@ export function DeleteTaskDialog({
   onOpenChange: (open: boolean) => void;
   onDelete: (deleteFile: boolean) => void;
 }) {
+  const { t } = useTranslation();
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete task</DialogTitle>
+          <DialogTitle>{t("deleteDialog.title")}</DialogTitle>
         </DialogHeader>
-        <div className="flex flex-col gap-3 p-4 text-sm">
+        <DialogBody className="py-4 text-sm">
           <p className="text-text-secondary">
             {task
-              ? `Delete "${task.fileName}" from the task list?`
-              : "Delete this task from the task list?"}
+              ? t("deleteDialog.messageWithName", { name: task.fileName })
+              : t("deleteDialog.messageGeneric")}
           </p>
-          <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button type="button" variant="outline" onClick={() => onDelete(false)}>
-              Delete record
-            </Button>
-            <Button type="button" variant="danger" onClick={() => onDelete(true)}>
-              Delete files too
-            </Button>
-          </div>
-        </div>
+        </DialogBody>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="ghost"
+            className="w-full sm:w-auto"
+            onClick={() => onOpenChange(false)}
+          >
+            {t("deleteDialog.cancel")}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full sm:w-auto"
+            onClick={() => onDelete(false)}
+          >
+            {t("deleteDialog.deleteRecord")}
+          </Button>
+          <Button
+            type="button"
+            variant="danger"
+            className="w-full sm:w-auto"
+            onClick={() => onDelete(true)}
+          >
+            {t("deleteDialog.deleteFilesToo")}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

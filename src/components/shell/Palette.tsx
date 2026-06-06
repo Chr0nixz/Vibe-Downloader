@@ -1,4 +1,13 @@
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useTranslation } from "react-i18next";
+
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { seedMockTasks } from "@/lib/tauri";
 import { useTaskStore } from "@/stores/task-store";
 
@@ -9,6 +18,7 @@ export function Palette({
   open: boolean;
   onOpenChange: (v: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const setTasks = useTaskStore((s) => s.setTasks);
   const setError = useTaskStore((s) => s.setError);
 
@@ -16,23 +26,26 @@ export function Palette({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Command palette</DialogTitle>
+          <DialogTitle>{t("palette.title")}</DialogTitle>
         </DialogHeader>
-        <button
-          type="button"
-          className="mt-2 w-full rounded-md bg-surface-raised px-3 py-2 text-left text-sm"
-          onClick={async () => {
-            try {
-              setTasks(await seedMockTasks());
-              setError(null);
-            } catch (e) {
-              setError(String(e));
-            }
-            onOpenChange(false);
-          }}
-        >
-          Reset mock tasks
-        </button>
+        <DialogBody className="py-4">
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full justify-start"
+            onClick={async () => {
+              try {
+                setTasks(await seedMockTasks());
+                setError(null);
+              } catch (e) {
+                setError(String(e));
+              }
+              onOpenChange(false);
+            }}
+          >
+            {t("palette.resetMockTasks")}
+          </Button>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

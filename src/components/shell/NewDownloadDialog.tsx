@@ -1,9 +1,12 @@
 import { useState, type FormEvent } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -23,6 +26,7 @@ export function NewDownloadDialog({
   onOpenChange: (open: boolean) => void;
   onCreated: (task: Task) => void;
 }) {
+  const { t } = useTranslation();
   const [url, setUrl] = useState("");
   const [saveDir, setSaveDir] = useState("");
   const [fileName, setFileName] = useState("");
@@ -75,78 +79,81 @@ export function NewDownloadDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>New download</DialogTitle>
+          <DialogTitle>{t("newDownload.title")}</DialogTitle>
         </DialogHeader>
-        <form className="flex flex-col gap-3 p-4" onSubmit={submit}>
-          <label className="flex flex-col gap-1 text-xs text-text-muted">
-            URL
-            <Input
-              value={url}
-              onChange={(event) => {
-                setUrl(event.target.value);
-                setProbe(null);
-              }}
-              placeholder="https://example.com/file.zip"
-              autoFocus
-              required
-            />
-          </label>
-          <div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={detect}
-              disabled={probing || !url.trim()}
-            >
-              {probing ? "Detecting..." : "Detect"}
-            </Button>
-          </div>
-          <label className="flex flex-col gap-1 text-xs text-text-muted">
-            Save directory
-            <Input
-              value={saveDir}
-              onChange={(event) => setSaveDir(event.target.value)}
-              placeholder="Default Downloads folder"
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-text-muted">
-            File name
-            <Input
-              value={fileName}
-              onChange={(event) => setFileName(event.target.value)}
-              placeholder="Detected from the server"
-            />
-          </label>
-          {probe ? (
-            <div className="grid grid-cols-2 gap-2 rounded-md border border-border-subtle bg-surface-raised/60 p-3 text-xs">
-              <Info label="File" value={probe.fileName} />
-              <Info label="Size" value={formatBytes(parseByteCount(probe.totalSize))} />
-              <Info label="Host" value={probe.sourceHost} />
-              <Info
-                label="Resume"
-                value={probe.supportsRange ? "Supported" : "Unavailable"}
+        <form className="flex min-h-0 flex-1 flex-col overflow-hidden" onSubmit={submit}>
+          <DialogBody className="flex flex-col gap-3 py-4">
+            <label className="flex flex-col gap-1 text-xs text-text-muted">
+              {t("newDownload.url")}
+              <Input
+                value={url}
+                onChange={(event) => {
+                  setUrl(event.target.value);
+                  setProbe(null);
+                }}
+                placeholder={t("newDownload.urlPlaceholder")}
+                autoFocus
+                required
               />
+            </label>
+            <div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={detect}
+                disabled={probing || !url.trim()}
+              >
+                {probing ? t("newDownload.detecting") : t("newDownload.detect")}
+              </Button>
             </div>
-          ) : null}
-          {error ? (
-            <p className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
-              {error}
-            </p>
-          ) : null}
-          <div className="flex justify-end gap-2 pt-1">
+            <label className="flex flex-col gap-1 text-xs text-text-muted">
+              {t("newDownload.saveDir")}
+              <Input
+                value={saveDir}
+                onChange={(event) => setSaveDir(event.target.value)}
+                placeholder={t("newDownload.saveDirPlaceholder")}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-text-muted">
+              {t("newDownload.fileName")}
+              <Input
+                value={fileName}
+                onChange={(event) => setFileName(event.target.value)}
+                placeholder={t("newDownload.fileNamePlaceholder")}
+              />
+            </label>
+            {probe ? (
+              <div className="grid grid-cols-1 gap-2 rounded-md border border-border-subtle bg-surface-raised/60 p-3 text-xs sm:grid-cols-2">
+                <Info label={t("newDownload.probeFile")} value={probe.fileName} />
+                <Info label={t("newDownload.probeSize")} value={formatBytes(parseByteCount(probe.totalSize))} />
+                <Info label={t("newDownload.probeHost")} value={probe.sourceHost} />
+                <Info
+                  label={t("newDownload.probeResume")}
+                  value={probe.supportsRange ? t("newDownload.resumeSupported") : t("newDownload.resumeUnavailable")}
+                />
+              </div>
+            ) : null}
+            {error ? (
+              <p className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+                {error}
+              </p>
+            ) : null}
+          </DialogBody>
+          <DialogFooter>
             <Button
               type="button"
               variant="ghost"
+              className="w-full sm:w-auto"
               onClick={() => onOpenChange(false)}
               disabled={submitting}
             >
-              Cancel
+              {t("newDownload.cancel")}
             </Button>
-            <Button type="submit" disabled={submitting}>
-              {submitting ? "Starting..." : "Start download"}
+            <Button type="submit" className="w-full sm:w-auto" disabled={submitting}>
+              {submitting ? t("newDownload.starting") : t("newDownload.start")}
             </Button>
-          </div>
+          </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

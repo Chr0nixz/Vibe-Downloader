@@ -10,12 +10,12 @@
 
 | 已完成 | 未完成 / 占位 |
 |--------|----------------|
-| Tauri 2 + React 壳层、设计 token、任务列表/详情/命令栏 UI | 分片表 `segments` 与 Range 多连接 |
-| SQLite 草案 schema、`list_tasks` / mock 种子数据 | 崩溃恢复、全局队列、限速与设置页 |
-| 单连接 HTTP 下载、真实 `task.progress` 事件 | 多连接详情 Chunks/Connections 仍为占位 |
+| Tauri 2 + React 壳层、设计 token、任务列表/详情/命令栏 UI | Range 多连接 |
+| SQLite 草案 schema、`list_tasks` / mock 种子数据、单连接 `segments` 记录 | 崩溃自动继续、全局队列、限速与设置页 |
+| 单连接 HTTP 下载、Range 续传校验、真实 `task.progress` 事件 | Connections 详情仍为占位 |
 | Windows 自绘标题栏 + 窗口控制 | 打开文件/目录、浏览器扩展交接 |
 | 新建下载、暂停/恢复/删除、重试、打开文件/目录命令 | 事件类型未完全纳入 specta event 契约 |
-| `tauri-specta` 命令绑定、本地 HTTP 回归测试 | L2 三平台 `tauri build` 仍需持续验证 |
+| `tauri-specta` 命令绑定、本地 HTTP/segments 回归测试 | L2 三平台 `tauri build` 仍需持续验证 |
 
 ---
 
@@ -153,23 +153,23 @@ flowchart LR
 | 4 | `pause_task` / `resume_task` / `retry_task` | 命令栏与任务行操作可用 |
 | 5 | 失败路径与 `failed` UI | 有明确原因、Retry、删除选择 |
 
-## 下一迭代建议（稳定化 → 阶段 2 前置）
+## 下一迭代建议（阶段 2：多连接前置 → 固定分片）
 
-在进入 Range 多连接前，优先把 HTTP MVP 稳定化：
+Range 续传 + 单连接 segment 记录已作为阶段 2 前置切片落地；下一步进入固定分片多连接前，应先完成以下收口：
 
 | 顺序 | 任务 | 产出 |
 |------|------|------|
-| 1 | 本地 HTTP 回归测试扩展 | 覆盖 probe、错误、下载完成、暂停恢复、不支持 Range |
-| 2 | 启动状态收敛 | 上次退出遗留的 downloading/retrying 安全重置 |
-| 3 | 文件操作验收 | 打开文件/目录、删除记录/删除文件语义清晰 |
-| 4 | 验证链路 | `pnpm typecheck`、`pnpm build`、`pnpm specta`、`cargo check`、`clippy`、`cargo test` 全绿 |
-| 5 | 版本基线 | 初始化提交，后续阶段基于 Git diff 推进 |
+| 1 | 固定分片计划 | 按 total size 生成 4 路以内 segments |
+| 2 | 随机写入 | 多个 Range 写入同一个临时文件不同偏移 |
+| 3 | 连接摘要事件 | 为详情 Connections tab 提供只读数据 |
+| 4 | 合并验收 | 文件大小与可选 hash 校验正确后 rename |
+| 5 | 验证链路 | `pnpm typecheck`、`pnpm build`、`pnpm specta`、`cargo check`、`clippy`、`cargo test` 全绿 |
 
 ### 阶段 2 启动条件
 
-- HTTP MVP 稳定化验证全绿。
-- 本地 HTTP 回归测试覆盖暂停/恢复和失败路径。
-- 真实下载任务在空列表、失败、完成、删除文件四类 UI 状态下行为一致。
+- Range 续传校验、单连接 segment 记录和 Chunks 详情展示验证全绿。
+- 默认并行 `cargo test` 稳定通过。
+- 多连接实现不改变现有任务级命令签名。
 
 ### 刻意延后
 

@@ -1,19 +1,50 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 
 import { CommandBar } from "@/components/shell/CommandBar";
-import { DeleteTaskDialog } from "@/components/shell/DeleteTaskDialog";
-import { NewDownloadDialog } from "@/components/shell/NewDownloadDialog";
-import { Palette } from "@/components/shell/Palette";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { StatusBar } from "@/components/shell/StatusBar";
-import { TaskDetails } from "@/components/shell/TaskDetails";
 import { TitleBar } from "@/components/shell/TitleBar";
 import { TaskList } from "@/components/tasks/TaskList";
+import { readShellLayout } from "@/hooks/use-shell-layout";
+import { useActiveDownloadSync } from "@/hooks/use-active-download-sync";
+import { useTaskEvents } from "@/hooks/use-task-events";
 import {
   getPlatform,
   trafficLightsInsetPx,
   type Platform,
 } from "@/lib/platform";
+import {
+  deleteTask,
+  listTasks,
+  openTaskFile,
+  openTaskFolder,
+  pauseTask,
+  retryTask,
+  resumeTask,
+} from "@/lib/tauri";
+import { useTaskStore } from "@/stores/task-store";
+import type { Task } from "@/types/task";
+
+const TaskDetails = lazy(() =>
+  import("@/components/shell/TaskDetails").then((module) => ({
+    default: module.TaskDetails,
+  })),
+);
+const Palette = lazy(() =>
+  import("@/components/shell/Palette").then((module) => ({
+    default: module.Palette,
+  })),
+);
+const NewDownloadDialog = lazy(() =>
+  import("@/components/shell/NewDownloadDialog").then((module) => ({
+    default: module.NewDownloadDialog,
+  })),
+);
+const DeleteTaskDialog = lazy(() =>
+  import("@/components/shell/DeleteTaskDialog").then((module) => ({
+    default: module.DeleteTaskDialog,
+  })),
+);
 
 function matchesShortcut(
   event: KeyboardEvent,
@@ -28,19 +59,6 @@ function matchesShortcut(
   }
   return event.key.toLowerCase() === key;
 }
-import {
-  deleteTask,
-  listTasks,
-  onQueueChanged,
-  onTaskProgress,
-  openTaskFile,
-  openTaskFolder,
-  pauseTask,
-  retryTask,
-  resumeTask,
-} from "@/lib/tauri";
-import { useTaskStore } from "@/stores/task-store";
-import type { Task } from "@/types/task";
 
 export function AppShell() {
   const [platform, setPlatform] = useState<Platform>("unknown");
@@ -52,10 +70,10 @@ export function AppShell() {
   const selectedId = useTaskStore((s) => s.selectedId);
   const detailOpen = useTaskStore((s) => s.detailOpen);
   const setTasks = useTaskStore((s) => s.setTasks);
-  const patchTask = useTaskStore((s) => s.patchTask);
   const setLoading = useTaskStore((s) => s.setLoading);
   const setError = useTaskStore((s) => s.setError);
   const selectTask = useTaskStore((s) => s.selectTask);
+  const setDetailOpen = useTaskStore((s) => s.setDetailOpen);
 
   const selected = tasks.find((t) => t.id === selectedId) ?? null;
 
@@ -113,42 +131,36 @@ export function AppShell() {
     );
   }, [platform]);
 
+  useTaskEvents();
+  useActiveDownloadSync();
+
   useEffect(() => {
     let cancelled = false;
-    let unlistenProgress: (() => void) | undefined;
-    let unlistenQueue: (() => void) | undefined;
 
     void (async () => {
       try {
         const data = await listTasks();
         if (!cancelled) {
           setTasks(data);
-          if (data.length > 0 && !selectedId) selectTask(data[0].id);
+          const currentSelectedId = useTaskStore.getState().selectedId;
+          if (data.length > 0 && !currentSelectedId) {
+            selectTask(data[0].id);
+            if (readShellLayout() === "wide") {
+              setDetailOpen(true);
+            }
+          }
         }
       } catch (err) {
         if (!cancelled) setError(String(err));
       } finally {
         if (!cancelled) setLoading(false);
       }
-
-      unlistenProgress = await onTaskProgress((payload) => {
-        patchTask(payload);
-      });
-      unlistenQueue = await onQueueChanged(async () => {
-        try {
-          setTasks(await listTasks());
-        } catch {
-          /* ignore refresh errors */
-        }
-      });
     })();
 
     return () => {
       cancelled = true;
-      unlistenProgress?.();
-      unlistenQueue?.();
     };
-  }, [patchTask, selectTask, selectedId, setError, setLoading, setTasks]);
+  }, [selectTask, setDetailOpen, setError, setLoading, setTasks]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -179,7 +191,7 @@ export function AppShell() {
           if (selected) setDeleteTarget(selected);
         }}
       />
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1">
         <Sidebar />
         <TaskList
           onToggleTransfer={toggleTransfer}
@@ -187,32 +199,50 @@ export function AppShell() {
           onOpenFile={openFile}
           onOpenFolder={openFolder}
         />
-        <TaskDetails task={selected} open={detailOpen && !!selected} />
+        <Suspense fallback={null}>
+          <TaskDetails
+            task={selected}
+            open={detailOpen && !!selected}
+            onClose={() => setDetailOpen(false)}
+          />
+        </Suspense>
       </div>
       <StatusBar />
-      <Palette open={paletteOpen} onOpenChange={setPaletteOpen} />
-      <NewDownloadDialog
-        open={newDownloadOpen}
-        onOpenChange={setNewDownloadOpen}
-        onCreated={(task) => {
-          selectTask(task.id);
-          void refreshTasks(task.id);
-        }}
-      />
-      <DeleteTaskDialog
-        task={deleteTarget}
-        open={!!deleteTarget}
-        onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null);
-        }}
-        onDelete={(deleteFile) => {
-          const target = deleteTarget;
-          setDeleteTarget(null);
-          if (target) {
-            void runTaskAction(() => deleteTask(target.id, deleteFile));
-          }
-        }}
-      />
+      {paletteOpen ? (
+        <Suspense fallback={null}>
+          <Palette open={paletteOpen} onOpenChange={setPaletteOpen} />
+        </Suspense>
+      ) : null}
+      {newDownloadOpen ? (
+        <Suspense fallback={null}>
+          <NewDownloadDialog
+            open={newDownloadOpen}
+            onOpenChange={setNewDownloadOpen}
+            onCreated={(task) => {
+              useTaskStore.getState().upsertTask(task);
+              selectTask(task.id);
+            }}
+          />
+        </Suspense>
+      ) : null}
+      {deleteTarget ? (
+        <Suspense fallback={null}>
+          <DeleteTaskDialog
+            task={deleteTarget}
+            open={!!deleteTarget}
+            onOpenChange={(open) => {
+              if (!open) setDeleteTarget(null);
+            }}
+            onDelete={(deleteFile) => {
+              const target = deleteTarget;
+              setDeleteTarget(null);
+              if (target) {
+                void runTaskAction(() => deleteTask(target.id, deleteFile));
+              }
+            }}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

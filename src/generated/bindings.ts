@@ -28,6 +28,7 @@ export const commands = {
 	createdAt: string,
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_task", { id })),
+	listTaskSegments: (taskId: string) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_task_segments", { taskId })),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
 	pauseTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("pause_task", { id })),
@@ -60,6 +61,8 @@ export type ProbeTaskPayload = {
 	contentType: string | null,
 };
 
+export type SegmentStatus = "pending" | "downloading" | "completed" | "failed";
+
 export type Task = {
 	id: string,
 	url: string,
@@ -91,6 +94,17 @@ export type TaskProgressPayload = {
 	speedBps: string,
 	connectionCount: number,
 	status: TaskStatus,
+};
+
+export type TaskSegment = {
+	id: string,
+	taskId: string,
+	rangeStart: string,
+	rangeEnd: string,
+	downloadedUntil: string,
+	status: SegmentStatus,
+	retryCount: number,
+	lastError: string | null,
 };
 
 export type TaskStatus = "queued" | "downloading" | "paused" | "completed" | "failed" | "retrying" | "waiting_network" | "needs_attention";

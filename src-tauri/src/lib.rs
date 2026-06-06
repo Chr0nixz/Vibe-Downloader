@@ -31,6 +31,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .commands(collect_commands![
             commands::tasks::list_tasks,
             commands::tasks::get_task,
+            commands::tasks::list_task_segments,
             commands::tasks::probe_task,
             commands::tasks::create_task,
             commands::tasks::pause_task,
@@ -70,6 +71,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::tasks::list_tasks,
             commands::tasks::get_task,
+            commands::tasks::list_task_segments,
             commands::tasks::probe_task,
             commands::tasks::create_task,
             commands::tasks::pause_task,

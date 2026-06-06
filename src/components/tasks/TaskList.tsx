@@ -1,5 +1,7 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
+import { setLocale, type Locale } from "@/i18n";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { TaskRow } from "@/components/tasks/TaskRow";
 import { filterTasks, useTaskStore } from "@/stores/task-store";
@@ -16,17 +18,62 @@ export function TaskList({
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
 }) {
+  const { t } = useTranslation();
   const tasks = useTaskStore((s) => s.tasks);
   const nav = useTaskStore((s) => s.nav);
   const search = useTaskStore((s) => s.search);
   const selectedId = useTaskStore((s) => s.selectedId);
   const selectTask = useTaskStore((s) => s.selectTask);
+  const setDetailOpen = useTaskStore((s) => s.setDetailOpen);
   const loading = useTaskStore((s) => s.loading);
   const error = useTaskStore((s) => s.error);
 
   const filtered = useMemo(
     () => filterTasks(tasks, nav, search),
     [tasks, nav, search],
+  );
+
+  const selectAndFocus = useCallback(
+    (taskId: string) => {
+      selectTask(taskId);
+      setDetailOpen(true);
+      requestAnimationFrame(() => {
+        document.getElementById(`task-option-${taskId}`)?.focus();
+      });
+    },
+    [selectTask, setDetailOpen],
+  );
+
+  const navigateRow = useCallback(
+    (direction: "next" | "prev") => {
+      if (filtered.length === 0) return;
+      const currentIndex = filtered.findIndex((task) => task.id === selectedId);
+      const startIndex = currentIndex >= 0 ? currentIndex : 0;
+      const nextIndex =
+        direction === "next"
+          ? Math.min(filtered.length - 1, startIndex + 1)
+          : Math.max(0, startIndex - 1);
+      const nextTask = filtered[nextIndex];
+      if (nextTask) selectAndFocus(nextTask.id);
+    },
+    [filtered, selectAndFocus, selectedId],
+  );
+
+  const handleListboxKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (filtered.length === 0) return;
+
+      if (event.key === "Home") {
+        event.preventDefault();
+        selectAndFocus(filtered[0].id);
+        return;
+      }
+      if (event.key === "End") {
+        event.preventDefault();
+        selectAndFocus(filtered[filtered.length - 1].id);
+      }
+    },
+    [filtered, selectAndFocus],
   );
 
   if (nav === "settings") {
@@ -46,22 +93,32 @@ export function TaskList({
 
       <ScrollArea className="min-h-0 flex-1">
         {loading ? (
-          <p className="px-4 py-8 text-sm text-text-muted">Loading tasks…</p>
+          <p className="px-4 py-8 text-sm text-text-muted">{t("taskList.loading")}</p>
         ) : filtered.length === 0 ? (
-          <p className="px-4 py-8 text-sm text-text-muted">No tasks in this view.</p>
+          <p className="px-4 py-8 text-sm text-text-muted">{t("taskList.empty")}</p>
         ) : (
-          filtered.map((task) => (
-            <TaskRow
-              key={task.id}
-              task={task}
-              selected={task.id === selectedId}
-              onSelect={() => selectTask(task.id)}
-              onToggleTransfer={onToggleTransfer}
-              onRetry={onRetry}
-              onOpenFile={onOpenFile}
-              onOpenFolder={onOpenFolder}
-            />
-          ))
+          <div
+            role="listbox"
+            aria-label={t("taskList.aria")}
+            aria-activedescendant={
+              selectedId ? `task-option-${selectedId}` : undefined
+            }
+            onKeyDown={handleListboxKeyDown}
+          >
+            {filtered.map((task) => (
+              <TaskRow
+                key={task.id}
+                task={task}
+                selected={task.id === selectedId}
+                onSelect={() => selectAndFocus(task.id)}
+                onNavigate={navigateRow}
+                onToggleTransfer={onToggleTransfer}
+                onRetry={onRetry}
+                onOpenFile={onOpenFile}
+                onOpenFolder={onOpenFolder}
+              />
+            ))}
+          </div>
         )}
       </ScrollArea>
     </div>
@@ -69,10 +126,27 @@ export function TaskList({
 }
 
 function SettingsPlaceholder() {
+  const { t, i18n } = useTranslation();
+  const currentLocale = (i18n.language === "zh-CN" ? "zh-CN" : "en") as Locale;
+
   return (
     <div className="flex flex-1 flex-col gap-4 p-6 text-sm text-text-secondary">
-      <h2 className="text-base font-medium text-text-primary">Settings</h2>
-      <p>Default download directory, speed limits, and browser integration will ship in the next milestone.</p>
+      <h2 className="text-base font-medium text-text-primary">{t("settings.title")}</h2>
+      <p>{t("settings.placeholder")}</p>
+      <div className="flex max-w-sm flex-col gap-2">
+        <label className="text-xs text-text-muted" htmlFor="locale-select">
+          {t("locale.label")}
+        </label>
+        <select
+          id="locale-select"
+          value={currentLocale}
+          onChange={(event) => setLocale(event.target.value as Locale)}
+          className="h-9 rounded-md border border-border-subtle bg-surface-base px-3 text-sm text-text-primary"
+        >
+          <option value="en">{t("locale.en")}</option>
+          <option value="zh-CN">{t("locale.zhCN")}</option>
+        </select>
+      </div>
     </div>
   );
 }

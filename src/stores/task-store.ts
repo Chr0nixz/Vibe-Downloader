@@ -2,7 +2,10 @@ import { create } from "zustand";
 
 import type { Task } from "@/types/task";
 import { parseByteCount } from "@/types/task";
-import type { TaskProgressPayload } from "@/types/task-progress";
+import {
+  normalizeTaskProgressPayload,
+  type TaskProgressPayload,
+} from "@/types/task-progress";
 
 export type NavFilter =
   | "all"
@@ -21,7 +24,8 @@ interface TaskStore {
   loading: boolean;
   error: string | null;
   setTasks: (tasks: Task[]) => void;
-  patchTask: (payload: TaskProgressPayload) => void;
+  upsertTask: (task: Task) => void;
+  patchTask: (payload: TaskProgressPayload | unknown) => void;
   selectTask: (id: string | null) => void;
   setNav: (nav: NavFilter) => void;
   setSearch: (search: string) => void;
@@ -30,18 +34,29 @@ interface TaskStore {
   setError: (error: string | null) => void;
 }
 
-export const useTaskStore = create<TaskStore>((set, get) => ({
+export const useTaskStore = create<TaskStore>((set) => ({
   tasks: [],
   selectedId: null,
   nav: "all",
   search: "",
-  detailOpen: true,
+  detailOpen: false,
   loading: true,
   error: null,
   setTasks: (tasks) => set({ tasks }),
-  patchTask: (payload) => {
-    set({
-      tasks: get().tasks.map((task) =>
+  upsertTask: (task) =>
+    set((state) => {
+      const index = state.tasks.findIndex((entry) => entry.id === task.id);
+      if (index < 0) return { tasks: [task, ...state.tasks] };
+      const tasks = [...state.tasks];
+      tasks[index] = { ...tasks[index], ...task };
+      return { tasks };
+    }),
+  patchTask: (raw) => {
+    const payload = normalizeTaskProgressPayload(raw);
+    if (!payload) return;
+
+    set((state) => ({
+      tasks: state.tasks.map((task) =>
         task.id === payload.taskId
           ? {
               ...task,
@@ -53,7 +68,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
             }
           : task,
       ),
-    });
+    }));
   },
   selectTask: (id) => set({ selectedId: id }),
   setNav: (nav) => set({ nav }),
@@ -62,6 +77,30 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
 }));
+
+/** Keep in-flight progress when a DB refresh lags behind live events. */
+export function mergeTasksFromServer(current: Task[], fresh: Task[]): Task[] {
+  const liveById = new Map(
+    current
+      .filter(
+        (task) => task.status === "downloading" || task.status === "retrying",
+      )
+      .map((task) => [task.id, task] as const),
+  );
+
+  return fresh.map((task) => {
+    const live = liveById.get(task.id);
+    if (!live) return task;
+    return {
+      ...task,
+      downloadedBytes: Math.max(task.downloadedBytes, live.downloadedBytes),
+      speedBps: live.speedBps > 0 ? live.speedBps : task.speedBps,
+      connectionCount:
+        live.connectionCount > 0 ? live.connectionCount : task.connectionCount,
+      status: live.status,
+    };
+  });
+}
 
 export function filterTasks(
   tasks: Task[],

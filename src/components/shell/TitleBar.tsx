@@ -1,4 +1,5 @@
 import { Minus, Square, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +21,8 @@ interface TitleBarProps {
 }
 
 export function TitleBar({ platform }: TitleBarProps) {
+  const { t } = useTranslation();
+
   if (platform === "linux") {
     return null;
   }
@@ -40,28 +43,28 @@ export function TitleBar({ platform }: TitleBarProps) {
     >
       <div className="flex min-w-0 flex-1 items-center gap-2 px-3" data-tauri-drag-region>
         <span className="truncate text-sm font-medium text-text-primary">
-          Vibe Downloader
+          {t("app.name")}
         </span>
       </div>
 
       {showWindowsControls ? (
         <div className="flex items-center" data-no-drag>
           <WindowControl
-            label="Minimize"
+            label={t("titleBar.minimize")}
             onClick={() => void minimizeWindow()}
           >
             <Minus className="h-3.5 w-3.5" />
           </WindowControl>
           <WindowControl
-            label="Maximize"
+            label={t("titleBar.maximize")}
             onClick={() => void toggleMaximizeWindow()}
           >
             <Square className="h-3 w-3" />
           </WindowControl>
           <WindowControl
-            label="Close"
+            label={t("titleBar.close")}
             onClick={() => void closeWindow()}
-            className="hover:bg-status-danger hover:text-white"
+            className="hover:bg-status-danger hover:text-text-on-danger"
           >
             <X className="h-3.5 w-3.5" />
           </WindowControl>

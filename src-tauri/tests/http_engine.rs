@@ -182,7 +182,9 @@ impl TestServer {
             listener.set_nonblocking(true).expect("nonblocking");
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((stream, _)) => handle_connection(stream),
+                    Ok((stream, _)) => {
+                        thread::spawn(move || handle_connection(stream));
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
                     }

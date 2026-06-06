@@ -12,12 +12,12 @@ use reqwest::{
     Client, Response, StatusCode,
 };
 use sqlx::SqlitePool;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::{fs, io::AsyncWriteExt};
 
 use crate::{
     db,
-    events::{EVENT_QUEUE_CHANGED, EVENT_TASK_PROGRESS},
+    events::{emit_queue_changed, emit_task_progress},
     models::{TaskProgressPayload, TaskRecord, TaskStatus},
 };
 
@@ -259,11 +259,15 @@ async fn run_single_connection_download(
         .ok_or_else(|| "Task is missing a final path.".to_string())?;
 
     let temp_path_buf = PathBuf::from(&temp_path);
+    let segment = db::ensure_single_segment_for_task(&pool, &task).await?;
     let disk_downloaded = fs::metadata(&temp_path_buf)
         .await
         .map(|metadata| i64::try_from(metadata.len()).unwrap_or(i64::MAX))
         .unwrap_or(0);
-    let resume_from = task.downloaded_bytes.max(disk_downloaded);
+    let resume_from = task
+        .downloaded_bytes
+        .max(segment.downloaded_until)
+        .max(disk_downloaded);
 
     let resume_from = if resume_from > 0 {
         if !task.supports_range {
@@ -281,6 +285,14 @@ async fn run_single_connection_download(
         0,
         1,
         Some("Downloading"),
+        None,
+    )
+    .await?;
+    db::update_segment_status(
+        &pool,
+        &segment.id,
+        crate::models::SegmentStatus::Downloading,
+        Some(resume_from),
         None,
     )
     .await?;
@@ -347,9 +359,10 @@ async fn run_single_connection_download(
         if last_emit.elapsed() >= Duration::from_millis(300) {
             let elapsed = last_tick.elapsed().as_secs_f64().max(0.001);
             let speed_bps = ((downloaded - last_bytes) as f64 / elapsed) as i64;
-            db::update_task_progress(
+            db::update_task_and_segment_progress(
                 &pool,
                 &task.id,
+                &segment.id,
                 downloaded,
                 speed_bps.max(0),
                 1,
@@ -389,9 +402,9 @@ async fn run_single_connection_download(
         .await
         .map_err(|e| format!("Could not finalize the downloaded file: {e}"))?;
 
-    db::complete_task(&pool, &task.id).await?;
+    db::complete_task_segment(&pool, &task.id, &segment.id).await?;
     emit_progress(&app, &task.id, task.total_size, task.total_size, 0, 0, TaskStatus::Completed);
-    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+    emit_queue_changed(&app);
 
     Ok(())
 }
@@ -413,7 +426,7 @@ fn emit_progress(
         connection_count,
         status,
     };
-    let _ = app.emit(EVENT_TASK_PROGRESS, &payload);
+    emit_task_progress(app, &payload);
 }
 
 fn file_name_from_response(response: &Response) -> String {
