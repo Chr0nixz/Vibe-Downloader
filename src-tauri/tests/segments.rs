@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri_app_lib::{
-    commands::tasks::{local_resume_error, resume_mismatch_message},
+    commands::tasks::{local_resume_error, resume_mismatch_message, segment_resume_error},
     db,
     download::ProbeResult,
     models::{SegmentStatus, TaskRecord, TaskStatus},
@@ -12,7 +12,9 @@ use tauri_app_lib::{
 async fn ensure_single_segment_creates_task_range() {
     let pool = test_pool("create-segment").await;
     let task = sample_task("task-create", 100);
-    db::insert_task_record(&pool, &task).await.expect("insert task");
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
 
     let segment = db::ensure_single_segment_for_task(&pool, &task)
         .await
@@ -29,7 +31,9 @@ async fn ensure_single_segment_creates_task_range() {
 async fn small_or_no_range_tasks_keep_one_segment() {
     let pool = test_pool("single-planning").await;
     let small = sample_task("task-small", db::MULTI_CONNECTION_THRESHOLD_BYTES - 1);
-    db::insert_task_record(&pool, &small).await.expect("insert small");
+    db::insert_task_record(&pool, &small)
+        .await
+        .expect("insert small");
     let small_segments = db::ensure_task_segments(&pool, &small)
         .await
         .expect("small segments");
@@ -51,7 +55,9 @@ async fn large_range_task_generates_four_non_overlapping_segments() {
     let pool = test_pool("multi-planning").await;
     let total_size = db::MULTI_CONNECTION_THRESHOLD_BYTES + 7;
     let task = sample_task("task-large", total_size);
-    db::insert_task_record(&pool, &task).await.expect("insert task");
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
 
     let segments = db::ensure_task_segments(&pool, &task)
         .await
@@ -79,7 +85,9 @@ async fn large_range_task_generates_four_non_overlapping_segments() {
 async fn progress_updates_task_and_segment_together() {
     let pool = test_pool("progress-segment").await;
     let task = sample_task("task-progress", 100);
-    db::insert_task_record(&pool, &task).await.expect("insert task");
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
     let segment = db::ensure_single_segment_for_task(&pool, &task)
         .await
         .expect("segment");
@@ -151,6 +159,75 @@ fn local_resume_errors_are_explicit() {
     assert_eq!(
         local_resume_error(0, true, 10, 100, false),
         Some("Resume unavailable. Restart this download from the beginning.")
+    );
+}
+
+#[test]
+fn segment_resume_errors_cover_multi_segment_corruption() {
+    let task = sample_task(
+        "task-corrupt-segments",
+        db::MULTI_CONNECTION_THRESHOLD_BYTES + 7,
+    );
+    let mut segments = db::planned_segments_for_task(&task);
+
+    assert!(segment_resume_error(&segments, 0, true, 0, task.total_size, true).is_none());
+
+    segments[1].downloaded_until = segments[1].range_end + 2;
+    assert_eq!(
+        segment_resume_error(&segments, 0, true, task.total_size, task.total_size, true),
+        Some("Segment progress is outside its byte range. Restart this download.")
+    );
+
+    let mut segments = db::planned_segments_for_task(&task);
+    segments[1].range_start += 1;
+    assert_eq!(
+        segment_resume_error(&segments, 0, true, task.total_size, task.total_size, true),
+        Some("Segment records are inconsistent. Restart this download.")
+    );
+
+    let mut segments = db::planned_segments_for_task(&task);
+    segments[2].downloaded_until = segments[2].range_start + 1024;
+    assert_eq!(
+        segment_resume_error(
+            &segments,
+            0,
+            true,
+            segments[2].range_start,
+            task.total_size,
+            true
+        ),
+        Some("Temporary file is smaller than the recorded progress.")
+    );
+
+    assert_eq!(
+        segment_resume_error(&segments, 0, false, 0, task.total_size, true),
+        Some("Temporary file is missing. Restart this download.")
+    );
+}
+
+#[test]
+fn multi_segment_remote_metadata_changes_are_blocked() {
+    let mut task = sample_task(
+        "task-remote-multi",
+        db::MULTI_CONNECTION_THRESHOLD_BYTES + 7,
+    );
+    task.etag = Some("etag-a".to_string());
+    task.last_modified = Some("Mon, 01 Jan 2024 00:00:00 GMT".to_string());
+
+    let mut probe = sample_probe(task.total_size);
+    assert!(resume_mismatch_message(&task, &probe).is_none());
+
+    probe.total_size += 1;
+    assert_eq!(
+        resume_mismatch_message(&task, &probe).as_deref(),
+        Some("Remote file changed. Restart download to avoid corruption.")
+    );
+
+    let mut probe = sample_probe(task.total_size);
+    probe.supports_range = false;
+    assert_eq!(
+        resume_mismatch_message(&task, &probe).as_deref(),
+        Some("Server no longer supports resume. Restart this download.")
     );
 }
 

@@ -15,9 +15,11 @@ use crate::{
     db,
     download::HttpEngine,
     events::{emit_queue_changed, emit_task_progress},
-    models::{task::now_iso, ProbeTaskPayload, Task, TaskRecord, TaskSegment, TaskStatus},
-    platform,
-    AppState, DownloadControl,
+    models::{
+        task::now_iso, ProbeTaskPayload, Task, TaskRecord, TaskSegment, TaskSegmentRecord,
+        TaskStatus,
+    },
+    platform, AppState, DownloadControl,
 };
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -100,7 +102,12 @@ pub async fn create_task(
 
     let engine = HttpEngine::new()?;
     let probe = engine.probe(url).await?;
-    let save_dir = match input.save_dir.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    let save_dir = match input
+        .save_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(dir) => PathBuf::from(dir),
         None => app
             .path()
@@ -411,13 +418,7 @@ async fn start_task_download(
         }
     });
 
-    downloads.insert(
-        map_task_id,
-        DownloadControl {
-            cancel,
-            handle,
-        },
-    );
+    downloads.insert(map_task_id, DownloadControl { cancel, handle });
 
     emit_queue_changed(&app);
     Ok(())
@@ -441,25 +442,22 @@ async fn prepare_task_for_download(
     let temp_size = std::fs::metadata(&temp_path)
         .map(|metadata| i64::try_from(metadata.len()).unwrap_or(i64::MAX))
         .unwrap_or(0);
-    let is_multi_segment = segments.len() > 1;
-    let recorded_progress = task
-        .downloaded_bytes
-        .max(db::total_segment_downloaded_bytes(&segments));
-
-    if let Some(message) = local_resume_error_for_segments(
-        recorded_progress,
+    if let Some(message) = segment_resume_error(
+        &segments,
+        task.downloaded_bytes,
         temp_exists,
         temp_size,
         task.total_size,
         task.supports_range,
-        is_multi_segment,
     ) {
         fail_task_and_segments(pool, &task.id, message).await?;
         return Err(message.to_string());
     }
 
     if temp_size > 0 {
-        let probe = HttpEngine::new()?.probe(task.final_url.as_deref().unwrap_or(&task.url)).await?;
+        let probe = HttpEngine::new()?
+            .probe(task.final_url.as_deref().unwrap_or(&task.url))
+            .await?;
         if let Some(message) = resume_mismatch_message(&task, &probe) {
             db::update_task_status(
                 pool,
@@ -482,7 +480,7 @@ async fn prepare_task_for_download(
         }
     }
 
-    if !is_multi_segment && temp_size > segments[0].downloaded_until {
+    if segments.len() == 1 && temp_size > segments[0].downloaded_until {
         db::update_task_and_segment_progress(
             pool,
             &task.id,
@@ -505,31 +503,71 @@ pub fn local_resume_error(
     total_size: i64,
     supports_range: bool,
 ) -> Option<&'static str> {
-    local_resume_error_for_segments(
-        recorded_progress,
-        temp_exists,
-        temp_size,
-        total_size,
-        supports_range,
-        false,
-    )
-}
-
-fn local_resume_error_for_segments(
-    recorded_progress: i64,
-    temp_exists: bool,
-    temp_size: i64,
-    total_size: i64,
-    supports_range: bool,
-    is_multi_segment: bool,
-) -> Option<&'static str> {
     if temp_size > total_size && total_size > 0 {
         return Some("Temporary file is larger than the remote file.");
     }
     if recorded_progress > 0 && !temp_exists {
         return Some("Temporary file is missing. Restart this download.");
     }
-    if !is_multi_segment && recorded_progress > temp_size {
+    if recorded_progress > temp_size {
+        return Some("Temporary file is smaller than the recorded progress.");
+    }
+    if temp_size > 0 && !supports_range {
+        return Some("Resume unavailable. Restart this download from the beginning.");
+    }
+    None
+}
+
+pub fn segment_resume_error(
+    segments: &[TaskSegmentRecord],
+    task_downloaded_bytes: i64,
+    temp_exists: bool,
+    temp_size: i64,
+    total_size: i64,
+    supports_range: bool,
+) -> Option<&'static str> {
+    if segments.is_empty() {
+        return Some("Task has no segment records. Restart this download.");
+    }
+    if temp_size > total_size && total_size > 0 {
+        return Some("Temporary file is larger than the remote file.");
+    }
+
+    let mut expected_start = 0_i64;
+    let mut highest_recorded_offset = 0_i64;
+    let mut downloaded_bytes = 0_i64;
+
+    for segment in segments {
+        if segment.range_start != expected_start || segment.range_end < segment.range_start {
+            return Some("Segment records are inconsistent. Restart this download.");
+        }
+        if segment.downloaded_until < segment.range_start
+            || segment.downloaded_until > segment.range_end.saturating_add(1)
+        {
+            return Some("Segment progress is outside its byte range. Restart this download.");
+        }
+
+        let clamped_until = segment
+            .downloaded_until
+            .clamp(segment.range_start, segment.range_end.saturating_add(1));
+        if clamped_until > segment.range_start {
+            highest_recorded_offset = highest_recorded_offset.max(clamped_until);
+        }
+        downloaded_bytes += clamped_until.saturating_sub(segment.range_start);
+        expected_start = segment.range_end.saturating_add(1);
+    }
+
+    if total_size > 0 && expected_start != total_size {
+        return Some("Segment records do not match the remote file size. Restart this download.");
+    }
+
+    let recorded_progress = task_downloaded_bytes
+        .max(downloaded_bytes)
+        .max(highest_recorded_offset);
+    if recorded_progress > 0 && !temp_exists {
+        return Some("Temporary file is missing. Restart this download.");
+    }
+    if highest_recorded_offset > temp_size {
         return Some("Temporary file is smaller than the recorded progress.");
     }
     if temp_size > 0 && !supports_range {
@@ -548,7 +586,11 @@ pub fn resume_mismatch_message(
     if !probe.supports_range {
         return Some("Server no longer supports resume. Restart this download.".to_string());
     }
-    if task.etag.as_deref().is_some_and(|etag| Some(etag) != probe.etag.as_deref()) {
+    if task
+        .etag
+        .as_deref()
+        .is_some_and(|etag| Some(etag) != probe.etag.as_deref())
+    {
         return Some("Remote file changed. Restart download to avoid corruption.".to_string());
     }
     if task
@@ -585,7 +627,12 @@ async fn fail_task_and_segments(
     .await
 }
 
-async fn mark_download_failed(app: &AppHandle, pool: &sqlx::SqlitePool, task_id: &str, error: String) {
+async fn mark_download_failed(
+    app: &AppHandle,
+    pool: &sqlx::SqlitePool,
+    task_id: &str,
+    error: String,
+) {
     let _ = db::update_task_status(
         pool,
         task_id,
@@ -637,7 +684,10 @@ fn unique_final_path(save_dir: &Path, requested_file_name: &str) -> PathBuf {
     }
 
     let path = Path::new(&sanitized);
-    let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("download");
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
     let extension = path.extension().and_then(|value| value.to_str());
 
     for index in 1..10_000 {

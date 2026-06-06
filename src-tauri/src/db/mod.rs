@@ -232,11 +232,7 @@ pub fn planned_segments_for_task(task: &TaskRecord) -> Vec<TaskSegmentRecord> {
             };
             let length = base + extra;
             let end = start + length - 1;
-            let downloaded_until = if completed {
-                end + 1
-            } else {
-                start
-            };
+            let downloaded_until = if completed { end + 1 } else { start };
             let segment = TaskSegmentRecord {
                 id: uuid::Uuid::new_v4().to_string(),
                 task_id: task.id.clone(),

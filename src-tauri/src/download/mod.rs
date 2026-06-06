@@ -8,7 +8,10 @@ use std::{
 };
 
 use reqwest::{
-    header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE},
+    header::{
+        ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+        LAST_MODIFIED, RANGE,
+    },
     Client, Response, StatusCode,
 };
 use sqlx::SqlitePool;
@@ -95,8 +98,12 @@ impl HttpEngine {
             return Err(format_http_status(response.status()));
         }
 
-        probe_from_response(url, &response, response.status() == StatusCode::PARTIAL_CONTENT)?
-            .ok_or_else(|| "The server did not report a file size.".to_string())
+        probe_from_response(
+            url,
+            &response,
+            response.status() == StatusCode::PARTIAL_CONTENT,
+        )?
+        .ok_or_else(|| "The server did not report a file size.".to_string())
     }
 
     pub async fn download(
@@ -151,7 +158,9 @@ async fn run_direct_download(
         .map_err(|e| format!("Could not connect to the server: {e}"))?;
 
     if resume_from > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
-        return Err("Resume unavailable. The server did not honor the byte range request.".to_string());
+        return Err(
+            "Resume unavailable. The server did not honor the byte range request.".to_string(),
+        );
     }
     if !response.status().is_success() {
         return Err(format_http_status(response.status()));
@@ -468,7 +477,14 @@ async fn run_segmented_download(
             db::complete_segment(&pool, &segment.id).await?;
             continue;
         }
-        db::update_segment_status(&pool, &segment.id, SegmentStatus::Downloading, Some(offset), None).await?;
+        db::update_segment_status(
+            &pool,
+            &segment.id,
+            SegmentStatus::Downloading,
+            Some(offset),
+            None,
+        )
+        .await?;
         active_workers += 1;
         workers.spawn(download_segment_worker(SegmentWorkerRequest {
             client: client.clone(),
@@ -602,7 +618,15 @@ async fn run_segmented_download(
         .map_err(|e| format!("Could not finalize the downloaded file: {e}"))?;
 
     db::complete_task(&pool, &task.id).await?;
-    emit_progress(&app, &task.id, task.total_size, task.total_size, 0, 0, TaskStatus::Completed);
+    emit_progress(
+        &app,
+        &task.id,
+        task.total_size,
+        task.total_size,
+        0,
+        0,
+        TaskStatus::Completed,
+    );
     emit_queue_changed(&app);
 
     Ok(())
@@ -649,13 +673,20 @@ async fn download_segment_worker(request: SegmentWorkerRequest) -> Result<(), Se
         request = request.header(RANGE, format!("bytes={offset}-{}", segment.range_end));
     }
 
-    let mut response = request
-        .send()
-        .await
-        .map_err(|e| segment_failure(&segment, offset, &format!("Could not connect to the server: {e}")))?;
+    let mut response = request.send().await.map_err(|e| {
+        segment_failure(
+            &segment,
+            offset,
+            &format!("Could not connect to the server: {e}"),
+        )
+    })?;
 
     if !response.status().is_success() {
-        return Err(segment_failure(&segment, offset, &format_http_status(response.status())));
+        return Err(segment_failure(
+            &segment,
+            offset,
+            &format_http_status(response.status()),
+        ));
     }
     if use_range && response.status() != StatusCode::PARTIAL_CONTENT {
         return Err(segment_failure(
@@ -671,25 +702,43 @@ async fn download_segment_worker(request: SegmentWorkerRequest) -> Result<(), Se
         .write(true)
         .open(&temp_path)
         .await
-        .map_err(|e| segment_failure(&segment, offset, &format!("Could not open the temporary file: {e}")))?;
+        .map_err(|e| {
+            segment_failure(
+                &segment,
+                offset,
+                &format!("Could not open the temporary file: {e}"),
+            )
+        })?;
 
     file.seek(std::io::SeekFrom::Start(u64::try_from(offset).unwrap_or(0)))
         .await
-        .map_err(|e| segment_failure(&segment, offset, &format!("Could not seek in the temporary file: {e}")))?;
+        .map_err(|e| {
+            segment_failure(
+                &segment,
+                offset,
+                &format!("Could not seek in the temporary file: {e}"),
+            )
+        })?;
 
     let mut last_emit = Instant::now();
     let mut last_tick = Instant::now();
     let mut last_bytes = offset;
 
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| segment_failure(&segment, offset, &format!("The connection failed while downloading: {e}")))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        segment_failure(
+            &segment,
+            offset,
+            &format!("The connection failed while downloading: {e}"),
+        )
+    })? {
         if cancel.load(Ordering::SeqCst) {
-            file.flush()
-                .await
-                .map_err(|e| segment_failure(&segment, offset, &format!("Could not flush the temporary file: {e}")))?;
+            file.flush().await.map_err(|e| {
+                segment_failure(
+                    &segment,
+                    offset,
+                    &format!("Could not flush the temporary file: {e}"),
+                )
+            })?;
             return Ok(());
         }
 
@@ -702,9 +751,9 @@ async fn download_segment_worker(request: SegmentWorkerRequest) -> Result<(), Se
             ));
         }
 
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| segment_failure(&segment, offset, &format!("Could not write to disk: {e}")))?;
+        file.write_all(&chunk).await.map_err(|e| {
+            segment_failure(&segment, offset, &format!("Could not write to disk: {e}"))
+        })?;
         offset += chunk_len;
 
         if last_emit.elapsed() >= Duration::from_millis(300) {
@@ -717,9 +766,13 @@ async fn download_segment_worker(request: SegmentWorkerRequest) -> Result<(), Se
         }
     }
 
-    file.flush()
-        .await
-        .map_err(|e| segment_failure(&segment, offset, &format!("Could not flush the temporary file: {e}")))?;
+    file.flush().await.map_err(|e| {
+        segment_failure(
+            &segment,
+            offset,
+            &format!("Could not flush the temporary file: {e}"),
+        )
+    })?;
 
     if offset <= segment.range_end {
         return Err(segment_failure(
@@ -753,7 +806,11 @@ async fn send_segment_progress(
         })
 }
 
-fn segment_failure(segment: &TaskSegmentRecord, downloaded_until: i64, error: &str) -> SegmentFailure {
+fn segment_failure(
+    segment: &TaskSegmentRecord,
+    downloaded_until: i64,
+    error: &str,
+) -> SegmentFailure {
     SegmentFailure {
         segment_id: segment.id.clone(),
         downloaded_until,

@@ -18,7 +18,8 @@ use tauri_app_lib::{
 };
 
 const SAMPLE: &[u8] = b"Vibe Downloader HTTP regression payload.";
-const LARGE_PAYLOAD_SHA256: &str = "f1808c3366e106973e30f4fa360e5355f36284aa0f299705ef9ee0a0d9648fc3";
+const LARGE_PAYLOAD_SHA256: &str =
+    "f1808c3366e106973e30f4fa360e5355f36284aa0f299705ef9ee0a0d9648fc3";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_reads_headers_and_range_support() {
@@ -34,7 +35,10 @@ async fn probe_reads_headers_and_range_support() {
     assert_eq!(probe.total_size, SAMPLE.len() as i64);
     assert!(probe.supports_range);
     assert_eq!(probe.source_host, "127.0.0.1");
-    assert_eq!(probe.content_type.as_deref(), Some("application/octet-stream"));
+    assert_eq!(
+        probe.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -141,7 +145,10 @@ async fn direct_download_can_resume_from_temp_file() {
         .await
         .expect("resume");
 
-    assert_eq!(fs::read(&paths.final_path).expect("read final"), slow_payload());
+    assert_eq!(
+        fs::read(&paths.final_path).expect("read final"),
+        slow_payload()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -336,13 +343,27 @@ fn handle_connection(mut stream: TcpStream) {
     let byte_range = request.lines().find_map(parse_range);
 
     match path {
-        "/file" => respond_file(&mut stream, method, SAMPLE, byte_range, true, "sample.bin", false),
+        "/file" => respond_file(
+            &mut stream,
+            method,
+            SAMPLE,
+            byte_range,
+            true,
+            "sample.bin",
+            false,
+        ),
         "/head-no-length" if method == "HEAD" => {
             write_response(&mut stream, 200, &[("Accept-Ranges", "bytes")], &[], false)
         }
-        "/head-no-length" => {
-            respond_file(&mut stream, method, SAMPLE, byte_range, true, "fallback.bin", false)
-        }
+        "/head-no-length" => respond_file(
+            &mut stream,
+            method,
+            SAMPLE,
+            byte_range,
+            true,
+            "fallback.bin",
+            false,
+        ),
         "/slow" => respond_file(
             &mut stream,
             method,
@@ -373,7 +394,15 @@ fn handle_connection(mut stream: TcpStream) {
             "segment-error.bin",
             false,
         ),
-        "/no-range" => respond_file(&mut stream, method, SAMPLE, None, false, "no-range.bin", false),
+        "/no-range" => respond_file(
+            &mut stream,
+            method,
+            SAMPLE,
+            None,
+            false,
+            "no-range.bin",
+            false,
+        ),
         "/status/403" => write_response(&mut stream, 403, &[], b"denied", false),
         "/status/404" => write_response(&mut stream, 404, &[], b"missing", false),
         "/status/429" => write_response(&mut stream, 429, &[], b"limited", false),
@@ -390,7 +419,10 @@ fn respond_file(
     file_name: &str,
     slow: bool,
 ) {
-    let start = byte_range.map(|range| range.start).unwrap_or(0).min(payload.len());
+    let start = byte_range
+        .map(|range| range.start)
+        .unwrap_or(0)
+        .min(payload.len());
     let end = byte_range
         .and_then(|range| range.end)
         .unwrap_or_else(|| payload.len().saturating_sub(1))
