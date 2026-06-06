@@ -1,6 +1,6 @@
 # Vibe Downloader
 
-Modern desktop download manager (Tauri 2 + React + Rust). This repository currently ships the app shell, design tokens, SQLite schema, event bridge, and a stabilized HTTP MVP with Range resume validation plus fixed four-way segmented downloads for large Range-capable files.
+Modern desktop download manager (Tauri 2 + React + Rust). This repository currently ships the app shell, design tokens, SQLite schema, event bridge, and a stage 2 HTTP engine with Range resume validation, fixed four-way segmented downloads for large Range-capable files, segment/connection details, and hash-backed regression coverage.
 
 ## Prerequisites
 
@@ -60,9 +60,15 @@ cargo test
 ## Architecture
 
 - **Frontend**: React, Zustand, Tailwind v4, shadcn-style primitives, Framer Motion (command palette / details).
-- **Backend**: Rust commands + SQLite (`sqlx` runtime queries), `reqwest` HTTP downloads, fixed four-way segmented Range downloads for files >= 16 MB, Range resume metadata checks, `segments` progress records, startup state reset for interrupted tasks, Tauri events (`task.progress`, `queue.changed`).
+- **Backend**: Rust commands + SQLite (`sqlx` runtime queries), `reqwest` HTTP downloads, fixed four-way segmented Range downloads for files >= 16 MB, Range resume metadata checks, hardened segment resume validation, `segments` progress records, startup state reset for interrupted tasks, Tauri events (`task.progress`, `queue.changed`).
 - **Types**: `tauri-specta` exports to `src/generated/bindings.ts`.
 - **Window API**: `@tauri-apps/api/window` (`getCurrentWindow`) with `core:window:*` capabilities. No `@tauri-apps/plugin-window`.
+
+### Current Status
+
+- **Stage 1 HTTP MVP**: complete.
+- **Stage 2 resumable segmented HTTP downloads**: accepted. Large Range-capable files use fixed four-way segments, Chunks/Connections show real segment data, and regression tests cover resume, failure, and SHA-256 integrity paths.
+- **Next stage**: Stage 3 queue and settings. Planned first slice: settings storage, `get_settings` / `update_settings`, max active task scheduling, default save directory, and queued task UI.
 
 ### Title bar (v0)
 
