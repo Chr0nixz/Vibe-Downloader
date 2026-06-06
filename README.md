@@ -91,4 +91,10 @@ See [docs/RELEASE.md](docs/RELEASE.md) for secrets, tagging, and first-release c
 
 ## License
 
-TBD
+Vibe Downloader is licensed under the GNU General Public License v3.0 only (`GPL-3.0-only`).
+
+Commercial licensing is available from the copyright holder. This means the public
+source release remains under GPL-3.0-only, while separate commercial terms may be
+offered for use cases that need a different license.
+
+See [LICENSE](LICENSE) and [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -2,7 +2,8 @@
 name = "vibe-downloader"
 version = "0.1.0"
 description = "Vibe Downloader - modern desktop download manager"
-authors = ["you"]
+authors = ["Chr0nixz"]
+license = "GPL-3.0-only"
 edition = "2021"
 default-run = "vibe-downloader"
 
