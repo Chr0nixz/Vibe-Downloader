@@ -58,6 +58,10 @@ const en = {
     active: "Active",
     queued: "Queued",
     noGlobalSpeedLimit: "No global speed limit",
+    updateAvailable: "Update v{{version}} available",
+    installUpdate: "Install",
+    updating: "Updating\u2026",
+    updateFailed: "Update check failed",
   },
   taskList: {
     loading: "Loading tasks\u2026",
@@ -191,6 +195,10 @@ const zhCN = {
     active: "\u6d3b\u8dc3",
     queued: "\u6392\u961f",
     noGlobalSpeedLimit: "\u672a\u8bbe\u7f6e\u5168\u5c40\u901f\u5ea6\u9650\u5236",
+    updateAvailable: "\u53ef\u66f4\u65b0\u81f3 v{{version}}",
+    installUpdate: "\u5b89\u88c5\u66f4\u65b0",
+    updating: "\u6b63\u5728\u66f4\u65b0\u2026",
+    updateFailed: "\u66f4\u65b0\u68c0\u67e5\u5931\u8d25",
   },
   taskList: {
     loading: "\u6b63\u5728\u52a0\u8f7d\u4efb\u52a1\u2026",

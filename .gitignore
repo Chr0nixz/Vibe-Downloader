@@ -33,3 +33,7 @@ src-tauri/target/
 
 # Download temp files
 *.vibe-downloading
+
+# Tauri updater signing keys (public key lives in tauri.conf.json)
+*.key
+!*.key.pub

@@ -1,6 +1,6 @@
 # Vibe Downloader
 
-Modern desktop download manager (Tauri 2 + React + Rust). This repository currently ships the app shell, design tokens, SQLite schema draft, mock-task dev helper, event bridge, and a stabilized **single-connection HTTP MVP** with Range resume validation and single-segment progress records.
+Modern desktop download manager (Tauri 2 + React + Rust). This repository currently ships the app shell, design tokens, SQLite schema, event bridge, and a stabilized HTTP MVP with Range resume validation plus fixed four-way segmented downloads for large Range-capable files.
 
 ## Prerequisites
 
@@ -41,6 +41,9 @@ pnpm tauri dev
 | `pnpm typecheck` | TypeScript check |
 | `pnpm tauri dev` | Run desktop app |
 | `pnpm specta` | Regenerate `src/generated/bindings.ts` from Rust (requires working test runtime) |
+| `pnpm test:rust` | Run Rust integration tests |
+| `pnpm check:bindings` | Regenerate bindings and fail if `bindings.ts` drifted |
+| `pnpm sync-version <tag>` | Sync version into `package.json`, `tauri.conf.json`, `Cargo.toml` |
 
 ### Verification
 
@@ -57,7 +60,7 @@ cargo test
 ## Architecture
 
 - **Frontend**: React, Zustand, Tailwind v4, shadcn-style primitives, Framer Motion (command palette / details).
-- **Backend**: Rust commands + SQLite (`sqlx` runtime queries), single-connection `reqwest` HTTP downloads, Range resume metadata checks, `segments` progress records, startup state reset for interrupted tasks, Tauri events (`task.progress`, `queue.changed`).
+- **Backend**: Rust commands + SQLite (`sqlx` runtime queries), `reqwest` HTTP downloads, fixed four-way segmented Range downloads for files >= 16 MB, Range resume metadata checks, `segments` progress records, startup state reset for interrupted tasks, Tauri events (`task.progress`, `queue.changed`).
 - **Types**: `tauri-specta` exports to `src/generated/bindings.ts`.
 - **Window API**: `@tauri-apps/api/window` (`getCurrentWindow`) with `core:window:*` capabilities. No `@tauri-apps/plugin-window`.
 
@@ -69,13 +72,17 @@ cargo test
 | macOS | Overlay native title bar + traffic-light safe area |
 | Linux | System decorations (`decorations: true`) |
 
-## CI
+## CI / CD
 
-- **L1 (required)**: `.github/workflows/ci.yml` — typecheck, lint, Vite build, `cargo check`, `clippy`.
-- **L2 (allowed-failure)**: `.github/workflows/tauri-build.yml` — Windows / macOS / Linux `pnpm tauri build`. Job names include `allowed-failure` until all platforms are green.
+- **CI (required)**: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — typecheck, lint, Vite build, `cargo check`, `clippy`, `cargo test`, specta bindings drift check.
+- **Tauri Build (required)**: [`.github/workflows/tauri-build.yml`](.github/workflows/tauri-build.yml) — Windows / macOS / Linux `pnpm tauri build`.
+- **Release**: [`.github/workflows/release.yml`](.github/workflows/release.yml) — triggered by `v*` tags; builds installers, uploads GitHub Release assets, and publishes `latest.json` for the in-app updater.
+
+See [docs/RELEASE.md](docs/RELEASE.md) for secrets, tagging, and first-release checklist.
 
 ## Docs
 
+- [docs/RELEASE.md](docs/RELEASE.md) — GitHub Release 与自动更新
 - [docs/ROADMAP.md](docs/ROADMAP.md) — 分阶段开发路线图
 - [PRODUCT.md](PRODUCT.md) — 产品上下文（Impeccable）
 - [DESIGN.md](DESIGN.md) — 设计系统（Impeccable）

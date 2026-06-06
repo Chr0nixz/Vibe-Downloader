@@ -1,12 +1,15 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Button } from "@/components/ui/button";
+import { useAppUpdater } from "@/hooks/use-app-updater";
 import { formatSpeed } from "@/lib/utils";
 import { useTaskStore } from "@/stores/task-store";
 
 export function StatusBar() {
   const { t } = useTranslation();
   const tasks = useTaskStore((s) => s.tasks);
+  const { updateVersion, installing, error, installUpdate } = useAppUpdater();
 
   const stats = useMemo(() => {
     const active = tasks.filter(
@@ -34,8 +37,34 @@ export function StatusBar() {
           <span className="font-mono text-text-primary">{stats.queued}</span>
         </span>
       </span>
-      <span className="hidden text-text-muted md:inline">
-        {t("statusBar.noGlobalSpeedLimit")}
+      <span className="flex min-w-0 items-center justify-end gap-2">
+        {updateVersion ? (
+          <span className="flex items-center gap-2">
+            <span className="truncate text-accent">
+              {t("statusBar.updateAvailable", { version: updateVersion })}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-6 shrink-0 px-2 text-xs"
+              disabled={installing}
+              onClick={() => void installUpdate()}
+            >
+              {installing
+                ? t("statusBar.updating")
+                : t("statusBar.installUpdate")}
+            </Button>
+          </span>
+        ) : error ? (
+          <span className="truncate text-destructive" title={error}>
+            {t("statusBar.updateFailed")}
+          </span>
+        ) : (
+          <span className="hidden text-text-muted md:inline">
+            {t("statusBar.noGlobalSpeedLimit")}
+          </span>
+        )}
       </span>
     </footer>
   );

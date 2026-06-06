@@ -1,0 +1,121 @@
+# Release Guide
+
+This document describes how to publish **Vibe Downloader** via GitHub Actions and enable in-app auto-updates.
+
+## Workflows
+
+| Workflow | File | Trigger | Purpose |
+|----------|------|---------|---------|
+| CI | `.github/workflows/ci.yml` | PR / push to `main` | typecheck, build, `cargo test`, specta drift check, clippy |
+| Tauri Build | `.github/workflows/tauri-build.yml` | PR / push to `main` | Windows / macOS / Linux `pnpm tauri build` (required gate) |
+| Release | `.github/workflows/release.yml` | tag `v*` or manual | Build installers, upload GitHub Release assets, generate `latest.json` |
+
+## One-time repository setup
+
+### 1. Update the updater endpoint
+
+Edit [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) and replace `YOUR_ORG` with your GitHub org or username:
+
+```json
+"endpoints": [
+  "https://github.com/<owner>/vibe-downloader/releases/latest/download/latest.json"
+]
+```
+
+### 2. Generate updater signing keys
+
+Updater artifacts are signed separately from OS code signing. On a trusted machine:
+
+```bash
+pnpm tauri signer generate -w vibe-downloader.key
+```
+
+- Copy the **public key** into `plugins.updater.pubkey` in `tauri.conf.json` (already committed for the project keypair generated during setup).
+- Store the **private key** as a GitHub Actions secret (see below). Never commit `*.key` files.
+
+To export the private key for CI:
+
+```bash
+# PowerShell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("vibe-downloader.key"))
+
+# macOS / Linux
+base64 -i vibe-downloader.key
+```
+
+### 3. Configure GitHub Secrets
+
+| Secret | Required | Purpose |
+|--------|----------|---------|
+| `TAURI_SIGNING_PRIVATE_KEY` | Yes | Base64-encoded updater private key |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | If key has password | Updater key password |
+| `GITHUB_TOKEN` | Built-in | Create Release and upload assets |
+
+**Reserved for later (OS code signing):**
+
+| Secret | Purpose |
+|--------|---------|
+| `APPLE_CERTIFICATE` | Base64 `.p12` for macOS signing |
+| `APPLE_CERTIFICATE_PASSWORD` | Certificate password |
+| `APPLE_SIGNING_IDENTITY` | e.g. `Developer ID Application: …` |
+| `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` | Notarization |
+| `WINDOWS_CERTIFICATE` | Base64 `.pfx` for Authenticode |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Certificate password |
+
+Uncomment the corresponding `env` entries in [`.github/workflows/release.yml`](../.github/workflows/release.yml) when these secrets are available.
+
+### 4. Branch protection (recommended)
+
+In **Settings → Branches**, require these checks on `main`:
+
+- `CI` (frontend + rust jobs)
+- `Tauri Build` (all matrix jobs)
+
+## Publishing a release
+
+1. Ensure `main` is green on CI and Tauri Build.
+2. Create and push a semver tag:
+
+   ```bash
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+3. The **Release** workflow will:
+   - Run [`scripts/sync-version.mjs`](../scripts/sync-version.mjs) to align `package.json`, `tauri.conf.json`, and `Cargo.toml`
+   - Build for macOS (arm64 + x64), Linux (x64), and Windows (x64)
+   - Create a **draft** GitHub Release and upload installers, `.sig` files, and `latest.json`
+
+4. Review the draft release assets on GitHub.
+5. Edit release notes and click **Publish release**.
+
+### Manual release (workflow_dispatch)
+
+Actions → **Release** → **Run workflow** → enter tag (e.g. `v0.2.0`) and choose draft/publish.
+
+## Auto-update behavior
+
+- Packaged builds check for updates ~3 seconds after startup.
+- When a newer version exists, the status bar shows **Install**; the app downloads, installs, and relaunches.
+- `tauri dev` and browser preview skip update checks.
+- Clients verify downloads using the public key in `tauri.conf.json`.
+
+## Unsigned builds (current default)
+
+Without Apple / Windows code signing secrets, installers are **unsigned**:
+
+- **macOS**: Users may need to right-click → Open on first launch.
+- **Windows**: SmartScreen may warn until a cert is configured.
+
+Configure the reserved signing secrets above when ready for production distribution.
+
+## Local verification before tagging
+
+```bash
+pnpm typecheck
+pnpm build
+pnpm test:rust
+pnpm check:bindings
+cd src-tauri && cargo clippy -- -D warnings
+pnpm tauri build
+```
