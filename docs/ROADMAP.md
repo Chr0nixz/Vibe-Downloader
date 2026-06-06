@@ -153,23 +153,24 @@ flowchart LR
 | 4 | `pause_task` / `resume_task` / `retry_task` | 命令栏与任务行操作可用 |
 | 5 | 失败路径与 `failed` UI | 有明确原因、Retry、删除选择 |
 
-## 下一迭代建议（阶段 2：多连接前置 → 固定分片）
+## 当前迭代状态（阶段 2：固定分片多连接 v1）
 
-Range 续传 + 单连接 segment 记录已作为阶段 2 前置切片落地；下一步进入固定分片多连接前，应先完成以下收口：
+Range 续传 + 单连接 segment 记录已作为阶段 2 前置切片落地；固定分片多连接 v1 已完成核心实现：
 
 | 顺序 | 任务 | 产出 |
 |------|------|------|
-| 1 | 固定分片计划 | 按 total size 生成 4 路以内 segments |
-| 2 | 随机写入 | 多个 Range 写入同一个临时文件不同偏移 |
-| 3 | 连接摘要事件 | 为详情 Connections tab 提供只读数据 |
-| 4 | 合并验收 | 文件大小与可选 hash 校验正确后 rename |
-| 5 | 验证链路 | `pnpm typecheck`、`pnpm build`、`pnpm specta`、`cargo check`、`clippy`、`cargo test` 全绿 |
+| 1 | 固定分片计划 | `supports_range=true` 且 `total_size >= 16 MB` 时生成 4 个不重叠 segments |
+| 2 | 随机写入 | 多个 Range worker 写入同一个 `.vibe-downloading` 临时文件不同偏移 |
+| 3 | 汇总进度 | `task.progress` 汇总所有 segment 下载字节与速度 |
+| 4 | 合并验收 | 所有 segments completed 且临时文件大小等于 `total_size` 后 rename |
+| 5 | 回归测试 | 覆盖分片规划、多 Range 写入、恢复跳过已完成段、segment 失败不 rename |
 
-### 阶段 2 启动条件
+### 下一迭代建议
 
-- Range 续传校验、单连接 segment 记录和 Chunks 详情展示验证全绿。
-- 默认并行 `cargo test` 稳定通过。
-- 多连接实现不改变现有任务级命令签名。
+- 为 Connections tab 设计只读连接摘要事件，不改变当前任务级命令。
+- 增加真实 hash 校验或 fixture 校验，强化大文件完整性验证。
+- 评估动态连接数、全局队列和任务级并发上限。
+- 继续保持 `pnpm typecheck`、`pnpm build`、`pnpm specta`、`cargo check`、`clippy`、`cargo test` 全绿。
 
 ### 刻意延后
 

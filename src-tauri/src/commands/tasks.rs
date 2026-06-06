@@ -150,7 +150,7 @@ pub async fn create_task(
     };
 
     db::insert_task_record(&state.pool, &record).await?;
-    db::ensure_single_segment_for_task(&state.pool, &record).await?;
+    db::ensure_task_segments(&state.pool, &record).await?;
     emit_queue_changed(&app);
     start_task_download(app.clone(), state.inner(), record.clone()).await?;
 
@@ -181,16 +181,13 @@ pub async fn pause_task(
         None,
     )
     .await?;
-    if let Some(segment) = db::get_first_segment_record(&state.pool, &id).await? {
-        db::update_segment_status(
-            &state.pool,
-            &segment.id,
-            crate::models::SegmentStatus::Pending,
-            None,
-            None,
-        )
-        .await?;
-    }
+    db::update_segments_status_for_task(
+        &state.pool,
+        &id,
+        crate::models::SegmentStatus::Pending,
+        None,
+    )
+    .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
     emit_queue_changed(&app);
@@ -235,16 +232,13 @@ pub async fn retry_task(
         None,
     )
     .await?;
-    if let Some(segment) = db::get_first_segment_record(&state.pool, &id).await? {
-        db::update_segment_status(
-            &state.pool,
-            &segment.id,
-            crate::models::SegmentStatus::Pending,
-            None,
-            None,
-        )
-        .await?;
-    }
+    db::update_segments_status_for_task(
+        &state.pool,
+        &id,
+        crate::models::SegmentStatus::Pending,
+        None,
+    )
+    .await?;
     let task = require_task(&state.pool, &id).await?;
     start_task_download(app.clone(), state.inner(), task).await?;
     let task = require_task(&state.pool, &id).await?;
@@ -272,16 +266,13 @@ pub async fn cancel_task(
         Some("Canceled by user."),
     )
     .await?;
-    if let Some(segment) = db::get_first_segment_record(&state.pool, &id).await? {
-        db::update_segment_status(
-            &state.pool,
-            &segment.id,
-            crate::models::SegmentStatus::Failed,
-            None,
-            Some("Canceled by user."),
-        )
-        .await?;
-    }
+    db::update_segments_status_for_task(
+        &state.pool,
+        &id,
+        crate::models::SegmentStatus::Failed,
+        Some("Canceled by user."),
+    )
+    .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
     emit_queue_changed(&app);
@@ -440,7 +431,7 @@ async fn prepare_task_for_download(
         return Err("Remote file changed. Restart download to avoid corruption.".to_string());
     }
 
-    let segment = db::ensure_single_segment_for_task(pool, &task).await?;
+    let segments = db::ensure_task_segments(pool, &task).await?;
     let temp_path = task
         .temp_path
         .as_deref()
@@ -450,16 +441,20 @@ async fn prepare_task_for_download(
     let temp_size = std::fs::metadata(&temp_path)
         .map(|metadata| i64::try_from(metadata.len()).unwrap_or(i64::MAX))
         .unwrap_or(0);
-    let recorded_progress = task.downloaded_bytes.max(segment.downloaded_until);
+    let is_multi_segment = segments.len() > 1;
+    let recorded_progress = task
+        .downloaded_bytes
+        .max(db::total_segment_downloaded_bytes(&segments));
 
-    if let Some(message) = local_resume_error(
+    if let Some(message) = local_resume_error_for_segments(
         recorded_progress,
         temp_exists,
         temp_size,
         task.total_size,
         task.supports_range,
+        is_multi_segment,
     ) {
-        fail_task_and_segment(pool, &task.id, &segment.id, message, temp_size).await?;
+        fail_task_and_segments(pool, &task.id, message).await?;
         return Err(message.to_string());
     }
 
@@ -476,11 +471,10 @@ async fn prepare_task_for_download(
                 Some(&message),
             )
             .await?;
-            db::update_segment_status(
+            db::update_segments_status_for_task(
                 pool,
-                &segment.id,
+                &task.id,
                 crate::models::SegmentStatus::Failed,
-                Some(temp_size),
                 Some(&message),
             )
             .await?;
@@ -488,11 +482,11 @@ async fn prepare_task_for_download(
         }
     }
 
-    if temp_size > segment.downloaded_until {
+    if !is_multi_segment && temp_size > segments[0].downloaded_until {
         db::update_task_and_segment_progress(
             pool,
             &task.id,
-            &segment.id,
+            &segments[0].id,
             temp_size,
             0,
             0,
@@ -511,13 +505,31 @@ pub fn local_resume_error(
     total_size: i64,
     supports_range: bool,
 ) -> Option<&'static str> {
+    local_resume_error_for_segments(
+        recorded_progress,
+        temp_exists,
+        temp_size,
+        total_size,
+        supports_range,
+        false,
+    )
+}
+
+fn local_resume_error_for_segments(
+    recorded_progress: i64,
+    temp_exists: bool,
+    temp_size: i64,
+    total_size: i64,
+    supports_range: bool,
+    is_multi_segment: bool,
+) -> Option<&'static str> {
     if temp_size > total_size && total_size > 0 {
         return Some("Temporary file is larger than the remote file.");
     }
     if recorded_progress > 0 && !temp_exists {
         return Some("Temporary file is missing. Restart this download.");
     }
-    if recorded_progress > temp_size {
+    if !is_multi_segment && recorded_progress > temp_size {
         return Some("Temporary file is smaller than the recorded progress.");
     }
     if temp_size > 0 && !supports_range {
@@ -549,12 +561,10 @@ pub fn resume_mismatch_message(
     None
 }
 
-async fn fail_task_and_segment(
+async fn fail_task_and_segments(
     pool: &sqlx::SqlitePool,
     task_id: &str,
-    segment_id: &str,
     message: &str,
-    downloaded_until: i64,
 ) -> Result<(), String> {
     db::update_task_status(
         pool,
@@ -566,11 +576,10 @@ async fn fail_task_and_segment(
         Some(message),
     )
     .await?;
-    db::update_segment_status(
+    db::update_segments_status_for_task(
         pool,
-        segment_id,
+        task_id,
         crate::models::SegmentStatus::Failed,
-        Some(downloaded_until),
         Some(message),
     )
     .await
@@ -587,16 +596,13 @@ async fn mark_download_failed(app: &AppHandle, pool: &sqlx::SqlitePool, task_id:
         Some(&error),
     )
     .await;
-    if let Ok(Some(segment)) = db::get_first_segment_record(pool, task_id).await {
-        let _ = db::update_segment_status(
-            pool,
-            &segment.id,
-            crate::models::SegmentStatus::Failed,
-            None,
-            Some(&error),
-        )
-        .await;
-    }
+    let _ = db::update_segments_status_for_task(
+        pool,
+        task_id,
+        crate::models::SegmentStatus::Failed,
+        Some(&error),
+    )
+    .await;
     if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
         emit_task_progress_snapshot(app, &task);
     }

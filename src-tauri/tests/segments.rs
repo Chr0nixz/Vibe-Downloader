@@ -26,6 +26,56 @@ async fn ensure_single_segment_creates_task_range() {
 }
 
 #[tokio::test]
+async fn small_or_no_range_tasks_keep_one_segment() {
+    let pool = test_pool("single-planning").await;
+    let small = sample_task("task-small", db::MULTI_CONNECTION_THRESHOLD_BYTES - 1);
+    db::insert_task_record(&pool, &small).await.expect("insert small");
+    let small_segments = db::ensure_task_segments(&pool, &small)
+        .await
+        .expect("small segments");
+    assert_eq!(small_segments.len(), 1);
+
+    let mut no_range = sample_task("task-no-range", db::MULTI_CONNECTION_THRESHOLD_BYTES);
+    no_range.supports_range = false;
+    db::insert_task_record(&pool, &no_range)
+        .await
+        .expect("insert no range");
+    let no_range_segments = db::ensure_task_segments(&pool, &no_range)
+        .await
+        .expect("no range segments");
+    assert_eq!(no_range_segments.len(), 1);
+}
+
+#[tokio::test]
+async fn large_range_task_generates_four_non_overlapping_segments() {
+    let pool = test_pool("multi-planning").await;
+    let total_size = db::MULTI_CONNECTION_THRESHOLD_BYTES + 7;
+    let task = sample_task("task-large", total_size);
+    db::insert_task_record(&pool, &task).await.expect("insert task");
+
+    let segments = db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments");
+
+    assert_eq!(segments.len(), 4);
+    assert_eq!(segments[0].range_start, 0);
+    assert_eq!(segments[3].range_end, total_size - 1);
+
+    for window in segments.windows(2) {
+        assert_eq!(window[0].range_end + 1, window[1].range_start);
+    }
+
+    let covered_bytes = segments
+        .iter()
+        .map(|segment| segment.range_end - segment.range_start + 1)
+        .sum::<i64>();
+    assert_eq!(covered_bytes, total_size);
+    assert!(segments
+        .iter()
+        .all(|segment| segment.downloaded_until == segment.range_start));
+}
+
+#[tokio::test]
 async fn progress_updates_task_and_segment_together() {
     let pool = test_pool("progress-segment").await;
     let task = sample_task("task-progress", 100);

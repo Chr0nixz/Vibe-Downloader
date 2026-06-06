@@ -2,6 +2,9 @@ use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 
 use crate::models::{SegmentStatus, TaskRecord, TaskSegmentRecord, TaskStatus};
 
+pub const MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;
+pub const MAX_SEGMENT_COUNT: usize = 4;
+
 pub async fn connect(db_path: &std::path::Path) -> Result<SqlitePool, String> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
 
@@ -162,26 +165,96 @@ pub async fn ensure_single_segment_for_task(
     pool: &SqlitePool,
     task: &TaskRecord,
 ) -> Result<TaskSegmentRecord, String> {
-    if let Some(segment) = get_first_segment_record(pool, &task.id).await? {
-        return Ok(segment);
+    ensure_task_segments(pool, task)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Task segment could not be created.".to_string())
+}
+
+pub async fn ensure_task_segments(
+    pool: &SqlitePool,
+    task: &TaskRecord,
+) -> Result<Vec<TaskSegmentRecord>, String> {
+    let existing = list_segment_records(pool, &task.id).await?;
+    if !existing.is_empty() {
+        return Ok(existing);
     }
 
-    let segment = TaskSegmentRecord {
-        id: uuid::Uuid::new_v4().to_string(),
-        task_id: task.id.clone(),
-        range_start: 0,
-        range_end: task.total_size.saturating_sub(1).max(0),
-        downloaded_until: task.downloaded_bytes.max(0),
-        status: if task.downloaded_bytes >= task.total_size && task.total_size > 0 {
-            SegmentStatus::Completed
-        } else {
-            SegmentStatus::Pending
-        },
-        retry_count: 0,
-        last_error: None,
-    };
-    insert_segment_record(pool, &segment).await?;
-    Ok(segment)
+    let segments = planned_segments_for_task(task);
+    for segment in &segments {
+        insert_segment_record(pool, segment).await?;
+    }
+    Ok(segments)
+}
+
+pub fn planned_segment_count(task: &TaskRecord) -> usize {
+    if task.supports_range && task.total_size >= MULTI_CONNECTION_THRESHOLD_BYTES {
+        MAX_SEGMENT_COUNT
+    } else {
+        1
+    }
+}
+
+pub fn planned_segments_for_task(task: &TaskRecord) -> Vec<TaskSegmentRecord> {
+    let count = planned_segment_count(task);
+    let total_size = task.total_size.max(0);
+    let completed = task.downloaded_bytes >= total_size && total_size > 0;
+
+    if count == 1 || total_size == 0 {
+        return vec![TaskSegmentRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_id: task.id.clone(),
+            range_start: 0,
+            range_end: total_size.saturating_sub(1).max(0),
+            downloaded_until: task.downloaded_bytes.max(0),
+            status: if completed {
+                SegmentStatus::Completed
+            } else {
+                SegmentStatus::Pending
+            },
+            retry_count: 0,
+            last_error: None,
+        }];
+    }
+
+    let count_i64 = i64::try_from(count).unwrap_or(1);
+    let base = total_size / count_i64;
+    let remainder = total_size % count_i64;
+    let mut start = 0_i64;
+
+    (0..count)
+        .map(|index| {
+            let extra = if i64::try_from(index).unwrap_or(0) < remainder {
+                1
+            } else {
+                0
+            };
+            let length = base + extra;
+            let end = start + length - 1;
+            let downloaded_until = if completed {
+                end + 1
+            } else {
+                start
+            };
+            let segment = TaskSegmentRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                task_id: task.id.clone(),
+                range_start: start,
+                range_end: end,
+                downloaded_until,
+                status: if completed {
+                    SegmentStatus::Completed
+                } else {
+                    SegmentStatus::Pending
+                },
+                retry_count: 0,
+                last_error: None,
+            };
+            start = end + 1;
+            segment
+        })
+        .collect()
 }
 
 pub async fn list_segment_records(
@@ -322,6 +395,29 @@ pub async fn update_task_and_segment_progress(
     Ok(())
 }
 
+pub async fn update_segment_progress(
+    pool: &SqlitePool,
+    segment_id: &str,
+    downloaded_until: i64,
+    status: SegmentStatus,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE segments
+        SET downloaded_until = ?, status = ?, last_error = NULL
+        WHERE id = ?
+        "#,
+    )
+    .bind(downloaded_until)
+    .bind(status.as_str())
+    .bind(segment_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 pub async fn update_task_status(
     pool: &SqlitePool,
     task_id: &str,
@@ -398,6 +494,22 @@ pub async fn complete_task_segment(
     Ok(())
 }
 
+pub async fn complete_segment(pool: &SqlitePool, segment_id: &str) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE segments
+        SET downloaded_until = range_end + 1, status = 'completed', last_error = NULL
+        WHERE id = ?
+        "#,
+    )
+    .bind(segment_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 pub async fn update_segment_status(
     pool: &SqlitePool,
     segment_id: &str,
@@ -421,6 +533,40 @@ pub async fn update_segment_status(
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+pub async fn update_segments_status_for_task(
+    pool: &SqlitePool,
+    task_id: &str,
+    status: SegmentStatus,
+    last_error: Option<&str>,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE segments
+        SET status = ?, last_error = ?
+        WHERE task_id = ? AND status != 'completed'
+        "#,
+    )
+    .bind(status.as_str())
+    .bind(last_error)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub fn segment_downloaded_bytes(segment: &TaskSegmentRecord) -> i64 {
+    let next_byte = segment
+        .downloaded_until
+        .clamp(segment.range_start, segment.range_end.saturating_add(1));
+    next_byte.saturating_sub(segment.range_start)
+}
+
+pub fn total_segment_downloaded_bytes(segments: &[TaskSegmentRecord]) -> i64 {
+    segments.iter().map(segment_downloaded_bytes).sum()
 }
 
 pub async fn delete_task_record(pool: &SqlitePool, task_id: &str) -> Result<(), String> {

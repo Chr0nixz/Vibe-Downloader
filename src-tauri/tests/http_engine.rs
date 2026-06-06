@@ -11,7 +11,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tauri_app_lib::download::{DirectDownloadRequest, HttpEngine};
+use tauri_app_lib::{
+    download::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine},
+    models::{SegmentStatus, TaskSegmentRecord},
+};
 
 const SAMPLE: &[u8] = b"Vibe Downloader HTTP regression payload.";
 
@@ -166,6 +169,90 @@ async fn direct_resume_fails_when_range_is_unavailable() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segmented_direct_download_writes_all_ranges_to_one_file() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("segmented-complete");
+    let payload = large_payload();
+    let segments = direct_segments("segmented-complete", payload.len() as i64);
+
+    let downloaded = engine
+        .download_segmented_direct(
+            DirectSegmentedDownloadRequest {
+                url: format!("{}/large", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: payload.len() as i64,
+                supports_range: true,
+                segments,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("segmented download");
+
+    assert_eq!(downloaded, payload.len() as i64);
+    assert_eq!(fs::read(&paths.final_path).expect("read final"), payload);
+    assert!(!paths.temp.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segmented_direct_resume_skips_completed_ranges() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("segmented-resume");
+    let payload = large_payload();
+    let mut segments = direct_segments("segmented-resume", payload.len() as i64);
+    let first_end = segments[0].range_end as usize;
+    fs::write(&paths.temp, &payload[..=first_end]).expect("write completed range");
+    segments[0].downloaded_until = segments[0].range_end + 1;
+    segments[0].status = SegmentStatus::Completed;
+
+    engine
+        .download_segmented_direct(
+            DirectSegmentedDownloadRequest {
+                url: format!("{}/large", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: payload.len() as i64,
+                supports_range: true,
+                segments,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("resume segmented download");
+
+    assert_eq!(fs::read(&paths.final_path).expect("read final"), payload);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segmented_direct_failure_does_not_rename_temp_file() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("segmented-failure");
+    let payload = large_payload();
+
+    let error = engine
+        .download_segmented_direct(
+            DirectSegmentedDownloadRequest {
+                url: format!("{}/segment-error", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: payload.len() as i64,
+                supports_range: true,
+                segments: direct_segments("segmented-failure", payload.len() as i64),
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect_err("segment should fail");
+
+    assert_eq!(error, "The server returned HTTP 500.");
+    assert!(!paths.final_path.exists());
+}
+
 struct TestServer {
     base_url: String,
     stop: Arc<AtomicBool>,
@@ -242,24 +329,45 @@ fn handle_connection(mut stream: TcpStream) {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or("/");
-    let range_start = request.lines().find_map(parse_range_start);
+    let byte_range = request.lines().find_map(parse_range);
 
     match path {
-        "/file" => respond_file(&mut stream, method, SAMPLE, range_start, true, "sample.bin", false),
+        "/file" => respond_file(&mut stream, method, SAMPLE, byte_range, true, "sample.bin", false),
         "/head-no-length" if method == "HEAD" => {
             write_response(&mut stream, 200, &[("Accept-Ranges", "bytes")], &[], false)
         }
         "/head-no-length" => {
-            respond_file(&mut stream, method, SAMPLE, range_start, true, "fallback.bin", false)
+            respond_file(&mut stream, method, SAMPLE, byte_range, true, "fallback.bin", false)
         }
         "/slow" => respond_file(
             &mut stream,
             method,
             &slow_payload(),
-            range_start,
+            byte_range,
             true,
             "slow.bin",
             true,
+        ),
+        "/large" => respond_file(
+            &mut stream,
+            method,
+            &large_payload(),
+            byte_range,
+            true,
+            "large.bin",
+            false,
+        ),
+        "/segment-error" if byte_range.is_some_and(|range| range.start > 0) => {
+            write_response(&mut stream, 500, &[], b"segment failed", false)
+        }
+        "/segment-error" => respond_file(
+            &mut stream,
+            method,
+            &large_payload(),
+            byte_range,
+            true,
+            "segment-error.bin",
+            false,
         ),
         "/no-range" => respond_file(&mut stream, method, SAMPLE, None, false, "no-range.bin", false),
         "/status/403" => write_response(&mut stream, 403, &[], b"denied", false),
@@ -273,14 +381,22 @@ fn respond_file(
     stream: &mut TcpStream,
     method: &str,
     payload: &[u8],
-    range_start: Option<usize>,
+    byte_range: Option<ByteRange>,
     supports_range: bool,
     file_name: &str,
     slow: bool,
 ) {
-    let start = range_start.unwrap_or(0).min(payload.len());
-    let body = if method == "HEAD" { &[][..] } else { &payload[start..] };
-    let status = if range_start.is_some() && supports_range {
+    let start = byte_range.map(|range| range.start).unwrap_or(0).min(payload.len());
+    let end = byte_range
+        .and_then(|range| range.end)
+        .unwrap_or_else(|| payload.len().saturating_sub(1))
+        .min(payload.len().saturating_sub(1));
+    let body = if method == "HEAD" || start > end {
+        &[][..]
+    } else {
+        &payload[start..=end]
+    };
+    let status = if byte_range.is_some() && supports_range {
         206
     } else {
         200
@@ -290,7 +406,7 @@ fn respond_file(
     } else {
         body.len().to_string()
     };
-    let content_range = format!("bytes {start}-{}/{}", payload.len().saturating_sub(1), payload.len());
+    let content_range = format!("bytes {start}-{end}/{}", payload.len());
     let disposition = format!("attachment; filename=\"{file_name}\"");
     let mut headers = vec![
         ("Content-Length", content_length.as_str()),
@@ -347,15 +463,56 @@ fn slow_payload() -> Vec<u8> {
     (0..65_536).map(|index| (index % 251) as u8).collect()
 }
 
-fn parse_range_start(line: &str) -> Option<usize> {
+fn large_payload() -> Vec<u8> {
+    (0..(16 * 1024 * 1024 + 13))
+        .map(|index| (index % 251) as u8)
+        .collect()
+}
+
+fn direct_segments(task_id: &str, total_size: i64) -> Vec<TaskSegmentRecord> {
+    let count = 4_i64;
+    let base = total_size / count;
+    let remainder = total_size % count;
+    let mut start = 0_i64;
+
+    (0..count)
+        .map(|index| {
+            let length = base + if index < remainder { 1 } else { 0 };
+            let end = start + length - 1;
+            let segment = TaskSegmentRecord {
+                id: format!("{task_id}-segment-{index}"),
+                task_id: task_id.to_string(),
+                range_start: start,
+                range_end: end,
+                downloaded_until: start,
+                status: SegmentStatus::Pending,
+                retry_count: 0,
+                last_error: None,
+            };
+            start = end + 1;
+            segment
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+struct ByteRange {
+    start: usize,
+    end: Option<usize>,
+}
+
+fn parse_range(line: &str) -> Option<ByteRange> {
     let (name, value) = line.split_once(':')?;
     if !name.eq_ignore_ascii_case("range") {
         return None;
     }
-    value
-        .trim()
-        .strip_prefix("bytes=")?
-        .trim_end_matches('-')
-        .parse::<usize>()
-        .ok()
+    let (start, end) = value.trim().strip_prefix("bytes=")?.split_once('-')?;
+    Some(ByteRange {
+        start: start.parse::<usize>().ok()?,
+        end: if end.is_empty() {
+            None
+        } else {
+            Some(end.parse::<usize>().ok()?)
+        },
+    })
 }
