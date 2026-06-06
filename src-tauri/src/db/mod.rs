@@ -1,9 +1,16 @@
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 
-use crate::models::{SegmentStatus, TaskRecord, TaskSegmentRecord, TaskStatus};
+use crate::models::{
+    AppSettings, BrowserKind, SegmentStatus, TaskRecord, TaskSegmentRecord, TaskStatus,
+};
 
 pub const MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;
 pub const MAX_SEGMENT_COUNT: usize = 4;
+pub const DEFAULT_MAX_ACTIVE_TASKS: i32 = 2;
+pub const MIN_MAX_ACTIVE_TASKS: i32 = 1;
+pub const MAX_MAX_ACTIVE_TASKS: i32 = 8;
+const SETTING_MAX_ACTIVE_TASKS: &str = "max_active_tasks";
+const SETTING_DEFAULT_SAVE_DIR: &str = "default_save_dir";
 
 pub async fn connect(db_path: &std::path::Path) -> Result<SqlitePool, String> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -69,6 +76,30 @@ pub async fn get_task_record(pool: &SqlitePool, id: &str) -> Result<Option<TaskR
     row.as_ref().map(row_to_task).transpose()
 }
 
+pub async fn list_queued_task_records(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<TaskRecord>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, url, final_url, file_name, save_dir, temp_path, final_path,
+               total_size, downloaded_bytes, status, etag, last_modified, content_type,
+               supports_range, source_host, connection_count, speed_bps,
+               health_summary, error_message, created_at, updated_at
+        FROM tasks
+        WHERE status = 'queued'
+        ORDER BY created_at ASC
+        LIMIT ?
+        "#,
+    )
+    .bind(limit.max(0))
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    rows.iter().map(row_to_task).collect()
+}
+
 fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
     Ok(TaskRecord {
         id: row.get("id"),
@@ -132,6 +163,146 @@ pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+pub async fn get_settings(
+    pool: &SqlitePool,
+    default_save_dir: String,
+) -> Result<AppSettings, String> {
+    let max_active_tasks = get_setting_value(pool, SETTING_MAX_ACTIVE_TASKS)
+        .await?
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(DEFAULT_MAX_ACTIVE_TASKS)
+        .clamp(MIN_MAX_ACTIVE_TASKS, MAX_MAX_ACTIVE_TASKS);
+    let default_save_dir = get_setting_value(pool, SETTING_DEFAULT_SAVE_DIR)
+        .await?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(default_save_dir);
+
+    Ok(AppSettings {
+        max_active_tasks,
+        default_save_dir,
+    })
+}
+
+pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Result<(), String> {
+    upsert_setting_value(
+        pool,
+        SETTING_MAX_ACTIVE_TASKS,
+        &settings.max_active_tasks.to_string(),
+    )
+    .await?;
+    upsert_setting_value(pool, SETTING_DEFAULT_SAVE_DIR, &settings.default_save_dir).await
+}
+
+async fn get_setting_value(pool: &SqlitePool, key: &str) -> Result<Option<String>, String> {
+    let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(row.map(|row| row.get("value")))
+}
+
+async fn upsert_setting_value(pool: &SqlitePool, key: &str, value: &str) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        INSERT INTO settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        "#,
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn browser_message_exists(pool: &SqlitePool, request_id: &str) -> Result<bool, String> {
+    let row = sqlx::query("SELECT 1 FROM browser_messages WHERE request_id = ?")
+        .bind(request_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(row.is_some())
+}
+
+pub async fn insert_browser_message(
+    pool: &SqlitePool,
+    request_id: &str,
+    browser: BrowserKind,
+    url: &str,
+    status: &str,
+    error_message: Option<&str>,
+) -> Result<(), String> {
+    let created_at = crate::models::task::now_iso();
+
+    sqlx::query(
+        r#"
+        INSERT INTO browser_messages (
+            request_id, browser, url, status, error_message, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(request_id)
+    .bind(browser.as_str())
+    .bind(url)
+    .bind(status)
+    .bind(error_message)
+    .bind(&created_at)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn update_browser_message_status(
+    pool: &SqlitePool,
+    request_id: &str,
+    status: &str,
+    error_message: Option<&str>,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE browser_messages
+        SET status = ?, error_message = ?
+        WHERE request_id = ?
+        "#,
+    )
+    .bind(status)
+    .bind(error_message)
+    .bind(request_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn latest_browser_error(
+    pool: &SqlitePool,
+    browser: BrowserKind,
+) -> Result<Option<String>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT error_message FROM browser_messages
+        WHERE browser = ? AND error_message IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(browser.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(row.map(|row| row.get("error_message")))
 }
 
 pub async fn insert_segment_record(

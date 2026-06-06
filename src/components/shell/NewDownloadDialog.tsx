@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
+import { FolderOpen } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,8 +13,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { ProbeTaskPayload } from "@/generated/bindings";
-import { createTask, probeTask } from "@/lib/tauri";
+import { createTask, openDirectoryPicker, probeTask } from "@/lib/tauri";
 import { formatBytes } from "@/lib/utils";
+import { useSettingsStore } from "@/stores/settings-store";
 import { parseByteCount } from "@/types/task";
 import type { Task } from "@/types/task";
 
@@ -27,6 +29,7 @@ export function NewDownloadDialog({
   onCreated: (task: Task) => void;
 }) {
   const { t } = useTranslation();
+  const settings = useSettingsStore((s) => s.settings);
   const [url, setUrl] = useState("");
   const [saveDir, setSaveDir] = useState("");
   const [fileName, setFileName] = useState("");
@@ -75,6 +78,11 @@ export function NewDownloadDialog({
     }
   }
 
+  async function chooseDirectory() {
+    const selected = await openDirectoryPicker();
+    if (selected) setSaveDir(selected);
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -109,11 +117,26 @@ export function NewDownloadDialog({
             </div>
             <label className="flex flex-col gap-1 text-xs text-text-muted">
               {t("newDownload.saveDir")}
-              <Input
-                value={saveDir}
-                onChange={(event) => setSaveDir(event.target.value)}
-                placeholder={t("newDownload.saveDirPlaceholder")}
-              />
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Input
+                  value={saveDir}
+                  onChange={(event) => setSaveDir(event.target.value)}
+                  placeholder={
+                    settings?.defaultSaveDir ?? t("newDownload.saveDirPlaceholder")
+                  }
+                  className="h-10 sm:h-8"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-10 shrink-0 sm:h-8"
+                  onClick={chooseDirectory}
+                  disabled={submitting}
+                >
+                  <FolderOpen className="h-4 w-4" />
+                  {t("newDownload.chooseDirectory")}
+                </Button>
+              </div>
             </label>
             <label className="flex flex-col gap-1 text-xs text-text-muted">
               {t("newDownload.fileName")}

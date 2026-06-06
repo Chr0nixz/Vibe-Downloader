@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Vibe Downloader",
+  "description": "Send download links to Vibe Downloader.",
+  "version": "0.1.0",
+  "permissions": ["nativeMessaging", "contextMenus", "activeTab", "tabs"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Vibe Downloader",
+    "default_popup": "popup.html"
+  }
+}

@@ -8,7 +8,7 @@ use std::{
 
 use serde::Deserialize;
 use specta::Type;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{
@@ -92,6 +92,14 @@ pub async fn create_task(
     state: State<'_, AppState>,
     input: CreateTaskInput,
 ) -> Result<Task, String> {
+    create_task_with_state(app, state.inner(), input).await
+}
+
+pub(crate) async fn create_task_with_state(
+    app: AppHandle,
+    state: &AppState,
+    input: CreateTaskInput,
+) -> Result<Task, String> {
     let url = input.url.trim();
     if url.is_empty() {
         return Err("Enter a download URL.".to_string());
@@ -102,6 +110,11 @@ pub async fn create_task(
 
     let engine = HttpEngine::new()?;
     let probe = engine.probe(url).await?;
+    let settings = db::get_settings(
+        &state.pool,
+        super::settings::default_download_dir(&app)?,
+    )
+    .await?;
     let save_dir = match input
         .save_dir
         .as_deref()
@@ -109,10 +122,7 @@ pub async fn create_task(
         .filter(|value| !value.is_empty())
     {
         Some(dir) => PathBuf::from(dir),
-        None => app
-            .path()
-            .download_dir()
-            .map_err(|e| format!("Failed to resolve the Downloads folder: {e}"))?,
+        None => PathBuf::from(settings.default_save_dir),
     };
     std::fs::create_dir_all(&save_dir)
         .map_err(|e| format!("Could not create the download directory: {e}"))?;
@@ -159,7 +169,7 @@ pub async fn create_task(
     db::insert_task_record(&state.pool, &record).await?;
     db::ensure_task_segments(&state.pool, &record).await?;
     emit_queue_changed(&app);
-    start_task_download(app.clone(), state.inner(), record.clone()).await?;
+    schedule_queued_tasks(app.clone(), state).await;
 
     db::get_task_record(&state.pool, &record.id)
         .await?
@@ -198,6 +208,7 @@ pub async fn pause_task(
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
     emit_queue_changed(&app);
+    schedule_queued_tasks(app, state.inner()).await;
     Ok(Task::from(task))
 }
 
@@ -212,7 +223,28 @@ pub async fn resume_task(
     if matches!(task.status, TaskStatus::Completed) {
         return Err("This download is already completed.".to_string());
     }
-    start_task_download(app.clone(), state.inner(), task).await?;
+    if matches!(task.status, TaskStatus::NeedsAttention) {
+        return Err("Remote file changed. Restart download to avoid corruption.".to_string());
+    }
+    db::update_task_status(
+        &state.pool,
+        &id,
+        TaskStatus::Queued,
+        0,
+        0,
+        Some("Queued"),
+        None,
+    )
+    .await?;
+    db::update_segments_status_for_task(
+        &state.pool,
+        &id,
+        crate::models::SegmentStatus::Pending,
+        None,
+    )
+    .await?;
+    emit_queue_changed(&app);
+    schedule_queued_tasks(app.clone(), state.inner()).await;
     let task = require_task(&state.pool, &id).await?;
     Ok(Task::from(task))
 }
@@ -247,7 +279,9 @@ pub async fn retry_task(
     )
     .await?;
     let task = require_task(&state.pool, &id).await?;
-    start_task_download(app.clone(), state.inner(), task).await?;
+    emit_task_progress_snapshot(&app, &task);
+    emit_queue_changed(&app);
+    schedule_queued_tasks(app.clone(), state.inner()).await;
     let task = require_task(&state.pool, &id).await?;
     Ok(Task::from(task))
 }
@@ -283,6 +317,7 @@ pub async fn cancel_task(
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
     emit_queue_changed(&app);
+    schedule_queued_tasks(app, state.inner()).await;
     Ok(Task::from(task))
 }
 
@@ -313,6 +348,7 @@ pub async fn delete_task(
 
     db::delete_task_record(&state.pool, &id).await?;
     emit_queue_changed(&app);
+    schedule_queued_tasks(app, state.inner()).await;
     Ok(())
 }
 
@@ -365,19 +401,98 @@ pub async fn seed_mock_tasks(state: State<'_, AppState>) -> Result<Vec<Task>, St
     seed_mock_data(&state.pool).await
 }
 
+pub(crate) async fn schedule_queued_tasks(app: AppHandle, state: &AppState) {
+    schedule_queued_tasks_inner(
+        app,
+        state.pool.clone(),
+        state.downloads.clone(),
+        state.scheduler.clone(),
+    )
+    .await;
+}
+
+async fn schedule_queued_tasks_inner(
+    app: AppHandle,
+    pool: sqlx::SqlitePool,
+    downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
+    scheduler: Arc<tokio::sync::Mutex<()>>,
+) {
+    let _guard = scheduler.lock().await;
+
+    loop {
+        let default_dir = super::settings::default_download_dir(&app).unwrap_or_default();
+        let settings = match db::get_settings(&pool, default_dir).await {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("failed to load settings for scheduler: {error}");
+                break;
+            }
+        };
+        let active_count = downloads.lock().await.len() as i32;
+        let available = settings.max_active_tasks.saturating_sub(active_count);
+        if available <= 0 {
+            break;
+        }
+
+        let queued = match db::list_queued_task_records(&pool, i64::from(available)).await {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                eprintln!("failed to load queued tasks: {error}");
+                break;
+            }
+        };
+        if queued.is_empty() {
+            break;
+        }
+
+        let mut made_progress = false;
+        for task in queued {
+            if downloads.lock().await.len() as i32 >= settings.max_active_tasks {
+                break;
+            }
+            let task_id = task.id.clone();
+            if let Err(error) = start_task_download(
+                app.clone(),
+                pool.clone(),
+                downloads.clone(),
+                scheduler.clone(),
+                task,
+            )
+            .await
+            {
+                match db::get_task_record(&pool, &task_id).await {
+                    Ok(Some(current)) if current.status == TaskStatus::Queued => {
+                        mark_download_failed(&app, &pool, &task_id, error).await;
+                    }
+                    Ok(Some(current)) => emit_task_progress_snapshot(&app, &current),
+                    _ => {}
+                }
+            }
+            made_progress = true;
+        }
+
+        if !made_progress {
+            break;
+        }
+    }
+
+    emit_queue_changed(&app);
+}
+
 async fn start_task_download(
     app: AppHandle,
-    state: &AppState,
+    pool: sqlx::SqlitePool,
+    downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
+    scheduler: Arc<tokio::sync::Mutex<()>>,
     task: TaskRecord,
 ) -> Result<(), String> {
-    let task = prepare_task_for_download(&state.pool, task).await?;
-    let mut downloads = state.downloads.lock().await;
-    if downloads.contains_key(&task.id) {
+    let task = prepare_task_for_download(&pool, task).await?;
+    if downloads.lock().await.contains_key(&task.id) {
         return Ok(());
     }
 
     db::update_task_status(
-        &state.pool,
+        &pool,
         &task.id,
         TaskStatus::Downloading,
         0,
@@ -388,40 +503,68 @@ async fn start_task_download(
     .await?;
 
     let cancel = Arc::new(AtomicBool::new(false));
-    let downloads_map = state.downloads.clone();
-    let pool = state.pool.clone();
+    let downloads_map = downloads.clone();
     let task_id = task.id.clone();
     let map_task_id = task.id.clone();
     let task_app = app.clone();
     let task_cancel = cancel.clone();
+    let task_pool = pool.clone();
+    let task_scheduler = scheduler.clone();
 
     let handle = tokio::spawn(async move {
         let engine = match HttpEngine::new() {
             Ok(engine) => engine,
             Err(error) => {
-                mark_download_failed(&task_app, &pool, &task_id, error).await;
+                mark_download_failed(&task_app, &task_pool, &task_id, error).await;
                 let _ = downloads_map.lock().await.remove(&task_id);
+                spawn_schedule_queued_tasks(
+                    task_app.clone(),
+                    task_pool.clone(),
+                    downloads_map.clone(),
+                    task_scheduler.clone(),
+                );
                 return;
             }
         };
 
         let result = engine
-            .download(task_app.clone(), pool.clone(), task, task_cancel.clone())
+            .download(
+                task_app.clone(),
+                task_pool.clone(),
+                task,
+                task_cancel.clone(),
+            )
             .await;
         let canceled = task_cancel.load(Ordering::SeqCst);
         let _ = downloads_map.lock().await.remove(&task_id);
 
         if let Err(error) = result {
             if !canceled {
-                mark_download_failed(&task_app, &pool, &task_id, error).await;
+                mark_download_failed(&task_app, &task_pool, &task_id, error).await;
             }
         }
+
+        spawn_schedule_queued_tasks(task_app, task_pool, downloads_map, task_scheduler);
     });
 
-    downloads.insert(map_task_id, DownloadControl { cancel, handle });
+    downloads
+        .lock()
+        .await
+        .insert(map_task_id, DownloadControl { cancel, handle });
 
     emit_queue_changed(&app);
     Ok(())
+}
+
+fn spawn_schedule_queued_tasks(
+    app: AppHandle,
+    pool: sqlx::SqlitePool,
+    downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
+    scheduler: Arc<tokio::sync::Mutex<()>>,
+) {
+    tokio::spawn(async move {
+        schedule_queued_tasks_inner(app, pool, downloads, scheduler).await;
+    });
 }
 
 async fn prepare_task_for_download(

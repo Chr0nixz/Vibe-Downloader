@@ -1,6 +1,11 @@
+pub mod browser;
 pub mod task;
 
+pub use browser::{
+    BrowserHandoffInput, BrowserHandoffResult, BrowserIntegrationEntry,
+    BrowserIntegrationStatus, BrowserIntegrationUpdateInput, BrowserKind,
+};
 pub use task::{
-    ProbeTaskPayload, SegmentStatus, Task, TaskProgressPayload, TaskRecord, TaskSegment,
+    AppSettings, ProbeTaskPayload, SegmentStatus, Task, TaskProgressPayload, TaskRecord, TaskSegment,
     TaskSegmentRecord, TaskStatus,
 };

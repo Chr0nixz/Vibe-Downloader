@@ -29,6 +29,12 @@ export const commands = {
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_task", { id })),
 	listTaskSegments: (taskId: string) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_task_segments", { taskId })),
+	getSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("get_settings")),
+	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
+	getBrowserIntegrationStatus: () => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("get_browser_integration_status")),
+	installBrowserIntegration: (input: BrowserIntegrationUpdateInput) => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("install_browser_integration", { input })),
+	uninstallBrowserIntegration: (input: BrowserIntegrationUpdateInput) => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("uninstall_browser_integration", { input })),
+	createBrowserHandoffTask: (input: BrowserHandoffInput) => typedError<BrowserHandoffResult, string>(__TAURI_INVOKE("create_browser_handoff_task", { input })),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
 	pauseTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("pause_task", { id })),
@@ -42,6 +48,54 @@ export const commands = {
 };
 
 /* Types */
+export type AppSettings = {
+	maxActiveTasks: number,
+	defaultSaveDir: string,
+};
+
+export type BrowserHandoffInput = {
+	version: number,
+	requestId: string,
+	browser: BrowserKind,
+	action: string,
+	url: string,
+	pageUrl: string | null,
+	referrer: string | null,
+	userAgent: string | null,
+	suggestedFileName: string | null,
+};
+
+export type BrowserHandoffResult = {
+	requestId: string,
+	status: string,
+	task: Task | null,
+	errorMessage: string | null,
+};
+
+export type BrowserIntegrationEntry = {
+	browser: BrowserKind,
+	displayName: string,
+	supportedOnPlatform: boolean,
+	detected: boolean,
+	manifestInstalled: boolean,
+	manifestPath: string | null,
+	extensionLoadPath: string | null,
+	lastError: string | null,
+};
+
+export type BrowserIntegrationStatus = {
+	nativeHostName: string,
+	nativeHostPath: string | null,
+	extensionCorePath: string | null,
+	browsers: BrowserIntegrationEntry[],
+};
+
+export type BrowserIntegrationUpdateInput = {
+	browsers: BrowserKind[],
+};
+
+export type BrowserKind = "chrome" | "edge" | "firefox" | "safari" | "brave" | "opera" | "vivaldi" | "chromium";
+
 export type CreateTaskInput = {
 	url: string,
 	saveDir: string | null,
@@ -108,6 +162,11 @@ export type TaskSegment = {
 };
 
 export type TaskStatus = "queued" | "downloading" | "paused" | "completed" | "failed" | "retrying" | "waiting_network" | "needs_attention";
+
+export type UpdateSettingsInput = {
+	maxActiveTasks: number | null,
+	defaultSaveDir: string | null,
+};
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

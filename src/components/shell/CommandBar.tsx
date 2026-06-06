@@ -45,11 +45,14 @@ export function CommandBar({
   const setSearch = useTaskStore((s) => s.setSearch);
   const canStart =
     !!selectedTask &&
-    selectedTask.status !== "downloading" &&
-    selectedTask.status !== "completed";
+    (selectedTask.status === "paused" ||
+      selectedTask.status === "failed" ||
+      selectedTask.status === "waiting_network");
   const canPause =
     !!selectedTask &&
-    (selectedTask.status === "downloading" || selectedTask.status === "retrying");
+    (selectedTask.status === "downloading" ||
+      selectedTask.status === "retrying" ||
+      selectedTask.status === "queued");
   const canDelete = !!selectedTask;
 
   return (

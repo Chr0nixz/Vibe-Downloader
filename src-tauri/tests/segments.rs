@@ -5,7 +5,7 @@ use tauri_app_lib::{
     commands::tasks::{local_resume_error, resume_mismatch_message, segment_resume_error},
     db,
     download::ProbeResult,
-    models::{SegmentStatus, TaskRecord, TaskStatus},
+    models::{AppSettings, BrowserKind, SegmentStatus, TaskRecord, TaskStatus},
 };
 
 #[tokio::test]
@@ -117,6 +117,162 @@ async fn progress_updates_task_and_segment_together() {
     assert_eq!(task.speed_bps, 2048);
     assert_eq!(segment.downloaded_until, 40);
     assert_eq!(segment.status, SegmentStatus::Downloading);
+}
+
+#[tokio::test]
+async fn settings_defaults_use_download_dir_and_two_active_tasks() {
+    let pool = test_pool("settings-defaults").await;
+    let settings = db::get_settings(&pool, "C:\\Downloads".to_string())
+        .await
+        .expect("settings");
+
+    assert_eq!(settings.max_active_tasks, 2);
+    assert_eq!(settings.default_save_dir, "C:\\Downloads");
+}
+
+#[tokio::test]
+async fn settings_upsert_and_clamp_active_task_count() {
+    let pool = test_pool("settings-upsert").await;
+    db::upsert_settings(
+        &pool,
+        &AppSettings {
+            max_active_tasks: 5,
+            default_save_dir: "D:\\Vibe".to_string(),
+        },
+    )
+    .await
+    .expect("upsert settings");
+
+    let settings = db::get_settings(&pool, "C:\\Downloads".to_string())
+        .await
+        .expect("settings");
+    assert_eq!(settings.max_active_tasks, 5);
+    assert_eq!(settings.default_save_dir, "D:\\Vibe");
+
+    db::upsert_settings(
+        &pool,
+        &AppSettings {
+            max_active_tasks: 99,
+            default_save_dir: "D:\\Vibe".to_string(),
+        },
+    )
+    .await
+    .expect("upsert settings");
+    let settings = db::get_settings(&pool, "C:\\Downloads".to_string())
+        .await
+        .expect("settings");
+    assert_eq!(settings.max_active_tasks, db::MAX_MAX_ACTIVE_TASKS);
+}
+
+#[tokio::test]
+async fn browser_messages_track_duplicates_and_latest_error() {
+    let pool = test_pool("browser-messages").await;
+    assert!(
+        !db::browser_message_exists(&pool, "request-1")
+            .await
+            .expect("exists")
+    );
+
+    db::insert_browser_message(
+        &pool,
+        "request-1",
+        BrowserKind::Chrome,
+        "https://example.com/file.zip",
+        "received",
+        None,
+    )
+    .await
+    .expect("insert message");
+    assert!(
+        db::browser_message_exists(&pool, "request-1")
+            .await
+            .expect("exists")
+    );
+
+    db::update_browser_message_status(
+        &pool,
+        "request-1",
+        "failed",
+        Some("Browser handoff URL is invalid."),
+    )
+    .await
+    .expect("update message");
+    let latest = db::latest_browser_error(&pool, BrowserKind::Chrome)
+        .await
+        .expect("latest error");
+    assert_eq!(latest.as_deref(), Some("Browser handoff URL is invalid."));
+}
+
+#[tokio::test]
+async fn queued_task_query_uses_fifo_order() {
+    let pool = test_pool("queued-fifo").await;
+    let mut first = sample_task("task-first", 100);
+    first.created_at = "2024-01-01T00:00:00Z".to_string();
+    first.updated_at = first.created_at.clone();
+    let mut second = sample_task("task-second", 100);
+    second.created_at = "2024-01-02T00:00:00Z".to_string();
+    second.updated_at = second.created_at.clone();
+    let mut paused = sample_task("task-paused", 100);
+    paused.status = TaskStatus::Paused;
+
+    for task in [&second, &paused, &first] {
+        db::insert_task_record(&pool, task)
+            .await
+            .expect("insert task");
+    }
+
+    let queued = db::list_queued_task_records(&pool, 2)
+        .await
+        .expect("queued");
+    assert_eq!(
+        queued.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+        vec!["task-first", "task-second"]
+    );
+}
+
+#[tokio::test]
+async fn reset_interrupted_tasks_pauses_active_records() {
+    let pool = test_pool("reset-interrupted").await;
+    let mut downloading = sample_task("task-downloading", 100);
+    downloading.status = TaskStatus::Downloading;
+    let mut retrying = sample_task("task-retrying", 100);
+    retrying.status = TaskStatus::Retrying;
+    let queued = sample_task("task-queued", 100);
+
+    for task in [&downloading, &retrying, &queued] {
+        db::insert_task_record(&pool, task)
+            .await
+            .expect("insert task");
+    }
+
+    db::reset_interrupted_tasks(&pool)
+        .await
+        .expect("reset interrupted");
+
+    assert_eq!(
+        db::get_task_record(&pool, "task-downloading")
+            .await
+            .expect("load")
+            .expect("task")
+            .status,
+        TaskStatus::Paused
+    );
+    assert_eq!(
+        db::get_task_record(&pool, "task-retrying")
+            .await
+            .expect("load")
+            .expect("task")
+            .status,
+        TaskStatus::Paused
+    );
+    assert_eq!(
+        db::get_task_record(&pool, "task-queued")
+            .await
+            .expect("load")
+            .expect("task")
+            .status,
+        TaskStatus::Queued
+    );
 }
 
 #[test]

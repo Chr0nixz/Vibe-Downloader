@@ -1,5 +1,6 @@
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { motion, useReducedMotion } from "framer-motion";
 
 import { cn } from "@/lib/utils";
 
@@ -11,35 +12,61 @@ const DialogClose = DialogPrimitive.Close;
 const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
->(({ className, ...props }, ref) => (
-  <DialogPrimitive.Overlay
-    ref={ref}
-    className={cn("fixed inset-0 z-50 bg-surface-scrim", className)}
-    {...props}
-  />
-));
+>(({ className, ...props }, ref) => {
+  const reduceMotion = useReducedMotion();
+
+  return (
+    <DialogPrimitive.Overlay asChild {...props}>
+      <motion.div
+        ref={ref}
+        className={cn("fixed inset-0 z-50 bg-surface-scrim", className)}
+        initial={reduceMotion ? false : { opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={{ duration: 0.18, ease: "easeOut" }}
+      />
+    </DialogPrimitive.Overlay>
+  );
+});
 DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, ...props }, ref) => (
-  <DialogPortal>
-    <DialogOverlay />
-    <DialogPrimitive.Content
-      ref={ref}
-      className={cn(
-        "fixed left-1/2 z-50 flex w-[calc(100%-1.5rem)] max-w-lg -translate-x-1/2 flex-col overflow-hidden rounded-lg border border-border-subtle bg-surface-overlay shadow-lg focus:outline-none",
-        "top-1/2 max-h-[calc(100dvh-1.5rem)] -translate-y-1/2",
-        "md:top-[16%] md:max-h-[min(32rem,calc(100dvh-2rem))] md:translate-y-0",
-        className,
-      )}
-      {...props}
-    >
-      {children}
-    </DialogPrimitive.Content>
-  </DialogPortal>
-));
+>(({ className, children, ...props }, ref) => {
+  const reduceMotion = useReducedMotion();
+
+  return (
+    <DialogPortal>
+      <DialogOverlay />
+      <DialogPrimitive.Content asChild {...props}>
+        <motion.div
+          ref={ref}
+          className={cn(
+            "fixed left-1/2 z-50 flex w-[calc(100%-1.5rem)] max-w-lg -translate-x-1/2 flex-col overflow-hidden rounded-lg border border-border-subtle bg-surface-overlay shadow-lg focus:outline-none",
+            "top-1/2 max-h-[calc(100dvh-1.5rem)] -translate-y-1/2",
+            "md:top-[16%] md:max-h-[min(32rem,calc(100dvh-2rem))] md:translate-y-0",
+            className,
+          )}
+          initial={
+            reduceMotion
+              ? false
+              : { opacity: 0, y: 10, scale: 0.98 }
+          }
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={
+            reduceMotion
+              ? { opacity: 0 }
+              : { opacity: 0, y: 8, scale: 0.98 }
+          }
+          transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+        >
+          {children}
+        </motion.div>
+      </DialogPrimitive.Content>
+    </DialogPortal>
+  );
+});
 DialogContent.displayName = DialogPrimitive.Content.displayName;
 
 const DialogHeader = ({

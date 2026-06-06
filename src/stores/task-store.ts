@@ -7,6 +7,13 @@ import {
   type TaskProgressPayload,
 } from "@/types/task-progress";
 
+export interface SpeedSample {
+  at: number;
+  speedBps: number;
+}
+
+const SPEED_HISTORY_LIMIT = 60;
+
 export type NavFilter =
   | "all"
   | "downloading"
@@ -21,6 +28,8 @@ interface TaskStore {
   nav: NavFilter;
   search: string;
   detailOpen: boolean;
+  expandedTaskIds: string[];
+  speedHistoryByTaskId: Record<string, SpeedSample[]>;
   loading: boolean;
   error: string | null;
   setTasks: (tasks: Task[]) => void;
@@ -30,6 +39,8 @@ interface TaskStore {
   setNav: (nav: NavFilter) => void;
   setSearch: (search: string) => void;
   setDetailOpen: (open: boolean) => void;
+  toggleTaskExpanded: (id: string) => void;
+  collapseTask: (id: string) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
 }
@@ -40,9 +51,22 @@ export const useTaskStore = create<TaskStore>((set) => ({
   nav: "all",
   search: "",
   detailOpen: false,
+  expandedTaskIds: [],
+  speedHistoryByTaskId: {},
   loading: true,
   error: null,
-  setTasks: (tasks) => set({ tasks }),
+  setTasks: (tasks) =>
+    set((state) => {
+      const ids = new Set(tasks.map((task) => task.id));
+      const speedHistoryByTaskId = Object.fromEntries(
+        Object.entries(state.speedHistoryByTaskId).filter(([id]) => ids.has(id)),
+      );
+      return {
+        tasks,
+        expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
+        speedHistoryByTaskId,
+      };
+    }),
   upsertTask: (task) =>
     set((state) => {
       const index = state.tasks.findIndex((entry) => entry.id === task.id);
@@ -54,6 +78,8 @@ export const useTaskStore = create<TaskStore>((set) => ({
   patchTask: (raw) => {
     const payload = normalizeTaskProgressPayload(raw);
     if (!payload) return;
+    const speedBps = parseByteCount(payload.speedBps);
+    const sample: SpeedSample = { at: Date.now(), speedBps };
 
     set((state) => ({
       tasks: state.tasks.map((task) =>
@@ -62,18 +88,35 @@ export const useTaskStore = create<TaskStore>((set) => ({
               ...task,
               downloadedBytes: parseByteCount(payload.downloadedBytes),
               totalSize: parseByteCount(payload.totalSize),
-              speedBps: parseByteCount(payload.speedBps),
+              speedBps,
               connectionCount: payload.connectionCount,
               status: payload.status,
             }
           : task,
       ),
+      speedHistoryByTaskId: {
+        ...state.speedHistoryByTaskId,
+        [payload.taskId]: [
+          ...(state.speedHistoryByTaskId[payload.taskId] ?? []),
+          sample,
+        ].slice(-SPEED_HISTORY_LIMIT),
+      },
     }));
   },
   selectTask: (id) => set({ selectedId: id }),
   setNav: (nav) => set({ nav }),
   setSearch: (search) => set({ search }),
   setDetailOpen: (open) => set({ detailOpen: open }),
+  toggleTaskExpanded: (id) =>
+    set((state) => ({
+      expandedTaskIds: state.expandedTaskIds.includes(id)
+        ? state.expandedTaskIds.filter((taskId) => taskId !== id)
+        : [...state.expandedTaskIds, id],
+    })),
+  collapseTask: (id) =>
+    set((state) => ({
+      expandedTaskIds: state.expandedTaskIds.filter((taskId) => taskId !== id),
+    })),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
 }));

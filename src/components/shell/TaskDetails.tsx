@@ -249,21 +249,36 @@ function ChunkList({
 
   return (
     <div className="space-y-3 text-xs">
+      <p className="rounded-md border border-border-subtle/70 bg-surface-root/50 px-3 py-2 text-text-secondary">
+        {t("taskDetails.chunksSummary", {
+          total: segments.length,
+          completed: segments.filter((segment) => segment.status === "completed").length,
+          active: segments.filter((segment) => segment.status === "downloading").length,
+          failed: segments.filter((segment) => segment.status === "failed").length,
+        })}
+      </p>
       {segments.map((segment) => {
         const total = Math.max(1, segment.rangeEnd - segment.rangeStart + 1);
         const completed = Math.max(0, segment.downloadedUntil - segment.rangeStart);
         const progress = Math.min(1, completed / total);
         const isLive =
           segment.status === "downloading" || segment.status === "pending";
+        const rangeText = `${formatBytes(segment.rangeStart)} - ${formatBytes(segment.rangeEnd)}`;
+        const percentText = `${Math.round(progress * 100)}%`;
 
         return (
           <div
             key={segment.id}
             className="rounded-md border border-border-subtle bg-surface-raised/50 p-3"
+            title={t("taskDetails.chunkTooltip", {
+              range: rangeText,
+              percent: percentText,
+              retries: segment.retryCount,
+            })}
           >
             <div className="flex items-center justify-between gap-3">
               <span className="font-medium text-text-primary">
-                {rangeLabel} {formatBytes(segment.rangeStart)} - {formatBytes(segment.rangeEnd)}
+                {rangeLabel} {rangeText}
               </span>
               <span className={cn("capitalize", segmentTone(segment.status))}>
                 {t(`segment.status.${segment.status}`)}
@@ -273,8 +288,8 @@ function ChunkList({
               <ProgressBar
                 value={progress}
                 label={t("taskDetails.chunkProgressAria", {
-                  range: `${formatBytes(segment.rangeStart)} - ${formatBytes(segment.rangeEnd)}`,
-                  percent: `${Math.round(progress * 100)}%`,
+                  range: rangeText,
+                  percent: percentText,
                 })}
                 active={segment.status !== "completed" && segment.status !== "failed"}
                 smooth={!isLive}
@@ -347,6 +362,13 @@ function ConnectionList({
 
   return (
     <div className="space-y-2 text-xs">
+      <p className="rounded-md border border-border-subtle/70 bg-surface-root/50 px-3 py-2 text-text-secondary">
+        {t("taskDetails.connectionsSummary", {
+          total: segments.length,
+          active: activeSegments.length,
+          speed: formatSpeed(taskSpeedBps),
+        })}
+      </p>
       {segments.map((segment, index) => {
         const total = Math.max(1, segment.rangeEnd - segment.rangeStart + 1);
         const completed = Math.max(
@@ -355,11 +377,19 @@ function ConnectionList({
         );
         const speed =
           segment.status === "downloading" ? averageActiveSpeed : 0;
+        const rangeText = `${formatBytes(segment.rangeStart)} - ${formatBytes(segment.rangeEnd)}`;
+        const percentText = formatPercent(completed, total);
 
         return (
           <div
             key={segment.id}
             className="rounded-md border border-border-subtle bg-surface-raised/50 p-3"
+            title={t("taskDetails.connectionTooltip", {
+              index: index + 1,
+              range: rangeText,
+              percent: percentText,
+              speed: formatSpeed(speed),
+            })}
           >
             <div className="flex items-center justify-between gap-3">
               <span className="font-medium text-text-primary">
@@ -372,11 +402,11 @@ function ConnectionList({
             <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 text-text-muted">
               <span>{rangeLabel}</span>
               <span className="text-right font-mono text-text-secondary">
-                {formatBytes(segment.rangeStart)} - {formatBytes(segment.rangeEnd)}
+                {rangeText}
               </span>
               <span>{progressLabel}</span>
               <span className="text-right font-mono text-text-secondary">
-                {formatPercent(completed, total)}
+                {percentText}
               </span>
               <span>{speedLabel}</span>
               <span className="text-right font-mono text-text-secondary">

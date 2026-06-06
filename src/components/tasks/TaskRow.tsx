@@ -1,6 +1,9 @@
-import { memo } from "react";
+import { memo, type MouseEventHandler, type ReactNode } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import {
+  Activity,
+  ChevronDown,
   File,
   FolderOpen,
   Pause,
@@ -10,6 +13,15 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { ProgressBar } from "@/components/ui/progress-bar";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
+  describeSpeedTrend,
+  SpeedSparkline,
+} from "@/components/tasks/SpeedSparkline";
 import type { Task } from "@/types/task";
 import {
   formatBytes,
@@ -18,6 +30,7 @@ import {
   formatSpeed,
 } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import type { SpeedSample } from "@/stores/task-store";
 
 interface TaskRowProps {
   task: Task;
@@ -28,6 +41,9 @@ interface TaskRowProps {
   onRetry: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
+  expanded: boolean;
+  speedHistory: SpeedSample[];
+  onToggleExpanded: () => void;
 }
 
 function statusTone(status: Task["status"]): string {
@@ -52,28 +68,38 @@ function statusTone(status: Task["status"]): string {
 export const TaskRow = memo(function TaskRow({
   task,
   selected,
+  expanded,
+  speedHistory,
   onSelect,
   onNavigate,
   onToggleTransfer,
   onRetry,
   onOpenFile,
   onOpenFolder,
+  onToggleExpanded,
 }: TaskRowProps) {
   const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
   const progress =
     task.totalSize > 0 ? task.downloadedBytes / task.totalSize : 0;
   const isActive =
     task.status === "downloading" || task.status === "retrying";
+  const speedTrend = describeSpeedTrend(speedHistory, task.speedBps, t);
+  const diagnosticLabel = task.healthSummary || speedTrend.label;
+  const expandedId = `task-${task.id}-expanded`;
   const progressLabel = t("task.progressAria", {
     name: task.fileName,
     percent: formatPercent(task.downloadedBytes, task.totalSize),
   });
 
   return (
-    <div
+    <motion.div
+      layout={!reduceMotion}
       id={`task-option-${task.id}`}
       role="option"
       aria-selected={selected}
+      aria-expanded={expanded}
+      aria-controls={expanded ? expandedId : undefined}
       aria-labelledby={`task-${task.id}-name`}
       tabIndex={selected ? 0 : -1}
       onClick={(event) => {
@@ -99,10 +125,15 @@ export const TaskRow = memo(function TaskRow({
         }
       }}
       className={cn(
-        "border-b border-border-subtle px-3 py-3 transition-colors hover:bg-surface-raised/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary md:px-4",
+        "relative overflow-hidden rounded-lg border border-border-subtle/70 bg-surface-base/85 px-3.5 py-3.5 shadow-[0_1px_2px_oklch(0_0_0_/_0.05),0_1px_0_oklch(1_0_0_/_0.025)_inset] transition-[background-color,border-color,box-shadow,transform] duration-200 ease-out hover:-translate-y-px hover:border-text-muted/30 hover:bg-surface-raised/70 hover:shadow-[0_6px_18px_oklch(0_0_0_/_0.08),0_1px_0_oklch(1_0_0_/_0.035)_inset] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70 md:px-4",
         "grid gap-x-4 gap-y-3 md:grid-cols-[minmax(0,1fr)_auto] md:gap-y-2",
-        selected && "bg-surface-raised/80",
+        selected &&
+          "border-accent-primary/35 bg-surface-raised ring-1 ring-accent-primary/45 shadow-[0_8px_24px_oklch(0_0_0_/_0.10),0_1px_0_oklch(1_0_0_/_0.04)_inset]",
+        task.status === "completed" && "border-status-success/30",
+        (task.status === "failed" || task.status === "needs_attention") &&
+          "border-status-danger/35",
       )}
+      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
     >
       <div className="min-w-0 space-y-2">
         <div className="flex min-w-0 items-start justify-between gap-2 md:block">
@@ -114,24 +145,34 @@ export const TaskRow = memo(function TaskRow({
               >
                 {task.fileName}
               </h3>
-              <span className={cn("shrink-0 text-xs", statusTone(task.status))}>
+              <motion.span
+                key={task.status}
+                initial={reduceMotion ? false : { opacity: 0, scale: 0.96 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                className={cn("shrink-0 text-xs font-medium", statusTone(task.status))}
+              >
                 {t(`task.status.${task.status}`)}
-              </span>
+              </motion.span>
             </div>
             <p className="truncate text-xs text-text-muted">{task.sourceHost}</p>
           </div>
-          <span className="shrink-0 font-mono text-sm text-text-primary md:hidden">
-            {formatSpeed(task.speedBps)}
-          </span>
         </div>
 
-        {task.healthSummary ? (
-          <p className="truncate text-xs text-text-secondary">{task.healthSummary}</p>
-        ) : null}
+        <p
+          className={cn(
+            "truncate text-xs text-text-secondary",
+            speedTrend.tone === "warning" && !task.healthSummary && "text-status-warning",
+            speedTrend.tone === "stable" && !task.healthSummary && "text-accent-energy",
+          )}
+        >
+          {diagnosticLabel}
+        </p>
 
         <ProgressBar value={progress} label={progressLabel} active={isActive} smooth={!isActive} />
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs text-text-muted md:hidden">
+          <span className="text-text-primary">{formatSpeed(task.speedBps)}</span>
           <span>
             {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
           </span>
@@ -145,8 +186,8 @@ export const TaskRow = memo(function TaskRow({
         </div>
       </div>
 
-      <div className="hidden flex-col items-end gap-1 text-right font-mono text-xs md:flex">
-        <span className="text-text-primary">{formatSpeed(task.speedBps)}</span>
+      <div className="hidden min-w-36 flex-col items-end gap-1 text-right font-mono text-xs md:flex">
+        <span className="text-sm text-text-primary">{formatSpeed(task.speedBps)}</span>
         <span className="text-text-muted">
           {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
         </span>
@@ -161,6 +202,8 @@ export const TaskRow = memo(function TaskRow({
         ) : null}
         <RowActions
           task={task}
+          expanded={expanded}
+          onToggleExpanded={onToggleExpanded}
           onToggleTransfer={onToggleTransfer}
           onRetry={onRetry}
           onOpenFile={onOpenFile}
@@ -171,18 +214,71 @@ export const TaskRow = memo(function TaskRow({
 
       <RowActions
         task={task}
+        expanded={expanded}
+        onToggleExpanded={onToggleExpanded}
         onToggleTransfer={onToggleTransfer}
         onRetry={onRetry}
         onOpenFile={onOpenFile}
         onOpenFolder={onOpenFolder}
         className="flex md:hidden"
       />
-    </div>
+
+      <AnimatePresence initial={false}>
+        {expanded ? (
+          <motion.div
+            id={expandedId}
+            className="col-span-full overflow-hidden"
+            initial={reduceMotion ? false : { opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <div className="grid gap-3 border-t border-border-subtle/70 pt-3 md:grid-cols-[minmax(0,1fr)_minmax(10rem,15rem)] md:items-center">
+              <div className="min-w-0 space-y-2 text-xs text-text-secondary">
+                <DetailLine label={t("task.expanded.saveDir")} value={task.saveDir} />
+                <DetailLine
+                  label={t("task.expanded.resume")}
+                  value={
+                    task.supportsRange
+                      ? t("task.expanded.resumeSupported")
+                      : t("task.expanded.resumeUnavailable")
+                  }
+                />
+                <div className="flex min-w-0 items-center gap-2">
+                  <Activity className="h-3.5 w-3.5 shrink-0 text-accent-primary" aria-hidden />
+                  <span className="min-w-0 truncate">{diagnosticLabel}</span>
+                </div>
+              </div>
+              <SpeedSparkline
+                samples={speedHistory}
+                currentSpeedBps={task.speedBps}
+                label={t("task.expanded.speedHistoryAria", {
+                  name: task.fileName,
+                })}
+              />
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </motion.div>
   );
 });
 
+function DetailLine({ label, value }: { label: string; value: string }) {
+  return (
+    <p className="flex min-w-0 gap-2">
+      <span className="shrink-0 text-text-muted">{label}</span>
+      <span className="min-w-0 truncate text-text-secondary" title={value}>
+        {value}
+      </span>
+    </p>
+  );
+}
+
 function RowActions({
   task,
+  expanded,
+  onToggleExpanded,
   onToggleTransfer,
   onRetry,
   onOpenFile,
@@ -190,6 +286,8 @@ function RowActions({
   className,
 }: {
   task: Task;
+  expanded: boolean;
+  onToggleExpanded: () => void;
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
   onOpenFile: (task: Task) => void;
@@ -197,6 +295,12 @@ function RowActions({
   className?: string;
 }) {
   const { t } = useTranslation();
+  const showsStart =
+    task.status === "paused" ||
+    task.status === "failed" ||
+    task.status === "waiting_network";
+  const transferDisabled =
+    task.status === "completed" || task.status === "needs_attention";
 
   return (
     <div
@@ -204,63 +308,87 @@ function RowActions({
       data-row-action
       data-no-drag
     >
-      <Button
-        variant="ghost"
-        size="icon"
-        aria-label={
-          task.status === "paused" || task.status === "failed"
-            ? t("actions.resume")
-            : t("actions.pause")
-        }
-        disabled={task.status === "completed"}
+      <ActionButton
+        label={expanded ? t("actions.collapse") : t("actions.expand")}
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggleExpanded();
+        }}
+      >
+        <ChevronDown
+          className={cn("h-4 w-4 transition-transform duration-200", expanded && "rotate-180")}
+        />
+      </ActionButton>
+      <ActionButton
+        label={showsStart ? t("actions.resume") : t("actions.pause")}
+        disabled={transferDisabled}
         onClick={(event) => {
           event.stopPropagation();
           onToggleTransfer(task);
         }}
       >
-        {task.status === "paused" || task.status === "failed" ? (
-          <Play className="h-4 w-4" />
-        ) : (
-          <Pause className="h-4 w-4" />
-        )}
-      </Button>
-      {task.status === "failed" || task.status === "needs_attention" ? (
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={t("actions.retry")}
+        {showsStart ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+      </ActionButton>
+      {task.status === "failed" ? (
+        <ActionButton
+          label={t("actions.retry")}
           onClick={(event) => {
             event.stopPropagation();
             onRetry(task);
           }}
         >
           <RotateCcw className="h-4 w-4" />
-        </Button>
+        </ActionButton>
       ) : null}
       {task.status === "completed" ? (
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={t("actions.openFile")}
+        <ActionButton
+          label={t("actions.openFile")}
           onClick={(event) => {
             event.stopPropagation();
             onOpenFile(task);
           }}
         >
           <File className="h-4 w-4" />
-        </Button>
+        </ActionButton>
       ) : null}
-      <Button
-        variant="ghost"
-        size="icon"
-        aria-label={t("actions.openFolder")}
+      <ActionButton
+        label={t("actions.openFolder")}
         onClick={(event) => {
           event.stopPropagation();
           onOpenFolder(task);
         }}
       >
         <FolderOpen className="h-4 w-4" />
-      </Button>
+      </ActionButton>
     </div>
+  );
+}
+
+function ActionButton({
+  label,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  disabled?: boolean;
+  onClick: MouseEventHandler<HTMLButtonElement>;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={label}
+          disabled={disabled}
+          onClick={onClick}
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }

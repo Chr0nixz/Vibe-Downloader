@@ -1,4 +1,12 @@
-import type { CreateTaskInput, ProbeTaskInput, ProbeTaskPayload } from "@/generated/bindings";
+import type {
+  AppSettings,
+  BrowserIntegrationStatus,
+  BrowserIntegrationUpdateInput,
+  CreateTaskInput,
+  ProbeTaskInput,
+  ProbeTaskPayload,
+  UpdateSettingsInput,
+} from "@/generated/bindings";
 import type { Task, TaskStatus } from "@/types/task";
 import { normalizeTask } from "@/types/task";
 import type { TaskSegment } from "@/types/task-segment";
@@ -6,13 +14,21 @@ import { normalizeTaskSegment } from "@/types/task-segment";
 import type { TaskProgressPayload } from "@/types/task-progress";
 
 const STORAGE_KEY = "vibe-browser-mock-tasks";
+const SETTINGS_STORAGE_KEY = "vibe-browser-settings";
 
 type BrowserListener = (payload: TaskProgressPayload) => void;
 
 let tasks: Task[] = loadStoredTasks() ?? buildBrowserMockTasks();
+let settings: AppSettings = loadStoredSettings() ?? {
+  maxActiveTasks: 2,
+  defaultSaveDir: "~/Downloads",
+};
 let progressTimer: ReturnType<typeof setInterval> | undefined;
 const progressListeners = new Set<BrowserListener>();
 const queueListeners = new Set<() => void>();
+const settingsListeners = new Set<() => void>();
+const browserIntegrationListeners = new Set<() => void>();
+const browserIntegrationInstalled = new Set(["chrome", "edge"]);
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -21,6 +37,14 @@ function nowIso(): string {
 function persistTasks(): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function persistSettings(): void {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   } catch {
     /* ignore quota / private mode */
   }
@@ -37,8 +61,33 @@ function loadStoredTasks(): Task[] | null {
   }
 }
 
+function loadStoredSettings(): AppSettings | null {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AppSettings;
+    if (
+      typeof parsed.defaultSaveDir === "string" &&
+      typeof parsed.maxActiveTasks === "number"
+    ) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function emitQueueChanged(): void {
   for (const handler of queueListeners) handler();
+}
+
+function emitSettingsChanged(): void {
+  for (const handler of settingsListeners) handler();
+}
+
+function emitBrowserIntegrationChanged(): void {
+  for (const handler of browserIntegrationListeners) handler();
 }
 
 function emitProgress(payload: TaskProgressPayload): void {
@@ -114,6 +163,35 @@ function updateTask(id: string, patch: Partial<Task>): Task {
   return next;
 }
 
+function scheduleBrowserQueue(): void {
+  const activeCount = tasks.filter(
+    (task) => task.status === "downloading" || task.status === "retrying",
+  ).length;
+  let available = Math.max(0, settings.maxActiveTasks - activeCount);
+  if (available === 0) return;
+
+  let changed = false;
+  tasks = tasks.map((task) => {
+    if (available <= 0 || task.status !== "queued") return task;
+    available -= 1;
+    changed = true;
+    return {
+      ...task,
+      status: "downloading",
+      speedBps: task.speedBps > 0 ? task.speedBps : 4_000_000,
+      connectionCount: task.connectionCount > 0 ? task.connectionCount : 2,
+      healthSummary: "Downloading",
+      updatedAt: nowIso(),
+    };
+  });
+
+  if (changed) {
+    persistTasks();
+    emitQueueChanged();
+    ensureProgressTimer();
+  }
+}
+
 function tickActiveDownloads(): void {
   let changed = false;
   tasks = tasks.map((task) => {
@@ -136,6 +214,7 @@ function tickActiveDownloads(): void {
   if (changed) {
     persistTasks();
     emitQueueChanged();
+    scheduleBrowserQueue();
   }
 }
 
@@ -198,9 +277,76 @@ export async function listTaskSegments(taskId: string): Promise<TaskSegment[]> {
 export async function seedMockTasks(): Promise<Task[]> {
   tasks = buildBrowserMockTasks();
   persistTasks();
+  scheduleBrowserQueue();
   emitQueueChanged();
   ensureProgressTimer();
   return cloneTasks();
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  return { ...settings };
+}
+
+export async function updateSettings(input: UpdateSettingsInput): Promise<AppSettings> {
+  const nextSaveDir =
+    input.defaultSaveDir === null || input.defaultSaveDir === undefined
+      ? settings.defaultSaveDir
+      : input.defaultSaveDir.trim() || "~/Downloads";
+  settings = {
+    maxActiveTasks: Math.min(8, Math.max(1, input.maxActiveTasks ?? settings.maxActiveTasks)),
+    defaultSaveDir: nextSaveDir,
+  };
+  persistSettings();
+  emitSettingsChanged();
+  scheduleBrowserQueue();
+  return { ...settings };
+}
+
+export async function openDirectoryPicker(): Promise<string | null> {
+  return "~/Downloads";
+}
+
+export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationStatus> {
+  return {
+    nativeHostName: "com.vibe_downloader.native_host",
+    nativeHostPath: "~/Applications/Vibe Downloader/vibe-native-host",
+    extensionCorePath: "browser/extension-core",
+    browsers: [
+      "chrome",
+      "edge",
+      "firefox",
+      "safari",
+      "brave",
+      "opera",
+      "vivaldi",
+      "chromium",
+    ].map((browser) => ({
+      browser: browser as BrowserIntegrationStatus["browsers"][number]["browser"],
+      displayName: browserDisplayName(browser),
+      supportedOnPlatform: browser !== "safari",
+      detected: browser !== "safari",
+      manifestInstalled: browserIntegrationInstalled.has(browser),
+      manifestPath: `~/Library/Application Support/${browser}/NativeMessagingHosts/com.vibe_downloader.native_host.json`,
+      extensionLoadPath: "browser/dist/chromium",
+      lastError: null,
+    })),
+  };
+}
+
+export async function installBrowserIntegration(
+  input: BrowserIntegrationUpdateInput,
+): Promise<BrowserIntegrationStatus> {
+  input.browsers.forEach((browser) => browserIntegrationInstalled.add(browser));
+  emitBrowserIntegrationChanged();
+  return getBrowserIntegrationStatus();
+}
+
+export async function uninstallBrowserIntegration(
+  input: BrowserIntegrationUpdateInput,
+): Promise<BrowserIntegrationStatus> {
+  input.browsers.forEach((browser) => browserIntegrationInstalled.delete(browser));
+  emitBrowserIntegrationChanged();
+  return getBrowserIntegrationStatus();
 }
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {
@@ -219,8 +365,9 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
     null,
     now,
   );
-  tasks = [task, ...tasks];
+  tasks = [{ ...task, saveDir: input.saveDir?.trim() || settings.defaultSaveDir }, ...tasks];
   persistTasks();
+  scheduleBrowserQueue();
   emitQueueChanged();
   return task;
 }
@@ -245,19 +392,22 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
 export async function pauseTask(id: string): Promise<Task> {
   const task = tasks.find((entry) => entry.id === id);
   if (!task) throw new Error(`Task not found: ${id}`);
-  return updateTask(id, { status: "paused", speedBps: 0, connectionCount: 0 });
+  const next = updateTask(id, { status: "paused", speedBps: 0, connectionCount: 0 });
+  scheduleBrowserQueue();
+  return next;
 }
 
 export async function resumeTask(id: string): Promise<Task> {
   const task = tasks.find((entry) => entry.id === id);
   if (!task) throw new Error(`Task not found: ${id}`);
   const next = updateTask(id, {
-    status: "downloading",
-    speedBps: task.speedBps > 0 ? task.speedBps : 4_000_000,
-    connectionCount: task.connectionCount > 0 ? task.connectionCount : 2,
+    status: "queued",
+    speedBps: 0,
+    connectionCount: 0,
+    healthSummary: "Queued",
   });
-  ensureProgressTimer();
-  return next;
+  scheduleBrowserQueue();
+  return tasks.find((entry) => entry.id === next.id) ?? next;
 }
 
 export async function retryTask(id: string): Promise<Task> {
@@ -272,6 +422,7 @@ export async function deleteTask(id: string, _deleteFile = false): Promise<void>
   tasks = tasks.filter((task) => task.id !== id);
   persistTasks();
   emitQueueChanged();
+  scheduleBrowserQueue();
   stopProgressTimerIfIdle();
 }
 
@@ -297,4 +448,41 @@ export function onQueueChanged(handler: () => void): Promise<() => void> {
   return Promise.resolve(() => {
     queueListeners.delete(handler);
   });
+}
+
+export function onSettingsChanged(handler: () => void): Promise<() => void> {
+  settingsListeners.add(handler);
+  return Promise.resolve(() => {
+    settingsListeners.delete(handler);
+  });
+}
+
+export function onBrowserIntegrationChanged(handler: () => void): Promise<() => void> {
+  browserIntegrationListeners.add(handler);
+  return Promise.resolve(() => {
+    browserIntegrationListeners.delete(handler);
+  });
+}
+
+function browserDisplayName(browser: string): string {
+  switch (browser) {
+    case "chrome":
+      return "Google Chrome";
+    case "edge":
+      return "Microsoft Edge";
+    case "firefox":
+      return "Mozilla Firefox";
+    case "safari":
+      return "Safari";
+    case "brave":
+      return "Brave";
+    case "opera":
+      return "Opera";
+    case "vivaldi":
+      return "Vivaldi";
+    case "chromium":
+      return "Chromium";
+    default:
+      return browser;
+  }
 }

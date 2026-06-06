@@ -43,6 +43,7 @@ pnpm tauri dev
 | `pnpm specta` | Regenerate `src/generated/bindings.ts` from Rust (requires working test runtime) |
 | `pnpm test:rust` | Run Rust integration tests |
 | `pnpm check:bindings` | Regenerate bindings and fail if `bindings.ts` drifted |
+| `pnpm build:extensions` | Build browser extension development packages into `browser/dist` |
 | `pnpm sync-version <tag>` | Sync version into `package.json`, `tauri.conf.json`, `Cargo.toml` |
 
 ### Verification
@@ -68,7 +69,8 @@ cargo test
 
 - **Stage 1 HTTP MVP**: complete.
 - **Stage 2 resumable segmented HTTP downloads**: accepted. Large Range-capable files use fixed four-way segments, Chunks/Connections show real segment data, and regression tests cover resume, failure, and SHA-256 integrity paths.
-- **Next stage**: Stage 3 queue and settings. Planned first slice: settings storage, `get_settings` / `update_settings`, max active task scheduling, default save directory, and queued task UI.
+- **Stage 3/4 queue, settings, and polish**: in progress in the current working tree. Settings storage, max active task scheduling, queued task UI, Toast, and speed history are implemented.
+- **Stage 5 browser handoff**: Native Messaging integration is in progress. See [docs/browser-integration.md](docs/browser-integration.md).
 
 ### Title bar (v0)
 
@@ -89,6 +91,7 @@ See [docs/RELEASE.md](docs/RELEASE.md) for secrets, tagging, and first-release c
 ## Docs
 
 - [docs/RELEASE.md](docs/RELEASE.md) — GitHub Release 与自动更新
+- [docs/browser-integration.md](docs/browser-integration.md) — Native Messaging browser handoff
 - [docs/ROADMAP.md](docs/ROADMAP.md) — 分阶段开发路线图
 - [PRODUCT.md](PRODUCT.md) — 产品上下文（Impeccable）
 - [DESIGN.md](DESIGN.md) — 设计系统（Impeccable）

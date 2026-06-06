@@ -213,6 +213,13 @@ pub struct ProbeTaskPayload {
     pub content_type: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub max_active_tasks: i32,
+    pub default_save_dir: String,
+}
+
 pub fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }

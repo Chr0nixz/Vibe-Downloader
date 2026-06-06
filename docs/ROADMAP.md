@@ -145,9 +145,12 @@ flowchart LR
 
 **周期（参考）**：2–4 周
 
-1. Native messaging 或本地 HTTP 服务 + 扩展「发送到 Vibe」。
-2. 剪贴板监听或拖拽 URL（可选）。
-3. 扩展最小权限与安装/使用说明。
+1. **Native Messaging 主通道**：新增独立 `vibe-native-host`，扩展通过官方 Native Messaging 下发 URL；Localhost / WebSocket 后置到实时面板或本地 API。
+2. **主流桌面浏览器覆盖**：Chrome、Edge、Firefox、Safari、Brave、Opera、Vivaldi、Chromium；Safari 仅 macOS。
+3. **统一扩展核心**：`browser/extension-core` 生成 Chromium、Firefox、Opera 开发包；Brave、Vivaldi、Chromium 复用 Chromium 包。
+4. **App handoff 入口**：新增 `create_browser_handoff_task`，复用现有 `create_task`、默认保存目录和队列调度。
+5. **安全边界**：仅接受 `http/https`；扩展不能指定保存路径；不转发 Cookie；不默认采集敏感 header。
+6. **设置页与文档**：浏览器集成状态、manifest 安装/卸载、扩展加载路径、故障排查。
 
 ---
 

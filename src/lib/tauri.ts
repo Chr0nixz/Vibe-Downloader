@@ -1,5 +1,13 @@
 import { isTauriRuntime } from "@/lib/runtime";
-import type { CreateTaskInput, ProbeTaskInput, ProbeTaskPayload } from "@/generated/bindings";
+import type {
+  AppSettings,
+  BrowserIntegrationStatus,
+  BrowserIntegrationUpdateInput,
+  CreateTaskInput,
+  ProbeTaskInput,
+  ProbeTaskPayload,
+  UpdateSettingsInput,
+} from "@/generated/bindings";
 import type { Task } from "@/types/task";
 import { normalizeTask } from "@/types/task";
 import type { TaskSegment } from "@/types/task-segment";
@@ -8,6 +16,8 @@ import type { TaskProgressPayload } from "@/types/task-progress";
 
 export const EVENT_TASK_PROGRESS = "task.progress";
 export const EVENT_QUEUE_CHANGED = "queue.changed";
+export const EVENT_SETTINGS_CHANGED = "settings.changed";
+export const EVENT_BROWSER_INTEGRATION_CHANGED = "browser.integration.changed";
 
 type CommandResult<T, E> =
   | { status: "ok"; data: T }
@@ -61,6 +71,59 @@ export async function seedMockTasks(): Promise<Task[]> {
   const commands = await loadNativeCommands();
   const tasks = unwrapCommand(await commands.seedMockTasks());
   return tasks.map(normalizeTask);
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getSettings();
+  }
+  const commands = await loadNativeCommands();
+  return unwrapCommand(await commands.getSettings());
+}
+
+export async function updateSettings(input: UpdateSettingsInput): Promise<AppSettings> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).updateSettings(input);
+  }
+  const commands = await loadNativeCommands();
+  return unwrapCommand(await commands.updateSettings(input));
+}
+
+export async function openDirectoryPicker(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).openDirectoryPicker();
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({ directory: true, multiple: false });
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationStatus> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getBrowserIntegrationStatus();
+  }
+  const commands = await loadNativeCommands();
+  return unwrapCommand(await commands.getBrowserIntegrationStatus());
+}
+
+export async function installBrowserIntegration(
+  input: BrowserIntegrationUpdateInput,
+): Promise<BrowserIntegrationStatus> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).installBrowserIntegration(input);
+  }
+  const commands = await loadNativeCommands();
+  return unwrapCommand(await commands.installBrowserIntegration(input));
+}
+
+export async function uninstallBrowserIntegration(
+  input: BrowserIntegrationUpdateInput,
+): Promise<BrowserIntegrationStatus> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).uninstallBrowserIntegration(input);
+  }
+  const commands = await loadNativeCommands();
+  return unwrapCommand(await commands.uninstallBrowserIntegration(input));
 }
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {
@@ -157,6 +220,30 @@ export function onQueueChanged(handler: () => void): Promise<() => void> {
   }
   return import("@tauri-apps/api/event").then(({ listen }) =>
     listen(EVENT_QUEUE_CHANGED, () => {
+      handler();
+    }).then((unlisten) => unlisten),
+  );
+}
+
+export function onSettingsChanged(handler: () => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return import("@/lib/tauri-browser").then((adapter) => adapter.onSettingsChanged(handler));
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen(EVENT_SETTINGS_CHANGED, () => {
+      handler();
+    }).then((unlisten) => unlisten),
+  );
+}
+
+export function onBrowserIntegrationChanged(handler: () => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return import("@/lib/tauri-browser").then((adapter) =>
+      adapter.onBrowserIntegrationChanged(handler),
+    );
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen(EVENT_BROWSER_INTEGRATION_CHANGED, () => {
       handler();
     }).then((unlisten) => unlisten),
   );

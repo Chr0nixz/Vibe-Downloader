@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import { setLocale, type Locale } from "@/i18n";
+import { SettingsPage } from "@/components/settings/SettingsPage";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { TaskRow } from "@/components/tasks/TaskRow";
 import { filterTasks, useTaskStore } from "@/stores/task-store";
@@ -23,8 +23,11 @@ export function TaskList({
   const nav = useTaskStore((s) => s.nav);
   const search = useTaskStore((s) => s.search);
   const selectedId = useTaskStore((s) => s.selectedId);
+  const expandedTaskIds = useTaskStore((s) => s.expandedTaskIds);
+  const speedHistoryByTaskId = useTaskStore((s) => s.speedHistoryByTaskId);
   const selectTask = useTaskStore((s) => s.selectTask);
   const setDetailOpen = useTaskStore((s) => s.setDetailOpen);
+  const toggleTaskExpanded = useTaskStore((s) => s.toggleTaskExpanded);
   const loading = useTaskStore((s) => s.loading);
   const error = useTaskStore((s) => s.error);
 
@@ -77,7 +80,7 @@ export function TaskList({
   );
 
   if (nav === "settings") {
-    return <SettingsPlaceholder />;
+    return <SettingsPage />;
   }
 
   return (
@@ -104,14 +107,18 @@ export function TaskList({
               selectedId ? `task-option-${selectedId}` : undefined
             }
             onKeyDown={handleListboxKeyDown}
+            className="space-y-2.5 p-3 md:p-4"
           >
             {filtered.map((task) => (
               <TaskRow
                 key={task.id}
                 task={task}
                 selected={task.id === selectedId}
+                expanded={expandedTaskIds.includes(task.id)}
+                speedHistory={speedHistoryByTaskId[task.id] ?? []}
                 onSelect={() => selectAndFocus(task.id)}
                 onNavigate={navigateRow}
+                onToggleExpanded={() => toggleTaskExpanded(task.id)}
                 onToggleTransfer={onToggleTransfer}
                 onRetry={onRetry}
                 onOpenFile={onOpenFile}
@@ -121,32 +128,6 @@ export function TaskList({
           </div>
         )}
       </ScrollArea>
-    </div>
-  );
-}
-
-function SettingsPlaceholder() {
-  const { t, i18n } = useTranslation();
-  const currentLocale = (i18n.language === "zh-CN" ? "zh-CN" : "en") as Locale;
-
-  return (
-    <div className="flex flex-1 flex-col gap-4 p-6 text-sm text-text-secondary">
-      <h2 className="text-base font-medium text-text-primary">{t("settings.title")}</h2>
-      <p>{t("settings.placeholder")}</p>
-      <div className="flex max-w-sm flex-col gap-2">
-        <label className="text-xs text-text-muted" htmlFor="locale-select">
-          {t("locale.label")}
-        </label>
-        <select
-          id="locale-select"
-          value={currentLocale}
-          onChange={(event) => setLocale(event.target.value as Locale)}
-          className="h-9 rounded-md border border-border-subtle bg-surface-base px-3 text-sm text-text-primary"
-        >
-          <option value="en">{t("locale.en")}</option>
-          <option value="zh-CN">{t("locale.zhCN")}</option>
-        </select>
-      </div>
     </div>
   );
 }
