@@ -11,12 +11,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use sha2::{Digest, Sha256};
 use tauri_app_lib::{
     download::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine},
     models::{SegmentStatus, TaskSegmentRecord},
 };
 
 const SAMPLE: &[u8] = b"Vibe Downloader HTTP regression payload.";
+const LARGE_PAYLOAD_SHA256: &str = "f1808c3366e106973e30f4fa360e5355f36284aa0f299705ef9ee0a0d9648fc3";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_reads_headers_and_range_support() {
@@ -193,7 +195,9 @@ async fn segmented_direct_download_writes_all_ranges_to_one_file() {
         .expect("segmented download");
 
     assert_eq!(downloaded, payload.len() as i64);
-    assert_eq!(fs::read(&paths.final_path).expect("read final"), payload);
+    let final_bytes = fs::read(&paths.final_path).expect("read final");
+    assert_eq!(sha256_hex(&final_bytes), LARGE_PAYLOAD_SHA256);
+    assert_eq!(final_bytes, payload);
     assert!(!paths.temp.exists());
 }
 
@@ -467,6 +471,11 @@ fn large_payload() -> Vec<u8> {
     (0..(16 * 1024 * 1024 + 13))
         .map(|index| (index % 251) as u8)
         .collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn direct_segments(task_id: &str, total_size: i64) -> Vec<TaskSegmentRecord> {

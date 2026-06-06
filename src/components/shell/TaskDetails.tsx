@@ -132,7 +132,7 @@ function TaskDetailsPanel({ task }: { task: Task }) {
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
 
-    if (activeTab !== "chunks") {
+    if (activeTab !== "chunks" && activeTab !== "connections") {
       setSegments([]);
       setSegmentError(null);
       return;
@@ -193,7 +193,16 @@ function TaskDetailsPanel({ task }: { task: Task }) {
             />
           </TabsContent>
           <TabsContent value="connections">
-            <p className="text-xs text-text-muted">{t("taskDetails.connectionsPlaceholder")}</p>
+            <ConnectionList
+              segments={segments}
+              taskSpeedBps={task.speedBps}
+              error={segmentError}
+              emptyLabel={t("taskDetails.noConnections")}
+              connectionLabel={t("taskDetails.connection")}
+              rangeLabel={t("taskDetails.connectionRange")}
+              progressLabel={t("taskDetails.connectionProgress")}
+              speedLabel={t("taskDetails.connectionSpeed")}
+            />
           </TabsContent>
         </ScrollArea>
       </Tabs>
@@ -285,6 +294,93 @@ function ChunkList({
               </span>
               <span>
                 {retryLabel} {segment.retryCount}
+              </span>
+            </div>
+            {segment.lastError ? (
+              <p className="mt-2 text-status-danger">{segment.lastError}</p>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ConnectionList({
+  segments,
+  taskSpeedBps,
+  error,
+  emptyLabel,
+  connectionLabel,
+  rangeLabel,
+  progressLabel,
+  speedLabel,
+}: {
+  segments: TaskSegment[];
+  taskSpeedBps: number;
+  error: string | null;
+  emptyLabel: string;
+  connectionLabel: string;
+  rangeLabel: string;
+  progressLabel: string;
+  speedLabel: string;
+}) {
+  const { t } = useTranslation();
+
+  if (error) {
+    return (
+      <p className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+        {error}
+      </p>
+    );
+  }
+
+  if (segments.length === 0) {
+    return <p className="text-xs text-text-secondary">{emptyLabel}</p>;
+  }
+
+  const activeSegments = segments.filter(
+    (segment) => segment.status === "downloading",
+  );
+  const averageActiveSpeed =
+    activeSegments.length > 0 ? taskSpeedBps / activeSegments.length : 0;
+
+  return (
+    <div className="space-y-2 text-xs">
+      {segments.map((segment, index) => {
+        const total = Math.max(1, segment.rangeEnd - segment.rangeStart + 1);
+        const completed = Math.max(
+          0,
+          segment.downloadedUntil - segment.rangeStart,
+        );
+        const speed =
+          segment.status === "downloading" ? averageActiveSpeed : 0;
+
+        return (
+          <div
+            key={segment.id}
+            className="rounded-md border border-border-subtle bg-surface-raised/50 p-3"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <span className="font-medium text-text-primary">
+                {connectionLabel} {index + 1}
+              </span>
+              <span className={cn("capitalize", segmentTone(segment.status))}>
+                {t(`segment.status.${segment.status}`)}
+              </span>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 text-text-muted">
+              <span>{rangeLabel}</span>
+              <span className="text-right font-mono text-text-secondary">
+                {formatBytes(segment.rangeStart)} - {formatBytes(segment.rangeEnd)}
+              </span>
+              <span>{progressLabel}</span>
+              <span className="text-right font-mono text-text-secondary">
+                {formatPercent(completed, total)}
+              </span>
+              <span>{speedLabel}</span>
+              <span className="text-right font-mono text-text-secondary">
+                {formatSpeed(speed)}
               </span>
             </div>
             {segment.lastError ? (
