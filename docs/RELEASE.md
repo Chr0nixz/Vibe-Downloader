@@ -7,7 +7,7 @@ This document describes how to publish **Vibe Downloader** via GitHub Actions an
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
 | CI | `.github/workflows/ci.yml` | PR / push to `main` | typecheck, build, `cargo test`, specta drift check, clippy |
-| Tauri Build | `.github/workflows/tauri-build.yml` | PR / push to `main` | Windows / macOS / Linux `pnpm tauri build` (required gate) |
+| Tauri Build | `.github/workflows/tauri-build.yml` | PR / push to `main` | Windows / macOS / Linux `pnpm tauri build --config src-tauri/tauri.ci.conf.json` (required gate; updater artifacts disabled) |
 | Release | `.github/workflows/release.yml` | tag `v*` or manual | Build installers, upload GitHub Release assets, generate `latest.json` |
 
 ## One-time repository setup
