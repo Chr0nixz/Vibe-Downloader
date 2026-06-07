@@ -1,4 +1,5 @@
 import { isTauriRuntime } from "@/lib/runtime";
+import { createLogger } from "@/lib/logger";
 import type {
   AppSettings,
   BrowserIntegrationStatus,
@@ -19,6 +20,8 @@ export const EVENT_QUEUE_CHANGED = "queue.changed";
 export const EVENT_SETTINGS_CHANGED = "settings.changed";
 export const EVENT_BROWSER_INTEGRATION_CHANGED = "browser.integration.changed";
 
+const log = createLogger("tauri");
+
 type CommandResult<T, E> =
   | { status: "ok"; data: T }
   | { status: "error"; error: E };
@@ -26,6 +29,18 @@ type CommandResult<T, E> =
 function unwrapCommand<T, E>(result: CommandResult<T, E>): T {
   if (result.status === "ok") return result.data;
   throw result.error;
+}
+
+async function runCommand<T>(name: string, run: () => Promise<CommandResult<T, unknown>>): Promise<T> {
+  log.debug(`→ ${name}`);
+  try {
+    const data = unwrapCommand(await run());
+    log.debug(`✓ ${name}`);
+    return data;
+  } catch (error) {
+    log.error(`✗ ${name}`, error);
+    throw error;
+  }
 }
 
 async function loadNativeCommands() {
@@ -42,7 +57,7 @@ export async function listTasks(): Promise<Task[]> {
     return (await loadBrowserAdapter()).listTasks();
   }
   const commands = await loadNativeCommands();
-  const tasks = unwrapCommand(await commands.listTasks());
+  const tasks = await runCommand("listTasks", () => commands.listTasks());
   return tasks.map(normalizeTask);
 }
 
@@ -51,7 +66,7 @@ export async function getTask(id: string): Promise<Task | null> {
     return (await loadBrowserAdapter()).getTask(id);
   }
   const commands = await loadNativeCommands();
-  const task = unwrapCommand(await commands.getTask(id));
+  const task = await runCommand("getTask", () => commands.getTask(id));
   return task ? normalizeTask(task) : null;
 }
 
@@ -60,7 +75,7 @@ export async function listTaskSegments(taskId: string): Promise<TaskSegment[]> {
     return (await loadBrowserAdapter()).listTaskSegments(taskId);
   }
   const commands = await loadNativeCommands();
-  const segments = unwrapCommand(await commands.listTaskSegments(taskId));
+  const segments = await runCommand("listTaskSegments", () => commands.listTaskSegments(taskId));
   return segments.map(normalizeTaskSegment);
 }
 
@@ -69,7 +84,7 @@ export async function seedMockTasks(): Promise<Task[]> {
     return (await loadBrowserAdapter()).seedMockTasks();
   }
   const commands = await loadNativeCommands();
-  const tasks = unwrapCommand(await commands.seedMockTasks());
+  const tasks = await runCommand("seedMockTasks", () => commands.seedMockTasks());
   return tasks.map(normalizeTask);
 }
 
@@ -78,7 +93,7 @@ export async function getSettings(): Promise<AppSettings> {
     return (await loadBrowserAdapter()).getSettings();
   }
   const commands = await loadNativeCommands();
-  return unwrapCommand(await commands.getSettings());
+  return runCommand("getSettings", () => commands.getSettings());
 }
 
 export async function updateSettings(input: UpdateSettingsInput): Promise<AppSettings> {
@@ -86,16 +101,19 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
     return (await loadBrowserAdapter()).updateSettings(input);
   }
   const commands = await loadNativeCommands();
-  return unwrapCommand(await commands.updateSettings(input));
+  return runCommand("updateSettings", () => commands.updateSettings(input));
 }
 
 export async function openDirectoryPicker(): Promise<string | null> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).openDirectoryPicker();
   }
+  log.debug("→ openDirectoryPicker");
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({ directory: true, multiple: false });
-  return typeof selected === "string" ? selected : null;
+  const path = typeof selected === "string" ? selected : null;
+  log.debug("✓ openDirectoryPicker", path ?? "(canceled)");
+  return path;
 }
 
 export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationStatus> {
@@ -103,7 +121,7 @@ export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationS
     return (await loadBrowserAdapter()).getBrowserIntegrationStatus();
   }
   const commands = await loadNativeCommands();
-  return unwrapCommand(await commands.getBrowserIntegrationStatus());
+  return runCommand("getBrowserIntegrationStatus", () => commands.getBrowserIntegrationStatus());
 }
 
 export async function installBrowserIntegration(
@@ -113,7 +131,7 @@ export async function installBrowserIntegration(
     return (await loadBrowserAdapter()).installBrowserIntegration(input);
   }
   const commands = await loadNativeCommands();
-  return unwrapCommand(await commands.installBrowserIntegration(input));
+  return runCommand("installBrowserIntegration", () => commands.installBrowserIntegration(input));
 }
 
 export async function uninstallBrowserIntegration(
@@ -123,7 +141,7 @@ export async function uninstallBrowserIntegration(
     return (await loadBrowserAdapter()).uninstallBrowserIntegration(input);
   }
   const commands = await loadNativeCommands();
-  return unwrapCommand(await commands.uninstallBrowserIntegration(input));
+  return runCommand("uninstallBrowserIntegration", () => commands.uninstallBrowserIntegration(input));
 }
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {
@@ -131,7 +149,7 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
     return (await loadBrowserAdapter()).createTask(input);
   }
   const commands = await loadNativeCommands();
-  return normalizeTask(unwrapCommand(await commands.createTask(input)));
+  return normalizeTask(await runCommand("createTask", () => commands.createTask(input)));
 }
 
 export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload> {
@@ -139,7 +157,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
     return (await loadBrowserAdapter()).probeTask(input);
   }
   const commands = await loadNativeCommands();
-  return unwrapCommand(await commands.probeTask(input));
+  return runCommand("probeTask", () => commands.probeTask(input));
 }
 
 export async function pauseTask(id: string): Promise<Task> {
@@ -147,7 +165,7 @@ export async function pauseTask(id: string): Promise<Task> {
     return (await loadBrowserAdapter()).pauseTask(id);
   }
   const commands = await loadNativeCommands();
-  return normalizeTask(unwrapCommand(await commands.pauseTask(id)));
+  return normalizeTask(await runCommand("pauseTask", () => commands.pauseTask(id)));
 }
 
 export async function resumeTask(id: string): Promise<Task> {
@@ -155,7 +173,7 @@ export async function resumeTask(id: string): Promise<Task> {
     return (await loadBrowserAdapter()).resumeTask(id);
   }
   const commands = await loadNativeCommands();
-  return normalizeTask(unwrapCommand(await commands.resumeTask(id)));
+  return normalizeTask(await runCommand("resumeTask", () => commands.resumeTask(id)));
 }
 
 export async function retryTask(id: string): Promise<Task> {
@@ -163,7 +181,7 @@ export async function retryTask(id: string): Promise<Task> {
     return (await loadBrowserAdapter()).retryTask(id);
   }
   const commands = await loadNativeCommands();
-  return normalizeTask(unwrapCommand(await commands.retryTask(id)));
+  return normalizeTask(await runCommand("retryTask", () => commands.retryTask(id)));
 }
 
 export async function cancelTask(id: string): Promise<Task> {
@@ -171,7 +189,7 @@ export async function cancelTask(id: string): Promise<Task> {
     return (await loadBrowserAdapter()).cancelTask(id);
   }
   const commands = await loadNativeCommands();
-  return normalizeTask(unwrapCommand(await commands.cancelTask(id)));
+  return normalizeTask(await runCommand("cancelTask", () => commands.cancelTask(id)));
 }
 
 export async function deleteTask(id: string, deleteFile = false): Promise<void> {
@@ -180,7 +198,7 @@ export async function deleteTask(id: string, deleteFile = false): Promise<void> 
     return;
   }
   const commands = await loadNativeCommands();
-  unwrapCommand(await commands.deleteTask(id, deleteFile));
+  await runCommand("deleteTask", () => commands.deleteTask(id, deleteFile));
 }
 
 export async function openTaskFile(id: string): Promise<void> {
@@ -189,7 +207,7 @@ export async function openTaskFile(id: string): Promise<void> {
     return;
   }
   const commands = await loadNativeCommands();
-  unwrapCommand(await commands.openTaskFile(id));
+  await runCommand("openTaskFile", () => commands.openTaskFile(id));
 }
 
 export async function openTaskFolder(id: string): Promise<void> {
@@ -198,7 +216,7 @@ export async function openTaskFolder(id: string): Promise<void> {
     return;
   }
   const commands = await loadNativeCommands();
-  unwrapCommand(await commands.openTaskFolder(id));
+  await runCommand("openTaskFolder", () => commands.openTaskFolder(id));
 }
 
 export function onTaskProgress(

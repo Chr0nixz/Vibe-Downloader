@@ -17,7 +17,7 @@
   --status-warning: oklch(0.68 0.14 75);
   --status-danger: oklch(0.55 0.18 25);
   --titlebar-height: 2.25rem;
-  --shell-nav-width-compact: 3rem;
+  --shell-nav-width-compact: 3.75rem;
   --shell-nav-width: 13rem;
   --motion-ui: 220ms;
   --traffic-lights-inset: 0px;

@@ -13,6 +13,7 @@ use crate::{
         emit_browser_handoff_failed, emit_browser_handoff_received,
         emit_browser_integration_changed,
     },
+    logging::sanitize_url,
     models::{
         BrowserHandoffInput, BrowserHandoffResult, BrowserIntegrationEntry,
         BrowserIntegrationStatus, BrowserIntegrationUpdateInput, BrowserKind,
@@ -46,6 +47,7 @@ pub async fn install_browser_integration(
         if !browser_supported_on_platform(browser) {
             continue;
         }
+        tracing::info!(browser = %browser.display_name(), "installing browser integration");
         install_manifest(&app, browser)?;
     }
     emit_browser_integration_changed(&app);
@@ -60,6 +62,7 @@ pub async fn uninstall_browser_integration(
     input: BrowserIntegrationUpdateInput,
 ) -> Result<BrowserIntegrationStatus, String> {
     for browser in input.browsers {
+        tracing::info!(browser = %browser.display_name(), "uninstalling browser integration");
         uninstall_manifest(&app, browser)?;
     }
     emit_browser_integration_changed(&app);
@@ -85,7 +88,14 @@ pub async fn create_browser_handoff_task_with_state(
     if request_id.is_empty() {
         return Err("Browser handoff request id is required.".to_string());
     }
+    tracing::info!(
+        request_id = %request_id,
+        browser = %input.browser.display_name(),
+        url = %sanitize_url(&input.url),
+        "browser handoff received"
+    );
     if db::browser_message_exists(&state.pool, &request_id).await? {
+        tracing::info!(request_id = %request_id, "duplicate browser handoff ignored");
         return Ok(BrowserHandoffResult {
             request_id,
             status: "duplicate".to_string(),
@@ -105,6 +115,11 @@ pub async fn create_browser_handoff_task_with_state(
     let create_input = match task_result {
         Ok(input) => input,
         Err(error) => {
+            tracing::error!(
+                request_id = %request_id,
+                error = %error,
+                "browser handoff validation failed"
+            );
             db::insert_browser_message(
                 &state.pool,
                 &request_id,
@@ -136,6 +151,11 @@ pub async fn create_browser_handoff_task_with_state(
 
     match create_task_with_state(app.clone(), state, create_input).await {
         Ok(task) => {
+            tracing::info!(
+                request_id = %request_id,
+                task_id = %task.id,
+                "browser handoff task created"
+            );
             emit_browser_handoff_received(&app);
             Ok(BrowserHandoffResult {
                 request_id,
@@ -145,6 +165,11 @@ pub async fn create_browser_handoff_task_with_state(
             })
         }
         Err(error) => {
+            tracing::error!(
+                request_id = %request_id,
+                error = %error,
+                "browser handoff task creation failed"
+            );
             db::update_browser_message_status(&state.pool, &request_id, "failed", Some(&error))
                 .await?;
             emit_browser_handoff_failed(&app);

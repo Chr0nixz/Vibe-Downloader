@@ -321,25 +321,31 @@ MVP 暂不包含：
 
 通信方式：
 
-- Chrome / Edge MV3 扩展。
-- Native Messaging 与本机 App 通信。
-- App 注册 Native Messaging manifest。
+- Chrome / Edge / Brave / Opera / Vivaldi / Chromium 使用同一套 Chromium WebExtension 开发包。
+- Firefox 使用同源 WebExtension 逻辑与 Firefox Native Messaging manifest。
+- Safari 仅 macOS，使用 Safari Web Extension 包装，生产交付单独处理。
+- Native Messaging 是阶段 5 主通道；Localhost / WebSocket 后置到实时浏览器面板或本地 API。
+- 独立 `vibe-native-host` 负责 stdin/stdout Native Messaging 协议，不让 Tauri GUI 主进程接管标准输入输出。
+- App 未运行时由 native host 启动；App 已运行时通过 single-instance 转发第二次启动参数。
+- App 注册/卸载 Native Messaging manifest，并在设置页展示每个浏览器状态。
 
 消息内容：
 
 - URL。
 - 页面 URL。
 - Referer。
-- Cookie 使用策略。
 - User-Agent。
 - 建议文件名。
+- request id，用于去重和日志关联。
 
 安全限制：
 
 - 网页不能直接指定任意本地路径。
-- Native Messaging 消息需要校验来源。
-- 敏感 header 不在 UI 中默认明文展示。
+- 阶段 5 只接受 `http` / `https` URL。
+- 嵌入账号密码的 URL 会被拒绝。
+- Cookie 和敏感 header 不在阶段 5 转发。
 - 默认保存目录由 App 设置决定。
+- 每次 handoff 写入 `browser_messages`，用于 request id 去重和失败诊断。
 
 ## 5.7 插件化协议
 

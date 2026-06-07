@@ -10,13 +10,14 @@
 
 | 已完成 | 未完成 / 占位 |
 |--------|----------------|
-| Tauri 2 + React 壳层、设计 token、任务列表/详情/命令栏 UI | 全局队列、任务级并发上限、限速与设置页 |
+| Tauri 2 + React 壳层、设计 token、任务列表/详情/命令栏 UI | 全局限速与单任务限速 |
 | SQLite schema、`tasks` / `segments`、`list_tasks`、`list_task_segments` | 崩溃后自动继续下载暂不启用 |
 | HTTP probe、Range 续传校验、固定 4 路分片多连接、真实 `task.progress` 事件 | 动态连接数与 `connection.changed` 实时事件 |
-| Chunks tab 与 Connections tab 只读 segment/连接摘要 | 浏览器扩展交接 |
-| Windows 自绘标题栏 + 窗口控制；打开文件/目录命令 | 速度历史、Toast、撤销等体验抛光 |
+| Chunks tab 与 Connections tab 只读 segment/连接摘要 | Safari Web Extension 生产包装 |
+| Windows 自绘标题栏 + 窗口控制；打开文件/目录命令 | 撤销、批量操作、托盘常驻 |
 | 新建下载、暂停/恢复/删除、重试、失败路径与 `needs_attention` | 事件类型未完全纳入 specta event 契约 |
-| `tauri-specta` 命令绑定、本地 HTTP/segments/SHA-256 回归测试 | L2 三平台 `tauri build` 仍需持续验证 |
+| `settings`、队列调度、Toast、速度历史、浏览器集成设置页 | L2 三平台 `tauri build` 仍需持续验证 |
+| `vibe-native-host`、Native Messaging manifest 安装、WebExtension 开发包 | 扩展商店 ID/签名与发布流程 |
 
 ---
 
@@ -180,17 +181,44 @@ flowchart LR
 | 6 | 合并验收 | 所有 segments completed 且临时文件大小等于 `total_size` 后 rename |
 | 7 | 回归测试 | 覆盖分片规划、多 Range 写入、恢复跳过已完成段、segment 失败不 rename、SHA-256 完整性 |
 
+## 当前迭代状态（阶段 3/4：已实现基础交付）
+
+阶段 3/4 已在当前工作树完成主要基础交付：
+
+| 顺序 | 任务 | 产出 |
+|------|------|------|
+| 1 | Settings 表与命令 | `get_settings` / `update_settings`，默认保存目录与同时下载任务数 |
+| 2 | 全局队列 v1 | `max_active_tasks` 控制 active tasks，queued 自动接力 |
+| 3 | 设置页 | Sidebar Settings 真实页面，目录选择、并发数、语言切换 |
+| 4 | 体验抛光 | Toast、删除确认、速度历史 sparkline、任务行展开态 |
+| 5 | 回归测试 | Settings 默认值、upsert clamp、queued FIFO、interrupted reset |
+
+## 当前迭代状态（阶段 5：Native Messaging 基础已实现）
+
+阶段 5 已完成浏览器 handoff 的可开发验证基础：
+
+| 顺序 | 任务 | 产出 |
+|------|------|------|
+| 1 | Native host | 独立 `vibe-native-host` 读取 Native Messaging stdio、校验 URL、写 handoff 文件 |
+| 2 | App handoff | `create_browser_handoff_task` 复用 `create_task`、settings 默认目录和队列调度 |
+| 3 | 运行中转发 | `tauri-plugin-single-instance` 将第二次启动参数转给现有 App 实例并聚焦主窗口 |
+| 4 | DB 记录 | `002_browser_messages.sql`，记录 request/browser/url/status/error |
+| 5 | Manifest 管理 | 设置页按浏览器安装/卸载 Native Messaging manifest；Windows 写 HKCU registry |
+| 6 | 扩展开发包 | `pnpm build:extensions` 生成 Chromium、Firefox、Opera 包 |
+| 7 | 文档 | `docs/browser-integration.md` 与 `docs/debug-logging.md` |
+
 ### 下一迭代建议
 
-- 进入阶段 3：先实现 Settings 表 + 全局队列调度器 v1。
-- 保持单任务内部 1/4 segment 策略不变，先控制任务级并发。
-- Settings 页先实现默认保存目录和同时下载任务数，限速后置。
+- 为扩展生成生产 ID / 签名策略，并把 manifest 的 development ID 与 release ID 分离。
+- 打通 Chrome / Edge / Firefox 的手动端到端验证矩阵；Safari 单独规划 macOS Web Extension target。
+- 在浏览器集成页增加最近 handoff 成功/失败记录和复制诊断信息。
 - 继续保持 `pnpm typecheck`、`pnpm build`、`pnpm specta`、`cargo check`、`clippy`、`cargo test` 全绿。
 
 ### 刻意延后
 
-- 浏览器扩展（阶段 5）
+- Localhost / WebSocket 本地 API
 - 磁力 / BT 等非 HTTP 协议
+- 扩展商店发布、Firefox/Safari 签名审核
 - 装饰性 Mica/玻璃态大面积铺陈
 - 无引擎支撑的高级可视化
 
@@ -215,4 +243,4 @@ flowchart LR
 
 ---
 
-*最后更新：2026-06-06；阶段 2 已通过验收，下一步进入阶段 3 队列与设置。*
+*最后更新：2026-06-07；阶段 3/4 基础交付与阶段 5 Native Messaging 基础已进入当前工作树，下一步补齐运行中 App 转发与浏览器端到端验证。*

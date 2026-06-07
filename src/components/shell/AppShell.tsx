@@ -10,11 +10,14 @@ import { ToastViewport } from "@/components/ui/toast";
 import { readShellLayout } from "@/hooks/use-shell-layout";
 import { useActiveDownloadSync } from "@/hooks/use-active-download-sync";
 import { useTaskEvents } from "@/hooks/use-task-events";
+import { createLogger } from "@/lib/logger";
 import {
   getPlatform,
   trafficLightsInsetPx,
   type Platform,
 } from "@/lib/platform";
+
+const log = createLogger("app-shell");
 import {
   deleteTask,
   getSettings,
@@ -107,6 +110,7 @@ export function AppShell() {
       await refreshTasks(selectId);
     } catch (err) {
       const message = String(err);
+      log.error("task action failed", err);
       setError(message);
       addToast({
         tone: "error",
@@ -168,7 +172,10 @@ export function AppShell() {
           }
         }
       } catch (err) {
-        if (!cancelled) setError(String(err));
+        if (!cancelled) {
+          log.error("initial task load failed", err);
+          setError(String(err));
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -191,7 +198,10 @@ export function AppShell() {
           setSettingsError(null);
         }
       } catch (err) {
-        if (!cancelled) setSettingsError(String(err));
+        if (!cancelled) {
+          log.warn("settings load failed", err);
+          setSettingsError(String(err));
+        }
       } finally {
         if (!cancelled) setSettingsLoading(false);
       }
@@ -238,31 +248,35 @@ export function AppShell() {
           if (selected) setDeleteTarget(selected);
         }}
       />
-      <div className="flex min-h-0 min-w-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
         <Sidebar />
-        <TaskList
-          onToggleTransfer={toggleTransfer}
-          onRetry={retry}
-          onOpenFile={openFile}
-          onOpenFolder={openFolder}
-        />
-        <Suspense fallback={null}>
-          <TaskDetails
-            task={selected}
-            open={detailOpen && !!selected}
-            onClose={() => {
-              setDetailOpen(false);
-              const focusId = selectedId;
-              if (focusId) {
-                requestAnimationFrame(() => {
-                  document.getElementById(`task-option-${focusId}`)?.focus();
-                });
-              }
-            }}
+        <main className="order-1 flex min-h-0 min-w-0 flex-1 md:order-none">
+          <h1 className="sr-only">{t("app.name")}</h1>
+          <TaskList
+            onToggleTransfer={toggleTransfer}
+            onRetry={retry}
+            onOpenFile={openFile}
+            onOpenFolder={openFolder}
           />
-        </Suspense>
+          <Suspense fallback={null}>
+            <TaskDetails
+              task={selected}
+              open={detailOpen && !!selected}
+              onClose={() => {
+                setDetailOpen(false);
+                const focusId = selectedId;
+                if (focusId) {
+                  requestAnimationFrame(() => {
+                    document.getElementById(`task-option-${focusId}`)?.focus();
+                  });
+                }
+              }}
+            />
+          </Suspense>
+        </main>
+        <StatusBar className="md:hidden" />
       </div>
-      <StatusBar />
+      <StatusBar className="hidden md:flex" />
       <ToastViewport />
       {paletteOpen ? (
         <Suspense fallback={null}>

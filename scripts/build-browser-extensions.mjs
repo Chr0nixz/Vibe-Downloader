@@ -46,7 +46,7 @@ for (const variant of variants) {
     path.join(target, "background.js"),
     backgroundTemplate.replaceAll("__VIBE_BROWSER_KIND__", variant.browserKind),
   );
-  for (const file of ["popup.html", "popup.js", "popup.css"]) {
+  for (const file of ["logger.js", "popup.html", "popup.js", "popup.css"]) {
     await copyFile(path.join(sourceDir, file), path.join(target, file));
   }
 }

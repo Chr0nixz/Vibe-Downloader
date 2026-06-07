@@ -36,6 +36,12 @@ tauri-specta = { version = "2.0.0-rc.25", features = ["typescript"] }
 uuid = { version = "1.23.2", features = ["v4", "serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 tauri-plugin-dialog = "2.7.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
+tracing-appender = "0.2"
+log = "0.4"
+tauri-plugin-log = "2"
+tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
 sha2 = "0.10"

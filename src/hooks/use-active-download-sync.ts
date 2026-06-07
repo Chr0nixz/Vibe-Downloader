@@ -1,6 +1,9 @@
 import { useEffect } from "react";
 
+import { createLogger } from "@/lib/logger";
 import { listTasks } from "@/lib/tauri";
+
+const log = createLogger("active-download-sync");
 import { useTaskStore } from "@/stores/task-store";
 
 const ACTIVE_POLL_MS = 500;
@@ -24,8 +27,8 @@ export function useActiveDownloadSync() {
       try {
         const fresh = await listTasks();
         if (!cancelled) useTaskStore.getState().setTasks(fresh);
-      } catch {
-        /* ignore transient refresh errors */
+      } catch (error) {
+        log.warn("active download sync failed", error);
       }
     }
 

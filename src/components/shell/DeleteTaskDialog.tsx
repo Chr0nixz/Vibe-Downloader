@@ -5,6 +5,7 @@ import {
   Dialog,
   DialogBody,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -31,11 +32,11 @@ export function DeleteTaskDialog({
           <DialogTitle>{t("deleteDialog.title")}</DialogTitle>
         </DialogHeader>
         <DialogBody className="py-4 text-sm">
-          <p className="text-text-secondary">
+          <DialogDescription>
             {task
               ? t("deleteDialog.messageWithName", { name: task.fileName })
               : t("deleteDialog.messageGeneric")}
-          </p>
+          </DialogDescription>
         </DialogBody>
         <DialogFooter>
           <Button

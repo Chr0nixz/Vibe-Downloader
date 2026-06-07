@@ -7,13 +7,17 @@ import {
   Dialog,
   DialogBody,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { ProbeTaskPayload } from "@/generated/bindings";
+import { createLogger } from "@/lib/logger";
 import { createTask, openDirectoryPicker, probeTask } from "@/lib/tauri";
+
+const log = createLogger("new-download");
 import { formatBytes } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
 import { parseByteCount } from "@/types/task";
@@ -49,6 +53,7 @@ export function NewDownloadDialog({
         setFileName(nextProbe.fileName);
       }
     } catch (err) {
+      log.warn("probe failed", err);
       setError(String(err));
     } finally {
       setProbing(false);
@@ -72,6 +77,7 @@ export function NewDownloadDialog({
       setProbe(null);
       onOpenChange(false);
     } catch (err) {
+      log.error("create task failed", err);
       setError(String(err));
     } finally {
       setSubmitting(false);
@@ -88,6 +94,9 @@ export function NewDownloadDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("newDownload.title")}</DialogTitle>
+          <DialogDescription className="sr-only">
+            {t("newDownload.description")}
+          </DialogDescription>
         </DialogHeader>
         <form className="flex min-h-0 flex-1 flex-col overflow-hidden" onSubmit={submit}>
           <DialogBody className="flex flex-col gap-3 py-4">
@@ -100,6 +109,7 @@ export function NewDownloadDialog({
                   setProbe(null);
                 }}
                 placeholder={t("newDownload.urlPlaceholder")}
+                className="h-11 md:h-8"
                 autoFocus
                 required
               />
@@ -109,6 +119,7 @@ export function NewDownloadDialog({
                 type="button"
                 variant="outline"
                 size="sm"
+                className="h-11 md:h-8"
                 onClick={detect}
                 disabled={probing || !url.trim()}
               >
@@ -117,19 +128,19 @@ export function NewDownloadDialog({
             </div>
             <label className="flex flex-col gap-1 text-xs text-text-muted">
               {t("newDownload.saveDir")}
-              <div className="flex flex-col gap-2 sm:flex-row">
+              <div className="flex flex-col gap-2 md:flex-row">
                 <Input
                   value={saveDir}
                   onChange={(event) => setSaveDir(event.target.value)}
                   placeholder={
                     settings?.defaultSaveDir ?? t("newDownload.saveDirPlaceholder")
                   }
-                  className="h-10 sm:h-8"
+                  className="h-11 md:h-8"
                 />
                 <Button
                   type="button"
                   variant="outline"
-                  className="h-10 shrink-0 sm:h-8"
+                  className="h-11 shrink-0 md:h-8"
                   onClick={chooseDirectory}
                   disabled={submitting}
                 >
@@ -144,6 +155,7 @@ export function NewDownloadDialog({
                 value={fileName}
                 onChange={(event) => setFileName(event.target.value)}
                 placeholder={t("newDownload.fileNamePlaceholder")}
+                className="h-11 md:h-8"
               />
             </label>
             {probe ? (

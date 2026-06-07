@@ -6,11 +6,13 @@ use crate::models::{
 
 pub const MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;
 pub const MAX_SEGMENT_COUNT: usize = 4;
+pub const MAX_AUTO_SEGMENT_COUNT: usize = 8;
 pub const DEFAULT_MAX_ACTIVE_TASKS: i32 = 2;
 pub const MIN_MAX_ACTIVE_TASKS: i32 = 1;
 pub const MAX_MAX_ACTIVE_TASKS: i32 = 8;
 const SETTING_MAX_ACTIVE_TASKS: &str = "max_active_tasks";
 const SETTING_DEFAULT_SAVE_DIR: &str = "default_save_dir";
+const SETTING_GLOBAL_SPEED_LIMIT_BPS: &str = "global_speed_limit_bps";
 
 pub async fn connect(db_path: &std::path::Path) -> Result<SqlitePool, String> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -26,6 +28,7 @@ pub async fn connect(db_path: &std::path::Path) -> Result<SqlitePool, String> {
         .await
         .map_err(|e| format!("Migration failed: {e}"))?;
 
+    tracing::info!(db_path = %db_path.display(), "database connected and migrations applied");
     Ok(pool)
 }
 
@@ -178,10 +181,14 @@ pub async fn get_settings(
         .await?
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(default_save_dir);
+    let global_speed_limit_bps = get_setting_value(pool, SETTING_GLOBAL_SPEED_LIMIT_BPS)
+        .await?
+        .and_then(|value| normalize_speed_limit_bps(&value));
 
     Ok(AppSettings {
         max_active_tasks,
         default_save_dir,
+        global_speed_limit_bps,
     })
 }
 
@@ -192,7 +199,28 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         &settings.max_active_tasks.to_string(),
     )
     .await?;
-    upsert_setting_value(pool, SETTING_DEFAULT_SAVE_DIR, &settings.default_save_dir).await
+    upsert_setting_value(pool, SETTING_DEFAULT_SAVE_DIR, &settings.default_save_dir).await?;
+    upsert_setting_value(
+        pool,
+        SETTING_GLOBAL_SPEED_LIMIT_BPS,
+        settings.global_speed_limit_bps.as_deref().unwrap_or(""),
+    )
+    .await
+}
+
+pub fn normalize_speed_limit_bps(value: &str) -> Option<String> {
+    value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|limit| *limit > 0)
+        .map(|limit| limit.to_string())
+}
+
+pub fn parse_speed_limit_bps(value: Option<&str>) -> Option<i64> {
+    value
+        .and_then(normalize_speed_limit_bps)
+        .and_then(|value| value.parse::<i64>().ok())
 }
 
 async fn get_setting_value(pool: &SqlitePool, key: &str) -> Result<Option<String>, String> {
@@ -585,6 +613,52 @@ pub async fn update_segment_progress(
     Ok(())
 }
 
+pub async fn update_segment_downloaded_until(
+    pool: &SqlitePool,
+    segment_id: &str,
+    downloaded_until: i64,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE segments
+        SET downloaded_until = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(downloaded_until)
+    .bind(segment_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn update_segment_retry(
+    pool: &SqlitePool,
+    segment_id: &str,
+    downloaded_until: i64,
+    retry_count: i32,
+    last_error: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE segments
+        SET downloaded_until = ?, retry_count = ?, status = 'pending', last_error = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(downloaded_until)
+    .bind(retry_count)
+    .bind(last_error)
+    .bind(segment_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 pub async fn update_task_status(
     pool: &SqlitePool,
     task_id: &str,
@@ -675,6 +749,161 @@ pub async fn complete_segment(pool: &SqlitePool, segment_id: &str) -> Result<(),
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+pub async fn complete_unknown_size_task(
+    pool: &SqlitePool,
+    task_id: &str,
+    segment_id: &str,
+    downloaded_bytes: i64,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+    let final_size = downloaded_bytes.max(0);
+
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET status = 'completed', total_size = ?, downloaded_bytes = ?, speed_bps = 0,
+            connection_count = 0, health_summary = 'Completed',
+            error_message = NULL, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(final_size)
+    .bind(final_size)
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        r#"
+        UPDATE segments
+        SET range_start = 0, range_end = ?, downloaded_until = ?, status = 'completed',
+            last_error = NULL
+        WHERE id = ?
+        "#,
+    )
+    .bind(final_size.saturating_sub(1).max(0))
+    .bind(final_size)
+    .bind(segment_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct SegmentSplit {
+    pub original_segment_id: String,
+    pub original_range_end: i64,
+    pub tail_segment: TaskSegmentRecord,
+}
+
+pub async fn split_largest_remaining_segment(
+    pool: &SqlitePool,
+    task_id: &str,
+    min_remaining_bytes: i64,
+    max_segments: usize,
+) -> Result<Option<SegmentSplit>, String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM segments WHERE task_id = ?")
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    if usize::try_from(count).unwrap_or(usize::MAX) >= max_segments {
+        tx.rollback().await.map_err(|e| e.to_string())?;
+        return Ok(None);
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT id, task_id, range_start, range_end, downloaded_until,
+               status, retry_count, last_error
+        FROM segments
+        WHERE task_id = ? AND downloaded_until <= range_end
+        ORDER BY (range_end - downloaded_until) DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let Some(row) = row else {
+        tx.rollback().await.map_err(|e| e.to_string())?;
+        return Ok(None);
+    };
+    let segment = row_to_segment(&row)?;
+    let remaining = segment
+        .range_end
+        .saturating_sub(segment.downloaded_until)
+        .saturating_add(1);
+    if remaining < min_remaining_bytes {
+        tx.rollback().await.map_err(|e| e.to_string())?;
+        return Ok(None);
+    }
+
+    let first_remaining_len = remaining / 2;
+    if first_remaining_len <= 0 {
+        tx.rollback().await.map_err(|e| e.to_string())?;
+        return Ok(None);
+    }
+    let original_range_end = segment.downloaded_until + first_remaining_len - 1;
+    let tail_start = original_range_end + 1;
+    if tail_start > segment.range_end {
+        tx.rollback().await.map_err(|e| e.to_string())?;
+        return Ok(None);
+    }
+
+    sqlx::query("UPDATE segments SET range_end = ? WHERE id = ?")
+        .bind(original_range_end)
+        .bind(&segment.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let tail_segment = TaskSegmentRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        task_id: segment.task_id.clone(),
+        range_start: tail_start,
+        range_end: segment.range_end,
+        downloaded_until: tail_start,
+        status: SegmentStatus::Pending,
+        retry_count: 0,
+        last_error: None,
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO segments (
+            id, task_id, range_start, range_end, downloaded_until,
+            status, retry_count, last_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&tail_segment.id)
+    .bind(&tail_segment.task_id)
+    .bind(tail_segment.range_start)
+    .bind(tail_segment.range_end)
+    .bind(tail_segment.downloaded_until)
+    .bind(tail_segment.status.as_str())
+    .bind(tail_segment.retry_count)
+    .bind(&tail_segment.last_error)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(Some(SegmentSplit {
+        original_segment_id: segment.id,
+        original_range_end,
+        tail_segment,
+    }))
 }
 
 pub async fn update_segment_status(

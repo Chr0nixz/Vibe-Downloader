@@ -1,11 +1,12 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        mpsc, Arc, Mutex,
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,6 +15,7 @@ use std::{
 use sha2::{Digest, Sha256};
 use tauri_app_lib::{
     download::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine},
+    download::GlobalSpeedLimiter,
     models::{SegmentStatus, TaskSegmentRecord},
 };
 
@@ -54,6 +56,61 @@ async fn probe_falls_back_to_get_range_when_head_is_incomplete() {
     assert_eq!(probe.file_name, "fallback.bin");
     assert_eq!(probe.total_size, SAMPLE.len() as i64);
     assert!(probe.supports_range);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_sends_identity_accept_encoding() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+
+    let probe = engine
+        .probe(&format!("{}/requires-identity", server.base_url))
+        .await
+        .expect("probe");
+
+    assert_eq!(probe.file_name, "identity.bin");
+    assert!(probe.supports_range);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_allows_unknown_size_single_streams() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+
+    let probe = engine
+        .probe(&format!("{}/unknown-size", server.base_url))
+        .await
+        .expect("probe");
+
+    assert_eq!(probe.total_size, 0);
+    assert!(!probe.supports_range);
+    assert_eq!(probe.file_name, "unknown-size.bin");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_uses_extended_file_name_sources() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+
+    let content_location = engine
+        .probe(&format!("{}/content-location-name", server.base_url))
+        .await
+        .expect("content location probe");
+    let query_name = engine
+        .probe(&format!(
+            "{}/query-name?response-content-disposition=attachment%3B%20filename%3D%22query.zip%22",
+            server.base_url
+        ))
+        .await
+        .expect("query probe");
+    let encoded_name = engine
+        .probe(&format!("{}/encoded-name", server.base_url))
+        .await
+        .expect("encoded probe");
+
+    assert_eq!(content_location.file_name, "report.pdf");
+    assert_eq!(query_name.file_name, "query.zip");
+    assert_eq!(encoded_name.file_name, "encoded name.txt");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -105,6 +162,30 @@ async fn direct_download_writes_final_file() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_unknown_size_download_writes_final_file() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("unknown-complete");
+
+    let downloaded = engine
+        .download_direct(
+            DirectDownloadRequest {
+                url: format!("{}/unknown-size", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: 0,
+                supports_range: false,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("download");
+
+    assert_eq!(downloaded, SAMPLE.len() as i64);
+    assert_eq!(fs::read(&paths.final_path).expect("read final"), SAMPLE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_download_can_resume_from_temp_file() {
     let server = TestServer::start();
     let engine = HttpEngine::new().expect("engine");
@@ -149,6 +230,32 @@ async fn direct_download_can_resume_from_temp_file() {
         fs::read(&paths.final_path).expect("read final"),
         slow_payload()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_download_respects_speed_limiter() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("speed-limit");
+    let started = std::time::Instant::now();
+
+    engine
+        .download_direct_with_limiter(
+            DirectDownloadRequest {
+                url: format!("{}/slow", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: slow_payload().len() as i64,
+                supports_range: true,
+            },
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(GlobalSpeedLimiter::new(Some(32 * 1024))),
+        )
+        .await
+        .expect("limited download");
+
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert_eq!(fs::read(&paths.final_path).expect("read final"), slow_payload());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -209,6 +316,34 @@ async fn segmented_direct_download_writes_all_ranges_to_one_file() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segmented_direct_retries_transient_segment_failures() {
+    std::env::set_var("VIBE_FAST_RETRY_DELAYS", "1");
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("segmented-retry");
+    let payload = large_payload();
+
+    engine
+        .download_segmented_direct(
+            DirectSegmentedDownloadRequest {
+                url: format!("{}/transient-segment", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: payload.len() as i64,
+                supports_range: true,
+                segments: direct_segments("segmented-retry", payload.len() as i64),
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("segmented retry");
+
+    let final_bytes = fs::read(&paths.final_path).expect("read final");
+    assert_eq!(sha256_hex(&final_bytes), LARGE_PAYLOAD_SHA256);
+    std::env::remove_var("VIBE_FAST_RETRY_DELAYS");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_direct_resume_skips_completed_ranges() {
     let server = TestServer::start();
     let engine = HttpEngine::new().expect("engine");
@@ -240,6 +375,7 @@ async fn segmented_direct_resume_skips_completed_ranges() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_direct_failure_does_not_rename_temp_file() {
+    std::env::set_var("VIBE_FAST_RETRY_DELAYS", "1");
     let server = TestServer::start();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("segmented-failure");
@@ -262,11 +398,13 @@ async fn segmented_direct_failure_does_not_rename_temp_file() {
 
     assert_eq!(error, "The server returned HTTP 500.");
     assert!(!paths.final_path.exists());
+    std::env::remove_var("VIBE_FAST_RETRY_DELAYS");
 }
 
 struct TestServer {
     base_url: String,
     stop: Arc<AtomicBool>,
+    _state: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl TestServer {
@@ -275,13 +413,18 @@ impl TestServer {
         let addr = listener.local_addr().expect("addr");
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
+        let state = Arc::new(Mutex::new(HashMap::new()));
+        let thread_state = state.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
 
         thread::spawn(move || {
             listener.set_nonblocking(true).expect("nonblocking");
+            let _ = ready_tx.send(());
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        thread::spawn(move || handle_connection(stream));
+                        let state = thread_state.clone();
+                        thread::spawn(move || handle_connection(stream, state));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
@@ -290,10 +433,14 @@ impl TestServer {
                 }
             }
         });
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("test server ready");
 
         Self {
             base_url: format!("http://{addr}"),
             stop,
+            _state: state,
         }
     }
 }
@@ -325,7 +472,7 @@ impl TestPaths {
     }
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usize>>>) {
     let mut buffer = [0_u8; 4096];
     let Ok(read) = stream.read(&mut buffer) else {
         return;
@@ -341,8 +488,28 @@ fn handle_connection(mut stream: TcpStream) {
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or("/");
     let byte_range = request.lines().find_map(parse_range);
+    let accept_encoding_identity = request.lines().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("accept-encoding")
+                && value
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case("identity"))
+        })
+    });
 
     match path {
+        "/requires-identity" if !accept_encoding_identity => {
+            write_response(&mut stream, 400, &[], b"identity required", false)
+        }
+        "/requires-identity" => respond_file(
+            &mut stream,
+            method,
+            SAMPLE,
+            byte_range,
+            true,
+            "identity.bin",
+            false,
+        ),
         "/file" => respond_file(
             &mut stream,
             method,
@@ -362,6 +529,70 @@ fn handle_connection(mut stream: TcpStream) {
             byte_range,
             true,
             "fallback.bin",
+            false,
+        ),
+        "/unknown-size" => write_unknown_size_response(
+            &mut stream,
+            method,
+            SAMPLE,
+            &[("Content-Type", "application/octet-stream")],
+        ),
+        "/content-location-name" => write_unknown_size_response(
+            &mut stream,
+            method,
+            SAMPLE,
+            &[
+                ("Content-Type", "application/pdf"),
+                ("Content-Location", "/exports/report"),
+            ],
+        ),
+        target if target.starts_with("/query-name") => respond_file_without_disposition(
+            &mut stream,
+            method,
+            SAMPLE,
+            byte_range,
+            true,
+            false,
+        ),
+        "/encoded-name" => write_unknown_size_response(
+            &mut stream,
+            method,
+            SAMPLE,
+            &[
+                ("Content-Type", "application/octet-stream"),
+                (
+                    "Content-Disposition",
+                    "attachment; filename*=UTF-8''encoded%20name.txt",
+                ),
+            ],
+        ),
+        "/transient-segment" if byte_range.is_some_and(|range| range.start > 0) => {
+            let key = format!("transient-{}", byte_range.map(|range| range.start).unwrap_or(0));
+            let mut state = state.lock().expect("state lock");
+            let count = state.entry(key).or_insert(0);
+            if *count == 0 {
+                *count += 1;
+                write_response(&mut stream, 500, &[], b"retry later", false);
+            } else {
+                drop(state);
+                respond_file(
+                    &mut stream,
+                    method,
+                    &large_payload(),
+                    byte_range,
+                    true,
+                    "transient.bin",
+                    false,
+                );
+            }
+        }
+        "/transient-segment" => respond_file(
+            &mut stream,
+            method,
+            &large_payload(),
+            byte_range,
+            true,
+            "transient.bin",
             false,
         ),
         "/slow" => respond_file(
@@ -459,6 +690,52 @@ fn respond_file(
     write_response(stream, status, &headers, body, slow);
 }
 
+fn respond_file_without_disposition(
+    stream: &mut TcpStream,
+    method: &str,
+    payload: &[u8],
+    byte_range: Option<ByteRange>,
+    supports_range: bool,
+    slow: bool,
+) {
+    let start = byte_range
+        .map(|range| range.start)
+        .unwrap_or(0)
+        .min(payload.len());
+    let end = byte_range
+        .and_then(|range| range.end)
+        .unwrap_or_else(|| payload.len().saturating_sub(1))
+        .min(payload.len().saturating_sub(1));
+    let body = if method == "HEAD" || start > end {
+        &[][..]
+    } else {
+        &payload[start..=end]
+    };
+    let status = if byte_range.is_some() && supports_range {
+        206
+    } else {
+        200
+    };
+    let content_length = if method == "HEAD" {
+        payload.len().to_string()
+    } else {
+        body.len().to_string()
+    };
+    let content_range = format!("bytes {start}-{end}/{}", payload.len());
+    let mut headers = vec![
+        ("Content-Length", content_length.as_str()),
+        ("Content-Type", "application/octet-stream"),
+    ];
+    if supports_range {
+        headers.push(("Accept-Ranges", "bytes"));
+    }
+    if status == 206 {
+        headers.push(("Content-Range", content_range.as_str()));
+    }
+
+    write_response(stream, status, &headers, body, slow);
+}
+
 fn write_response(
     stream: &mut TcpStream,
     status: u16,
@@ -493,6 +770,27 @@ fn write_response(
         let _ = stream.write_all(body);
         let _ = stream.flush();
     }
+}
+
+fn write_unknown_size_response(
+    stream: &mut TcpStream,
+    method: &str,
+    body: &[u8],
+    headers: &[(&str, &str)],
+) {
+    let mut response = "HTTP/1.1 200 OK\r\nConnection: close\r\n".to_string();
+    for (name, value) in headers {
+        response.push_str(name);
+        response.push_str(": ");
+        response.push_str(value);
+        response.push_str("\r\n");
+    }
+    response.push_str("\r\n");
+    let _ = stream.write_all(response.as_bytes());
+    if method != "HEAD" {
+        let _ = stream.write_all(body);
+    }
+    let _ = stream.flush();
 }
 
 fn slow_payload() -> Vec<u8> {

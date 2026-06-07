@@ -2,7 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
 
+import { createLogger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
+
+const log = createLogger("updater");
 
 const UPDATE_CHECK_DELAY_MS = 3000;
 
@@ -17,11 +20,12 @@ export function useAppUpdater() {
     const timer = window.setTimeout(async () => {
       try {
         const update = await check();
-        if (update) {
-          setUpdateVersion(update.version);
-        }
-      } catch (err) {
-        console.warn("Update check failed:", err);
+      if (update) {
+        setUpdateVersion(update.version);
+      }
+    } catch (err) {
+        log.warn("update check failed", err);
+        setError(err instanceof Error ? err.message : String(err));
       }
     }, UPDATE_CHECK_DELAY_MS);
 
@@ -45,6 +49,7 @@ export function useAppUpdater() {
       await update.downloadAndInstall();
       await relaunch();
     } catch (err) {
+      log.error("update install failed", err);
       setError(err instanceof Error ? err.message : String(err));
       setInstalling(false);
     }

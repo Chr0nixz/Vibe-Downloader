@@ -10,45 +10,49 @@ pub const EVENT_BROWSER_HANDOFF_FAILED: &str = "browser.handoff.failed";
 pub const EVENT_BROWSER_INTEGRATION_CHANGED: &str = "browser.integration.changed";
 
 pub fn emit_task_progress(app: &AppHandle, payload: &TaskProgressPayload) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.emit(EVENT_TASK_PROGRESS, payload);
-        return;
-    }
-    let _ = app.emit(EVENT_TASK_PROGRESS, payload);
+    emit_payload(app, EVENT_TASK_PROGRESS, payload);
 }
 
 pub fn emit_queue_changed(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.emit(EVENT_QUEUE_CHANGED, ());
-        return;
-    }
-    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+    emit_empty(app, EVENT_QUEUE_CHANGED);
 }
 
 pub fn emit_settings_changed(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.emit(EVENT_SETTINGS_CHANGED, ());
-        return;
-    }
-    let _ = app.emit(EVENT_SETTINGS_CHANGED, ());
+    emit_empty(app, EVENT_SETTINGS_CHANGED);
 }
 
 pub fn emit_browser_handoff_received(app: &AppHandle) {
-    emit_browser_event(app, EVENT_BROWSER_HANDOFF_RECEIVED);
+    emit_empty(app, EVENT_BROWSER_HANDOFF_RECEIVED);
 }
 
 pub fn emit_browser_handoff_failed(app: &AppHandle) {
-    emit_browser_event(app, EVENT_BROWSER_HANDOFF_FAILED);
+    emit_empty(app, EVENT_BROWSER_HANDOFF_FAILED);
 }
 
 pub fn emit_browser_integration_changed(app: &AppHandle) {
-    emit_browser_event(app, EVENT_BROWSER_INTEGRATION_CHANGED);
+    emit_empty(app, EVENT_BROWSER_INTEGRATION_CHANGED);
 }
 
-fn emit_browser_event(app: &AppHandle, event: &str) {
+fn emit_empty(app: &AppHandle, event: &str) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.emit(event, ());
+        if let Err(error) = window.emit(event, ()) {
+            tracing::warn!(event, error = %error, "failed to emit event to main window");
+        }
         return;
     }
-    let _ = app.emit(event, ());
+    if let Err(error) = app.emit(event, ()) {
+        tracing::warn!(event, error = %error, "failed to emit event");
+    }
+}
+
+fn emit_payload<T: Clone + serde::Serialize>(app: &AppHandle, event: &str, payload: &T) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(error) = window.emit(event, payload) {
+            tracing::warn!(event, error = %error, "failed to emit event to main window");
+        }
+        return;
+    }
+    if let Err(error) = app.emit(event, payload) {
+        tracing::warn!(event, error = %error, "failed to emit event");
+    }
 }

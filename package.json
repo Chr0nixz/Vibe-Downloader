@@ -16,7 +16,8 @@
     "check:bindings": "pnpm specta && git diff --exit-code src/generated/bindings.ts",
     "build:extensions": "node scripts/build-browser-extensions.mjs",
     "sync-version": "node scripts/sync-version.mjs",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "dev:tauri": "cross-env RUST_LOG=vibe_downloader=debug,tauri=warn,sqlx=debug tauri dev"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
@@ -49,6 +50,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "cross-env": "^7.0.3",
     "tailwindcss": "^4.3.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"

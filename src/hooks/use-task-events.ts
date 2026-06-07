@@ -1,7 +1,10 @@
 import { useEffect, useRef } from "react";
 import i18n from "@/i18n";
 
+import { createLogger } from "@/lib/logger";
 import { listTasks, onQueueChanged, onTaskProgress } from "@/lib/tauri";
+
+const log = createLogger("task-events");
 import { mergeTasksFromServer, useTaskStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
@@ -76,8 +79,8 @@ export function useTaskEvents() {
           const merged = mergeTasksFromServer(previous, fresh);
           useTaskStore.getState().setTasks(merged);
           notifyTaskStatusChanges(previous, merged);
-        } catch {
-          /* ignore refresh errors */
+        } catch (error) {
+          log.warn("queue refresh failed", error);
         }
       });
       if (cancelled) {

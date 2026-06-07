@@ -15,6 +15,7 @@ use crate::{
     db,
     download::HttpEngine,
     events::{emit_queue_changed, emit_task_progress},
+    logging::sanitize_url,
     models::{
         task::now_iso, ProbeTaskPayload, Task, TaskRecord, TaskSegment, TaskSegmentRecord,
         TaskStatus,
@@ -74,7 +75,15 @@ pub async fn probe_task(input: ProbeTaskInput) -> Result<ProbeTaskPayload, Strin
         return Err("Only HTTP and HTTPS downloads are supported in this milestone.".to_string());
     }
 
+    tracing::debug!(url = %sanitize_url(url), "probing download url");
     let probe = HttpEngine::new()?.probe(url).await?;
+    tracing::debug!(
+        url = %sanitize_url(url),
+        total_size = probe.total_size,
+        supports_range = probe.supports_range,
+        source_host = %probe.source_host,
+        "probe completed"
+    );
     Ok(ProbeTaskPayload {
         final_url: probe.final_url,
         file_name: probe.file_name,
@@ -168,6 +177,13 @@ pub(crate) async fn create_task_with_state(
 
     db::insert_task_record(&state.pool, &record).await?;
     db::ensure_task_segments(&state.pool, &record).await?;
+    tracing::info!(
+        task_id = %record.id,
+        url = %sanitize_url(url),
+        file_name = %record.file_name,
+        total_size = record.total_size,
+        "task created"
+    );
     emit_queue_changed(&app);
     schedule_queued_tasks(app.clone(), state).await;
 
@@ -184,9 +200,9 @@ pub async fn pause_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Task, String> {
-    if let Some(control) = state.downloads.lock().await.remove(&id) {
+    tracing::info!(task_id = %id, "pausing task");
+    if let Some(control) = state.downloads.lock().await.get(&id) {
         control.cancel.store(true, Ordering::SeqCst);
-        control.handle.abort();
     }
     db::update_task_status(
         &state.pool,
@@ -219,6 +235,7 @@ pub async fn resume_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Task, String> {
+    tracing::info!(task_id = %id, "resuming task");
     let task = require_task(&state.pool, &id).await?;
     if matches!(task.status, TaskStatus::Completed) {
         return Err("This download is already completed.".to_string());
@@ -256,6 +273,7 @@ pub async fn retry_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Task, String> {
+    tracing::info!(task_id = %id, "retrying task");
     if let Some(control) = state.downloads.lock().await.remove(&id) {
         control.cancel.store(true, Ordering::SeqCst);
         control.handle.abort();
@@ -293,9 +311,9 @@ pub async fn cancel_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Task, String> {
-    if let Some(control) = state.downloads.lock().await.remove(&id) {
+    tracing::info!(task_id = %id, "canceling task");
+    if let Some(control) = state.downloads.lock().await.get(&id) {
         control.cancel.store(true, Ordering::SeqCst);
-        control.handle.abort();
     }
     db::update_task_status(
         &state.pool,
@@ -329,6 +347,7 @@ pub async fn delete_task(
     id: String,
     delete_file: bool,
 ) -> Result<(), String> {
+    tracing::info!(task_id = %id, delete_file, "deleting task");
     if let Some(control) = state.downloads.lock().await.remove(&id) {
         control.cancel.store(true, Ordering::SeqCst);
         control.handle.abort();
@@ -407,6 +426,7 @@ pub(crate) async fn schedule_queued_tasks(app: AppHandle, state: &AppState) {
         state.pool.clone(),
         state.downloads.clone(),
         state.scheduler.clone(),
+        state.speed_limiter.clone(),
     )
     .await;
 }
@@ -416,6 +436,7 @@ async fn schedule_queued_tasks_inner(
     pool: sqlx::SqlitePool,
     downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
     scheduler: Arc<tokio::sync::Mutex<()>>,
+    speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
 ) {
     let _guard = scheduler.lock().await;
 
@@ -424,26 +445,37 @@ async fn schedule_queued_tasks_inner(
         let settings = match db::get_settings(&pool, default_dir).await {
             Ok(settings) => settings,
             Err(error) => {
-                eprintln!("failed to load settings for scheduler: {error}");
+                tracing::error!(error = %error, "failed to load settings for scheduler");
                 break;
             }
         };
         let active_count = downloads.lock().await.len() as i32;
         let available = settings.max_active_tasks.saturating_sub(active_count);
         if available <= 0 {
+            tracing::debug!(
+                active_count,
+                max_active_tasks = settings.max_active_tasks,
+                "scheduler has no available slots"
+            );
             break;
         }
 
         let queued = match db::list_queued_task_records(&pool, i64::from(available)).await {
             Ok(tasks) => tasks,
             Err(error) => {
-                eprintln!("failed to load queued tasks: {error}");
+                tracing::error!(error = %error, "failed to load queued tasks");
                 break;
             }
         };
         if queued.is_empty() {
             break;
         }
+
+        tracing::debug!(
+            available,
+            queued_count = queued.len(),
+            "scheduler dispatching queued tasks"
+        );
 
         let mut made_progress = false;
         for task in queued {
@@ -456,6 +488,7 @@ async fn schedule_queued_tasks_inner(
                 pool.clone(),
                 downloads.clone(),
                 scheduler.clone(),
+                speed_limiter.clone(),
                 task,
             )
             .await
@@ -484,12 +517,21 @@ async fn start_task_download(
     pool: sqlx::SqlitePool,
     downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
     scheduler: Arc<tokio::sync::Mutex<()>>,
+    speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
     task: TaskRecord,
 ) -> Result<(), String> {
     let task = prepare_task_for_download(&pool, task).await?;
     if downloads.lock().await.contains_key(&task.id) {
+        tracing::debug!(task_id = %task.id, "download already active, skipping start");
         return Ok(());
     }
+
+    tracing::info!(
+        task_id = %task.id,
+        url = %sanitize_url(&task.url),
+        total_size = task.total_size,
+        "starting task download"
+    );
 
     db::update_task_status(
         &pool,
@@ -510,6 +552,7 @@ async fn start_task_download(
     let task_cancel = cancel.clone();
     let task_pool = pool.clone();
     let task_scheduler = scheduler.clone();
+    let state_speed_limiter = speed_limiter.clone();
 
     let handle = tokio::spawn(async move {
         let engine = match HttpEngine::new() {
@@ -522,6 +565,7 @@ async fn start_task_download(
                     task_pool.clone(),
                     downloads_map.clone(),
                     task_scheduler.clone(),
+                    state_speed_limiter.clone(),
                 );
                 return;
             }
@@ -533,6 +577,7 @@ async fn start_task_download(
                 task_pool.clone(),
                 task,
                 task_cancel.clone(),
+                state_speed_limiter.clone(),
             )
             .await;
         let canceled = task_cancel.load(Ordering::SeqCst);
@@ -544,7 +589,13 @@ async fn start_task_download(
             }
         }
 
-        spawn_schedule_queued_tasks(task_app, task_pool, downloads_map, task_scheduler);
+        spawn_schedule_queued_tasks(
+            task_app,
+            task_pool,
+            downloads_map,
+            task_scheduler,
+            state_speed_limiter,
+        );
     });
 
     downloads
@@ -561,9 +612,10 @@ fn spawn_schedule_queued_tasks(
     pool: sqlx::SqlitePool,
     downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
     scheduler: Arc<tokio::sync::Mutex<()>>,
+    speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
 ) {
     tokio::spawn(async move {
-        schedule_queued_tasks_inner(app, pool, downloads, scheduler).await;
+        schedule_queued_tasks_inner(app, pool, downloads, scheduler, speed_limiter).await;
     });
 }
 
@@ -729,18 +781,10 @@ pub fn resume_mismatch_message(
     if !probe.supports_range {
         return Some("Server no longer supports resume. Restart this download.".to_string());
     }
-    if task
-        .etag
-        .as_deref()
-        .is_some_and(|etag| Some(etag) != probe.etag.as_deref())
-    {
+    if task.etag != probe.etag {
         return Some("Remote file changed. Restart download to avoid corruption.".to_string());
     }
-    if task
-        .last_modified
-        .as_deref()
-        .is_some_and(|last_modified| Some(last_modified) != probe.last_modified.as_deref())
-    {
+    if task.last_modified != probe.last_modified {
         return Some("Remote file changed. Restart download to avoid corruption.".to_string());
     }
     None
@@ -776,7 +820,8 @@ async fn mark_download_failed(
     task_id: &str,
     error: String,
 ) {
-    let _ = db::update_task_status(
+    tracing::error!(task_id = %task_id, error = %error, "download failed");
+    if let Err(db_error) = db::update_task_status(
         pool,
         task_id,
         TaskStatus::Failed,
@@ -785,14 +830,28 @@ async fn mark_download_failed(
         Some(&error),
         Some(&error),
     )
-    .await;
-    let _ = db::update_segments_status_for_task(
+    .await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %db_error,
+            "failed to persist task failure status"
+        );
+    }
+    if let Err(db_error) = db::update_segments_status_for_task(
         pool,
         task_id,
         crate::models::SegmentStatus::Failed,
         Some(&error),
     )
-    .await;
+    .await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %db_error,
+            "failed to persist segment failure status"
+        );
+    }
     if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
         emit_task_progress_snapshot(app, &task);
     }

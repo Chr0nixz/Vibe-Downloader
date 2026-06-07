@@ -16,7 +16,10 @@ import {
   uninstallBrowserIntegration,
   updateSettings,
 } from "@/lib/tauri";
+import { createLogger } from "@/lib/logger";
 import { cn } from "@/lib/utils";
+
+const log = createLogger("settings");
 import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
 
@@ -33,6 +36,7 @@ export function SettingsPage() {
   const addToast = useToastStore((s) => s.addToast);
   const [defaultSaveDir, setDefaultSaveDir] = useState("");
   const [maxActiveTasks, setMaxActiveTasks] = useState(2);
+  const [globalSpeedLimitBps, setGlobalSpeedLimitBps] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const [browserStatus, setBrowserStatus] = useState<BrowserIntegrationStatus | null>(null);
@@ -47,6 +51,7 @@ export function SettingsPage() {
     if (!settings) return;
     setDefaultSaveDir(settings.defaultSaveDir);
     setMaxActiveTasks(settings.maxActiveTasks);
+    setGlobalSpeedLimitBps(settings.globalSpeedLimitBps ?? "");
     setSaveState("saved");
   }, [settings]);
 
@@ -54,7 +59,8 @@ export function SettingsPage() {
     if (!settings || loading) return;
     if (
       defaultSaveDir === settings.defaultSaveDir &&
-      maxActiveTasks === settings.maxActiveTasks
+      maxActiveTasks === settings.maxActiveTasks &&
+      globalSpeedLimitBps === (settings.globalSpeedLimitBps ?? "")
     ) {
       return;
     }
@@ -65,13 +71,14 @@ export function SettingsPage() {
       void saveSettings({
         defaultSaveDir,
         maxActiveTasks,
+        globalSpeedLimitBps: globalSpeedLimitBps.trim(),
       });
     }, AUTO_SAVE_DELAY_MS);
 
     return () => {
       if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     };
-  }, [defaultSaveDir, loading, maxActiveTasks, settings]);
+  }, [defaultSaveDir, globalSpeedLimitBps, loading, maxActiveTasks, settings]);
 
   useEffect(() => {
     return () => {
@@ -85,6 +92,7 @@ export function SettingsPage() {
     try {
       setSettings(await getSettings());
     } catch (err) {
+      log.error("settings refresh failed", err);
       setError(String(err));
     } finally {
       setLoading(false);
@@ -100,6 +108,7 @@ export function SettingsPage() {
       const next = await updateSettings({
         maxActiveTasks: nextSettings.maxActiveTasks,
         defaultSaveDir: nextSettings.defaultSaveDir,
+        globalSpeedLimitBps: nextSettings.globalSpeedLimitBps,
       });
       if (version === saveVersion.current) {
         setSettings(next);
@@ -111,6 +120,7 @@ export function SettingsPage() {
       }
     } catch (err) {
       if (version === saveVersion.current) {
+        log.error("settings save failed", err);
         setError(String(err));
         setSaveState("idle");
       }
@@ -150,6 +160,7 @@ export function SettingsPage() {
     try {
       setBrowserStatus(await getBrowserIntegrationStatus());
     } catch (err) {
+      log.error("browser integration status refresh failed", err);
       addToast({
         tone: "error",
         title: t("toast.actionFailed"),
@@ -168,6 +179,7 @@ export function SettingsPage() {
         : await installBrowserIntegration({ browsers: [browser.browser] });
       setBrowserStatus(next);
     } catch (err) {
+      log.error("browser integration action failed", browser.browser, err);
       addToast({
         tone: "error",
         title: t("toast.actionFailed"),
@@ -179,9 +191,9 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-surface-root">
-      <div className="flex min-h-0 flex-1 flex-col">
-        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-border-subtle bg-surface-base/55 px-5 py-4">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-root">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border-subtle bg-surface-base/55 px-4 py-4 sm:px-5">
           <div className="min-w-0">
             <h2 className="text-base font-semibold text-text-primary">
               {t("settings.title")}
@@ -195,10 +207,10 @@ export function SettingsPage() {
             saving={saving}
             className="hidden sm:inline-flex"
           />
-        </header>
+        </div>
 
         <ScrollArea className="min-h-0 flex-1">
-          <div className="mx-auto flex max-w-4xl flex-col px-4 py-4 md:px-6 md:py-5">
+          <div className="mx-auto flex w-full max-w-4xl flex-col px-3 py-4 sm:px-4 md:px-6 md:py-5">
             {error ? (
               <p
                 className="mb-4 rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger"
@@ -224,13 +236,13 @@ export function SettingsPage() {
                     onChange={(event) => setDefaultSaveDir(event.target.value)}
                     placeholder={t("settings.defaultSaveDirPlaceholder")}
                     disabled={controlsDisabled}
-                    className="h-10 min-w-0 bg-surface-root sm:h-8"
+                    className="h-11 min-w-0 bg-surface-root md:h-8"
                   />
                   <div className="flex gap-2">
                     <Button
                       type="button"
                       variant="outline"
-                      className="h-10 shrink-0 sm:h-8"
+                      className="h-11 shrink-0 md:h-8"
                       onClick={chooseDirectory}
                       disabled={controlsDisabled || saving}
                     >
@@ -240,7 +252,7 @@ export function SettingsPage() {
                     <Button
                       type="button"
                       variant="ghost"
-                      className="h-10 shrink-0 sm:h-8"
+                      className="h-11 shrink-0 md:h-8"
                       onClick={resetDirectory}
                       disabled={controlsDisabled || saving}
                     >
@@ -269,7 +281,34 @@ export function SettingsPage() {
                     }
                   }}
                   disabled={controlsDisabled}
-                  className="h-10 w-28 bg-surface-root text-center font-mono sm:h-8"
+                  className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
+                />
+              </SettingsRow>
+
+              <SettingsRow
+                title={t("settings.globalSpeedLimit")}
+                htmlFor="global-speed-limit"
+              >
+                <Input
+                  id="global-speed-limit"
+                  type="number"
+                  min={0}
+                  step={1024}
+                  value={globalSpeedLimitBps}
+                  onChange={(event) => {
+                    const value = event.target.value.trim();
+                    if (value === "") {
+                      setGlobalSpeedLimitBps("");
+                      return;
+                    }
+                    const next = Number(value);
+                    if (Number.isFinite(next) && next >= 0) {
+                      setGlobalSpeedLimitBps(String(Math.floor(next)));
+                    }
+                  }}
+                  placeholder={t("settings.globalSpeedLimitPlaceholder")}
+                  disabled={controlsDisabled}
+                  className="h-11 w-40 bg-surface-root text-center font-mono md:h-8"
                 />
               </SettingsRow>
             </SettingsSection>
@@ -280,7 +319,7 @@ export function SettingsPage() {
                   id="locale-select"
                   value={currentLocale}
                   onChange={(event) => setLocale(event.target.value as Locale)}
-                  className="h-10 w-full max-w-xs rounded-md border border-border-subtle bg-surface-root px-3 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary sm:h-8"
+                  className="h-11 w-full max-w-xs rounded-md border border-border-subtle bg-surface-root px-3 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
                   disabled={controlsDisabled}
                 >
                   <option value="en">{t("locale.en")}</option>
@@ -327,7 +366,7 @@ export function SettingsPage() {
                       <Button
                         type="button"
                         variant={browser.manifestInstalled ? "ghost" : "outline"}
-                        className="h-9 justify-center"
+                        className="h-11 justify-center md:h-9"
                         onClick={() => void setBrowserInstalled(browser)}
                         disabled={disabled}
                       >

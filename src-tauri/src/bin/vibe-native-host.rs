@@ -7,7 +7,10 @@ use std::{
 
 use reqwest::Url;
 use serde::Serialize;
-use tauri_app_lib::models::{BrowserHandoffInput, BrowserKind};
+use tauri_app_lib::{
+    logging::{init_standalone_logging, sanitize_url},
+    models::{BrowserHandoffInput, BrowserKind},
+};
 
 const MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
 
@@ -22,19 +25,26 @@ struct NativeHostResponse {
 }
 
 fn main() {
+    if let Err(error) = init_standalone_logging() {
+        let _ = writeln!(io::stderr(), "failed to initialize native host logging: {error}");
+    }
+
     let response = match read_native_message().and_then(handle_message) {
         Ok(response) => response,
-        Err(error) => NativeHostResponse {
-            status: "failed".to_string(),
-            request_id: None,
-            handoff_file: None,
-            app_started: false,
-            error_message: Some(error),
-        },
+        Err(error) => {
+            tracing::error!(error = %error, "native host message handling failed");
+            NativeHostResponse {
+                status: "failed".to_string(),
+                request_id: None,
+                handoff_file: None,
+                app_started: false,
+                error_message: Some(error),
+            }
+        }
     };
 
     if let Err(error) = write_native_message(&response) {
-        let _ = writeln!(io::stderr(), "{error}");
+        tracing::error!(error = %error, "failed to write native host response");
     }
 }
 
@@ -56,10 +66,28 @@ fn read_native_message() -> Result<BrowserHandoffInput, String> {
 }
 
 fn handle_message(input: BrowserHandoffInput) -> Result<NativeHostResponse, String> {
-    validate_handoff(&input)?;
     let request_id = input.request_id.trim().to_string();
+    tracing::info!(
+        request_id = %request_id,
+        browser = %input.browser.display_name(),
+        action = %input.action,
+        url = %sanitize_url(&input.url),
+        "native host message received"
+    );
+
+    validate_handoff(&input)?;
     let handoff_file = write_handoff_file(&input)?;
+    tracing::debug!(
+        request_id = %request_id,
+        path = %handoff_file.display(),
+        "handoff file written"
+    );
     let app_started = start_app(&handoff_file);
+    tracing::info!(
+        request_id = %request_id,
+        app_started,
+        "native host handoff accepted"
+    );
 
     Ok(NativeHostResponse {
         status: "accepted".to_string(),
@@ -110,13 +138,21 @@ fn write_handoff_file(input: &BrowserHandoffInput) -> Result<PathBuf, String> {
 
 fn start_app(handoff_file: &Path) -> bool {
     let Some(app_path) = app_executable_path() else {
+        tracing::warn!("could not resolve app executable path");
         return false;
     };
-    Command::new(app_path)
+    let started = Command::new(app_path)
         .arg("--browser-handoff-file")
         .arg(handoff_file)
         .spawn()
-        .is_ok()
+        .is_ok();
+    if !started {
+        tracing::warn!(
+            handoff_file = %handoff_file.display(),
+            "failed to spawn main application"
+        );
+    }
+    started
 }
 
 fn app_executable_path() -> Option<PathBuf> {

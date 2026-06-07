@@ -1,6 +1,6 @@
 # Vibe Downloader
 
-Modern desktop download manager (Tauri 2 + React + Rust). This repository currently ships the app shell, design tokens, SQLite schema, event bridge, and a stage 2 HTTP engine with Range resume validation, fixed four-way segmented downloads for large Range-capable files, segment/connection details, and hash-backed regression coverage.
+Modern desktop download manager (Tauri 2 + React + Rust). This repository currently ships the app shell, design tokens, SQLite persistence, a resumable segmented HTTP engine, task queue/settings, diagnostic logging, and the Stage 5 Native Messaging browser handoff foundation.
 
 ## Prerequisites
 
@@ -40,6 +40,7 @@ pnpm tauri dev
 | `pnpm build` | Production frontend build |
 | `pnpm typecheck` | TypeScript check |
 | `pnpm tauri dev` | Run desktop app |
+| `pnpm dev:tauri` | Run desktop app with verbose Rust logging (`RUST_LOG`) |
 | `pnpm specta` | Regenerate `src/generated/bindings.ts` from Rust (requires working test runtime) |
 | `pnpm test:rust` | Run Rust integration tests |
 | `pnpm check:bindings` | Regenerate bindings and fail if `bindings.ts` drifted |
@@ -58,10 +59,16 @@ cargo clippy -- -D warnings
 cargo test
 ```
 
+## Debug logging
+
+The app writes logs to disk in release builds and captures frontend console output into the same log file. See [docs/debug-logging.md](docs/debug-logging.md) for log paths, `RUST_LOG` presets, browser extension console access, and bug-report guidance.
+
 ## Architecture
 
 - **Frontend**: React, Zustand, Tailwind v4, shadcn-style primitives, Framer Motion (command palette / details).
-- **Backend**: Rust commands + SQLite (`sqlx` runtime queries), `reqwest` HTTP downloads, fixed four-way segmented Range downloads for files >= 16 MB, Range resume metadata checks, hardened segment resume validation, `segments` progress records, startup state reset for interrupted tasks, Tauri events (`task.progress`, `queue.changed`).
+- **Backend**: Rust commands + SQLite (`sqlx` runtime queries), `reqwest` HTTP downloads, fixed four-way segmented Range downloads for files >= 16 MB, Range resume metadata checks, hardened segment resume validation, task queue scheduling, settings storage, startup state reset for interrupted tasks, Tauri events (`task.progress`, `queue.changed`, `settings.changed`).
+- **Browser handoff**: WebExtension source under `browser/extension-core`, Native Messaging manifests managed from Settings, a standalone `vibe-native-host` binary, and single-instance forwarding for handoff files when the app is already running.
+- **Logging**: `tracing` + Tauri logging for the app and standalone native host; see [docs/debug-logging.md](docs/debug-logging.md).
 - **Types**: `tauri-specta` exports to `src/generated/bindings.ts`.
 - **Window API**: `@tauri-apps/api/window` (`getCurrentWindow`) with `core:window:*` capabilities. No `@tauri-apps/plugin-window`.
 
@@ -69,8 +76,9 @@ cargo test
 
 - **Stage 1 HTTP MVP**: complete.
 - **Stage 2 resumable segmented HTTP downloads**: accepted. Large Range-capable files use fixed four-way segments, Chunks/Connections show real segment data, and regression tests cover resume, failure, and SHA-256 integrity paths.
-- **Stage 3/4 queue, settings, and polish**: in progress in the current working tree. Settings storage, max active task scheduling, queued task UI, Toast, and speed history are implemented.
-- **Stage 5 browser handoff**: Native Messaging integration is in progress. See [docs/browser-integration.md](docs/browser-integration.md).
+- **Stage 3 queue and settings**: implemented in the current working tree. Settings storage, default save directory, max active task scheduling, queued task UI, and settings events are wired.
+- **Stage 4 experience polish**: implemented in the current working tree for Toast, delete confirmation, speed history sparkline, expanded task rows, and accessibility copy.
+- **Stage 5 browser handoff**: Native Messaging foundation is implemented in the current working tree. See [docs/browser-integration.md](docs/browser-integration.md).
 
 ### Title bar (v0)
 
@@ -92,6 +100,7 @@ See [docs/RELEASE.md](docs/RELEASE.md) for secrets, tagging, and first-release c
 
 - [docs/RELEASE.md](docs/RELEASE.md) — GitHub Release 与自动更新
 - [docs/browser-integration.md](docs/browser-integration.md) — Native Messaging browser handoff
+- [docs/debug-logging.md](docs/debug-logging.md) — App, native host, frontend, and extension diagnostics
 - [docs/ROADMAP.md](docs/ROADMAP.md) — 分阶段开发路线图
 - [PRODUCT.md](PRODUCT.md) — 产品上下文（Impeccable）
 - [DESIGN.md](DESIGN.md) — 设计系统（Impeccable）

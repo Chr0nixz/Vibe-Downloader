@@ -101,13 +101,10 @@ export function TaskList({
           <p className="px-4 py-8 text-sm text-text-muted">{t("taskList.empty")}</p>
         ) : (
           <div
-            role="listbox"
+            role="list"
             aria-label={t("taskList.aria")}
-            aria-activedescendant={
-              selectedId ? `task-option-${selectedId}` : undefined
-            }
             onKeyDown={handleListboxKeyDown}
-            className="space-y-2.5 p-3 md:p-4"
+            className="space-y-2.5 p-2.5 sm:p-3 md:p-4"
           >
             {filtered.map((task) => (
               <TaskRow

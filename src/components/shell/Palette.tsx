@@ -5,6 +5,7 @@ import {
   Dialog,
   DialogBody,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -27,6 +28,9 @@ export function Palette({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("palette.title")}</DialogTitle>
+          <DialogDescription className="sr-only">
+            {t("palette.description")}
+          </DialogDescription>
         </DialogHeader>
         <DialogBody className="py-4">
           <Button

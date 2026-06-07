@@ -16,6 +16,7 @@ use crate::{
 pub struct UpdateSettingsInput {
     pub max_active_tasks: Option<i32>,
     pub default_save_dir: Option<String>,
+    pub global_speed_limit_bps: Option<String>,
 }
 
 #[tauri::command]
@@ -40,12 +41,19 @@ pub async fn update_settings(
         .unwrap_or(current.max_active_tasks)
         .clamp(db::MIN_MAX_ACTIVE_TASKS, db::MAX_MAX_ACTIVE_TASKS);
     let default_save_dir = resolve_save_dir(&app, input.default_save_dir, current.default_save_dir)?;
+    let global_speed_limit_bps = input
+        .global_speed_limit_bps
+        .and_then(|value| db::normalize_speed_limit_bps(&value));
     let settings = AppSettings {
         max_active_tasks,
         default_save_dir,
+        global_speed_limit_bps,
     };
 
     db::upsert_settings(&state.pool, &settings).await?;
+    state.speed_limiter.set_limit(db::parse_speed_limit_bps(
+        settings.global_speed_limit_bps.as_deref(),
+    ));
     emit_settings_changed(&app);
     emit_queue_changed(&app);
     super::tasks::schedule_queued_tasks(app, state.inner()).await;

@@ -218,6 +218,7 @@ pub struct ProbeTaskPayload {
 pub struct AppSettings {
     pub max_active_tasks: i32,
     pub default_save_dir: String,
+    pub global_speed_limit_bps: Option<String>,
 }
 
 pub fn now_iso() -> String {

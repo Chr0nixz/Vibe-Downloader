@@ -17,7 +17,7 @@ export function ToastViewport() {
 
   return (
     <div
-      className="pointer-events-none fixed bottom-12 right-3 z-[70] flex w-[calc(100vw-1.5rem)] max-w-sm flex-col gap-2 sm:right-4"
+      className="pointer-events-none fixed bottom-28 right-3 z-[70] flex w-[calc(100vw-1.5rem)] max-w-sm flex-col gap-2 md:bottom-12 md:right-4"
       aria-live="polite"
       aria-atomic="false"
     >
@@ -97,7 +97,7 @@ function ToastItem({
             type="button"
             variant="ghost"
             size="sm"
-            className="mt-2 h-7 px-2 text-xs"
+            className="mt-2 h-10 px-3 text-xs md:h-7 md:px-2"
             onClick={() => {
               toast.action?.onClick();
               onDismiss();
@@ -111,7 +111,7 @@ function ToastItem({
         type="button"
         variant="ghost"
         size="icon"
-        className="h-7 w-7 shrink-0"
+        className="h-10 w-10 shrink-0 md:h-7 md:w-7"
         aria-label={dismissLabel}
         onClick={onDismiss}
       >

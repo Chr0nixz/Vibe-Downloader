@@ -94,12 +94,9 @@ export const TaskRow = memo(function TaskRow({
 
   return (
     <motion.div
-      layout={!reduceMotion}
       id={`task-option-${task.id}`}
-      role="option"
-      aria-selected={selected}
-      aria-expanded={expanded}
-      aria-controls={expanded ? expandedId : undefined}
+      role="listitem"
+      aria-current={selected ? "true" : undefined}
       aria-labelledby={`task-${task.id}-name`}
       tabIndex={selected ? 0 : -1}
       onClick={(event) => {
@@ -125,7 +122,7 @@ export const TaskRow = memo(function TaskRow({
         }
       }}
       className={cn(
-        "relative overflow-hidden rounded-lg border border-border-subtle/70 bg-surface-base/85 px-3.5 py-3.5 shadow-[0_1px_2px_oklch(0_0_0_/_0.05),0_1px_0_oklch(1_0_0_/_0.025)_inset] transition-[background-color,border-color,box-shadow,transform] duration-200 ease-out hover:-translate-y-px hover:border-text-muted/30 hover:bg-surface-raised/70 hover:shadow-[0_6px_18px_oklch(0_0_0_/_0.08),0_1px_0_oklch(1_0_0_/_0.035)_inset] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70 md:px-4",
+        "relative overflow-hidden rounded-lg border border-border-subtle/70 bg-surface-base/85 px-3 py-3.5 shadow-[0_1px_2px_oklch(0_0_0_/_0.05),0_1px_0_oklch(1_0_0_/_0.025)_inset] transition-[background-color,border-color,box-shadow,transform] duration-200 ease-out hover:-translate-y-px hover:border-text-muted/30 hover:bg-surface-raised/70 hover:shadow-[0_6px_18px_oklch(0_0_0_/_0.08),0_1px_0_oklch(1_0_0_/_0.035)_inset] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70 sm:px-3.5 md:px-4",
         "grid gap-x-4 gap-y-3 md:grid-cols-[minmax(0,1fr)_auto] md:gap-y-2",
         selected &&
           "border-accent-primary/35 bg-surface-raised ring-1 ring-accent-primary/45 shadow-[0_8px_24px_oklch(0_0_0_/_0.10),0_1px_0_oklch(1_0_0_/_0.04)_inset]",
@@ -139,12 +136,12 @@ export const TaskRow = memo(function TaskRow({
         <div className="flex min-w-0 items-start justify-between gap-2 md:block">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <h3
+              <div
                 id={`task-${task.id}-name`}
                 className="truncate text-sm font-medium text-text-primary"
               >
                 {task.fileName}
-              </h3>
+              </div>
               <motion.span
                 key={task.status}
                 initial={reduceMotion ? false : { opacity: 0, scale: 0.96 }}
@@ -203,6 +200,7 @@ export const TaskRow = memo(function TaskRow({
         <RowActions
           task={task}
           expanded={expanded}
+          expandedId={expandedId}
           onToggleExpanded={onToggleExpanded}
           onToggleTransfer={onToggleTransfer}
           onRetry={onRetry}
@@ -215,6 +213,7 @@ export const TaskRow = memo(function TaskRow({
       <RowActions
         task={task}
         expanded={expanded}
+        expandedId={expandedId}
         onToggleExpanded={onToggleExpanded}
         onToggleTransfer={onToggleTransfer}
         onRetry={onRetry}
@@ -278,6 +277,7 @@ function DetailLine({ label, value }: { label: string; value: string }) {
 function RowActions({
   task,
   expanded,
+  expandedId,
   onToggleExpanded,
   onToggleTransfer,
   onRetry,
@@ -287,6 +287,7 @@ function RowActions({
 }: {
   task: Task;
   expanded: boolean;
+  expandedId: string;
   onToggleExpanded: () => void;
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
@@ -304,12 +305,14 @@ function RowActions({
 
   return (
     <div
-      className={cn("flex gap-1.5 [&_button]:h-10 [&_button]:w-10 md:[&_button]:h-8 md:[&_button]:w-8", className)}
+      className={cn("flex gap-1.5 [&_button]:h-11 [&_button]:w-11 md:[&_button]:h-8 md:[&_button]:w-8", className)}
       data-row-action
       data-no-drag
     >
       <ActionButton
         label={expanded ? t("actions.collapse") : t("actions.expand")}
+        expanded={expanded}
+        controls={expandedId}
         onClick={(event) => {
           event.stopPropagation();
           onToggleExpanded();
@@ -367,11 +370,15 @@ function RowActions({
 function ActionButton({
   label,
   disabled,
+  expanded,
+  controls,
   onClick,
   children,
 }: {
   label: string;
   disabled?: boolean;
+  expanded?: boolean;
+  controls?: string;
   onClick: MouseEventHandler<HTMLButtonElement>;
   children: ReactNode;
 }) {
@@ -382,6 +389,8 @@ function ActionButton({
           variant="ghost"
           size="icon"
           aria-label={label}
+          aria-expanded={expanded}
+          aria-controls={controls}
           disabled={disabled}
           onClick={onClick}
         >

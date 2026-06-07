@@ -2,6 +2,7 @@ pub mod commands;
 pub mod db;
 pub mod download;
 pub mod events;
+pub mod logging;
 pub mod models;
 pub mod platform;
 
@@ -23,6 +24,7 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub downloads: Arc<Mutex<HashMap<String, DownloadControl>>>,
     pub scheduler: Arc<Mutex<()>>,
+    pub speed_limiter: Arc<download::GlobalSpeedLimiter>,
 }
 
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
@@ -77,6 +79,32 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets({
+                    let mut targets = vec![
+                        tauri_plugin_log::Target::new(
+                            tauri_plugin_log::TargetKind::LogDir {
+                                file_name: Some("vibe".to_string()),
+                            },
+                        ),
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
+                    ];
+                    if cfg!(debug_assertions) {
+                        targets.push(tauri_plugin_log::Target::new(
+                            tauri_plugin_log::TargetKind::Stdout,
+                        ));
+                    }
+                    targets
+                })
+                .level(log::LevelFilter::Trace)
+                .build(),
+        )
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            tracing::info!(args = ?args, "single-instance launch received");
+            process_browser_handoff_files_from_args(app, args, "single-instance");
+            focus_main_window(app);
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -103,18 +131,31 @@ pub fn run() {
             commands::tasks::seed_mock_tasks,
         ])
         .setup(|app| {
+            logging::init_logging(app.handle())?;
+
             let handle = app.handle().clone();
 
             let db_path = platform::db_path(&handle)?;
             let pool = tauri::async_runtime::block_on(async { db::connect(&db_path).await })?;
             tauri::async_runtime::block_on(async { db::reset_interrupted_tasks(&pool).await })?;
+            let default_dir = commands::settings::default_download_dir(&handle)?;
+            let settings =
+                tauri::async_runtime::block_on(async { db::get_settings(&pool, default_dir).await })?;
+            let speed_limiter = Arc::new(download::GlobalSpeedLimiter::new(
+                db::parse_speed_limit_bps(settings.global_speed_limit_bps.as_deref()),
+            ));
 
             app.manage(AppState {
                 pool: pool.clone(),
                 downloads: Arc::new(Mutex::new(HashMap::new())),
                 scheduler: Arc::new(Mutex::new(())),
+                speed_limiter,
             });
-            process_initial_browser_handoff_files(&handle);
+            process_browser_handoff_files_from_args(
+                &handle,
+                std::env::args().collect(),
+                "initial-launch",
+            );
 
             if let Some(window) = app.get_webview_window("main") {
                 platform::configure_main_window(&window)?;
@@ -126,11 +167,16 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn process_initial_browser_handoff_files(app: &tauri::AppHandle) {
-    let files = browser_handoff_files_from_args(std::env::args().collect());
+fn process_browser_handoff_files_from_args(
+    app: &tauri::AppHandle,
+    args: Vec<String>,
+    source: &'static str,
+) {
+    let files = browser_handoff_files_from_args(args);
     if files.is_empty() {
         return;
     }
+    tracing::info!(count = files.len(), source, "browser handoff files received");
 
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -138,19 +184,56 @@ fn process_initial_browser_handoff_files(app: &tauri::AppHandle) {
         for path in files {
             match commands::browser::read_handoff_file(&path) {
                 Ok(input) => {
-                    let _ = commands::browser::create_browser_handoff_task_with_state(
+                    let request_id = input.request_id.clone();
+                    tracing::info!(
+                        request_id = %request_id,
+                        path = %path.display(),
+                        source,
+                        "processing browser handoff file"
+                    );
+                    if let Err(error) = commands::browser::create_browser_handoff_task_with_state(
                         handle.clone(),
                         state.inner(),
                         input,
                     )
-                    .await;
+                    .await
+                    {
+                        tracing::error!(
+                            request_id = %request_id,
+                            path = %path.display(),
+                            source,
+                            error = %error,
+                            "browser handoff task creation failed"
+                        );
+                    } else if let Err(error) = std::fs::remove_file(&path) {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            path = %path.display(),
+                            source,
+                            error = %error,
+                            "browser handoff file cleanup failed"
+                        );
+                    }
                 }
                 Err(error) => {
-                    eprintln!("{error}");
+                    tracing::error!(
+                        path = %path.display(),
+                        source,
+                        error = %error,
+                        "browser handoff file read failed"
+                    );
                 }
             }
         }
     });
+}
+
+fn focus_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 fn browser_handoff_files_from_args(args: Vec<String>) -> Vec<std::path::PathBuf> {

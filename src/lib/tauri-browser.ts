@@ -12,7 +12,9 @@ import { normalizeTask } from "@/types/task";
 import type { TaskSegment } from "@/types/task-segment";
 import { normalizeTaskSegment } from "@/types/task-segment";
 import type { TaskProgressPayload } from "@/types/task-progress";
+import { createLogger } from "@/lib/logger";
 
+const log = createLogger("browser-mock");
 const STORAGE_KEY = "vibe-browser-mock-tasks";
 const SETTINGS_STORAGE_KEY = "vibe-browser-settings";
 
@@ -22,6 +24,7 @@ let tasks: Task[] = loadStoredTasks() ?? buildBrowserMockTasks();
 let settings: AppSettings = loadStoredSettings() ?? {
   maxActiveTasks: 2,
   defaultSaveDir: "~/Downloads",
+  globalSpeedLimitBps: null,
 };
 let progressTimer: ReturnType<typeof setInterval> | undefined;
 const progressListeners = new Set<BrowserListener>();
@@ -37,16 +40,16 @@ function nowIso(): string {
 function persistTasks(): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
-  } catch {
-    /* ignore quota / private mode */
+  } catch (error) {
+    log.warn("failed to persist mock tasks", error);
   }
 }
 
 function persistSettings(): void {
   try {
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-  } catch {
-    /* ignore quota / private mode */
+  } catch (error) {
+    log.warn("failed to persist mock settings", error);
   }
 }
 
@@ -70,7 +73,13 @@ function loadStoredSettings(): AppSettings | null {
       typeof parsed.defaultSaveDir === "string" &&
       typeof parsed.maxActiveTasks === "number"
     ) {
-      return parsed;
+      return {
+        ...parsed,
+        globalSpeedLimitBps:
+          typeof parsed.globalSpeedLimitBps === "string"
+            ? parsed.globalSpeedLimitBps
+            : null,
+      };
     }
     return null;
   } catch {
@@ -295,11 +304,21 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
   settings = {
     maxActiveTasks: Math.min(8, Math.max(1, input.maxActiveTasks ?? settings.maxActiveTasks)),
     defaultSaveDir: nextSaveDir,
+    globalSpeedLimitBps:
+      input.globalSpeedLimitBps === null || input.globalSpeedLimitBps === undefined
+        ? null
+        : normalizeSpeedLimit(input.globalSpeedLimitBps),
   };
   persistSettings();
   emitSettingsChanged();
   scheduleBrowserQueue();
   return { ...settings };
+}
+
+function normalizeSpeedLimit(value: string): string | null {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return String(Math.floor(parsed));
 }
 
 export async function openDirectoryPicker(): Promise<string | null> {

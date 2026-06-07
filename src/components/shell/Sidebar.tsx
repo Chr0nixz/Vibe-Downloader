@@ -38,7 +38,7 @@ export function Sidebar() {
   return (
     <nav
       className={cn(
-        "flex w-[var(--shell-nav-width-compact)] shrink-0 flex-col gap-1 border-r border-border-subtle bg-surface-base/80 p-1.5 lg:w-[var(--shell-nav-width)] lg:p-2",
+        "order-3 flex h-14 w-full shrink-0 flex-row items-center justify-around gap-1 border-t border-border-subtle bg-surface-base/80 px-1.5 py-1 md:order-none md:h-auto md:w-[var(--shell-nav-width-compact)] md:flex-col md:items-stretch md:justify-start md:border-r md:border-t-0 md:p-1.5 lg:w-[var(--shell-nav-width)] lg:p-2",
       )}
       aria-label={t("app.navAria")}
     >
@@ -57,9 +57,9 @@ export function Sidebar() {
                 aria-current={active ? "page" : undefined}
                 aria-label={label}
                 className={cn(
-                  "h-10 w-full justify-start gap-2 px-0 text-sm lg:h-9 lg:px-3",
+                  "h-12 min-w-11 flex-1 justify-center gap-2 px-0 text-sm md:h-11 md:w-full md:flex-none md:justify-start lg:h-9 lg:px-3",
                   active
-                    ? "bg-accent-primary/15 text-accent-primary"
+                    ? "bg-accent-primary/10 text-text-primary ring-1 ring-accent-primary/35"
                     : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
                 )}
               >
@@ -67,7 +67,7 @@ export function Sidebar() {
                 <span className="hidden lg:inline">{label}</span>
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="right" className="lg:hidden">
+            <TooltipContent side="top" className="lg:hidden">
               {label}
             </TooltipContent>
           </Tooltip>

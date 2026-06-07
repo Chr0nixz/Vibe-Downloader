@@ -56,13 +56,16 @@ export function CommandBar({
   const canDelete = !!selectedTask;
 
   return (
-    <div className="flex min-w-0 items-center gap-1 border-b border-border-subtle bg-surface-base px-2 py-1.5 md:gap-2 md:px-3 md:py-2">
+    <section
+      className="flex min-w-0 items-center gap-1 border-b border-border-subtle bg-surface-base px-2 py-1.5 md:gap-2 md:px-3 md:py-2"
+      aria-label={t("commandBar.toolbarAria")}
+    >
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             variant="default"
             size="icon"
-            className="h-10 w-10 shrink-0 md:h-8 md:w-8"
+            className="h-11 w-11 shrink-0 md:h-8 md:w-8"
             aria-label={t("commandBar.newDownloadAria")}
             onClick={onNewDownload}
           >
@@ -72,7 +75,7 @@ export function CommandBar({
         <TooltipContent>{t("commandBar.newDownload")}</TooltipContent>
       </Tooltip>
 
-      <div className="hidden shrink-0 items-center gap-1 sm:flex md:gap-2">
+      <div className="hidden shrink-0 items-center gap-1 md:flex md:gap-2">
         <ActionIcon
           label={t("commandBar.start")}
           icon={Play}
@@ -104,7 +107,7 @@ export function CommandBar({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder={t("commandBar.searchPlaceholder")}
-          className="h-10 pl-8 md:h-8"
+          className="h-11 pl-8 md:h-8"
           aria-label={t("commandBar.searchAria")}
         />
       </div>
@@ -114,7 +117,7 @@ export function CommandBar({
           <Button
             variant="outline"
             size="icon"
-            className="h-10 w-10 shrink-0 md:hidden"
+            className="h-11 w-11 shrink-0 md:hidden"
             aria-label={t("commandBar.palette")}
             onClick={onOpenPalette}
           >
@@ -135,7 +138,7 @@ export function CommandBar({
           {formatShortcut("mod+K", platform)}
         </kbd>
       </Button>
-    </div>
+    </section>
   );
 }
 

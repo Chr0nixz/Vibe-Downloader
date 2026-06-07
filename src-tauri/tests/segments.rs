@@ -82,6 +82,44 @@ async fn large_range_task_generates_four_non_overlapping_segments() {
 }
 
 #[tokio::test]
+async fn splitting_largest_remaining_segment_keeps_ranges_contiguous() {
+    let pool = test_pool("split-segment").await;
+    let total_size = db::MULTI_CONNECTION_THRESHOLD_BYTES + 7;
+    let task = sample_task("task-split", total_size);
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+    let segments = db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments");
+
+    db::update_segment_progress(
+        &pool,
+        &segments[0].id,
+        segments[0].range_start + 1024,
+        SegmentStatus::Downloading,
+    )
+    .await
+    .expect("progress");
+
+    let split = db::split_largest_remaining_segment(&pool, &task.id, 1024, db::MAX_AUTO_SEGMENT_COUNT)
+        .await
+        .expect("split")
+        .expect("split result");
+    let next = db::list_segment_records(&pool, &task.id)
+        .await
+        .expect("list segments");
+
+    assert_eq!(next.len(), 5);
+    assert_eq!(split.original_range_end + 1, split.tail_segment.range_start);
+    assert_eq!(next[0].range_start, 0);
+    assert_eq!(next.last().expect("last").range_end, total_size - 1);
+    for window in next.windows(2) {
+        assert_eq!(window[0].range_end + 1, window[1].range_start);
+    }
+}
+
+#[tokio::test]
 async fn progress_updates_task_and_segment_together() {
     let pool = test_pool("progress-segment").await;
     let task = sample_task("task-progress", 100);
@@ -128,6 +166,7 @@ async fn settings_defaults_use_download_dir_and_two_active_tasks() {
 
     assert_eq!(settings.max_active_tasks, 2);
     assert_eq!(settings.default_save_dir, "C:\\Downloads");
+    assert!(settings.global_speed_limit_bps.is_none());
 }
 
 #[tokio::test]
@@ -138,6 +177,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
         &AppSettings {
             max_active_tasks: 5,
             default_save_dir: "D:\\Vibe".to_string(),
+            global_speed_limit_bps: None,
         },
     )
     .await
@@ -154,6 +194,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
         &AppSettings {
             max_active_tasks: 99,
             default_save_dir: "D:\\Vibe".to_string(),
+            global_speed_limit_bps: Some("2048".to_string()),
         },
     )
     .await
@@ -162,6 +203,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
         .await
         .expect("settings");
     assert_eq!(settings.max_active_tasks, db::MAX_MAX_ACTIVE_TASKS);
+    assert_eq!(settings.global_speed_limit_bps.as_deref(), Some("2048"));
 }
 
 #[tokio::test]

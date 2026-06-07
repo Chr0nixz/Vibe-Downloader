@@ -51,6 +51,7 @@ export const commands = {
 export type AppSettings = {
 	maxActiveTasks: number,
 	defaultSaveDir: string,
+	globalSpeedLimitBps: string | null,
 };
 
 export type BrowserHandoffInput = {
@@ -166,6 +167,7 @@ export type TaskStatus = "queued" | "downloading" | "paused" | "completed" | "fa
 export type UpdateSettingsInput = {
 	maxActiveTasks: number | null,
 	defaultSaveDir: string | null,
+	globalSpeedLimitBps: string | null,
 };
 
 /* Tauri Specta runtime */

@@ -56,6 +56,7 @@ const en = {
     pause: "Pause",
     delete: "Delete",
     speedLimit: "Speed limit",
+    toolbarAria: "Download controls",
     searchPlaceholder: "Search tasks",
     searchAria: "Search tasks",
     palette: "Command palette",
@@ -70,6 +71,7 @@ const en = {
     active: "Active",
     queued: "Queued",
     noGlobalSpeedLimit: "No global speed limit",
+    globalSpeedLimit: "Limit {{speed}}",
     updateAvailable: "Update v{{version}} available",
     installUpdate: "Install",
     updating: "Updating\u2026",
@@ -97,6 +99,8 @@ const en = {
     chooseDirectory: "Choose folder",
     reset: "Reset",
     maxActiveTasks: "Simultaneous downloads",
+    globalSpeedLimit: "Global speed limit (B/s)",
+    globalSpeedLimitPlaceholder: "Unlimited",
     interface: "Interface",
     browserIntegration: "Browser integration",
     browserIntegrationDescription: "Install the Native Messaging host used by browser extensions to send URLs into Vibe.",
@@ -126,6 +130,7 @@ const en = {
   },
   newDownload: {
     title: "New download",
+    description: "Add a URL, choose where to save it, then start the download.",
     url: "URL",
     urlPlaceholder: "https://example.com/file.zip",
     detect: "Detect",
@@ -147,6 +152,7 @@ const en = {
   },
   palette: {
     title: "Command palette",
+    description: "Run app commands from the keyboard.",
     resetMockTasks: "Reset mock tasks",
   },
   taskDetails: {
@@ -249,6 +255,7 @@ const zhCN = {
     pause: "\u6682\u505c",
     delete: "\u5220\u9664",
     speedLimit: "\u901f\u5ea6\u9650\u5236",
+    toolbarAria: "\u4e0b\u8f7d\u63a7\u5236",
     searchPlaceholder: "\u641c\u7d22\u4efb\u52a1",
     searchAria: "\u641c\u7d22\u4efb\u52a1",
     palette: "\u547d\u4ee4\u9762\u677f",
@@ -263,6 +270,7 @@ const zhCN = {
     active: "\u6d3b\u8dc3",
     queued: "\u6392\u961f",
     noGlobalSpeedLimit: "\u672a\u8bbe\u7f6e\u5168\u5c40\u901f\u5ea6\u9650\u5236",
+    globalSpeedLimit: "\u9650\u901f {{speed}}",
     updateAvailable: "\u53ef\u66f4\u65b0\u81f3 v{{version}}",
     installUpdate: "\u5b89\u88c5\u66f4\u65b0",
     updating: "\u6b63\u5728\u66f4\u65b0\u2026",
@@ -290,6 +298,8 @@ const zhCN = {
     chooseDirectory: "\u9009\u62e9\u6587\u4ef6\u5939",
       reset: "\u91cd\u7f6e",
       maxActiveTasks: "\u540c\u65f6\u4e0b\u8f7d\u4efb\u52a1",
+      globalSpeedLimit: "\u5168\u5c40\u901f\u5ea6\u9650\u5236 (B/s)",
+      globalSpeedLimitPlaceholder: "\u4e0d\u9650\u901f",
       interface: "\u754c\u9762",
       browserIntegration: "浏览器集成",
       browserIntegrationDescription: "安装浏览器扩展用于发送 URL 的 Native Messaging 主机。",
@@ -319,6 +329,7 @@ const zhCN = {
   },
   newDownload: {
     title: "\u65b0\u5efa\u4e0b\u8f7d",
+    description: "\u6dfb\u52a0 URL\uff0c\u9009\u62e9\u4fdd\u5b58\u4f4d\u7f6e\uff0c\u7136\u540e\u5f00\u59cb\u4e0b\u8f7d\u3002",
     url: "URL",
     urlPlaceholder: "https://example.com/file.zip",
     detect: "\u68c0\u6d4b",
@@ -340,6 +351,7 @@ const zhCN = {
   },
   palette: {
     title: "\u547d\u4ee4\u9762\u677f",
+    description: "\u4ece\u952e\u76d8\u8fd0\u884c\u5e94\u7528\u547d\u4ee4\u3002",
     resetMockTasks: "\u91cd\u7f6e\u6a21\u62df\u4efb\u52a1",
   },
   taskDetails: {
