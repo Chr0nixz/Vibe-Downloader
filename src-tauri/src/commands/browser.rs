@@ -375,7 +375,7 @@ fn manifest_path(app: &AppHandle, browser: BrowserKind) -> Result<PathBuf, Strin
             BrowserKind::Vivaldi => ".config/vivaldi/NativeMessagingHosts",
             BrowserKind::Chromium => ".config/chromium/NativeMessagingHosts",
         };
-        return Ok(home.join(base).join(format!("{NATIVE_HOST_NAME}.json")));
+        Ok(home.join(base).join(format!("{NATIVE_HOST_NAME}.json")))
     }
 }
 
