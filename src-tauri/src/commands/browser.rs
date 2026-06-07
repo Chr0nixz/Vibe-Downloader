@@ -1,8 +1,9 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
+#[cfg(target_os = "windows")]
+use std::process::Command;
 
 use reqwest::Url;
 use tauri::{AppHandle, Manager, State};
@@ -358,7 +359,7 @@ fn manifest_path(app: &AppHandle, browser: BrowserKind) -> Result<PathBuf, Strin
             BrowserKind::Vivaldi => "Library/Application Support/Vivaldi/NativeMessagingHosts",
             BrowserKind::Chromium => "Library/Application Support/Chromium/NativeMessagingHosts",
         };
-        return Ok(home.join(base).join(format!("{NATIVE_HOST_NAME}.json")));
+        Ok(home.join(base).join(format!("{NATIVE_HOST_NAME}.json")))
     }
 
     #[cfg(target_os = "linux")]
@@ -418,7 +419,7 @@ fn browser_detected(app: &AppHandle, browser: BrowserKind) -> bool {
             BrowserKind::Vivaldi => ".config/vivaldi",
             BrowserKind::Chromium => ".config/chromium",
         };
-        return home.is_some_and(|home| home.join(marker).exists());
+        home.is_some_and(|home| home.join(marker).exists())
     }
 }
 
