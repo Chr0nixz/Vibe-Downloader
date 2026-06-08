@@ -7,7 +7,6 @@ use tracing::Level;
 use tracing_subscriber::{
     filter::EnvFilter,
     layer::SubscriberExt,
-    util::SubscriberInitExt,
     Layer,
 };
 
@@ -33,10 +32,13 @@ fn init_logging_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(default_filter));
 
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(env_filter)
-        .with(LogBridgeLayer)
-        .init();
+        .with(LogBridgeLayer);
+
+    if let Err(error) = tracing::subscriber::set_global_default(subscriber) {
+        eprintln!("tracing subscriber already initialized: {error}");
+    }
 
     let log_dir = app
         .path()
@@ -78,7 +80,7 @@ fn init_standalone_logging_inner() -> Result<(), String> {
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     std::mem::forget(guard);
 
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(env_filter)
         .with(
             tracing_subscriber::fmt::layer()
@@ -91,8 +93,11 @@ fn init_standalone_logging_inner() -> Result<(), String> {
                 .with_writer(std::io::stderr)
                 .with_ansi(false)
                 .with_target(true),
-        )
-        .init();
+        );
+
+    if let Err(error) = tracing::subscriber::set_global_default(subscriber) {
+        eprintln!("tracing subscriber already initialized: {error}");
+    }
 
     tracing::info!(log_dir = %log_dir.display(), "native host logging initialized");
     Ok(())
