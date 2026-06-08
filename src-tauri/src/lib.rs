@@ -18,6 +18,8 @@ use tokio::{sync::Mutex, task::JoinHandle};
 pub struct DownloadControl {
     pub cancel: Arc<AtomicBool>,
     pub handle: JoinHandle<()>,
+    pub source_host: String,
+    pub connection_slots: usize,
 }
 
 pub struct AppState {
@@ -30,7 +32,8 @@ pub struct AppState {
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     use tauri_specta::{collect_commands, Builder};
 
-    Builder::<tauri::Wry>::new()
+    #[cfg(debug_assertions)]
+    let builder = Builder::<tauri::Wry>::new()
         .commands(collect_commands![
             commands::tasks::list_tasks,
             commands::tasks::get_task,
@@ -51,7 +54,33 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::tasks::open_task_file,
             commands::tasks::open_task_folder,
             commands::tasks::seed_mock_tasks,
-        ])
+        ]);
+
+    #[cfg(not(debug_assertions))]
+    let builder = Builder::<tauri::Wry>::new()
+        .commands(collect_commands![
+            commands::tasks::list_tasks,
+            commands::tasks::get_task,
+            commands::tasks::list_task_segments,
+            commands::settings::get_settings,
+            commands::settings::update_settings,
+            commands::browser::get_browser_integration_status,
+            commands::browser::install_browser_integration,
+            commands::browser::uninstall_browser_integration,
+            commands::browser::create_browser_handoff_task,
+            commands::tasks::probe_task,
+            commands::tasks::create_task,
+            commands::tasks::pause_task,
+            commands::tasks::resume_task,
+            commands::tasks::retry_task,
+            commands::tasks::cancel_task,
+            commands::tasks::delete_task,
+            commands::tasks::open_task_file,
+            commands::tasks::open_task_folder,
+        ]);
+
+    builder
+        .typ::<models::AppErrorPayload>()
         .typ::<models::AppSettings>()
         .typ::<models::TaskProgressPayload>()
         .typ::<models::BrowserIntegrationStatus>()
@@ -78,7 +107,7 @@ pub fn run() {
         export_typescript_bindings().expect("Failed to export TypeScript bindings");
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets({
@@ -108,8 +137,33 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_os::init())
-        .invoke_handler(tauri::generate_handler![
+        .plugin(tauri_plugin_os::init());
+
+    #[cfg(debug_assertions)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        commands::tasks::list_tasks,
+        commands::tasks::get_task,
+        commands::tasks::list_task_segments,
+        commands::settings::get_settings,
+        commands::settings::update_settings,
+        commands::browser::get_browser_integration_status,
+        commands::browser::install_browser_integration,
+        commands::browser::uninstall_browser_integration,
+        commands::browser::create_browser_handoff_task,
+        commands::tasks::probe_task,
+        commands::tasks::create_task,
+        commands::tasks::pause_task,
+        commands::tasks::resume_task,
+        commands::tasks::retry_task,
+        commands::tasks::cancel_task,
+        commands::tasks::delete_task,
+        commands::tasks::open_task_file,
+        commands::tasks::open_task_folder,
+        commands::tasks::seed_mock_tasks,
+    ]);
+
+    #[cfg(not(debug_assertions))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
             commands::tasks::list_tasks,
             commands::tasks::get_task,
             commands::tasks::list_task_segments,
@@ -128,8 +182,9 @@ pub fn run() {
             commands::tasks::delete_task,
             commands::tasks::open_task_file,
             commands::tasks::open_task_folder,
-            commands::tasks::seed_mock_tasks,
-        ])
+    ]);
+
+    builder
         .setup(|app| {
             logging::init_logging(app.handle())?;
 

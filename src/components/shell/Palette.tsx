@@ -9,7 +9,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { seedMockTasks } from "@/lib/tauri";
+import { errorMessage } from "@/lib/errors";
+import { canSeedMockTasks, seedMockTasks } from "@/lib/tauri";
 import { useTaskStore } from "@/stores/task-store";
 
 export function Palette({
@@ -33,22 +34,26 @@ export function Palette({
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="py-4">
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full justify-start"
-            onClick={async () => {
-              try {
-                setTasks(await seedMockTasks());
-                setError(null);
-              } catch (e) {
-                setError(String(e));
-              }
-              onOpenChange(false);
-            }}
-          >
-            {t("palette.resetMockTasks")}
-          </Button>
+          {canSeedMockTasks ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full justify-start"
+              onClick={async () => {
+                try {
+                  setTasks(await seedMockTasks());
+                  setError(null);
+                } catch (e) {
+                  setError(errorMessage(e));
+                }
+                onOpenChange(false);
+              }}
+            >
+              {t("palette.resetMockTasks")}
+            </Button>
+          ) : (
+            <p className="text-sm text-text-secondary">{t("palette.noActions")}</p>
+          )}
         </DialogBody>
       </DialogContent>
     </Dialog>

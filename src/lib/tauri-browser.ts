@@ -25,6 +25,9 @@ let settings: AppSettings = loadStoredSettings() ?? {
   maxActiveTasks: 2,
   defaultSaveDir: "~/Downloads",
   globalSpeedLimitBps: null,
+  multiConnectionThresholdBytes: String(16 * 1024 * 1024),
+  segmentCount: 4,
+  maxConnectionsPerHost: 8,
 };
 let progressTimer: ReturnType<typeof setInterval> | undefined;
 const progressListeners = new Set<BrowserListener>();
@@ -79,6 +82,18 @@ function loadStoredSettings(): AppSettings | null {
           typeof parsed.globalSpeedLimitBps === "string"
             ? parsed.globalSpeedLimitBps
             : null,
+        multiConnectionThresholdBytes:
+          typeof parsed.multiConnectionThresholdBytes === "string"
+            ? parsed.multiConnectionThresholdBytes
+            : String(16 * 1024 * 1024),
+        segmentCount:
+          typeof parsed.segmentCount === "number"
+            ? Math.min(8, Math.max(1, parsed.segmentCount))
+            : 4,
+        maxConnectionsPerHost:
+          typeof parsed.maxConnectionsPerHost === "number"
+            ? Math.min(16, Math.max(1, parsed.maxConnectionsPerHost))
+            : 8,
       };
     }
     return null;
@@ -188,7 +203,10 @@ function scheduleBrowserQueue(): void {
       ...task,
       status: "downloading",
       speedBps: task.speedBps > 0 ? task.speedBps : 4_000_000,
-      connectionCount: task.connectionCount > 0 ? task.connectionCount : 2,
+      connectionCount: Math.min(
+        settings.maxConnectionsPerHost,
+        task.connectionCount > 0 ? task.connectionCount : settings.segmentCount,
+      ),
       healthSummary: "Downloading",
       updatedAt: nowIso(),
     };
@@ -308,6 +326,16 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
       input.globalSpeedLimitBps === null || input.globalSpeedLimitBps === undefined
         ? null
         : normalizeSpeedLimit(input.globalSpeedLimitBps),
+    multiConnectionThresholdBytes:
+      input.multiConnectionThresholdBytes === null ||
+      input.multiConnectionThresholdBytes === undefined
+        ? settings.multiConnectionThresholdBytes
+        : normalizeByteThreshold(input.multiConnectionThresholdBytes),
+    segmentCount: Math.min(8, Math.max(1, input.segmentCount ?? settings.segmentCount)),
+    maxConnectionsPerHost: Math.min(
+      16,
+      Math.max(1, input.maxConnectionsPerHost ?? settings.maxConnectionsPerHost),
+    ),
   };
   persistSettings();
   emitSettingsChanged();
@@ -318,6 +346,12 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
 function normalizeSpeedLimit(value: string): string | null {
   const parsed = Number(value.trim());
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return String(Math.floor(parsed));
+}
+
+function normalizeByteThreshold(value: string): string {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed < 0) return "0";
   return String(Math.floor(parsed));
 }
 

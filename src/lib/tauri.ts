@@ -1,5 +1,6 @@
 import { isTauriRuntime } from "@/lib/runtime";
 import { createLogger } from "@/lib/logger";
+import { parseAppError } from "@/lib/errors";
 import type {
   AppSettings,
   BrowserIntegrationStatus,
@@ -19,6 +20,7 @@ export const EVENT_TASK_PROGRESS = "task.progress";
 export const EVENT_QUEUE_CHANGED = "queue.changed";
 export const EVENT_SETTINGS_CHANGED = "settings.changed";
 export const EVENT_BROWSER_INTEGRATION_CHANGED = "browser.integration.changed";
+export const canSeedMockTasks = !isTauriRuntime() || import.meta.env.DEV;
 
 const log = createLogger("tauri");
 
@@ -28,7 +30,7 @@ type CommandResult<T, E> =
 
 function unwrapCommand<T, E>(result: CommandResult<T, E>): T {
   if (result.status === "ok") return result.data;
-  throw result.error;
+  throw parseAppError(result.error) ?? result.error;
 }
 
 async function runCommand<T>(name: string, run: () => Promise<CommandResult<T, unknown>>): Promise<T> {
@@ -82,6 +84,9 @@ export async function listTaskSegments(taskId: string): Promise<TaskSegment[]> {
 export async function seedMockTasks(): Promise<Task[]> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).seedMockTasks();
+  }
+  if (!canSeedMockTasks) {
+    throw new Error("Mock task reset is only available in development builds.");
   }
   const commands = await loadNativeCommands();
   const tasks = await runCommand("seedMockTasks", () => commands.seedMockTasks());

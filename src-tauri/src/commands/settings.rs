@@ -17,6 +17,9 @@ pub struct UpdateSettingsInput {
     pub max_active_tasks: Option<i32>,
     pub default_save_dir: Option<String>,
     pub global_speed_limit_bps: Option<String>,
+    pub multi_connection_threshold_bytes: Option<String>,
+    pub segment_count: Option<i32>,
+    pub max_connections_per_host: Option<i32>,
 }
 
 #[tauri::command]
@@ -44,10 +47,28 @@ pub async fn update_settings(
     let global_speed_limit_bps = input
         .global_speed_limit_bps
         .and_then(|value| db::normalize_speed_limit_bps(&value));
+    let multi_connection_threshold_bytes = input
+        .multi_connection_threshold_bytes
+        .and_then(|value| db::normalize_multi_connection_threshold_bytes(&value))
+        .unwrap_or(current.multi_connection_threshold_bytes);
+    let segment_count = input
+        .segment_count
+        .unwrap_or(current.segment_count)
+        .clamp(db::MIN_SEGMENT_COUNT, db::MAX_SEGMENT_COUNT);
+    let max_connections_per_host = input
+        .max_connections_per_host
+        .unwrap_or(current.max_connections_per_host)
+        .clamp(
+            db::MIN_MAX_CONNECTIONS_PER_HOST,
+            db::MAX_MAX_CONNECTIONS_PER_HOST,
+        );
     let settings = AppSettings {
         max_active_tasks,
         default_save_dir,
         global_speed_limit_bps,
+        multi_connection_threshold_bytes,
+        segment_count,
+        max_connections_per_host,
     };
 
     db::upsert_settings(&state.pool, &settings).await?;

@@ -16,6 +16,7 @@ import {
   uninstallBrowserIntegration,
   updateSettings,
 } from "@/lib/tauri";
+import { errorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import { cn } from "@/lib/utils";
 
@@ -24,6 +25,8 @@ import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
 
 const AUTO_SAVE_DELAY_MS = 650;
+const MAX_SEGMENT_COUNT = 8;
+const MAX_CONNECTIONS_PER_HOST = 16;
 
 export function SettingsPage() {
   const { t, i18n } = useTranslation();
@@ -37,6 +40,9 @@ export function SettingsPage() {
   const [defaultSaveDir, setDefaultSaveDir] = useState("");
   const [maxActiveTasks, setMaxActiveTasks] = useState(2);
   const [globalSpeedLimitBps, setGlobalSpeedLimitBps] = useState("");
+  const [multiConnectionThresholdBytes, setMultiConnectionThresholdBytes] = useState("");
+  const [segmentCount, setSegmentCount] = useState(4);
+  const [maxConnectionsPerHost, setMaxConnectionsPerHost] = useState(8);
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const [browserStatus, setBrowserStatus] = useState<BrowserIntegrationStatus | null>(null);
@@ -52,6 +58,9 @@ export function SettingsPage() {
     setDefaultSaveDir(settings.defaultSaveDir);
     setMaxActiveTasks(settings.maxActiveTasks);
     setGlobalSpeedLimitBps(settings.globalSpeedLimitBps ?? "");
+    setMultiConnectionThresholdBytes(settings.multiConnectionThresholdBytes);
+    setSegmentCount(settings.segmentCount);
+    setMaxConnectionsPerHost(settings.maxConnectionsPerHost);
     setSaveState("saved");
   }, [settings]);
 
@@ -60,7 +69,10 @@ export function SettingsPage() {
     if (
       defaultSaveDir === settings.defaultSaveDir &&
       maxActiveTasks === settings.maxActiveTasks &&
-      globalSpeedLimitBps === (settings.globalSpeedLimitBps ?? "")
+      globalSpeedLimitBps === (settings.globalSpeedLimitBps ?? "") &&
+      multiConnectionThresholdBytes === settings.multiConnectionThresholdBytes &&
+      segmentCount === settings.segmentCount &&
+      maxConnectionsPerHost === settings.maxConnectionsPerHost
     ) {
       return;
     }
@@ -72,13 +84,25 @@ export function SettingsPage() {
         defaultSaveDir,
         maxActiveTasks,
         globalSpeedLimitBps: globalSpeedLimitBps.trim(),
+        multiConnectionThresholdBytes: multiConnectionThresholdBytes.trim(),
+        segmentCount,
+        maxConnectionsPerHost,
       });
     }, AUTO_SAVE_DELAY_MS);
 
     return () => {
       if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     };
-  }, [defaultSaveDir, globalSpeedLimitBps, loading, maxActiveTasks, settings]);
+  }, [
+    defaultSaveDir,
+    globalSpeedLimitBps,
+    loading,
+    maxActiveTasks,
+    maxConnectionsPerHost,
+    multiConnectionThresholdBytes,
+    segmentCount,
+    settings,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -93,7 +117,7 @@ export function SettingsPage() {
       setSettings(await getSettings());
     } catch (err) {
       log.error("settings refresh failed", err);
-      setError(String(err));
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -109,6 +133,9 @@ export function SettingsPage() {
         maxActiveTasks: nextSettings.maxActiveTasks,
         defaultSaveDir: nextSettings.defaultSaveDir,
         globalSpeedLimitBps: nextSettings.globalSpeedLimitBps,
+        multiConnectionThresholdBytes: nextSettings.multiConnectionThresholdBytes,
+        segmentCount: nextSettings.segmentCount,
+        maxConnectionsPerHost: nextSettings.maxConnectionsPerHost,
       });
       if (version === saveVersion.current) {
         setSettings(next);
@@ -121,7 +148,7 @@ export function SettingsPage() {
     } catch (err) {
       if (version === saveVersion.current) {
         log.error("settings save failed", err);
-        setError(String(err));
+        setError(errorMessage(err));
         setSaveState("idle");
       }
     } finally {
@@ -164,7 +191,7 @@ export function SettingsPage() {
       addToast({
         tone: "error",
         title: t("toast.actionFailed"),
-        description: String(err),
+        description: errorMessage(err),
       });
     } finally {
       setBrowserLoading(false);
@@ -183,7 +210,7 @@ export function SettingsPage() {
       addToast({
         tone: "error",
         title: t("toast.actionFailed"),
-        description: String(err),
+        description: errorMessage(err),
       });
     } finally {
       setBrowserAction(null);
@@ -309,6 +336,78 @@ export function SettingsPage() {
                   placeholder={t("settings.globalSpeedLimitPlaceholder")}
                   disabled={controlsDisabled}
                   className="h-11 w-40 bg-surface-root text-center font-mono md:h-8"
+                />
+              </SettingsRow>
+
+              <SettingsRow
+                title={t("settings.multiConnectionThreshold")}
+                htmlFor="multi-connection-threshold"
+              >
+                <Input
+                  id="multi-connection-threshold"
+                  type="number"
+                  min={0}
+                  step={1048576}
+                  value={multiConnectionThresholdBytes}
+                  onChange={(event) => {
+                    const value = event.target.value.trim();
+                    if (value === "") {
+                      setMultiConnectionThresholdBytes("0");
+                      return;
+                    }
+                    const next = Number(value);
+                    if (Number.isFinite(next) && next >= 0) {
+                      setMultiConnectionThresholdBytes(String(Math.floor(next)));
+                    }
+                  }}
+                  disabled={controlsDisabled}
+                  className="h-11 w-44 bg-surface-root text-center font-mono md:h-8"
+                />
+              </SettingsRow>
+
+              <SettingsRow
+                title={t("settings.segmentCount")}
+                htmlFor="segment-count"
+              >
+                <Input
+                  id="segment-count"
+                  type="number"
+                  min={1}
+                  max={MAX_SEGMENT_COUNT}
+                  step={1}
+                  value={segmentCount}
+                  onChange={(event) => {
+                    const next = event.target.valueAsNumber;
+                    if (Number.isFinite(next)) {
+                      setSegmentCount(Math.min(MAX_SEGMENT_COUNT, Math.max(1, Math.floor(next))));
+                    }
+                  }}
+                  disabled={controlsDisabled}
+                  className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
+                />
+              </SettingsRow>
+
+              <SettingsRow
+                title={t("settings.maxConnectionsPerHost")}
+                htmlFor="max-connections-per-host"
+              >
+                <Input
+                  id="max-connections-per-host"
+                  type="number"
+                  min={1}
+                  max={MAX_CONNECTIONS_PER_HOST}
+                  step={1}
+                  value={maxConnectionsPerHost}
+                  onChange={(event) => {
+                    const next = event.target.valueAsNumber;
+                    if (Number.isFinite(next)) {
+                      setMaxConnectionsPerHost(
+                        Math.min(MAX_CONNECTIONS_PER_HOST, Math.max(1, Math.floor(next))),
+                      );
+                    }
+                  }}
+                  disabled={controlsDisabled}
+                  className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
                 />
               </SettingsRow>
             </SettingsSection>

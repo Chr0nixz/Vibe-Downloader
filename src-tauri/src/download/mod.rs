@@ -28,7 +28,10 @@ use crate::{
     db,
     events::{emit_queue_changed, emit_task_progress},
     logging::sanitize_url,
-    models::{SegmentStatus, TaskProgressPayload, TaskRecord, TaskSegmentRecord, TaskStatus},
+    models::{
+        AppErrorPayload, SegmentStatus, TaskProgressPayload, TaskRecord, TaskSegmentRecord,
+        TaskStatus,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -203,8 +206,18 @@ impl HttpEngine {
         task: TaskRecord,
         cancel: Arc<AtomicBool>,
         speed_limiter: Arc<GlobalSpeedLimiter>,
+        connection_limit: usize,
     ) -> Result<(), String> {
-        run_segmented_download(&self.client, app, pool, task, cancel, speed_limiter).await
+        run_segmented_download(
+            &self.client,
+            app,
+            pool,
+            task,
+            cancel,
+            speed_limiter,
+            connection_limit,
+        )
+        .await
     }
 
     pub async fn download_direct(
@@ -349,9 +362,10 @@ async fn run_direct_download(
         }
 
         speed_limiter.throttle(chunk.len()).await;
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| format!("Could not write to disk: {e}"))?;
+        file.write_all(&chunk).await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
+                .command_error()
+        })?;
         downloaded += i64::try_from(chunk.len()).unwrap_or(0);
     }
 
@@ -363,14 +377,7 @@ async fn run_direct_download(
         return Err("The download ended before all bytes were received.".to_string());
     }
 
-    if fs::try_exists(&request.final_path).await.unwrap_or(false) {
-        fs::remove_file(&request.final_path)
-            .await
-            .map_err(|e| format!("Could not replace the existing file: {e}"))?;
-    }
-    fs::rename(&request.temp_path, &request.final_path)
-        .await
-        .map_err(|e| format!("Could not finalize the downloaded file: {e}"))?;
+    finalize_download_file(&request.temp_path, &request.final_path).await?;
 
     Ok(downloaded)
 }
@@ -475,16 +482,64 @@ async fn run_direct_segmented_download(
         return Err("The temporary file size does not match the remote file.".to_string());
     }
 
-    if fs::try_exists(&request.final_path).await.unwrap_or(false) {
-        fs::remove_file(&request.final_path)
-            .await
-            .map_err(|e| format!("Could not replace the existing file: {e}"))?;
-    }
-    fs::rename(&request.temp_path, &request.final_path)
-        .await
-        .map_err(|e| format!("Could not finalize the downloaded file: {e}"))?;
+    finalize_download_file(&request.temp_path, &request.final_path).await?;
 
     Ok(request.total_size)
+}
+
+async fn finalize_download_file(temp_path: &Path, preferred_final_path: &Path) -> Result<PathBuf, String> {
+    let final_path = available_final_path(preferred_final_path).await?;
+    fs::rename(temp_path, &final_path).await.map_err(|e| {
+        AppErrorPayload::disk_write_failed(format!("Could not finalize the downloaded file: {e}"))
+            .command_error()
+    })?;
+    Ok(final_path)
+}
+
+async fn available_final_path(preferred_final_path: &Path) -> Result<PathBuf, String> {
+    if !fs::try_exists(preferred_final_path).await.unwrap_or(false) {
+        return Ok(preferred_final_path.to_path_buf());
+    }
+
+    let parent = preferred_final_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = preferred_final_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("download");
+    let extension = preferred_final_path.extension().and_then(|value| value.to_str());
+
+    for index in 1..10_000 {
+        let file_name = match extension {
+            Some(extension) if !extension.is_empty() => format!("{stem} ({index}).{extension}"),
+            _ => format!("{stem} ({index})"),
+        };
+        let candidate = parent.join(file_name);
+        if !fs::try_exists(&candidate).await.unwrap_or(false) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(AppErrorPayload::final_path_conflict(&preferred_final_path.to_string_lossy()).command_error())
+}
+
+async fn persist_completed_path(
+    pool: &SqlitePool,
+    task_id: &str,
+    completed_path: &Path,
+) -> Result<(), String> {
+    let file_name = completed_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download")
+        .to_string();
+    db::update_task_final_path(
+        pool,
+        task_id,
+        &file_name,
+        &completed_path.to_string_lossy(),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -498,6 +553,7 @@ async fn run_unknown_size_download(
     segments: Vec<TaskSegmentRecord>,
     cancel: Arc<AtomicBool>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
+    _connection_limit: usize,
 ) -> Result<(), String> {
     let segment = segments
         .into_iter()
@@ -568,9 +624,10 @@ async fn run_unknown_size_download(
         }
 
         speed_limiter.throttle(chunk.len()).await;
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| format!("Could not write to disk: {e}"))?;
+        file.write_all(&chunk).await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
+                .command_error()
+        })?;
         downloaded += i64::try_from(chunk.len()).unwrap_or(0);
 
         if last_emit.elapsed() >= Duration::from_millis(300) {
@@ -615,14 +672,8 @@ async fn run_unknown_size_download(
     )
     .await?;
 
-    if fs::try_exists(&final_path_buf).await.unwrap_or(false) {
-        fs::remove_file(&final_path_buf)
-            .await
-            .map_err(|e| format!("Could not replace the existing file: {e}"))?;
-    }
-    fs::rename(&temp_path_buf, &final_path_buf)
-        .await
-        .map_err(|e| format!("Could not finalize the downloaded file: {e}"))?;
+    let completed_path = finalize_download_file(&temp_path_buf, &final_path_buf).await?;
+    persist_completed_path(&pool, &task.id, &completed_path).await?;
     db::complete_unknown_size_task(&pool, &task.id, &segment.id, downloaded).await?;
     emit_progress(
         &app,
@@ -722,6 +773,7 @@ async fn run_segmented_download(
     task: TaskRecord,
     cancel: Arc<AtomicBool>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
+    connection_limit: usize,
 ) -> Result<(), String> {
     tracing::info!(
         task_id = %task.id,
@@ -754,6 +806,7 @@ async fn run_segmented_download(
             segments,
             cancel,
             speed_limiter,
+            connection_limit.max(1),
         )
         .await;
     }
@@ -816,12 +869,17 @@ async fn run_segmented_download(
     let mut workers = JoinSet::new();
     let url = task.final_url.clone().unwrap_or_else(|| task.url.clone());
     let mut active_workers = 0_usize;
+    let max_worker_count = connection_limit.clamp(
+        1,
+        AUTO_ACCELERATION_MAX_SEGMENTS.min(db::MAX_AUTO_SEGMENT_COUNT),
+    );
     let live_ends = Arc::new(RwLock::new(
         segments
             .iter()
             .map(|segment| (segment.id.clone(), segment.range_end))
             .collect::<HashMap<_, _>>(),
     ));
+    let mut pending_segments = VecDeque::new();
 
     for segment in segments {
         let offset = segment
@@ -831,28 +889,26 @@ async fn run_segmented_download(
             db::complete_segment(&pool, &segment.id).await?;
             continue;
         }
-        db::update_segment_status(
-            &pool,
-            &segment.id,
-            SegmentStatus::Downloading,
-            Some(offset),
-            None,
-        )
-        .await?;
-        active_workers += 1;
-        workers.spawn(download_segment_worker(SegmentWorkerRequest {
-            client: client.clone(),
-            url: url.clone(),
-            temp_path: temp_path_buf.clone(),
-            segment,
-            segment_count,
-            supports_range: task.supports_range,
-            cancel: cancel.clone(),
-            progress_tx: progress_tx.clone(),
-            live_ends: live_ends.clone(),
-            speed_limiter: speed_limiter.clone(),
-        }));
+        pending_segments.push_back(segment);
     }
+    spawn_segment_workers(
+        client,
+        &pool,
+        &url,
+        &temp_path_buf,
+        task.supports_range,
+        &cancel,
+        &progress_tx,
+        &mut workers,
+        &mut active_workers,
+        &mut pending_segments,
+        segment_count,
+        max_worker_count,
+        &live_ends,
+        speed_limiter.clone(),
+    )
+    .await?;
+
     let mut last_speeds: HashMap<String, i64> = HashMap::new();
     let mut last_emit = Instant::now();
     let mut active_connection_count = i32::try_from(active_workers.max(1)).unwrap_or(1);
@@ -883,7 +939,6 @@ async fn run_segmented_download(
             }
             Some(result) = workers.join_next() => {
                 active_workers = active_workers.saturating_sub(1);
-                active_connection_count = i32::try_from(active_workers.max(1)).unwrap_or(1);
                 match result {
                     Ok(Ok(())) => {}
                     Ok(Err(failure)) => {
@@ -939,6 +994,24 @@ async fn run_segmented_download(
                         return Err(message);
                     }
                 }
+                spawn_segment_workers(
+                    client,
+                    &pool,
+                    &url,
+                    &temp_path_buf,
+                    task.supports_range,
+                    &cancel,
+                    &progress_tx,
+                    &mut workers,
+                    &mut active_workers,
+                    &mut pending_segments,
+                    segment_count,
+                    max_worker_count,
+                    &live_ends,
+                    speed_limiter.clone(),
+                )
+                .await?;
+                active_connection_count = i32::try_from(active_workers.max(1)).unwrap_or(1);
             }
             _ = tick.tick() => {
                 if cancel.load(Ordering::SeqCst) {
@@ -969,6 +1042,7 @@ async fn run_segmented_download(
                     &live_ends,
                     speed_limiter.clone(),
                     started_at,
+                    max_worker_count,
                 )
                 .await?;
             }
@@ -1011,14 +1085,8 @@ async fn run_segmented_download(
         return Err("The temporary file size does not match the remote file.".to_string());
     }
 
-    if fs::try_exists(&final_path_buf).await.unwrap_or(false) {
-        fs::remove_file(&final_path_buf)
-            .await
-            .map_err(|e| format!("Could not replace the existing file: {e}"))?;
-    }
-    fs::rename(&temp_path_buf, &final_path_buf)
-        .await
-        .map_err(|e| format!("Could not finalize the downloaded file: {e}"))?;
+    let completed_path = finalize_download_file(&temp_path_buf, &final_path_buf).await?;
+    persist_completed_path(&pool, &task.id, &completed_path).await?;
 
     db::complete_task(&pool, &task.id).await?;
     tracing::info!(
@@ -1036,6 +1104,56 @@ async fn run_segmented_download(
         TaskStatus::Completed,
     );
     emit_queue_changed(&app);
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_segment_workers(
+    client: &Client,
+    pool: &SqlitePool,
+    url: &str,
+    temp_path: &Path,
+    supports_range: bool,
+    cancel: &Arc<AtomicBool>,
+    progress_tx: &mpsc::Sender<SegmentMessage>,
+    workers: &mut JoinSet<Result<(), SegmentFailure>>,
+    active_workers: &mut usize,
+    pending_segments: &mut VecDeque<TaskSegmentRecord>,
+    segment_count: usize,
+    max_worker_count: usize,
+    live_ends: &Arc<RwLock<HashMap<String, i64>>>,
+    speed_limiter: Arc<GlobalSpeedLimiter>,
+) -> Result<(), String> {
+    while *active_workers < max_worker_count {
+        let Some(segment) = pending_segments.pop_front() else {
+            break;
+        };
+        let offset = segment
+            .downloaded_until
+            .clamp(segment.range_start, segment.range_end.saturating_add(1));
+        db::update_segment_status(
+            pool,
+            &segment.id,
+            SegmentStatus::Downloading,
+            Some(offset),
+            None,
+        )
+        .await?;
+        *active_workers += 1;
+        workers.spawn(download_segment_worker(SegmentWorkerRequest {
+            client: client.clone(),
+            url: url.to_string(),
+            temp_path: temp_path.to_path_buf(),
+            segment,
+            segment_count,
+            supports_range,
+            cancel: cancel.clone(),
+            progress_tx: progress_tx.clone(),
+            live_ends: live_ends.clone(),
+            speed_limiter: speed_limiter.clone(),
+        }));
+    }
 
     Ok(())
 }
@@ -1066,6 +1184,7 @@ async fn maybe_accelerate_segments(
     live_ends: &Arc<RwLock<HashMap<String, i64>>>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     started_at: Instant,
+    max_worker_count: usize,
 ) -> Result<(), String> {
     if *acceleration_disabled || cancel.load(Ordering::SeqCst) || !task.supports_range {
         return Ok(());
@@ -1097,6 +1216,7 @@ async fn maybe_accelerate_segments(
         || speed_history.len() < AUTO_ACCELERATION_STABILITY_WINDOW
         || !speed_is_stable(speed_history)
         || *active_connection_count as usize >= AUTO_ACCELERATION_MAX_SEGMENTS
+        || *active_connection_count as usize >= max_worker_count
     {
         return Ok(());
     }
@@ -1131,8 +1251,9 @@ async fn maybe_accelerate_segments(
     .await?;
 
     *active_workers += 1;
-    *active_connection_count = i32::try_from((*active_workers).min(AUTO_ACCELERATION_MAX_SEGMENTS))
-        .unwrap_or(*active_connection_count);
+    *active_connection_count =
+        i32::try_from((*active_workers).min(AUTO_ACCELERATION_MAX_SEGMENTS).min(max_worker_count))
+            .unwrap_or(*active_connection_count);
     workers.spawn(download_segment_worker(SegmentWorkerRequest {
         client: client.clone(),
         url: url.to_string(),
@@ -1414,7 +1535,8 @@ async fn download_segment_once(request: SegmentAttemptRequest<'_>) -> Result<i64
             non_retryable(segment_failure(
                 segment,
                 offset,
-                &format!("Could not write to disk: {e}"),
+                &AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
+                    .command_error(),
             ))
         })?;
         offset += write_len;
@@ -1873,9 +1995,24 @@ fn header_to_string(response: &Response, name: reqwest::header::HeaderName) -> O
 
 fn format_http_status(status: StatusCode) -> String {
     match status.as_u16() {
-        401 | 403 => "The server denied access to this file.".to_string(),
-        404 => "The file was not found on the server.".to_string(),
-        429 => "The server is limiting requests. Try again later.".to_string(),
+        401 | 403 => AppErrorPayload::http_status(
+            "http_denied",
+            "The server denied access to this file.",
+            false,
+        )
+        .command_error(),
+        404 => AppErrorPayload::http_status(
+            "http_not_found",
+            "The file was not found on the server.",
+            false,
+        )
+        .command_error(),
+        429 => AppErrorPayload::http_status(
+            "server_rate_limited",
+            "The server is limiting requests. Try again later.",
+            true,
+        )
+        .command_error(),
         code => format!("The server returned HTTP {code}."),
     }
 }

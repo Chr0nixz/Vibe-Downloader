@@ -15,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import type { ProbeTaskPayload } from "@/generated/bindings";
 import { createLogger } from "@/lib/logger";
+import { errorMessage } from "@/lib/errors";
 import { createTask, openDirectoryPicker, probeTask } from "@/lib/tauri";
 
 const log = createLogger("new-download");
@@ -54,7 +55,7 @@ export function NewDownloadDialog({
       }
     } catch (err) {
       log.warn("probe failed", err);
-      setError(String(err));
+      setError(errorMessage(err));
     } finally {
       setProbing(false);
     }
@@ -78,7 +79,7 @@ export function NewDownloadDialog({
       onOpenChange(false);
     } catch (err) {
       log.error("create task failed", err);
-      setError(String(err));
+      setError(errorMessage(err));
     } finally {
       setSubmitting(false);
     }

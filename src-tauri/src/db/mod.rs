@@ -4,15 +4,25 @@ use crate::models::{
     AppSettings, BrowserKind, SegmentStatus, TaskRecord, TaskSegmentRecord, TaskStatus,
 };
 
-pub const MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;
-pub const MAX_SEGMENT_COUNT: usize = 4;
+pub const DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;
+pub const MIN_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 0;
+pub const MAX_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 1024_i64 * 1024 * 1024 * 1024;
+pub const DEFAULT_SEGMENT_COUNT: i32 = 4;
+pub const MIN_SEGMENT_COUNT: i32 = 1;
+pub const MAX_SEGMENT_COUNT: i32 = 8;
 pub const MAX_AUTO_SEGMENT_COUNT: usize = 8;
+pub const DEFAULT_MAX_CONNECTIONS_PER_HOST: i32 = 8;
+pub const MIN_MAX_CONNECTIONS_PER_HOST: i32 = 1;
+pub const MAX_MAX_CONNECTIONS_PER_HOST: i32 = 16;
 pub const DEFAULT_MAX_ACTIVE_TASKS: i32 = 2;
 pub const MIN_MAX_ACTIVE_TASKS: i32 = 1;
 pub const MAX_MAX_ACTIVE_TASKS: i32 = 8;
 const SETTING_MAX_ACTIVE_TASKS: &str = "max_active_tasks";
 const SETTING_DEFAULT_SAVE_DIR: &str = "default_save_dir";
 const SETTING_GLOBAL_SPEED_LIMIT_BPS: &str = "global_speed_limit_bps";
+const SETTING_MULTI_CONNECTION_THRESHOLD_BYTES: &str = "multi_connection_threshold_bytes";
+const SETTING_SEGMENT_COUNT: &str = "segment_count";
+const SETTING_MAX_CONNECTIONS_PER_HOST: &str = "max_connections_per_host";
 
 pub async fn connect(db_path: &std::path::Path) -> Result<SqlitePool, String> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -184,11 +194,31 @@ pub async fn get_settings(
     let global_speed_limit_bps = get_setting_value(pool, SETTING_GLOBAL_SPEED_LIMIT_BPS)
         .await?
         .and_then(|value| normalize_speed_limit_bps(&value));
+    let multi_connection_threshold_bytes = get_setting_value(
+        pool,
+        SETTING_MULTI_CONNECTION_THRESHOLD_BYTES,
+    )
+    .await?
+    .and_then(|value| normalize_multi_connection_threshold_bytes(&value))
+    .unwrap_or_else(|| DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES.to_string());
+    let segment_count = get_setting_value(pool, SETTING_SEGMENT_COUNT)
+        .await?
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(DEFAULT_SEGMENT_COUNT)
+        .clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT);
+    let max_connections_per_host = get_setting_value(pool, SETTING_MAX_CONNECTIONS_PER_HOST)
+        .await?
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(DEFAULT_MAX_CONNECTIONS_PER_HOST)
+        .clamp(MIN_MAX_CONNECTIONS_PER_HOST, MAX_MAX_CONNECTIONS_PER_HOST);
 
     Ok(AppSettings {
         max_active_tasks,
         default_save_dir,
         global_speed_limit_bps,
+        multi_connection_threshold_bytes,
+        segment_count,
+        max_connections_per_host,
     })
 }
 
@@ -204,6 +234,20 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         pool,
         SETTING_GLOBAL_SPEED_LIMIT_BPS,
         settings.global_speed_limit_bps.as_deref().unwrap_or(""),
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_MULTI_CONNECTION_THRESHOLD_BYTES,
+        &settings.multi_connection_threshold_bytes,
+    )
+    .await?;
+    upsert_setting_value(pool, SETTING_SEGMENT_COUNT, &settings.segment_count.to_string())
+        .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_MAX_CONNECTIONS_PER_HOST,
+        &settings.max_connections_per_host.to_string(),
     )
     .await
 }
@@ -221,6 +265,26 @@ pub fn parse_speed_limit_bps(value: Option<&str>) -> Option<i64> {
     value
         .and_then(normalize_speed_limit_bps)
         .and_then(|value| value.parse::<i64>().ok())
+}
+
+pub fn normalize_multi_connection_threshold_bytes(value: &str) -> Option<String> {
+    value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .map(|limit| {
+            limit.clamp(
+                MIN_MULTI_CONNECTION_THRESHOLD_BYTES,
+                MAX_MULTI_CONNECTION_THRESHOLD_BYTES,
+            )
+        })
+        .map(|limit| limit.to_string())
+}
+
+pub fn parse_multi_connection_threshold_bytes(value: &str) -> i64 {
+    normalize_multi_connection_threshold_bytes(value)
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES)
 }
 
 async fn get_setting_value(pool: &SqlitePool, key: &str) -> Result<Option<String>, String> {
@@ -375,12 +439,48 @@ pub async fn ensure_task_segments(
     pool: &SqlitePool,
     task: &TaskRecord,
 ) -> Result<Vec<TaskSegmentRecord>, String> {
+    ensure_task_segments_with_plan(
+        pool,
+        task,
+        DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
+        DEFAULT_SEGMENT_COUNT,
+    )
+    .await
+}
+
+pub async fn ensure_task_segments_with_settings(
+    pool: &SqlitePool,
+    task: &TaskRecord,
+    settings: &AppSettings,
+) -> Result<Vec<TaskSegmentRecord>, String> {
+    ensure_task_segments_with_plan(
+        pool,
+        task,
+        parse_multi_connection_threshold_bytes(&settings.multi_connection_threshold_bytes),
+        settings
+            .segment_count
+            .min(settings.max_connections_per_host)
+            .clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT),
+    )
+    .await
+}
+
+async fn ensure_task_segments_with_plan(
+    pool: &SqlitePool,
+    task: &TaskRecord,
+    multi_connection_threshold_bytes: i64,
+    segment_count: i32,
+) -> Result<Vec<TaskSegmentRecord>, String> {
     let existing = list_segment_records(pool, &task.id).await?;
     if !existing.is_empty() {
         return Ok(existing);
     }
 
-    let segments = planned_segments_for_task(task);
+    let segments = planned_segments_for_task_with_plan(
+        task,
+        multi_connection_threshold_bytes,
+        segment_count,
+    );
     for segment in &segments {
         insert_segment_record(pool, segment).await?;
     }
@@ -388,15 +488,47 @@ pub async fn ensure_task_segments(
 }
 
 pub fn planned_segment_count(task: &TaskRecord) -> usize {
-    if task.supports_range && task.total_size >= MULTI_CONNECTION_THRESHOLD_BYTES {
-        MAX_SEGMENT_COUNT
+    planned_segment_count_with_plan(
+        task,
+        DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
+        DEFAULT_SEGMENT_COUNT,
+    )
+}
+
+pub fn planned_segment_count_with_plan(
+    task: &TaskRecord,
+    multi_connection_threshold_bytes: i64,
+    segment_count: i32,
+) -> usize {
+    let segment_count = segment_count.clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT) as usize;
+    if task.supports_range
+        && task.total_size > 0
+        && task.total_size >= multi_connection_threshold_bytes.max(0)
+    {
+        segment_count
     } else {
         1
     }
 }
 
 pub fn planned_segments_for_task(task: &TaskRecord) -> Vec<TaskSegmentRecord> {
-    let count = planned_segment_count(task);
+    planned_segments_for_task_with_plan(
+        task,
+        DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
+        DEFAULT_SEGMENT_COUNT,
+    )
+}
+
+pub fn planned_segments_for_task_with_plan(
+    task: &TaskRecord,
+    multi_connection_threshold_bytes: i64,
+    segment_count: i32,
+) -> Vec<TaskSegmentRecord> {
+    let count = planned_segment_count_with_plan(
+        task,
+        multi_connection_threshold_bytes,
+        segment_count,
+    );
     let total_size = task.total_size.max(0);
     let completed = task.downloaded_bytes >= total_size && total_size > 0;
 
@@ -683,6 +815,32 @@ pub async fn update_task_status(
     .bind(connection_count)
     .bind(health_summary)
     .bind(error_message)
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn update_task_final_path(
+    pool: &SqlitePool,
+    task_id: &str,
+    file_name: &str,
+    final_path: &str,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET file_name = ?, final_path = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(file_name)
+    .bind(final_path)
     .bind(&updated_at)
     .bind(task_id)
     .execute(pool)

@@ -219,6 +219,65 @@ pub struct AppSettings {
     pub max_active_tasks: i32,
     pub default_save_dir: String,
     pub global_speed_limit_bps: Option<String>,
+    pub multi_connection_threshold_bytes: String,
+    pub segment_count: i32,
+    pub max_connections_per_host: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AppErrorPayload {
+    pub code: String,
+    pub message: String,
+    pub recoverable: bool,
+    pub actions: Vec<String>,
+}
+
+impl AppErrorPayload {
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        recoverable: bool,
+        actions: Vec<&str>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            recoverable,
+            actions: actions.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    pub fn command_error(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| self.message.clone())
+    }
+
+    pub fn final_path_conflict(path: &str) -> Self {
+        Self::new(
+            "final_path_conflict",
+            format!("The destination file already exists and no alternate name is available: {path}"),
+            true,
+            vec!["choose_another_name", "choose_another_folder", "retry"],
+        )
+    }
+
+    pub fn disk_write_failed(message: impl Into<String>) -> Self {
+        Self::new(
+            "disk_write_failed",
+            message,
+            true,
+            vec!["free_disk_space", "choose_another_folder", "retry"],
+        )
+    }
+
+    pub fn http_status(code: &str, message: impl Into<String>, recoverable: bool) -> Self {
+        let actions = if recoverable {
+            vec!["retry_later"]
+        } else {
+            vec!["check_url", "retry"]
+        };
+        Self::new(code, message, recoverable, actions)
+    }
 }
 
 pub fn now_iso() -> String {

@@ -131,9 +131,17 @@ async fn probe_maps_common_http_failures() {
         .await
         .expect_err("429 should fail");
 
-    assert_eq!(not_found, "The file was not found on the server.");
-    assert_eq!(denied, "The server denied access to this file.");
-    assert_eq!(limited, "The server is limiting requests. Try again later.");
+    let not_found: serde_json::Value = serde_json::from_str(&not_found).expect("404 payload");
+    let denied: serde_json::Value = serde_json::from_str(&denied).expect("403 payload");
+    let limited: serde_json::Value = serde_json::from_str(&limited).expect("429 payload");
+
+    assert_eq!(not_found["code"], "http_not_found");
+    assert_eq!(not_found["message"], "The file was not found on the server.");
+    assert_eq!(denied["code"], "http_denied");
+    assert_eq!(denied["message"], "The server denied access to this file.");
+    assert_eq!(limited["code"], "server_rate_limited");
+    assert_eq!(limited["message"], "The server is limiting requests. Try again later.");
+    assert_eq!(limited["recoverable"], true);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -183,6 +191,38 @@ async fn direct_unknown_size_download_writes_final_file() {
 
     assert_eq!(downloaded, SAMPLE.len() as i64);
     assert_eq!(fs::read(&paths.final_path).expect("read final"), SAMPLE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_download_renames_when_final_path_exists() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("final-conflict");
+    let existing = b"existing user file";
+    fs::write(&paths.final_path, existing).expect("seed existing final");
+
+    let downloaded = engine
+        .download_direct(
+            DirectDownloadRequest {
+                url: format!("{}/file", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: SAMPLE.len() as i64,
+                supports_range: true,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("download");
+
+    let renamed = paths
+        .final_path
+        .parent()
+        .expect("parent")
+        .join("file (1).bin");
+    assert_eq!(downloaded, SAMPLE.len() as i64);
+    assert_eq!(fs::read(&paths.final_path).expect("read existing"), existing);
+    assert_eq!(fs::read(renamed).expect("read renamed final"), SAMPLE);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

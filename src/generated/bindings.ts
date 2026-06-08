@@ -48,10 +48,20 @@ export const commands = {
 };
 
 /* Types */
+export type AppErrorPayload = {
+	code: string,
+	message: string,
+	recoverable: boolean,
+	actions: string[],
+};
+
 export type AppSettings = {
 	maxActiveTasks: number,
 	defaultSaveDir: string,
 	globalSpeedLimitBps: string | null,
+	multiConnectionThresholdBytes: string,
+	segmentCount: number,
+	maxConnectionsPerHost: number,
 };
 
 export type BrowserHandoffInput = {
@@ -168,6 +178,9 @@ export type UpdateSettingsInput = {
 	maxActiveTasks: number | null,
 	defaultSaveDir: string | null,
 	globalSpeedLimitBps: string | null,
+	multiConnectionThresholdBytes: string | null,
+	segmentCount: number | null,
+	maxConnectionsPerHost: number | null,
 };
 
 /* Tauri Specta runtime */

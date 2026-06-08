@@ -17,8 +17,8 @@ use crate::{
     events::{emit_queue_changed, emit_task_progress},
     logging::sanitize_url,
     models::{
-        task::now_iso, ProbeTaskPayload, Task, TaskRecord, TaskSegment, TaskSegmentRecord,
-        TaskStatus,
+        task::now_iso, AppErrorPayload, ProbeTaskPayload, Task, TaskRecord, TaskSegment,
+        TaskSegmentRecord, TaskStatus,
     },
     platform, AppState, DownloadControl,
 };
@@ -131,7 +131,7 @@ pub(crate) async fn create_task_with_state(
         .filter(|value| !value.is_empty())
     {
         Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(settings.default_save_dir),
+        None => PathBuf::from(&settings.default_save_dir),
     };
     std::fs::create_dir_all(&save_dir)
         .map_err(|e| format!("Could not create the download directory: {e}"))?;
@@ -176,7 +176,7 @@ pub(crate) async fn create_task_with_state(
     };
 
     db::insert_task_record(&state.pool, &record).await?;
-    db::ensure_task_segments(&state.pool, &record).await?;
+    db::ensure_task_segments_with_settings(&state.pool, &record, &settings).await?;
     tracing::info!(
         task_id = %record.id,
         url = %sanitize_url(url),
@@ -400,6 +400,7 @@ pub async fn open_task_folder(state: State<'_, AppState>, id: String) -> Result<
     platform::open_path(&path)
 }
 
+#[cfg(debug_assertions)]
 pub async fn seed_mock_data(pool: &sqlx::SqlitePool) -> Result<Vec<Task>, String> {
     db::clear_tasks(pool).await?;
     let now = now_iso();
@@ -414,6 +415,7 @@ pub async fn seed_mock_data(pool: &sqlx::SqlitePool) -> Result<Vec<Task>, String
         .map(|records| records.into_iter().map(Task::from).collect())
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 #[specta::specta]
 pub async fn seed_mock_tasks(state: State<'_, AppState>) -> Result<Vec<Task>, String> {
@@ -460,7 +462,7 @@ async fn schedule_queued_tasks_inner(
             break;
         }
 
-        let queued = match db::list_queued_task_records(&pool, i64::from(available)).await {
+        let queued = match db::list_queued_task_records(&pool, i64::from(settings.max_active_tasks)).await {
             Ok(tasks) => tasks,
             Err(error) => {
                 tracing::error!(error = %error, "failed to load queued tasks");
@@ -482,6 +484,29 @@ async fn schedule_queued_tasks_inner(
             if downloads.lock().await.len() as i32 >= settings.max_active_tasks {
                 break;
             }
+            let host_used = host_connection_slots(&downloads, &task.source_host).await;
+            let host_limit = usize::try_from(settings.max_connections_per_host)
+                .unwrap_or(usize::try_from(db::DEFAULT_MAX_CONNECTIONS_PER_HOST).unwrap_or(8))
+                .max(1);
+            if host_used >= host_limit {
+                tracing::debug!(
+                    task_id = %task.id,
+                    source_host = %task.source_host,
+                    host_used,
+                    host_limit,
+                    "scheduler deferred task because host connection limit is full"
+                );
+                continue;
+            }
+            let planned_slots = db::planned_segment_count_with_plan(
+                &task,
+                db::parse_multi_connection_threshold_bytes(
+                    &settings.multi_connection_threshold_bytes,
+                ),
+                settings.segment_count,
+            )
+            .min(host_limit.saturating_sub(host_used))
+            .max(1);
             let task_id = task.id.clone();
             if let Err(error) = start_task_download(
                 app.clone(),
@@ -490,6 +515,7 @@ async fn schedule_queued_tasks_inner(
                 scheduler.clone(),
                 speed_limiter.clone(),
                 task,
+                planned_slots,
             )
             .await
             {
@@ -519,6 +545,7 @@ async fn start_task_download(
     scheduler: Arc<tokio::sync::Mutex<()>>,
     speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
     task: TaskRecord,
+    connection_limit: usize,
 ) -> Result<(), String> {
     let task = prepare_task_for_download(&pool, task).await?;
     if downloads.lock().await.contains_key(&task.id) {
@@ -530,15 +557,17 @@ async fn start_task_download(
         task_id = %task.id,
         url = %sanitize_url(&task.url),
         total_size = task.total_size,
+        connection_limit,
         "starting task download"
     );
 
+    let connection_count = i32::try_from(connection_limit.max(1)).unwrap_or(1);
     db::update_task_status(
         &pool,
         &task.id,
         TaskStatus::Downloading,
         0,
-        1,
+        connection_count,
         Some("Downloading"),
         None,
     )
@@ -548,6 +577,7 @@ async fn start_task_download(
     let downloads_map = downloads.clone();
     let task_id = task.id.clone();
     let map_task_id = task.id.clone();
+    let source_host = task.source_host.clone();
     let task_app = app.clone();
     let task_cancel = cancel.clone();
     let task_pool = pool.clone();
@@ -578,6 +608,7 @@ async fn start_task_download(
                 task,
                 task_cancel.clone(),
                 state_speed_limiter.clone(),
+                connection_limit,
             )
             .await;
         let canceled = task_cancel.load(Ordering::SeqCst);
@@ -601,10 +632,31 @@ async fn start_task_download(
     downloads
         .lock()
         .await
-        .insert(map_task_id, DownloadControl { cancel, handle });
+        .insert(
+            map_task_id,
+            DownloadControl {
+                cancel,
+                handle,
+                source_host,
+                connection_slots: connection_limit.max(1),
+            },
+        );
 
     emit_queue_changed(&app);
     Ok(())
+}
+
+async fn host_connection_slots(
+    downloads: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
+    source_host: &str,
+) -> usize {
+    downloads
+        .lock()
+        .await
+        .values()
+        .filter(|control| control.source_host == source_host)
+        .map(|control| control.connection_slots)
+        .sum()
 }
 
 fn spawn_schedule_queued_tasks(
@@ -821,10 +873,15 @@ async fn mark_download_failed(
     error: String,
 ) {
     tracing::error!(task_id = %task_id, error = %error, "download failed");
+    let payload = serde_json::from_str::<AppErrorPayload>(&error).ok();
+    let status = match payload.as_ref().map(|payload| payload.code.as_str()) {
+        Some("final_path_conflict") => TaskStatus::NeedsAttention,
+        _ => TaskStatus::Failed,
+    };
     if let Err(db_error) = db::update_task_status(
         pool,
         task_id,
-        TaskStatus::Failed,
+        status,
         0,
         0,
         Some(&error),
@@ -925,6 +982,7 @@ fn sanitize_file_name(value: &str) -> String {
     }
 }
 
+#[cfg(debug_assertions)]
 fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
     vec![
         mock_task(
@@ -1051,6 +1109,7 @@ fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(debug_assertions)]
 fn mock_task(
     file_name: &str,
     url: &str,

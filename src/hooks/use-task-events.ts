@@ -7,6 +7,7 @@ import { listTasks, onQueueChanged, onTaskProgress } from "@/lib/tauri";
 const log = createLogger("task-events");
 import { mergeTasksFromServer, useTaskStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
+import { errorMessage } from "@/lib/errors";
 import type { Task } from "@/types/task";
 
 /** Subscribe once to backend progress/queue events for the app lifetime. */
@@ -51,7 +52,7 @@ export function useTaskEvents() {
           addToast({
             tone: "error",
             title: i18n.t("toast.taskFailed", { name: task.fileName }),
-            description: task.errorMessage || task.healthSummary || undefined,
+            description: task.errorMessage ? errorMessage(task.errorMessage) : task.healthSummary || undefined,
           });
         }
       }

@@ -6,6 +6,6 @@ pub use browser::{
     BrowserIntegrationStatus, BrowserIntegrationUpdateInput, BrowserKind,
 };
 pub use task::{
-    AppSettings, ProbeTaskPayload, SegmentStatus, Task, TaskProgressPayload, TaskRecord, TaskSegment,
-    TaskSegmentRecord, TaskStatus,
+    AppErrorPayload, AppSettings, ProbeTaskPayload, SegmentStatus, Task, TaskProgressPayload,
+    TaskRecord, TaskSegment, TaskSegmentRecord, TaskStatus,
 };

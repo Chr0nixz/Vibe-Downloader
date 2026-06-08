@@ -30,7 +30,7 @@ async fn ensure_single_segment_creates_task_range() {
 #[tokio::test]
 async fn small_or_no_range_tasks_keep_one_segment() {
     let pool = test_pool("single-planning").await;
-    let small = sample_task("task-small", db::MULTI_CONNECTION_THRESHOLD_BYTES - 1);
+    let small = sample_task("task-small", db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES - 1);
     db::insert_task_record(&pool, &small)
         .await
         .expect("insert small");
@@ -39,7 +39,7 @@ async fn small_or_no_range_tasks_keep_one_segment() {
         .expect("small segments");
     assert_eq!(small_segments.len(), 1);
 
-    let mut no_range = sample_task("task-no-range", db::MULTI_CONNECTION_THRESHOLD_BYTES);
+    let mut no_range = sample_task("task-no-range", db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES);
     no_range.supports_range = false;
     db::insert_task_record(&pool, &no_range)
         .await
@@ -53,7 +53,7 @@ async fn small_or_no_range_tasks_keep_one_segment() {
 #[tokio::test]
 async fn large_range_task_generates_four_non_overlapping_segments() {
     let pool = test_pool("multi-planning").await;
-    let total_size = db::MULTI_CONNECTION_THRESHOLD_BYTES + 7;
+    let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES + 7;
     let task = sample_task("task-large", total_size);
     db::insert_task_record(&pool, &task)
         .await
@@ -82,9 +82,37 @@ async fn large_range_task_generates_four_non_overlapping_segments() {
 }
 
 #[tokio::test]
+async fn configurable_threshold_and_segment_count_plan_new_segments() {
+    let pool = test_pool("configurable-planning").await;
+    let task = sample_task("task-configurable", 4 * 1024 * 1024);
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+    let settings = AppSettings {
+        max_active_tasks: 2,
+        default_save_dir: "C:\\Downloads".to_string(),
+        global_speed_limit_bps: None,
+        multi_connection_threshold_bytes: "1048576".to_string(),
+        segment_count: 6,
+        max_connections_per_host: 8,
+    };
+
+    let segments = db::ensure_task_segments_with_settings(&pool, &task, &settings)
+        .await
+        .expect("segments");
+
+    assert_eq!(segments.len(), 6);
+    assert_eq!(segments[0].range_start, 0);
+    assert_eq!(segments.last().expect("last").range_end, task.total_size - 1);
+    for window in segments.windows(2) {
+        assert_eq!(window[0].range_end + 1, window[1].range_start);
+    }
+}
+
+#[tokio::test]
 async fn splitting_largest_remaining_segment_keeps_ranges_contiguous() {
     let pool = test_pool("split-segment").await;
-    let total_size = db::MULTI_CONNECTION_THRESHOLD_BYTES + 7;
+    let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES + 7;
     let task = sample_task("task-split", total_size);
     db::insert_task_record(&pool, &task)
         .await
@@ -167,6 +195,15 @@ async fn settings_defaults_use_download_dir_and_two_active_tasks() {
     assert_eq!(settings.max_active_tasks, 2);
     assert_eq!(settings.default_save_dir, "C:\\Downloads");
     assert!(settings.global_speed_limit_bps.is_none());
+    assert_eq!(
+        settings.multi_connection_threshold_bytes,
+        db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES.to_string()
+    );
+    assert_eq!(settings.segment_count, db::DEFAULT_SEGMENT_COUNT);
+    assert_eq!(
+        settings.max_connections_per_host,
+        db::DEFAULT_MAX_CONNECTIONS_PER_HOST
+    );
 }
 
 #[tokio::test]
@@ -178,6 +215,9 @@ async fn settings_upsert_and_clamp_active_task_count() {
             max_active_tasks: 5,
             default_save_dir: "D:\\Vibe".to_string(),
             global_speed_limit_bps: None,
+            multi_connection_threshold_bytes: "1048576".to_string(),
+            segment_count: 12,
+            max_connections_per_host: 12,
         },
     )
     .await
@@ -188,6 +228,9 @@ async fn settings_upsert_and_clamp_active_task_count() {
         .expect("settings");
     assert_eq!(settings.max_active_tasks, 5);
     assert_eq!(settings.default_save_dir, "D:\\Vibe");
+    assert_eq!(settings.multi_connection_threshold_bytes, "1048576");
+    assert_eq!(settings.segment_count, db::MAX_SEGMENT_COUNT);
+    assert_eq!(settings.max_connections_per_host, 12);
 
     db::upsert_settings(
         &pool,
@@ -195,6 +238,9 @@ async fn settings_upsert_and_clamp_active_task_count() {
             max_active_tasks: 99,
             default_save_dir: "D:\\Vibe".to_string(),
             global_speed_limit_bps: Some("2048".to_string()),
+            multi_connection_threshold_bytes: "0".to_string(),
+            segment_count: 999,
+            max_connections_per_host: 999,
         },
     )
     .await
@@ -204,6 +250,12 @@ async fn settings_upsert_and_clamp_active_task_count() {
         .expect("settings");
     assert_eq!(settings.max_active_tasks, db::MAX_MAX_ACTIVE_TASKS);
     assert_eq!(settings.global_speed_limit_bps.as_deref(), Some("2048"));
+    assert_eq!(settings.multi_connection_threshold_bytes, "0");
+    assert_eq!(settings.segment_count, db::MAX_SEGMENT_COUNT);
+    assert_eq!(
+        settings.max_connections_per_host,
+        db::MAX_MAX_CONNECTIONS_PER_HOST
+    );
 }
 
 #[tokio::test]
@@ -364,7 +416,7 @@ fn local_resume_errors_are_explicit() {
 fn segment_resume_errors_cover_multi_segment_corruption() {
     let task = sample_task(
         "task-corrupt-segments",
-        db::MULTI_CONNECTION_THRESHOLD_BYTES + 7,
+        db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES + 7,
     );
     let mut segments = db::planned_segments_for_task(&task);
 
@@ -407,7 +459,7 @@ fn segment_resume_errors_cover_multi_segment_corruption() {
 fn multi_segment_remote_metadata_changes_are_blocked() {
     let mut task = sample_task(
         "task-remote-multi",
-        db::MULTI_CONNECTION_THRESHOLD_BYTES + 7,
+        db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES + 7,
     );
     task.etag = Some("etag-a".to_string());
     task.last_modified = Some("Mon, 01 Jan 2024 00:00:00 GMT".to_string());

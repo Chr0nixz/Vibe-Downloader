@@ -11,6 +11,7 @@ import { readShellLayout } from "@/hooks/use-shell-layout";
 import { useActiveDownloadSync } from "@/hooks/use-active-download-sync";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import { createLogger } from "@/lib/logger";
+import { errorMessage } from "@/lib/errors";
 import {
   getPlatform,
   trafficLightsInsetPx,
@@ -109,7 +110,7 @@ export function AppShell() {
       setError(null);
       await refreshTasks(selectId);
     } catch (err) {
-      const message = String(err);
+      const message = errorMessage(err);
       log.error("task action failed", err);
       setError(message);
       addToast({
@@ -174,7 +175,7 @@ export function AppShell() {
       } catch (err) {
         if (!cancelled) {
           log.error("initial task load failed", err);
-          setError(String(err));
+          setError(errorMessage(err));
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -200,7 +201,7 @@ export function AppShell() {
       } catch (err) {
         if (!cancelled) {
           log.warn("settings load failed", err);
-          setSettingsError(String(err));
+          setSettingsError(errorMessage(err));
         }
       } finally {
         if (!cancelled) setSettingsLoading(false);
