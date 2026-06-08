@@ -35,8 +35,8 @@ async fn probe_reads_headers_and_range_support() {
 
     assert_eq!(probe.file_name, "sample.bin");
     assert_eq!(probe.total_size, SAMPLE.len() as i64);
-    assert!(probe.supports_range);
-    assert_eq!(probe.source_host, "127.0.0.1");
+    assert!(probe.supports_parallel);
+    assert_eq!(probe.source_key, "127.0.0.1");
     assert_eq!(
         probe.content_type.as_deref(),
         Some("application/octet-stream")
@@ -55,7 +55,7 @@ async fn probe_falls_back_to_get_range_when_head_is_incomplete() {
 
     assert_eq!(probe.file_name, "fallback.bin");
     assert_eq!(probe.total_size, SAMPLE.len() as i64);
-    assert!(probe.supports_range);
+    assert!(probe.supports_parallel);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -69,7 +69,7 @@ async fn probe_sends_identity_accept_encoding() {
         .expect("probe");
 
     assert_eq!(probe.file_name, "identity.bin");
-    assert!(probe.supports_range);
+    assert!(probe.supports_parallel);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -83,7 +83,7 @@ async fn probe_allows_unknown_size_single_streams() {
         .expect("probe");
 
     assert_eq!(probe.total_size, 0);
-    assert!(!probe.supports_range);
+    assert!(!probe.supports_parallel);
     assert_eq!(probe.file_name, "unknown-size.bin");
 }
 
@@ -163,7 +163,9 @@ async fn direct_download_writes_final_file() {
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
                 total_size: SAMPLE.len() as i64,
-                supports_range: true,
+                supports_resume: true,
+
+                supports_parallel: true,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -188,7 +190,9 @@ async fn direct_unknown_size_download_writes_final_file() {
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
                 total_size: 0,
-                supports_range: false,
+                supports_resume: false,
+
+                supports_parallel: false,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -214,7 +218,9 @@ async fn direct_download_renames_when_final_path_exists() {
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
                 total_size: SAMPLE.len() as i64,
-                supports_range: true,
+                supports_resume: true,
+
+                supports_parallel: true,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -249,7 +255,9 @@ async fn direct_download_can_resume_from_temp_file() {
             temp_path: paths.temp.clone(),
             final_path: paths.final_path.clone(),
             total_size: slow_payload().len() as i64,
-            supports_range: true,
+            supports_resume: true,
+
+            supports_parallel: true,
         };
         async move { engine.download_direct(request, first_cancel).await }
     });
@@ -268,7 +276,9 @@ async fn direct_download_can_resume_from_temp_file() {
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
                 total_size: slow_payload().len() as i64,
-                supports_range: true,
+                supports_resume: true,
+
+                supports_parallel: true,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -295,7 +305,9 @@ async fn direct_download_respects_speed_limiter() {
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
                 total_size: slow_payload().len() as i64,
-                supports_range: true,
+                supports_resume: true,
+
+                supports_parallel: true,
             },
             Arc::new(AtomicBool::new(false)),
             Arc::new(GlobalSpeedLimiter::new(Some(32 * 1024))),
@@ -324,7 +336,9 @@ async fn direct_resume_fails_when_range_is_unavailable() {
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
                 total_size: SAMPLE.len() as i64,
-                supports_range: false,
+                supports_resume: false,
+
+                supports_parallel: false,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -352,7 +366,9 @@ async fn segmented_direct_download_writes_all_ranges_to_one_file() {
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
                 total_size: payload.len() as i64,
-                supports_range: true,
+                supports_resume: true,
+
+                supports_parallel: true,
                 segments,
             },
             Arc::new(AtomicBool::new(false)),
@@ -382,7 +398,9 @@ async fn segmented_direct_retries_transient_segment_failures() {
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
                 total_size: payload.len() as i64,
-                supports_range: true,
+                supports_resume: true,
+
+                supports_parallel: true,
                 segments: direct_segments("segmented-retry", payload.len() as i64),
             },
             Arc::new(AtomicBool::new(false)),
@@ -414,7 +432,9 @@ async fn segmented_direct_resume_skips_completed_ranges() {
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
                 total_size: payload.len() as i64,
-                supports_range: true,
+                supports_resume: true,
+
+                supports_parallel: true,
                 segments,
             },
             Arc::new(AtomicBool::new(false)),
@@ -440,7 +460,9 @@ async fn segmented_direct_failure_does_not_rename_temp_file() {
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
                 total_size: payload.len() as i64,
-                supports_range: true,
+                supports_resume: true,
+
+                supports_parallel: true,
                 segments: direct_segments("segmented-failure", payload.len() as i64),
             },
             Arc::new(AtomicBool::new(false)),
@@ -696,7 +718,7 @@ fn respond_file(
     method: &str,
     payload: &[u8],
     byte_range: Option<ByteRange>,
-    supports_range: bool,
+    supports_parallel: bool,
     file_name: &str,
     slow: bool,
 ) {
@@ -713,7 +735,7 @@ fn respond_file(
     } else {
         &payload[start..=end]
     };
-    let status = if byte_range.is_some() && supports_range {
+    let status = if byte_range.is_some() && supports_parallel {
         206
     } else {
         200
@@ -730,7 +752,7 @@ fn respond_file(
         ("Content-Type", "application/octet-stream"),
         ("Content-Disposition", disposition.as_str()),
     ];
-    if supports_range {
+    if supports_parallel {
         headers.push(("Accept-Ranges", "bytes"));
     }
     if status == 206 {
@@ -745,7 +767,7 @@ fn respond_file_without_disposition(
     method: &str,
     payload: &[u8],
     byte_range: Option<ByteRange>,
-    supports_range: bool,
+    supports_parallel: bool,
     slow: bool,
 ) {
     let start = byte_range
@@ -761,7 +783,7 @@ fn respond_file_without_disposition(
     } else {
         &payload[start..=end]
     };
-    let status = if byte_range.is_some() && supports_range {
+    let status = if byte_range.is_some() && supports_parallel {
         206
     } else {
         200
@@ -776,7 +798,7 @@ fn respond_file_without_disposition(
         ("Content-Length", content_length.as_str()),
         ("Content-Type", "application/octet-stream"),
     ];
-    if supports_range {
+    if supports_parallel {
         headers.push(("Accept-Ranges", "bytes"));
     }
     if status == 206 {
@@ -871,6 +893,8 @@ fn direct_segments(task_id: &str, total_size: i64) -> Vec<TaskSegmentRecord> {
             let segment = TaskSegmentRecord {
                 id: format!("{task_id}-segment-{index}"),
                 task_id: task_id.to_string(),
+                file_id: None,
+                unit_kind: "http_range".to_string(),
                 range_start: start,
                 range_end: end,
                 downloaded_until: start,

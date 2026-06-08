@@ -43,12 +43,48 @@ impl TaskStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    SingleFile,
+    MultiFile,
+    Manifest,
+}
+
+impl TaskKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleFile => "single_file",
+            Self::MultiFile => "multi_file",
+            Self::Manifest => "manifest",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Self {
+        match value {
+            "multi_file" => Self::MultiFile,
+            "manifest" => Self::Manifest,
+            _ => Self::SingleFile,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineCapabilities {
+    pub supports_resume: bool,
+    pub supports_parallel: bool,
+    pub supports_multi_file: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     pub id: String,
     pub url: String,
     pub final_url: Option<String>,
+    pub protocol: String,
+    pub task_kind: TaskKind,
     pub file_name: String,
     pub save_dir: String,
     pub temp_path: Option<String>,
@@ -59,12 +95,15 @@ pub struct Task {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub content_type: Option<String>,
-    pub supports_range: bool,
-    pub source_host: String,
+    pub supports_resume: bool,
+    pub supports_parallel: bool,
+    pub supports_multi_file: bool,
+    pub source_key: String,
     pub connection_count: i32,
     pub speed_bps: String,
     pub health_summary: Option<String>,
     pub error_message: Option<String>,
+    pub files: Vec<TaskFile>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -74,6 +113,8 @@ pub struct TaskRecord {
     pub id: String,
     pub url: String,
     pub final_url: Option<String>,
+    pub protocol: String,
+    pub task_kind: TaskKind,
     pub file_name: String,
     pub save_dir: String,
     pub temp_path: Option<String>,
@@ -84,8 +125,10 @@ pub struct TaskRecord {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub content_type: Option<String>,
-    pub supports_range: bool,
-    pub source_host: String,
+    pub supports_resume: bool,
+    pub supports_parallel: bool,
+    pub supports_multi_file: bool,
+    pub source_key: String,
     pub connection_count: i32,
     pub speed_bps: i64,
     pub health_summary: Option<String>,
@@ -96,9 +139,44 @@ pub struct TaskRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskFile {
+    pub id: String,
+    pub task_id: String,
+    pub relative_path: String,
+    pub file_name: String,
+    pub save_dir: String,
+    pub temp_path: Option<String>,
+    pub final_path: Option<String>,
+    pub total_size: String,
+    pub downloaded_bytes: String,
+    pub selected: bool,
+    pub status: TaskStatus,
+    pub content_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskFileRecord {
+    pub id: String,
+    pub task_id: String,
+    pub relative_path: String,
+    pub file_name: String,
+    pub save_dir: String,
+    pub temp_path: Option<String>,
+    pub final_path: Option<String>,
+    pub total_size: i64,
+    pub downloaded_bytes: i64,
+    pub selected: bool,
+    pub status: TaskStatus,
+    pub content_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskSegment {
     pub id: String,
     pub task_id: String,
+    pub file_id: Option<String>,
+    pub unit_kind: String,
     pub range_start: String,
     pub range_end: String,
     pub downloaded_until: String,
@@ -111,6 +189,8 @@ pub struct TaskSegment {
 pub struct TaskSegmentRecord {
     pub id: String,
     pub task_id: String,
+    pub file_id: Option<String>,
+    pub unit_kind: String,
     pub range_start: i64,
     pub range_end: i64,
     pub downloaded_until: i64,
@@ -124,6 +204,8 @@ impl From<TaskSegmentRecord> for TaskSegment {
         Self {
             id: record.id,
             task_id: record.task_id,
+            file_id: record.file_id,
+            unit_kind: record.unit_kind,
             range_start: record.range_start.to_string(),
             range_end: record.range_end.to_string(),
             downloaded_until: record.downloaded_until.to_string(),
@@ -134,12 +216,33 @@ impl From<TaskSegmentRecord> for TaskSegment {
     }
 }
 
+impl From<TaskFileRecord> for TaskFile {
+    fn from(record: TaskFileRecord) -> Self {
+        Self {
+            id: record.id,
+            task_id: record.task_id,
+            relative_path: record.relative_path,
+            file_name: record.file_name,
+            save_dir: record.save_dir,
+            temp_path: record.temp_path,
+            final_path: record.final_path,
+            total_size: record.total_size.to_string(),
+            downloaded_bytes: record.downloaded_bytes.to_string(),
+            selected: record.selected,
+            status: record.status,
+            content_type: record.content_type,
+        }
+    }
+}
+
 impl From<TaskRecord> for Task {
     fn from(record: TaskRecord) -> Self {
         Self {
             id: record.id,
             url: record.url,
             final_url: record.final_url,
+            protocol: record.protocol,
+            task_kind: record.task_kind,
             file_name: record.file_name,
             save_dir: record.save_dir,
             temp_path: record.temp_path,
@@ -150,12 +253,15 @@ impl From<TaskRecord> for Task {
             etag: record.etag,
             last_modified: record.last_modified,
             content_type: record.content_type,
-            supports_range: record.supports_range,
-            source_host: record.source_host,
+            supports_resume: record.supports_resume,
+            supports_parallel: record.supports_parallel,
+            supports_multi_file: record.supports_multi_file,
+            source_key: record.source_key,
             connection_count: record.connection_count,
             speed_bps: record.speed_bps.to_string(),
             health_summary: record.health_summary,
             error_message: record.error_message,
+            files: Vec::new(),
             created_at: record.created_at,
             updated_at: record.updated_at,
         }
@@ -213,9 +319,20 @@ pub struct TaskUpdatedPayload {
 pub struct ProbeTaskPayload {
     pub final_url: String,
     pub file_name: String,
+    pub protocol: String,
+    pub task_kind: TaskKind,
+    pub capabilities: EngineCapabilities,
+    pub files: Vec<ProbedFile>,
     pub total_size: String,
-    pub supports_range: bool,
-    pub source_host: String,
+    pub source_key: String,
+    pub content_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbedFile {
+    pub relative_path: String,
+    pub size: String,
     pub content_type: Option<String>,
 }
 

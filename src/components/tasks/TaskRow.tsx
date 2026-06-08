@@ -181,7 +181,7 @@ export const TaskRow = memo(function TaskRow({
               </motion.span>
             </div>
             <p id={hostId} className="truncate text-xs text-text-muted">
-              {task.sourceHost}
+              {task.sourceKey}
             </p>
           </div>
         </div>
@@ -269,7 +269,7 @@ export const TaskRow = memo(function TaskRow({
                 <DetailLine
                   label={t("task.expanded.resume")}
                   value={
-                    task.supportsRange
+                    task.supportsParallel
                       ? t("task.expanded.resumeSupported")
                       : t("task.expanded.resumeUnavailable")
                   }

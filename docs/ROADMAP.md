@@ -1,246 +1,178 @@
-# Vibe Downloader 开发路线图
+# Vibe Downloader 路线图
 
-本文档描述在**基础框架**（当前仓库状态）之上的分阶段开发计划，与 [PRODUCT.md](../PRODUCT.md) 的战略优先级、[DESIGN.md](../DESIGN.md) 的体验与视觉规范对齐。
+最后更新：2026-06-08
 
-> 说明：`docs/functional-design.md` 与 `docs/ui-design-style.md` 已恢复到 `docs/`，后续计划以这两份文档、`PRODUCT.md` 与 `DESIGN.md` 共同约束。
+本文档描述当前代码库之后的开发路线。已实现状态以仓库代码为准，产品和设计约束见 [PRODUCT.md](../PRODUCT.md) 与 [DESIGN.md](../DESIGN.md)。
 
----
+## 当前基线
 
-## 现状快照
+当前版本：`0.1.0`。
 
-| 已完成 | 未完成 / 占位 |
-|--------|----------------|
-| Tauri 2 + React 壳层、设计 token、任务列表/详情/命令栏 UI | 全局限速与单任务限速 |
-| SQLite schema、`tasks` / `segments`、`list_tasks`、`list_task_segments` | 崩溃后自动继续下载暂不启用 |
-| HTTP probe、Range 续传校验、固定 4 路分片多连接、真实 `task.progress` 事件 | 动态连接数与 `connection.changed` 实时事件 |
-| Chunks tab 与 Connections tab 只读 segment/连接摘要 | Safari Web Extension 生产包装 |
-| Windows 自绘标题栏 + 窗口控制；打开文件/目录命令 | 撤销、批量操作、托盘常驻 |
-| 新建下载、暂停/恢复/删除、重试、失败路径与 `needs_attention` | 事件类型未完全纳入 specta event 契约 |
-| `settings`、队列调度、Toast、速度历史、浏览器集成设置页 | L2 三平台 `tauri build` 仍需持续验证 |
-| `vibe-native-host`、Native Messaging manifest 安装、WebExtension 开发包 | 扩展商店 ID/签名与发布流程 |
+当前仓库已经完成一个可运行的 HTTP/HTTPS 下载管理器基础版本：
 
----
+- 桌面壳：Tauri 2 + React 19 + Rust，Windows/macOS/Linux 配置已存在。
+- 下载核心：HTTP probe、未知大小单连接下载、Range 分段下载、续传校验、分段重试、全局限速。
+- 持久化：SQLite 保存任务、分段、设置、浏览器 handoff 消息。
+- 调度：全局活跃任务上限、per-host 连接槽限制、queued FIFO 调度、启动时中断任务重置为 paused。
+- UI：任务列表、状态导航、搜索、设置页、详情页、Chunks/Connections、toast、删除确认、基础恢复动作、中文/英文 i18n。
+- 浏览器交接：WebExtension 开发包、Native Messaging host、manifest 安装/卸载、request id 去重、单实例转发。
+- 发布链路：CI、三平台 Tauri build、Release workflow、Tauri updater 配置和状态栏安装入口。
 
-## 阶段 0：巩固基础
+## 已知边界
 
-**目标**：在加功能前减少技术债，避免类型漂移与平台差异。
+这些能力尚未完成，不应在发布说明或产品文案中描述为已支持：
 
-**周期（参考）**：3–5 天
+- 命令面板还不是完整命令中心，生产构建中无实际用户命令。
+- 顶部速度限制按钮尚未绑定快捷设置行为。
+- 新建下载没有自动 probe，也没有复用 probe 结果减少二次等待。
+- 任务详情没有 Logs、Request、真实逐连接速度和请求头诊断。
+- `task_events` 表未写入完整生命周期数据。
+- 浏览器扩展不自动接管浏览器下载，不转发 Cookie/header，不包含商店发布 ID 和签名流程。
+- Safari wrapper、系统托盘、系统通知、开机启动、关闭到托盘、批量导入、任务优先级、单任务限速、文件分类规则尚未实现。
+- HTTP 之外的 BT、HLS、网盘解析、视频嗅探和插件协议尚未实现。
 
-### 任务
+## P0：发布前收敛
 
-1. **版本管理**：初始化 git，完善 `.gitignore`（`target/`、`dist/`、本地 DB 等）；可选恢复 `docs/functional-design.md`、`docs/ui-design-style.md`。
-2. **类型与事件**：为 `TaskProgressPayload` 注册 `tauri-specta` events，或统一事件契约；逐步减少手写 `src/types/*` 与生成 bindings 的双轨维护。
-3. **平台与壳层**：验证 Windows / macOS / Linux 标题栏；`tauri.conf` 与 runtime `decorations` 策略一致；推动 L2 `tauri build` 三平台绿。
-4. **主题**：按 DESIGN 接入 `next-themes`，默认跟随系统，暗色为主要打磨目标。
+目标：让 `0.1.x` 能作为可信的 HTTP 下载器进行内部/公开预览。
 
-### 验收
+1. 完善命令面板
+   - 新建下载、暂停/继续、删除、重试、打开文件/目录、切换视图、打开设置。
+   - 生产构建中不显示 mock reset。
 
-- `pnpm tauri dev` 稳定启动，`pnpm typecheck` 与 `cargo clippy -D warnings` 通过。
-- 无 mock 数据时仍可空列表正常启动。
+2. 收紧主界面限速入口
+   - 顶部速度限制按钮接入快捷菜单。
+   - 预设值：不限速、512 KB/s、1 MB/s、5 MB/s、10 MB/s、自定义。
+   - 继续保留设置页精确 B/s 输入。
 
----
+3. 优化新建下载流程
+   - URL 停止输入后自动 probe。
+   - 提交时尽量复用最近一次 probe 结果，或明确展示重新验证状态。
+   - probe 失败时提供可控的继续尝试路径。
 
-## 阶段 1：HTTP MVP — 单连接可下载
+4. 完成任务事件日志闭环
+   - 写入 `task_events`：created、started、paused、resumed、retrying、failed、completed、resume_blocked。
+   - 详情页增加 Logs tab。
 
-**对齐 PRODUCT 优先级 1**：HTTP 稳定后再扩展其他协议。
+5. 补齐发布安全检查
+   - 确认生产构建不可调用 debug-only mock command。
+   - 验证 updater `latest.json`、签名、安装包和失败 UI。
+   - 复查 Tauri capabilities 是否仍是最小权限集。
 
-**周期（参考）**：2–3 周
+## P1：核心体验完善
 
-### 架构示意
+目标：让日常下载管理更接近成熟工具。
 
-```mermaid
-flowchart LR
-  UI[React UI] -->|create_task / pause / resume| CMD[Tauri commands]
-  CMD --> DB[(SQLite)]
-  CMD --> ENG[HttpEngine]
-  ENG -->|reqwest + tokio| NET[HTTP]
-  ENG -->|task.progress| EVT[Events]
-  DB --> ENG
+1. 批量操作
+   - 多选任务。
+   - 批量暂停、继续、删除、重试、打开目录。
+
+2. 排序和筛选
+   - 按创建时间、更新时间、文件大小、进度、速度、状态排序。
+   - 按文件类型、来源域名、失败原因、是否支持续传筛选。
+
+3. 错误恢复体验
+   - 为结构化错误补齐本地化文案和恢复动作。
+   - 对远端文件变化、Range 不可用、临时文件缺失、磁盘写入失败分别给出明确路径。
+
+4. 设置页单位友好化
+   - 限速支持 KB/s、MB/s、GB/s 单位输入。
+   - 多连接阈值支持 MB/GB 单位输入。
+   - 高级项和普通项分组，避免普通用户直接面对原始字节值。
+
+5. 完成通知和基础桌面集成
+   - 下载完成系统通知。
+   - 系统托盘常驻、关闭到托盘、开机启动作为独立开关。
+
+## P2：诊断和可靠性增强
+
+目标：让大文件、失败恢复和浏览器交接更可诊断。
+
+1. 真实连接诊断
+   - 后端维护每个 segment/connection 的实时速度、重试、最近错误。
+   - Connections tab 不再用任务总速度均分。
+
+2. Request tab
+   - 展示最终 URL、响应状态、关键响应头、Range/Content-Range 信息。
+   - 保持 URL query 和敏感 header 默认隐藏。
+
+3. 续传策略增强
+   - 区分强/弱 ETag。
+   - 记录 Range 能力变化。
+   - 对弱元数据资源给出风险提示。
+
+4. Native Messaging 稳定性
+   - handoff 文件先写临时文件再 rename。
+   - request id 使用 create-new 语义避免覆盖。
+   - 读入失败也写入诊断结果，并清理过期 handoff 文件。
+
+5. 性能
+   - 活跃任务主要依赖事件更新，降低完整列表兜底刷新频率。
+   - 详情页 segment 数据改为订阅/分页/摘要，减少轮询压力。
+   - 任务列表虚拟化，支持 1000+ 历史任务。
+
+## P3：浏览器集成产品化
+
+目标：从开发验证扩展走向可发布浏览器工作流。
+
+1. 扩展发布身份
+   - Chrome Web Store / Edge Add-ons / Firefox AMO ID。
+   - Native Messaging manifest 区分开发 ID 与发布 ID。
+   - 扩展版本和 app 版本同步策略。
+
+2. 安装引导
+   - 设置页展示扩展加载路径、manifest 路径、native host 路径和复制诊断信息。
+   - 对常见浏览器给出平台化指引。
+
+3. Safari
+   - macOS Safari Web Extension wrapper。
+   - 单独签名、打包、审核流程。
+
+4. 后续浏览器能力
+   - 自动接管大文件下载提示。
+   - 站点级规则。
+   - 扩展内实时任务状态面板。
+   - Cookie/header 转发必须建立明确授权和脱敏边界后再做。
+
+## P4：协议和高级能力
+
+目标：在 HTTP 下载稳定后再扩展协议面。
+
+优先级建议：
+
+1. 批量 URL 导入和校验。
+2. HLS 下载。
+3. 校验文件完整性（hash 输入/自动识别）。
+4. BT 下载。
+5. 插件协议或协议适配层。
+
+明确延后：
+
+- 网盘解析。
+- 视频嗅探。
+- 云账号/跨设备同步。
+- 无实际下载引擎支撑的高级可视化。
+
+## 验证基线
+
+每个重要变更至少运行：
+
+```bash
+pnpm typecheck
+pnpm build
+pnpm check:bindings
+pnpm test:rust
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 ```
 
-### 1.1 后端（Rust）
+浏览器集成相关变更额外运行：
 
-| 顺序 | 能力 | 说明 |
-|------|------|------|
-| 1 | **Probe** | HEAD/GET：解析 `Content-Length`、`Accept-Ranges`、`Content-Disposition`、重定向 → `final_url`、`total_size`、`supports_range` |
-| 2 | **单连接下载** | 流式写入 `temp_path`；更新 `downloaded_bytes`、`speed_bps`；发 `task.progress`（**替换** demo emitter） |
-| 3 | **命令** | `create_task`、`pause_task`、`resume_task`、`cancel_task`、`delete_task` |
-| 4 | **状态机** | `queued → downloading → paused \| completed \| failed`（及 `retrying`、`waiting_network`、`needs_attention`） |
-| 5 | **错误模型** | 可恢复 / 不可恢复；`health_summary`、`error_message` 符合 PRODUCT 文案风格 |
+```bash
+pnpm build:extensions
+```
 
-### 1.2 前端（React）
+发布相关变更额外验证：
 
-| 顺序 | 能力 | 说明 |
-|------|------|------|
-| 1 | **新建下载** | 命令栏 `+` → 对话框（URL、保存路径、文件名预览） |
-| 2 | **命令栏接线** | Start / Pause / Delete 绑定选中任务与禁用态 |
-| 3 | **列表真实进度** | 进度条接引擎事件；mock `seed_mock_tasks` 仅 dev 可选 |
-
-### 验收
-
-- 粘贴 URL 后 **5 秒内**看到进度与速度（PRODUCT Success Criteria）。
-- 暂停/继续后字节数连续；失败时有明确原因与可理解文案。
-
----
-
-## 阶段 2：可恢复与多连接
-
-**对齐**：大文件断点续传、专家向细节诊断。
-
-**周期（参考）**：2–3 周
-
-### 任务
-
-1. **Range 续传**：`.vibe-downloading` 临时文件 + `segments` 表；`etag` / `last_modified` 校验；远端变更 → `needs_attention`。**已完成**。
-2. **多连接**：`supports_range=true` 且 `total_size >= 16 MB` 时固定 4 个 segments；并发 Range worker 随机写入同一个临时文件。**已完成**。
-3. **恢复加固**：恢复前校验 segment range 连续性、`downloaded_until` 边界、临时文件大小、远端元信息变化。**已完成**。
-4. **详情面板**：Chunks tab 显示真实 segments；Connections tab 显示只读连接摘要。**已完成**。
-5. **Schema 定稿**：当前仍沿用 `001_init.sql`；后续如需 settings 或索引，使用 `002_*` migration。
-
-### 验收
-
-- 必跑链路已通过：`pnpm typecheck`、`pnpm build`、`pnpm specta`、`cargo check`、`cargo clippy -- -D warnings`、`cargo test`。
-- 本地 HTTP 回归覆盖：probe、HTTP 错误映射、单连接完成、Range 恢复、多 Range 写同一文件、segment 失败不 rename、SHA-256 完整性、多 segment 恢复异常与远端变化阻断。
-- UI 验收通过：大文件可显示 4 个 chunks / connections，暂停/继续、退出后恢复、删除与失败路径符合预期。
-
----
-
-## 阶段 3：队列与设置
-
-**周期（参考）**：1–2 周
-
-### 任务
-
-1. **Settings 表与命令**：新增 `settings` key-value 或结构化表；提供 `get_settings`、`update_settings`；先覆盖 `max_active_tasks` 与 `default_save_dir`。
-2. **全局队列 v1**：默认最多 2 个 active tasks；超过上限的新任务进入 `queued`；完成/失败/暂停/删除后自动调度下一个 queued task。
-3. **调度状态收敛**：`create_task`、`resume_task`、`retry_task` 统一进入调度器；app 启动后 interrupted task 仍重置为 `paused`，不自动继续。
-4. **设置页**：Sidebar「Settings」由占位改为真实页面；支持默认保存目录与同时下载任务数。
-5. **队列 UI**：任务行显示 queued；CommandBar 按状态收敛按钮禁用态；StatusBar 显示 active / queued / total speed。
-6. **回归测试**：最大并发 2 时创建 3 个任务只启动 2 个；完成或暂停 active task 后 queued 自动顶上；retry failed task 走队列；settings 更新即时影响调度。
-
-### 验收
-
-- 必跑链路继续全绿：`pnpm typecheck`、`pnpm build`、`pnpm specta`、`cargo check`、`cargo clippy -- -D warnings`、`cargo test`。
-- UI 能同时创建多个下载，但 active tasks 不超过 `max_active_tasks`。
-- queued task 能自动接力启动，且不破坏阶段 2 的单任务 1/4 segment 下载与恢复逻辑。
-- 设置页能修改默认目录和并发任务数；更新后调度器立即使用新配置。
-
----
-
-## 阶段 4：体验抛光
-
-可与阶段 2–3 **交错**进行，按 DESIGN 逐项补齐。
-
-- 任务行展开态；完成/错误动效（Framer，约 150–250ms）
-- Toast；破坏性操作确认或撤销
-- 速度历史 sparkline；磁盘/网络瓶颈文案
-- 响应式：中窄窗口详情抽屉
-- 无障碍：焦点环、热力图文字摘要与 tooltip
-
----
-
-## 阶段 5：浏览器扩展交接
-
-**对齐 PRODUCT 优先级 2**。建议在 HTTP + 续传可靠后启动。
-
-**周期（参考）**：2–4 周
-
-1. **Native Messaging 主通道**：新增独立 `vibe-native-host`，扩展通过官方 Native Messaging 下发 URL；Localhost / WebSocket 后置到实时面板或本地 API。
-2. **主流桌面浏览器覆盖**：Chrome、Edge、Firefox、Safari、Brave、Opera、Vivaldi、Chromium；Safari 仅 macOS。
-3. **统一扩展核心**：`browser/extension-core` 生成 Chromium、Firefox、Opera 开发包；Brave、Vivaldi、Chromium 复用 Chromium 包。
-4. **App handoff 入口**：新增 `create_browser_handoff_task`，复用现有 `create_task`、默认保存目录和队列调度。
-5. **安全边界**：仅接受 `http/https`；扩展不能指定保存路径；不转发 Cookie；不默认采集敏感 header。
-6. **设置页与文档**：浏览器集成状态、manifest 安装/卸载、扩展加载路径、故障排查。
-
----
-
-## 当前迭代状态
-
-**阶段 1 最小切片已完成**：
-
-| 顺序 | 任务 | 产出 |
-|------|------|------|
-| 1 | `reqwest` + `create_task` + probe | 可创建真实任务行 |
-| 2 | 单连接下载 + 写盘 + `task.progress` | 已移除 demo progress emitter |
-| 3 | 新建下载对话框 + probe 信息 | 用户可粘贴 URL、检测元信息并开始下载 |
-| 4 | `pause_task` / `resume_task` / `retry_task` | 命令栏与任务行操作可用 |
-| 5 | 失败路径与 `failed` UI | 有明确原因、Retry、删除选择 |
-
-## 当前迭代状态（阶段 2：已通过验收）
-
-阶段 2 已完成并通过验收。当前交付范围：
-
-| 顺序 | 任务 | 产出 |
-|------|------|------|
-| 1 | 固定分片计划 | `supports_range=true` 且 `total_size >= 16 MB` 时生成 4 个不重叠 segments |
-| 2 | 随机写入 | 多个 Range worker 写入同一个 `.vibe-downloading` 临时文件不同偏移 |
-| 3 | 汇总进度 | `task.progress` 汇总所有 segment 下载字节与速度 |
-| 4 | Chunks / Connections | Chunks 显示真实 segments；Connections 显示只读连接摘要 |
-| 5 | 恢复保护 | 恢复前校验本地 segment 状态与远端元信息，异常进入 `failed` 或 `needs_attention` |
-| 6 | 合并验收 | 所有 segments completed 且临时文件大小等于 `total_size` 后 rename |
-| 7 | 回归测试 | 覆盖分片规划、多 Range 写入、恢复跳过已完成段、segment 失败不 rename、SHA-256 完整性 |
-
-## 当前迭代状态（阶段 3/4：已实现基础交付）
-
-阶段 3/4 已在当前工作树完成主要基础交付：
-
-| 顺序 | 任务 | 产出 |
-|------|------|------|
-| 1 | Settings 表与命令 | `get_settings` / `update_settings`，默认保存目录与同时下载任务数 |
-| 2 | 全局队列 v1 | `max_active_tasks` 控制 active tasks，queued 自动接力 |
-| 3 | 设置页 | Sidebar Settings 真实页面，目录选择、并发数、语言切换 |
-| 4 | 体验抛光 | Toast、删除确认、速度历史 sparkline、任务行展开态 |
-| 5 | 回归测试 | Settings 默认值、upsert clamp、queued FIFO、interrupted reset |
-
-## 当前迭代状态（阶段 5：Native Messaging 基础已实现）
-
-阶段 5 已完成浏览器 handoff 的可开发验证基础：
-
-| 顺序 | 任务 | 产出 |
-|------|------|------|
-| 1 | Native host | 独立 `vibe-native-host` 读取 Native Messaging stdio、校验 URL、写 handoff 文件 |
-| 2 | App handoff | `create_browser_handoff_task` 复用 `create_task`、settings 默认目录和队列调度 |
-| 3 | 运行中转发 | `tauri-plugin-single-instance` 将第二次启动参数转给现有 App 实例并聚焦主窗口 |
-| 4 | DB 记录 | `002_browser_messages.sql`，记录 request/browser/url/status/error |
-| 5 | Manifest 管理 | 设置页按浏览器安装/卸载 Native Messaging manifest；Windows 写 HKCU registry |
-| 6 | 扩展开发包 | `pnpm build:extensions` 生成 Chromium、Firefox、Opera 包 |
-| 7 | 文档 | `docs/browser-integration.md` 与 `docs/debug-logging.md` |
-
-### 下一迭代建议
-
-- 为扩展生成生产 ID / 签名策略，并把 manifest 的 development ID 与 release ID 分离。
-- 打通 Chrome / Edge / Firefox 的手动端到端验证矩阵；Safari 单独规划 macOS Web Extension target。
-- 在浏览器集成页增加最近 handoff 成功/失败记录和复制诊断信息。
-- 继续保持 `pnpm typecheck`、`pnpm build`、`pnpm specta`、`cargo check`、`clippy`、`cargo test` 全绿。
-
-### 刻意延后
-
-- Localhost / WebSocket 本地 API
-- 磁力 / BT 等非 HTTP 协议
-- 扩展商店发布、Firefox/Safari 签名审核
-- 装饰性 Mica/玻璃态大面积铺陈
-- 无引擎支撑的高级可视化
-
----
-
-## 风险与依赖
-
-| 项 | 说明 |
-|----|------|
-| **大整数与 IPC** | 前端/API 使用 `f64`；引擎内部建议 `u64`，在边界显式转换 |
-| **Windows 发布** | WebView2、L2 `pnpm tauri build` 需持续验证 |
-| **设计文档** | 恢复 `docs/functional-design.md` 可减少需求口头漂移 |
-| **Specta** | 禁止直接导出 `i64` 等；新增命令/事件类型需符合 specta-typescript 约束 |
-
----
-
-## 文档索引
-
-- [PRODUCT.md](../PRODUCT.md) — 产品目的、用户、优先级、成功标准
-- [DESIGN.md](../DESIGN.md) — 设计系统、组件、动效、无障碍
-- [README.md](../README.md) — 环境、脚本、CI、架构摘要
-
----
-
-*最后更新：2026-06-07；阶段 3/4 基础交付与阶段 5 Native Messaging 基础已进入当前工作树，下一步补齐运行中 App 转发与浏览器端到端验证。*
+```bash
+pnpm tauri build --config src-tauri/tauri.ci.conf.json
+```

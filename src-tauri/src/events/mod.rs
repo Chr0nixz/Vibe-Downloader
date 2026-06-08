@@ -1,6 +1,10 @@
+use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::models::{Task, TaskProgressPayload, TaskRecord, TaskUpdatedPayload};
+use crate::{
+    db,
+    models::{Task, TaskProgressPayload, TaskRecord, TaskUpdatedPayload},
+};
 
 pub const EVENT_TASK_PROGRESS: &str = "task.progress";
 pub const EVENT_TASK_UPDATED: &str = "task.updated";
@@ -14,11 +18,26 @@ pub fn emit_task_progress(app: &AppHandle, payload: &TaskProgressPayload) {
     emit_payload(app, EVENT_TASK_PROGRESS, payload);
 }
 
-pub fn emit_task_updated(app: &AppHandle, task: &TaskRecord) {
-    let payload = TaskUpdatedPayload {
-        task: Task::from(task.clone()),
-    };
+pub fn emit_task_updated(app: &AppHandle, task: &Task) {
+    let payload = TaskUpdatedPayload { task: task.clone() };
     emit_payload(app, EVENT_TASK_UPDATED, &payload);
+}
+
+pub async fn emit_task_updated_record(app: &AppHandle, pool: &SqlitePool, task: &TaskRecord) {
+    let files = match db::list_task_file_records(pool, &task.id).await {
+        Ok(files) => files.into_iter().map(Into::into).collect(),
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %error,
+                "failed to load task files for update event"
+            );
+            Vec::new()
+        }
+    };
+    let mut task = Task::from(task.clone());
+    task.files = files;
+    emit_task_updated(app, &task);
 }
 
 pub fn emit_queue_changed(app: &AppHandle) {

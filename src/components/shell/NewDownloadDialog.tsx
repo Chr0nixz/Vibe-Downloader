@@ -163,10 +163,10 @@ export function NewDownloadDialog({
               <div className="grid grid-cols-1 gap-2 rounded-md border border-border-subtle bg-surface-raised/60 p-3 text-xs sm:grid-cols-2">
                 <Info label={t("newDownload.probeFile")} value={probe.fileName} />
                 <Info label={t("newDownload.probeSize")} value={formatBytes(parseByteCount(probe.totalSize))} />
-                <Info label={t("newDownload.probeHost")} value={probe.sourceHost} />
+                <Info label={t("newDownload.probeHost")} value={probe.sourceKey} />
                 <Info
                   label={t("newDownload.probeResume")}
-                  value={probe.supportsRange ? t("newDownload.resumeSupported") : t("newDownload.resumeUnavailable")}
+                  value={probe.capabilities.supportsResume ? t("newDownload.resumeSupported") : t("newDownload.resumeUnavailable")}
                 />
               </div>
             ) : null}

@@ -13,12 +13,12 @@ use uuid::Uuid;
 
 use crate::{
     db,
-    download::HttpEngine,
-    events::{emit_queue_changed, emit_task_progress, emit_task_updated},
+    download::{DownloadContext, EngineRegistry, ProbeOutput, ProbeRequest},
+    events::{emit_queue_changed, emit_task_progress, emit_task_updated, emit_task_updated_record},
     logging::sanitize_url,
     models::{
-        task::now_iso, AppErrorPayload, ProbeTaskPayload, RecoveryAction, Task, TaskRecord,
-        TaskSegment, TaskSegmentRecord, TaskStatus,
+        task::now_iso, AppErrorPayload, ProbeTaskPayload, RecoveryAction, Task, TaskFileRecord,
+        TaskKind, TaskRecord, TaskSegment, TaskSegmentRecord, TaskStatus,
     },
     platform, AppState, DownloadControl,
 };
@@ -49,17 +49,23 @@ pub struct ResolveTaskAttentionInput {
 #[tauri::command]
 #[specta::specta]
 pub async fn list_tasks(state: State<'_, AppState>) -> Result<Vec<Task>, String> {
-    db::list_task_records(&state.pool)
-        .await
-        .map(|records| records.into_iter().map(Task::from).collect())
+    let records = db::list_task_records(&state.pool).await?;
+    let mut tasks = Vec::with_capacity(records.len());
+    for record in records {
+        tasks.push(task_from_record_with_files(&state.pool, record).await?);
+    }
+    Ok(tasks)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn get_task(state: State<'_, AppState>, id: String) -> Result<Option<Task>, String> {
-    db::get_task_record(&state.pool, &id)
-        .await
-        .map(|record| record.map(Task::from))
+    let Some(record) = db::get_task_record(&state.pool, &id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        task_from_record_with_files(&state.pool, record).await?,
+    ))
 }
 
 #[tauri::command]
@@ -75,30 +81,39 @@ pub async fn list_task_segments(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn probe_task(input: ProbeTaskInput) -> Result<ProbeTaskPayload, String> {
+pub async fn probe_task(
+    state: State<'_, AppState>,
+    input: ProbeTaskInput,
+) -> Result<ProbeTaskPayload, String> {
     let url = input.url.trim();
     if url.is_empty() {
         return Err("Enter a download URL.".to_string());
     }
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("Only HTTP and HTTPS downloads are supported in this milestone.".to_string());
-    }
 
     tracing::debug!(url = %sanitize_url(url), "probing download url");
-    let probe = HttpEngine::new()?.probe(url).await?;
+    let engine = state.engine_registry.engine_for_uri(url)?;
+    let probe = engine
+        .probe(ProbeRequest {
+            uri: url.to_string(),
+            source: None,
+        })
+        .await?;
     tracing::debug!(
         url = %sanitize_url(url),
         total_size = probe.total_size,
-        supports_range = probe.supports_range,
-        source_host = %probe.source_host,
+        supports_parallel = probe.capabilities.supports_parallel,
+        source_key = %probe.source_key,
         "probe completed"
     );
     Ok(ProbeTaskPayload {
-        final_url: probe.final_url,
-        file_name: probe.file_name,
+        final_url: probe.resolved_uri,
+        file_name: probe.display_name,
+        protocol: probe.protocol,
+        task_kind: probe.task_kind,
+        capabilities: probe.capabilities,
+        files: probe.files,
         total_size: probe.total_size.to_string(),
-        supports_range: probe.supports_range,
-        source_host: probe.source_host,
+        source_key: probe.source_key,
         content_type: probe.content_type,
     })
 }
@@ -122,12 +137,14 @@ pub(crate) async fn create_task_with_state(
     if url.is_empty() {
         return Err("Enter a download URL.".to_string());
     }
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("Only HTTP and HTTPS downloads are supported in this milestone.".to_string());
-    }
 
-    let engine = HttpEngine::new()?;
-    let probe = engine.probe(url).await?;
+    let engine = state.engine_registry.engine_for_uri(url)?;
+    let probe = engine
+        .probe(ProbeRequest {
+            uri: url.to_string(),
+            source: None,
+        })
+        .await?;
     let settings =
         db::get_settings(&state.pool, super::settings::default_download_dir(&app)?).await?;
     let save_dir = match input
@@ -142,12 +159,15 @@ pub(crate) async fn create_task_with_state(
     std::fs::create_dir_all(&save_dir)
         .map_err(|e| format!("Could not create the download directory: {e}"))?;
 
+    let probe_files = normalized_probe_files(&probe);
+    let uses_single_output_file = probe_files.len() == 1;
     let requested_file_name = input
         .file_name
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(&probe.file_name);
+        .filter(|_| uses_single_output_file)
+        .unwrap_or(&probe.display_name);
     let final_path = unique_final_path(&save_dir, requested_file_name);
     let file_name = final_path
         .file_name()
@@ -160,19 +180,23 @@ pub(crate) async fn create_task_with_state(
     let record = TaskRecord {
         id: Uuid::new_v4().to_string(),
         url: url.to_string(),
-        final_url: Some(probe.final_url),
-        file_name,
+        final_url: Some(probe.resolved_uri.clone()),
+        protocol: probe.protocol.clone(),
+        task_kind: probe.task_kind,
+        file_name: file_name.clone(),
         save_dir: save_dir.to_string_lossy().to_string(),
         temp_path: Some(temp_path.to_string_lossy().to_string()),
         final_path: Some(final_path.to_string_lossy().to_string()),
         total_size: probe.total_size,
         downloaded_bytes: 0,
         status: TaskStatus::Queued,
-        etag: probe.etag,
-        last_modified: probe.last_modified,
-        content_type: probe.content_type,
-        supports_range: probe.supports_range,
-        source_host: probe.source_host,
+        etag: probe.etag.clone(),
+        last_modified: probe.last_modified.clone(),
+        content_type: probe.content_type.clone(),
+        supports_resume: probe.capabilities.supports_resume,
+        supports_parallel: probe.capabilities.supports_parallel,
+        supports_multi_file: probe.capabilities.supports_multi_file,
+        source_key: probe.source_key.clone(),
         connection_count: 0,
         speed_bps: 0,
         health_summary: Some("Queued".to_string()),
@@ -182,6 +206,16 @@ pub(crate) async fn create_task_with_state(
     };
 
     db::insert_task_record(&state.pool, &record).await?;
+    for file_record in task_file_records_from_probe(
+        &record,
+        &probe_files,
+        &save_dir,
+        &final_path,
+        &temp_path,
+        &file_name,
+    )? {
+        db::insert_task_file_record(&state.pool, &file_record).await?;
+    }
     db::ensure_task_segments_with_settings(&state.pool, &record, &settings).await?;
     tracing::info!(
         task_id = %record.id,
@@ -193,13 +227,8 @@ pub(crate) async fn create_task_with_state(
     emit_queue_changed(&app);
     schedule_queued_tasks(app.clone(), state).await;
 
-    let task = db::get_task_record(&state.pool, &record.id)
-        .await?
-        .map(Task::from)
-        .ok_or_else(|| "Task was created but could not be loaded.".to_string())?;
-    if let Some(record) = db::get_task_record(&state.pool, &task.id).await? {
-        emit_task_updated(&app, &record);
-    }
+    let task = task_payload(&state.pool, &record.id).await?;
+    emit_task_updated(&app, &task);
     Ok(task)
 }
 
@@ -233,10 +262,10 @@ pub async fn pause_task(
     .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
-    emit_task_updated(&app, &task);
+    emit_task_updated_record(&app, &state.pool, &task).await;
     emit_queue_changed(&app);
     schedule_queued_tasks(app, state.inner()).await;
-    Ok(Task::from(task))
+    task_payload(&state.pool, &id).await
 }
 
 #[tauri::command]
@@ -255,7 +284,7 @@ pub async fn resume_task(
         return Err("Remote file changed. Restart download to avoid corruption.".to_string());
     }
     let task = queue_task_for_retry(&app, state.inner(), &id).await?;
-    Ok(Task::from(task))
+    task_from_record_with_files(&state.pool, task).await
 }
 
 #[tauri::command]
@@ -280,7 +309,7 @@ pub async fn retry_task(
     }
 
     let task = queue_task_for_retry(&app, state.inner(), &id).await?;
-    Ok(Task::from(task))
+    task_from_record_with_files(&state.pool, task).await
 }
 
 #[tauri::command]
@@ -313,10 +342,10 @@ pub async fn cancel_task(
     .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
-    emit_task_updated(&app, &task);
+    emit_task_updated_record(&app, &state.pool, &task).await;
     emit_queue_changed(&app);
     schedule_queued_tasks(app, state.inner()).await;
-    Ok(Task::from(task))
+    task_payload(&state.pool, &id).await
 }
 
 #[tauri::command]
@@ -335,12 +364,13 @@ pub async fn delete_task(
 
     if delete_file {
         if let Some(task) = db::get_task_record(&state.pool, &id).await? {
-            for path in [task.temp_path, task.final_path].into_iter().flatten() {
-                match std::fs::remove_file(&path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(format!("Could not delete {path}: {e}")),
+            for file in db::list_task_file_records(&state.pool, &id).await? {
+                for path in [file.temp_path, file.final_path].into_iter().flatten() {
+                    remove_task_file_path(&path)?;
                 }
+            }
+            for path in [task.temp_path, task.final_path].into_iter().flatten() {
+                remove_task_file_path(&path)?;
             }
         }
     }
@@ -376,20 +406,21 @@ pub async fn resolve_task_attention(
                     "This task must be restarted before it can continue safely.".to_string()
                 );
             }
-            queue_task_for_retry(&app, state.inner(), id)
-                .await
-                .map(Task::from)
+            let task = queue_task_for_retry(&app, state.inner(), id).await?;
+            task_from_record_with_files(&state.pool, task).await
         }
         RecoveryAction::ChooseAnotherName | RecoveryAction::ChooseAnotherFolder => {
             update_recovery_target(&app, state.inner(), &task, &input).await?;
-            queue_task_for_retry(&app, state.inner(), id)
-                .await
-                .map(Task::from)
+            let task = queue_task_for_retry(&app, state.inner(), id).await?;
+            task_from_record_with_files(&state.pool, task).await
         }
-        RecoveryAction::Restart => restart_task_from_beginning(&app, state.inner(), &task)
-            .await
-            .map(Task::from),
-        RecoveryAction::OpenFolder | RecoveryAction::CheckUrl => Ok(Task::from(task)),
+        RecoveryAction::Restart => {
+            let task = restart_task_from_beginning(&app, state.inner(), &task).await?;
+            task_from_record_with_files(&state.pool, task).await
+        }
+        RecoveryAction::OpenFolder | RecoveryAction::CheckUrl => {
+            task_from_record_with_files(&state.pool, task).await
+        }
     }
 }
 
@@ -430,11 +461,32 @@ pub async fn seed_mock_data(pool: &sqlx::SqlitePool) -> Result<Vec<Task>, String
 
     for task in &mocks {
         db::insert_task_record(pool, task).await?;
+        db::insert_task_file_record(
+            pool,
+            &TaskFileRecord {
+                id: Uuid::new_v4().to_string(),
+                task_id: task.id.clone(),
+                relative_path: task.file_name.clone(),
+                file_name: task.file_name.clone(),
+                save_dir: task.save_dir.clone(),
+                temp_path: task.temp_path.clone(),
+                final_path: task.final_path.clone(),
+                total_size: task.total_size,
+                downloaded_bytes: task.downloaded_bytes,
+                selected: true,
+                status: task.status,
+                content_type: task.content_type.clone(),
+            },
+        )
+        .await?;
     }
 
-    db::list_task_records(pool)
-        .await
-        .map(|records| records.into_iter().map(Task::from).collect())
+    let records = db::list_task_records(pool).await?;
+    let mut tasks = Vec::with_capacity(records.len());
+    for record in records {
+        tasks.push(task_from_record_with_files(pool, record).await?);
+    }
+    Ok(tasks)
 }
 
 #[cfg(debug_assertions)]
@@ -451,6 +503,7 @@ pub(crate) async fn schedule_queued_tasks(app: AppHandle, state: &AppState) {
         state.downloads.clone(),
         state.scheduler.clone(),
         state.speed_limiter.clone(),
+        state.engine_registry.clone(),
     )
     .await;
 }
@@ -461,6 +514,7 @@ async fn schedule_queued_tasks_inner(
     downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
     scheduler: Arc<tokio::sync::Mutex<()>>,
     speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
+    engine_registry: Arc<EngineRegistry>,
 ) {
     let _guard = scheduler.lock().await;
 
@@ -507,14 +561,14 @@ async fn schedule_queued_tasks_inner(
             if downloads.lock().await.len() as i32 >= settings.max_active_tasks {
                 break;
             }
-            let host_used = host_connection_slots(&downloads, &task.source_host).await;
+            let host_used = host_connection_slots(&downloads, &task.source_key).await;
             let host_limit = usize::try_from(settings.max_connections_per_host)
                 .unwrap_or(usize::try_from(db::DEFAULT_MAX_CONNECTIONS_PER_HOST).unwrap_or(8))
                 .max(1);
             if host_used >= host_limit {
                 tracing::debug!(
                     task_id = %task.id,
-                    source_host = %task.source_host,
+                    source_key = %task.source_key,
                     host_used,
                     host_limit,
                     "scheduler deferred task because host connection limit is full"
@@ -537,6 +591,7 @@ async fn schedule_queued_tasks_inner(
                 downloads.clone(),
                 scheduler.clone(),
                 speed_limiter.clone(),
+                engine_registry.clone(),
                 task,
                 planned_slots,
             )
@@ -548,7 +603,7 @@ async fn schedule_queued_tasks_inner(
                     }
                     Ok(Some(current)) => {
                         emit_task_progress_snapshot(&app, &current);
-                        emit_task_updated(&app, &current);
+                        emit_task_updated_record(&app, &pool, &current).await;
                     }
                     _ => {}
                 }
@@ -570,10 +625,11 @@ async fn start_task_download(
     downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
     scheduler: Arc<tokio::sync::Mutex<()>>,
     speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
+    engine_registry: Arc<EngineRegistry>,
     task: TaskRecord,
     connection_limit: usize,
 ) -> Result<(), String> {
-    let task = prepare_task_for_download(&pool, task).await?;
+    let task = prepare_task_for_download(&pool, &engine_registry, task).await?;
     if downloads.lock().await.contains_key(&task.id) {
         tracing::debug!(task_id = %task.id, "download already active, skipping start");
         return Ok(());
@@ -599,22 +655,23 @@ async fn start_task_download(
     )
     .await?;
     if let Some(current) = db::get_task_record(&pool, &task.id).await? {
-        emit_task_updated(&app, &current);
+        emit_task_updated_record(&app, &pool, &current).await;
     }
 
     let cancel = Arc::new(AtomicBool::new(false));
     let downloads_map = downloads.clone();
     let task_id = task.id.clone();
     let map_task_id = task.id.clone();
-    let source_host = task.source_host.clone();
+    let source_key = task.source_key.clone();
     let task_app = app.clone();
     let task_cancel = cancel.clone();
     let task_pool = pool.clone();
     let task_scheduler = scheduler.clone();
     let state_speed_limiter = speed_limiter.clone();
+    let task_engine_registry = engine_registry.clone();
 
     let handle = tokio::spawn(async move {
-        let engine = match HttpEngine::new() {
+        let engine = match task_engine_registry.engine_for_uri(&task.url) {
             Ok(engine) => engine,
             Err(error) => {
                 mark_download_failed(&task_app, &task_pool, &task_id, error).await;
@@ -625,20 +682,21 @@ async fn start_task_download(
                     downloads_map.clone(),
                     task_scheduler.clone(),
                     state_speed_limiter.clone(),
+                    task_engine_registry.clone(),
                 );
                 return;
             }
         };
 
         let result = engine
-            .download(
-                task_app.clone(),
-                task_pool.clone(),
+            .download(DownloadContext {
+                app: task_app.clone(),
+                pool: task_pool.clone(),
                 task,
-                task_cancel.clone(),
-                state_speed_limiter.clone(),
+                cancel: task_cancel.clone(),
+                speed_limiter: state_speed_limiter.clone(),
                 connection_limit,
-            )
+            })
             .await;
         let canceled = task_cancel.load(Ordering::SeqCst);
         let _ = downloads_map.lock().await.remove(&task_id);
@@ -655,6 +713,7 @@ async fn start_task_download(
             downloads_map,
             task_scheduler,
             state_speed_limiter,
+            task_engine_registry,
         );
     });
 
@@ -663,7 +722,7 @@ async fn start_task_download(
         DownloadControl {
             cancel,
             handle,
-            source_host,
+            source_key,
             connection_slots: connection_limit.max(1),
         },
     );
@@ -674,13 +733,13 @@ async fn start_task_download(
 
 async fn host_connection_slots(
     downloads: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
-    source_host: &str,
+    source_key: &str,
 ) -> usize {
     downloads
         .lock()
         .await
         .values()
-        .filter(|control| control.source_host == source_host)
+        .filter(|control| control.source_key == source_key)
         .map(|control| control.connection_slots)
         .sum()
 }
@@ -691,9 +750,18 @@ fn spawn_schedule_queued_tasks(
     downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
     scheduler: Arc<tokio::sync::Mutex<()>>,
     speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
+    engine_registry: Arc<EngineRegistry>,
 ) {
     tokio::spawn(async move {
-        schedule_queued_tasks_inner(app, pool, downloads, scheduler, speed_limiter).await;
+        schedule_queued_tasks_inner(
+            app,
+            pool,
+            downloads,
+            scheduler,
+            speed_limiter,
+            engine_registry,
+        )
+        .await;
     });
 }
 
@@ -721,7 +789,7 @@ async fn queue_task_for_retry(
     .await?;
     let task = require_task(&state.pool, id).await?;
     emit_task_progress_snapshot(app, &task);
-    emit_task_updated(app, &task);
+    emit_task_updated_record(app, &state.pool, &task).await;
     emit_queue_changed(app);
     schedule_queued_tasks(app.clone(), state).await;
     require_task(&state.pool, id).await
@@ -765,7 +833,7 @@ async fn update_recovery_target(
     )
     .await?;
     if let Some(updated) = db::get_task_record(&state.pool, &task.id).await? {
-        emit_task_updated(app, &updated);
+        emit_task_updated_record(app, &state.pool, &updated).await;
     }
     Ok(())
 }
@@ -789,17 +857,25 @@ async fn restart_task_from_beginning(
         }
     }
 
-    let probe = HttpEngine::new()?.probe(&task.url).await?;
+    let engine = state.engine_registry.engine_for_uri(&task.url)?;
+    let probe = engine
+        .probe(ProbeRequest {
+            uri: task.url.clone(),
+            source: None,
+        })
+        .await?;
     db::update_task_remote_metadata(
         &state.pool,
         &task.id,
-        &probe.final_url,
+        &probe.resolved_uri,
         probe.total_size,
         probe.etag.as_deref(),
         probe.last_modified.as_deref(),
         probe.content_type.as_deref(),
-        probe.supports_range,
-        &probe.source_host,
+        probe.capabilities.supports_resume,
+        probe.capabilities.supports_parallel,
+        probe.capabilities.supports_multi_file,
+        &probe.source_key,
     )
     .await?;
     db::delete_segments_for_task(&state.pool, &task.id).await?;
@@ -812,7 +888,7 @@ async fn restart_task_from_beginning(
     let task = require_task(&state.pool, &task.id).await?;
     db::ensure_task_segments_with_settings(&state.pool, &task, &settings).await?;
     emit_task_progress_snapshot(app, &task);
-    emit_task_updated(app, &task);
+    emit_task_updated_record(app, &state.pool, &task).await;
     emit_queue_changed(app);
     schedule_queued_tasks(app.clone(), state).await;
     require_task(&state.pool, &task.id).await
@@ -850,6 +926,7 @@ fn task_error_code(task: &TaskRecord) -> Option<String> {
 
 async fn prepare_task_for_download(
     pool: &sqlx::SqlitePool,
+    engine_registry: &EngineRegistry,
     task: TaskRecord,
 ) -> Result<TaskRecord, String> {
     if task.status == TaskStatus::NeedsAttention {
@@ -872,16 +949,16 @@ async fn prepare_task_for_download(
         temp_exists,
         temp_size,
         task.total_size,
-        task.supports_range,
+        task.supports_resume,
     ) {
         fail_task_and_segments(pool, &task.id, message).await?;
         return Err(message.to_string());
     }
 
     if temp_size > 0 {
-        let probe = HttpEngine::new()?
-            .probe(task.final_url.as_deref().unwrap_or(&task.url))
-            .await?;
+        let uri = task.final_url.as_deref().unwrap_or(&task.url).to_string();
+        let engine = engine_registry.engine_for_uri(&uri)?;
+        let probe = engine.probe(ProbeRequest { uri, source: None }).await?;
         if let Some(message) = resume_mismatch_message(&task, &probe) {
             db::update_task_status(
                 pool,
@@ -925,7 +1002,7 @@ pub fn local_resume_error(
     temp_exists: bool,
     temp_size: i64,
     total_size: i64,
-    supports_range: bool,
+    supports_parallel: bool,
 ) -> Option<&'static str> {
     if temp_size > total_size && total_size > 0 {
         return Some("Temporary file is larger than the remote file.");
@@ -936,7 +1013,7 @@ pub fn local_resume_error(
     if recorded_progress > temp_size {
         return Some("Temporary file is smaller than the recorded progress.");
     }
-    if temp_size > 0 && !supports_range {
+    if temp_size > 0 && !supports_parallel {
         return Some("Resume unavailable. Restart this download from the beginning.");
     }
     None
@@ -948,7 +1025,7 @@ pub fn segment_resume_error(
     temp_exists: bool,
     temp_size: i64,
     total_size: i64,
-    supports_range: bool,
+    supports_parallel: bool,
 ) -> Option<&'static str> {
     if segments.is_empty() {
         return Some("Task has no segment records. Restart this download.");
@@ -994,26 +1071,66 @@ pub fn segment_resume_error(
     if highest_recorded_offset > temp_size {
         return Some("Temporary file is smaller than the recorded progress.");
     }
-    if temp_size > 0 && !supports_range {
+    if temp_size > 0 && !supports_parallel {
         return Some("Resume unavailable. Restart this download from the beginning.");
     }
     None
 }
 
-pub fn resume_mismatch_message(
-    task: &TaskRecord,
-    probe: &crate::download::ProbeResult,
-) -> Option<String> {
-    if task.total_size != probe.total_size {
+pub trait ResumeProbe {
+    fn total_size(&self) -> i64;
+    fn supports_resume(&self) -> bool;
+    fn etag(&self) -> Option<&String>;
+    fn last_modified(&self) -> Option<&String>;
+}
+
+impl ResumeProbe for crate::download::ProbeOutput {
+    fn total_size(&self) -> i64 {
+        self.total_size
+    }
+
+    fn supports_resume(&self) -> bool {
+        self.capabilities.supports_resume
+    }
+
+    fn etag(&self) -> Option<&String> {
+        self.etag.as_ref()
+    }
+
+    fn last_modified(&self) -> Option<&String> {
+        self.last_modified.as_ref()
+    }
+}
+
+impl ResumeProbe for crate::download::ProbeResult {
+    fn total_size(&self) -> i64 {
+        self.total_size
+    }
+
+    fn supports_resume(&self) -> bool {
+        self.supports_resume
+    }
+
+    fn etag(&self) -> Option<&String> {
+        self.etag.as_ref()
+    }
+
+    fn last_modified(&self) -> Option<&String> {
+        self.last_modified.as_ref()
+    }
+}
+
+pub fn resume_mismatch_message<P: ResumeProbe>(task: &TaskRecord, probe: &P) -> Option<String> {
+    if task.total_size != probe.total_size() {
         return Some("Remote file changed. Restart download to avoid corruption.".to_string());
     }
-    if !probe.supports_range {
+    if !probe.supports_resume() {
         return Some("Server no longer supports resume. Restart this download.".to_string());
     }
-    if task.etag != probe.etag {
+    if task.etag.as_ref() != probe.etag() {
         return Some("Remote file changed. Restart download to avoid corruption.".to_string());
     }
-    if task.last_modified != probe.last_modified {
+    if task.last_modified.as_ref() != probe.last_modified() {
         return Some("Remote file changed. Restart download to avoid corruption.".to_string());
     }
     None
@@ -1080,7 +1197,7 @@ async fn mark_download_failed(
     }
     if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
         emit_task_progress_snapshot(app, &task);
-        emit_task_updated(app, &task);
+        emit_task_updated_record(app, pool, &task).await;
     }
     emit_queue_changed(app);
 }
@@ -1089,6 +1206,123 @@ async fn require_task(pool: &sqlx::SqlitePool, id: &str) -> Result<TaskRecord, S
     db::get_task_record(pool, id)
         .await?
         .ok_or_else(|| "Task not found.".to_string())
+}
+
+async fn task_payload(pool: &sqlx::SqlitePool, id: &str) -> Result<Task, String> {
+    let record = require_task(pool, id).await?;
+    task_from_record_with_files(pool, record).await
+}
+
+async fn task_from_record_with_files(
+    pool: &sqlx::SqlitePool,
+    record: TaskRecord,
+) -> Result<Task, String> {
+    let files = db::list_task_file_records(pool, &record.id)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let mut task = Task::from(record);
+    task.files = files;
+    Ok(task)
+}
+
+fn normalized_probe_files(probe: &ProbeOutput) -> Vec<crate::models::ProbedFile> {
+    if probe.files.is_empty() {
+        return vec![crate::models::ProbedFile {
+            relative_path: probe.display_name.clone(),
+            size: probe.total_size.to_string(),
+            content_type: probe.content_type.clone(),
+        }];
+    }
+    probe.files.clone()
+}
+
+fn task_file_records_from_probe(
+    task: &TaskRecord,
+    files: &[crate::models::ProbedFile],
+    save_dir: &Path,
+    single_final_path: &Path,
+    single_temp_path: &Path,
+    single_file_name: &str,
+) -> Result<Vec<TaskFileRecord>, String> {
+    let single_file = files.len() == 1;
+    let mut records = Vec::with_capacity(files.len());
+    for file in files {
+        let (relative_path, file_name, final_path, temp_path) = if single_file {
+            (
+                single_file_name.to_string(),
+                single_file_name.to_string(),
+                single_final_path.to_path_buf(),
+                single_temp_path.to_path_buf(),
+            )
+        } else {
+            let relative_path = sanitize_relative_path(&file.relative_path);
+            let parent = save_dir.join(relative_path.parent().unwrap_or_else(|| Path::new("")));
+            std::fs::create_dir_all(&parent)
+                .map_err(|e| format!("Could not create the download directory: {e}"))?;
+            let requested_name = relative_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("download");
+            let final_path = unique_final_path(&parent, requested_name);
+            let relative_path = final_path
+                .strip_prefix(save_dir)
+                .unwrap_or(&final_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let file_name = final_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(requested_name)
+                .to_string();
+            let temp_path = PathBuf::from(format!("{}.vibe-downloading", final_path.display()));
+            (relative_path, file_name, final_path, temp_path)
+        };
+
+        records.push(TaskFileRecord {
+            id: Uuid::new_v4().to_string(),
+            task_id: task.id.clone(),
+            relative_path,
+            file_name,
+            save_dir: task.save_dir.clone(),
+            temp_path: Some(temp_path.to_string_lossy().to_string()),
+            final_path: Some(final_path.to_string_lossy().to_string()),
+            total_size: parse_probed_file_size(&file.size),
+            downloaded_bytes: 0,
+            selected: true,
+            status: TaskStatus::Queued,
+            content_type: file.content_type.clone(),
+        });
+    }
+    Ok(records)
+}
+
+fn sanitize_relative_path(value: &str) -> PathBuf {
+    let mut path = PathBuf::new();
+    for component in value
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|component| !component.is_empty() && *component != "." && *component != "..")
+    {
+        path.push(sanitize_file_name(component));
+    }
+    if path.as_os_str().is_empty() {
+        path.push(format!("download-{}", chrono::Utc::now().timestamp()));
+    }
+    path
+}
+
+fn parse_probed_file_size(value: &str) -> i64 {
+    value.parse::<i64>().unwrap_or(0)
+}
+
+fn remove_task_file_path(path: &str) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not delete {path}: {error}")),
+    }
 }
 
 fn emit_task_progress_snapshot(app: &AppHandle, task: &TaskRecord) {
@@ -1302,6 +1536,8 @@ fn mock_task(
         id: Uuid::new_v4().to_string(),
         url: url.to_string(),
         final_url: Some(url.to_string()),
+        protocol: "https".to_string(),
+        task_kind: TaskKind::SingleFile,
         file_name: file_name.to_string(),
         save_dir: "~/Downloads".to_string(),
         temp_path: None,
@@ -1312,8 +1548,10 @@ fn mock_task(
         etag: None,
         last_modified: None,
         content_type: None,
-        supports_range: true,
-        source_host: host.to_string(),
+        supports_resume: true,
+        supports_parallel: true,
+        supports_multi_file: false,
+        source_key: host.to_string(),
         connection_count,
         speed_bps,
         health_summary,

@@ -9,6 +9,8 @@ export const commands = {
 	id: string,
 	url: string,
 	finalUrl: string | null,
+	protocol: string,
+	taskKind: TaskKind,
 	fileName: string,
 	saveDir: string,
 	tempPath: string | null,
@@ -19,12 +21,15 @@ export const commands = {
 	etag: string | null,
 	lastModified: string | null,
 	contentType: string | null,
-	supportsRange: boolean,
-	sourceHost: string,
+	supportsResume: boolean,
+	supportsParallel: boolean,
+	supportsMultiFile: boolean,
+	sourceKey: string,
 	connectionCount: number,
 	speedBps: string,
 	healthSummary: string | null,
 	errorMessage: string | null,
+	files: TaskFile[],
 	createdAt: string,
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_task", { id })),
@@ -114,6 +119,12 @@ export type CreateTaskInput = {
 	fileName: string | null,
 };
 
+export type EngineCapabilities = {
+	supportsResume: boolean,
+	supportsParallel: boolean,
+	supportsMultiFile: boolean,
+};
+
 export type ProbeTaskInput = {
 	url: string,
 };
@@ -121,9 +132,18 @@ export type ProbeTaskInput = {
 export type ProbeTaskPayload = {
 	finalUrl: string,
 	fileName: string,
+	protocol: string,
+	taskKind: TaskKind,
+	capabilities: EngineCapabilities,
+	files: ProbedFile[],
 	totalSize: string,
-	supportsRange: boolean,
-	sourceHost: string,
+	sourceKey: string,
+	contentType: string | null,
+};
+
+export type ProbedFile = {
+	relativePath: string,
+	size: string,
 	contentType: string | null,
 };
 
@@ -142,6 +162,8 @@ export type Task = {
 	id: string,
 	url: string,
 	finalUrl: string | null,
+	protocol: string,
+	taskKind: TaskKind,
 	fileName: string,
 	saveDir: string,
 	tempPath: string | null,
@@ -152,15 +174,35 @@ export type Task = {
 	etag: string | null,
 	lastModified: string | null,
 	contentType: string | null,
-	supportsRange: boolean,
-	sourceHost: string,
+	supportsResume: boolean,
+	supportsParallel: boolean,
+	supportsMultiFile: boolean,
+	sourceKey: string,
 	connectionCount: number,
 	speedBps: string,
 	healthSummary: string | null,
 	errorMessage: string | null,
+	files: TaskFile[],
 	createdAt: string,
 	updatedAt: string,
 };
+
+export type TaskFile = {
+	id: string,
+	taskId: string,
+	relativePath: string,
+	fileName: string,
+	saveDir: string,
+	tempPath: string | null,
+	finalPath: string | null,
+	totalSize: string,
+	downloadedBytes: string,
+	selected: boolean,
+	status: TaskStatus,
+	contentType: string | null,
+};
+
+export type TaskKind = "single_file" | "multi_file" | "manifest";
 
 export type TaskProgressPayload = {
 	taskId: string,
@@ -174,6 +216,8 @@ export type TaskProgressPayload = {
 export type TaskSegment = {
 	id: string,
 	taskId: string,
+	fileId: string | null,
+	unitKind: string,
 	rangeStart: string,
 	rangeEnd: string,
 	downloadedUntil: string,

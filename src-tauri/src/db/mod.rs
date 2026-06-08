@@ -1,7 +1,8 @@
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 
 use crate::models::{
-    AppSettings, BrowserKind, SegmentStatus, TaskRecord, TaskSegmentRecord, TaskStatus,
+    AppSettings, BrowserKind, SegmentStatus, TaskFileRecord, TaskKind, TaskRecord,
+    TaskSegmentRecord, TaskStatus,
 };
 
 pub const DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;
@@ -29,6 +30,14 @@ pub async fn connect(db_path: &std::path::Path) -> Result<SqlitePool, String> {
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys = ON")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(&url)
         .await
         .map_err(|e| format!("Database connection failed: {e}"))?;
@@ -45,9 +54,9 @@ pub async fn connect(db_path: &std::path::Path) -> Result<SqlitePool, String> {
 pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, String> {
     let rows = sqlx::query(
         r#"
-        SELECT id, url, final_url, file_name, save_dir, temp_path, final_path,
+        SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
-               supports_range, source_host, connection_count, speed_bps,
+               supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
                health_summary, error_message, created_at, updated_at
         FROM tasks
         ORDER BY
@@ -74,9 +83,9 @@ pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, Str
 pub async fn get_task_record(pool: &SqlitePool, id: &str) -> Result<Option<TaskRecord>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, url, final_url, file_name, save_dir, temp_path, final_path,
+        SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
-               supports_range, source_host, connection_count, speed_bps,
+               supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
                health_summary, error_message, created_at, updated_at
         FROM tasks WHERE id = ?
         "#,
@@ -95,9 +104,9 @@ pub async fn list_queued_task_records(
 ) -> Result<Vec<TaskRecord>, String> {
     let rows = sqlx::query(
         r#"
-        SELECT id, url, final_url, file_name, save_dir, temp_path, final_path,
+        SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
-               supports_range, source_host, connection_count, speed_bps,
+               supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
                health_summary, error_message, created_at, updated_at
         FROM tasks
         WHERE status = 'queued'
@@ -118,6 +127,8 @@ fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
         id: row.get("id"),
         url: row.get("url"),
         final_url: row.get("final_url"),
+        protocol: row.get("protocol"),
+        task_kind: TaskKind::from_db_str(row.get::<String, _>("task_kind").as_str()),
         file_name: row.get("file_name"),
         save_dir: row.get("save_dir"),
         temp_path: row.get("temp_path"),
@@ -128,8 +139,10 @@ fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
         etag: row.get("etag"),
         last_modified: row.get("last_modified"),
         content_type: row.get("content_type"),
-        supports_range: row.get::<i64, _>("supports_range") != 0,
-        source_host: row.get("source_host"),
+        supports_resume: row.get::<i64, _>("supports_resume") != 0,
+        supports_parallel: row.get::<i64, _>("supports_parallel") != 0,
+        supports_multi_file: row.get::<i64, _>("supports_multi_file") != 0,
+        source_key: row.get("source_key"),
         connection_count: row.get("connection_count"),
         speed_bps: row.get("speed_bps"),
         health_summary: row.get("health_summary"),
@@ -143,16 +156,18 @@ pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<
     sqlx::query(
         r#"
         INSERT INTO tasks (
-            id, url, final_url, file_name, save_dir, temp_path, final_path,
+            id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
             total_size, downloaded_bytes, status, etag, last_modified, content_type,
-            supports_range, source_host, connection_count, speed_bps,
+            supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
             health_summary, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&task.id)
     .bind(&task.url)
     .bind(&task.final_url)
+    .bind(&task.protocol)
+    .bind(task.task_kind.as_str())
     .bind(&task.file_name)
     .bind(&task.save_dir)
     .bind(&task.temp_path)
@@ -163,8 +178,10 @@ pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<
     .bind(&task.etag)
     .bind(&task.last_modified)
     .bind(&task.content_type)
-    .bind(if task.supports_range { 1 } else { 0 })
-    .bind(&task.source_host)
+    .bind(if task.supports_resume { 1 } else { 0 })
+    .bind(if task.supports_parallel { 1 } else { 0 })
+    .bind(if task.supports_multi_file { 1 } else { 0 })
+    .bind(&task.source_key)
     .bind(task.connection_count)
     .bind(task.speed_bps)
     .bind(&task.health_summary)
@@ -399,20 +416,91 @@ pub async fn latest_browser_error(
     Ok(row.map(|row| row.get("error_message")))
 }
 
+pub async fn insert_task_file_record(
+    pool: &SqlitePool,
+    file: &TaskFileRecord,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        INSERT INTO task_files (
+            id, task_id, relative_path, file_name, save_dir, temp_path, final_path,
+            total_size, downloaded_bytes, selected, status, content_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&file.id)
+    .bind(&file.task_id)
+    .bind(&file.relative_path)
+    .bind(&file.file_name)
+    .bind(&file.save_dir)
+    .bind(&file.temp_path)
+    .bind(&file.final_path)
+    .bind(file.total_size)
+    .bind(file.downloaded_bytes)
+    .bind(if file.selected { 1 } else { 0 })
+    .bind(file.status.as_str())
+    .bind(&file.content_type)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn list_task_file_records(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Vec<TaskFileRecord>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, task_id, relative_path, file_name, save_dir, temp_path, final_path,
+               total_size, downloaded_bytes, selected, status, content_type
+        FROM task_files
+        WHERE task_id = ?
+        ORDER BY relative_path ASC
+        "#,
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    rows.iter().map(row_to_task_file).collect()
+}
+
+fn row_to_task_file(row: &sqlx::sqlite::SqliteRow) -> Result<TaskFileRecord, String> {
+    Ok(TaskFileRecord {
+        id: row.get("id"),
+        task_id: row.get("task_id"),
+        relative_path: row.get("relative_path"),
+        file_name: row.get("file_name"),
+        save_dir: row.get("save_dir"),
+        temp_path: row.get("temp_path"),
+        final_path: row.get("final_path"),
+        total_size: row.get("total_size"),
+        downloaded_bytes: row.get("downloaded_bytes"),
+        selected: row.get::<i64, _>("selected") != 0,
+        status: TaskStatus::from_db_str(row.get::<String, _>("status").as_str()),
+        content_type: row.get("content_type"),
+    })
+}
+
 pub async fn insert_segment_record(
     pool: &SqlitePool,
     segment: &TaskSegmentRecord,
 ) -> Result<(), String> {
     sqlx::query(
         r#"
-        INSERT INTO segments (
-            id, task_id, range_start, range_end, downloaded_until,
+        INSERT INTO task_work_units (
+            id, task_id, file_id, unit_kind, range_start, range_end, downloaded_until,
             status, retry_count, last_error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&segment.id)
     .bind(&segment.task_id)
+    .bind(&segment.file_id)
+    .bind(&segment.unit_kind)
     .bind(segment.range_start)
     .bind(segment.range_end)
     .bind(segment.downloaded_until)
@@ -478,12 +566,12 @@ async fn ensure_task_segments_with_plan(
         return Ok(existing);
     }
 
-    let segments =
+    let task_work_units =
         planned_segments_for_task_with_plan(task, multi_connection_threshold_bytes, segment_count);
-    for segment in &segments {
+    for segment in &task_work_units {
         insert_segment_record(pool, segment).await?;
     }
-    Ok(segments)
+    Ok(task_work_units)
 }
 
 pub fn planned_segment_count(task: &TaskRecord) -> usize {
@@ -500,7 +588,7 @@ pub fn planned_segment_count_with_plan(
     segment_count: i32,
 ) -> usize {
     let segment_count = segment_count.clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT) as usize;
-    if task.supports_range
+    if task.supports_parallel
         && task.total_size > 0
         && task.total_size >= multi_connection_threshold_bytes.max(0)
     {
@@ -532,6 +620,8 @@ pub fn planned_segments_for_task_with_plan(
         return vec![TaskSegmentRecord {
             id: uuid::Uuid::new_v4().to_string(),
             task_id: task.id.clone(),
+            file_id: None,
+            unit_kind: "http_range".to_string(),
             range_start: 0,
             range_end: total_size.saturating_sub(1).max(0),
             downloaded_until: task.downloaded_bytes.max(0),
@@ -563,6 +653,8 @@ pub fn planned_segments_for_task_with_plan(
             let segment = TaskSegmentRecord {
                 id: uuid::Uuid::new_v4().to_string(),
                 task_id: task.id.clone(),
+                file_id: None,
+                unit_kind: "http_range".to_string(),
                 range_start: start,
                 range_end: end,
                 downloaded_until,
@@ -586,9 +678,9 @@ pub async fn list_segment_records(
 ) -> Result<Vec<TaskSegmentRecord>, String> {
     let rows = sqlx::query(
         r#"
-        SELECT id, task_id, range_start, range_end, downloaded_until,
+        SELECT id, task_id, file_id, unit_kind, range_start, range_end, downloaded_until,
                status, retry_count, last_error
-        FROM segments
+        FROM task_work_units
         WHERE task_id = ?
         ORDER BY range_start ASC
         "#,
@@ -607,9 +699,9 @@ pub async fn get_first_segment_record(
 ) -> Result<Option<TaskSegmentRecord>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, task_id, range_start, range_end, downloaded_until,
+        SELECT id, task_id, file_id, unit_kind, range_start, range_end, downloaded_until,
                status, retry_count, last_error
-        FROM segments
+        FROM task_work_units
         WHERE task_id = ?
         ORDER BY range_start ASC
         LIMIT 1
@@ -627,6 +719,8 @@ fn row_to_segment(row: &sqlx::sqlite::SqliteRow) -> Result<TaskSegmentRecord, St
     Ok(TaskSegmentRecord {
         id: row.get("id"),
         task_id: row.get("task_id"),
+        file_id: row.get("file_id"),
+        unit_kind: row.get("unit_kind"),
         range_start: row.get("range_start"),
         range_end: row.get("range_end"),
         downloaded_until: row.get("downloaded_until"),
@@ -641,7 +735,11 @@ pub async fn clear_tasks(pool: &SqlitePool) -> Result<(), String> {
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM segments")
+    sqlx::query("DELETE FROM task_work_units")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM task_files")
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -679,6 +777,20 @@ pub async fn update_task_progress(
     .await
     .map_err(|e| e.to_string())?;
 
+    sqlx::query(
+        r#"
+        UPDATE task_files
+        SET downloaded_bytes = ?, status = ?
+        WHERE task_id = ? AND selected = 1
+        "#,
+    )
+    .bind(downloaded_bytes)
+    .bind(status.as_str())
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
@@ -703,7 +815,7 @@ pub async fn update_task_and_segment_progress(
 
     sqlx::query(
         r#"
-        UPDATE segments
+        UPDATE task_work_units
         SET downloaded_until = ?, status = ?, last_error = NULL
         WHERE id = ?
         "#,
@@ -726,7 +838,7 @@ pub async fn update_segment_progress(
 ) -> Result<(), String> {
     sqlx::query(
         r#"
-        UPDATE segments
+        UPDATE task_work_units
         SET downloaded_until = ?, status = ?, last_error = NULL
         WHERE id = ?
         "#,
@@ -748,7 +860,7 @@ pub async fn update_segment_downloaded_until(
 ) -> Result<(), String> {
     sqlx::query(
         r#"
-        UPDATE segments
+        UPDATE task_work_units
         SET downloaded_until = ?
         WHERE id = ?
         "#,
@@ -771,7 +883,7 @@ pub async fn update_segment_retry(
 ) -> Result<(), String> {
     sqlx::query(
         r#"
-        UPDATE segments
+        UPDATE task_work_units
         SET downloaded_until = ?, retry_count = ?, status = 'pending', last_error = ?
         WHERE id = ?
         "#,
@@ -817,6 +929,19 @@ pub async fn update_task_status(
     .await
     .map_err(|e| e.to_string())?;
 
+    sqlx::query(
+        r#"
+        UPDATE task_files
+        SET status = ?
+        WHERE task_id = ?
+        "#,
+    )
+    .bind(status.as_str())
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
@@ -838,6 +963,21 @@ pub async fn update_task_final_path(
     .bind(file_name)
     .bind(final_path)
     .bind(&updated_at)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        r#"
+        UPDATE task_files
+        SET file_name = ?, relative_path = ?, final_path = ?
+        WHERE task_id = ? AND selected = 1
+        "#,
+    )
+    .bind(file_name)
+    .bind(file_name)
+    .bind(final_path)
     .bind(task_id)
     .execute(pool)
     .await
@@ -871,6 +1011,24 @@ pub async fn update_task_save_target(
     .await
     .map_err(|e| e.to_string())?;
 
+    let temp_path = format!("{final_path}.vibe-downloading");
+    sqlx::query(
+        r#"
+        UPDATE task_files
+        SET file_name = ?, relative_path = ?, save_dir = ?, final_path = ?, temp_path = ?
+        WHERE task_id = ? AND selected = 1
+        "#,
+    )
+    .bind(file_name)
+    .bind(file_name)
+    .bind(save_dir)
+    .bind(final_path)
+    .bind(temp_path)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
@@ -883,8 +1041,10 @@ pub async fn update_task_remote_metadata(
     etag: Option<&str>,
     last_modified: Option<&str>,
     content_type: Option<&str>,
-    supports_range: bool,
-    source_host: &str,
+    supports_resume: bool,
+    supports_parallel: bool,
+    supports_multi_file: bool,
+    source_key: &str,
 ) -> Result<(), String> {
     let updated_at = crate::models::task::now_iso();
 
@@ -892,7 +1052,8 @@ pub async fn update_task_remote_metadata(
         r#"
         UPDATE tasks
         SET final_url = ?, total_size = ?, etag = ?, last_modified = ?,
-            content_type = ?, supports_range = ?, source_host = ?, updated_at = ?
+            content_type = ?, supports_resume = ?, supports_parallel = ?,
+            supports_multi_file = ?, source_key = ?, updated_at = ?
         WHERE id = ?
         "#,
     )
@@ -901,8 +1062,10 @@ pub async fn update_task_remote_metadata(
     .bind(etag)
     .bind(last_modified)
     .bind(content_type)
-    .bind(if supports_range { 1 } else { 0 })
-    .bind(source_host)
+    .bind(if supports_resume { 1 } else { 0 })
+    .bind(if supports_parallel { 1 } else { 0 })
+    .bind(if supports_multi_file { 1 } else { 0 })
+    .bind(source_key)
     .bind(&updated_at)
     .bind(task_id)
     .execute(pool)
@@ -930,11 +1093,23 @@ pub async fn reset_task_download_state(pool: &SqlitePool, task_id: &str) -> Resu
     .await
     .map_err(|e| e.to_string())?;
 
+    sqlx::query(
+        r#"
+        UPDATE task_files
+        SET downloaded_bytes = 0, status = 'queued'
+        WHERE task_id = ?
+        "#,
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
 pub async fn delete_segments_for_task(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
-    sqlx::query("DELETE FROM segments WHERE task_id = ?")
+    sqlx::query("DELETE FROM task_work_units WHERE task_id = ?")
         .bind(task_id)
         .execute(pool)
         .await
@@ -961,6 +1136,18 @@ pub async fn complete_task(pool: &SqlitePool, task_id: &str) -> Result<(), Strin
     .await
     .map_err(|e| e.to_string())?;
 
+    sqlx::query(
+        r#"
+        UPDATE task_files
+        SET status = 'completed', downloaded_bytes = total_size
+        WHERE task_id = ?
+        "#,
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
@@ -973,7 +1160,7 @@ pub async fn complete_task_segment(
 
     sqlx::query(
         r#"
-        UPDATE segments
+        UPDATE task_work_units
         SET downloaded_until = range_end + 1, status = 'completed', last_error = NULL
         WHERE id = ?
         "#,
@@ -989,7 +1176,7 @@ pub async fn complete_task_segment(
 pub async fn complete_segment(pool: &SqlitePool, segment_id: &str) -> Result<(), String> {
     sqlx::query(
         r#"
-        UPDATE segments
+        UPDATE task_work_units
         SET downloaded_until = range_end + 1, status = 'completed', last_error = NULL
         WHERE id = ?
         "#,
@@ -1030,7 +1217,21 @@ pub async fn complete_unknown_size_task(
 
     sqlx::query(
         r#"
-        UPDATE segments
+        UPDATE task_files
+        SET status = 'completed', total_size = ?, downloaded_bytes = ?
+        WHERE task_id = ?
+        "#,
+    )
+    .bind(final_size)
+    .bind(final_size)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        r#"
+        UPDATE task_work_units
         SET range_start = 0, range_end = ?, downloaded_until = ?, status = 'completed',
             last_error = NULL
         WHERE id = ?
@@ -1060,7 +1261,7 @@ pub async fn split_largest_remaining_segment(
     max_segments: usize,
 ) -> Result<Option<SegmentSplit>, String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM segments WHERE task_id = ?")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_work_units WHERE task_id = ?")
         .bind(task_id)
         .fetch_one(&mut *tx)
         .await
@@ -1072,9 +1273,9 @@ pub async fn split_largest_remaining_segment(
 
     let row = sqlx::query(
         r#"
-        SELECT id, task_id, range_start, range_end, downloaded_until,
+        SELECT id, task_id, file_id, unit_kind, range_start, range_end, downloaded_until,
                status, retry_count, last_error
-        FROM segments
+        FROM task_work_units
         WHERE task_id = ? AND downloaded_until <= range_end
         ORDER BY (range_end - downloaded_until) DESC
         LIMIT 1
@@ -1111,7 +1312,7 @@ pub async fn split_largest_remaining_segment(
         return Ok(None);
     }
 
-    sqlx::query("UPDATE segments SET range_end = ? WHERE id = ?")
+    sqlx::query("UPDATE task_work_units SET range_end = ? WHERE id = ?")
         .bind(original_range_end)
         .bind(&segment.id)
         .execute(&mut *tx)
@@ -1121,6 +1322,8 @@ pub async fn split_largest_remaining_segment(
     let tail_segment = TaskSegmentRecord {
         id: uuid::Uuid::new_v4().to_string(),
         task_id: segment.task_id.clone(),
+        file_id: segment.file_id.clone(),
+        unit_kind: segment.unit_kind.clone(),
         range_start: tail_start,
         range_end: segment.range_end,
         downloaded_until: tail_start,
@@ -1131,14 +1334,16 @@ pub async fn split_largest_remaining_segment(
 
     sqlx::query(
         r#"
-        INSERT INTO segments (
-            id, task_id, range_start, range_end, downloaded_until,
+        INSERT INTO task_work_units (
+            id, task_id, file_id, unit_kind, range_start, range_end, downloaded_until,
             status, retry_count, last_error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&tail_segment.id)
     .bind(&tail_segment.task_id)
+    .bind(&tail_segment.file_id)
+    .bind(&tail_segment.unit_kind)
     .bind(tail_segment.range_start)
     .bind(tail_segment.range_end)
     .bind(tail_segment.downloaded_until)
@@ -1166,7 +1371,7 @@ pub async fn update_segment_status(
 ) -> Result<(), String> {
     sqlx::query(
         r#"
-        UPDATE segments
+        UPDATE task_work_units
         SET status = ?, downloaded_until = COALESCE(?, downloaded_until), last_error = ?
         WHERE id = ?
         "#,
@@ -1190,7 +1395,7 @@ pub async fn update_segments_status_for_task(
 ) -> Result<(), String> {
     sqlx::query(
         r#"
-        UPDATE segments
+        UPDATE task_work_units
         SET status = ?, last_error = ?
         WHERE task_id = ? AND status != 'completed'
         "#,
@@ -1212,11 +1417,29 @@ pub fn segment_downloaded_bytes(segment: &TaskSegmentRecord) -> i64 {
     next_byte.saturating_sub(segment.range_start)
 }
 
-pub fn total_segment_downloaded_bytes(segments: &[TaskSegmentRecord]) -> i64 {
-    segments.iter().map(segment_downloaded_bytes).sum()
+pub fn total_segment_downloaded_bytes(task_work_units: &[TaskSegmentRecord]) -> i64 {
+    task_work_units.iter().map(segment_downloaded_bytes).sum()
 }
 
 pub async fn delete_task_record(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM task_work_units WHERE task_id = ?")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("DELETE FROM task_files WHERE task_id = ?")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("DELETE FROM task_events WHERE task_id = ?")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     sqlx::query("DELETE FROM tasks WHERE id = ?")
         .bind(task_id)
         .execute(pool)
@@ -1245,7 +1468,7 @@ pub async fn reset_interrupted_tasks(pool: &SqlitePool) -> Result<(), String> {
 
     sqlx::query(
         r#"
-        UPDATE segments
+        UPDATE task_work_units
         SET status = 'pending'
         WHERE status = 'downloading'
         "#,

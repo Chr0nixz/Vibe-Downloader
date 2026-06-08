@@ -10,6 +10,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::{
     db,
+    download::EngineRegistry,
     events::{
         emit_browser_handoff_failed, emit_browser_handoff_received,
         emit_browser_integration_changed,
@@ -105,7 +106,7 @@ pub async fn create_browser_handoff_task_with_state(
         });
     }
 
-    let task_result = validate_handoff(&input).map(|url| CreateTaskInput {
+    let task_result = validate_handoff(&input, &state.engine_registry).map(|url| CreateTaskInput {
         url,
         save_dir: None,
         file_name: sanitize_suggested_file_name(input.suggested_file_name.as_deref()),
@@ -222,7 +223,10 @@ async fn integration_status(
     })
 }
 
-fn validate_handoff(input: &BrowserHandoffInput) -> Result<String, String> {
+fn validate_handoff(
+    input: &BrowserHandoffInput,
+    registry: &EngineRegistry,
+) -> Result<String, String> {
     if input.version != 1 {
         return Err("Unsupported browser handoff payload version.".to_string());
     }
@@ -232,9 +236,7 @@ fn validate_handoff(input: &BrowserHandoffInput) -> Result<String, String> {
 
     let url = input.url.trim();
     let parsed = Url::parse(url).map_err(|_| "Browser handoff URL is invalid.".to_string())?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err("Browser handoff only accepts HTTP and HTTPS URLs.".to_string());
-    }
+    registry.engine_for_uri(parsed.as_str())?;
     if parsed.username() != "" || parsed.password().is_some() {
         return Err("Browser handoff URLs must not contain embedded credentials.".to_string());
     }

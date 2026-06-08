@@ -20,5 +20,11 @@ Before submitting changes, run the relevant checks:
 ```bash
 pnpm typecheck
 pnpm build
+pnpm check:bindings
 pnpm test:rust
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 ```
+
+Run `pnpm build:extensions` when changing `browser/extension-core` or Native
+Messaging documentation.

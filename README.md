@@ -1,20 +1,51 @@
 # Vibe Downloader
 
-Modern desktop download manager (Tauri 2 + React + Rust). This repository currently ships the app shell, design tokens, SQLite persistence, a resumable segmented HTTP engine, task queue/settings, diagnostic logging, and the Stage 5 Native Messaging browser handoff foundation.
+Vibe Downloader 是一个现代桌面下载管理器，技术栈为 Tauri 2、React 19、TypeScript、Rust、SQLite 和 WebExtension Native Messaging。
 
-## Prerequisites
+当前仓库已经具备可运行的桌面应用、HTTP/HTTPS 下载核心、任务持久化、队列调度、设置页、诊断日志、基础浏览器扩展交接和发布流水线。项目仍处于 `0.1.0` 开发阶段，重点是把 HTTP 下载、续传、浏览器交接和桌面体验打磨稳定，再扩展更多协议。
+
+## 当前实现状态
+
+已实现：
+
+- HTTP/HTTPS 任务创建、HEAD/Range GET 探测、文件名/大小/Range 支持识别。
+- SQLite 持久化：`tasks`、`segments`、`settings`、`browser_messages`。
+- 单连接下载、未知大小下载、Range 分段下载、`.vibe-downloading` 临时文件、完成后原子改名。
+- 断点续传校验：本地临时文件、segment range、远端大小、ETag、Last-Modified、Range 支持变化。
+- 大文件多连接：默认 16 MB 以上启用，默认 4 段，配置上限 8 段。
+- 队列调度：默认最多 2 个活跃任务，支持 per-host 连接槽限制，队列按创建时间 FIFO 调度。
+- 全局速度限制：后端 token bucket，设置页可配置 B/s。
+- 基础恢复动作：重试、稍后重试、另存为、更换目录、重新开始、打开目录、检查 URL。
+- 前端体验：任务列表、状态筛选、搜索、详情面板、Chunks/Connections、展开行、速度 sparkline、toast、删除确认、响应式抽屉、简体中文/英文界面。
+- 浏览器集成基础：Chromium/Firefox/Opera 开发包、Native Messaging host、manifest 安装/卸载、request id 去重、单实例转发。
+- 自动更新基础：Tauri updater endpoint、公钥、Release workflow 和状态栏安装入口。
+- 质量基线：TypeScript 检查、Vite 构建、Rust check/clippy/test、Specta 绑定漂移检查、三平台 Tauri build workflow。
+
+尚未完成或仍需打磨：
+
+- 命令面板目前只提供开发环境 mock reset，还不是完整用户命令中心。
+- 顶部速度限制按钮只有 UI 入口，实际限速仍在设置页配置。
+- 新建下载需要手动 Detect，提交时后端会再次 probe。
+- 详情页只有 Overview、Chunks、Connections，尚无 Logs/Request tab。
+- `task_events` 表已存在，但任务生命周期日志尚未形成数据闭环。
+- 浏览器扩展不自动接管浏览器下载，不转发 Cookie/header，不含商店 ID/签名/Safari wrapper。
+- 未实现单任务限速、任务优先级、文件类型规则、批量导入、系统托盘、通知、开机启动、BT/HLS 等能力。
+
+## 环境要求
 
 ### Windows
 
-- [Rust](https://www.rust-lang.org/tools/install)
-- [Node.js](https://nodejs.org/) 20+
-- [pnpm](https://pnpm.io/) 10+
-- [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (usually preinstalled on Windows 11)
+- Rust
+- Node.js 20+（CI 使用 Node 22）
+- pnpm 10+
+- WebView2（Windows 11 通常已预装）
 
 ### macOS
 
-- Xcode Command Line Tools: `xcode-select --install`
-- Rust, Node 20+, pnpm 10+
+- Xcode Command Line Tools：`xcode-select --install`
+- Rust
+- Node.js 20+
+- pnpm 10+
 
 ### Linux
 
@@ -23,96 +54,103 @@ sudo apt update
 sudo apt install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 ```
 
-See [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for other distributions.
-
-## Development
+## 本地开发
 
 ```bash
 pnpm install
 pnpm tauri dev
 ```
 
-### Scripts
+常用脚本：
 
-| Script | Description |
-|--------|-------------|
-| `pnpm dev` | Vite dev server (used by Tauri) |
-| `pnpm build` | Production frontend build |
-| `pnpm typecheck` | TypeScript check |
-| `pnpm tauri dev` | Run desktop app |
-| `pnpm dev:tauri` | Run desktop app with verbose Rust logging (`RUST_LOG`) |
-| `pnpm specta` | Regenerate `src/generated/bindings.ts` from Rust (requires working test runtime) |
-| `pnpm test:rust` | Run Rust integration tests |
-| `pnpm check:bindings` | Regenerate bindings and fail if `bindings.ts` drifted |
-| `pnpm build:extensions` | Build browser extension development packages into `browser/dist` |
-| `pnpm sync-version <tag>` | Sync version into `package.json`, `tauri.conf.json`, `Cargo.toml` |
+| 命令 | 用途 |
+| --- | --- |
+| `pnpm dev` | 启动 Vite dev server |
+| `pnpm build` | TypeScript 编译并构建前端产物 |
+| `pnpm typecheck` | TypeScript 类型检查 |
+| `pnpm lint` | 当前等同于 `tsc --noEmit` |
+| `pnpm tauri dev` | 启动桌面应用 |
+| `pnpm dev:tauri` | 带 `RUST_LOG` 调试预设启动桌面应用 |
+| `pnpm specta` | 从 Rust 导出 `src/generated/bindings.ts` |
+| `pnpm check:bindings` | 导出绑定并检查是否漂移 |
+| `pnpm test:rust` | 运行 Rust 测试 |
+| `pnpm build:extensions` | 生成浏览器扩展开发包到 `browser/dist` |
+| `pnpm sync-version <tag>` | 同步版本到 package、Tauri config 和 Cargo |
 
-### Verification
+推荐验证命令：
 
 ```bash
 pnpm typecheck
 pnpm build
-pnpm specta
-cd src-tauri
-cargo check
-cargo clippy -- -D warnings
-cargo test
+pnpm check:bindings
+pnpm test:rust
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+pnpm build:extensions
 ```
 
-## Debug logging
+## 项目结构
 
-The app writes logs to disk in release builds and captures frontend console output into the same log file. See [docs/debug-logging.md](docs/debug-logging.md) for log paths, `RUST_LOG` presets, browser extension console access, and bug-report guidance.
+```text
+src/                         React 前端、状态管理、i18n、Tauri adapter
+src-tauri/src/               Rust 后端、命令、下载引擎、数据库、日志、平台适配
+src-tauri/src/db/migrations/ SQLite migration
+src-tauri/src/bin/           独立二进制：vibe-native-host、export-bindings
+browser/extension-core/      WebExtension 源码和 manifest 模板
+scripts/                     扩展构建、版本同步脚本
+docs/                        发布、日志、浏览器集成、路线图、审计文档
+.github/workflows/           CI、Tauri build、Release workflows
+```
 
-## Architecture
+## 架构摘要
 
-- **Frontend**: React, Zustand, Tailwind v4, shadcn-style primitives, Framer Motion (command palette / details).
-- **Backend**: Rust commands + SQLite (`sqlx` runtime queries), `reqwest` HTTP downloads, fixed four-way segmented Range downloads for files >= 16 MB, Range resume metadata checks, hardened segment resume validation, task queue scheduling, settings storage, startup state reset for interrupted tasks, Tauri events (`task.progress`, `queue.changed`, `settings.changed`).
-- **Browser handoff**: WebExtension source under `browser/extension-core`, Native Messaging manifests managed from Settings, a standalone `vibe-native-host` binary, and single-instance forwarding for handoff files when the app is already running.
-- **Logging**: `tracing` + Tauri logging for the app and standalone native host; see [docs/debug-logging.md](docs/debug-logging.md).
-- **Types**: `tauri-specta` exports to `src/generated/bindings.ts`.
-- **Window API**: `@tauri-apps/api/window` (`getCurrentWindow`) with `core:window:*` capabilities. No `@tauri-apps/plugin-window`.
+- 前端使用 React、Zustand、Tailwind v4、Radix primitives、lucide-react、Framer Motion 和 i18next。
+- 前后端命令类型通过 `tauri-specta` 导出到 `src/generated/bindings.ts`。
+- 后端使用 `reqwest` 下载、`tokio` 异步任务、`sqlx` SQLite、`tracing` 日志。
+- Tauri 事件包括 `task.progress`、`task.updated`、`queue.changed`、`settings.changed`、`browser.integration.changed`、`browser.handoff.*`。
+- Windows 使用自绘标题栏；macOS 使用 overlay 标题栏；Linux 保留系统装饰。
+- Tauri CSP 已配置为最小化的本地资源策略，生产自动更新通过 GitHub Release `latest.json`。
 
-### Current Status
+## 浏览器扩展
 
-- **Stage 1 HTTP MVP**: complete.
-- **Stage 2 resumable segmented HTTP downloads**: accepted. Large Range-capable files use fixed four-way segments, Chunks/Connections show real segment data, and regression tests cover resume, failure, and SHA-256 integrity paths.
-- **Stage 3 queue and settings**: implemented in the current working tree. Settings storage, default save directory, max active task scheduling, queued task UI, and settings events are wired.
-- **Stage 4 experience polish**: implemented in the current working tree for Toast, delete confirmation, speed history sparkline, expanded task rows, and accessibility copy.
-- **Stage 5 browser handoff**: Native Messaging foundation is implemented in the current working tree. See [docs/browser-integration.md](docs/browser-integration.md).
+```bash
+pnpm build:extensions
+```
 
-### Title bar (v0)
+输出：
 
-| Platform | Strategy |
-|----------|----------|
-| Windows | Custom title bar (`decorations: false` in setup) |
-| macOS | Overlay native title bar + traffic-light safe area |
-| Linux | System decorations (`decorations: true`) |
+- `browser/dist/chromium`
+- `browser/dist/firefox`
+- `browser/dist/opera`
 
-## CI / CD
+Chrome、Edge、Brave、Vivaldi、Chromium 开发验证可加载 Chromium 包。Firefox 使用 Firefox 包。Safari 目前仅保留平台和文档占位，尚未提供生产 wrapper。
 
-- **CI (required)**: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — typecheck, lint, Vite build, `cargo check`, `clippy`, `cargo test`, specta bindings drift check.
-- **Tauri Build (required)**: [`.github/workflows/tauri-build.yml`](.github/workflows/tauri-build.yml) — Windows / macOS / Linux `pnpm tauri build`.
-- **Release**: [`.github/workflows/release.yml`](.github/workflows/release.yml) — triggered by `v*` tags; builds installers, uploads GitHub Release assets, and publishes `latest.json` for the in-app updater.
+更多细节见 [docs/browser-integration.md](docs/browser-integration.md)。
 
-See [docs/RELEASE.md](docs/RELEASE.md) for secrets, tagging, and first-release checklist.
+## CI / Release
 
-## Docs
+- CI：`.github/workflows/ci.yml`，包含前端类型/构建、Rust check/clippy/test、Specta drift。
+- Tauri Build：`.github/workflows/tauri-build.yml`，Windows/macOS/Linux 三平台构建，CI 配置关闭 updater artifacts。
+- Release：`.github/workflows/release.yml`，由 `v*` tag 或手动触发，构建安装包并生成 updater `latest.json`。
 
-- [docs/RELEASE.md](docs/RELEASE.md) — GitHub Release 与自动更新
-- [docs/browser-integration.md](docs/browser-integration.md) — Native Messaging browser handoff
-- [docs/debug-logging.md](docs/debug-logging.md) — App, native host, frontend, and extension diagnostics
-- [docs/ROADMAP.md](docs/ROADMAP.md) — 分阶段开发路线图
-- [PRODUCT.md](PRODUCT.md) — 产品上下文（Impeccable）
-- [DESIGN.md](DESIGN.md) — 设计系统（Impeccable）
+发布流程见 [docs/RELEASE.md](docs/RELEASE.md)。
 
-说明：`docs/functional-design.md` 与 `docs/ui-design-style.md` 已恢复，后续开发应与 roadmap、产品文档和设计文档交叉校验。
+## 文档索引
+
+- [PRODUCT.md](PRODUCT.md)：产品定位、用户、体验原则。
+- [DESIGN.md](DESIGN.md)：设计系统、布局、视觉、组件和可访问性准则。
+- [docs/ROADMAP.md](docs/ROADMAP.md)：按当前代码状态整理的后续路线图。
+- [docs/project-improvement-audit.md](docs/project-improvement-audit.md)：当前不足和优先级建议。
+- [docs/browser-integration.md](docs/browser-integration.md)：Native Messaging 与扩展开发验证。
+- [docs/debug-logging.md](docs/debug-logging.md)：应用、native host、前端和扩展日志。
+- [docs/RELEASE.md](docs/RELEASE.md)：GitHub Release 和自动更新发布流程。
+
+旧的 `docs/functional-design.md` 和 `docs/ui-design-style.md` 已合并到产品、设计、路线图和审计文档中。
 
 ## License
 
-Vibe Downloader is licensed under the GNU General Public License v3.0 only (`GPL-3.0-only`).
+Vibe Downloader 使用 GNU General Public License v3.0 only（`GPL-3.0-only`）。
 
-Commercial licensing is available from the copyright holder. This means the public
-source release remains under GPL-3.0-only, while separate commercial terms may be
-offered for use cases that need a different license.
+商业授权可由版权持有人另行提供。公开源码保持 GPL-3.0-only，同时保留对需要不同授权条款的使用场景提供商业许可的可能。
 
-See [LICENSE](LICENSE) and [CONTRIBUTING.md](CONTRIBUTING.md).
+详见 [LICENSE](LICENSE) 和 [CONTRIBUTING.md](CONTRIBUTING.md)。

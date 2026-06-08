@@ -72,7 +72,11 @@ export const useTaskStore = create<TaskStore>((set) => ({
       const index = state.tasks.findIndex((entry) => entry.id === task.id);
       if (index < 0) return { tasks: [task, ...state.tasks] };
       const tasks = [...state.tasks];
-      tasks[index] = { ...tasks[index], ...task };
+      tasks[index] = {
+        ...tasks[index],
+        ...task,
+        files: task.files.length > 0 ? task.files : tasks[index].files,
+      };
       return { tasks };
     }),
   patchTask: (raw) => {
@@ -91,6 +95,16 @@ export const useTaskStore = create<TaskStore>((set) => ({
               speedBps,
               connectionCount: payload.connectionCount,
               status: payload.status,
+              files: task.files.map((file) =>
+                file.selected
+                  ? {
+                      ...file,
+                      downloadedBytes: parseByteCount(payload.downloadedBytes),
+                      totalSize: parseByteCount(payload.totalSize),
+                      status: payload.status,
+                    }
+                  : file,
+              ),
             }
           : task,
       ),
@@ -166,7 +180,7 @@ export function filterTasks(
     if (!query) return true;
     return (
       task.fileName.toLowerCase().includes(query) ||
-      task.sourceHost.toLowerCase().includes(query) ||
+      task.sourceKey.toLowerCase().includes(query) ||
       task.url.toLowerCase().includes(query)
     );
   });

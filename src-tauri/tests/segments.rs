@@ -6,7 +6,8 @@ use tauri_app_lib::{
     db,
     download::ProbeResult,
     models::{
-        AppSettings, BrowserKind, SegmentStatus, Task, TaskRecord, TaskStatus, TaskUpdatedPayload,
+        AppSettings, BrowserKind, SegmentStatus, Task, TaskKind, TaskRecord, TaskStatus,
+        TaskUpdatedPayload,
     },
 };
 
@@ -48,7 +49,7 @@ async fn small_or_no_range_tasks_keep_one_segment() {
         "task-no-range",
         db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
     );
-    no_range.supports_range = false;
+    no_range.supports_parallel = false;
     db::insert_task_record(&pool, &no_range)
         .await
         .expect("insert no range");
@@ -570,7 +571,8 @@ fn multi_segment_remote_metadata_changes_are_blocked() {
     );
 
     let mut probe = sample_probe(task.total_size);
-    probe.supports_range = false;
+    probe.supports_resume = false;
+    probe.supports_parallel = false;
     assert_eq!(
         resume_mismatch_message(&task, &probe).as_deref(),
         Some("Server no longer supports resume. Restart this download.")
@@ -592,6 +594,8 @@ fn sample_task(id: &str, total_size: i64) -> TaskRecord {
         id: id.to_string(),
         url: "http://127.0.0.1/file".to_string(),
         final_url: Some("http://127.0.0.1/file".to_string()),
+        protocol: "http".to_string(),
+        task_kind: TaskKind::SingleFile,
         file_name: "file.bin".to_string(),
         save_dir: std::env::temp_dir().to_string_lossy().to_string(),
         temp_path: Some(
@@ -612,8 +616,10 @@ fn sample_task(id: &str, total_size: i64) -> TaskRecord {
         etag: Some("etag-a".to_string()),
         last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT".to_string()),
         content_type: Some("application/octet-stream".to_string()),
-        supports_range: true,
-        source_host: "127.0.0.1".to_string(),
+        supports_resume: true,
+        supports_parallel: true,
+        supports_multi_file: false,
+        source_key: "127.0.0.1".to_string(),
         connection_count: 0,
         speed_bps: 0,
         health_summary: Some("Queued".to_string()),
@@ -628,8 +634,10 @@ fn sample_probe(total_size: i64) -> ProbeResult {
         final_url: "http://127.0.0.1/file".to_string(),
         file_name: "file.bin".to_string(),
         total_size,
-        supports_range: true,
-        source_host: "127.0.0.1".to_string(),
+        supports_resume: true,
+        supports_parallel: true,
+        supports_multi_file: false,
+        source_key: "127.0.0.1".to_string(),
         etag: Some("etag-a".to_string()),
         last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT".to_string()),
         content_type: Some("application/octet-stream".to_string()),

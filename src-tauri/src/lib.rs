@@ -18,7 +18,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 pub struct DownloadControl {
     pub cancel: Arc<AtomicBool>,
     pub handle: JoinHandle<()>,
-    pub source_host: String,
+    pub source_key: String,
     pub connection_slots: usize,
 }
 
@@ -27,6 +27,7 @@ pub struct AppState {
     pub downloads: Arc<Mutex<HashMap<String, DownloadControl>>>,
     pub scheduler: Arc<Mutex<()>>,
     pub speed_limiter: Arc<download::GlobalSpeedLimiter>,
+    pub engine_registry: Arc<download::EngineRegistry>,
 }
 
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
@@ -201,12 +202,14 @@ pub fn run() {
             let speed_limiter = Arc::new(download::GlobalSpeedLimiter::new(
                 db::parse_speed_limit_bps(settings.global_speed_limit_bps.as_deref()),
             ));
+            let engine_registry = Arc::new(download::EngineRegistry::new()?);
 
             app.manage(AppState {
                 pool: pool.clone(),
                 downloads: Arc::new(Mutex::new(HashMap::new())),
                 scheduler: Arc::new(Mutex::new(())),
                 speed_limiter,
+                engine_registry,
             });
             process_browser_handoff_files_from_args(
                 &handle,

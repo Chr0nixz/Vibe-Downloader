@@ -8,6 +8,7 @@ use std::{
 use reqwest::Url;
 use serde::Serialize;
 use tauri_app_lib::{
+    download::EngineRegistry,
     logging::{init_standalone_logging, sanitize_url},
     models::{BrowserHandoffInput, BrowserKind},
 };
@@ -116,9 +117,7 @@ fn validate_handoff(input: &BrowserHandoffInput) -> Result<(), String> {
     }
 
     let url = Url::parse(input.url.trim()).map_err(|_| "Handoff URL is invalid.".to_string())?;
-    if url.scheme() != "http" && url.scheme() != "https" {
-        return Err("Only HTTP and HTTPS handoff URLs are accepted.".to_string());
-    }
+    EngineRegistry::new()?.engine_for_uri(url.as_str())?;
     if url.username() != "" || url.password().is_some() {
         return Err("Handoff URLs must not contain embedded credentials.".to_string());
     }
