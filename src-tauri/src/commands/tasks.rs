@@ -14,11 +14,11 @@ use uuid::Uuid;
 use crate::{
     db,
     download::HttpEngine,
-    events::{emit_queue_changed, emit_task_progress},
+    events::{emit_queue_changed, emit_task_progress, emit_task_updated},
     logging::sanitize_url,
     models::{
-        task::now_iso, AppErrorPayload, ProbeTaskPayload, Task, TaskRecord, TaskSegment,
-        TaskSegmentRecord, TaskStatus,
+        task::now_iso, AppErrorPayload, ProbeTaskPayload, RecoveryAction, Task, TaskRecord,
+        TaskSegment, TaskSegmentRecord, TaskStatus,
     },
     platform, AppState, DownloadControl,
 };
@@ -35,6 +35,15 @@ pub struct CreateTaskInput {
 #[serde(rename_all = "camelCase")]
 pub struct ProbeTaskInput {
     pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveTaskAttentionInput {
+    pub id: String,
+    pub action: RecoveryAction,
+    pub file_name: Option<String>,
+    pub save_dir: Option<String>,
 }
 
 #[tauri::command]
@@ -119,11 +128,8 @@ pub(crate) async fn create_task_with_state(
 
     let engine = HttpEngine::new()?;
     let probe = engine.probe(url).await?;
-    let settings = db::get_settings(
-        &state.pool,
-        super::settings::default_download_dir(&app)?,
-    )
-    .await?;
+    let settings =
+        db::get_settings(&state.pool, super::settings::default_download_dir(&app)?).await?;
     let save_dir = match input
         .save_dir
         .as_deref()
@@ -187,10 +193,14 @@ pub(crate) async fn create_task_with_state(
     emit_queue_changed(&app);
     schedule_queued_tasks(app.clone(), state).await;
 
-    db::get_task_record(&state.pool, &record.id)
+    let task = db::get_task_record(&state.pool, &record.id)
         .await?
         .map(Task::from)
-        .ok_or_else(|| "Task was created but could not be loaded.".to_string())
+        .ok_or_else(|| "Task was created but could not be loaded.".to_string())?;
+    if let Some(record) = db::get_task_record(&state.pool, &task.id).await? {
+        emit_task_updated(&app, &record);
+    }
+    Ok(task)
 }
 
 #[tauri::command]
@@ -223,6 +233,7 @@ pub async fn pause_task(
     .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
+    emit_task_updated(&app, &task);
     emit_queue_changed(&app);
     schedule_queued_tasks(app, state.inner()).await;
     Ok(Task::from(task))
@@ -243,26 +254,7 @@ pub async fn resume_task(
     if matches!(task.status, TaskStatus::NeedsAttention) {
         return Err("Remote file changed. Restart download to avoid corruption.".to_string());
     }
-    db::update_task_status(
-        &state.pool,
-        &id,
-        TaskStatus::Queued,
-        0,
-        0,
-        Some("Queued"),
-        None,
-    )
-    .await?;
-    db::update_segments_status_for_task(
-        &state.pool,
-        &id,
-        crate::models::SegmentStatus::Pending,
-        None,
-    )
-    .await?;
-    emit_queue_changed(&app);
-    schedule_queued_tasks(app.clone(), state.inner()).await;
-    let task = require_task(&state.pool, &id).await?;
+    let task = queue_task_for_retry(&app, state.inner(), &id).await?;
     Ok(Task::from(task))
 }
 
@@ -274,33 +266,20 @@ pub async fn retry_task(
     id: String,
 ) -> Result<Task, String> {
     tracing::info!(task_id = %id, "retrying task");
+    let task = require_task(&state.pool, &id).await?;
+    if task.status == TaskStatus::NeedsAttention
+        && task_error_code(&task)
+            .as_deref()
+            .is_some_and(restart_required_error_code)
+    {
+        return Err("This task must be restarted before it can continue safely.".to_string());
+    }
     if let Some(control) = state.downloads.lock().await.remove(&id) {
         control.cancel.store(true, Ordering::SeqCst);
         control.handle.abort();
     }
 
-    db::update_task_status(
-        &state.pool,
-        &id,
-        TaskStatus::Queued,
-        0,
-        0,
-        Some("Queued"),
-        None,
-    )
-    .await?;
-    db::update_segments_status_for_task(
-        &state.pool,
-        &id,
-        crate::models::SegmentStatus::Pending,
-        None,
-    )
-    .await?;
-    let task = require_task(&state.pool, &id).await?;
-    emit_task_progress_snapshot(&app, &task);
-    emit_queue_changed(&app);
-    schedule_queued_tasks(app.clone(), state.inner()).await;
-    let task = require_task(&state.pool, &id).await?;
+    let task = queue_task_for_retry(&app, state.inner(), &id).await?;
     Ok(Task::from(task))
 }
 
@@ -334,6 +313,7 @@ pub async fn cancel_task(
     .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
+    emit_task_updated(&app, &task);
     emit_queue_changed(&app);
     schedule_queued_tasks(app, state.inner()).await;
     Ok(Task::from(task))
@@ -369,6 +349,48 @@ pub async fn delete_task(
     emit_queue_changed(&app);
     schedule_queued_tasks(app, state.inner()).await;
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn resolve_task_attention(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: ResolveTaskAttentionInput,
+) -> Result<Task, String> {
+    let id = input.id.trim();
+    if id.is_empty() {
+        return Err("Task id is required.".to_string());
+    }
+    let task = require_task(&state.pool, id).await?;
+    let error_code = task_error_code(&task);
+
+    match input.action {
+        RecoveryAction::Retry | RecoveryAction::RetryLater => {
+            if task.status == TaskStatus::NeedsAttention
+                && error_code
+                    .as_deref()
+                    .is_some_and(restart_required_error_code)
+            {
+                return Err(
+                    "This task must be restarted before it can continue safely.".to_string()
+                );
+            }
+            queue_task_for_retry(&app, state.inner(), id)
+                .await
+                .map(Task::from)
+        }
+        RecoveryAction::ChooseAnotherName | RecoveryAction::ChooseAnotherFolder => {
+            update_recovery_target(&app, state.inner(), &task, &input).await?;
+            queue_task_for_retry(&app, state.inner(), id)
+                .await
+                .map(Task::from)
+        }
+        RecoveryAction::Restart => restart_task_from_beginning(&app, state.inner(), &task)
+            .await
+            .map(Task::from),
+        RecoveryAction::OpenFolder | RecoveryAction::CheckUrl => Ok(Task::from(task)),
+    }
 }
 
 #[tauri::command]
@@ -462,13 +484,14 @@ async fn schedule_queued_tasks_inner(
             break;
         }
 
-        let queued = match db::list_queued_task_records(&pool, i64::from(settings.max_active_tasks)).await {
-            Ok(tasks) => tasks,
-            Err(error) => {
-                tracing::error!(error = %error, "failed to load queued tasks");
-                break;
-            }
-        };
+        let queued =
+            match db::list_queued_task_records(&pool, i64::from(settings.max_active_tasks)).await {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to load queued tasks");
+                    break;
+                }
+            };
         if queued.is_empty() {
             break;
         }
@@ -523,7 +546,10 @@ async fn schedule_queued_tasks_inner(
                     Ok(Some(current)) if current.status == TaskStatus::Queued => {
                         mark_download_failed(&app, &pool, &task_id, error).await;
                     }
-                    Ok(Some(current)) => emit_task_progress_snapshot(&app, &current),
+                    Ok(Some(current)) => {
+                        emit_task_progress_snapshot(&app, &current);
+                        emit_task_updated(&app, &current);
+                    }
                     _ => {}
                 }
             }
@@ -572,6 +598,9 @@ async fn start_task_download(
         None,
     )
     .await?;
+    if let Some(current) = db::get_task_record(&pool, &task.id).await? {
+        emit_task_updated(&app, &current);
+    }
 
     let cancel = Arc::new(AtomicBool::new(false));
     let downloads_map = downloads.clone();
@@ -629,18 +658,15 @@ async fn start_task_download(
         );
     });
 
-    downloads
-        .lock()
-        .await
-        .insert(
-            map_task_id,
-            DownloadControl {
-                cancel,
-                handle,
-                source_host,
-                connection_slots: connection_limit.max(1),
-            },
-        );
+    downloads.lock().await.insert(
+        map_task_id,
+        DownloadControl {
+            cancel,
+            handle,
+            source_host,
+            connection_slots: connection_limit.max(1),
+        },
+    );
 
     emit_queue_changed(&app);
     Ok(())
@@ -669,6 +695,157 @@ fn spawn_schedule_queued_tasks(
     tokio::spawn(async move {
         schedule_queued_tasks_inner(app, pool, downloads, scheduler, speed_limiter).await;
     });
+}
+
+async fn queue_task_for_retry(
+    app: &AppHandle,
+    state: &AppState,
+    id: &str,
+) -> Result<TaskRecord, String> {
+    db::update_task_status(
+        &state.pool,
+        id,
+        TaskStatus::Queued,
+        0,
+        0,
+        Some("Queued"),
+        None,
+    )
+    .await?;
+    db::update_segments_status_for_task(
+        &state.pool,
+        id,
+        crate::models::SegmentStatus::Pending,
+        None,
+    )
+    .await?;
+    let task = require_task(&state.pool, id).await?;
+    emit_task_progress_snapshot(app, &task);
+    emit_task_updated(app, &task);
+    emit_queue_changed(app);
+    schedule_queued_tasks(app.clone(), state).await;
+    require_task(&state.pool, id).await
+}
+
+async fn update_recovery_target(
+    app: &AppHandle,
+    state: &AppState,
+    task: &TaskRecord,
+    input: &ResolveTaskAttentionInput,
+) -> Result<(), String> {
+    let save_dir = input
+        .save_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&task.save_dir));
+    std::fs::create_dir_all(&save_dir)
+        .map_err(|e| format!("Could not create the download directory: {e}"))?;
+
+    let requested_file_name = input
+        .file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&task.file_name);
+    let final_path = unique_final_path(&save_dir, requested_file_name);
+    let file_name = final_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(requested_file_name)
+        .to_string();
+
+    db::update_task_save_target(
+        &state.pool,
+        &task.id,
+        &file_name,
+        &save_dir.to_string_lossy(),
+        &final_path.to_string_lossy(),
+    )
+    .await?;
+    if let Some(updated) = db::get_task_record(&state.pool, &task.id).await? {
+        emit_task_updated(app, &updated);
+    }
+    Ok(())
+}
+
+async fn restart_task_from_beginning(
+    app: &AppHandle,
+    state: &AppState,
+    task: &TaskRecord,
+) -> Result<TaskRecord, String> {
+    if let Some(control) = state.downloads.lock().await.remove(&task.id) {
+        control.cancel.store(true, Ordering::SeqCst);
+        control.handle.abort();
+    }
+    if let Some(temp_path) = task.temp_path.as_deref() {
+        match std::fs::remove_file(temp_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("Could not delete the temporary file: {error}"));
+            }
+        }
+    }
+
+    let probe = HttpEngine::new()?.probe(&task.url).await?;
+    db::update_task_remote_metadata(
+        &state.pool,
+        &task.id,
+        &probe.final_url,
+        probe.total_size,
+        probe.etag.as_deref(),
+        probe.last_modified.as_deref(),
+        probe.content_type.as_deref(),
+        probe.supports_range,
+        &probe.source_host,
+    )
+    .await?;
+    db::delete_segments_for_task(&state.pool, &task.id).await?;
+    db::reset_task_download_state(&state.pool, &task.id).await?;
+    let settings = db::get_settings(
+        &state.pool,
+        super::settings::default_download_dir(app).unwrap_or_default(),
+    )
+    .await?;
+    let task = require_task(&state.pool, &task.id).await?;
+    db::ensure_task_segments_with_settings(&state.pool, &task, &settings).await?;
+    emit_task_progress_snapshot(app, &task);
+    emit_task_updated(app, &task);
+    emit_queue_changed(app);
+    schedule_queued_tasks(app.clone(), state).await;
+    require_task(&state.pool, &task.id).await
+}
+
+fn restart_required_error_code(code: &str) -> bool {
+    matches!(
+        code,
+        "remote_changed"
+            | "resume_unavailable"
+            | "temp_file_missing"
+            | "temp_file_smaller_than_progress"
+    )
+}
+
+fn task_error_code(task: &TaskRecord) -> Option<String> {
+    let error = task.error_message.as_deref()?;
+    if let Ok(payload) = serde_json::from_str::<AppErrorPayload>(error) {
+        return Some(payload.code);
+    }
+    if error.contains("Remote file changed") {
+        return Some("remote_changed".to_string());
+    }
+    if error.contains("Server no longer supports resume") || error.contains("Resume unavailable") {
+        return Some("resume_unavailable".to_string());
+    }
+    if error.contains("Temporary file is missing") {
+        return Some("temp_file_missing".to_string());
+    }
+    if error.contains("Temporary file is smaller") {
+        return Some("temp_file_smaller_than_progress".to_string());
+    }
+    None
 }
 
 async fn prepare_task_for_download(
@@ -878,16 +1055,8 @@ async fn mark_download_failed(
         Some("final_path_conflict") => TaskStatus::NeedsAttention,
         _ => TaskStatus::Failed,
     };
-    if let Err(db_error) = db::update_task_status(
-        pool,
-        task_id,
-        status,
-        0,
-        0,
-        Some(&error),
-        Some(&error),
-    )
-    .await
+    if let Err(db_error) =
+        db::update_task_status(pool, task_id, status, 0, 0, Some(&error), Some(&error)).await
     {
         tracing::warn!(
             task_id = %task_id,
@@ -911,6 +1080,7 @@ async fn mark_download_failed(
     }
     if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
         emit_task_progress_snapshot(app, &task);
+        emit_task_updated(app, &task);
     }
     emit_queue_changed(app);
 }

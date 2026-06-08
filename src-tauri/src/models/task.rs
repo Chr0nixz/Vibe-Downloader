@@ -204,6 +204,12 @@ pub struct TaskProgressPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskUpdatedPayload {
+    pub task: Task,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct ProbeTaskPayload {
     pub final_url: String,
     pub file_name: String,
@@ -233,6 +239,18 @@ pub struct AppErrorPayload {
     pub actions: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAction {
+    Retry,
+    RetryLater,
+    ChooseAnotherName,
+    ChooseAnotherFolder,
+    Restart,
+    OpenFolder,
+    CheckUrl,
+}
+
 impl AppErrorPayload {
     pub fn new(
         code: impl Into<String>,
@@ -255,7 +273,9 @@ impl AppErrorPayload {
     pub fn final_path_conflict(path: &str) -> Self {
         Self::new(
             "final_path_conflict",
-            format!("The destination file already exists and no alternate name is available: {path}"),
+            format!(
+                "The destination file already exists and no alternate name is available: {path}"
+            ),
             true,
             vec!["choose_another_name", "choose_another_folder", "retry"],
         )

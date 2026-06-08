@@ -5,7 +5,9 @@ use tauri_app_lib::{
     commands::tasks::{local_resume_error, resume_mismatch_message, segment_resume_error},
     db,
     download::ProbeResult,
-    models::{AppSettings, BrowserKind, SegmentStatus, TaskRecord, TaskStatus},
+    models::{
+        AppSettings, BrowserKind, SegmentStatus, Task, TaskRecord, TaskStatus, TaskUpdatedPayload,
+    },
 };
 
 #[tokio::test]
@@ -30,7 +32,10 @@ async fn ensure_single_segment_creates_task_range() {
 #[tokio::test]
 async fn small_or_no_range_tasks_keep_one_segment() {
     let pool = test_pool("single-planning").await;
-    let small = sample_task("task-small", db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES - 1);
+    let small = sample_task(
+        "task-small",
+        db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES - 1,
+    );
     db::insert_task_record(&pool, &small)
         .await
         .expect("insert small");
@@ -39,7 +44,10 @@ async fn small_or_no_range_tasks_keep_one_segment() {
         .expect("small segments");
     assert_eq!(small_segments.len(), 1);
 
-    let mut no_range = sample_task("task-no-range", db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES);
+    let mut no_range = sample_task(
+        "task-no-range",
+        db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
+    );
     no_range.supports_range = false;
     db::insert_task_record(&pool, &no_range)
         .await
@@ -103,7 +111,10 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
 
     assert_eq!(segments.len(), 6);
     assert_eq!(segments[0].range_start, 0);
-    assert_eq!(segments.last().expect("last").range_end, task.total_size - 1);
+    assert_eq!(
+        segments.last().expect("last").range_end,
+        task.total_size - 1
+    );
     for window in segments.windows(2) {
         assert_eq!(window[0].range_end + 1, window[1].range_start);
     }
@@ -130,10 +141,11 @@ async fn splitting_largest_remaining_segment_keeps_ranges_contiguous() {
     .await
     .expect("progress");
 
-    let split = db::split_largest_remaining_segment(&pool, &task.id, 1024, db::MAX_AUTO_SEGMENT_COUNT)
-        .await
-        .expect("split")
-        .expect("split result");
+    let split =
+        db::split_largest_remaining_segment(&pool, &task.id, 1024, db::MAX_AUTO_SEGMENT_COUNT)
+            .await
+            .expect("split")
+            .expect("split result");
     let next = db::list_segment_records(&pool, &task.id)
         .await
         .expect("list segments");
@@ -259,13 +271,96 @@ async fn settings_upsert_and_clamp_active_task_count() {
 }
 
 #[tokio::test]
+async fn recovery_target_update_preserves_progress_and_temp_path() {
+    let pool = test_pool("recovery-target").await;
+    let mut task = sample_task("task-recovery-target", 1024);
+    task.downloaded_bytes = 512;
+    task.status = TaskStatus::NeedsAttention;
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+    let temp_path = task.temp_path.clone();
+
+    let save_dir = std::env::temp_dir().join("vibe-recovery-target");
+    let final_path = save_dir.join("renamed.bin");
+    db::update_task_save_target(
+        &pool,
+        &task.id,
+        "renamed.bin",
+        &save_dir.to_string_lossy(),
+        &final_path.to_string_lossy(),
+    )
+    .await
+    .expect("update target");
+
+    let updated = db::get_task_record(&pool, &task.id)
+        .await
+        .expect("load task")
+        .expect("task");
+    assert_eq!(updated.file_name, "renamed.bin");
+    assert_eq!(updated.save_dir, save_dir.to_string_lossy());
+    assert_eq!(
+        updated.final_path.as_deref(),
+        Some(final_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(updated.temp_path, temp_path);
+    assert_eq!(updated.downloaded_bytes, 512);
+}
+
+#[tokio::test]
+async fn restart_reset_clears_progress_and_segments() {
+    let pool = test_pool("restart-reset").await;
+    let mut task = sample_task("task-restart-reset", 4096);
+    task.downloaded_bytes = 2048;
+    task.speed_bps = 999;
+    task.connection_count = 2;
+    task.status = TaskStatus::NeedsAttention;
+    task.error_message =
+        Some("Remote file changed. Restart download to avoid corruption.".to_string());
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+    db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments");
+
+    db::delete_segments_for_task(&pool, &task.id)
+        .await
+        .expect("delete segments");
+    db::reset_task_download_state(&pool, &task.id)
+        .await
+        .expect("reset task");
+
+    let updated = db::get_task_record(&pool, &task.id)
+        .await
+        .expect("load task")
+        .expect("task");
+    let segments = db::list_segment_records(&pool, &task.id)
+        .await
+        .expect("segments");
+    assert!(segments.is_empty());
+    assert_eq!(updated.status, TaskStatus::Queued);
+    assert_eq!(updated.downloaded_bytes, 0);
+    assert_eq!(updated.speed_bps, 0);
+    assert_eq!(updated.connection_count, 0);
+    assert_eq!(updated.health_summary.as_deref(), Some("Queued"));
+    assert!(updated.error_message.is_none());
+}
+
+#[test]
+fn task_updated_payload_serializes() {
+    let task = Task::from(sample_task("task-updated-payload", 128));
+    let payload = TaskUpdatedPayload { task };
+    let json = serde_json::to_value(payload).expect("serialize");
+    assert_eq!(json["task"]["id"], "task-updated-payload");
+}
+
+#[tokio::test]
 async fn browser_messages_track_duplicates_and_latest_error() {
     let pool = test_pool("browser-messages").await;
-    assert!(
-        !db::browser_message_exists(&pool, "request-1")
-            .await
-            .expect("exists")
-    );
+    assert!(!db::browser_message_exists(&pool, "request-1")
+        .await
+        .expect("exists"));
 
     db::insert_browser_message(
         &pool,
@@ -277,11 +372,9 @@ async fn browser_messages_track_duplicates_and_latest_error() {
     )
     .await
     .expect("insert message");
-    assert!(
-        db::browser_message_exists(&pool, "request-1")
-            .await
-            .expect("exists")
-    );
+    assert!(db::browser_message_exists(&pool, "request-1")
+        .await
+        .expect("exists"));
 
     db::update_browser_message_status(
         &pool,
@@ -319,7 +412,10 @@ async fn queued_task_query_uses_fifo_order() {
         .await
         .expect("queued");
     assert_eq!(
-        queued.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+        queued
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
         vec!["task-first", "task-second"]
     );
 }

@@ -8,6 +8,8 @@ import type {
   CreateTaskInput,
   ProbeTaskInput,
   ProbeTaskPayload,
+  ResolveTaskAttentionInput,
+  TaskUpdatedPayload,
   UpdateSettingsInput,
 } from "@/generated/bindings";
 import type { Task } from "@/types/task";
@@ -17,6 +19,7 @@ import { normalizeTaskSegment } from "@/types/task-segment";
 import type { TaskProgressPayload } from "@/types/task-progress";
 
 export const EVENT_TASK_PROGRESS = "task.progress";
+export const EVENT_TASK_UPDATED = "task.updated";
 export const EVENT_QUEUE_CHANGED = "queue.changed";
 export const EVENT_SETTINGS_CHANGED = "settings.changed";
 export const EVENT_BROWSER_INTEGRATION_CHANGED = "browser.integration.changed";
@@ -189,6 +192,16 @@ export async function retryTask(id: string): Promise<Task> {
   return normalizeTask(await runCommand("retryTask", () => commands.retryTask(id)));
 }
 
+export async function resolveTaskAttention(input: ResolveTaskAttentionInput): Promise<Task> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).resolveTaskAttention(input);
+  }
+  const commands = await loadNativeCommands();
+  return normalizeTask(
+    await runCommand("resolveTaskAttention", () => commands.resolveTaskAttention(input)),
+  );
+}
+
 export async function cancelTask(id: string): Promise<Task> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).cancelTask(id);
@@ -233,6 +246,17 @@ export function onTaskProgress(
   return import("@tauri-apps/api/event").then(({ listen }) =>
     listen<TaskProgressPayload>(EVENT_TASK_PROGRESS, (event) => {
       handler(event.payload);
+    }).then((unlisten) => unlisten),
+  );
+}
+
+export function onTaskUpdated(handler: (task: Task) => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return import("@/lib/tauri-browser").then((adapter) => adapter.onTaskUpdated(handler));
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<TaskUpdatedPayload>(EVENT_TASK_UPDATED, (event) => {
+      handler(normalizeTask(event.payload.task));
     }).then((unlisten) => unlisten),
   );
 }

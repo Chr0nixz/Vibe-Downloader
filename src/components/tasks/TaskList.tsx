@@ -6,28 +6,28 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { TaskRow } from "@/components/tasks/TaskRow";
 import { filterTasks, useTaskStore } from "@/stores/task-store";
 import type { Task } from "@/types/task";
+import type { RecoveryAction } from "@/generated/bindings";
 
 export function TaskList({
   onToggleTransfer,
   onRetry,
   onOpenFile,
   onOpenFolder,
+  onResolveAttention,
 }: {
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
+  onResolveAttention: (task: Task, action: RecoveryAction) => void;
 }) {
   const { t } = useTranslation();
   const tasks = useTaskStore((s) => s.tasks);
   const nav = useTaskStore((s) => s.nav);
   const search = useTaskStore((s) => s.search);
   const selectedId = useTaskStore((s) => s.selectedId);
-  const expandedTaskIds = useTaskStore((s) => s.expandedTaskIds);
-  const speedHistoryByTaskId = useTaskStore((s) => s.speedHistoryByTaskId);
   const selectTask = useTaskStore((s) => s.selectTask);
   const setDetailOpen = useTaskStore((s) => s.setDetailOpen);
-  const toggleTaskExpanded = useTaskStore((s) => s.toggleTaskExpanded);
   const loading = useTaskStore((s) => s.loading);
   const error = useTaskStore((s) => s.error);
 
@@ -101,25 +101,26 @@ export function TaskList({
           <p className="px-4 py-8 text-sm text-text-muted">{t("taskList.empty")}</p>
         ) : (
           <div
-            role="list"
+            role="listbox"
             aria-label={t("taskList.aria")}
+            aria-activedescendant={selectedId ? `task-option-${selectedId}` : undefined}
             onKeyDown={handleListboxKeyDown}
             className="space-y-2.5 p-2.5 sm:p-3 md:p-4"
           >
-            {filtered.map((task) => (
+            {filtered.map((task, index) => (
               <TaskRow
                 key={task.id}
                 task={task}
                 selected={task.id === selectedId}
-                expanded={expandedTaskIds.includes(task.id)}
-                speedHistory={speedHistoryByTaskId[task.id] ?? []}
-                onSelect={() => selectAndFocus(task.id)}
+                position={index + 1}
+                setSize={filtered.length}
+                onSelectTask={selectAndFocus}
                 onNavigate={navigateRow}
-                onToggleExpanded={() => toggleTaskExpanded(task.id)}
                 onToggleTransfer={onToggleTransfer}
                 onRetry={onRetry}
                 onOpenFile={onOpenFile}
                 onOpenFolder={onOpenFolder}
+                onResolveAttention={onResolveAttention}
               />
             ))}
           </div>

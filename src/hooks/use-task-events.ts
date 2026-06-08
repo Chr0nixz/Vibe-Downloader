@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import i18n from "@/i18n";
 
 import { createLogger } from "@/lib/logger";
-import { listTasks, onQueueChanged, onTaskProgress } from "@/lib/tauri";
+import { listTasks, onQueueChanged, onTaskProgress, onTaskUpdated } from "@/lib/tauri";
 
 const log = createLogger("task-events");
 import { mergeTasksFromServer, useTaskStore } from "@/stores/task-store";
@@ -17,7 +17,9 @@ export function useTaskEvents() {
   useEffect(() => {
     let cancelled = false;
     let unlistenProgress: (() => void) | undefined;
+    let unlistenTaskUpdated: (() => void) | undefined;
     let unlistenQueue: (() => void) | undefined;
+    let queueRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
     function notifyTaskStatusChanges(previous: Task[], next: Task[]) {
       const previousById = new Map(previous.map((task) => [task.id, task]));
@@ -71,18 +73,34 @@ export function useTaskEvents() {
         return;
       }
 
+      unlistenTaskUpdated = await onTaskUpdated((task) => {
+        if (cancelled) return;
+        const previous = useTaskStore.getState().tasks;
+        useTaskStore.getState().upsertTask(task);
+        notifyTaskStatusChanges(previous, useTaskStore.getState().tasks);
+      });
+      if (cancelled) {
+        unlistenTaskUpdated();
+        return;
+      }
+
       unlistenQueue = await onQueueChanged(async () => {
         if (cancelled) return;
-        try {
-          const previous = useTaskStore.getState().tasks;
-          const fresh = await listTasks();
-          if (cancelled) return;
-          const merged = mergeTasksFromServer(previous, fresh);
-          useTaskStore.getState().setTasks(merged);
-          notifyTaskStatusChanges(previous, merged);
-        } catch (error) {
-          log.warn("queue refresh failed", error);
-        }
+        if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
+        queueRefreshTimer = setTimeout(() => {
+          void (async () => {
+            try {
+              const previous = useTaskStore.getState().tasks;
+              const fresh = await listTasks();
+              if (cancelled) return;
+              const merged = mergeTasksFromServer(previous, fresh);
+              useTaskStore.getState().setTasks(merged);
+              notifyTaskStatusChanges(previous, merged);
+            } catch (error) {
+              log.warn("queue refresh failed", error);
+            }
+          })();
+        }, 100);
       });
       if (cancelled) {
         unlistenQueue?.();
@@ -91,7 +109,9 @@ export function useTaskEvents() {
 
     return () => {
       cancelled = true;
+      if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
       unlistenProgress?.();
+      unlistenTaskUpdated?.();
       unlistenQueue?.();
     };
   }, []);

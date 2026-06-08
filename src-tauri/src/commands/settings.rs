@@ -43,7 +43,8 @@ pub async fn update_settings(
         .max_active_tasks
         .unwrap_or(current.max_active_tasks)
         .clamp(db::MIN_MAX_ACTIVE_TASKS, db::MAX_MAX_ACTIVE_TASKS);
-    let default_save_dir = resolve_save_dir(&app, input.default_save_dir, current.default_save_dir)?;
+    let default_save_dir =
+        resolve_save_dir(&app, input.default_save_dir, current.default_save_dir)?;
     let global_speed_limit_bps = input
         .global_speed_limit_bps
         .and_then(|value| db::normalize_speed_limit_bps(&value));

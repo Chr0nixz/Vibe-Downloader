@@ -1,4 +1,4 @@
-import { memo, type MouseEventHandler, type ReactNode } from "react";
+import { memo, useCallback, type MouseEventHandler, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import {
@@ -31,20 +31,26 @@ import {
 } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import type { SpeedSample } from "@/stores/task-store";
+import { useTaskStore } from "@/stores/task-store";
+import { errorMessage } from "@/lib/errors";
+import type { RecoveryAction } from "@/generated/bindings";
+import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 
 interface TaskRowProps {
   task: Task;
   selected: boolean;
-  onSelect: () => void;
+  position: number;
+  setSize: number;
+  onSelectTask: (taskId: string) => void;
   onNavigate: (direction: "next" | "prev") => void;
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
-  expanded: boolean;
-  speedHistory: SpeedSample[];
-  onToggleExpanded: () => void;
+  onResolveAttention: (task: Task, action: RecoveryAction) => void;
 }
+
+const EMPTY_SPEED_HISTORY: SpeedSample[] = [];
 
 function statusTone(status: Task["status"]): string {
   switch (status) {
@@ -68,25 +74,43 @@ function statusTone(status: Task["status"]): string {
 export const TaskRow = memo(function TaskRow({
   task,
   selected,
-  expanded,
-  speedHistory,
-  onSelect,
+  position,
+  setSize,
+  onSelectTask,
   onNavigate,
   onToggleTransfer,
   onRetry,
   onOpenFile,
   onOpenFolder,
-  onToggleExpanded,
+  onResolveAttention,
 }: TaskRowProps) {
   const { t } = useTranslation();
   const reduceMotion = useReducedMotion();
+  const expanded = useTaskStore((s) => s.expandedTaskIds.includes(task.id));
+  const speedHistory = useTaskStore(
+    (s) => s.speedHistoryByTaskId[task.id] ?? EMPTY_SPEED_HISTORY,
+  );
+  const toggleTaskExpanded = useTaskStore((s) => s.toggleTaskExpanded);
+  const onSelect = useCallback(() => {
+    onSelectTask(task.id);
+  }, [onSelectTask, task.id]);
+  const onToggleExpanded = useCallback(() => {
+    toggleTaskExpanded(task.id);
+  }, [toggleTaskExpanded, task.id]);
   const progress =
     task.totalSize > 0 ? task.downloadedBytes / task.totalSize : 0;
   const isActive =
     task.status === "downloading" || task.status === "retrying";
   const speedTrend = describeSpeedTrend(speedHistory, task.speedBps, t);
-  const diagnosticLabel = task.healthSummary || speedTrend.label;
-  const expandedId = `task-${task.id}-expanded`;
+  const diagnosticLabel = task.errorMessage
+    ? errorMessage(task.errorMessage)
+    : task.healthSummary || speedTrend.label;
+  const baseId = `task-${task.id}`;
+  const nameId = `${baseId}-name`;
+  const statusId = `${baseId}-status`;
+  const hostId = `${baseId}-host`;
+  const diagnosticId = `${baseId}-diagnostic`;
+  const expandedId = `${baseId}-expanded`;
   const progressLabel = t("task.progressAria", {
     name: task.fileName,
     percent: formatPercent(task.downloadedBytes, task.totalSize),
@@ -95,9 +119,12 @@ export const TaskRow = memo(function TaskRow({
   return (
     <motion.div
       id={`task-option-${task.id}`}
-      role="listitem"
-      aria-current={selected ? "true" : undefined}
-      aria-labelledby={`task-${task.id}-name`}
+      role="option"
+      aria-selected={selected}
+      aria-posinset={position}
+      aria-setsize={setSize}
+      aria-labelledby={nameId}
+      aria-describedby={`${statusId} ${hostId} ${diagnosticId}`}
       tabIndex={selected ? 0 : -1}
       onClick={(event) => {
         if ((event.target as HTMLElement).closest("[data-row-action]")) return;
@@ -137,12 +164,13 @@ export const TaskRow = memo(function TaskRow({
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <div
-                id={`task-${task.id}-name`}
+                id={nameId}
                 className="truncate text-sm font-medium text-text-primary"
               >
                 {task.fileName}
               </div>
               <motion.span
+                id={statusId}
                 key={task.status}
                 initial={reduceMotion ? false : { opacity: 0, scale: 0.96 }}
                 animate={{ opacity: 1, scale: 1 }}
@@ -152,11 +180,14 @@ export const TaskRow = memo(function TaskRow({
                 {t(`task.status.${task.status}`)}
               </motion.span>
             </div>
-            <p className="truncate text-xs text-text-muted">{task.sourceHost}</p>
+            <p id={hostId} className="truncate text-xs text-text-muted">
+              {task.sourceHost}
+            </p>
           </div>
         </div>
 
         <p
+          id={diagnosticId}
           className={cn(
             "truncate text-xs text-text-secondary",
             speedTrend.tone === "warning" && !task.healthSummary && "text-status-warning",
@@ -227,9 +258,9 @@ export const TaskRow = memo(function TaskRow({
           <motion.div
             id={expandedId}
             className="col-span-full overflow-hidden"
-            initial={reduceMotion ? false : { opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0 }}
+            initial={reduceMotion ? false : { opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -4 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
           >
             <div className="grid gap-3 border-t border-border-subtle/70 pt-3 md:grid-cols-[minmax(0,1fr)_minmax(10rem,15rem)] md:items-center">
@@ -255,6 +286,13 @@ export const TaskRow = memo(function TaskRow({
                   name: task.fileName,
                 })}
               />
+              <div className="md:col-span-2">
+                <TaskRecoveryActions
+                  task={task}
+                  onResolve={onResolveAttention}
+                  compact
+                />
+              </div>
             </div>
           </motion.div>
         ) : null}
@@ -311,6 +349,9 @@ function RowActions({
     >
       <ActionButton
         label={expanded ? t("actions.collapse") : t("actions.expand")}
+        ariaLabel={t(expanded ? "actions.collapseFor" : "actions.expandFor", {
+          name: task.fileName,
+        })}
         expanded={expanded}
         controls={expandedId}
         onClick={(event) => {
@@ -324,6 +365,9 @@ function RowActions({
       </ActionButton>
       <ActionButton
         label={showsStart ? t("actions.resume") : t("actions.pause")}
+        ariaLabel={t(showsStart ? "actions.resumeFor" : "actions.pauseFor", {
+          name: task.fileName,
+        })}
         disabled={transferDisabled}
         onClick={(event) => {
           event.stopPropagation();
@@ -335,6 +379,7 @@ function RowActions({
       {task.status === "failed" ? (
         <ActionButton
           label={t("actions.retry")}
+          ariaLabel={t("actions.retryFor", { name: task.fileName })}
           onClick={(event) => {
             event.stopPropagation();
             onRetry(task);
@@ -346,6 +391,7 @@ function RowActions({
       {task.status === "completed" ? (
         <ActionButton
           label={t("actions.openFile")}
+          ariaLabel={t("actions.openFileFor", { name: task.fileName })}
           onClick={(event) => {
             event.stopPropagation();
             onOpenFile(task);
@@ -356,6 +402,7 @@ function RowActions({
       ) : null}
       <ActionButton
         label={t("actions.openFolder")}
+        ariaLabel={t("actions.openFolderFor", { name: task.fileName })}
         onClick={(event) => {
           event.stopPropagation();
           onOpenFolder(task);
@@ -369,6 +416,7 @@ function RowActions({
 
 function ActionButton({
   label,
+  ariaLabel,
   disabled,
   expanded,
   controls,
@@ -376,6 +424,7 @@ function ActionButton({
   children,
 }: {
   label: string;
+  ariaLabel?: string;
   disabled?: boolean;
   expanded?: boolean;
   controls?: string;
@@ -388,7 +437,7 @@ function ActionButton({
         <Button
           variant="ghost"
           size="icon"
-          aria-label={label}
+          aria-label={ariaLabel ?? label}
           aria-expanded={expanded}
           aria-controls={controls}
           disabled={disabled}

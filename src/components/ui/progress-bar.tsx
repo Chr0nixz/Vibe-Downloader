@@ -47,13 +47,13 @@ export function ProgressBar({
       <div
         aria-hidden
         className={cn(
-          "absolute inset-y-0 left-0 w-full origin-left rounded-full will-change-transform",
+          "absolute inset-y-0 left-0 w-full origin-left rounded-full",
           smooth
-            ? "transition-transform duration-200 ease-out motion-reduce:transition-none"
+            ? "transition-transform duration-200 ease-out will-change-transform motion-reduce:transition-none"
             : "transition-none",
           active ? toneClass[tone] : toneClass.neutral,
         )}
-        style={{ transform: `scaleX(${Math.max(0.02, clamped)})` }}
+        style={{ transform: `scaleX(${clamped})` }}
       />
     </div>
   );

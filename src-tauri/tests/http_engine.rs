@@ -14,8 +14,8 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tauri_app_lib::{
-    download::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine},
     download::GlobalSpeedLimiter,
+    download::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine},
     models::{SegmentStatus, TaskSegmentRecord},
 };
 
@@ -136,11 +136,17 @@ async fn probe_maps_common_http_failures() {
     let limited: serde_json::Value = serde_json::from_str(&limited).expect("429 payload");
 
     assert_eq!(not_found["code"], "http_not_found");
-    assert_eq!(not_found["message"], "The file was not found on the server.");
+    assert_eq!(
+        not_found["message"],
+        "The file was not found on the server."
+    );
     assert_eq!(denied["code"], "http_denied");
     assert_eq!(denied["message"], "The server denied access to this file.");
     assert_eq!(limited["code"], "server_rate_limited");
-    assert_eq!(limited["message"], "The server is limiting requests. Try again later.");
+    assert_eq!(
+        limited["message"],
+        "The server is limiting requests. Try again later."
+    );
     assert_eq!(limited["recoverable"], true);
 }
 
@@ -221,7 +227,10 @@ async fn direct_download_renames_when_final_path_exists() {
         .expect("parent")
         .join("file (1).bin");
     assert_eq!(downloaded, SAMPLE.len() as i64);
-    assert_eq!(fs::read(&paths.final_path).expect("read existing"), existing);
+    assert_eq!(
+        fs::read(&paths.final_path).expect("read existing"),
+        existing
+    );
     assert_eq!(fs::read(renamed).expect("read renamed final"), SAMPLE);
 }
 
@@ -295,7 +304,10 @@ async fn direct_download_respects_speed_limiter() {
         .expect("limited download");
 
     assert!(started.elapsed() >= Duration::from_secs(1));
-    assert_eq!(fs::read(&paths.final_path).expect("read final"), slow_payload());
+    assert_eq!(
+        fs::read(&paths.final_path).expect("read final"),
+        slow_payload()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -586,14 +598,9 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
                 ("Content-Location", "/exports/report"),
             ],
         ),
-        target if target.starts_with("/query-name") => respond_file_without_disposition(
-            &mut stream,
-            method,
-            SAMPLE,
-            byte_range,
-            true,
-            false,
-        ),
+        target if target.starts_with("/query-name") => {
+            respond_file_without_disposition(&mut stream, method, SAMPLE, byte_range, true, false)
+        }
         "/encoded-name" => write_unknown_size_response(
             &mut stream,
             method,
@@ -607,7 +614,10 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
             ],
         ),
         "/transient-segment" if byte_range.is_some_and(|range| range.start > 0) => {
-            let key = format!("transient-{}", byte_range.map(|range| range.start).unwrap_or(0));
+            let key = format!(
+                "transient-{}",
+                byte_range.map(|range| range.start).unwrap_or(0)
+            );
             let mut state = state.lock().expect("state lock");
             let count = state.entry(key).or_insert(0);
             if *count == 0 {

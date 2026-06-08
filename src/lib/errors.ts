@@ -1,9 +1,21 @@
+import type { RecoveryAction } from "@/generated/bindings";
+
 export interface AppErrorPayload {
   code: string;
   message: string;
   recoverable: boolean;
   actions: string[];
 }
+
+const SUPPORTED_RECOVERY_ACTIONS = new Set<RecoveryAction>([
+  "retry",
+  "retry_later",
+  "choose_another_name",
+  "choose_another_folder",
+  "restart",
+  "open_folder",
+  "check_url",
+]);
 
 export function parseAppError(error: unknown): AppErrorPayload | null {
   if (isAppErrorPayload(error)) return error;
@@ -13,7 +25,7 @@ export function parseAppError(error: unknown): AppErrorPayload | null {
     const parsed = JSON.parse(error) as unknown;
     return isAppErrorPayload(parsed) ? parsed : null;
   } catch {
-    return null;
+    return legacyAppError(error);
   }
 }
 
@@ -22,6 +34,18 @@ export function errorMessage(error: unknown): string {
   if (payload) return payload.message;
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+export function recoveryActionsForError(error: unknown): RecoveryAction[] {
+  const payload = parseAppError(error);
+  if (!payload) return [];
+  const explicitActions = payload.actions.filter(isRecoveryAction);
+  if (explicitActions.length > 0) return explicitActions;
+  return fallbackActionsForCode(payload.code);
+}
+
+export function isRecoveryAction(action: string): action is RecoveryAction {
+  return SUPPORTED_RECOVERY_ACTIONS.has(action as RecoveryAction);
 }
 
 function isAppErrorPayload(value: unknown): value is AppErrorPayload {
@@ -34,4 +58,61 @@ function isAppErrorPayload(value: unknown): value is AppErrorPayload {
     Array.isArray(candidate.actions) &&
     candidate.actions.every((action) => typeof action === "string")
   );
+}
+
+function fallbackActionsForCode(code: string): RecoveryAction[] {
+  switch (code) {
+    case "final_path_conflict":
+      return ["choose_another_name", "choose_another_folder", "retry"];
+    case "remote_changed":
+    case "resume_unavailable":
+    case "temp_file_missing":
+    case "temp_file_smaller_than_progress":
+      return ["restart", "open_folder"];
+    case "disk_write_failed":
+      return ["open_folder", "choose_another_folder", "retry"];
+    case "http_denied":
+    case "http_not_found":
+      return ["check_url", "retry"];
+    case "server_rate_limited":
+      return ["retry_later"];
+    default:
+      return [];
+  }
+}
+
+function legacyAppError(error: string): AppErrorPayload | null {
+  if (error.includes("Remote file changed")) {
+    return {
+      code: "remote_changed",
+      message: error,
+      recoverable: true,
+      actions: fallbackActionsForCode("remote_changed"),
+    };
+  }
+  if (error.includes("Server no longer supports resume") || error.includes("Resume unavailable")) {
+    return {
+      code: "resume_unavailable",
+      message: error,
+      recoverable: true,
+      actions: fallbackActionsForCode("resume_unavailable"),
+    };
+  }
+  if (error.includes("Temporary file is missing")) {
+    return {
+      code: "temp_file_missing",
+      message: error,
+      recoverable: true,
+      actions: fallbackActionsForCode("temp_file_missing"),
+    };
+  }
+  if (error.includes("Temporary file is smaller")) {
+    return {
+      code: "temp_file_smaller_than_progress",
+      message: error,
+      recoverable: true,
+      actions: fallbackActionsForCode("temp_file_smaller_than_progress"),
+    };
+  }
+  return null;
 }

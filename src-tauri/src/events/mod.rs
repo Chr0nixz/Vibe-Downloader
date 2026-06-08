@@ -1,8 +1,9 @@
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::models::TaskProgressPayload;
+use crate::models::{Task, TaskProgressPayload, TaskRecord, TaskUpdatedPayload};
 
 pub const EVENT_TASK_PROGRESS: &str = "task.progress";
+pub const EVENT_TASK_UPDATED: &str = "task.updated";
 pub const EVENT_QUEUE_CHANGED: &str = "queue.changed";
 pub const EVENT_SETTINGS_CHANGED: &str = "settings.changed";
 pub const EVENT_BROWSER_HANDOFF_RECEIVED: &str = "browser.handoff.received";
@@ -11,6 +12,13 @@ pub const EVENT_BROWSER_INTEGRATION_CHANGED: &str = "browser.integration.changed
 
 pub fn emit_task_progress(app: &AppHandle, payload: &TaskProgressPayload) {
     emit_payload(app, EVENT_TASK_PROGRESS, payload);
+}
+
+pub fn emit_task_updated(app: &AppHandle, task: &TaskRecord) {
+    let payload = TaskUpdatedPayload {
+        task: Task::from(task.clone()),
+    };
+    emit_payload(app, EVENT_TASK_UPDATED, &payload);
 }
 
 pub fn emit_queue_changed(app: &AppHandle) {

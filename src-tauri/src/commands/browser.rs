@@ -1,9 +1,9 @@
+#[cfg(target_os = "windows")]
+use std::process::Command;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-#[cfg(target_os = "windows")]
-use std::process::Command;
 
 use reqwest::Url;
 use tauri::{AppHandle, Manager, State};
@@ -105,12 +105,10 @@ pub async fn create_browser_handoff_task_with_state(
         });
     }
 
-    let task_result = validate_handoff(&input).map(|url| {
-        CreateTaskInput {
-            url,
-            save_dir: None,
-            file_name: sanitize_suggested_file_name(input.suggested_file_name.as_deref()),
-        }
+    let task_result = validate_handoff(&input).map(|url| CreateTaskInput {
+        url,
+        save_dir: None,
+        file_name: sanitize_suggested_file_name(input.suggested_file_name.as_deref()),
     });
 
     let create_input = match task_result {
@@ -335,8 +333,7 @@ fn extension_core_path() -> Option<PathBuf> {
 fn manifest_path(app: &AppHandle, browser: BrowserKind) -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
-        app
-            .path()
+        app.path()
             .app_config_dir()
             .map(|path| {
                 path.join("native-messaging")
@@ -354,8 +351,12 @@ fn manifest_path(app: &AppHandle, browser: BrowserKind) -> Result<PathBuf, Strin
             BrowserKind::Edge => "Library/Application Support/Microsoft Edge/NativeMessagingHosts",
             BrowserKind::Firefox => "Library/Application Support/Mozilla/NativeMessagingHosts",
             BrowserKind::Safari => "Library/Application Support/Vibe Downloader/Safari",
-            BrowserKind::Brave => "Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts",
-            BrowserKind::Opera => "Library/Application Support/com.operasoftware.Opera/NativeMessagingHosts",
+            BrowserKind::Brave => {
+                "Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts"
+            }
+            BrowserKind::Opera => {
+                "Library/Application Support/com.operasoftware.Opera/NativeMessagingHosts"
+            }
             BrowserKind::Vivaldi => "Library/Application Support/Vivaldi/NativeMessagingHosts",
             BrowserKind::Chromium => "Library/Application Support/Chromium/NativeMessagingHosts",
         };
@@ -394,10 +395,16 @@ fn browser_detected(app: &AppHandle, browser: BrowserKind) -> bool {
         let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
         let program_files = std::env::var("ProgramFiles").unwrap_or_default();
         let candidates = match browser {
-            BrowserKind::Chrome => vec![format!("{local}\\Google\\Chrome\\Application\\chrome.exe")],
-            BrowserKind::Edge => vec![format!("{program_files}\\Microsoft\\Edge\\Application\\msedge.exe")],
+            BrowserKind::Chrome => {
+                vec![format!("{local}\\Google\\Chrome\\Application\\chrome.exe")]
+            }
+            BrowserKind::Edge => vec![format!(
+                "{program_files}\\Microsoft\\Edge\\Application\\msedge.exe"
+            )],
             BrowserKind::Firefox => vec![format!("{program_files}\\Mozilla Firefox\\firefox.exe")],
-            BrowserKind::Brave => vec![format!("{local}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe")],
+            BrowserKind::Brave => vec![format!(
+                "{local}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+            )],
             BrowserKind::Opera => vec![format!("{local}\\Programs\\Opera\\opera.exe")],
             BrowserKind::Vivaldi => vec![format!("{local}\\Vivaldi\\Application\\vivaldi.exe")],
             BrowserKind::Chromium => vec![format!("{local}\\Chromium\\Application\\chrome.exe")],

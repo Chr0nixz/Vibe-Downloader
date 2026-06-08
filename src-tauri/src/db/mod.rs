@@ -194,13 +194,11 @@ pub async fn get_settings(
     let global_speed_limit_bps = get_setting_value(pool, SETTING_GLOBAL_SPEED_LIMIT_BPS)
         .await?
         .and_then(|value| normalize_speed_limit_bps(&value));
-    let multi_connection_threshold_bytes = get_setting_value(
-        pool,
-        SETTING_MULTI_CONNECTION_THRESHOLD_BYTES,
-    )
-    .await?
-    .and_then(|value| normalize_multi_connection_threshold_bytes(&value))
-    .unwrap_or_else(|| DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES.to_string());
+    let multi_connection_threshold_bytes =
+        get_setting_value(pool, SETTING_MULTI_CONNECTION_THRESHOLD_BYTES)
+            .await?
+            .and_then(|value| normalize_multi_connection_threshold_bytes(&value))
+            .unwrap_or_else(|| DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES.to_string());
     let segment_count = get_setting_value(pool, SETTING_SEGMENT_COUNT)
         .await?
         .and_then(|value| value.parse::<i32>().ok())
@@ -242,8 +240,12 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         &settings.multi_connection_threshold_bytes,
     )
     .await?;
-    upsert_setting_value(pool, SETTING_SEGMENT_COUNT, &settings.segment_count.to_string())
-        .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_SEGMENT_COUNT,
+        &settings.segment_count.to_string(),
+    )
+    .await?;
     upsert_setting_value(
         pool,
         SETTING_MAX_CONNECTIONS_PER_HOST,
@@ -476,11 +478,8 @@ async fn ensure_task_segments_with_plan(
         return Ok(existing);
     }
 
-    let segments = planned_segments_for_task_with_plan(
-        task,
-        multi_connection_threshold_bytes,
-        segment_count,
-    );
+    let segments =
+        planned_segments_for_task_with_plan(task, multi_connection_threshold_bytes, segment_count);
     for segment in &segments {
         insert_segment_record(pool, segment).await?;
     }
@@ -524,11 +523,8 @@ pub fn planned_segments_for_task_with_plan(
     multi_connection_threshold_bytes: i64,
     segment_count: i32,
 ) -> Vec<TaskSegmentRecord> {
-    let count = planned_segment_count_with_plan(
-        task,
-        multi_connection_threshold_bytes,
-        segment_count,
-    );
+    let count =
+        planned_segment_count_with_plan(task, multi_connection_threshold_bytes, segment_count);
     let total_size = task.total_size.max(0);
     let completed = task.downloaded_bytes >= total_size && total_size > 0;
 
@@ -846,6 +842,103 @@ pub async fn update_task_final_path(
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn update_task_save_target(
+    pool: &SqlitePool,
+    task_id: &str,
+    file_name: &str,
+    save_dir: &str,
+    final_path: &str,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET file_name = ?, save_dir = ?, final_path = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(file_name)
+    .bind(save_dir)
+    .bind(final_path)
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_task_remote_metadata(
+    pool: &SqlitePool,
+    task_id: &str,
+    final_url: &str,
+    total_size: i64,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+    content_type: Option<&str>,
+    supports_range: bool,
+    source_host: &str,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET final_url = ?, total_size = ?, etag = ?, last_modified = ?,
+            content_type = ?, supports_range = ?, source_host = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(final_url)
+    .bind(total_size)
+    .bind(etag)
+    .bind(last_modified)
+    .bind(content_type)
+    .bind(if supports_range { 1 } else { 0 })
+    .bind(source_host)
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn reset_task_download_state(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET downloaded_bytes = 0, speed_bps = 0, connection_count = 0,
+            status = 'queued', health_summary = 'Queued', error_message = NULL,
+            updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn delete_segments_for_task(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM segments WHERE task_id = ?")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }

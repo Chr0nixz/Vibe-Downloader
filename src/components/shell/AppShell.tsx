@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { CommandBar } from "@/components/shell/CommandBar";
@@ -7,11 +7,12 @@ import { StatusBar } from "@/components/shell/StatusBar";
 import { TitleBar } from "@/components/shell/TitleBar";
 import { TaskList } from "@/components/tasks/TaskList";
 import { ToastViewport } from "@/components/ui/toast";
+import type { AttentionDialogRequest } from "@/components/shell/ResolveAttentionDialog";
 import { readShellLayout } from "@/hooks/use-shell-layout";
-import { useActiveDownloadSync } from "@/hooks/use-active-download-sync";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import { createLogger } from "@/lib/logger";
 import { errorMessage } from "@/lib/errors";
+import type { RecoveryAction, ResolveTaskAttentionInput } from "@/generated/bindings";
 import {
   getPlatform,
   trafficLightsInsetPx,
@@ -26,7 +27,9 @@ import {
   onSettingsChanged,
   openTaskFile,
   openTaskFolder,
+  openDirectoryPicker,
   pauseTask,
+  resolveTaskAttention,
   retryTask,
   resumeTask,
 } from "@/lib/tauri";
@@ -55,6 +58,11 @@ const DeleteTaskDialog = lazy(() =>
     default: module.DeleteTaskDialog,
   })),
 );
+const ResolveAttentionDialog = lazy(() =>
+  import("@/components/shell/ResolveAttentionDialog").then((module) => ({
+    default: module.ResolveAttentionDialog,
+  })),
+);
 
 function matchesShortcut(
   event: KeyboardEvent,
@@ -76,11 +84,15 @@ export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
+  const [attentionRequest, setAttentionRequest] =
+    useState<AttentionDialogRequest | null>(null);
 
   const tasks = useTaskStore((s) => s.tasks);
   const selectedId = useTaskStore((s) => s.selectedId);
+  const nav = useTaskStore((s) => s.nav);
   const detailOpen = useTaskStore((s) => s.detailOpen);
   const setTasks = useTaskStore((s) => s.setTasks);
+  const upsertTask = useTaskStore((s) => s.upsertTask);
   const setLoading = useTaskStore((s) => s.setLoading);
   const setError = useTaskStore((s) => s.setError);
   const selectTask = useTaskStore((s) => s.selectTask);
@@ -91,24 +103,36 @@ export function AppShell() {
   const addToast = useToastStore((s) => s.addToast);
 
   const selected = tasks.find((t) => t.id === selectedId) ?? null;
+  const taskSurfaceActive = nav !== "settings";
 
-  async function refreshTasks(selectId?: string) {
+  const refreshTasks = useCallback(async (selectId?: string) => {
     const data = await listTasks();
     setTasks(data);
     if (selectId) {
       selectTask(selectId);
-    } else if (data.length > 0 && (!selectedId || !data.some((task) => task.id === selectedId))) {
-      selectTask(data[0].id);
-    } else if (data.length === 0) {
-      selectTask(null);
+    } else {
+      const currentSelectedId = useTaskStore.getState().selectedId;
+      if (
+        data.length > 0 &&
+        (!currentSelectedId || !data.some((task) => task.id === currentSelectedId))
+      ) {
+        selectTask(data[0].id);
+      } else if (data.length === 0) {
+        selectTask(null);
+      }
     }
-  }
+  }, [selectTask, setTasks]);
 
-  async function runTaskAction(action: () => Promise<Task | void>, selectId?: string) {
+  const runTaskAction = useCallback(async (action: () => Promise<Task | void>, selectId?: string) => {
     try {
-      await action();
+      const result = await action();
       setError(null);
-      await refreshTasks(selectId);
+      if (result) {
+        upsertTask(result);
+        if (selectId) selectTask(selectId);
+      } else {
+        await refreshTasks(selectId);
+      }
     } catch (err) {
       const message = errorMessage(err);
       log.error("task action failed", err);
@@ -119,27 +143,78 @@ export function AppShell() {
         description: message,
       });
     }
-  }
+  }, [addToast, refreshTasks, selectTask, setError, t, upsertTask]);
 
-  function toggleTransfer(task: Task) {
+  const toggleTransfer = useCallback((task: Task) => {
     if (task.status === "downloading" || task.status === "retrying" || task.status === "queued") {
       void runTaskAction(() => pauseTask(task.id), task.id);
     } else if (task.status !== "completed" && task.status !== "needs_attention") {
       void runTaskAction(() => resumeTask(task.id), task.id);
     }
-  }
+  }, [runTaskAction]);
 
-  function retry(task: Task) {
+  const retry = useCallback((task: Task) => {
     void runTaskAction(() => retryTask(task.id), task.id);
-  }
+  }, [runTaskAction]);
 
-  function openFile(task: Task) {
+  const openFile = useCallback((task: Task) => {
     void runTaskAction(() => openTaskFile(task.id), task.id);
-  }
+  }, [runTaskAction]);
 
-  function openFolder(task: Task) {
+  const openFolder = useCallback((task: Task) => {
     void runTaskAction(() => openTaskFolder(task.id), task.id);
-  }
+  }, [runTaskAction]);
+
+  const submitAttentionResolution = useCallback((
+    task: Task,
+    action: RecoveryAction,
+    overrides?: Partial<Pick<ResolveTaskAttentionInput, "fileName" | "saveDir">>,
+  ) => {
+    const input: ResolveTaskAttentionInput = {
+      id: task.id,
+      action,
+      fileName: overrides?.fileName ?? null,
+      saveDir: overrides?.saveDir ?? null,
+    };
+
+    void runTaskAction(() => resolveTaskAttention(input), task.id);
+  }, [runTaskAction]);
+
+  const resolveAttention = useCallback(async (task: Task, action: RecoveryAction) => {
+    if (action === "open_folder") {
+      openFolder(task);
+      return;
+    }
+    if (action === "check_url") {
+      selectTask(task.id);
+      setDetailOpen(true);
+      addToast({
+        tone: "info",
+        title: t("recovery.checkUrlToast"),
+        description: task.url,
+      });
+      return;
+    }
+
+    if (action === "choose_another_name") {
+      setAttentionRequest({ task, action });
+      return;
+    }
+
+    if (action === "choose_another_folder") {
+      const saveDir = await openDirectoryPicker();
+      if (!saveDir) return;
+      submitAttentionResolution(task, action, { saveDir });
+      return;
+    }
+
+    if (action === "restart") {
+      setAttentionRequest({ task, action });
+      return;
+    }
+
+    submitAttentionResolution(task, action);
+  }, [addToast, openFolder, selectTask, setDetailOpen, submitAttentionResolution, t]);
 
   useEffect(() => {
     void getPlatform().then(setPlatform);
@@ -154,7 +229,6 @@ export function AppShell() {
   }, [platform]);
 
   useTaskEvents();
-  useActiveDownloadSync();
 
   useEffect(() => {
     let cancelled = false;
@@ -236,7 +310,7 @@ export function AppShell() {
       <TitleBar platform={platform} />
       <CommandBar
         platform={platform}
-        selectedTask={selected}
+        selectedTask={taskSurfaceActive ? selected : null}
         onOpenPalette={() => setPaletteOpen(true)}
         onNewDownload={() => setNewDownloadOpen(true)}
         onStart={() => {
@@ -258,11 +332,12 @@ export function AppShell() {
             onRetry={retry}
             onOpenFile={openFile}
             onOpenFolder={openFolder}
+            onResolveAttention={resolveAttention}
           />
           <Suspense fallback={null}>
             <TaskDetails
-              task={selected}
-              open={detailOpen && !!selected}
+              task={taskSurfaceActive ? selected : null}
+              open={taskSurfaceActive && detailOpen && !!selected}
               onClose={() => {
                 setDetailOpen(false);
                 const focusId = selectedId;
@@ -272,6 +347,7 @@ export function AppShell() {
                   });
                 }
               }}
+              onResolveAttention={resolveAttention}
             />
           </Suspense>
         </main>
@@ -309,6 +385,26 @@ export function AppShell() {
               setDeleteTarget(null);
               if (target) {
                 void runTaskAction(() => deleteTask(target.id, deleteFile));
+              }
+            }}
+          />
+        </Suspense>
+      ) : null}
+      {attentionRequest ? (
+        <Suspense fallback={null}>
+          <ResolveAttentionDialog
+            request={attentionRequest}
+            open={!!attentionRequest}
+            onOpenChange={(open) => {
+              if (!open) setAttentionRequest(null);
+            }}
+            onResolve={(fileName) => {
+              const request = attentionRequest;
+              setAttentionRequest(null);
+              if (request) {
+                submitAttentionResolution(request.task, request.action, {
+                  fileName: fileName ?? null,
+                });
               }
             }}
           />

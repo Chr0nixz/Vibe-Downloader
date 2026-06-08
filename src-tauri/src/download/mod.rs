@@ -26,7 +26,7 @@ use tokio::{
 
 use crate::{
     db,
-    events::{emit_queue_changed, emit_task_progress},
+    events::{emit_queue_changed, emit_task_progress, emit_task_updated},
     logging::sanitize_url,
     models::{
         AppErrorPayload, SegmentStatus, TaskProgressPayload, TaskRecord, TaskSegmentRecord,
@@ -225,7 +225,13 @@ impl HttpEngine {
         request: DirectDownloadRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<i64, String> {
-        run_direct_download(&self.client, request, cancel, GlobalSpeedLimiter::disabled()).await
+        run_direct_download(
+            &self.client,
+            request,
+            cancel,
+            GlobalSpeedLimiter::disabled(),
+        )
+        .await
     }
 
     pub async fn download_direct_with_limiter(
@@ -242,8 +248,13 @@ impl HttpEngine {
         request: DirectSegmentedDownloadRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<i64, String> {
-        run_direct_segmented_download(&self.client, request, cancel, GlobalSpeedLimiter::disabled())
-            .await
+        run_direct_segmented_download(
+            &self.client,
+            request,
+            cancel,
+            GlobalSpeedLimiter::disabled(),
+        )
+        .await
     }
 }
 
@@ -487,7 +498,10 @@ async fn run_direct_segmented_download(
     Ok(request.total_size)
 }
 
-async fn finalize_download_file(temp_path: &Path, preferred_final_path: &Path) -> Result<PathBuf, String> {
+async fn finalize_download_file(
+    temp_path: &Path,
+    preferred_final_path: &Path,
+) -> Result<PathBuf, String> {
     let final_path = available_final_path(preferred_final_path).await?;
     fs::rename(temp_path, &final_path).await.map_err(|e| {
         AppErrorPayload::disk_write_failed(format!("Could not finalize the downloaded file: {e}"))
@@ -501,13 +515,17 @@ async fn available_final_path(preferred_final_path: &Path) -> Result<PathBuf, St
         return Ok(preferred_final_path.to_path_buf());
     }
 
-    let parent = preferred_final_path.parent().unwrap_or_else(|| Path::new(""));
+    let parent = preferred_final_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
     let stem = preferred_final_path
         .file_stem()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("download");
-    let extension = preferred_final_path.extension().and_then(|value| value.to_str());
+    let extension = preferred_final_path
+        .extension()
+        .and_then(|value| value.to_str());
 
     for index in 1..10_000 {
         let file_name = match extension {
@@ -520,7 +538,10 @@ async fn available_final_path(preferred_final_path: &Path) -> Result<PathBuf, St
         }
     }
 
-    Err(AppErrorPayload::final_path_conflict(&preferred_final_path.to_string_lossy()).command_error())
+    Err(
+        AppErrorPayload::final_path_conflict(&preferred_final_path.to_string_lossy())
+            .command_error(),
+    )
 }
 
 async fn persist_completed_path(
@@ -533,13 +554,7 @@ async fn persist_completed_path(
         .and_then(|value| value.to_str())
         .unwrap_or("download")
         .to_string();
-    db::update_task_final_path(
-        pool,
-        task_id,
-        &file_name,
-        &completed_path.to_string_lossy(),
-    )
-    .await
+    db::update_task_final_path(pool, task_id, &file_name, &completed_path.to_string_lossy()).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -613,13 +628,8 @@ async fn run_unknown_size_download(
             file.flush()
                 .await
                 .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
-            db::update_segment_progress(
-                &pool,
-                &segment.id,
-                downloaded,
-                SegmentStatus::Downloading,
-            )
-            .await?;
+            db::update_segment_progress(&pool, &segment.id, downloaded, SegmentStatus::Downloading)
+                .await?;
             return Ok(());
         }
 
@@ -675,6 +685,9 @@ async fn run_unknown_size_download(
     let completed_path = finalize_download_file(&temp_path_buf, &final_path_buf).await?;
     persist_completed_path(&pool, &task.id, &completed_path).await?;
     db::complete_unknown_size_task(&pool, &task.id, &segment.id, downloaded).await?;
+    if let Some(updated) = db::get_task_record(&pool, &task.id).await? {
+        emit_task_updated(&app, &updated);
+    }
     emit_progress(
         &app,
         &task.id,
@@ -1089,6 +1102,9 @@ async fn run_segmented_download(
     persist_completed_path(&pool, &task.id, &completed_path).await?;
 
     db::complete_task(&pool, &task.id).await?;
+    if let Some(updated) = db::get_task_record(&pool, &task.id).await? {
+        emit_task_updated(&app, &updated);
+    }
     tracing::info!(
         task_id = %task.id,
         total_size = task.total_size,
@@ -1235,10 +1251,7 @@ async fn maybe_accelerate_segments(
     {
         let mut ends = live_ends.write().await;
         ends.insert(split.original_segment_id.clone(), split.original_range_end);
-        ends.insert(
-            split.tail_segment.id.clone(),
-            split.tail_segment.range_end,
-        );
+        ends.insert(split.tail_segment.id.clone(), split.tail_segment.range_end);
     }
 
     db::update_segment_status(
@@ -1251,9 +1264,12 @@ async fn maybe_accelerate_segments(
     .await?;
 
     *active_workers += 1;
-    *active_connection_count =
-        i32::try_from((*active_workers).min(AUTO_ACCELERATION_MAX_SEGMENTS).min(max_worker_count))
-            .unwrap_or(*active_connection_count);
+    *active_connection_count = i32::try_from(
+        (*active_workers)
+            .min(AUTO_ACCELERATION_MAX_SEGMENTS)
+            .min(max_worker_count),
+    )
+    .unwrap_or(*active_connection_count);
     workers.spawn(download_segment_worker(SegmentWorkerRequest {
         client: client.clone(),
         url: url.to_string(),
@@ -1368,8 +1384,12 @@ async fn download_segment_worker(request: SegmentWorkerRequest) -> Result<(), Se
                     &error.failure.error,
                 )
                 .await?;
-                tokio::time::sleep(error.retry_after.unwrap_or_else(|| retry_delay(retry_count)))
-                    .await;
+                tokio::time::sleep(
+                    error
+                        .retry_after
+                        .unwrap_or_else(|| retry_delay(retry_count)),
+                )
+                .await;
             }
             Err(error) => return Err(error.failure),
         }
@@ -1396,7 +1416,9 @@ struct SegmentAttemptError {
     retry_after: Option<Duration>,
 }
 
-async fn download_segment_once(request: SegmentAttemptRequest<'_>) -> Result<i64, SegmentAttemptError> {
+async fn download_segment_once(
+    request: SegmentAttemptRequest<'_>,
+) -> Result<i64, SegmentAttemptError> {
     let SegmentAttemptRequest {
         client,
         url,
@@ -1531,14 +1553,16 @@ async fn download_segment_once(request: SegmentAttemptRequest<'_>) -> Result<i64
 
         let write_len_usize = usize::try_from(write_len).unwrap_or(0);
         speed_limiter.throttle(write_len_usize).await;
-        file.write_all(&chunk[..write_len_usize]).await.map_err(|e| {
-            non_retryable(segment_failure(
-                segment,
-                offset,
-                &AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
-                    .command_error(),
-            ))
-        })?;
+        file.write_all(&chunk[..write_len_usize])
+            .await
+            .map_err(|e| {
+                non_retryable(segment_failure(
+                    segment,
+                    offset,
+                    &AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
+                        .command_error(),
+                ))
+            })?;
         offset += write_len;
 
         if last_emit.elapsed() >= Duration::from_millis(300) {
@@ -1748,14 +1772,8 @@ async fn handle_segment_message(
             retry_count,
             error,
         } => {
-            db::update_segment_retry(
-                pool,
-                &segment_id,
-                downloaded_until,
-                retry_count,
-                &error,
-            )
-            .await?;
+            db::update_segment_retry(pool, &segment_id, downloaded_until, retry_count, &error)
+                .await?;
             last_speeds.insert(segment_id, 0);
             if update_task {
                 let segments = db::list_segment_records(pool, task_id).await?;
@@ -1896,7 +1914,10 @@ fn parse_content_disposition_filename(value: &str) -> Option<String> {
 }
 
 fn decode_rfc5987_filename(value: &str) -> Option<String> {
-    let encoded = value.split_once("''").map(|(_, value)| value).unwrap_or(value);
+    let encoded = value
+        .split_once("''")
+        .map(|(_, value)| value)
+        .unwrap_or(value);
     let decoded = percent_decode_lossy(encoded);
     (!decoded.trim().is_empty()).then_some(decoded)
 }
@@ -1908,7 +1929,8 @@ fn percent_decode_lossy(value: &str) -> String {
 
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let (Some(high), Some(low)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
             {
                 output.push(high * 16 + low);
                 index += 3;

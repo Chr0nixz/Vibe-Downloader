@@ -26,7 +26,10 @@ struct NativeHostResponse {
 
 fn main() {
     if let Err(error) = init_standalone_logging() {
-        let _ = writeln!(io::stderr(), "failed to initialize native host logging: {error}");
+        let _ = writeln!(
+            io::stderr(),
+            "failed to initialize native host logging: {error}"
+        );
     }
 
     let response = match read_native_message().and_then(handle_message) {

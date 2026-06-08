@@ -4,11 +4,7 @@ use std::sync::Once;
 use crate::platform;
 use tauri::{AppHandle, Manager, Runtime};
 use tracing::Level;
-use tracing_subscriber::{
-    filter::EnvFilter,
-    layer::SubscriberExt,
-    Layer,
-};
+use tracing_subscriber::{filter::EnvFilter, layer::SubscriberExt, Layer};
 
 static INIT: Once = Once::new();
 
@@ -29,8 +25,8 @@ fn init_logging_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         "vibe_downloader=info,tauri=warn,sqlx=warn"
     };
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
 
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
@@ -69,8 +65,8 @@ fn init_standalone_logging_inner() -> Result<(), String> {
         "vibe_downloader=info"
     };
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
 
     let file_appender = tracing_appender::rolling::RollingFileAppender::new(
         tracing_appender::rolling::Rotation::DAILY,

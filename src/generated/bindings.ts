@@ -40,6 +40,7 @@ export const commands = {
 	pauseTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("pause_task", { id })),
 	resumeTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("resume_task", { id })),
 	retryTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("retry_task", { id })),
+	resolveTaskAttention: (input: ResolveTaskAttentionInput) => typedError<Task, string>(__TAURI_INVOKE("resolve_task_attention", { input })),
 	cancelTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("cancel_task", { id })),
 	deleteTask: (id: string, deleteFile: boolean) => typedError<null, string>(__TAURI_INVOKE("delete_task", { id, deleteFile })),
 	openTaskFile: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_file", { id })),
@@ -126,6 +127,15 @@ export type ProbeTaskPayload = {
 	contentType: string | null,
 };
 
+export type RecoveryAction = "retry" | "retry_later" | "choose_another_name" | "choose_another_folder" | "restart" | "open_folder" | "check_url";
+
+export type ResolveTaskAttentionInput = {
+	id: string,
+	action: RecoveryAction,
+	fileName: string | null,
+	saveDir: string | null,
+};
+
 export type SegmentStatus = "pending" | "downloading" | "completed" | "failed";
 
 export type Task = {
@@ -173,6 +183,10 @@ export type TaskSegment = {
 };
 
 export type TaskStatus = "queued" | "downloading" | "paused" | "completed" | "failed" | "retrying" | "waiting_network" | "needs_attention";
+
+export type TaskUpdatedPayload = {
+	task: Task,
+};
 
 export type UpdateSettingsInput = {
 	maxActiveTasks: number | null,

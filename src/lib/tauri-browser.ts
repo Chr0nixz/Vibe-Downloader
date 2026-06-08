@@ -5,6 +5,7 @@ import type {
   CreateTaskInput,
   ProbeTaskInput,
   ProbeTaskPayload,
+  ResolveTaskAttentionInput,
   UpdateSettingsInput,
 } from "@/generated/bindings";
 import type { Task, TaskStatus } from "@/types/task";
@@ -19,6 +20,7 @@ const STORAGE_KEY = "vibe-browser-mock-tasks";
 const SETTINGS_STORAGE_KEY = "vibe-browser-settings";
 
 type BrowserListener = (payload: TaskProgressPayload) => void;
+type TaskUpdatedListener = (task: Task) => void;
 
 let tasks: Task[] = loadStoredTasks() ?? buildBrowserMockTasks();
 let settings: AppSettings = loadStoredSettings() ?? {
@@ -31,6 +33,7 @@ let settings: AppSettings = loadStoredSettings() ?? {
 };
 let progressTimer: ReturnType<typeof setInterval> | undefined;
 const progressListeners = new Set<BrowserListener>();
+const taskUpdatedListeners = new Set<TaskUpdatedListener>();
 const queueListeners = new Set<() => void>();
 const settingsListeners = new Set<() => void>();
 const browserIntegrationListeners = new Set<() => void>();
@@ -118,6 +121,10 @@ function emitProgress(payload: TaskProgressPayload): void {
   for (const handler of progressListeners) handler(payload);
 }
 
+function emitTaskUpdated(task: Task): void {
+  for (const handler of taskUpdatedListeners) handler({ ...task });
+}
+
 function browserTask(
   id: string,
   fileName: string,
@@ -184,6 +191,7 @@ function updateTask(id: string, patch: Partial<Task>): Task {
   tasks = [...tasks.slice(0, index), next, ...tasks.slice(index + 1)];
   persistTasks();
   emitQueueChanged();
+  emitTaskUpdated(next);
   return next;
 }
 
@@ -199,7 +207,7 @@ function scheduleBrowserQueue(): void {
     if (available <= 0 || task.status !== "queued") return task;
     available -= 1;
     changed = true;
-    return {
+    const next: Task = {
       ...task,
       status: "downloading",
       speedBps: task.speedBps > 0 ? task.speedBps : 4_000_000,
@@ -210,6 +218,8 @@ function scheduleBrowserQueue(): void {
       healthSummary: "Downloading",
       updatedAt: nowIso(),
     };
+    emitTaskUpdated(next);
+    return next;
   });
 
   if (changed) {
@@ -422,6 +432,7 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   persistTasks();
   scheduleBrowserQueue();
   emitQueueChanged();
+  emitTaskUpdated(task);
   return task;
 }
 
@@ -467,6 +478,33 @@ export async function retryTask(id: string): Promise<Task> {
   return resumeTask(id);
 }
 
+export async function resolveTaskAttention(input: ResolveTaskAttentionInput): Promise<Task> {
+  const task = tasks.find((entry) => entry.id === input.id);
+  if (!task) throw new Error(`Task not found: ${input.id}`);
+  if (input.action === "open_folder" || input.action === "check_url") {
+    return task;
+  }
+  if (input.action === "choose_another_name" || input.action === "choose_another_folder") {
+    const fileName = input.fileName?.trim() || task.fileName;
+    const saveDir = input.saveDir?.trim() || task.saveDir;
+    updateTask(input.id, {
+      fileName,
+      saveDir,
+      finalPath: `${saveDir}/${fileName}`,
+    });
+  }
+  if (input.action === "restart") {
+    updateTask(input.id, {
+      downloadedBytes: 0,
+      speedBps: 0,
+      connectionCount: 0,
+      healthSummary: "Queued",
+      errorMessage: null,
+    });
+  }
+  return resumeTask(input.id);
+}
+
 export async function cancelTask(id: string): Promise<Task> {
   return pauseTask(id);
 }
@@ -493,6 +531,13 @@ export function onTaskProgress(handler: (payload: TaskProgressPayload) => void):
   return Promise.resolve(() => {
     progressListeners.delete(handler);
     stopProgressTimerIfIdle();
+  });
+}
+
+export function onTaskUpdated(handler: (task: Task) => void): Promise<() => void> {
+  taskUpdatedListeners.add(handler);
+  return Promise.resolve(() => {
+    taskUpdatedListeners.delete(handler);
   });
 }
 

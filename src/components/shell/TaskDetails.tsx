@@ -7,11 +7,14 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import type { Task } from "@/types/task";
 import type { TaskSegment } from "@/types/task-segment";
+import type { RecoveryAction } from "@/generated/bindings";
 import { listTaskSegments } from "@/lib/tauri";
+import { errorMessage } from "@/lib/errors";
 import { formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import { useIsCompactShell } from "@/hooks/use-shell-layout";
+import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 
 const SEGMENT_REFRESH_MS = 2500;
 
@@ -19,16 +22,22 @@ interface TaskDetailsProps {
   task: Task | null;
   open: boolean;
   onClose?: () => void;
+  onResolveAttention: (task: Task, action: RecoveryAction) => void;
 }
 
-export function TaskDetails({ task, open, onClose }: TaskDetailsProps) {
+export function TaskDetails({ task, open, onClose, onResolveAttention }: TaskDetailsProps) {
   const compact = useIsCompactShell();
 
   if (!open || !task) return null;
 
   if (compact) {
     return (
-      <TaskDetailsDrawer task={task} open={open} onClose={onClose} />
+      <TaskDetailsDrawer
+        task={task}
+        open={open}
+        onClose={onClose}
+        onResolveAttention={onResolveAttention}
+      />
     );
   }
 
@@ -40,7 +49,7 @@ export function TaskDetails({ task, open, onClose }: TaskDetailsProps) {
       )}
     >
       <TaskDetailsHeader task={task} />
-      <TaskDetailsPanel task={task} />
+      <TaskDetailsPanel task={task} onResolveAttention={onResolveAttention} />
     </aside>
   );
 }
@@ -49,10 +58,12 @@ function TaskDetailsDrawer({
   task,
   open,
   onClose,
+  onResolveAttention,
 }: {
   task: Task;
   open: boolean;
   onClose?: () => void;
+  onResolveAttention: (task: Task, action: RecoveryAction) => void;
 }) {
   const { t } = useTranslation();
 
@@ -100,7 +111,7 @@ function TaskDetailsDrawer({
           <Dialog.Description className="sr-only">
             {t("taskDetails.drawerDescription", { name: task.fileName })}
           </Dialog.Description>
-          <TaskDetailsPanel task={task} />
+          <TaskDetailsPanel task={task} onResolveAttention={onResolveAttention} />
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -118,7 +129,13 @@ function TaskDetailsHeader({ task }: { task: Task }) {
   );
 }
 
-function TaskDetailsPanel({ task }: { task: Task }) {
+function TaskDetailsPanel({
+  task,
+  onResolveAttention,
+}: {
+  task: Task;
+  onResolveAttention: (task: Task, action: RecoveryAction) => void;
+}) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("overview");
   const [segments, setSegments] = useState<TaskSegment[]>([]);
@@ -181,6 +198,7 @@ function TaskDetailsPanel({ task }: { task: Task }) {
             <Row label={t("taskDetails.progress")} value={formatPercent(task.downloadedBytes, task.totalSize)} />
             <Row label={t("taskDetails.speed")} value={formatSpeed(task.speedBps)} />
             <Row label={t("taskDetails.eta")} value={formatEta(task.downloadedBytes, task.totalSize, task.speedBps)} />
+            <TaskRecoveryActions task={task} onResolve={onResolveAttention} />
           </TabsContent>
           <TabsContent value="chunks">
             <ChunkList
@@ -414,7 +432,7 @@ function ConnectionList({
               </span>
             </div>
             {segment.lastError ? (
-              <p className="mt-2 text-status-danger">{segment.lastError}</p>
+              <p className="mt-2 text-status-danger">{errorMessage(segment.lastError)}</p>
             ) : null}
           </div>
         );

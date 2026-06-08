@@ -9,7 +9,9 @@ pub fn app_log_dir() -> Result<PathBuf, String> {
     let dir = if cfg!(target_os = "windows") {
         let local_app_data = std::env::var_os("LOCALAPPDATA")
             .ok_or_else(|| "LOCALAPPDATA is not set.".to_string())?;
-        PathBuf::from(local_app_data).join(APP_IDENTIFIER).join("logs")
+        PathBuf::from(local_app_data)
+            .join(APP_IDENTIFIER)
+            .join("logs")
     } else if cfg!(target_os = "macos") {
         let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set.".to_string())?;
         PathBuf::from(home)
