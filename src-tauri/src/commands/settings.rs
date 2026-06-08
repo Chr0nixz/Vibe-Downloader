@@ -20,6 +20,9 @@ pub struct UpdateSettingsInput {
     pub multi_connection_threshold_bytes: Option<String>,
     pub segment_count: Option<i32>,
     pub max_connections_per_host: Option<i32>,
+    pub system_notifications: Option<bool>,
+    pub close_to_tray: Option<bool>,
+    pub start_on_boot: Option<bool>,
 }
 
 #[tauri::command]
@@ -63,6 +66,11 @@ pub async fn update_settings(
             db::MIN_MAX_CONNECTIONS_PER_HOST,
             db::MAX_MAX_CONNECTIONS_PER_HOST,
         );
+    let system_notifications = input
+        .system_notifications
+        .unwrap_or(current.system_notifications);
+    let close_to_tray = input.close_to_tray.unwrap_or(current.close_to_tray);
+    let start_on_boot = input.start_on_boot.unwrap_or(current.start_on_boot);
     let settings = AppSettings {
         max_active_tasks,
         default_save_dir,
@@ -70,6 +78,9 @@ pub async fn update_settings(
         multi_connection_threshold_bytes,
         segment_count,
         max_connections_per_host,
+        system_notifications,
+        close_to_tray,
+        start_on_boot,
     };
 
     db::upsert_settings(&state.pool, &settings).await?;

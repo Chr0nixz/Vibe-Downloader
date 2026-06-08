@@ -8,11 +8,12 @@ export type { SegmentStatus };
 
 export type TaskSegment = Omit<
   GeneratedTaskSegment,
-  "rangeStart" | "rangeEnd" | "downloadedUntil"
+  "rangeStart" | "rangeEnd" | "downloadedUntil" | "speedBps"
 > & {
   rangeStart: number;
   rangeEnd: number;
   downloadedUntil: number;
+  speedBps: number;
 };
 
 export function normalizeTaskSegment(segment: GeneratedTaskSegment): TaskSegment {
@@ -21,5 +22,6 @@ export function normalizeTaskSegment(segment: GeneratedTaskSegment): TaskSegment
     rangeStart: parseByteCount(segment.rangeStart),
     rangeEnd: parseByteCount(segment.rangeEnd),
     downloadedUntil: parseByteCount(segment.downloadedUntil),
+    speedBps: parseByteCount(segment.speedBps),
   };
 }

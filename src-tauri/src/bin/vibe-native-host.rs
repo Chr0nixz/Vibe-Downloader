@@ -133,8 +133,23 @@ fn write_handoff_file(input: &BrowserHandoffInput) -> Result<PathBuf, String> {
 
     let file_name = safe_file_stem(&input.request_id);
     let path = dir.join(format!("{file_name}.json"));
+    if path.exists() {
+        return Err("Handoff request id already exists.".to_string());
+    }
+    let temp_path = dir.join(format!("{file_name}.{}.tmp", std::process::id()));
     let raw = serde_json::to_vec_pretty(input).map_err(|e| e.to_string())?;
-    fs::write(&path, raw).map_err(|e| format!("Could not write handoff file: {e}"))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|e| format!("Could not create handoff temp file: {e}"))?;
+    file.write_all(&raw)
+        .and_then(|_| file.flush())
+        .map_err(|e| format!("Could not write handoff temp file: {e}"))?;
+    fs::rename(&temp_path, &path).map_err(|e| {
+        let _ = fs::remove_file(&temp_path);
+        format!("Could not publish handoff file: {e}")
+    })?;
     Ok(path)
 }
 

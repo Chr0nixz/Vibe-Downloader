@@ -2,10 +2,17 @@ import { useEffect, useRef } from "react";
 import i18n from "@/i18n";
 
 import { createLogger } from "@/lib/logger";
-import { listTasks, onQueueChanged, onTaskProgress, onTaskUpdated } from "@/lib/tauri";
+import {
+  isTauriRuntime,
+  listTasks,
+  onQueueChanged,
+  onTaskProgress,
+  onTaskUpdated,
+} from "@/lib/tauri";
 
 const log = createLogger("task-events");
 import { mergeTasksFromServer, useTaskStore } from "@/stores/task-store";
+import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
 import { errorMessage } from "@/lib/errors";
 import type { Task } from "@/types/task";
@@ -47,6 +54,7 @@ export function useTaskEvents() {
             tone: "success",
             title: i18n.t("toast.taskCompleted", { name: task.fileName }),
           });
+          void sendCompletionNotification(task);
         }
 
         if (task.status === "failed" || task.status === "needs_attention") {
@@ -115,4 +123,29 @@ export function useTaskEvents() {
       unlistenQueue?.();
     };
   }, []);
+}
+
+async function sendCompletionNotification(task: Task) {
+  if (!isTauriRuntime()) return;
+  if (!useSettingsStore.getState().settings?.systemNotifications) return;
+
+  try {
+    const {
+      isPermissionGranted,
+      requestPermission,
+      sendNotification,
+    } = await import("@tauri-apps/plugin-notification");
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      const permission = await requestPermission();
+      granted = permission === "granted";
+    }
+    if (!granted) return;
+    sendNotification({
+      title: i18n.t("toast.taskCompleted", { name: task.fileName }),
+      body: task.saveDir,
+    });
+  } catch (error) {
+    log.warn("system notification failed", error);
+  }
 }

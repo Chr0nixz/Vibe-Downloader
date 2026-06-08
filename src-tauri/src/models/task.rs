@@ -15,6 +15,35 @@ pub enum TaskStatus {
     NeedsAttention,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HashVerificationStatus {
+    NotRequested,
+    Pending,
+    Verified,
+    Failed,
+}
+
+impl HashVerificationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::Pending => "pending",
+            Self::Verified => "verified",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Self {
+        match value {
+            "pending" => Self::Pending,
+            "verified" => Self::Verified,
+            "failed" => Self::Failed,
+            _ => Self::NotRequested,
+        }
+    }
+}
+
 impl TaskStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -103,6 +132,11 @@ pub struct Task {
     pub speed_bps: String,
     pub health_summary: Option<String>,
     pub error_message: Option<String>,
+    pub expected_hash_sha256: Option<String>,
+    pub actual_hash_sha256: Option<String>,
+    pub hash_status: HashVerificationStatus,
+    pub hash_error: Option<String>,
+    pub hash_verified_at: Option<String>,
     pub files: Vec<TaskFile>,
     pub created_at: String,
     pub updated_at: String,
@@ -133,6 +167,11 @@ pub struct TaskRecord {
     pub speed_bps: i64,
     pub health_summary: Option<String>,
     pub error_message: Option<String>,
+    pub expected_hash_sha256: Option<String>,
+    pub actual_hash_sha256: Option<String>,
+    pub hash_status: HashVerificationStatus,
+    pub hash_error: Option<String>,
+    pub hash_verified_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -180,6 +219,7 @@ pub struct TaskSegment {
     pub range_start: String,
     pub range_end: String,
     pub downloaded_until: String,
+    pub speed_bps: String,
     pub status: SegmentStatus,
     pub retry_count: i32,
     pub last_error: Option<String>,
@@ -194,9 +234,99 @@ pub struct TaskSegmentRecord {
     pub range_start: i64,
     pub range_end: i64,
     pub downloaded_until: i64,
+    pub speed_bps: i64,
     pub status: SegmentStatus,
     pub retry_count: i32,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskEvent {
+    pub id: String,
+    pub task_id: String,
+    pub event_type: String,
+    pub payload: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestDiagnostic {
+    pub id: String,
+    pub task_id: String,
+    pub method: String,
+    pub url: String,
+    pub range_header: Option<String>,
+    pub status_code: Option<i32>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub content_length: Option<String>,
+    pub error_message: Option<String>,
+    pub retry_count: i32,
+    pub duration_ms: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestDiagnosticRecord {
+    pub task_id: String,
+    pub method: String,
+    pub url: String,
+    pub range_header: Option<String>,
+    pub status_code: Option<i32>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub content_length: Option<i64>,
+    pub error_message: Option<String>,
+    pub retry_count: i32,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentSummary {
+    pub total: i32,
+    pub active: i32,
+    pub completed: i32,
+    pub failed: i32,
+    pub downloaded_bytes: String,
+    pub speed_bps: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HashVerificationState {
+    pub task_id: String,
+    pub expected_sha256: Option<String>,
+    pub actual_sha256: Option<String>,
+    pub status: HashVerificationStatus,
+    pub error_message: Option<String>,
+    pub verified_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchImportItem {
+    pub input_url: String,
+    pub normalized_url: Option<String>,
+    pub duplicate: bool,
+    pub valid: bool,
+    pub file_name: Option<String>,
+    pub total_size: Option<String>,
+    pub content_type: Option<String>,
+    pub supports_resume: bool,
+    pub error_message: Option<String>,
+    pub task: Option<Task>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchImportResult {
+    pub items: Vec<BatchImportItem>,
+    pub created_count: i32,
+    pub failed_count: i32,
+    pub duplicate_count: i32,
 }
 
 impl From<TaskSegmentRecord> for TaskSegment {
@@ -209,6 +339,7 @@ impl From<TaskSegmentRecord> for TaskSegment {
             range_start: record.range_start.to_string(),
             range_end: record.range_end.to_string(),
             downloaded_until: record.downloaded_until.to_string(),
+            speed_bps: record.speed_bps.to_string(),
             status: record.status,
             retry_count: record.retry_count,
             last_error: record.last_error,
@@ -261,6 +392,11 @@ impl From<TaskRecord> for Task {
             speed_bps: record.speed_bps.to_string(),
             health_summary: record.health_summary,
             error_message: record.error_message,
+            expected_hash_sha256: record.expected_hash_sha256,
+            actual_hash_sha256: record.actual_hash_sha256,
+            hash_status: record.hash_status,
+            hash_error: record.hash_error,
+            hash_verified_at: record.hash_verified_at,
             files: Vec::new(),
             created_at: record.created_at,
             updated_at: record.updated_at,
@@ -345,6 +481,9 @@ pub struct AppSettings {
     pub multi_connection_threshold_bytes: String,
     pub segment_count: i32,
     pub max_connections_per_host: i32,
+    pub system_notifications: bool,
+    pub close_to_tray: bool,
+    pub start_on_boot: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

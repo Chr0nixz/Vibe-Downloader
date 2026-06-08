@@ -898,6 +898,7 @@ fn direct_segments(task_id: &str, total_size: i64) -> Vec<TaskSegmentRecord> {
                 range_start: start,
                 range_end: end,
                 downloaded_until: start,
+                speed_bps: 0,
                 status: SegmentStatus::Pending,
                 retry_count: 0,
                 last_error: None,

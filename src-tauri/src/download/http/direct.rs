@@ -159,6 +159,7 @@ pub(super) async fn run_direct_segmented_download(
         active_workers += 1;
         workers.spawn(download_segment_worker(SegmentWorkerRequest {
             client: client.clone(),
+            task_id: segment.task_id.clone(),
             url: request.url.clone(),
             temp_path: request.temp_path.clone(),
             segment,

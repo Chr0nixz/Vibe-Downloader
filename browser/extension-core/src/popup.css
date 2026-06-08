@@ -3,7 +3,7 @@
 }
 
 body {
-  width: 260px;
+  width: 320px;
   margin: 0;
   background: #111318;
   color: #f4f7fb;
@@ -43,4 +43,56 @@ button {
 button:disabled {
   cursor: default;
   opacity: 0.65;
+}
+
+section {
+  display: grid;
+  gap: 8px;
+}
+
+.section-title {
+  color: #9aa6b2;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+#recent-tasks {
+  display: grid;
+  gap: 6px;
+  max-height: 190px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+#recent-tasks li {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid #2c3442;
+  border-radius: 6px;
+  background: #171b22;
+}
+
+.recent-url {
+  overflow: hidden;
+  color: #f4f7fb;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #9aa6b2;
+  font-size: 11px;
+}
+
+.recent-failed {
+  color: #ff9b86;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, FolderOpen, LoaderCircle, Puzzle, RotateCcw, Trash2 } from "lucide-react";
+import { Check, Clipboard, FolderOpen, LoaderCircle, Puzzle, RotateCcw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import {
   getBrowserIntegrationStatus,
   getSettings,
   installBrowserIntegration,
+  isTauriRuntime,
   onBrowserIntegrationChanged,
   openDirectoryPicker,
   uninstallBrowserIntegration,
@@ -43,6 +44,9 @@ export function SettingsPage() {
   const [multiConnectionThresholdBytes, setMultiConnectionThresholdBytes] = useState("");
   const [segmentCount, setSegmentCount] = useState(4);
   const [maxConnectionsPerHost, setMaxConnectionsPerHost] = useState(8);
+  const [systemNotifications, setSystemNotifications] = useState(true);
+  const [closeToTray, setCloseToTray] = useState(false);
+  const [startOnBoot, setStartOnBoot] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const [browserStatus, setBrowserStatus] = useState<BrowserIntegrationStatus | null>(null);
@@ -61,6 +65,9 @@ export function SettingsPage() {
     setMultiConnectionThresholdBytes(settings.multiConnectionThresholdBytes);
     setSegmentCount(settings.segmentCount);
     setMaxConnectionsPerHost(settings.maxConnectionsPerHost);
+    setSystemNotifications(settings.systemNotifications);
+    setCloseToTray(settings.closeToTray);
+    setStartOnBoot(settings.startOnBoot);
     setSaveState("saved");
   }, [settings]);
 
@@ -72,7 +79,10 @@ export function SettingsPage() {
       globalSpeedLimitBps === (settings.globalSpeedLimitBps ?? "") &&
       multiConnectionThresholdBytes === settings.multiConnectionThresholdBytes &&
       segmentCount === settings.segmentCount &&
-      maxConnectionsPerHost === settings.maxConnectionsPerHost
+      maxConnectionsPerHost === settings.maxConnectionsPerHost &&
+      systemNotifications === settings.systemNotifications &&
+      closeToTray === settings.closeToTray &&
+      startOnBoot === settings.startOnBoot
     ) {
       return;
     }
@@ -87,6 +97,9 @@ export function SettingsPage() {
         multiConnectionThresholdBytes: multiConnectionThresholdBytes.trim(),
         segmentCount,
         maxConnectionsPerHost,
+        systemNotifications,
+        closeToTray,
+        startOnBoot,
       });
     }, AUTO_SAVE_DELAY_MS);
 
@@ -102,6 +115,9 @@ export function SettingsPage() {
     multiConnectionThresholdBytes,
     segmentCount,
     settings,
+    systemNotifications,
+    closeToTray,
+    startOnBoot,
   ]);
 
   useEffect(() => {
@@ -136,7 +152,11 @@ export function SettingsPage() {
         multiConnectionThresholdBytes: nextSettings.multiConnectionThresholdBytes,
         segmentCount: nextSettings.segmentCount,
         maxConnectionsPerHost: nextSettings.maxConnectionsPerHost,
+        systemNotifications: nextSettings.systemNotifications,
+        closeToTray: nextSettings.closeToTray,
+        startOnBoot: nextSettings.startOnBoot,
       });
+      await syncAutostart(next.startOnBoot);
       if (version === saveVersion.current) {
         setSettings(next);
         setSaveState("saved");
@@ -156,9 +176,43 @@ export function SettingsPage() {
     }
   }
 
+  async function syncAutostart(enabled: boolean) {
+    if (!isTauriRuntime()) return;
+    try {
+      const autostart = await import("@tauri-apps/plugin-autostart");
+      if (enabled) {
+        await autostart.enable();
+      } else {
+        await autostart.disable();
+      }
+    } catch (err) {
+      log.warn("autostart sync failed", err);
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: errorMessage(err),
+      });
+    }
+  }
+
   async function chooseDirectory() {
     const selected = await openDirectoryPicker();
     if (selected) setDefaultSaveDir(selected);
+  }
+
+  async function copyBrowserDiagnostics() {
+    if (!browserStatus) return;
+    const lines = [
+      `Native host: ${browserStatus.nativeHostName}`,
+      `Native host path: ${browserStatus.nativeHostPath ?? "(missing)"}`,
+      `Extension source: ${browserStatus.extensionCorePath ?? "(missing)"}`,
+      ...browserStatus.browsers.map(
+        (browser) =>
+          `${browser.displayName}: profile=${browser.profile}, extensionId=${browser.extensionId ?? "(none)"}, manifest=${browser.manifestPath ?? "(missing)"}, installed=${browser.manifestInstalled}`,
+      ),
+    ];
+    await navigator.clipboard.writeText(lines.join("\n"));
+    addToast({ title: t("settings.browserDiagnosticsCopied"), tone: "success" });
   }
 
   function resetDirectory() {
@@ -316,26 +370,19 @@ export function SettingsPage() {
                 title={t("settings.globalSpeedLimit")}
                 htmlFor="global-speed-limit"
               >
-                <Input
+                <ByteUnitInput
                   id="global-speed-limit"
-                  type="number"
-                  min={0}
-                  step={1024}
-                  value={globalSpeedLimitBps}
-                  onChange={(event) => {
-                    const value = event.target.value.trim();
-                    if (value === "") {
-                      setGlobalSpeedLimitBps("");
-                      return;
-                    }
-                    const next = Number(value);
-                    if (Number.isFinite(next) && next >= 0) {
-                      setGlobalSpeedLimitBps(String(Math.floor(next)));
-                    }
-                  }}
+                  valueBytes={globalSpeedLimitBps}
+                  onChange={setGlobalSpeedLimitBps}
                   placeholder={t("settings.globalSpeedLimitPlaceholder")}
                   disabled={controlsDisabled}
-                  className="h-11 w-40 bg-surface-root text-center font-mono md:h-8"
+                  units={[
+                    ["1", "B/s"],
+                    ["1024", "KB/s"],
+                    ["1048576", "MB/s"],
+                    ["1073741824", "GB/s"],
+                  ]}
+                  allowEmpty
                 />
               </SettingsRow>
 
@@ -343,28 +390,23 @@ export function SettingsPage() {
                 title={t("settings.multiConnectionThreshold")}
                 htmlFor="multi-connection-threshold"
               >
-                <Input
+                <ByteUnitInput
                   id="multi-connection-threshold"
-                  type="number"
-                  min={0}
-                  step={1048576}
-                  value={multiConnectionThresholdBytes}
-                  onChange={(event) => {
-                    const value = event.target.value.trim();
-                    if (value === "") {
-                      setMultiConnectionThresholdBytes("0");
-                      return;
-                    }
-                    const next = Number(value);
-                    if (Number.isFinite(next) && next >= 0) {
-                      setMultiConnectionThresholdBytes(String(Math.floor(next)));
-                    }
-                  }}
+                  valueBytes={multiConnectionThresholdBytes}
+                  onChange={setMultiConnectionThresholdBytes}
                   disabled={controlsDisabled}
-                  className="h-11 w-44 bg-surface-root text-center font-mono md:h-8"
+                  units={[
+                    ["1048576", "MB"],
+                    ["1073741824", "GB"],
+                  ]}
                 />
               </SettingsRow>
+            </SettingsSection>
 
+            <SettingsSection
+              title={t("settings.advancedDownloads")}
+              description={t("settings.advancedDownloadsDescription")}
+            >
               <SettingsRow
                 title={t("settings.segmentCount")}
                 htmlFor="segment-count"
@@ -428,6 +470,33 @@ export function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection
+              title={t("settings.desktopIntegration")}
+              description={t("settings.desktopIntegrationDescription")}
+            >
+              <SettingsToggle
+                title={t("settings.systemNotifications")}
+                description={t("settings.systemNotificationsDescription")}
+                checked={systemNotifications}
+                disabled={controlsDisabled}
+                onChange={setSystemNotifications}
+              />
+              <SettingsToggle
+                title={t("settings.closeToTray")}
+                description={t("settings.closeToTrayDescription")}
+                checked={closeToTray}
+                disabled={controlsDisabled}
+                onChange={setCloseToTray}
+              />
+              <SettingsToggle
+                title={t("settings.startOnBoot")}
+                description={t("settings.startOnBootDescription")}
+                checked={startOnBoot}
+                disabled={controlsDisabled}
+                onChange={setStartOnBoot}
+              />
+            </SettingsSection>
+
+            <SettingsSection
               title={t("settings.browserIntegration")}
               description={t("settings.browserIntegrationDescription")}
             >
@@ -457,6 +526,9 @@ export function SettingsPage() {
                         <p className="text-sm text-text-primary">{statusLabel}</p>
                         <p className="mt-1 truncate text-xs text-text-muted">
                           {browser.manifestPath ?? t("settings.browserNoManifestPath")}
+                        </p>
+                        <p className="mt-1 truncate text-xs text-text-muted">
+                          {browser.profile} / {browser.extensionId ?? t("settings.browserNoExtensionId")}
                         </p>
                         {browser.lastError ? (
                           <p className="mt-1 text-xs text-status-danger">{browser.lastError}</p>
@@ -496,11 +568,27 @@ export function SettingsPage() {
                     </span>
                   </p>
                   <p className="truncate">
+                    {t("settings.browserNativeHostPath")}{" "}
+                    <span className="font-mono text-text-secondary">
+                      {browserStatus.nativeHostPath ?? t("settings.browserNoManifestPath")}
+                    </span>
+                  </p>
+                  <p className="truncate">
                     {t("settings.browserExtensionPath")}{" "}
                     <span className="font-mono text-text-secondary">
                       {browserStatus.extensionCorePath ?? t("settings.browserBuildExtensions")}
                     </span>
                   </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-3 h-8"
+                    onClick={() => void copyBrowserDiagnostics()}
+                  >
+                    <Clipboard className="h-4 w-4" />
+                    {t("settings.browserCopyDiagnostics")}
+                  </Button>
                 </div>
               ) : null}
             </SettingsSection>
@@ -573,6 +661,128 @@ function SettingsSection({
         {children}
       </div>
     </section>
+  );
+}
+
+function ByteUnitInput({
+  id,
+  valueBytes,
+  onChange,
+  units,
+  disabled,
+  placeholder,
+  allowEmpty,
+}: {
+  id: string;
+  valueBytes: string;
+  onChange: (value: string) => void;
+  units: readonly (readonly [string, string])[];
+  disabled?: boolean;
+  placeholder?: string;
+  allowEmpty?: boolean;
+}) {
+  const initialUnit = bestUnit(valueBytes, units);
+  const [unit, setUnit] = useState(initialUnit);
+  const unitSize = Number(unit);
+  const amount = displayAmount(valueBytes, unitSize, allowEmpty);
+
+  function commit(nextAmount: string, nextUnit = unit) {
+    const trimmed = nextAmount.trim();
+    if (allowEmpty && trimmed === "") {
+      onChange("");
+      return;
+    }
+    const parsed = Number(trimmed);
+    const parsedUnit = Number(nextUnit);
+    if (Number.isFinite(parsed) && parsed >= 0 && Number.isFinite(parsedUnit)) {
+      onChange(String(Math.floor(parsed * parsedUnit)));
+    }
+  }
+
+  return (
+    <div className="flex max-w-xs gap-2">
+      <Input
+        id={id}
+        type="number"
+        min={0}
+        step={unitSize >= 1048576 ? 0.25 : 1}
+        value={amount}
+        onChange={(event) => commit(event.target.value)}
+        placeholder={placeholder}
+        disabled={disabled}
+        className="h-11 min-w-0 bg-surface-root text-center font-mono md:h-8"
+      />
+      <select
+        value={unit}
+        onChange={(event) => {
+          setUnit(event.target.value);
+          commit(amount, event.target.value);
+        }}
+        disabled={disabled}
+        className="h-11 rounded-md border border-border-subtle bg-surface-root px-2 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
+      >
+        {units.map(([value, label]) => (
+          <option key={value} value={value}>
+            {label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function bestUnit(valueBytes: string, units: readonly (readonly [string, string])[]): string {
+  const bytes = Number(valueBytes);
+  if (!Number.isFinite(bytes) || bytes <= 0) return units[0]?.[0] ?? "1";
+  const exact = [...units]
+    .reverse()
+    .find(([unit]) => bytes >= Number(unit) && bytes % Number(unit) === 0);
+  return exact?.[0] ?? units[0]?.[0] ?? "1";
+}
+
+function displayAmount(
+  valueBytes: string,
+  unitSize: number,
+  allowEmpty?: boolean,
+): string {
+  if (allowEmpty && valueBytes.trim() === "") return "";
+  const bytes = Number(valueBytes);
+  if (!Number.isFinite(bytes) || bytes < 0 || !Number.isFinite(unitSize) || unitSize <= 0) {
+    return "0";
+  }
+  const value = bytes / unitSize;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function SettingsToggle({
+  title,
+  description,
+  checked,
+  disabled,
+  onChange,
+}: {
+  title: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="grid gap-3 border-t border-border-subtle/70 px-4 py-4 first:border-t-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+      <span className="min-w-0">
+        <span className="block text-sm font-medium text-text-primary">{title}</span>
+        <span className="mt-1 block text-xs leading-5 text-text-muted">
+          {description}
+        </span>
+      </span>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-5 w-5 accent-accent-primary"
+      />
+    </label>
   );
 }
 

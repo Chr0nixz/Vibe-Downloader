@@ -3,6 +3,7 @@ importScripts("logger.js");
 const log = createLogger("background");
 const HOST_NAME = "com.vibe_downloader.native_host";
 const BROWSER_KIND = "__VIBE_BROWSER_KIND__";
+const RECENT_KEY = "vibeRecentHandoffs";
 
 const api = globalThis.browser ?? globalThis.chrome;
 
@@ -79,6 +80,7 @@ async function sendDownloadUrl({ url, pageUrl, referrer, suggestedFileName }) {
           requestId: payload.requestId,
           error: lastError.message,
         });
+        recordRecentHandoff(payload, "failed", lastError.message);
         reject(new Error(lastError.message));
         return;
       }
@@ -86,9 +88,29 @@ async function sendDownloadUrl({ url, pageUrl, referrer, suggestedFileName }) {
         requestId: payload.requestId,
         status: response?.status,
       });
+      recordRecentHandoff(payload, response?.status ?? "accepted", null);
       resolve(response);
     });
   });
+}
+
+async function recordRecentHandoff(payload, status, errorMessage) {
+  const item = {
+    requestId: payload.requestId,
+    url: payload.url,
+    status,
+    errorMessage,
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    const stored = await api.storage.local.get(RECENT_KEY);
+    const recent = Array.isArray(stored?.[RECENT_KEY]) ? stored[RECENT_KEY] : [];
+    await api.storage.local.set({
+      [RECENT_KEY]: [item, ...recent].slice(0, 8),
+    });
+  } catch (error) {
+    log.warn("failed to record recent handoff", error);
+  }
 }
 
 function firstUrlFromText(text) {

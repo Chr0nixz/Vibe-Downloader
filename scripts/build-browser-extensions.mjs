@@ -11,11 +11,42 @@ const manifestTemplatePath = path.join(
   "manifest.template.json",
 );
 const distDir = path.join(root, "browser", "dist");
+const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+const profile = process.env.VIBE_BROWSER_PROFILE === "release" ? "release" : "dev";
 
 const variants = [
-  { id: "chromium", browserKind: "chrome" },
-  { id: "firefox", browserKind: "firefox", firefoxId: "vibe-downloader@local" },
-  { id: "opera", browserKind: "opera" },
+  {
+    id: "chromium",
+    browserKind: "chrome",
+    extensionId:
+      profile === "release"
+        ? "replace-with-chrome-web-store-id"
+        : "abcdefghijklmnopabcdefghijklmnop",
+  },
+  {
+    id: "edge",
+    browserKind: "edge",
+    extensionId:
+      profile === "release"
+        ? "replace-with-edge-addons-id"
+        : "abcdefghijklmnopabcdefghijklmnop",
+  },
+  {
+    id: "firefox",
+    browserKind: "firefox",
+    firefoxId:
+      profile === "release"
+        ? "vibe-downloader@example.invalid"
+        : "vibe-downloader@local",
+  },
+  {
+    id: "opera",
+    browserKind: "opera",
+    extensionId:
+      profile === "release"
+        ? "replace-with-opera-addons-id"
+        : "abcdefghijklmnopabcdefghijklmnop",
+  },
 ];
 
 await rm(distDir, { recursive: true, force: true });
@@ -31,7 +62,11 @@ for (const variant of variants) {
   const manifest = {
     ...manifestTemplate,
     name: variant.id === "firefox" ? "Vibe Downloader (Firefox)" : manifestTemplate.name,
+    version: packageJson.version,
   };
+  if (variant.extensionId) {
+    manifest.key = undefined;
+  }
   if (variant.firefoxId) {
     manifest.browser_specific_settings = {
       gecko: {

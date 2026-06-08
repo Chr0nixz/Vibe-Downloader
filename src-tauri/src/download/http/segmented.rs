@@ -9,7 +9,7 @@ use std::{
 };
 
 use reqwest::{
-    header::{ACCEPT_ENCODING, RANGE},
+    header::{ACCEPT_ENCODING, CONTENT_LENGTH, ETAG, LAST_MODIFIED, RANGE},
     Client, StatusCode,
 };
 use sqlx::SqlitePool;
@@ -32,11 +32,12 @@ use crate::{
     events::{emit_queue_changed, emit_task_progress, emit_task_updated_record},
     logging::sanitize_url,
     models::{
-        AppErrorPayload, SegmentStatus, TaskProgressPayload, TaskRecord, TaskSegmentRecord,
-        TaskStatus,
+        AppErrorPayload, RequestDiagnosticRecord, SegmentStatus, TaskProgressPayload, TaskRecord,
+        TaskSegmentRecord, TaskStatus,
     },
 };
 
+#[allow(clippy::too_many_arguments)]
 async fn run_unknown_size_download(
     client: &Client,
     app: AppHandle,
@@ -85,7 +86,37 @@ async fn run_unknown_size_download(
             .map_err(|e| format!("Could not reset the temporary file: {e}"))?;
     }
 
-    let mut response = send_get_with_retry(client, &url, None).await?;
+    let started_at = Instant::now();
+    let mut response = match send_get_with_retry(client, &url, None).await {
+        Ok(response) => {
+            persist_response_diagnostic(
+                &pool,
+                &task.id,
+                "GET",
+                &url,
+                None,
+                &response,
+                0,
+                started_at.elapsed(),
+            )
+            .await;
+            response
+        }
+        Err(error) => {
+            persist_error_diagnostic(
+                &pool,
+                &task.id,
+                "GET",
+                &url,
+                None,
+                &error,
+                0,
+                started_at.elapsed(),
+            )
+            .await;
+            return Err(error);
+        }
+    };
     if !response.status().is_success() {
         return Err(format_http_status(response.status()));
     }
@@ -199,6 +230,9 @@ pub(super) enum SegmentMessage {
         downloaded_until: i64,
         retry_count: i32,
         error: String,
+    },
+    Request {
+        record: RequestDiagnosticRecord,
     },
 }
 
@@ -590,6 +624,7 @@ async fn spawn_segment_workers(
         *active_workers += 1;
         workers.spawn(download_segment_worker(SegmentWorkerRequest {
             client: client.clone(),
+            task_id: segment.task_id.clone(),
             url: url.to_string(),
             temp_path: temp_path.to_path_buf(),
             segment,
@@ -703,6 +738,7 @@ async fn maybe_accelerate_segments(
     .unwrap_or(*active_connection_count);
     workers.spawn(download_segment_worker(SegmentWorkerRequest {
         client: client.clone(),
+        task_id: split.tail_segment.task_id.clone(),
         url: url.to_string(),
         temp_path: temp_path.to_path_buf(),
         segment: split.tail_segment,
@@ -752,6 +788,7 @@ fn speed_is_stable(speed_history: &VecDeque<(Instant, i64)>) -> bool {
 
 pub(super) struct SegmentWorkerRequest {
     pub(super) client: Client,
+    pub(super) task_id: String,
     pub(super) url: String,
     pub(super) temp_path: PathBuf,
     pub(super) segment: TaskSegmentRecord,
@@ -768,6 +805,7 @@ pub(super) async fn download_segment_worker(
 ) -> Result<(), SegmentFailure> {
     let SegmentWorkerRequest {
         client,
+        task_id,
         url,
         temp_path,
         segment,
@@ -792,6 +830,7 @@ pub(super) async fn download_segment_worker(
 
         match download_segment_once(SegmentAttemptRequest {
             client: &client,
+            task_id: &task_id,
             url: &url,
             temp_path: &temp_path,
             segment: &segment,
@@ -831,6 +870,7 @@ pub(super) async fn download_segment_worker(
 
 struct SegmentAttemptRequest<'a> {
     client: &'a Client,
+    task_id: &'a str,
     url: &'a str,
     temp_path: &'a Path,
     segment: &'a TaskSegmentRecord,
@@ -854,6 +894,7 @@ async fn download_segment_once(
 ) -> Result<i64, SegmentAttemptError> {
     let SegmentAttemptRequest {
         client,
+        task_id,
         url,
         temp_path,
         segment,
@@ -884,17 +925,49 @@ async fn download_segment_once(
     }
 
     let mut http_request = client.get(url).header(ACCEPT_ENCODING, "identity");
+    let range_header = if use_range {
+        Some(format!("bytes={offset}-{range_end}"))
+    } else {
+        None
+    };
     if use_range {
-        http_request = http_request.header(RANGE, format!("bytes={offset}-{range_end}"));
+        http_request = http_request.header(RANGE, range_header.as_deref().unwrap_or_default());
     }
 
-    let mut response = http_request.send().await.map_err(|e| {
-        retryable(segment_failure(
-            segment,
-            offset,
-            &format!("Could not connect to the server: {e}"),
-        ))
-    })?;
+    let started_at = Instant::now();
+    let mut response = match http_request.send().await {
+        Ok(response) => {
+            let record = response_diagnostic_record(
+                task_id,
+                "GET",
+                url,
+                range_header.clone(),
+                &response,
+                segment.retry_count,
+                started_at.elapsed(),
+            );
+            send_request_diagnostic(progress_tx, record)
+                .await
+                .map_err(non_retryable_attempt)?;
+            response
+        }
+        Err(error) => {
+            let message = format!("Could not connect to the server: {error}");
+            let record = error_diagnostic_record(
+                task_id,
+                "GET",
+                url,
+                range_header.clone(),
+                &message,
+                segment.retry_count,
+                started_at.elapsed(),
+            );
+            send_request_diagnostic(progress_tx, record)
+                .await
+                .map_err(non_retryable_attempt)?;
+            return Err(retryable(segment_failure(segment, offset, &message)));
+        }
+    };
 
     if !response.status().is_success() {
         let status = response.status();
@@ -906,6 +979,7 @@ async fn download_segment_once(
             Err(non_retryable(failure))
         };
     }
+
     if use_range && response.status() != StatusCode::PARTIAL_CONTENT {
         return Err(non_retryable(segment_failure(
             segment,
@@ -1141,6 +1215,21 @@ async fn send_segment_retry(
         })
 }
 
+async fn send_request_diagnostic(
+    progress_tx: &mpsc::Sender<SegmentMessage>,
+    record: RequestDiagnosticRecord,
+) -> Result<(), SegmentFailure> {
+    progress_tx
+        .send(SegmentMessage::Request { record })
+        .await
+        .map_err(|_| SegmentFailure {
+            segment_id: String::new(),
+            downloaded_until: 0,
+            error: "Progress channel closed before request diagnostics could be recorded."
+                .to_string(),
+        })
+}
+
 fn segment_failure(
     segment: &TaskSegmentRecord,
     downloaded_until: i64,
@@ -1171,10 +1260,11 @@ async fn handle_segment_message(
             speed_bps,
         } => {
             if update_task {
-                db::update_segment_progress(
+                db::update_segment_runtime_progress(
                     pool,
                     &segment_id,
                     downloaded_until,
+                    speed_bps,
                     SegmentStatus::Downloading,
                 )
                 .await?;
@@ -1191,6 +1281,8 @@ async fn handle_segment_message(
         } => {
             db::update_segment_retry(pool, &segment_id, downloaded_until, retry_count, &error)
                 .await?;
+            let payload = format!("{segment_id}: {error}");
+            db::insert_task_event(pool, task_id, "retrying", Some(&payload)).await?;
             last_speeds.insert(segment_id, 0);
             if update_task {
                 let segments = db::list_segment_records(pool, task_id).await?;
@@ -1216,8 +1308,137 @@ async fn handle_segment_message(
                 );
             }
         }
+        SegmentMessage::Request { record } => {
+            db::insert_request_diagnostic(pool, &record).await?;
+        }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_response_diagnostic(
+    pool: &SqlitePool,
+    task_id: &str,
+    method: &str,
+    url: &str,
+    range_header: Option<String>,
+    response: &reqwest::Response,
+    retry_count: i32,
+    duration: Duration,
+) {
+    let record = response_diagnostic_record(
+        task_id,
+        method,
+        url,
+        range_header,
+        response,
+        retry_count,
+        duration,
+    );
+    if let Err(error) = db::insert_request_diagnostic(pool, &record).await {
+        tracing::warn!(task_id, error = %error, "failed to persist request diagnostic");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_error_diagnostic(
+    pool: &SqlitePool,
+    task_id: &str,
+    method: &str,
+    url: &str,
+    range_header: Option<String>,
+    error_message: &str,
+    retry_count: i32,
+    duration: Duration,
+) {
+    let record = RequestDiagnosticRecord {
+        task_id: task_id.to_string(),
+        method: method.to_string(),
+        url: sanitize_url(url),
+        range_header,
+        status_code: None,
+        etag: None,
+        last_modified: None,
+        content_length: None,
+        error_message: Some(error_message.to_string()),
+        retry_count,
+        duration_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
+    };
+    if let Err(error) = db::insert_request_diagnostic(pool, &record).await {
+        tracing::warn!(task_id, error = %error, "failed to persist request diagnostic");
+    }
+}
+
+fn response_diagnostic_record(
+    task_id: &str,
+    method: &str,
+    url: &str,
+    range_header: Option<String>,
+    response: &reqwest::Response,
+    retry_count: i32,
+    duration: Duration,
+) -> RequestDiagnosticRecord {
+    let headers = response.headers();
+    RequestDiagnosticRecord {
+        task_id: task_id.to_string(),
+        method: method.to_string(),
+        url: sanitize_url(response.url().as_str()).if_empty(|| sanitize_url(url)),
+        range_header,
+        status_code: Some(i32::from(response.status().as_u16())),
+        etag: headers
+            .get(ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        last_modified: headers
+            .get(LAST_MODIFIED)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        content_length: headers
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok()),
+        error_message: None,
+        retry_count,
+        duration_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
+    }
+}
+
+fn error_diagnostic_record(
+    task_id: &str,
+    method: &str,
+    url: &str,
+    range_header: Option<String>,
+    error_message: &str,
+    retry_count: i32,
+    duration: Duration,
+) -> RequestDiagnosticRecord {
+    RequestDiagnosticRecord {
+        task_id: task_id.to_string(),
+        method: method.to_string(),
+        url: sanitize_url(url),
+        range_header,
+        status_code: None,
+        etag: None,
+        last_modified: None,
+        content_length: None,
+        error_message: Some(error_message.to_string()),
+        retry_count,
+        duration_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
+    }
+}
+
+trait EmptyFallback {
+    fn if_empty<F: FnOnce() -> String>(self, fallback: F) -> String;
+}
+
+impl EmptyFallback for String {
+    fn if_empty<F: FnOnce() -> String>(self, fallback: F) -> String {
+        if self.trim().is_empty() {
+            fallback()
+        } else {
+            self
+        }
+    }
 }
 
 async fn emit_aggregate_progress(

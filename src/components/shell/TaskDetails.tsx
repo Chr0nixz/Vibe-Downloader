@@ -7,8 +7,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import type { Task } from "@/types/task";
 import type { TaskSegment } from "@/types/task-segment";
-import type { RecoveryAction } from "@/generated/bindings";
-import { listTaskSegments } from "@/lib/tauri";
+import type { HashVerificationState, RecoveryAction, RequestDiagnostic, TaskEvent } from "@/generated/bindings";
+import { listTaskEvents, listSegments, listTaskRequests, verifyTaskHash } from "@/lib/tauri";
 import { errorMessage } from "@/lib/errors";
 import { formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
 import { cn } from "@/lib/utils";
@@ -140,9 +140,16 @@ function TaskDetailsPanel({
   const [activeTab, setActiveTab] = useState("overview");
   const [segments, setSegments] = useState<TaskSegment[]>([]);
   const [segmentError, setSegmentError] = useState<string | null>(null);
+  const [events, setEvents] = useState<TaskEvent[]>([]);
+  const [eventsError, setEventsError] = useState<string | null>(null);
+  const [requests, setRequests] = useState<RequestDiagnostic[]>([]);
+  const [requestsError, setRequestsError] = useState<string | null>(null);
+  const [hashState, setHashState] = useState<HashVerificationState | null>(null);
+  const [verifyingHash, setVerifyingHash] = useState(false);
 
   useEffect(() => {
     setActiveTab("overview");
+    setHashState(null);
   }, [task.id]);
 
   useEffect(() => {
@@ -156,7 +163,7 @@ function TaskDetailsPanel({
     }
 
     const loadSegments = () => {
-      void listTaskSegments(task.id)
+      void listSegments(task.id)
         .then((nextSegments) => {
           if (!cancelled) {
             setSegments(nextSegments);
@@ -182,6 +189,93 @@ function TaskDetailsPanel({
     };
   }, [activeTab, task.id, task.status]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+
+    if (activeTab !== "requests") {
+      setRequests([]);
+      setRequestsError(null);
+      return;
+    }
+
+    const loadRequests = () => {
+      void listTaskRequests(task.id)
+        .then((nextRequests) => {
+          if (!cancelled) {
+            setRequests(nextRequests);
+            setRequestsError(null);
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) setRequestsError(String(error));
+        });
+    };
+
+    loadRequests();
+
+    const isLive =
+      task.status === "downloading" ||
+      task.status === "retrying" ||
+      task.status === "queued";
+    if (isLive) {
+      intervalId = setInterval(loadRequests, SEGMENT_REFRESH_MS);
+    }
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [activeTab, task.id, task.status]);
+
+  async function runHashVerification() {
+    setVerifyingHash(true);
+    try {
+      setHashState(await verifyTaskHash(task.id));
+    } finally {
+      setVerifyingHash(false);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+
+    if (activeTab !== "logs") {
+      setEvents([]);
+      setEventsError(null);
+      return;
+    }
+
+    const loadEvents = () => {
+      void listTaskEvents(task.id)
+        .then((nextEvents) => {
+          if (!cancelled) {
+            setEvents(nextEvents);
+            setEventsError(null);
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) setEventsError(String(error));
+        });
+    };
+
+    loadEvents();
+
+    const isLive =
+      task.status === "downloading" ||
+      task.status === "retrying" ||
+      task.status === "queued";
+    if (isLive) {
+      intervalId = setInterval(loadEvents, SEGMENT_REFRESH_MS);
+    }
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [activeTab, task.id, task.status]);
+
   return (
     <Tabs
       value={activeTab}
@@ -192,12 +286,20 @@ function TaskDetailsPanel({
           <TabsTrigger value="overview">{t("taskDetails.overview")}</TabsTrigger>
           <TabsTrigger value="chunks">{t("taskDetails.chunks")}</TabsTrigger>
           <TabsTrigger value="connections">{t("taskDetails.connections")}</TabsTrigger>
+          <TabsTrigger value="requests">{t("taskDetails.requests")}</TabsTrigger>
+          <TabsTrigger value="logs">{t("taskDetails.logs")}</TabsTrigger>
         </TabsList>
         <ScrollArea className="min-h-0 flex-1">
           <TabsContent value="overview" className="space-y-2 text-sm">
             <Row label={t("taskDetails.progress")} value={formatPercent(task.downloadedBytes, task.totalSize)} />
             <Row label={t("taskDetails.speed")} value={formatSpeed(task.speedBps)} />
             <Row label={t("taskDetails.eta")} value={formatEta(task.downloadedBytes, task.totalSize, task.speedBps)} />
+            <HashPanel
+              task={task}
+              state={hashState}
+              verifying={verifyingHash}
+              onVerify={() => void runHashVerification()}
+            />
             <TaskRecoveryActions task={task} onResolve={onResolveAttention} />
           </TabsContent>
           <TabsContent value="chunks">
@@ -222,6 +324,20 @@ function TaskDetailsPanel({
               speedLabel={t("taskDetails.connectionSpeed")}
             />
           </TabsContent>
+          <TabsContent value="requests">
+            <RequestList
+              requests={requests}
+              error={requestsError}
+              emptyLabel={t("taskDetails.noRequests")}
+            />
+          </TabsContent>
+          <TabsContent value="logs">
+            <EventList
+              events={events}
+              error={eventsError}
+              emptyLabel={t("taskDetails.noLogs")}
+            />
+          </TabsContent>
         </ScrollArea>
       </Tabs>
   );
@@ -232,6 +348,66 @@ function Row({ label, value }: { label: string; value: string }) {
     <div>
       <div className="text-xs text-text-muted">{label}</div>
       <div className={cn("text-text-primary")}>{value}</div>
+    </div>
+  );
+}
+
+function HashPanel({
+  task,
+  state,
+  verifying,
+  onVerify,
+}: {
+  task: Task;
+  state: HashVerificationState | null;
+  verifying: boolean;
+  onVerify: () => void;
+}) {
+  const { t } = useTranslation();
+  const status = state?.status ?? task.hashStatus;
+  const actual = state?.actualSha256 ?? task.actualHashSha256;
+  const error = state?.errorMessage ?? task.hashError;
+
+  if (!task.expectedHashSha256 && !state?.expectedSha256) {
+    return (
+      <Row
+        label={t("taskDetails.integrity")}
+        value={t("taskDetails.hashNotRequested")}
+      />
+    );
+  }
+
+  return (
+    <div className="rounded-md border border-border-subtle bg-surface-raised/40 p-3 text-xs">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-text-muted">{t("taskDetails.integrity")}</div>
+          <div className={cn("font-medium", hashTone(status))}>
+            {t(`hash.status.${status}`)}
+          </div>
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8 shrink-0"
+          onClick={onVerify}
+          disabled={verifying || task.status !== "completed"}
+        >
+          {verifying ? t("taskDetails.verifyingHash") : t("taskDetails.verifyHash")}
+        </Button>
+      </div>
+      <div className="mt-2 grid gap-1 font-mono text-[11px] text-text-secondary">
+        <span className="break-all">
+          {t("taskDetails.expectedHash")} {task.expectedHashSha256 ?? state?.expectedSha256}
+        </span>
+        {actual ? (
+          <span className="break-all">
+            {t("taskDetails.actualHash")} {actual}
+          </span>
+        ) : null}
+      </div>
+      {error ? <p className="mt-2 text-status-danger">{error}</p> : null}
     </div>
   );
 }
@@ -375,9 +551,6 @@ function ConnectionList({
   const activeSegments = segments.filter(
     (segment) => segment.status === "downloading",
   );
-  const averageActiveSpeed =
-    activeSegments.length > 0 ? taskSpeedBps / activeSegments.length : 0;
-
   return (
     <div className="space-y-2 text-xs">
       <p className="rounded-md border border-border-subtle/70 bg-surface-root/50 px-3 py-2 text-text-secondary">
@@ -393,8 +566,7 @@ function ConnectionList({
           0,
           segment.downloadedUntil - segment.rangeStart,
         );
-        const speed =
-          segment.status === "downloading" ? averageActiveSpeed : 0;
+        const speed = segment.status === "downloading" ? segment.speedBps : 0;
         const rangeText = `${formatBytes(segment.rangeStart)} - ${formatBytes(segment.rangeEnd)}`;
         const percentText = formatPercent(completed, total);
 
@@ -439,6 +611,153 @@ function ConnectionList({
       })}
     </div>
   );
+}
+
+function EventList({
+  events,
+  error,
+  emptyLabel,
+}: {
+  events: TaskEvent[];
+  error: string | null;
+  emptyLabel: string;
+}) {
+  const { t } = useTranslation();
+
+  if (error) {
+    return (
+      <p className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+        {error}
+      </p>
+    );
+  }
+
+  if (events.length === 0) {
+    return <p className="text-xs text-text-secondary">{emptyLabel}</p>;
+  }
+
+  return (
+    <ol className="space-y-2 text-xs">
+      {events.map((event) => (
+        <li
+          key={event.id}
+          className="rounded-md border border-border-subtle bg-surface-raised/50 px-3 py-2"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <span className="font-medium text-text-primary">
+              {t(`taskEvent.${event.eventType}`, {
+                defaultValue: event.eventType,
+              })}
+            </span>
+            <time className="shrink-0 font-mono text-[11px] text-text-muted">
+              {formatEventTime(event.createdAt)}
+            </time>
+          </div>
+          {event.payload ? (
+            <p className="mt-1 break-words text-text-secondary">{event.payload}</p>
+          ) : null}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function RequestList({
+  requests,
+  error,
+  emptyLabel,
+}: {
+  requests: RequestDiagnostic[];
+  error: string | null;
+  emptyLabel: string;
+}) {
+  const { t } = useTranslation();
+
+  if (error) {
+    return (
+      <p className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+        {error}
+      </p>
+    );
+  }
+
+  if (requests.length === 0) {
+    return <p className="text-xs text-text-secondary">{emptyLabel}</p>;
+  }
+
+  return (
+    <ol className="space-y-2 text-xs">
+      {requests.map((request) => (
+        <li
+          key={request.id}
+          className="rounded-md border border-border-subtle bg-surface-raised/50 px-3 py-2"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <span className="font-mono text-text-primary">
+              {request.method} {request.statusCode ?? t("taskDetails.requestFailed")}
+            </span>
+            <time className="shrink-0 font-mono text-[11px] text-text-muted">
+              {formatEventTime(request.createdAt)}
+            </time>
+          </div>
+          <p className="mt-1 break-all font-mono text-[11px] text-text-secondary">
+            {request.url}
+          </p>
+          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-text-muted">
+            <span>{t("taskDetails.requestRange")}</span>
+            <span className="truncate text-right font-mono text-text-secondary">
+              {request.rangeHeader ?? "-"}
+            </span>
+            <span>{t("taskDetails.requestLength")}</span>
+            <span className="text-right font-mono text-text-secondary">
+              {request.contentLength ? formatBytes(Number(request.contentLength)) : "-"}
+            </span>
+            <span>{t("taskDetails.requestDuration")}</span>
+            <span className="text-right font-mono text-text-secondary">
+              {request.durationMs} ms
+            </span>
+            <span>{t("taskDetails.requestRetries")}</span>
+            <span className="text-right font-mono text-text-secondary">
+              {request.retryCount}
+            </span>
+          </div>
+          {request.etag ? (
+            <p className="mt-2 break-all font-mono text-[11px] text-text-muted">
+              ETag {request.etag}
+            </p>
+          ) : null}
+          {request.errorMessage ? (
+            <p className="mt-2 text-status-danger">{request.errorMessage}</p>
+          ) : null}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function formatEventTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function hashTone(status: Task["hashStatus"]): string {
+  switch (status) {
+    case "verified":
+      return "text-status-success";
+    case "failed":
+      return "text-status-danger";
+    case "pending":
+      return "text-status-warning";
+    default:
+      return "text-text-secondary";
+  }
 }
 
 function segmentTone(status: TaskSegment["status"]): string {

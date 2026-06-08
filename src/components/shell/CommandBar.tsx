@@ -1,12 +1,15 @@
 import {
+  Check,
   Command,
   Gauge,
+  LoaderCircle,
   Pause,
   Play,
   Plus,
   Search,
   Trash2,
 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -17,8 +20,11 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { Platform } from "@/lib/platform";
-import { formatShortcut } from "@/lib/utils";
+import { applyGlobalSpeedLimit } from "@/lib/settings";
+import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
+import { useSettingsStore } from "@/stores/settings-store";
 import { useTaskStore } from "@/stores/task-store";
+import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 
 interface CommandBarProps {
@@ -43,6 +49,13 @@ export function CommandBar({
   const { t } = useTranslation();
   const search = useTaskStore((s) => s.search);
   const setSearch = useTaskStore((s) => s.setSearch);
+  const settings = useSettingsStore((s) => s.settings);
+  const setSettings = useSettingsStore((s) => s.setSettings);
+  const addToast = useToastStore((s) => s.addToast);
+  const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
+  const [customLimit, setCustomLimit] = useState("");
+  const [savingSpeed, setSavingSpeed] = useState(false);
+  const speedMenuRef = useRef<HTMLDivElement>(null);
   const canStart =
     !!selectedTask &&
     (selectedTask.status === "paused" ||
@@ -54,6 +67,49 @@ export function CommandBar({
       selectedTask.status === "retrying" ||
       selectedTask.status === "queued");
   const canDelete = !!selectedTask;
+  const currentLimit = Number(settings?.globalSpeedLimitBps ?? 0);
+
+  useEffect(() => {
+    if (!speedMenuOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Node &&
+        speedMenuRef.current &&
+        !speedMenuRef.current.contains(target)
+      ) {
+        setSpeedMenuOpen(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [speedMenuOpen]);
+
+  async function setSpeedLimit(limit: number | null) {
+    try {
+      setSavingSpeed(true);
+      if (!settings) return;
+      const nextSettings = await applyGlobalSpeedLimit(settings, limit);
+      setSettings(nextSettings);
+      setSpeedMenuOpen(false);
+    } catch (error) {
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setSavingSpeed(false);
+    }
+  }
+
+  function applyCustomSpeed() {
+    const parsed = Number(customLimit);
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+    void setSpeedLimit(Math.round(parsed));
+  }
 
   return (
     <section
@@ -94,11 +150,68 @@ export function CommandBar({
           onClick={onDelete}
           disabled={!canDelete}
         />
-        <ActionIcon
-          label={t("commandBar.speedLimit")}
-          icon={Gauge}
-          className="hidden md:inline-flex"
-        />
+        <div className="relative" ref={speedMenuRef}>
+          <ActionIcon
+            label={
+              currentLimit > 0
+                ? t("commandBar.speedLimitActive", {
+                    speed: formatSpeed(currentLimit),
+                  })
+                : t("commandBar.speedLimit")
+            }
+            icon={savingSpeed ? LoaderCircle : Gauge}
+            className={cn("hidden md:inline-flex", savingSpeed && "animate-spin")}
+            onClick={() => setSpeedMenuOpen((open) => !open)}
+            disabled={!settings || savingSpeed}
+          />
+          {speedMenuOpen ? (
+            <div
+              className="absolute left-0 top-10 z-30 w-64 rounded-md border border-border-subtle bg-surface-overlay p-1.5 shadow-xl"
+              role="menu"
+              aria-label={t("commandBar.speedLimit")}
+            >
+              <SpeedPreset
+                label={t("speedLimit.unlimited")}
+                active={currentLimit <= 0}
+                onClick={() => void setSpeedLimit(null)}
+              />
+              {SPEED_LIMIT_PRESETS.map((preset) => (
+                <SpeedPreset
+                  key={preset.value}
+                  label={preset.label}
+                  active={currentLimit === preset.value}
+                  onClick={() => void setSpeedLimit(preset.value)}
+                />
+              ))}
+              <div className="mt-1 border-t border-border-subtle pt-1">
+                <label className="block px-2 py-1 text-[11px] font-medium text-text-muted">
+                  {t("speedLimit.customBytes")}
+                </label>
+                <div className="flex gap-1 px-1">
+                  <Input
+                    value={customLimit}
+                    onChange={(event) => setCustomLimit(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") applyCustomSpeed();
+                    }}
+                    inputMode="numeric"
+                    placeholder="1048576"
+                    className="h-8"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={applyCustomSpeed}
+                    disabled={savingSpeed || !customLimit.trim()}
+                  >
+                    {t("speedLimit.apply")}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <div className="relative min-w-0 flex-1">
@@ -139,6 +252,39 @@ export function CommandBar({
         </kbd>
       </Button>
     </section>
+  );
+}
+
+const SPEED_LIMIT_PRESETS = [
+  { label: "512 KB/s", value: 512 * 1024 },
+  { label: "1 MB/s", value: 1024 * 1024 },
+  { label: "5 MB/s", value: 5 * 1024 * 1024 },
+  { label: "10 MB/s", value: 10 * 1024 * 1024 },
+];
+
+function SpeedPreset({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={active}
+      className={cn(
+        "flex h-8 w-full items-center justify-between rounded px-2 text-left text-sm text-text-secondary hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
+        active && "bg-surface-raised text-text-primary",
+      )}
+      onClick={onClick}
+    >
+      <span>{label}</span>
+      {active ? <Check className="h-4 w-4 text-accent-primary" /> : null}
+    </button>
   );
 }
 

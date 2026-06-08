@@ -67,6 +67,8 @@ pub struct BrowserIntegrationEntry {
     pub manifest_installed: bool,
     pub manifest_path: Option<String>,
     pub extension_load_path: Option<String>,
+    pub extension_id: Option<String>,
+    pub profile: String,
     pub last_error: Option<String>,
 }
 

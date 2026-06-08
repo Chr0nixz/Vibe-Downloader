@@ -3,7 +3,7 @@
   "name": "Vibe Downloader",
   "description": "Send download links to Vibe Downloader.",
   "version": "0.1.0",
-  "permissions": ["nativeMessaging", "contextMenus", "activeTab", "tabs"],
+  "permissions": ["nativeMessaging", "contextMenus", "activeTab", "tabs", "storage"],
   "background": {
     "service_worker": "background.js"
   },

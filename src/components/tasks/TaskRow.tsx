@@ -39,9 +39,11 @@ import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 interface TaskRowProps {
   task: Task;
   selected: boolean;
+  multiSelected: boolean;
   position: number;
   setSize: number;
   onSelectTask: (taskId: string) => void;
+  onToggleSelected: (taskId: string, selected: boolean) => void;
   onNavigate: (direction: "next" | "prev") => void;
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
@@ -74,9 +76,11 @@ function statusTone(status: Task["status"]): string {
 export const TaskRow = memo(function TaskRow({
   task,
   selected,
+  multiSelected,
   position,
   setSize,
   onSelectTask,
+  onToggleSelected,
   onNavigate,
   onToggleTransfer,
   onRetry,
@@ -120,7 +124,7 @@ export const TaskRow = memo(function TaskRow({
     <motion.div
       id={`task-option-${task.id}`}
       role="option"
-      aria-selected={selected}
+      aria-selected={selected || multiSelected}
       aria-posinset={position}
       aria-setsize={setSize}
       aria-labelledby={nameId}
@@ -153,13 +157,30 @@ export const TaskRow = memo(function TaskRow({
         "grid gap-x-4 gap-y-3 md:grid-cols-[minmax(0,1fr)_auto] md:gap-y-2",
         selected &&
           "border-accent-primary/35 bg-surface-raised ring-1 ring-accent-primary/45 shadow-[0_8px_24px_oklch(0_0_0_/_0.10),0_1px_0_oklch(1_0_0_/_0.04)_inset]",
+        multiSelected && !selected && "border-accent-primary/25 bg-accent-primary/5",
         task.status === "completed" && "border-status-success/30",
         (task.status === "failed" || task.status === "needs_attention") &&
           "border-status-danger/35",
       )}
       transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
     >
-      <div className="min-w-0 space-y-2">
+      <div className="flex min-w-0 gap-3">
+        <label
+          className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-surface-raised"
+          data-row-action
+          onClick={(event) => event.stopPropagation()}
+        >
+          <span className="sr-only">
+            {t("taskList.selectTask", { name: task.fileName })}
+          </span>
+          <input
+            type="checkbox"
+            checked={multiSelected}
+            onChange={(event) => onToggleSelected(task.id, event.target.checked)}
+            className="h-4 w-4 accent-accent-primary"
+          />
+        </label>
+        <div className="min-w-0 flex-1 space-y-2">
         <div className="flex min-w-0 items-start justify-between gap-2 md:block">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -211,6 +232,7 @@ export const TaskRow = memo(function TaskRow({
           {task.connectionCount > 0 ? (
             <span>{t("task.connections", { count: task.connectionCount })}</span>
           ) : null}
+        </div>
         </div>
       </div>
 

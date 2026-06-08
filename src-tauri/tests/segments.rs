@@ -6,8 +6,8 @@ use tauri_app_lib::{
     db,
     download::ProbeResult,
     models::{
-        AppSettings, BrowserKind, SegmentStatus, Task, TaskKind, TaskRecord, TaskStatus,
-        TaskUpdatedPayload,
+        AppSettings, BrowserKind, HashVerificationStatus, SegmentStatus, Task, TaskKind,
+        TaskRecord, TaskStatus, TaskUpdatedPayload,
     },
 };
 
@@ -104,6 +104,9 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         multi_connection_threshold_bytes: "1048576".to_string(),
         segment_count: 6,
         max_connections_per_host: 8,
+        system_notifications: true,
+        close_to_tray: false,
+        start_on_boot: false,
     };
 
     let segments = db::ensure_task_segments_with_settings(&pool, &task, &settings)
@@ -231,6 +234,9 @@ async fn settings_upsert_and_clamp_active_task_count() {
             multi_connection_threshold_bytes: "1048576".to_string(),
             segment_count: 12,
             max_connections_per_host: 12,
+            system_notifications: true,
+            close_to_tray: false,
+            start_on_boot: false,
         },
     )
     .await
@@ -254,6 +260,9 @@ async fn settings_upsert_and_clamp_active_task_count() {
             multi_connection_threshold_bytes: "0".to_string(),
             segment_count: 999,
             max_connections_per_host: 999,
+            system_notifications: false,
+            close_to_tray: true,
+            start_on_boot: true,
         },
     )
     .await
@@ -624,6 +633,11 @@ fn sample_task(id: &str, total_size: i64) -> TaskRecord {
         speed_bps: 0,
         health_summary: Some("Queued".to_string()),
         error_message: None,
+        expected_hash_sha256: None,
+        actual_hash_sha256: None,
+        hash_status: HashVerificationStatus::NotRequested,
+        hash_error: None,
+        hash_verified_at: None,
         created_at: now.clone(),
         updated_at: now,
     }

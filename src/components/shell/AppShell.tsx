@@ -96,6 +96,7 @@ export function AppShell() {
   const setLoading = useTaskStore((s) => s.setLoading);
   const setError = useTaskStore((s) => s.setError);
   const selectTask = useTaskStore((s) => s.selectTask);
+  const clearSelectedIds = useTaskStore((s) => s.clearSelectedIds);
   const setDetailOpen = useTaskStore((s) => s.setDetailOpen);
   const setSettings = useSettingsStore((s) => s.setSettings);
   const setSettingsLoading = useSettingsStore((s) => s.setLoading);
@@ -164,6 +165,63 @@ export function AppShell() {
   const openFolder = useCallback((task: Task) => {
     void runTaskAction(() => openTaskFolder(task.id), task.id);
   }, [runTaskAction]);
+
+  const runBulkTaskAction = useCallback(async (
+    selectedTasks: Task[],
+    action: (task: Task) => Promise<Task | void>,
+  ) => {
+    for (const task of selectedTasks) {
+      await runTaskAction(() => action(task), task.id);
+    }
+  }, [runTaskAction]);
+
+  const bulkPause = useCallback((selectedTasks: Task[]) => {
+    void runBulkTaskAction(
+      selectedTasks.filter((task) =>
+        task.status === "downloading" ||
+        task.status === "retrying" ||
+        task.status === "queued",
+      ),
+      (task) => pauseTask(task.id),
+    );
+  }, [runBulkTaskAction]);
+
+  const bulkResume = useCallback((selectedTasks: Task[]) => {
+    void runBulkTaskAction(
+      selectedTasks.filter((task) =>
+        task.status === "paused" ||
+        task.status === "failed" ||
+        task.status === "waiting_network",
+      ),
+      (task) => resumeTask(task.id),
+    );
+  }, [runBulkTaskAction]);
+
+  const bulkRetry = useCallback((selectedTasks: Task[]) => {
+    void runBulkTaskAction(
+      selectedTasks.filter((task) => task.status !== "completed"),
+      (task) => retryTask(task.id),
+    );
+  }, [runBulkTaskAction]);
+
+  const bulkOpenFolder = useCallback((selectedTasks: Task[]) => {
+    const first = selectedTasks[0];
+    if (first) openFolder(first);
+  }, [openFolder]);
+
+  const bulkDelete = useCallback((selectedTasks: Task[]) => {
+    if (selectedTasks.length === 0) return;
+    const confirmed = window.confirm(
+      t("deleteDialog.bulkMessage", { count: selectedTasks.length }),
+    );
+    if (!confirmed) return;
+    void (async () => {
+      for (const task of selectedTasks) {
+        await runTaskAction(() => deleteTask(task.id, false));
+      }
+      clearSelectedIds();
+    })();
+  }, [clearSelectedIds, runTaskAction, t]);
 
   const submitAttentionResolution = useCallback((
     task: Task,
@@ -333,6 +391,11 @@ export function AppShell() {
             onOpenFile={openFile}
             onOpenFolder={openFolder}
             onResolveAttention={resolveAttention}
+            onBulkPause={bulkPause}
+            onBulkResume={bulkResume}
+            onBulkRetry={bulkRetry}
+            onBulkDelete={bulkDelete}
+            onBulkOpenFolder={bulkOpenFolder}
           />
           <Suspense fallback={null}>
             <TaskDetails
@@ -357,7 +420,41 @@ export function AppShell() {
       <ToastViewport />
       {paletteOpen ? (
         <Suspense fallback={null}>
-          <Palette open={paletteOpen} onOpenChange={setPaletteOpen} />
+          <Palette
+            open={paletteOpen}
+            onOpenChange={setPaletteOpen}
+            selectedTask={taskSurfaceActive ? selected : null}
+            onNewDownload={() => setNewDownloadOpen(true)}
+            onStart={() => {
+              if (selected) void runTaskAction(() => resumeTask(selected.id), selected.id);
+            }}
+            onPause={() => {
+              if (selected) void runTaskAction(() => pauseTask(selected.id), selected.id);
+            }}
+            onDelete={() => {
+              if (selected) setDeleteTarget(selected);
+            }}
+            onRetry={() => {
+              if (selected) retry(selected);
+            }}
+            onOpenFile={() => {
+              if (selected) openFile(selected);
+            }}
+            onOpenFolder={() => {
+              if (selected) openFolder(selected);
+            }}
+            onBulkPause={bulkPause}
+            onBulkResume={bulkResume}
+            onBulkRetry={bulkRetry}
+            onBulkDelete={bulkDelete}
+            onBulkOpenFolder={bulkOpenFolder}
+            onSetNav={(nextNav) => {
+              useTaskStore.getState().setNav(nextNav);
+              if (nextNav === "settings") {
+                setDetailOpen(false);
+              }
+            }}
+          />
         </Suspense>
       ) : null}
       {newDownloadOpen ? (

@@ -29,11 +29,20 @@ export const commands = {
 	speedBps: string,
 	healthSummary: string | null,
 	errorMessage: string | null,
+	expectedHashSha256: string | null,
+	actualHashSha256: string | null,
+	hashStatus: HashVerificationStatus,
+	hashError: string | null,
+	hashVerifiedAt: string | null,
 	files: TaskFile[],
 	createdAt: string,
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_task", { id })),
 	listTaskSegments: (taskId: string) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_task_segments", { taskId })),
+	listSegments: (input: ListSegmentsInput) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_segments", { input })),
+	getSegmentSummary: (taskId: string) => typedError<SegmentSummary, string>(__TAURI_INVOKE("get_segment_summary", { taskId })),
+	listTaskEvents: (taskId: string) => typedError<TaskEvent[], string>(__TAURI_INVOKE("list_task_events", { taskId })),
+	listTaskRequests: (taskId: string) => typedError<RequestDiagnostic[], string>(__TAURI_INVOKE("list_task_requests", { taskId })),
 	getSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("get_settings")),
 	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
 	getBrowserIntegrationStatus: () => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("get_browser_integration_status")),
@@ -42,6 +51,8 @@ export const commands = {
 	createBrowserHandoffTask: (input: BrowserHandoffInput) => typedError<BrowserHandoffResult, string>(__TAURI_INVOKE("create_browser_handoff_task", { input })),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
+	importUrls: (input: ImportUrlsInput) => typedError<BatchImportResult, string>(__TAURI_INVOKE("import_urls", { input })),
+	verifyTaskHash: (id: string) => typedError<HashVerificationState, string>(__TAURI_INVOKE("verify_task_hash", { id })),
 	pauseTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("pause_task", { id })),
 	resumeTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("resume_task", { id })),
 	retryTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("retry_task", { id })),
@@ -68,6 +79,29 @@ export type AppSettings = {
 	multiConnectionThresholdBytes: string,
 	segmentCount: number,
 	maxConnectionsPerHost: number,
+	systemNotifications: boolean,
+	closeToTray: boolean,
+	startOnBoot: boolean,
+};
+
+export type BatchImportItem = {
+	inputUrl: string,
+	normalizedUrl: string | null,
+	duplicate: boolean,
+	valid: boolean,
+	fileName: string | null,
+	totalSize: string | null,
+	contentType: string | null,
+	supportsResume: boolean,
+	errorMessage: string | null,
+	task: Task | null,
+};
+
+export type BatchImportResult = {
+	items: BatchImportItem[],
+	createdCount: number,
+	failedCount: number,
+	duplicateCount: number,
 };
 
 export type BrowserHandoffInput = {
@@ -97,6 +131,8 @@ export type BrowserIntegrationEntry = {
 	manifestInstalled: boolean,
 	manifestPath: string | null,
 	extensionLoadPath: string | null,
+	extensionId: string | null,
+	profile: string,
 	lastError: string | null,
 };
 
@@ -117,12 +153,37 @@ export type CreateTaskInput = {
 	url: string,
 	saveDir: string | null,
 	fileName: string | null,
+	expectedHashSha256: string | null,
 };
 
 export type EngineCapabilities = {
 	supportsResume: boolean,
 	supportsParallel: boolean,
 	supportsMultiFile: boolean,
+};
+
+export type HashVerificationState = {
+	taskId: string,
+	expectedSha256: string | null,
+	actualSha256: string | null,
+	status: HashVerificationStatus,
+	errorMessage: string | null,
+	verifiedAt: string | null,
+};
+
+export type HashVerificationStatus = "not_requested" | "pending" | "verified" | "failed";
+
+export type ImportUrlsInput = {
+	input: string,
+	saveDir: string | null,
+	probe: boolean | null,
+	create: boolean | null,
+};
+
+export type ListSegmentsInput = {
+	taskId: string,
+	page: number | null,
+	pageSize: number | null,
 };
 
 export type ProbeTaskInput = {
@@ -149,6 +210,22 @@ export type ProbedFile = {
 
 export type RecoveryAction = "retry" | "retry_later" | "choose_another_name" | "choose_another_folder" | "restart" | "open_folder" | "check_url";
 
+export type RequestDiagnostic = {
+	id: string,
+	taskId: string,
+	method: string,
+	url: string,
+	rangeHeader: string | null,
+	statusCode: number | null,
+	etag: string | null,
+	lastModified: string | null,
+	contentLength: string | null,
+	errorMessage: string | null,
+	retryCount: number,
+	durationMs: string,
+	createdAt: string,
+};
+
 export type ResolveTaskAttentionInput = {
 	id: string,
 	action: RecoveryAction,
@@ -157,6 +234,15 @@ export type ResolveTaskAttentionInput = {
 };
 
 export type SegmentStatus = "pending" | "downloading" | "completed" | "failed";
+
+export type SegmentSummary = {
+	total: number,
+	active: number,
+	completed: number,
+	failed: number,
+	downloadedBytes: string,
+	speedBps: string,
+};
 
 export type Task = {
 	id: string,
@@ -182,9 +268,22 @@ export type Task = {
 	speedBps: string,
 	healthSummary: string | null,
 	errorMessage: string | null,
+	expectedHashSha256: string | null,
+	actualHashSha256: string | null,
+	hashStatus: HashVerificationStatus,
+	hashError: string | null,
+	hashVerifiedAt: string | null,
 	files: TaskFile[],
 	createdAt: string,
 	updatedAt: string,
+};
+
+export type TaskEvent = {
+	id: string,
+	taskId: string,
+	eventType: string,
+	payload: string | null,
+	createdAt: string,
 };
 
 export type TaskFile = {
@@ -221,6 +320,7 @@ export type TaskSegment = {
 	rangeStart: string,
 	rangeEnd: string,
 	downloadedUntil: string,
+	speedBps: string,
 	status: SegmentStatus,
 	retryCount: number,
 	lastError: string | null,
@@ -239,6 +339,9 @@ export type UpdateSettingsInput = {
 	multiConnectionThresholdBytes: string | null,
 	segmentCount: number | null,
 	maxConnectionsPerHost: number | null,
+	systemNotifications: boolean | null,
+	closeToTray: boolean | null,
+	startOnBoot: boolean | null,
 };
 
 /* Tauri Specta runtime */

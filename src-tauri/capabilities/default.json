@@ -12,6 +12,8 @@
     "core:window:allow-set-focus",
     "dialog:allow-open",
     "os:default",
+    "notification:default",
+    "autostart:default",
     "updater:default",
     "process:allow-restart",
     "log:default"

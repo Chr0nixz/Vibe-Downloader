@@ -114,5 +114,42 @@ function legacyAppError(error: string): AppErrorPayload | null {
       actions: fallbackActionsForCode("temp_file_smaller_than_progress"),
     };
   }
+  if (
+    error.includes("disk") ||
+    error.includes("Disk") ||
+    error.includes("write") ||
+    error.includes("Write")
+  ) {
+    return {
+      code: "disk_write_failed",
+      message: error,
+      recoverable: true,
+      actions: fallbackActionsForCode("disk_write_failed"),
+    };
+  }
+  if (/\b403\b/.test(error)) {
+    return {
+      code: "http_denied",
+      message: error,
+      recoverable: false,
+      actions: fallbackActionsForCode("http_denied"),
+    };
+  }
+  if (/\b404\b/.test(error)) {
+    return {
+      code: "http_not_found",
+      message: error,
+      recoverable: false,
+      actions: fallbackActionsForCode("http_not_found"),
+    };
+  }
+  if (/\b429\b/.test(error)) {
+    return {
+      code: "server_rate_limited",
+      message: error,
+      recoverable: true,
+      actions: fallbackActionsForCode("server_rate_limited"),
+    };
+  }
   return null;
 }

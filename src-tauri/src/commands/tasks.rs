@@ -6,9 +6,12 @@ use std::{
     },
 };
 
+use reqwest::Url;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use specta::Type;
 use tauri::{AppHandle, State};
+use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
 use crate::{
@@ -17,8 +20,10 @@ use crate::{
     events::{emit_queue_changed, emit_task_progress, emit_task_updated, emit_task_updated_record},
     logging::sanitize_url,
     models::{
-        task::now_iso, AppErrorPayload, ProbeTaskPayload, RecoveryAction, Task, TaskFileRecord,
-        TaskKind, TaskRecord, TaskSegment, TaskSegmentRecord, TaskStatus,
+        task::now_iso, AppErrorPayload, BatchImportItem, BatchImportResult, HashVerificationState,
+        HashVerificationStatus, ProbeTaskPayload, RecoveryAction, RequestDiagnostic,
+        SegmentSummary, Task, TaskEvent, TaskFileRecord, TaskRecord, TaskSegment,
+        TaskSegmentRecord, TaskStatus,
     },
     platform, AppState, DownloadControl,
 };
@@ -29,6 +34,7 @@ pub struct CreateTaskInput {
     pub url: String,
     pub save_dir: Option<String>,
     pub file_name: Option<String>,
+    pub expected_hash_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -44,6 +50,23 @@ pub struct ResolveTaskAttentionInput {
     pub action: RecoveryAction,
     pub file_name: Option<String>,
     pub save_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSegmentsInput {
+    pub task_id: String,
+    pub page: Option<i32>,
+    pub page_size: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportUrlsInput {
+    pub input: String,
+    pub save_dir: Option<String>,
+    pub probe: Option<bool>,
+    pub create: Option<bool>,
 }
 
 #[tauri::command]
@@ -77,6 +100,49 @@ pub async fn list_task_segments(
     db::list_segment_records(&state.pool, &task_id)
         .await
         .map(|records| records.into_iter().map(TaskSegment::from).collect())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_segments(
+    state: State<'_, AppState>,
+    input: ListSegmentsInput,
+) -> Result<Vec<TaskSegment>, String> {
+    db::list_segment_records_paged(
+        &state.pool,
+        &input.task_id,
+        i64::from(input.page.unwrap_or(0)),
+        i64::from(input.page_size.unwrap_or(100)),
+    )
+    .await
+    .map(|records| records.into_iter().map(TaskSegment::from).collect())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_segment_summary(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<SegmentSummary, String> {
+    db::segment_summary(&state.pool, &task_id).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_task_events(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<Vec<TaskEvent>, String> {
+    db::list_task_events(&state.pool, &task_id, 100).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_task_requests(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<Vec<RequestDiagnostic>, String> {
+    db::list_request_diagnostics(&state.pool, &task_id, 100).await
 }
 
 #[tauri::command]
@@ -128,6 +194,158 @@ pub async fn create_task(
     create_task_with_state(app, state.inner(), input).await
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn import_urls(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: ImportUrlsInput,
+) -> Result<BatchImportResult, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+    let mut created_count = 0_i32;
+    let mut failed_count = 0_i32;
+    let mut duplicate_count = 0_i32;
+    let should_probe = input.probe.unwrap_or(true);
+    let should_create = input.create.unwrap_or(false);
+
+    for raw_url in input
+        .input
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let parsed = match Url::parse(raw_url) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") => url,
+            Ok(_) => {
+                failed_count += 1;
+                items.push(BatchImportItem {
+                    input_url: raw_url.to_string(),
+                    normalized_url: None,
+                    duplicate: false,
+                    valid: false,
+                    file_name: None,
+                    total_size: None,
+                    content_type: None,
+                    supports_resume: false,
+                    error_message: Some("Only HTTP and HTTPS URLs are supported.".to_string()),
+                    task: None,
+                });
+                continue;
+            }
+            Err(_) => {
+                failed_count += 1;
+                items.push(BatchImportItem {
+                    input_url: raw_url.to_string(),
+                    normalized_url: None,
+                    duplicate: false,
+                    valid: false,
+                    file_name: None,
+                    total_size: None,
+                    content_type: None,
+                    supports_resume: false,
+                    error_message: Some("URL is invalid.".to_string()),
+                    task: None,
+                });
+                continue;
+            }
+        };
+        let normalized_url = parsed.to_string();
+        if !seen.insert(normalized_url.clone()) {
+            duplicate_count += 1;
+            items.push(BatchImportItem {
+                input_url: raw_url.to_string(),
+                normalized_url: Some(normalized_url),
+                duplicate: true,
+                valid: true,
+                file_name: None,
+                total_size: None,
+                content_type: None,
+                supports_resume: false,
+                error_message: Some("Duplicate URL in this import.".to_string()),
+                task: None,
+            });
+            continue;
+        }
+
+        let mut item = BatchImportItem {
+            input_url: raw_url.to_string(),
+            normalized_url: Some(normalized_url.clone()),
+            duplicate: false,
+            valid: true,
+            file_name: None,
+            total_size: None,
+            content_type: None,
+            supports_resume: false,
+            error_message: None,
+            task: None,
+        };
+
+        if should_probe {
+            let probe_result = match state.engine_registry.engine_for_uri(&normalized_url) {
+                Ok(engine) => {
+                    engine
+                        .probe(ProbeRequest {
+                            uri: normalized_url.clone(),
+                            source: None,
+                        })
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            match probe_result {
+                Ok(probe) => {
+                    item.file_name = Some(probe.display_name);
+                    item.total_size = Some(probe.total_size.to_string());
+                    item.content_type = probe.content_type;
+                    item.supports_resume = probe.capabilities.supports_resume;
+                }
+                Err(error) => {
+                    item.valid = false;
+                    item.error_message = Some(error);
+                    failed_count += 1;
+                    items.push(item);
+                    continue;
+                }
+            }
+        }
+
+        if should_create {
+            match create_task_with_state(
+                app.clone(),
+                state.inner(),
+                CreateTaskInput {
+                    url: normalized_url,
+                    save_dir: input.save_dir.clone(),
+                    file_name: item.file_name.clone(),
+                    expected_hash_sha256: None,
+                },
+            )
+            .await
+            {
+                Ok(task) => {
+                    created_count += 1;
+                    item.task = Some(task);
+                }
+                Err(error) => {
+                    failed_count += 1;
+                    item.valid = false;
+                    item.error_message = Some(error);
+                }
+            }
+        }
+
+        items.push(item);
+    }
+
+    Ok(BatchImportResult {
+        items,
+        created_count,
+        failed_count,
+        duplicate_count,
+    })
+}
+
 pub(crate) async fn create_task_with_state(
     app: AppHandle,
     state: &AppState,
@@ -176,6 +394,12 @@ pub(crate) async fn create_task_with_state(
         .to_string();
     let temp_path = PathBuf::from(format!("{}.vibe-downloading", final_path.display()));
     let now = now_iso();
+    let expected_hash_sha256 = normalize_sha256(input.expected_hash_sha256.as_deref())?;
+    let hash_status = if expected_hash_sha256.is_some() {
+        HashVerificationStatus::Pending
+    } else {
+        HashVerificationStatus::NotRequested
+    };
 
     let record = TaskRecord {
         id: Uuid::new_v4().to_string(),
@@ -201,11 +425,17 @@ pub(crate) async fn create_task_with_state(
         speed_bps: 0,
         health_summary: Some("Queued".to_string()),
         error_message: None,
+        expected_hash_sha256,
+        actual_hash_sha256: None,
+        hash_status,
+        hash_error: None,
+        hash_verified_at: None,
         created_at: now.clone(),
         updated_at: now,
     };
 
     db::insert_task_record(&state.pool, &record).await?;
+    db::insert_task_event(&state.pool, &record.id, "created", None).await?;
     for file_record in task_file_records_from_probe(
         &record,
         &probe_files,
@@ -253,6 +483,7 @@ pub async fn pause_task(
         None,
     )
     .await?;
+    db::insert_task_event(&state.pool, &id, "paused", None).await?;
     db::update_segments_status_for_task(
         &state.pool,
         &id,
@@ -283,6 +514,7 @@ pub async fn resume_task(
     if matches!(task.status, TaskStatus::NeedsAttention) {
         return Err("Remote file changed. Restart download to avoid corruption.".to_string());
     }
+    db::insert_task_event(&state.pool, &id, "resumed", None).await?;
     let task = queue_task_for_retry(&app, state.inner(), &id).await?;
     task_from_record_with_files(&state.pool, task).await
 }
@@ -308,6 +540,7 @@ pub async fn retry_task(
         control.handle.abort();
     }
 
+    db::insert_task_event(&state.pool, &id, "retrying", None).await?;
     let task = queue_task_for_retry(&app, state.inner(), &id).await?;
     task_from_record_with_files(&state.pool, task).await
 }
@@ -333,6 +566,7 @@ pub async fn cancel_task(
         Some("Canceled by user."),
     )
     .await?;
+    db::insert_task_event(&state.pool, &id, "failed", Some("Canceled by user.")).await?;
     db::update_segments_status_for_task(
         &state.pool,
         &id,
@@ -406,15 +640,30 @@ pub async fn resolve_task_attention(
                     "This task must be restarted before it can continue safely.".to_string()
                 );
             }
+            db::insert_task_event(&state.pool, id, "retrying", None).await?;
             let task = queue_task_for_retry(&app, state.inner(), id).await?;
             task_from_record_with_files(&state.pool, task).await
         }
         RecoveryAction::ChooseAnotherName | RecoveryAction::ChooseAnotherFolder => {
             update_recovery_target(&app, state.inner(), &task, &input).await?;
+            db::insert_task_event(
+                &state.pool,
+                id,
+                "retrying",
+                Some("Recovery target changed."),
+            )
+            .await?;
             let task = queue_task_for_retry(&app, state.inner(), id).await?;
             task_from_record_with_files(&state.pool, task).await
         }
         RecoveryAction::Restart => {
+            db::insert_task_event(
+                &state.pool,
+                id,
+                "retrying",
+                Some("Restarted from beginning."),
+            )
+            .await?;
             let task = restart_task_from_beginning(&app, state.inner(), &task).await?;
             task_from_record_with_files(&state.pool, task).await
         }
@@ -451,6 +700,93 @@ pub async fn open_task_folder(state: State<'_, AppState>, id: String) -> Result<
         return Err("The download folder was not found on disk.".to_string());
     }
     platform::open_path(&path)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn verify_task_hash(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<HashVerificationState, String> {
+    verify_task_hash_with_pool(&state.pool, &id).await
+}
+
+pub(crate) async fn verify_task_hash_with_pool(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+) -> Result<HashVerificationState, String> {
+    let task = require_task(pool, id).await?;
+    let Some(expected) = task.expected_hash_sha256.clone() else {
+        return Ok(HashVerificationState {
+            task_id: task.id,
+            expected_sha256: None,
+            actual_sha256: task.actual_hash_sha256,
+            status: HashVerificationStatus::NotRequested,
+            error_message: None,
+            verified_at: task.hash_verified_at,
+        });
+    };
+    let Some(final_path) = task.final_path.clone() else {
+        let message = "Downloaded file path is not available.".to_string();
+        db::update_hash_verification(
+            pool,
+            &task.id,
+            None,
+            HashVerificationStatus::Failed,
+            Some(&message),
+        )
+        .await?;
+        return Ok(HashVerificationState {
+            task_id: task.id,
+            expected_sha256: Some(expected),
+            actual_sha256: None,
+            status: HashVerificationStatus::Failed,
+            error_message: Some(message),
+            verified_at: Some(now_iso()),
+        });
+    };
+
+    db::update_hash_verification(pool, &task.id, None, HashVerificationStatus::Pending, None)
+        .await?;
+    let actual = sha256_file(&PathBuf::from(final_path)).await?;
+    let status = if actual.eq_ignore_ascii_case(&expected) {
+        HashVerificationStatus::Verified
+    } else {
+        HashVerificationStatus::Failed
+    };
+    let error_message = if status == HashVerificationStatus::Failed {
+        Some("SHA-256 checksum does not match.".to_string())
+    } else {
+        None
+    };
+    db::update_hash_verification(
+        pool,
+        &task.id,
+        Some(&actual),
+        status,
+        error_message.as_deref(),
+    )
+    .await?;
+    db::insert_task_event(
+        pool,
+        &task.id,
+        if status == HashVerificationStatus::Verified {
+            "hash_verified"
+        } else {
+            "hash_failed"
+        },
+        error_message.as_deref(),
+    )
+    .await?;
+    let updated = require_task(pool, &task.id).await?;
+    Ok(HashVerificationState {
+        task_id: updated.id,
+        expected_sha256: updated.expected_hash_sha256,
+        actual_sha256: updated.actual_hash_sha256,
+        status: updated.hash_status,
+        error_message: updated.hash_error,
+        verified_at: updated.hash_verified_at,
+    })
 }
 
 #[cfg(debug_assertions)]
@@ -619,6 +955,7 @@ async fn schedule_queued_tasks_inner(
     emit_queue_changed(&app);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_task_download(
     app: AppHandle,
     pool: sqlx::SqlitePool,
@@ -654,6 +991,7 @@ async fn start_task_download(
         None,
     )
     .await?;
+    db::insert_task_event(&pool, &task.id, "started", None).await?;
     if let Some(current) = db::get_task_record(&pool, &task.id).await? {
         emit_task_updated_record(&app, &pool, &current).await;
     }
@@ -704,6 +1042,27 @@ async fn start_task_download(
         if let Err(error) = result {
             if !canceled {
                 mark_download_failed(&task_app, &task_pool, &task_id, error).await;
+            }
+        } else if !canceled {
+            match verify_task_hash_with_pool(&task_pool, &task_id).await {
+                Ok(state) if state.status != HashVerificationStatus::NotRequested => {
+                    tracing::info!(
+                        task_id = %task_id,
+                        status = ?state.status,
+                        "hash verification completed"
+                    );
+                    if let Ok(Some(current)) = db::get_task_record(&task_pool, &task_id).await {
+                        emit_task_updated_record(&task_app, &task_pool, &current).await;
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %error,
+                        "hash verification failed to run"
+                    );
+                }
             }
         }
 
@@ -952,6 +1311,7 @@ async fn prepare_task_for_download(
         task.supports_resume,
     ) {
         fail_task_and_segments(pool, &task.id, message).await?;
+        db::insert_task_event(pool, &task.id, "resume_blocked", Some(message)).await?;
         return Err(message.to_string());
     }
 
@@ -977,7 +1337,11 @@ async fn prepare_task_for_download(
                 Some(&message),
             )
             .await?;
+            db::insert_task_event(pool, &task.id, "resume_blocked", Some(&message)).await?;
             return Err(message);
+        }
+        if let Some(message) = resume_decision_message(&task, &probe) {
+            db::insert_task_event(pool, &task.id, "resume_checked", Some(&message)).await?;
         }
     }
 
@@ -1127,13 +1491,42 @@ pub fn resume_mismatch_message<P: ResumeProbe>(task: &TaskRecord, probe: &P) -> 
     if !probe.supports_resume() {
         return Some("Server no longer supports resume. Restart this download.".to_string());
     }
-    if task.etag.as_ref() != probe.etag() {
+    if strong_etag(task.etag.as_deref())
+        && strong_etag(probe.etag().map(String::as_str))
+        && task.etag.as_ref() != probe.etag()
+    {
         return Some("Remote file changed. Restart download to avoid corruption.".to_string());
     }
-    if task.last_modified.as_ref() != probe.last_modified() {
+    if task.last_modified.is_some()
+        && probe.last_modified().is_some()
+        && task.last_modified.as_ref() != probe.last_modified()
+    {
         return Some("Remote file changed. Restart download to avoid corruption.".to_string());
     }
     None
+}
+
+pub fn resume_decision_message<P: ResumeProbe>(task: &TaskRecord, probe: &P) -> Option<String> {
+    if weak_etag(task.etag.as_deref()) || weak_etag(probe.etag().map(String::as_str)) {
+        return Some(
+            "Resume allowed with weak ETag metadata. Verify the file if the source is unstable."
+                .to_string(),
+        );
+    }
+    if task.etag.is_none() && task.last_modified.is_none() {
+        return Some("Resume allowed without remote validators. Range metadata matched, but integrity depends on the server.".to_string());
+    }
+    Some("Resume metadata matched. Continuing from the temporary file.".to_string())
+}
+
+fn weak_etag(value: Option<&str>) -> bool {
+    value
+        .map(str::trim_start)
+        .is_some_and(|value| value.starts_with("W/") || value.starts_with("w/"))
+}
+
+fn strong_etag(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !weak_etag(Some(value)))
 }
 
 async fn fail_task_and_segments(
@@ -1179,6 +1572,13 @@ async fn mark_download_failed(
             task_id = %task_id,
             error = %db_error,
             "failed to persist task failure status"
+        );
+    }
+    if let Err(db_error) = db::insert_task_event(pool, task_id, "failed", Some(&error)).await {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %db_error,
+            "failed to persist task failure event"
         );
     }
     if let Err(db_error) = db::update_segments_status_for_task(
@@ -1315,6 +1715,36 @@ fn sanitize_relative_path(value: &str) -> PathBuf {
 
 fn parse_probed_file_size(value: &str) -> i64 {
     value.parse::<i64>().unwrap_or(0)
+}
+
+fn normalize_sha256(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let normalized = value.to_ascii_lowercase();
+    if normalized.len() != 64 || !normalized.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("SHA-256 must be 64 hexadecimal characters.".to_string());
+    }
+    Ok(Some(normalized))
+}
+
+async fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("Could not open file for checksum verification: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn remove_task_file_path(path: &str) -> Result<(), String> {
@@ -1537,7 +1967,7 @@ fn mock_task(
         url: url.to_string(),
         final_url: Some(url.to_string()),
         protocol: "https".to_string(),
-        task_kind: TaskKind::SingleFile,
+        task_kind: crate::models::TaskKind::SingleFile,
         file_name: file_name.to_string(),
         save_dir: "~/Downloads".to_string(),
         temp_path: None,
@@ -1556,6 +1986,11 @@ fn mock_task(
         speed_bps,
         health_summary,
         error_message,
+        expected_hash_sha256: None,
+        actual_hash_sha256: None,
+        hash_status: HashVerificationStatus::NotRequested,
+        hash_error: None,
+        hash_verified_at: None,
         created_at: now.to_string(),
         updated_at: now.to_string(),
     }

@@ -1,11 +1,17 @@
 import type {
   AppSettings,
+  BatchImportResult,
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
   CreateTaskInput,
+  HashVerificationState,
+  ImportUrlsInput,
   ProbeTaskInput,
   ProbeTaskPayload,
+  RequestDiagnostic,
   ResolveTaskAttentionInput,
+  SegmentSummary,
+  TaskEvent,
   UpdateSettingsInput,
 } from "@/generated/bindings";
 import type { Task, TaskStatus } from "@/types/task";
@@ -23,6 +29,8 @@ type BrowserListener = (payload: TaskProgressPayload) => void;
 type TaskUpdatedListener = (task: Task) => void;
 
 let tasks: Task[] = loadStoredTasks() ?? buildBrowserMockTasks();
+let taskEvents: TaskEvent[] = buildBrowserMockEvents(tasks);
+let taskRequests: RequestDiagnostic[] = [];
 let settings: AppSettings = loadStoredSettings() ?? {
   maxActiveTasks: 2,
   defaultSaveDir: "~/Downloads",
@@ -30,6 +38,9 @@ let settings: AppSettings = loadStoredSettings() ?? {
   multiConnectionThresholdBytes: String(16 * 1024 * 1024),
   segmentCount: 4,
   maxConnectionsPerHost: 8,
+  systemNotifications: true,
+  closeToTray: false,
+  startOnBoot: false,
 };
 let progressTimer: ReturnType<typeof setInterval> | undefined;
 const progressListeners = new Set<BrowserListener>();
@@ -97,6 +108,14 @@ function loadStoredSettings(): AppSettings | null {
           typeof parsed.maxConnectionsPerHost === "number"
             ? Math.min(16, Math.max(1, parsed.maxConnectionsPerHost))
             : 8,
+        systemNotifications:
+          typeof parsed.systemNotifications === "boolean"
+            ? parsed.systemNotifications
+            : true,
+        closeToTray:
+          typeof parsed.closeToTray === "boolean" ? parsed.closeToTray : false,
+        startOnBoot:
+          typeof parsed.startOnBoot === "boolean" ? parsed.startOnBoot : false,
       };
     }
     return null;
@@ -123,6 +142,19 @@ function emitProgress(payload: TaskProgressPayload): void {
 
 function emitTaskUpdated(task: Task): void {
   for (const handler of taskUpdatedListeners) handler({ ...task });
+}
+
+function logTaskEvent(taskId: string, eventType: string, payload: string | null = null): void {
+  taskEvents = [
+    {
+      id: String(Date.now() + taskEvents.length),
+      taskId,
+      eventType,
+      payload,
+      createdAt: nowIso(),
+    },
+    ...taskEvents,
+  ].slice(0, 500);
 }
 
 function browserTask(
@@ -163,6 +195,11 @@ function browserTask(
     speedBps: String(speedBps),
     healthSummary,
     errorMessage: needsError ? healthSummary : null,
+    expectedHashSha256: null,
+    actualHashSha256: null,
+    hashStatus: "not_requested",
+    hashError: null,
+    hashVerifiedAt: null,
     files: [
       {
         id: `${id}-file-0`,
@@ -198,6 +235,39 @@ export function buildBrowserMockTasks(): Task[] {
     browserTask("mock-fonts", "fonts-bundle.zip", "https://github.com/google/fonts/archive/refs/heads/main.zip", "github.com", "waiting_network", 220_000_000, 45_000_000, 0, 0, "Waiting for network", now),
     browserTask("mock-vscode", "vscode.deb", "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64", "code.visualstudio.com", "downloading", 95_000_000, 71_000_000, 2, 8_900_000, "Disk write slower than network", now),
   ];
+}
+
+function buildBrowserMockEvents(nextTasks: Task[]): TaskEvent[] {
+  return nextTasks.flatMap((task, index) => {
+    const baseId = index * 10;
+    const events: TaskEvent[] = [
+      {
+        id: String(baseId + 1),
+        taskId: task.id,
+        eventType: "created",
+        payload: null,
+        createdAt: task.createdAt,
+      },
+    ];
+    if (task.status === "completed") {
+      events.unshift({
+        id: String(baseId + 2),
+        taskId: task.id,
+        eventType: "completed",
+        payload: null,
+        createdAt: task.updatedAt,
+      });
+    } else if (task.status === "failed" || task.status === "needs_attention") {
+      events.unshift({
+        id: String(baseId + 2),
+        taskId: task.id,
+        eventType: "failed",
+        payload: task.errorMessage,
+        createdAt: task.updatedAt,
+      });
+    }
+    return events;
+  });
 }
 
 function cloneTasks(): Task[] {
@@ -238,6 +308,7 @@ function scheduleBrowserQueue(): void {
       healthSummary: "Downloading",
       updatedAt: nowIso(),
     };
+    logTaskEvent(task.id, "started");
     emitTaskUpdated(next);
     return next;
   });
@@ -256,8 +327,21 @@ function tickActiveDownloads(): void {
     if (task.downloadedBytes >= task.totalSize) return task;
     const step = Math.max(64_000, Math.floor(task.speedBps / 4));
     const downloadedBytes = Math.min(task.totalSize, task.downloadedBytes + step);
+    const completed = downloadedBytes >= task.totalSize;
     changed = true;
-    const next = { ...task, downloadedBytes, updatedAt: nowIso() };
+    const next = {
+      ...task,
+      downloadedBytes,
+      status: completed ? ("completed" as const) : task.status,
+      speedBps: completed ? 0 : task.speedBps,
+      connectionCount: completed ? 0 : task.connectionCount,
+      healthSummary: completed ? "Completed" : task.healthSummary,
+      updatedAt: nowIso(),
+    };
+    if (completed) {
+      logTaskEvent(task.id, "completed");
+      emitTaskUpdated(next);
+    }
     emitProgress({
       taskId: next.id,
       downloadedBytes: String(next.downloadedBytes),
@@ -319,6 +403,7 @@ export async function listTaskSegments(taskId: string): Promise<TaskSegment[]> {
       rangeStart: "0",
       rangeEnd: String(total - 1),
       downloadedUntil: String(downloaded),
+      speedBps: String(task.status === "downloading" ? task.speedBps : 0),
       status:
         task.status === "completed"
           ? "completed"
@@ -333,8 +418,61 @@ export async function listTaskSegments(taskId: string): Promise<TaskSegment[]> {
   ];
 }
 
+export async function listSegments(taskId: string, _page = 0, _pageSize = 100): Promise<TaskSegment[]> {
+  return listTaskSegments(taskId);
+}
+
+export async function getSegmentSummary(taskId: string): Promise<SegmentSummary> {
+  const segments = await listTaskSegments(taskId);
+  return {
+    total: segments.length,
+    active: segments.filter((segment) => segment.status === "downloading").length,
+    completed: segments.filter((segment) => segment.status === "completed").length,
+    failed: segments.filter((segment) => segment.status === "failed").length,
+    downloadedBytes: String(
+      segments.reduce(
+        (sum, segment) =>
+          sum + Math.max(0, segment.downloadedUntil - segment.rangeStart),
+        0,
+      ),
+    ),
+    speedBps: String(segments.reduce((sum, segment) => sum + segment.speedBps, 0)),
+  };
+}
+
+export async function listTaskEvents(taskId: string): Promise<TaskEvent[]> {
+  return taskEvents.filter((event) => event.taskId === taskId).slice(0, 100);
+}
+
+export async function listTaskRequests(taskId: string): Promise<RequestDiagnostic[]> {
+  const task = tasks.find((entry) => entry.id === taskId);
+  if (!task) return [];
+  if (!taskRequests.some((request) => request.taskId === taskId)) {
+    taskRequests = [
+      {
+        id: `${taskId}-request-0`,
+        taskId,
+        method: "GET",
+        url: task.url,
+        rangeHeader: task.supportsParallel ? "bytes=0-" : null,
+        statusCode: task.status === "failed" ? 503 : 206,
+        etag: task.etag,
+        lastModified: task.lastModified,
+        contentLength: String(task.totalSize),
+        errorMessage: task.errorMessage,
+        retryCount: task.status === "retrying" ? 1 : 0,
+        durationMs: "128",
+        createdAt: task.updatedAt,
+      },
+      ...taskRequests,
+    ];
+  }
+  return taskRequests.filter((request) => request.taskId === taskId).slice(0, 100);
+}
+
 export async function seedMockTasks(): Promise<Task[]> {
   tasks = buildBrowserMockTasks();
+  taskEvents = buildBrowserMockEvents(tasks);
   persistTasks();
   scheduleBrowserQueue();
   emitQueueChanged();
@@ -368,6 +506,9 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
       16,
       Math.max(1, input.maxConnectionsPerHost ?? settings.maxConnectionsPerHost),
     ),
+    systemNotifications: input.systemNotifications ?? settings.systemNotifications,
+    closeToTray: input.closeToTray ?? settings.closeToTray,
+    startOnBoot: input.startOnBoot ?? settings.startOnBoot,
   };
   persistSettings();
   emitSettingsChanged();
@@ -413,6 +554,13 @@ export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationS
       manifestInstalled: browserIntegrationInstalled.has(browser),
       manifestPath: `~/Library/Application Support/${browser}/NativeMessagingHosts/com.vibe_downloader.native_host.json`,
       extensionLoadPath: "browser/dist/chromium",
+      extensionId:
+        browser === "firefox"
+          ? "vibe-downloader@local"
+          : browser === "safari"
+            ? null
+            : "abcdefghijklmnopabcdefghijklmnop",
+      profile: "dev",
       lastError: null,
     })),
   };
@@ -451,11 +599,84 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
     now,
   );
   tasks = [{ ...task, saveDir: input.saveDir?.trim() || settings.defaultSaveDir }, ...tasks];
+  logTaskEvent(task.id, "created");
   persistTasks();
   scheduleBrowserQueue();
   emitQueueChanged();
   emitTaskUpdated(task);
   return task;
+}
+
+export async function importUrls(input: ImportUrlsInput): Promise<BatchImportResult> {
+  const urls = input.input
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const seen = new Set<string>();
+  const items: BatchImportResult["items"] = [];
+  for (const raw of urls) {
+    let normalized: string | null = null;
+    try {
+      normalized = new URL(raw).toString();
+    } catch {
+      items.push({
+        inputUrl: raw,
+        normalizedUrl: null,
+        duplicate: false,
+        valid: false,
+        fileName: null,
+        totalSize: null,
+        contentType: null,
+        supportsResume: false,
+        errorMessage: "URL is invalid.",
+        task: null,
+      });
+      continue;
+    }
+    const duplicate = seen.has(normalized);
+    seen.add(normalized);
+    const probe = duplicate ? null : await probeTask({ url: normalized });
+    const task =
+      !duplicate && input.create
+        ? await createTask({
+            url: normalized,
+            saveDir: input.saveDir,
+            fileName: probe?.fileName ?? null,
+            expectedHashSha256: null,
+          })
+        : null;
+    items.push({
+      inputUrl: raw,
+      normalizedUrl: normalized,
+      duplicate,
+      valid: !duplicate,
+      fileName: probe?.fileName ?? null,
+      totalSize: probe?.totalSize ?? null,
+      contentType: probe?.contentType ?? null,
+      supportsResume: probe?.capabilities.supportsResume ?? false,
+      errorMessage: duplicate ? "Duplicate URL in this import." : null,
+      task: task as unknown as BatchImportResult["items"][number]["task"],
+    });
+  }
+  return {
+    items,
+    createdCount: items.filter((item) => item.task).length,
+    failedCount: items.filter((item) => !item.valid).length,
+    duplicateCount: items.filter((item) => item.duplicate).length,
+  };
+}
+
+export async function verifyTaskHash(id: string): Promise<HashVerificationState> {
+  const task = tasks.find((entry) => entry.id === id);
+  if (!task) throw new Error(`Task not found: ${id}`);
+  return {
+    taskId: id,
+    expectedSha256: task.expectedHashSha256,
+    actualSha256: task.actualHashSha256,
+    status: task.hashStatus,
+    errorMessage: task.hashError,
+    verifiedAt: task.hashVerifiedAt,
+  };
 }
 
 export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload> {
@@ -492,6 +713,7 @@ export async function pauseTask(id: string): Promise<Task> {
   const task = tasks.find((entry) => entry.id === id);
   if (!task) throw new Error(`Task not found: ${id}`);
   const next = updateTask(id, { status: "paused", speedBps: 0, connectionCount: 0 });
+  logTaskEvent(id, "paused");
   scheduleBrowserQueue();
   return next;
 }
@@ -505,11 +727,13 @@ export async function resumeTask(id: string): Promise<Task> {
     connectionCount: 0,
     healthSummary: "Queued",
   });
+  logTaskEvent(id, "resumed");
   scheduleBrowserQueue();
   return tasks.find((entry) => entry.id === next.id) ?? next;
 }
 
 export async function retryTask(id: string): Promise<Task> {
+  logTaskEvent(id, "retrying");
   return resumeTask(id);
 }
 

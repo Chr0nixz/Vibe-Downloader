@@ -5,9 +5,15 @@ import type {
   AppSettings,
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
+  BatchImportResult,
   CreateTaskInput,
+  HashVerificationState,
+  ImportUrlsInput,
+  RequestDiagnostic,
   ProbeTaskInput,
   ProbeTaskPayload,
+  SegmentSummary,
+  TaskEvent,
   ResolveTaskAttentionInput,
   TaskUpdatedPayload,
   UpdateSettingsInput,
@@ -84,6 +90,41 @@ export async function listTaskSegments(taskId: string): Promise<TaskSegment[]> {
   return segments.map(normalizeTaskSegment);
 }
 
+export async function listSegments(taskId: string, page = 0, pageSize = 100): Promise<TaskSegment[]> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listSegments(taskId, page, pageSize);
+  }
+  const commands = await loadNativeCommands();
+  const segments = await runCommand("listSegments", () =>
+    commands.listSegments({ taskId, page, pageSize }),
+  );
+  return segments.map(normalizeTaskSegment);
+}
+
+export async function getSegmentSummary(taskId: string): Promise<SegmentSummary> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getSegmentSummary(taskId);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("getSegmentSummary", () => commands.getSegmentSummary(taskId));
+}
+
+export async function listTaskEvents(taskId: string): Promise<TaskEvent[]> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listTaskEvents(taskId);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("listTaskEvents", () => commands.listTaskEvents(taskId));
+}
+
+export async function listTaskRequests(taskId: string): Promise<RequestDiagnostic[]> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listTaskRequests(taskId);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("listTaskRequests", () => commands.listTaskRequests(taskId));
+}
+
 export async function seedMockTasks(): Promise<Task[]> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).seedMockTasks();
@@ -158,6 +199,22 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   }
   const commands = await loadNativeCommands();
   return normalizeTask(await runCommand("createTask", () => commands.createTask(input)));
+}
+
+export async function importUrls(input: ImportUrlsInput): Promise<BatchImportResult> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).importUrls(input);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("importUrls", () => commands.importUrls(input));
+}
+
+export async function verifyTaskHash(id: string): Promise<HashVerificationState> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).verifyTaskHash(id);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("verifyTaskHash", () => commands.verifyTaskHash(id));
 }
 
 export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload> {

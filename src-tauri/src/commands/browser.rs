@@ -26,8 +26,11 @@ use crate::{
 use super::tasks::{create_task_with_state, CreateTaskInput};
 
 const NATIVE_HOST_NAME: &str = "com.vibe_downloader.native_host";
-const CHROMIUM_EXTENSION_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
-const FIREFOX_EXTENSION_ID: &str = "vibe-downloader@local";
+const CHROMIUM_DEV_EXTENSION_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+const CHROMIUM_RELEASE_EXTENSION_ID: &str = "replace-with-chrome-web-store-id";
+const EDGE_RELEASE_EXTENSION_ID: &str = "replace-with-edge-addons-id";
+const FIREFOX_DEV_EXTENSION_ID: &str = "vibe-downloader@local";
+const FIREFOX_RELEASE_EXTENSION_ID: &str = "vibe-downloader@example.invalid";
 
 #[tauri::command]
 #[specta::specta]
@@ -110,6 +113,7 @@ pub async fn create_browser_handoff_task_with_state(
         url,
         save_dir: None,
         file_name: sanitize_suggested_file_name(input.suggested_file_name.as_deref()),
+        expected_hash_sha256: None,
     });
 
     let create_input = match task_result {
@@ -211,6 +215,8 @@ async fn integration_status(
             manifest_installed,
             manifest_path: manifest_path.map(|path| path.to_string_lossy().to_string()),
             extension_load_path: extension_core_path.clone(),
+            extension_id: extension_id(browser).map(str::to_string),
+            profile: integration_profile().to_string(),
             last_error,
         });
     }
@@ -299,18 +305,49 @@ fn manifest_json(browser: BrowserKind) -> Result<String, String> {
             "description": "Vibe Downloader browser handoff host",
             "path": path,
             "type": "stdio",
-            "allowed_extensions": [FIREFOX_EXTENSION_ID]
+            "allowed_extensions": [extension_id(browser).unwrap_or(FIREFOX_DEV_EXTENSION_ID)]
         })
     } else {
+        let extension_id = extension_id(browser).unwrap_or(CHROMIUM_DEV_EXTENSION_ID);
         serde_json::json!({
             "name": NATIVE_HOST_NAME,
             "description": "Vibe Downloader browser handoff host",
             "path": path,
             "type": "stdio",
-            "allowed_origins": [format!("chrome-extension://{CHROMIUM_EXTENSION_ID}/")]
+            "allowed_origins": [format!("chrome-extension://{extension_id}/")]
         })
     };
     serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
+fn integration_profile() -> &'static str {
+    match option_env!("VIBE_BROWSER_PROFILE") {
+        Some("release") => "release",
+        _ if cfg!(debug_assertions) => "dev",
+        _ => "release",
+    }
+}
+
+fn extension_id(browser: BrowserKind) -> Option<&'static str> {
+    let release = integration_profile() == "release";
+    match browser {
+        BrowserKind::Firefox => Some(if release {
+            FIREFOX_RELEASE_EXTENSION_ID
+        } else {
+            FIREFOX_DEV_EXTENSION_ID
+        }),
+        BrowserKind::Edge => Some(if release {
+            EDGE_RELEASE_EXTENSION_ID
+        } else {
+            CHROMIUM_DEV_EXTENSION_ID
+        }),
+        BrowserKind::Safari => None,
+        _ => Some(if release {
+            CHROMIUM_RELEASE_EXTENSION_ID
+        } else {
+            CHROMIUM_DEV_EXTENSION_ID
+        }),
+    }
 }
 
 fn native_host_path() -> Option<PathBuf> {
