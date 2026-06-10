@@ -106,9 +106,13 @@ export const TaskRow = memo(function TaskRow({
   const isActive =
     task.status === "downloading" || task.status === "retrying";
   const speedTrend = describeSpeedTrend(speedHistory, task.speedBps, t);
+  const retryLaterLabel =
+    task.retryAfterAt && task.status === "queued"
+      ? t("task.retryAfter", { time: formatRetryTime(task.retryAfterAt) })
+      : null;
   const diagnosticLabel = task.errorMessage
     ? errorMessage(task.errorMessage)
-    : task.healthSummary || speedTrend.label;
+    : retryLaterLabel || task.healthSummary || speedTrend.label;
   const baseId = `task-${task.id}`;
   const nameId = `${baseId}-name`;
   const statusId = `${baseId}-status`;
@@ -322,6 +326,12 @@ export const TaskRow = memo(function TaskRow({
     </motion.div>
   );
 });
+
+function formatRetryTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
 function DetailLine({ label, value }: { label: string; value: string }) {
   return (

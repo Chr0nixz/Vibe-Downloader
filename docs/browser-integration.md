@@ -1,6 +1,6 @@
 # Browser Integration
 
-Vibe Downloader 当前使用 Native Messaging 作为浏览器到桌面应用的主要交接通道。localhost/WebSocket API 暂不实现，后续可用于扩展内实时任务面板或自动化集成。
+Vibe Downloader 当前使用 Native Messaging 启动和引导浏览器集成，再通过本地 WebSocket 提供实时任务状态、设置同步和自动下载接管。没有建立 WebSocket 时，扩展仍会回退到 Native Messaging handoff。
 
 ## 当前状态
 
@@ -13,19 +13,21 @@ Vibe Downloader 当前使用 Native Messaging 作为浏览器到桌面应用的�
 - Tauri 命令：获取集成状态、安装/卸载 manifest、创建 browser handoff task。
 - 单实例转发：应用已运行时，第二次启动参数会转发给现有实例。
 - SQLite `browser_messages` 表：request id 去重和错误诊断。
+- 本地 WebSocket bridge：扩展可读取实时任务快照、任务进度和队列变化。
+- 自动接管浏览器原生 HTTP/HTTPS 下载，并在 Vibe 创建成功后取消浏览器下载。
+- Cookie/header 转发基础能力：由设置控制，并只转发受控 allowlist header。
+- 浏览器捕获设置：自动接管、header 转发、最小文件大小、扩展名和站点规则模型。
 
 扩展当前入口：
 
 - 右键链接：`Download with Vibe Downloader`。
 - 右键选中文本：从文本中提取第一个 HTTP/HTTPS URL。
-- popup：发送当前 tab URL。
+- popup：发送当前 tab URL、查看 bridge 状态、切换自动接管和 Cookie/header 转发、查看实时任务与最近 handoff。
 
 尚未实现：
 
-- 自动接管浏览器原生下载。
-- Cookie/header 转发。
-- 站点规则和自动大文件提示。
-- 扩展内实时任务状态面板。
+- 完整站点规则管理 UI。
+- 自动大文件提示 UI。
 - 生产 Safari Web Extension wrapper。
 - Chrome Web Store / Edge Add-ons / Firefox AMO 的正式 ID、签名和审核流程。
 
@@ -77,7 +79,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
 Native host 二进制名为 `vibe-native-host`。
 
-工作流程：
+传统 handoff 工作流程：
 
 1. 浏览器通过 Native Messaging 向 host 发送 payload。
 2. Host 校验 payload 版本、action、browser、URL scheme 和内嵌凭据。
@@ -85,6 +87,14 @@ Native host 二进制名为 `vibe-native-host`。
 4. Host 启动 `vibe-downloader --browser-handoff-file <path>`。
 5. 如果应用已运行，Tauri single-instance 插件把参数转发给现有实例。
 6. 应用读取 handoff 文件，创建任务，聚焦主窗口，成功后删除 handoff 文件。
+
+实时 bridge 工作流程：
+
+1. 扩展通过 Native Messaging 发送 `bootstrap`。
+2. Host 启动或唤醒桌面应用。
+3. 应用启动本地 WebSocket bridge，并写入临时 bootstrap 文件。
+4. Host 返回 `wsUrl` 和一次性 token。
+5. 扩展连接 WebSocket，订阅任务状态，并通过 bridge 创建下载任务或同步捕获设置。
 
 Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messaging 协议。日志见 [debug-logging.md](debug-logging.md)。
 
@@ -122,7 +132,15 @@ Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messagin
   "pageUrl": "https://example.com/page",
   "referrer": "https://example.com/page",
   "userAgent": "optional",
-  "suggestedFileName": "optional.zip"
+  "suggestedFileName": "optional.zip",
+  "source": "browser_capture",
+  "browserDownloadId": 123,
+  "totalBytes": 104857600,
+  "mime": "application/zip",
+  "forwardedHeaders": [
+    { "name": "cookie", "value": "session=..." },
+    { "name": "authorization", "value": "Bearer ..." }
+  ]
 }
 ```
 
@@ -131,7 +149,8 @@ Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messagin
 - 只接受 `http` 和 `https` URL。
 - 拒绝带内嵌用户名或密码的 URL。
 - 扩展不能指定本地保存路径。
-- Stage 5 基础实现不转发 Cookie 和敏感 header。
+- Cookie/header 转发必须由设置开启，并经过后端 allowlist 过滤。
+- 当前 allowlist 包括 `cookie`、`authorization`、`referer`、`user-agent`、`accept`、`accept-language`、`accept-encoding`、`range`、`origin`。
 - URL 日志会去掉 query string 和凭据。
 
 ## 手动端到端验证
@@ -149,8 +168,10 @@ Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messagin
    - Firefox：临时加载 `browser/dist/firefox`。
    - Opera：加载 `browser/dist/opera`。
 4. 右键 HTTP/HTTPS 链接，选择 `Download with Vibe Downloader`。
-5. 确认 Vibe 中出现新的 queued/downloading task。
-6. 确认 `browser_messages` 记录 request id、browser、url、status。
+5. 在 popup 中确认 bridge 为 connected，并能看到实时任务状态。
+6. 开启 Auto capture 后，在浏览器里触发一个普通 HTTP/HTTPS 文件下载。
+7. 确认浏览器下载被暂停/取消，Vibe 中出现新的 queued/downloading task。
+8. 确认 `browser_messages` 记录 request id、browser、url、status。
 
 ## 排查清单
 

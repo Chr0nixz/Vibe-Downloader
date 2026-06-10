@@ -15,6 +15,7 @@ export async function applyGlobalSpeedLimit(
     systemNotifications: settings.systemNotifications,
     closeToTray: settings.closeToTray,
     startOnBoot: settings.startOnBoot,
+    floatingWindowEnabled: settings.floatingWindowEnabled,
+    fontFamily: settings.fontFamily,
   });
 }
-

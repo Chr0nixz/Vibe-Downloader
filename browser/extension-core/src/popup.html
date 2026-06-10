@@ -12,7 +12,25 @@
         <strong>Vibe Downloader</strong>
         <span id="status">Ready</span>
       </header>
+      <section aria-label="Capture settings" class="controls">
+        <label>
+          <input id="auto-intercept" type="checkbox" />
+          <span>Auto capture</span>
+        </label>
+        <label>
+          <span>Cookies & headers</span>
+          <select id="forward-headers-mode">
+            <option value="ask">Ask first</option>
+            <option value="enabled">Forward</option>
+            <option value="disabled">Do not forward</option>
+          </select>
+        </label>
+      </section>
       <button id="send-current" type="button">Send current page</button>
+      <section aria-label="Live tasks">
+        <div class="section-title">Live</div>
+        <ol id="live-tasks"></ol>
+      </section>
       <section aria-label="Recent handoffs">
         <div class="section-title">Recent</div>
         <ol id="recent-tasks"></ol>

@@ -24,7 +24,9 @@ use tokio::{
 use super::{
     error::format_http_status,
     file::{finalize_download_file, persist_completed_path},
-    request::{is_retryable_status, retry_after_duration, send_get_with_retry},
+    request::{
+        apply_forwarded_headers, is_retryable_status, retry_after_duration, send_get_with_retry,
+    },
 };
 use crate::{
     db,
@@ -49,6 +51,7 @@ async fn run_unknown_size_download(
     cancel: Arc<AtomicBool>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     _connection_limit: usize,
+    request_headers: Vec<(String, String)>,
 ) -> Result<(), String> {
     let segment = segments
         .into_iter()
@@ -87,7 +90,7 @@ async fn run_unknown_size_download(
     }
 
     let started_at = Instant::now();
-    let mut response = match send_get_with_retry(client, &url, None).await {
+    let mut response = match send_get_with_retry(client, &url, None, &request_headers).await {
         Ok(response) => {
             persist_response_diagnostic(
                 &pool,
@@ -244,6 +247,7 @@ pub(super) struct SegmentFailure {
 }
 
 #[tracing::instrument(skip(client, app, pool, cancel), fields(task_id = %task.id))]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_segmented_download(
     client: &Client,
     app: AppHandle,
@@ -252,6 +256,7 @@ pub(super) async fn run_segmented_download(
     cancel: Arc<AtomicBool>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     connection_limit: usize,
+    request_headers: Vec<(String, String)>,
 ) -> Result<(), String> {
     tracing::info!(
         task_id = %task.id,
@@ -285,6 +290,7 @@ pub(super) async fn run_segmented_download(
             cancel,
             speed_limiter,
             connection_limit.max(1),
+            request_headers,
         )
         .await;
     }
@@ -384,6 +390,7 @@ pub(super) async fn run_segmented_download(
         max_worker_count,
         &live_ends,
         speed_limiter.clone(),
+        &request_headers,
     )
     .await?;
 
@@ -487,6 +494,7 @@ pub(super) async fn run_segmented_download(
                     max_worker_count,
                     &live_ends,
                     speed_limiter.clone(),
+                    &request_headers,
                 )
                 .await?;
                 active_connection_count = i32::try_from(active_workers.max(1)).unwrap_or(1);
@@ -521,6 +529,7 @@ pub(super) async fn run_segmented_download(
                     speed_limiter.clone(),
                     started_at,
                     max_worker_count,
+                    &request_headers,
                 )
                 .await?;
             }
@@ -605,6 +614,7 @@ async fn spawn_segment_workers(
     max_worker_count: usize,
     live_ends: &Arc<RwLock<HashMap<String, i64>>>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
+    request_headers: &[(String, String)],
 ) -> Result<(), String> {
     while *active_workers < max_worker_count {
         let Some(segment) = pending_segments.pop_front() else {
@@ -634,6 +644,7 @@ async fn spawn_segment_workers(
             progress_tx: progress_tx.clone(),
             live_ends: live_ends.clone(),
             speed_limiter: speed_limiter.clone(),
+            request_headers: request_headers.to_vec(),
         }));
     }
 
@@ -667,6 +678,7 @@ async fn maybe_accelerate_segments(
     speed_limiter: Arc<GlobalSpeedLimiter>,
     started_at: Instant,
     max_worker_count: usize,
+    request_headers: &[(String, String)],
 ) -> Result<(), String> {
     if *acceleration_disabled || cancel.load(Ordering::SeqCst) || !task.supports_parallel {
         return Ok(());
@@ -748,6 +760,7 @@ async fn maybe_accelerate_segments(
         progress_tx: progress_tx.clone(),
         live_ends: live_ends.clone(),
         speed_limiter,
+        request_headers: request_headers.to_vec(),
     }));
 
     *pending_acceleration = Some(AccelerationCheck {
@@ -798,6 +811,7 @@ pub(super) struct SegmentWorkerRequest {
     pub(super) progress_tx: mpsc::Sender<SegmentMessage>,
     pub(super) live_ends: Arc<RwLock<HashMap<String, i64>>>,
     pub(super) speed_limiter: Arc<GlobalSpeedLimiter>,
+    pub(super) request_headers: Vec<(String, String)>,
 }
 
 pub(super) async fn download_segment_worker(
@@ -815,6 +829,7 @@ pub(super) async fn download_segment_worker(
         progress_tx,
         live_ends,
         speed_limiter,
+        request_headers,
     } = request;
 
     let mut offset = segment
@@ -840,6 +855,7 @@ pub(super) async fn download_segment_worker(
             progress_tx: &progress_tx,
             live_ends: &live_ends,
             speed_limiter: &speed_limiter,
+            request_headers: &request_headers,
             offset,
         })
         .await
@@ -880,6 +896,7 @@ struct SegmentAttemptRequest<'a> {
     progress_tx: &'a mpsc::Sender<SegmentMessage>,
     live_ends: &'a Arc<RwLock<HashMap<String, i64>>>,
     speed_limiter: &'a Arc<GlobalSpeedLimiter>,
+    request_headers: &'a [(String, String)],
     offset: i64,
 }
 
@@ -904,6 +921,7 @@ async fn download_segment_once(
         progress_tx,
         live_ends,
         speed_limiter,
+        request_headers,
         mut offset,
     } = request;
 
@@ -924,7 +942,8 @@ async fn download_segment_once(
         )));
     }
 
-    let mut http_request = client.get(url).header(ACCEPT_ENCODING, "identity");
+    let mut http_request = apply_forwarded_headers(client.get(url), request_headers)
+        .header(ACCEPT_ENCODING, "identity");
     let range_header = if use_range {
         Some(format!("bytes={offset}-{range_end}"))
     } else {

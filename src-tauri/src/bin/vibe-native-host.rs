@@ -6,8 +6,9 @@ use std::{
 };
 
 use reqwest::Url;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri_app_lib::{
+    browser_realtime,
     download::EngineRegistry,
     logging::{init_standalone_logging, sanitize_url},
     models::{BrowserHandoffInput, BrowserKind},
@@ -22,7 +23,15 @@ struct NativeHostResponse {
     request_id: Option<String>,
     handoff_file: Option<String>,
     app_started: bool,
+    ws_url: Option<String>,
+    token: Option<String>,
     error_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeHostAction {
+    action: String,
 }
 
 fn main() {
@@ -42,6 +51,8 @@ fn main() {
                 request_id: None,
                 handoff_file: None,
                 app_started: false,
+                ws_url: None,
+                token: None,
                 error_message: Some(error),
             }
         }
@@ -52,7 +63,7 @@ fn main() {
     }
 }
 
-fn read_native_message() -> Result<BrowserHandoffInput, String> {
+fn read_native_message() -> Result<serde_json::Value, String> {
     let mut length = [0_u8; 4];
     io::stdin()
         .read_exact(&mut length)
@@ -69,7 +80,15 @@ fn read_native_message() -> Result<BrowserHandoffInput, String> {
     serde_json::from_slice(&buffer).map_err(|e| format!("Invalid native message JSON: {e}"))
 }
 
-fn handle_message(input: BrowserHandoffInput) -> Result<NativeHostResponse, String> {
+fn handle_message(value: serde_json::Value) -> Result<NativeHostResponse, String> {
+    let action = serde_json::from_value::<NativeHostAction>(value.clone())
+        .map_err(|e| format!("Invalid native message action: {e}"))?
+        .action;
+    if action == "bootstrap" {
+        return handle_bootstrap();
+    }
+    let input: BrowserHandoffInput =
+        serde_json::from_value(value).map_err(|e| format!("Invalid handoff payload: {e}"))?;
     let request_id = input.request_id.trim().to_string();
     tracing::info!(
         request_id = %request_id,
@@ -98,6 +117,22 @@ fn handle_message(input: BrowserHandoffInput) -> Result<NativeHostResponse, Stri
         request_id: Some(request_id),
         handoff_file: Some(handoff_file.to_string_lossy().to_string()),
         app_started,
+        ws_url: None,
+        token: None,
+        error_message: None,
+    })
+}
+
+fn handle_bootstrap() -> Result<NativeHostResponse, String> {
+    let app_started = start_app_without_handoff();
+    let bootstrap = read_bootstrap_with_retry()?;
+    Ok(NativeHostResponse {
+        status: "ready".to_string(),
+        request_id: None,
+        handoff_file: None,
+        app_started,
+        ws_url: Some(bootstrap.ws_url),
+        token: Some(bootstrap.token),
         error_message: None,
     })
 }
@@ -170,6 +205,24 @@ fn start_app(handoff_file: &Path) -> bool {
         );
     }
     started
+}
+
+fn start_app_without_handoff() -> bool {
+    let Some(app_path) = app_executable_path() else {
+        tracing::warn!("could not resolve app executable path");
+        return false;
+    };
+    Command::new(app_path).spawn().is_ok()
+}
+
+fn read_bootstrap_with_retry() -> Result<browser_realtime::BrowserBridgeBootstrap, String> {
+    for _ in 0..40 {
+        if let Ok(bootstrap) = browser_realtime::read_bootstrap_file() {
+            return Ok(bootstrap);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    browser_realtime::read_bootstrap_file()
 }
 
 fn app_executable_path() -> Option<PathBuf> {

@@ -15,6 +15,7 @@ const SUPPORTED_RECOVERY_ACTIONS = new Set<RecoveryAction>([
   "restart",
   "open_folder",
   "check_url",
+  "free_disk_space",
 ]);
 
 export function parseAppError(error: unknown): AppErrorPayload | null {
@@ -70,7 +71,9 @@ function fallbackActionsForCode(code: string): RecoveryAction[] {
     case "temp_file_smaller_than_progress":
       return ["restart", "open_folder"];
     case "disk_write_failed":
-      return ["open_folder", "choose_another_folder", "retry"];
+      return ["free_disk_space", "choose_another_folder", "retry"];
+    case "auth_headers_expired":
+      return ["check_url", "restart"];
     case "http_denied":
     case "http_not_found":
       return ["check_url", "retry"];

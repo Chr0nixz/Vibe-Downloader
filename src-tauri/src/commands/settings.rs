@@ -7,7 +7,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::{
     db,
     events::{emit_queue_changed, emit_settings_changed},
-    models::AppSettings,
+    models::{AppFontFamily, AppSettings},
     AppState,
 };
 
@@ -23,6 +23,8 @@ pub struct UpdateSettingsInput {
     pub system_notifications: Option<bool>,
     pub close_to_tray: Option<bool>,
     pub start_on_boot: Option<bool>,
+    pub floating_window_enabled: Option<bool>,
+    pub font_family: Option<AppFontFamily>,
 }
 
 #[tauri::command]
@@ -71,6 +73,10 @@ pub async fn update_settings(
         .unwrap_or(current.system_notifications);
     let close_to_tray = input.close_to_tray.unwrap_or(current.close_to_tray);
     let start_on_boot = input.start_on_boot.unwrap_or(current.start_on_boot);
+    let floating_window_enabled = input
+        .floating_window_enabled
+        .unwrap_or(current.floating_window_enabled);
+    let font_family = input.font_family.unwrap_or(current.font_family);
     let settings = AppSettings {
         max_active_tasks,
         default_save_dir,
@@ -81,12 +87,15 @@ pub async fn update_settings(
         system_notifications,
         close_to_tray,
         start_on_boot,
+        floating_window_enabled,
+        font_family,
     };
 
     db::upsert_settings(&state.pool, &settings).await?;
     state.speed_limiter.set_limit(db::parse_speed_limit_bps(
         settings.global_speed_limit_bps.as_deref(),
     ));
+    super::floating::sync_floating_status_window(&app, settings.floating_window_enabled)?;
     emit_settings_changed(&app);
     emit_queue_changed(&app);
     super::tasks::schedule_queued_tasks(app, state.inner()).await;

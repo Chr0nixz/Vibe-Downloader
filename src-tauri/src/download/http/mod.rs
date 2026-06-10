@@ -83,8 +83,16 @@ impl HttpEngine {
     }
 
     pub async fn probe(&self, url: &str) -> Result<ProbeResult, String> {
+        self.probe_with_headers(url, &[]).await
+    }
+
+    pub async fn probe_with_headers(
+        &self,
+        url: &str,
+        request_headers: &[(String, String)],
+    ) -> Result<ProbeResult, String> {
         let sanitized = sanitize_url(url);
-        let head = send_head_with_retry(&self.client, url).await;
+        let head = send_head_with_retry(&self.client, url, request_headers).await;
         if let Ok(response) = head {
             if response.status().is_success() {
                 let probe = probe_from_response(url, &response, false)?;
@@ -107,8 +115,13 @@ impl HttpEngine {
             );
         }
 
-        let response =
-            send_get_with_retry(&self.client, url, Some("bytes=0-0".to_string())).await?;
+        let response = send_get_with_retry(
+            &self.client,
+            url,
+            Some("bytes=0-0".to_string()),
+            request_headers,
+        )
+        .await?;
 
         if !response.status().is_success() {
             return Err(format_http_status(response.status()));
@@ -130,6 +143,7 @@ impl HttpEngine {
         Ok(probe)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn download(
         &self,
         app: AppHandle,
@@ -138,6 +152,7 @@ impl HttpEngine {
         cancel: Arc<AtomicBool>,
         speed_limiter: Arc<GlobalSpeedLimiter>,
         connection_limit: usize,
+        request_headers: Vec<(String, String)>,
     ) -> Result<(), String> {
         run_segmented_download(
             &self.client,
@@ -147,6 +162,7 @@ impl HttpEngine {
             cancel,
             speed_limiter,
             connection_limit,
+            request_headers,
         )
         .await
     }
@@ -200,7 +216,9 @@ impl DownloadEngine for HttpEngine {
 
     fn probe<'a>(&'a self, request: ProbeRequest) -> EngineFuture<'a, Result<ProbeOutput, String>> {
         Box::pin(async move {
-            let probe = HttpEngine::probe(self, &request.uri).await?;
+            let probe =
+                HttpEngine::probe_with_headers(self, &request.uri, &request.request_headers)
+                    .await?;
             Ok(ProbeOutput {
                 protocol: reqwest::Url::parse(&probe.final_url)
                     .map(|url| url.scheme().to_string())
@@ -237,6 +255,7 @@ impl DownloadEngine for HttpEngine {
                 context.cancel,
                 context.speed_limiter,
                 context.connection_limit,
+                context.request_headers,
             )
             .await
         })

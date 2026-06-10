@@ -2,6 +2,7 @@ use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
+    browser_realtime::BrowserRealtimeEvent,
     db,
     models::{Task, TaskProgressPayload, TaskRecord, TaskUpdatedPayload},
 };
@@ -13,14 +14,26 @@ pub const EVENT_SETTINGS_CHANGED: &str = "settings.changed";
 pub const EVENT_BROWSER_HANDOFF_RECEIVED: &str = "browser.handoff.received";
 pub const EVENT_BROWSER_HANDOFF_FAILED: &str = "browser.handoff.failed";
 pub const EVENT_BROWSER_INTEGRATION_CHANGED: &str = "browser.integration.changed";
+pub const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED: &str = "tray.new-download.requested";
+pub const EVENT_TRAY_SETTINGS_REQUESTED: &str = "tray.settings.requested";
 
 pub fn emit_task_progress(app: &AppHandle, payload: &TaskProgressPayload) {
     emit_payload(app, EVENT_TASK_PROGRESS, payload);
+    if let Some(state) = app.try_state::<crate::AppState>() {
+        state
+            .browser_realtime
+            .broadcast(BrowserRealtimeEvent::TaskProgress(payload.clone()));
+    }
 }
 
 pub fn emit_task_updated(app: &AppHandle, task: &Task) {
     let payload = TaskUpdatedPayload { task: task.clone() };
     emit_payload(app, EVENT_TASK_UPDATED, &payload);
+    if let Some(state) = app.try_state::<crate::AppState>() {
+        state
+            .browser_realtime
+            .broadcast(BrowserRealtimeEvent::TaskUpdated(Box::new(task.clone())));
+    }
 }
 
 pub async fn emit_task_updated_record(app: &AppHandle, pool: &SqlitePool, task: &TaskRecord) {
@@ -42,6 +55,11 @@ pub async fn emit_task_updated_record(app: &AppHandle, pool: &SqlitePool, task: 
 
 pub fn emit_queue_changed(app: &AppHandle) {
     emit_empty(app, EVENT_QUEUE_CHANGED);
+    if let Some(state) = app.try_state::<crate::AppState>() {
+        state
+            .browser_realtime
+            .broadcast(BrowserRealtimeEvent::QueueChanged);
+    }
 }
 
 pub fn emit_settings_changed(app: &AppHandle) {
@@ -60,25 +78,21 @@ pub fn emit_browser_integration_changed(app: &AppHandle) {
     emit_empty(app, EVENT_BROWSER_INTEGRATION_CHANGED);
 }
 
+pub fn emit_tray_new_download_requested(app: &AppHandle) {
+    emit_empty(app, EVENT_TRAY_NEW_DOWNLOAD_REQUESTED);
+}
+
+pub fn emit_tray_settings_requested(app: &AppHandle) {
+    emit_empty(app, EVENT_TRAY_SETTINGS_REQUESTED);
+}
+
 fn emit_empty(app: &AppHandle, event: &str) {
-    if let Some(window) = app.get_webview_window("main") {
-        if let Err(error) = window.emit(event, ()) {
-            tracing::warn!(event, error = %error, "failed to emit event to main window");
-        }
-        return;
-    }
     if let Err(error) = app.emit(event, ()) {
         tracing::warn!(event, error = %error, "failed to emit event");
     }
 }
 
 fn emit_payload<T: Clone + serde::Serialize>(app: &AppHandle, event: &str, payload: &T) {
-    if let Some(window) = app.get_webview_window("main") {
-        if let Err(error) = window.emit(event, payload) {
-            tracing::warn!(event, error = %error, "failed to emit event to main window");
-        }
-        return;
-    }
     if let Err(error) = app.emit(event, payload) {
         tracing::warn!(event, error = %error, "failed to emit event");
     }

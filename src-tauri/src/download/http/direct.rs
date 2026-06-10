@@ -42,6 +42,7 @@ pub(super) async fn run_direct_download(
         client,
         &request.url,
         (resume_from > 0).then(|| format!("bytes={resume_from}-")),
+        &[],
     )
     .await?;
 
@@ -169,6 +170,7 @@ pub(super) async fn run_direct_segmented_download(
             progress_tx: progress_tx.clone(),
             live_ends: live_ends.clone(),
             speed_limiter: speed_limiter.clone(),
+            request_headers: Vec::new(),
         }));
     }
     drop(progress_tx);

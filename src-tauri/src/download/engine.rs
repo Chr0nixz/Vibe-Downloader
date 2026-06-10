@@ -16,6 +16,7 @@ pub(crate) type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a
 pub struct ProbeRequest {
     pub uri: String,
     pub source: Option<String>,
+    pub request_headers: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +42,7 @@ pub struct DownloadContext {
     pub cancel: Arc<AtomicBool>,
     pub speed_limiter: Arc<GlobalSpeedLimiter>,
     pub connection_limit: usize,
+    pub request_headers: Vec<(String, String)>,
 }
 
 pub trait DownloadEngine: Send + Sync {

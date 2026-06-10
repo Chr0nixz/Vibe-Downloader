@@ -1,13 +1,31 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, Clipboard, FolderOpen, LoaderCircle, Puzzle, RotateCcw, Trash2 } from "lucide-react";
+import {
+  Archive,
+  Check,
+  Clipboard,
+  FolderOpen,
+  LoaderCircle,
+  Puzzle,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { AppSettings, BrowserIntegrationStatus } from "@/generated/bindings";
+import type {
+  AppFontFamily,
+  AppSettings,
+  BrowserCaptureSettings,
+  BrowserExtensionExportResult,
+  BrowserForwardHeadersMode,
+  BrowserIntegrationStatus,
+} from "@/generated/bindings";
 import { setLocale, type Locale } from "@/i18n";
 import {
+  exportBrowserExtensionPackages,
+  getBrowserCaptureSettings,
   getBrowserIntegrationStatus,
   getSettings,
   installBrowserIntegration,
@@ -15,6 +33,7 @@ import {
   onBrowserIntegrationChanged,
   openDirectoryPicker,
   uninstallBrowserIntegration,
+  updateBrowserCaptureSettings,
   updateSettings,
 } from "@/lib/tauri";
 import { errorMessage } from "@/lib/errors";
@@ -47,11 +66,18 @@ export function SettingsPage() {
   const [systemNotifications, setSystemNotifications] = useState(true);
   const [closeToTray, setCloseToTray] = useState(false);
   const [startOnBoot, setStartOnBoot] = useState(false);
+  const [floatingWindowEnabled, setFloatingWindowEnabled] = useState(false);
+  const [fontFamily, setFontFamily] = useState<AppFontFamily>("source_han_sans_sc");
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const [browserStatus, setBrowserStatus] = useState<BrowserIntegrationStatus | null>(null);
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserAction, setBrowserAction] = useState<string | null>(null);
+  const [browserExporting, setBrowserExporting] = useState(false);
+  const [browserExportResult, setBrowserExportResult] =
+    useState<BrowserExtensionExportResult | null>(null);
+  const [browserCapture, setBrowserCapture] = useState<BrowserCaptureSettings | null>(null);
+  const [browserCaptureSaving, setBrowserCaptureSaving] = useState(false);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveVersion = useRef(0);
   const currentLocale = (i18n.language === "zh-CN" ? "zh-CN" : "en") as Locale;
@@ -68,6 +94,8 @@ export function SettingsPage() {
     setSystemNotifications(settings.systemNotifications);
     setCloseToTray(settings.closeToTray);
     setStartOnBoot(settings.startOnBoot);
+    setFloatingWindowEnabled(settings.floatingWindowEnabled);
+    setFontFamily(settings.fontFamily);
     setSaveState("saved");
   }, [settings]);
 
@@ -82,7 +110,9 @@ export function SettingsPage() {
       maxConnectionsPerHost === settings.maxConnectionsPerHost &&
       systemNotifications === settings.systemNotifications &&
       closeToTray === settings.closeToTray &&
-      startOnBoot === settings.startOnBoot
+      startOnBoot === settings.startOnBoot &&
+      floatingWindowEnabled === settings.floatingWindowEnabled &&
+      fontFamily === settings.fontFamily
     ) {
       return;
     }
@@ -100,6 +130,8 @@ export function SettingsPage() {
         systemNotifications,
         closeToTray,
         startOnBoot,
+        floatingWindowEnabled,
+        fontFamily,
       });
     }, AUTO_SAVE_DELAY_MS);
 
@@ -118,6 +150,8 @@ export function SettingsPage() {
     systemNotifications,
     closeToTray,
     startOnBoot,
+    floatingWindowEnabled,
+    fontFamily,
   ]);
 
   useEffect(() => {
@@ -155,8 +189,12 @@ export function SettingsPage() {
         systemNotifications: nextSettings.systemNotifications,
         closeToTray: nextSettings.closeToTray,
         startOnBoot: nextSettings.startOnBoot,
+        floatingWindowEnabled: nextSettings.floatingWindowEnabled,
+        fontFamily: nextSettings.fontFamily,
       });
-      await syncAutostart(next.startOnBoot);
+      if (next.startOnBoot !== settings?.startOnBoot) {
+        await syncAutostart(next.startOnBoot);
+      }
       if (version === saveVersion.current) {
         setSettings(next);
         setSaveState("saved");
@@ -215,6 +253,53 @@ export function SettingsPage() {
     addToast({ title: t("settings.browserDiagnosticsCopied"), tone: "success" });
   }
 
+  async function exportBrowserPackages() {
+    setBrowserExporting(true);
+    try {
+      const result = await exportBrowserExtensionPackages();
+      setBrowserExportResult(result);
+      addToast({
+        title: t("settings.browserPackagesExported"),
+        description: result.outputDir,
+        tone: "success",
+      });
+    } catch (err) {
+      log.error("browser extension package export failed", err);
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: errorMessage(err),
+      });
+    } finally {
+      setBrowserExporting(false);
+    }
+  }
+
+  async function updateBrowserCapture(patch: Partial<BrowserCaptureSettings>) {
+    setBrowserCaptureSaving(true);
+    try {
+      const next = await updateBrowserCaptureSettings({
+        autoIntercept: patch.autoIntercept ?? null,
+        forwardHeaders: patch.forwardHeaders ?? null,
+        forwardHeadersMode: patch.forwardHeadersMode ?? null,
+        minSizeBytes: patch.minSizeBytes ?? null,
+        fileExtensions: patch.fileExtensions ?? null,
+        siteRules: patch.siteRules ?? null,
+      });
+      setBrowserCapture(next);
+      setBrowserStatus((current) => (current ? { ...current, capture: next } : current));
+    } catch (err) {
+      log.error("browser capture settings update failed", err);
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: errorMessage(err),
+      });
+    } finally {
+      setBrowserCaptureSaving(false);
+    }
+  }
+
   function resetDirectory() {
     setDefaultSaveDir("");
   }
@@ -239,7 +324,9 @@ export function SettingsPage() {
   async function refreshBrowserIntegration() {
     setBrowserLoading(true);
     try {
-      setBrowserStatus(await getBrowserIntegrationStatus());
+      const status = await getBrowserIntegrationStatus();
+      setBrowserStatus(status);
+      setBrowserCapture(status.capture ?? (await getBrowserCaptureSettings()));
     } catch (err) {
       log.error("browser integration status refresh failed", err);
       addToast({
@@ -467,6 +554,20 @@ export function SettingsPage() {
                   <option value="zh-CN">{t("locale.zhCN")}</option>
                 </select>
               </SettingsRow>
+              <SettingsRow title={t("settings.fontFamily")} htmlFor="font-family-select">
+                <select
+                  id="font-family-select"
+                  value={fontFamily}
+                  onChange={(event) => setFontFamily(event.target.value as AppFontFamily)}
+                  className="h-11 w-full max-w-xs rounded-md border border-border-subtle bg-surface-root px-3 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
+                  disabled={controlsDisabled}
+                >
+                  <option value="source_han_sans_sc">
+                    {t("settings.fontFamilySourceHanSans")}
+                  </option>
+                  <option value="system">{t("settings.fontFamilySystem")}</option>
+                </select>
+              </SettingsRow>
             </SettingsSection>
 
             <SettingsSection
@@ -494,12 +595,64 @@ export function SettingsPage() {
                 disabled={controlsDisabled}
                 onChange={setStartOnBoot}
               />
+              <SettingsToggle
+                title={t("settings.floatingWindow")}
+                description={t("settings.floatingWindowDescription")}
+                checked={floatingWindowEnabled}
+                disabled={controlsDisabled}
+                onChange={setFloatingWindowEnabled}
+              />
             </SettingsSection>
 
             <SettingsSection
               title={t("settings.browserIntegration")}
               description={t("settings.browserIntegrationDescription")}
             >
+              {browserCapture ? (
+                <div className="grid border-b border-border-subtle/70">
+                  <SettingsToggle
+                    title={t("settings.browserAutoIntercept")}
+                    description={t("settings.browserAutoInterceptDescription")}
+                    checked={browserCapture.autoIntercept}
+                    disabled={browserLoading || browserCaptureSaving}
+                    onChange={(autoIntercept) => void updateBrowserCapture({ autoIntercept })}
+                  />
+                  <SettingsToggle
+                    title={t("settings.browserForwardHeaders")}
+                    description={t("settings.browserForwardHeadersDescription")}
+                    checked={browserCapture.forwardHeadersMode === "enabled"}
+                    disabled={browserLoading || browserCaptureSaving}
+                    onChange={(forwardHeaders) =>
+                      void updateBrowserCapture({
+                        forwardHeadersMode: forwardHeaders ? "enabled" : "disabled",
+                      })
+                    }
+                  />
+                  <SettingsRow
+                    title={t("settings.browserForwardHeadersMode")}
+                  >
+                    <div className="grid gap-1">
+                      <select
+                        value={browserCapture.forwardHeadersMode}
+                        disabled={browserLoading || browserCaptureSaving}
+                        onChange={(event) =>
+                          void updateBrowserCapture({
+                            forwardHeadersMode: event.target.value as BrowserForwardHeadersMode,
+                          })
+                        }
+                        className="h-11 w-full max-w-xs rounded-md border border-border-subtle bg-surface-root px-3 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
+                      >
+                        <option value="ask">{t("settings.browserForwardHeadersAsk")}</option>
+                        <option value="enabled">{t("settings.browserForwardHeadersEnabled")}</option>
+                        <option value="disabled">{t("settings.browserForwardHeadersDisabled")}</option>
+                      </select>
+                      <p className="max-w-xl text-xs leading-5 text-text-muted">
+                        {t("settings.browserForwardHeadersModeDescription")}
+                      </p>
+                    </div>
+                  </SettingsRow>
+                </div>
+              ) : null}
               <div className="grid">
                 {browserStatus?.browsers.map((browser) => {
                   const disabled =
@@ -579,16 +732,41 @@ export function SettingsPage() {
                       {browserStatus.extensionCorePath ?? t("settings.browserBuildExtensions")}
                     </span>
                   </p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="mt-3 h-8"
-                    onClick={() => void copyBrowserDiagnostics()}
-                  >
-                    <Clipboard className="h-4 w-4" />
-                    {t("settings.browserCopyDiagnostics")}
-                  </Button>
+                  {browserExportResult ? (
+                    <p className="mt-2 truncate">
+                      {t("settings.browserExportPath")}{" "}
+                      <span className="font-mono text-text-secondary">
+                        {browserExportResult.outputDir}
+                      </span>
+                    </p>
+                  ) : null}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8"
+                      onClick={() => void exportBrowserPackages()}
+                      disabled={browserExporting || browserLoading}
+                    >
+                      {browserExporting ? (
+                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Archive className="h-4 w-4" />
+                      )}
+                      {t("settings.browserExportPackages")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8"
+                      onClick={() => void copyBrowserDiagnostics()}
+                    >
+                      <Clipboard className="h-4 w-4" />
+                      {t("settings.browserCopyDiagnostics")}
+                    </Button>
+                  </div>
                 </div>
               ) : null}
             </SettingsSection>

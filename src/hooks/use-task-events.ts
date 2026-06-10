@@ -4,21 +4,26 @@ import i18n from "@/i18n";
 import { createLogger } from "@/lib/logger";
 import {
   isTauriRuntime,
-  listTasks,
+  listTasksPage,
   onQueueChanged,
   onTaskProgress,
   onTaskUpdated,
 } from "@/lib/tauri";
 
 const log = createLogger("task-events");
-import { mergeTasksFromServer, useTaskStore } from "@/stores/task-store";
+import { mergeTasksFromServer, taskPageInput, useTaskStore } from "@/stores/task-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
 import { errorMessage } from "@/lib/errors";
 import type { Task } from "@/types/task";
 
+interface UseTaskEventsOptions {
+  notify?: boolean;
+}
+
 /** Subscribe once to backend progress/queue events for the app lifetime. */
-export function useTaskEvents() {
+export function useTaskEvents(options: UseTaskEventsOptions = {}) {
+  const notify = options.notify ?? true;
   const notifiedStatuses = useRef(new Set<string>());
 
   useEffect(() => {
@@ -29,6 +34,7 @@ export function useTaskEvents() {
     let queueRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
     function notifyTaskStatusChanges(previous: Task[], next: Task[]) {
+      if (!notify) return;
       const previousById = new Map(previous.map((task) => [task.id, task]));
       const addToast = useToastStore.getState().addToast;
 
@@ -99,10 +105,11 @@ export function useTaskEvents() {
           void (async () => {
             try {
               const previous = useTaskStore.getState().tasks;
-              const fresh = await listTasks();
+              const page = await listTasksPage(taskPageInput(0));
+              const fresh = page.items;
               if (cancelled) return;
               const merged = mergeTasksFromServer(previous, fresh);
-              useTaskStore.getState().setTasks(merged);
+              useTaskStore.getState().setTaskPage(merged, page.total, page.page, page.pageSize);
               notifyTaskStatusChanges(previous, merged);
             } catch (error) {
               log.warn("queue refresh failed", error);
@@ -122,7 +129,7 @@ export function useTaskEvents() {
       unlistenTaskUpdated?.();
       unlistenQueue?.();
     };
-  }, []);
+  }, [notify]);
 }
 
 async function sendCompletionNotification(task: Task) {

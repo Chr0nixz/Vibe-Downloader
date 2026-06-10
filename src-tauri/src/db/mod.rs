@@ -1,9 +1,14 @@
-use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
+
+use sqlx::{migrate::MigrateError, sqlite::SqlitePoolOptions, QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::models::{
-    AppSettings, BrowserKind, HashVerificationStatus, RequestDiagnostic, RequestDiagnosticRecord,
-    SegmentStatus, SegmentSummary, TaskEvent, TaskFileRecord, TaskKind, TaskRecord,
-    TaskSegmentRecord, TaskStatus,
+    AppErrorPayload, AppFontFamily, AppSettings, BrowserKind, HashVerificationStatus,
+    RecoveryAction, RequestDiagnostic, RequestDiagnosticRecord, SegmentStatus, SegmentSummary,
+    TaskEvent, TaskFileRecord, TaskKind, TaskRecord, TaskSegmentRecord, TaskStatus,
 };
 
 pub const DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;
@@ -19,6 +24,9 @@ pub const MAX_MAX_CONNECTIONS_PER_HOST: i32 = 16;
 pub const DEFAULT_MAX_ACTIVE_TASKS: i32 = 2;
 pub const MIN_MAX_ACTIVE_TASKS: i32 = 1;
 pub const MAX_MAX_ACTIVE_TASKS: i32 = 8;
+pub const TASK_REQUEST_HEADERS_TTL_HOURS: i64 = 24;
+pub const DEFAULT_TASK_PAGE_SIZE: i64 = 100;
+pub const MAX_TASK_PAGE_SIZE: i64 = 500;
 const SETTING_MAX_ACTIVE_TASKS: &str = "max_active_tasks";
 const SETTING_DEFAULT_SAVE_DIR: &str = "default_save_dir";
 const SETTING_GLOBAL_SPEED_LIMIT_BPS: &str = "global_speed_limit_bps";
@@ -28,31 +36,139 @@ const SETTING_MAX_CONNECTIONS_PER_HOST: &str = "max_connections_per_host";
 const SETTING_SYSTEM_NOTIFICATIONS: &str = "system_notifications";
 const SETTING_CLOSE_TO_TRAY: &str = "close_to_tray";
 const SETTING_START_ON_BOOT: &str = "start_on_boot";
+const SETTING_FLOATING_WINDOW_ENABLED: &str = "floating_window_enabled";
+const SETTING_FONT_FAMILY: &str = "font_family";
 
-pub async fn connect(db_path: &std::path::Path) -> Result<SqlitePool, String> {
+pub struct DbConnection {
+    pub pool: SqlitePool,
+    pub data_was_reset: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskListQuery {
+    pub nav: String,
+    pub search: String,
+    pub sort_key: String,
+    pub sort_direction: String,
+    pub file_type: String,
+    pub source: String,
+    pub failure: String,
+    pub resume: String,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskListPage {
+    pub items: Vec<TaskRecord>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+pub async fn connect(db_path: &Path) -> Result<DbConnection, String> {
+    let pool = open_pool(db_path).await?;
+
+    match run_migrations(&pool).await {
+        Ok(()) => {
+            tracing::info!(db_path = %db_path.display(), "database connected and migrations applied");
+            Ok(DbConnection {
+                pool,
+                data_was_reset: false,
+            })
+        }
+        Err(error) if should_rebuild_database_after_migration_error(&error) => {
+            tracing::warn!(
+                db_path = %db_path.display(),
+                error = %error,
+                "rebuilding development database after migration history reset"
+            );
+            pool.close().await;
+            remove_database_files(db_path)?;
+
+            let pool = open_pool(db_path).await?;
+            run_migrations(&pool)
+                .await
+                .map_err(|e| format!("Migration failed after database rebuild: {e}"))?;
+            tracing::info!(db_path = %db_path.display(), "database rebuilt and migrations applied");
+            Ok(DbConnection {
+                pool,
+                data_was_reset: true,
+            })
+        }
+        Err(error) => Err(format!("Migration failed: {error}")),
+    }
+}
+
+async fn open_pool(db_path: &Path) -> Result<SqlitePool, String> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
 
-    let pool = SqlitePoolOptions::new()
+    SqlitePoolOptions::new()
         .max_connections(5)
         .after_connect(|connection, _metadata| {
             Box::pin(async move {
                 sqlx::query("PRAGMA foreign_keys = ON")
-                    .execute(connection)
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query("PRAGMA journal_mode = WAL")
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query("PRAGMA busy_timeout = 5000")
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query("PRAGMA synchronous = NORMAL")
+                    .execute(&mut *connection)
                     .await?;
                 Ok(())
             })
         })
         .connect(&url)
         .await
-        .map_err(|e| format!("Database connection failed: {e}"))?;
+        .map_err(|e| format!("Database connection failed: {e}"))
+}
 
-    sqlx::migrate!("./src/db/migrations")
-        .run(&pool)
-        .await
-        .map_err(|e| format!("Migration failed: {e}"))?;
+async fn run_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
+    sqlx::migrate!("./src/db/migrations").run(pool).await
+}
 
-    tracing::info!(db_path = %db_path.display(), "database connected and migrations applied");
-    Ok(pool)
+fn should_rebuild_database_after_migration_error(error: &MigrateError) -> bool {
+    cfg!(debug_assertions)
+        && matches!(
+            error,
+            MigrateError::VersionMissing(_) | MigrateError::VersionMismatch(_)
+        )
+}
+
+fn remove_database_files(db_path: &Path) -> Result<(), String> {
+    for path in sqlite_database_paths(db_path) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Failed to remove stale database file {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn sqlite_database_paths(db_path: &Path) -> [PathBuf; 4] {
+    [
+        db_path.to_path_buf(),
+        sqlite_sidecar_path(db_path, "-wal"),
+        sqlite_sidecar_path(db_path, "-shm"),
+        sqlite_sidecar_path(db_path, "-journal"),
+    ]
+}
+
+fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = OsString::from(db_path.as_os_str());
+    path.push(suffix);
+    PathBuf::from(path)
 }
 
 pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, String> {
@@ -61,7 +177,8 @@ pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, Str
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
                supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
-               health_summary, error_message, expected_hash_sha256, actual_hash_sha256,
+               health_summary, error_message, error_code, recovery_actions, retry_after_at,
+               expected_hash_sha256, actual_hash_sha256,
                hash_status, hash_error, hash_verified_at, created_at, updated_at
         FROM tasks
         ORDER BY
@@ -85,13 +202,166 @@ pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, Str
     rows.iter().map(row_to_task).collect()
 }
 
+pub async fn list_task_records_page(
+    pool: &SqlitePool,
+    input: &TaskListQuery,
+) -> Result<TaskListPage, String> {
+    let page_size = input.page_size.clamp(1, MAX_TASK_PAGE_SIZE);
+    let page = input.page.max(0);
+    let offset = page.saturating_mul(page_size);
+
+    let mut count_query = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM tasks");
+    append_task_filters(&mut count_query, input);
+    let total: i64 = count_query
+        .build_query_scalar()
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut query = QueryBuilder::<Sqlite>::new(
+        r#"
+        SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
+               total_size, downloaded_bytes, status, etag, last_modified, content_type,
+               supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               health_summary, error_message, error_code, recovery_actions, retry_after_at,
+               expected_hash_sha256, actual_hash_sha256,
+               hash_status, hash_error, hash_verified_at, created_at, updated_at
+        FROM tasks
+        "#,
+    );
+    append_task_filters(&mut query, input);
+    query.push(" ORDER BY ");
+    query.push(task_sort_sql(&input.sort_key));
+    query.push(if input.sort_direction == "asc" {
+        " ASC"
+    } else {
+        " DESC"
+    });
+    query.push(", file_name ASC LIMIT ");
+    query.push_bind(page_size);
+    query.push(" OFFSET ");
+    query.push_bind(offset);
+
+    let rows = query
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(TaskListPage {
+        items: rows.iter().map(row_to_task).collect::<Result<Vec<_>, _>>()?,
+        total,
+        page,
+        page_size,
+    })
+}
+
+fn append_task_filters(query: &mut QueryBuilder<'_, Sqlite>, input: &TaskListQuery) {
+    let mut has_where = false;
+
+    match input.nav.as_str() {
+        "downloading" => push_static_filter(query, &mut has_where, "status IN ('downloading', 'retrying')"),
+        "paused" => push_static_filter(query, &mut has_where, "status = 'paused'"),
+        "completed" => push_static_filter(query, &mut has_where, "status = 'completed'"),
+        "failed" => push_static_filter(query, &mut has_where, "status IN ('failed', 'needs_attention')"),
+        "settings" => push_static_filter(query, &mut has_where, "0 = 1"),
+        _ => {}
+    }
+
+    let search = input.search.trim();
+    if !search.is_empty() {
+        let pattern = format!("%{}%", search.to_ascii_lowercase());
+        push_filter_prefix(query, &mut has_where);
+        query
+            .push("(LOWER(file_name) LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR LOWER(source_key) LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR LOWER(url) LIKE ")
+            .push_bind(pattern)
+            .push(")");
+    }
+
+    if input.source != "all" {
+        push_filter_prefix(query, &mut has_where);
+        query.push("source_key = ").push_bind(input.source.clone());
+    }
+
+    if input.failure != "all" {
+        push_filter_prefix(query, &mut has_where);
+        query.push("error_code = ").push_bind(input.failure.clone());
+    }
+
+    match input.resume.as_str() {
+        "resumable" => push_static_filter(query, &mut has_where, "supports_resume = 1"),
+        "single_connection" => push_static_filter(query, &mut has_where, "supports_resume = 0"),
+        _ => {}
+    }
+
+    if let Some(filter) = file_type_filter_sql(&input.file_type) {
+        push_static_filter(query, &mut has_where, filter);
+    }
+}
+
+fn push_filter_prefix(query: &mut QueryBuilder<'_, Sqlite>, has_where: &mut bool) {
+    if *has_where {
+        query.push(" AND ");
+    } else {
+        query.push(" WHERE ");
+        *has_where = true;
+    }
+}
+
+fn push_static_filter(query: &mut QueryBuilder<'_, Sqlite>, has_where: &mut bool, filter: &str) {
+    push_filter_prefix(query, has_where);
+    query.push(filter);
+}
+
+fn task_sort_sql(sort_key: &str) -> &'static str {
+    match sort_key {
+        "created_at" => "created_at",
+        "file_size" => "total_size",
+        "progress" => "CASE WHEN total_size > 0 THEN CAST(downloaded_bytes AS REAL) / total_size ELSE 0 END",
+        "speed" => "speed_bps",
+        "status" => {
+            "CASE status WHEN 'downloading' THEN 0 WHEN 'retrying' THEN 1 WHEN 'queued' THEN 2 WHEN 'paused' THEN 3 WHEN 'waiting_network' THEN 4 WHEN 'needs_attention' THEN 5 WHEN 'failed' THEN 6 WHEN 'completed' THEN 7 ELSE 8 END"
+        }
+        _ => "updated_at",
+    }
+}
+
+fn file_type_filter_sql(file_type: &str) -> Option<&'static str> {
+    match file_type {
+        "archive" => Some(
+            "(LOWER(COALESCE(content_type, '')) LIKE '%zip%' OR LOWER(file_name) LIKE '%.zip' OR LOWER(file_name) LIKE '%.rar' OR LOWER(file_name) LIKE '%.7z' OR LOWER(file_name) LIKE '%.tar' OR LOWER(file_name) LIKE '%.gz' OR LOWER(file_name) LIKE '%.bz2' OR LOWER(file_name) LIKE '%.xz')",
+        ),
+        "image" => Some(
+            "(LOWER(COALESCE(content_type, '')) LIKE 'image/%' OR LOWER(file_name) LIKE '%.png' OR LOWER(file_name) LIKE '%.jpg' OR LOWER(file_name) LIKE '%.jpeg' OR LOWER(file_name) LIKE '%.gif' OR LOWER(file_name) LIKE '%.webp' OR LOWER(file_name) LIKE '%.avif' OR LOWER(file_name) LIKE '%.svg')",
+        ),
+        "video" => Some(
+            "(LOWER(COALESCE(content_type, '')) LIKE 'video/%' OR LOWER(file_name) LIKE '%.mp4' OR LOWER(file_name) LIKE '%.mkv' OR LOWER(file_name) LIKE '%.mov' OR LOWER(file_name) LIKE '%.webm' OR LOWER(file_name) LIKE '%.avi')",
+        ),
+        "document" => Some(
+            "(LOWER(file_name) LIKE '%.pdf' OR LOWER(file_name) LIKE '%.doc' OR LOWER(file_name) LIKE '%.docx' OR LOWER(file_name) LIKE '%.xls' OR LOWER(file_name) LIKE '%.xlsx' OR LOWER(file_name) LIKE '%.ppt' OR LOWER(file_name) LIKE '%.pptx' OR LOWER(file_name) LIKE '%.txt' OR LOWER(file_name) LIKE '%.md')",
+        ),
+        "app" => Some(
+            "(LOWER(file_name) LIKE '%.exe' OR LOWER(file_name) LIKE '%.msi' OR LOWER(file_name) LIKE '%.dmg' OR LOWER(file_name) LIKE '%.pkg' OR LOWER(file_name) LIKE '%.deb' OR LOWER(file_name) LIKE '%.rpm' OR LOWER(file_name) LIKE '%.appimage')",
+        ),
+        "other" => Some(
+            "NOT ((LOWER(COALESCE(content_type, '')) LIKE '%zip%' OR LOWER(file_name) LIKE '%.zip' OR LOWER(file_name) LIKE '%.rar' OR LOWER(file_name) LIKE '%.7z' OR LOWER(file_name) LIKE '%.tar' OR LOWER(file_name) LIKE '%.gz' OR LOWER(file_name) LIKE '%.bz2' OR LOWER(file_name) LIKE '%.xz') OR (LOWER(COALESCE(content_type, '')) LIKE 'image/%' OR LOWER(file_name) LIKE '%.png' OR LOWER(file_name) LIKE '%.jpg' OR LOWER(file_name) LIKE '%.jpeg' OR LOWER(file_name) LIKE '%.gif' OR LOWER(file_name) LIKE '%.webp' OR LOWER(file_name) LIKE '%.avif' OR LOWER(file_name) LIKE '%.svg') OR (LOWER(COALESCE(content_type, '')) LIKE 'video/%' OR LOWER(file_name) LIKE '%.mp4' OR LOWER(file_name) LIKE '%.mkv' OR LOWER(file_name) LIKE '%.mov' OR LOWER(file_name) LIKE '%.webm' OR LOWER(file_name) LIKE '%.avi') OR (LOWER(file_name) LIKE '%.pdf' OR LOWER(file_name) LIKE '%.doc' OR LOWER(file_name) LIKE '%.docx' OR LOWER(file_name) LIKE '%.xls' OR LOWER(file_name) LIKE '%.xlsx' OR LOWER(file_name) LIKE '%.ppt' OR LOWER(file_name) LIKE '%.pptx' OR LOWER(file_name) LIKE '%.txt' OR LOWER(file_name) LIKE '%.md') OR (LOWER(file_name) LIKE '%.exe' OR LOWER(file_name) LIKE '%.msi' OR LOWER(file_name) LIKE '%.dmg' OR LOWER(file_name) LIKE '%.pkg' OR LOWER(file_name) LIKE '%.deb' OR LOWER(file_name) LIKE '%.rpm' OR LOWER(file_name) LIKE '%.appimage'))",
+        ),
+        _ => None,
+    }
+}
+
 pub async fn get_task_record(pool: &SqlitePool, id: &str) -> Result<Option<TaskRecord>, String> {
     let row = sqlx::query(
         r#"
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
                supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
-               health_summary, error_message, expected_hash_sha256, actual_hash_sha256,
+               health_summary, error_message, error_code, recovery_actions, retry_after_at,
+               expected_hash_sha256, actual_hash_sha256,
                hash_status, hash_error, hash_verified_at, created_at, updated_at
         FROM tasks WHERE id = ?
         "#,
@@ -244,14 +514,16 @@ pub async fn list_queued_task_records(
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
                supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
-               health_summary, error_message, expected_hash_sha256, actual_hash_sha256,
+               health_summary, error_message, error_code, recovery_actions, retry_after_at,
+               expected_hash_sha256, actual_hash_sha256,
                hash_status, hash_error, hash_verified_at, created_at, updated_at
         FROM tasks
-        WHERE status = 'queued'
+        WHERE status = 'queued' AND (retry_after_at IS NULL OR retry_after_at <= ?)
         ORDER BY created_at ASC
         LIMIT ?
         "#,
     )
+    .bind(crate::models::task::now_iso())
     .bind(limit.max(0))
     .fetch_all(pool)
     .await
@@ -285,6 +557,9 @@ fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
         speed_bps: row.get("speed_bps"),
         health_summary: row.get("health_summary"),
         error_message: row.get("error_message"),
+        error_code: task_error_code_from_row(row),
+        recovery_actions: task_recovery_actions_from_row(row),
+        retry_after_at: row.get("retry_after_at"),
         expected_hash_sha256: row.get("expected_hash_sha256"),
         actual_hash_sha256: row.get("actual_hash_sha256"),
         hash_status: HashVerificationStatus::from_db_str(
@@ -297,6 +572,107 @@ fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
     })
 }
 
+fn task_error_code_from_row(row: &sqlx::sqlite::SqliteRow) -> Option<String> {
+    row.try_get::<Option<String>, _>("error_code")
+        .ok()
+        .flatten()
+        .or_else(|| {
+            row.try_get::<Option<String>, _>("error_message")
+                .ok()
+                .flatten()
+                .and_then(|error| serde_json::from_str::<AppErrorPayload>(&error).ok())
+                .map(|payload| payload.code)
+        })
+}
+
+fn task_recovery_actions_from_row(row: &sqlx::sqlite::SqliteRow) -> Vec<RecoveryAction> {
+    if let Some(raw) = row
+        .try_get::<Option<String>, _>("recovery_actions")
+        .ok()
+        .flatten()
+    {
+        if let Ok(values) = serde_json::from_str::<Vec<String>>(&raw) {
+            let actions = values
+                .iter()
+                .filter_map(|value| RecoveryAction::from_str(value))
+                .collect::<Vec<_>>();
+            if !actions.is_empty() {
+                return actions;
+            }
+        }
+    }
+
+    row.try_get::<Option<String>, _>("error_message")
+        .ok()
+        .flatten()
+        .and_then(|error| serde_json::from_str::<AppErrorPayload>(&error).ok())
+        .map(|payload| {
+            payload
+                .actions
+                .iter()
+                .filter_map(|value| RecoveryAction::from_str(value))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn recovery_actions_json(actions: &[RecoveryAction]) -> Result<String, String> {
+    let values = actions
+        .iter()
+        .map(|action| action.as_str())
+        .collect::<Vec<_>>();
+    serde_json::to_string(&values).map_err(|e| e.to_string())
+}
+
+fn error_state_from_message(
+    error_message: Option<&str>,
+) -> (Option<String>, Vec<RecoveryAction>) {
+    let Some(error) = error_message else {
+        return (None, Vec::new());
+    };
+    if let Ok(payload) = serde_json::from_str::<AppErrorPayload>(error) {
+        let actions = payload
+            .actions
+            .iter()
+            .filter_map(|value| RecoveryAction::from_str(value))
+            .collect();
+        return (Some(payload.code), actions);
+    }
+    (legacy_error_code(error), Vec::new())
+}
+
+fn legacy_error_code(error: &str) -> Option<String> {
+    if error.contains("Remote file changed") {
+        return Some("remote_changed".to_string());
+    }
+    if error.contains("Server no longer supports resume") || error.contains("Resume unavailable") {
+        return Some("resume_unavailable".to_string());
+    }
+    if error.contains("Temporary file is missing") {
+        return Some("temp_file_missing".to_string());
+    }
+    if error.contains("Temporary file is smaller") {
+        return Some("temp_file_smaller_than_progress".to_string());
+    }
+    if error.contains("disk")
+        || error.contains("Disk")
+        || error.contains("write")
+        || error.contains("Write")
+    {
+        return Some("disk_write_failed".to_string());
+    }
+    if error.contains("403") {
+        return Some("http_denied".to_string());
+    }
+    if error.contains("404") {
+        return Some("http_not_found".to_string());
+    }
+    if error.contains("429") {
+        return Some("server_rate_limited".to_string());
+    }
+    None
+}
+
 pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<(), String> {
     sqlx::query(
         r#"
@@ -304,9 +680,10 @@ pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<
             id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
             total_size, downloaded_bytes, status, etag, last_modified, content_type,
             supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
-            health_summary, error_message, expected_hash_sha256, actual_hash_sha256,
+            health_summary, error_message, error_code, recovery_actions, retry_after_at,
+            expected_hash_sha256, actual_hash_sha256,
             hash_status, hash_error, hash_verified_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&task.id)
@@ -332,6 +709,9 @@ pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<
     .bind(task.speed_bps)
     .bind(&task.health_summary)
     .bind(&task.error_message)
+    .bind(&task.error_code)
+    .bind(recovery_actions_json(&task.recovery_actions)?)
+    .bind(&task.retry_after_at)
     .bind(&task.expected_hash_sha256)
     .bind(&task.actual_hash_sha256)
     .bind(task.hash_status.as_str())
@@ -380,6 +760,12 @@ pub async fn get_settings(
     let system_notifications = get_bool_setting(pool, SETTING_SYSTEM_NOTIFICATIONS, true).await?;
     let close_to_tray = get_bool_setting(pool, SETTING_CLOSE_TO_TRAY, false).await?;
     let start_on_boot = get_bool_setting(pool, SETTING_START_ON_BOOT, false).await?;
+    let floating_window_enabled =
+        get_bool_setting(pool, SETTING_FLOATING_WINDOW_ENABLED, false).await?;
+    let font_family = get_setting_value(pool, SETTING_FONT_FAMILY)
+        .await?
+        .map(|value| normalize_font_family(&value))
+        .unwrap_or(AppFontFamily::SourceHanSansSc);
 
     Ok(AppSettings {
         max_active_tasks,
@@ -391,6 +777,8 @@ pub async fn get_settings(
         system_notifications,
         close_to_tray,
         start_on_boot,
+        floating_window_enabled,
+        font_family,
     })
 }
 
@@ -443,7 +831,22 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         SETTING_START_ON_BOOT,
         bool_setting_value(settings.start_on_boot),
     )
-    .await
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_FLOATING_WINDOW_ENABLED,
+        bool_setting_value(settings.floating_window_enabled),
+    )
+    .await?;
+    upsert_setting_value(pool, SETTING_FONT_FAMILY, settings.font_family.as_str()).await
+}
+
+pub fn normalize_font_family(value: &str) -> AppFontFamily {
+    match value.trim() {
+        "system" => AppFontFamily::System,
+        "source_han_sans_sc" => AppFontFamily::SourceHanSansSc,
+        _ => AppFontFamily::SourceHanSansSc,
+    }
 }
 
 pub fn normalize_speed_limit_bps(value: &str) -> Option<String> {
@@ -604,6 +1007,104 @@ pub async fn latest_browser_error(
     .map_err(|e| e.to_string())?;
 
     Ok(row.map(|row| row.get("error_message")))
+}
+
+pub async fn upsert_task_request_headers(
+    pool: &SqlitePool,
+    task_id: &str,
+    headers: &[(String, String)],
+    source_browser: Option<BrowserKind>,
+) -> Result<(), String> {
+    if headers.is_empty() {
+        return Ok(());
+    }
+    let now = crate::models::task::now_iso();
+    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(TASK_REQUEST_HEADERS_TTL_HOURS))
+        .to_rfc3339();
+    let headers_json = serde_json::to_string(headers).map_err(|e| e.to_string())?;
+    sqlx::query(
+        r#"
+        INSERT INTO task_request_headers (
+            task_id, headers_json, expires_at, created_at, last_used_at, source_browser
+        ) VALUES (?, ?, ?, ?, NULL, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+            headers_json = excluded.headers_json,
+            expires_at = excluded.expires_at,
+            source_browser = excluded.source_browser
+        "#,
+    )
+    .bind(task_id)
+    .bind(headers_json)
+    .bind(expires_at)
+    .bind(&now)
+    .bind(source_browser.map(BrowserKind::as_str))
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn resolve_task_request_headers(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let now = crate::models::task::now_iso();
+    let row = sqlx::query(
+        r#"
+        SELECT headers_json, expires_at FROM task_request_headers
+        WHERE task_id = ?
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
+    let expires_at: String = row.get("expires_at");
+    if expires_at <= now {
+        delete_task_request_headers(pool, task_id).await?;
+        return Err(AppErrorPayload::auth_headers_expired().command_error());
+    }
+
+    sqlx::query("UPDATE task_request_headers SET last_used_at = ? WHERE task_id = ?")
+        .bind(&now)
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    serde_json::from_str(&row.get::<String, _>("headers_json")).map_err(|e| e.to_string())
+}
+
+pub async fn delete_task_request_headers(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM task_request_headers WHERE task_id = ?")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn clear_all_task_request_headers(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query("DELETE FROM task_request_headers")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn clear_expired_task_request_headers(pool: &SqlitePool) -> Result<(), String> {
+    let now = crate::models::task::now_iso();
+    sqlx::query("DELETE FROM task_request_headers WHERE expires_at <= ?")
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub async fn insert_task_file_record(
@@ -988,6 +1489,10 @@ fn row_to_segment(row: &sqlx::sqlite::SqliteRow) -> Result<TaskSegmentRecord, St
 }
 
 pub async fn clear_tasks(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query("DELETE FROM task_request_headers")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM task_requests")
         .execute(pool)
         .await
@@ -1196,12 +1701,16 @@ pub async fn update_task_status(
     error_message: Option<&str>,
 ) -> Result<(), String> {
     let updated_at = crate::models::task::now_iso();
+    let (error_code, recovery_actions) = error_state_from_message(error_message);
+    let recovery_actions = recovery_actions_json(&recovery_actions)?;
 
     sqlx::query(
         r#"
         UPDATE tasks
         SET status = ?, speed_bps = ?, connection_count = ?,
-            health_summary = ?, error_message = ?, updated_at = ?
+            health_summary = ?, error_message = ?, error_code = ?, recovery_actions = ?,
+            retry_after_at = CASE WHEN ? IS NULL THEN NULL ELSE retry_after_at END,
+            updated_at = ?
         WHERE id = ?
         "#,
     )
@@ -1209,6 +1718,9 @@ pub async fn update_task_status(
     .bind(speed_bps)
     .bind(connection_count)
     .bind(health_summary)
+    .bind(error_message)
+    .bind(error_code)
+    .bind(recovery_actions)
     .bind(error_message)
     .bind(&updated_at)
     .bind(task_id)
@@ -1229,6 +1741,28 @@ pub async fn update_task_status(
     .await
     .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+pub async fn update_task_retry_after(
+    pool: &SqlitePool,
+    task_id: &str,
+    retry_after_at: Option<&str>,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET retry_after_at = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(retry_after_at)
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1408,6 +1942,7 @@ pub async fn reset_task_download_state(pool: &SqlitePool, task_id: &str) -> Resu
         UPDATE tasks
         SET downloaded_bytes = 0, speed_bps = 0, connection_count = 0,
             status = 'queued', health_summary = 'Queued', error_message = NULL,
+            error_code = NULL, recovery_actions = NULL, retry_after_at = NULL,
             updated_at = ?
         WHERE id = ?
         "#,
@@ -1451,7 +1986,8 @@ pub async fn complete_task(pool: &SqlitePool, task_id: &str) -> Result<(), Strin
         UPDATE tasks
         SET status = 'completed', downloaded_bytes = total_size, speed_bps = 0,
             connection_count = 0, health_summary = 'Completed',
-            error_message = NULL, updated_at = ?
+            error_message = NULL, error_code = NULL, recovery_actions = NULL,
+            retry_after_at = NULL, updated_at = ?
         WHERE id = ?
         "#,
     )
@@ -1474,6 +2010,7 @@ pub async fn complete_task(pool: &SqlitePool, task_id: &str) -> Result<(), Strin
     .map_err(|e| e.to_string())?;
 
     insert_task_event(pool, task_id, "completed", None).await?;
+    delete_task_request_headers(pool, task_id).await?;
 
     Ok(())
 }
@@ -1530,7 +2067,8 @@ pub async fn complete_unknown_size_task(
         UPDATE tasks
         SET status = 'completed', total_size = ?, downloaded_bytes = ?, speed_bps = 0,
             connection_count = 0, health_summary = 'Completed',
-            error_message = NULL, updated_at = ?
+            error_message = NULL, error_code = NULL, recovery_actions = NULL,
+            retry_after_at = NULL, updated_at = ?
         WHERE id = ?
         "#,
     )
@@ -1572,6 +2110,7 @@ pub async fn complete_unknown_size_task(
     .map_err(|e| e.to_string())?;
 
     insert_task_event(pool, task_id, "completed", None).await?;
+    delete_task_request_headers(pool, task_id).await?;
 
     Ok(())
 }
@@ -1756,6 +2295,12 @@ pub fn total_segment_downloaded_bytes(task_work_units: &[TaskSegmentRecord]) -> 
 }
 
 pub async fn delete_task_record(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM task_request_headers WHERE task_id = ?")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     sqlx::query("DELETE FROM task_requests WHERE task_id = ?")
         .bind(task_id)
         .execute(pool)
@@ -1797,6 +2342,7 @@ pub async fn reset_interrupted_tasks(pool: &SqlitePool) -> Result<(), String> {
         UPDATE tasks
         SET status = 'paused', speed_bps = 0, connection_count = 0,
             health_summary = 'Paused after app restart', error_message = NULL,
+            error_code = NULL, recovery_actions = NULL,
             updated_at = ?
         WHERE status IN ('downloading', 'retrying')
         "#,

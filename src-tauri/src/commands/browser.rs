@@ -1,12 +1,16 @@
 #[cfg(target_os = "windows")]
 use std::process::Command;
 use std::{
-    fs,
+    fs::{self, File},
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
 use reqwest::Url;
-use tauri::{AppHandle, Manager, State};
+use sha2::{Digest, Sha256};
+use sqlx::Row;
+use tauri::{path::BaseDirectory, AppHandle, Manager, State};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 use crate::{
     db,
@@ -17,13 +21,15 @@ use crate::{
     },
     logging::sanitize_url,
     models::{
-        BrowserHandoffInput, BrowserHandoffResult, BrowserIntegrationEntry,
-        BrowserIntegrationStatus, BrowserIntegrationUpdateInput, BrowserKind,
+        BrowserCaptureSettings, BrowserCaptureSettingsInput, BrowserExtensionExportResult,
+        BrowserExtensionPackage, BrowserForwardedHeader, BrowserHandoffInput, BrowserHandoffResult,
+        BrowserIntegrationEntry, BrowserIntegrationStatus, BrowserIntegrationUpdateInput,
+        BrowserForwardHeadersMode, BrowserKind, BrowserRealtimeStatus,
     },
     AppState,
 };
 
-use super::tasks::{create_task_with_state, CreateTaskInput};
+use super::tasks::{create_task_with_state_and_headers, CreateTaskInput};
 
 const NATIVE_HOST_NAME: &str = "com.vibe_downloader.native_host";
 const CHROMIUM_DEV_EXTENSION_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
@@ -31,6 +37,23 @@ const CHROMIUM_RELEASE_EXTENSION_ID: &str = "replace-with-chrome-web-store-id";
 const EDGE_RELEASE_EXTENSION_ID: &str = "replace-with-edge-addons-id";
 const FIREFOX_DEV_EXTENSION_ID: &str = "vibe-downloader@local";
 const FIREFOX_RELEASE_EXTENSION_ID: &str = "vibe-downloader@example.invalid";
+const SETTING_BROWSER_CAPTURE: &str = "browser_capture_settings";
+const DEFAULT_BROWSER_MIN_SIZE_BYTES: &str = "0";
+const DEFAULT_BROWSER_EXTENSIONS: &[&str] = &[
+    "zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "bz2", "xz", "pdf", "mp4",
+    "mkv", "mp3", "flac",
+];
+const FORWARDED_HEADER_ALLOWLIST: &[&str] = &[
+    "cookie",
+    "user-agent",
+    "referer",
+    "origin",
+    "accept",
+    "accept-language",
+    "dnt",
+    "cache-control",
+    "pragma",
+];
 
 #[tauri::command]
 #[specta::specta]
@@ -76,6 +99,68 @@ pub async fn uninstall_browser_integration(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn export_browser_extension_packages(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<BrowserExtensionExportResult, String> {
+    export_extension_packages(&app, state.inner()).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_browser_capture_settings(
+    state: State<'_, AppState>,
+) -> Result<BrowserCaptureSettings, String> {
+    browser_capture_settings(&state.pool).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_browser_capture_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: BrowserCaptureSettingsInput,
+) -> Result<BrowserCaptureSettings, String> {
+    let current = browser_capture_settings(&state.pool).await?;
+    let forward_headers_mode = input
+        .forward_headers_mode
+        .or_else(|| {
+            input.forward_headers.map(|enabled| {
+                if enabled {
+                    BrowserForwardHeadersMode::Enabled
+                } else {
+                    BrowserForwardHeadersMode::Disabled
+                }
+            })
+        })
+        .unwrap_or(current.forward_headers_mode);
+    let next = BrowserCaptureSettings {
+        auto_intercept: input.auto_intercept.unwrap_or(current.auto_intercept),
+        forward_headers: matches!(forward_headers_mode, BrowserForwardHeadersMode::Enabled),
+        forward_headers_mode,
+        min_size_bytes: input
+            .min_size_bytes
+            .as_deref()
+            .map(normalize_non_negative_i64_string)
+            .transpose()?
+            .unwrap_or(current.min_size_bytes),
+        file_extensions: input
+            .file_extensions
+            .map(normalize_extensions)
+            .unwrap_or(current.file_extensions),
+        site_rules: input.site_rules.unwrap_or(current.site_rules),
+    };
+    upsert_browser_capture_settings(&state.pool, &next).await?;
+    if matches!(next.forward_headers_mode, BrowserForwardHeadersMode::Disabled) {
+        db::clear_all_task_request_headers(&state.pool).await?;
+        state.request_headers.lock().await.clear();
+    }
+    emit_browser_integration_changed(&app);
+    Ok(next)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn create_browser_handoff_task(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -108,6 +193,17 @@ pub async fn create_browser_handoff_task_with_state(
             error_message: None,
         });
     }
+
+    let forwarded_headers = sanitize_forwarded_headers(input.forwarded_headers.as_deref());
+    let capture_settings = browser_capture_settings(&state.pool).await?;
+    let request_headers = if matches!(
+        capture_settings.forward_headers_mode,
+        BrowserForwardHeadersMode::Enabled
+    ) {
+        forwarded_headers
+    } else {
+        Vec::new()
+    };
 
     let task_result = validate_handoff(&input, &state.engine_registry).map(|url| CreateTaskInput {
         url,
@@ -153,7 +249,15 @@ pub async fn create_browser_handoff_task_with_state(
     )
     .await?;
 
-    match create_task_with_state(app.clone(), state, create_input).await {
+    match create_task_with_state_and_headers(
+        app.clone(),
+        state,
+        create_input,
+        request_headers,
+        Some(input.browser),
+    )
+    .await
+    {
         Ok(task) => {
             tracing::info!(
                 request_id = %request_id,
@@ -193,14 +297,223 @@ pub fn read_handoff_file(path: &Path) -> Result<BrowserHandoffInput, String> {
     serde_json::from_str(&raw).map_err(|e| format!("Invalid browser handoff payload: {e}"))
 }
 
+pub async fn browser_capture_settings(
+    pool: &sqlx::SqlitePool,
+) -> Result<BrowserCaptureSettings, String> {
+    let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
+        .bind(SETTING_BROWSER_CAPTURE)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(raw) = row.map(|row| row.get::<String, _>("value")) else {
+        return Ok(default_browser_capture_settings());
+    };
+    let mut parsed = parse_browser_capture_settings(&raw);
+    parsed.min_size_bytes = normalize_non_negative_i64_string(&parsed.min_size_bytes)?;
+    parsed.file_extensions = normalize_extensions(parsed.file_extensions);
+    Ok(parsed)
+}
+
+pub async fn upsert_browser_capture_settings(
+    pool: &sqlx::SqlitePool,
+    settings: &BrowserCaptureSettings,
+) -> Result<(), String> {
+    let raw = serde_json::to_string(settings).map_err(|e| e.to_string())?;
+    sqlx::query(
+        r#"
+        INSERT INTO settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        "#,
+    )
+    .bind(SETTING_BROWSER_CAPTURE)
+    .bind(raw)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn default_browser_capture_settings() -> BrowserCaptureSettings {
+    BrowserCaptureSettings {
+        auto_intercept: true,
+        forward_headers: false,
+        forward_headers_mode: BrowserForwardHeadersMode::Ask,
+        min_size_bytes: DEFAULT_BROWSER_MIN_SIZE_BYTES.to_string(),
+        file_extensions: DEFAULT_BROWSER_EXTENSIONS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        site_rules: Vec::new(),
+    }
+}
+
+fn parse_browser_capture_settings(raw: &str) -> BrowserCaptureSettings {
+    let mut settings = default_browser_capture_settings();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return settings;
+    };
+    settings.auto_intercept = value
+        .get("autoIntercept")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(settings.auto_intercept);
+    settings.forward_headers_mode = value
+        .get("forwardHeadersMode")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|mode| match mode {
+            "enabled" => Some(BrowserForwardHeadersMode::Enabled),
+            "disabled" => Some(BrowserForwardHeadersMode::Disabled),
+            "ask" => Some(BrowserForwardHeadersMode::Ask),
+            _ => None,
+        })
+        .or_else(|| {
+            value
+                .get("forwardHeaders")
+                .and_then(serde_json::Value::as_bool)
+                .map(|enabled| {
+                    if enabled {
+                        BrowserForwardHeadersMode::Enabled
+                    } else {
+                        BrowserForwardHeadersMode::Disabled
+                    }
+                })
+        })
+        .unwrap_or(BrowserForwardHeadersMode::Ask);
+    settings.forward_headers = matches!(
+        settings.forward_headers_mode,
+        BrowserForwardHeadersMode::Enabled
+    );
+    settings.min_size_bytes = value
+        .get("minSizeBytes")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&settings.min_size_bytes)
+        .to_string();
+    if let Some(file_extensions) = value.get("fileExtensions").cloned() {
+        if let Ok(values) = serde_json::from_value::<Vec<String>>(file_extensions) {
+            settings.file_extensions = values;
+        }
+    }
+    if let Some(site_rules) = value.get("siteRules").cloned() {
+        if let Ok(values) = serde_json::from_value(site_rules) {
+            settings.site_rules = values;
+        }
+    }
+    settings
+}
+
+fn normalize_non_negative_i64_string(value: &str) -> Result<String, String> {
+    let parsed = value
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| "Browser rule size must be a number.".to_string())?;
+    Ok(parsed.max(0).to_string())
+}
+
+fn normalize_extensions(values: Vec<String>) -> Vec<String> {
+    let mut out = values
+        .into_iter()
+        .map(|value| value.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|value| {
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        })
+        .collect::<Vec<_>>();
+    out.sort();
+    out.dedup();
+    out
+}
+
+async fn export_extension_packages(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<BrowserExtensionExportResult, String> {
+    let extension_root = extension_core_path_for_app(app)
+        .ok_or_else(|| "Browser extension source folder could not be found.".to_string())?;
+    let source_dir = extension_root.join("src");
+    let template_path = extension_root.join("manifest.template.json");
+    if !source_dir.exists() || !template_path.exists() {
+        return Err("Browser extension source files are incomplete.".to_string());
+    }
+
+    let default_dir = super::settings::default_download_dir(app)?;
+    let settings = db::get_settings(&state.pool, default_dir).await?;
+    let output_dir = PathBuf::from(settings.default_save_dir)
+        .join("Vibe Downloader Extensions")
+        .join(format!("v{}", env!("CARGO_PKG_VERSION")));
+    fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("Could not create extension export folder: {e}"))?;
+
+    let manifest_template = fs::read_to_string(&template_path)
+        .map_err(|e| format!("Could not read extension manifest template: {e}"))?;
+    let background_template = fs::read_to_string(source_dir.join("background.js"))
+        .map_err(|e| format!("Could not read extension background script: {e}"))?;
+    let shared_files = ["logger.js", "popup.html", "popup.js", "popup.css"];
+    for file in shared_files {
+        if !source_dir.join(file).exists() {
+            return Err(format!("Browser extension source file is missing: {file}"));
+        }
+    }
+
+    let mut packages = Vec::new();
+    for variant in extension_package_variants() {
+        let package_path = output_dir.join(format!(
+            "vibe-downloader-{}-v{}.{}",
+            variant.id,
+            env!("CARGO_PKG_VERSION"),
+            variant.extension
+        ));
+        if package_path.exists() {
+            fs::remove_file(&package_path)
+                .map_err(|e| format!("Could not replace existing extension package: {e}"))?;
+        }
+
+        let manifest = extension_manifest(&manifest_template, &variant)?;
+        let background = background_template.replace("__VIBE_BROWSER_KIND__", variant.browser_kind);
+        write_extension_package(
+            &package_path,
+            &source_dir,
+            &manifest,
+            &background,
+            &shared_files,
+        )?;
+        let sha256 = file_sha256(&package_path)?;
+        packages.push(BrowserExtensionPackage {
+            target: variant.target.to_string(),
+            package_path: package_path.to_string_lossy().to_string(),
+            sha256,
+            install_note: variant.install_note.to_string(),
+        });
+    }
+
+    let install_guide_path = output_dir.join("INSTALL.md");
+    fs::write(&install_guide_path, install_guide(&packages))
+        .map_err(|e| format!("Could not write extension install guide: {e}"))?;
+    let sums_path = output_dir.join("SHA256SUMS.txt");
+    fs::write(&sums_path, sha256_sums(&packages))
+        .map_err(|e| format!("Could not write extension checksums: {e}"))?;
+
+    tracing::info!(
+        output_dir = %output_dir.display(),
+        package_count = packages.len(),
+        "browser extension packages exported"
+    );
+
+    Ok(BrowserExtensionExportResult {
+        output_dir: output_dir.to_string_lossy().to_string(),
+        install_guide_path: install_guide_path.to_string_lossy().to_string(),
+        packages,
+    })
+}
+
 async fn integration_status(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<BrowserIntegrationStatus, String> {
     let native_host_path = native_host_path().map(|path| path.to_string_lossy().to_string());
-    let extension_core_path = extension_core_path()
-        .filter(|path| path.exists())
-        .map(|path| path.to_string_lossy().to_string());
+    let extension_core_path =
+        extension_core_path_for_app(app).map(|path| path.to_string_lossy().to_string());
     let mut browsers = Vec::new();
 
     for browser in BrowserKind::all() {
@@ -221,10 +534,16 @@ async fn integration_status(
         });
     }
 
+    let realtime = state.browser_realtime.status().await;
     Ok(BrowserIntegrationStatus {
         native_host_name: NATIVE_HOST_NAME.to_string(),
         native_host_path,
         extension_core_path,
+        realtime: BrowserRealtimeStatus {
+            ws_url: realtime.ws_url,
+            connected: realtime.connected,
+        },
+        capture: browser_capture_settings(&state.pool).await?,
         browsers,
     })
 }
@@ -247,6 +566,206 @@ fn validate_handoff(
         return Err("Browser handoff URLs must not contain embedded credentials.".to_string());
     }
     Ok(parsed.to_string())
+}
+
+fn sanitize_forwarded_headers(headers: Option<&[BrowserForwardedHeader]>) -> Vec<(String, String)> {
+    let Some(headers) = headers else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for header in headers {
+        let name = header.name.trim().to_ascii_lowercase();
+        if !FORWARDED_HEADER_ALLOWLIST.contains(&name.as_str()) {
+            continue;
+        }
+        if name.starts_with("sec-")
+            || matches!(
+                name.as_str(),
+                "authorization"
+                    | "proxy-authorization"
+                    | "set-cookie"
+                    | "range"
+                    | "accept-encoding"
+                    | "host"
+                    | "connection"
+            )
+        {
+            continue;
+        }
+        let value = header.value.trim();
+        if value.is_empty() || value.contains('\n') || value.contains('\r') {
+            continue;
+        }
+        out.push((name, value.to_string()));
+    }
+    out
+}
+
+struct ExtensionPackageVariant {
+    id: &'static str,
+    target: &'static str,
+    browser_kind: &'static str,
+    extension: &'static str,
+    firefox_id: Option<&'static str>,
+    install_note: &'static str,
+}
+
+fn extension_package_variants() -> [ExtensionPackageVariant; 4] {
+    let release = integration_profile() == "release";
+    [
+        ExtensionPackageVariant {
+            id: "chromium",
+            target: "Chrome, Brave, Vivaldi, Chromium",
+            browser_kind: "chrome",
+            extension: "zip",
+            firefox_id: None,
+            install_note: "Load the unpacked or zipped Chromium package from the browser extensions page.",
+        },
+        ExtensionPackageVariant {
+            id: "edge",
+            target: "Microsoft Edge",
+            browser_kind: "edge",
+            extension: "zip",
+            firefox_id: None,
+            install_note: "Load the package from edge://extensions after enabling developer mode.",
+        },
+        ExtensionPackageVariant {
+            id: "firefox",
+            target: "Mozilla Firefox",
+            browser_kind: "firefox",
+            extension: "xpi",
+            firefox_id: Some(if release {
+                FIREFOX_RELEASE_EXTENSION_ID
+            } else {
+                FIREFOX_DEV_EXTENSION_ID
+            }),
+            install_note: "Firefox release builds require a signed XPI. Use this local package for development profiles.",
+        },
+        ExtensionPackageVariant {
+            id: "opera",
+            target: "Opera",
+            browser_kind: "opera",
+            extension: "zip",
+            firefox_id: None,
+            install_note: "Load the package from Opera's extensions page after enabling developer mode.",
+        },
+    ]
+}
+
+fn extension_manifest(template: &str, variant: &ExtensionPackageVariant) -> Result<String, String> {
+    let mut manifest: serde_json::Value = serde_json::from_str(template)
+        .map_err(|e| format!("Invalid extension manifest template: {e}"))?;
+    manifest["version"] = serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string());
+    if variant.id == "firefox" {
+        manifest["name"] = serde_json::Value::String("Vibe Downloader (Firefox)".to_string());
+    }
+    if let Some(firefox_id) = variant.firefox_id {
+        manifest["browser_specific_settings"] = serde_json::json!({
+            "gecko": {
+                "id": firefox_id,
+                "strict_min_version": "109.0"
+            }
+        });
+    }
+    serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())
+}
+
+fn write_extension_package(
+    package_path: &Path,
+    source_dir: &Path,
+    manifest: &str,
+    background: &str,
+    shared_files: &[&str],
+) -> Result<(), String> {
+    let file = File::create(package_path)
+        .map_err(|e| format!("Could not create extension package: {e}"))?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+
+    zip.start_file("manifest.json", options)
+        .map_err(|e| format!("Could not write extension package manifest: {e}"))?;
+    zip.write_all(format!("{manifest}\n").as_bytes())
+        .map_err(|e| format!("Could not write extension package manifest: {e}"))?;
+    zip.start_file("background.js", options)
+        .map_err(|e| format!("Could not write extension background script: {e}"))?;
+    zip.write_all(background.as_bytes())
+        .map_err(|e| format!("Could not write extension background script: {e}"))?;
+
+    for file_name in shared_files {
+        zip.start_file(*file_name, options)
+            .map_err(|e| format!("Could not add extension file {file_name}: {e}"))?;
+        let mut file = File::open(source_dir.join(file_name))
+            .map_err(|e| format!("Could not read extension file {file_name}: {e}"))?;
+        std::io::copy(&mut file, &mut zip)
+            .map_err(|e| format!("Could not write extension file {file_name}: {e}"))?;
+    }
+
+    zip.finish()
+        .map_err(|e| format!("Could not finalize extension package: {e}"))?;
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<String, String> {
+    let mut file =
+        File::open(path).map_err(|e| format!("Could not read extension package: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("Could not hash extension package: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn install_guide(packages: &[BrowserExtensionPackage]) -> String {
+    let mut lines = vec![
+        "# Vibe Downloader Browser Extensions".to_string(),
+        String::new(),
+        format!(
+            "Generated by Vibe Downloader v{}.",
+            env!("CARGO_PKG_VERSION")
+        ),
+        String::new(),
+        "Install the Native Messaging host from Vibe Settings before loading these packages."
+            .to_string(),
+        "Local browser packages still require browser-side confirmation or developer mode."
+            .to_string(),
+        String::new(),
+        "## Packages".to_string(),
+    ];
+    for package in packages {
+        let file_name = Path::new(&package.package_path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&package.package_path);
+        lines.push(format!("- {}: `{}`", package.target, file_name));
+        lines.push(format!("  - SHA-256: `{}`", package.sha256));
+        lines.push(format!("  - Note: {}", package.install_note));
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn sha256_sums(packages: &[BrowserExtensionPackage]) -> String {
+    packages
+        .iter()
+        .map(|package| {
+            let file_name = Path::new(&package.package_path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&package.package_path);
+            format!("{}  {}", package.sha256, file_name)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 fn sanitize_suggested_file_name(value: Option<&str>) -> Option<String> {
@@ -367,6 +886,14 @@ fn extension_core_path() -> Option<PathBuf> {
             .join("browser")
             .join("extension-core"),
     )
+}
+
+fn extension_core_path_for_app(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .resolve("browser/extension-core", BaseDirectory::Resource)
+        .ok()
+        .filter(|path| path.exists())
+        .or_else(|| extension_core_path().filter(|path| path.exists()))
 }
 
 fn manifest_path(app: &AppHandle, browser: BrowserKind) -> Result<PathBuf, String> {

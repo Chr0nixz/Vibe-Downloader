@@ -2,6 +2,7 @@ import {
   Clock,
   FilePenLine,
   FolderOpen,
+  HardDrive,
   Link,
   RotateCcw,
 } from "lucide-react";
@@ -22,7 +23,10 @@ export function TaskRecoveryActions({
   compact?: boolean;
 }) {
   const { t } = useTranslation();
-  const actions = recoveryActionsForError(task.errorMessage);
+  const actions =
+    task.recoveryActions.length > 0
+      ? task.recoveryActions
+      : recoveryActionsForError(task.errorMessage);
   if (!task.errorMessage || actions.length === 0) return null;
 
   return (
@@ -58,6 +62,8 @@ function RecoveryIcon({ action }: { action: RecoveryAction }) {
     case "choose_another_folder":
     case "open_folder":
       return <FolderOpen className="h-4 w-4" />;
+    case "free_disk_space":
+      return <HardDrive className="h-4 w-4" />;
     case "check_url":
       return <Link className="h-4 w-4" />;
     case "retry_later":

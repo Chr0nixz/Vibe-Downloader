@@ -23,8 +23,10 @@ const log = createLogger("app-shell");
 import {
   deleteTask,
   getSettings,
-  listTasks,
+  listTasksPage,
   onSettingsChanged,
+  onTrayNewDownloadRequested,
+  onTraySettingsRequested,
   openTaskFile,
   openTaskFolder,
   openDirectoryPicker,
@@ -34,7 +36,7 @@ import {
   resumeTask,
 } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settings-store";
-import { useTaskStore } from "@/stores/task-store";
+import { taskPageInput, useTaskStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 
@@ -91,13 +93,14 @@ export function AppShell() {
   const selectedId = useTaskStore((s) => s.selectedId);
   const nav = useTaskStore((s) => s.nav);
   const detailOpen = useTaskStore((s) => s.detailOpen);
-  const setTasks = useTaskStore((s) => s.setTasks);
+  const setTaskPage = useTaskStore((s) => s.setTaskPage);
   const upsertTask = useTaskStore((s) => s.upsertTask);
   const setLoading = useTaskStore((s) => s.setLoading);
   const setError = useTaskStore((s) => s.setError);
   const selectTask = useTaskStore((s) => s.selectTask);
   const clearSelectedIds = useTaskStore((s) => s.clearSelectedIds);
   const setDetailOpen = useTaskStore((s) => s.setDetailOpen);
+  const settings = useSettingsStore((s) => s.settings);
   const setSettings = useSettingsStore((s) => s.setSettings);
   const setSettingsLoading = useSettingsStore((s) => s.setLoading);
   const setSettingsError = useSettingsStore((s) => s.setError);
@@ -107,8 +110,9 @@ export function AppShell() {
   const taskSurfaceActive = nav !== "settings";
 
   const refreshTasks = useCallback(async (selectId?: string) => {
-    const data = await listTasks();
-    setTasks(data);
+    const page = await listTasksPage(taskPageInput(0));
+    const data = page.items;
+    setTaskPage(data, page.total, page.page, page.pageSize);
     if (selectId) {
       selectTask(selectId);
     } else {
@@ -122,7 +126,7 @@ export function AppShell() {
         selectTask(null);
       }
     }
-  }, [selectTask, setTasks]);
+  }, [selectTask, setTaskPage]);
 
   const runTaskAction = useCallback(async (action: () => Promise<Task | void>, selectId?: string) => {
     try {
@@ -239,8 +243,15 @@ export function AppShell() {
   }, [runTaskAction]);
 
   const resolveAttention = useCallback(async (task: Task, action: RecoveryAction) => {
-    if (action === "open_folder") {
+    if (action === "open_folder" || action === "free_disk_space") {
       openFolder(task);
+      if (action === "free_disk_space") {
+        addToast({
+          tone: "info",
+          title: t("recovery.freeDiskSpaceToast"),
+          description: task.saveDir,
+        });
+      }
       return;
     }
     if (action === "check_url") {
@@ -293,9 +304,10 @@ export function AppShell() {
 
     void (async () => {
       try {
-        const data = await listTasks();
+          const page = await listTasksPage(taskPageInput(0));
+          const data = page.items;
         if (!cancelled) {
-          setTasks(data);
+          setTaskPage(data, page.total, page.page, page.pageSize);
           const currentSelectedId = useTaskStore.getState().selectedId;
           if (data.length > 0 && !currentSelectedId) {
             selectTask(data[0].id);
@@ -317,7 +329,7 @@ export function AppShell() {
     return () => {
       cancelled = true;
     };
-  }, [selectTask, setDetailOpen, setError, setLoading, setTasks]);
+  }, [selectTask, setDetailOpen, setError, setLoading, setTaskPage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -351,6 +363,38 @@ export function AppShell() {
       unlistenSettings?.();
     };
   }, [setSettings, setSettingsError, setSettingsLoading]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenNewDownload: (() => void) | undefined;
+    let unlistenSettings: (() => void) | undefined;
+
+    void (async () => {
+      unlistenNewDownload = await onTrayNewDownloadRequested(() => {
+        setNewDownloadOpen(true);
+      });
+      unlistenSettings = await onTraySettingsRequested(() => {
+        useTaskStore.getState().setNav("settings");
+        setDetailOpen(false);
+      });
+
+      if (cancelled) {
+        unlistenNewDownload();
+        unlistenSettings();
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlistenNewDownload?.();
+      unlistenSettings?.();
+    };
+  }, [setDetailOpen]);
+
+  useEffect(() => {
+    document.documentElement.dataset.fontFamily =
+      settings?.fontFamily ?? "source_han_sans_sc";
+  }, [settings?.fontFamily]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

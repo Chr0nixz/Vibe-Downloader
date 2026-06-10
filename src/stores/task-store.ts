@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import type { ListTasksInput } from "@/generated/bindings";
 import type { Task } from "@/types/task";
 import { parseByteCount } from "@/types/task";
 import {
@@ -43,6 +44,10 @@ export interface TaskFilters {
 
 interface TaskStore {
   tasks: Task[];
+  total: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
   selectedId: string | null;
   selectedIds: string[];
   nav: NavFilter;
@@ -56,6 +61,7 @@ interface TaskStore {
   loading: boolean;
   error: string | null;
   setTasks: (tasks: Task[]) => void;
+  setTaskPage: (tasks: Task[], total: number, page: number, pageSize: number, append?: boolean) => void;
   upsertTask: (task: Task) => void;
   patchTask: (payload: TaskProgressPayload | unknown) => void;
   selectTask: (id: string | null) => void;
@@ -76,6 +82,10 @@ interface TaskStore {
 
 export const useTaskStore = create<TaskStore>((set) => ({
   tasks: [],
+  total: 0,
+  page: 0,
+  pageSize: 100,
+  hasMore: false,
   selectedId: null,
   selectedIds: [],
   nav: "all",
@@ -101,6 +111,27 @@ export const useTaskStore = create<TaskStore>((set) => ({
       );
       return {
         tasks,
+        total: tasks.length,
+        page: 0,
+        hasMore: false,
+        selectedIds: state.selectedIds.filter((id) => ids.has(id)),
+        expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
+        speedHistoryByTaskId,
+      };
+    }),
+  setTaskPage: (tasks, total, page, pageSize, append = false) =>
+    set((state) => {
+      const nextTasks = append ? mergePagedTasks(state.tasks, tasks) : tasks;
+      const ids = new Set(nextTasks.map((task) => task.id));
+      const speedHistoryByTaskId = Object.fromEntries(
+        Object.entries(state.speedHistoryByTaskId).filter(([id]) => ids.has(id)),
+      );
+      return {
+        tasks: nextTasks,
+        total,
+        page,
+        pageSize,
+        hasMore: nextTasks.length < total,
         selectedIds: state.selectedIds.filter((id) => ids.has(id)),
         expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
         speedHistoryByTaskId,
@@ -196,6 +227,32 @@ export const useTaskStore = create<TaskStore>((set) => ({
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
 }));
+
+function mergePagedTasks(current: Task[], incoming: Task[]): Task[] {
+  const byId = new Map(current.map((task) => [task.id, task] as const));
+  const order = current.map((task) => task.id);
+  for (const task of incoming) {
+    if (!byId.has(task.id)) order.push(task.id);
+    byId.set(task.id, task);
+  }
+  return order.map((id) => byId.get(id)).filter((task): task is Task => Boolean(task));
+}
+
+export function taskPageInput(page = useTaskStore.getState().page): ListTasksInput {
+  const state = useTaskStore.getState();
+  return {
+    nav: state.nav,
+    search: state.search,
+    sortKey: state.sortKey,
+    sortDirection: state.sortDirection,
+    fileType: state.filters.fileType,
+    source: state.filters.source,
+    failure: state.filters.failure,
+    resume: state.filters.resume,
+    page,
+    pageSize: state.pageSize,
+  };
+}
 
 /** Keep in-flight progress when a DB refresh lags behind live events. */
 export function mergeTasksFromServer(current: Task[], fresh: Task[]): Task[] {
@@ -358,6 +415,16 @@ export function taskFileType(task: Task): FileTypeFilter {
 
 export function failureKind(task: Task): string {
   if (task.status !== "failed" && task.status !== "needs_attention") return "none";
+  if (task.errorCode) {
+    if (task.errorCode === "remote_changed") return "remote_changed";
+    if (task.errorCode === "resume_unavailable") return "resume_unavailable";
+    if (task.errorCode.startsWith("temp_file")) return "temp_file";
+    if (task.errorCode === "disk_write_failed") return "disk_write";
+    if (task.errorCode.startsWith("http_") || task.errorCode === "server_rate_limited") {
+      return "http";
+    }
+    return task.errorCode;
+  }
   const message = (task.errorMessage ?? task.healthSummary ?? "").toLowerCase();
   if (message.includes("remote file changed")) return "remote_changed";
   if (message.includes("resume")) return "resume_unavailable";

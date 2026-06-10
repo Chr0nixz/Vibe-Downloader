@@ -357,8 +357,8 @@ export function Palette({
             {t("palette.description")}
           </DialogDescription>
         </DialogHeader>
-        <DialogBody className="p-0" onKeyDown={onKeyDown}>
-          <div className="border-b border-border-subtle p-3">
+        <DialogBody className="flex flex-col overflow-hidden p-0" onKeyDown={onKeyDown}>
+          <div className="shrink-0 border-b border-border-subtle p-3">
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
               <Input
@@ -383,7 +383,7 @@ export function Palette({
             id="command-palette-results"
             role="listbox"
             aria-label={t("palette.resultsAria")}
-            className="max-h-[min(28rem,calc(100dvh-12rem))] overflow-y-auto overscroll-contain p-2"
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2"
           >
             {groupedCommands.length === 0 ? (
               <p className="px-3 py-8 text-center text-sm text-text-muted">

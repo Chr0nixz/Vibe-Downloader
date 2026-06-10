@@ -81,7 +81,7 @@ Use system-native product typography.
 Recommended stack:
 
 ```css
-font-family: Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+font-family: var(--vibe-font-sans);
 ```
 
 For data-heavy values:

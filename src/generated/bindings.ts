@@ -5,6 +5,7 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 /** Commands */
 export const commands = {
 	listTasks: () => typedError<Task[], string>(__TAURI_INVOKE("list_tasks")),
+	listTasksPage: (input: ListTasksInput) => typedError<ListTasksResult, string>(__TAURI_INVOKE("list_tasks_page", { input })),
 	getTask: (id: string) => typedError<{
 	id: string,
 	url: string,
@@ -29,6 +30,9 @@ export const commands = {
 	speedBps: string,
 	healthSummary: string | null,
 	errorMessage: string | null,
+	errorCode: string | null,
+	recoveryActions: RecoveryAction[],
+	retryAfterAt: string | null,
 	expectedHashSha256: string | null,
 	actualHashSha256: string | null,
 	hashStatus: HashVerificationStatus,
@@ -48,7 +52,15 @@ export const commands = {
 	getBrowserIntegrationStatus: () => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("get_browser_integration_status")),
 	installBrowserIntegration: (input: BrowserIntegrationUpdateInput) => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("install_browser_integration", { input })),
 	uninstallBrowserIntegration: (input: BrowserIntegrationUpdateInput) => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("uninstall_browser_integration", { input })),
+	exportBrowserExtensionPackages: () => typedError<BrowserExtensionExportResult, string>(__TAURI_INVOKE("export_browser_extension_packages")),
+	getBrowserCaptureSettings: () => typedError<BrowserCaptureSettings, string>(__TAURI_INVOKE("get_browser_capture_settings")),
+	updateBrowserCaptureSettings: (input: BrowserCaptureSettingsInput) => typedError<BrowserCaptureSettings, string>(__TAURI_INVOKE("update_browser_capture_settings", { input })),
 	createBrowserHandoffTask: (input: BrowserHandoffInput) => typedError<BrowserHandoffResult, string>(__TAURI_INVOKE("create_browser_handoff_task", { input })),
+	showFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("show_floating_status_window")),
+	hideFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("hide_floating_status_window")),
+	toggleFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("toggle_floating_status_window")),
+	focusMainWindowFromFloating: () => typedError<null, string>(__TAURI_INVOKE("focus_main_window_from_floating")),
+	runTrayMenuAction: (action: TrayMenuAction) => typedError<null, string>(__TAURI_INVOKE("run_tray_menu_action", { action })),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
 	importUrls: (input: ImportUrlsInput) => typedError<BatchImportResult, string>(__TAURI_INVOKE("import_urls", { input })),
@@ -72,6 +84,8 @@ export type AppErrorPayload = {
 	actions: string[],
 };
 
+export type AppFontFamily = "system" | "source_han_sans_sc";
+
 export type AppSettings = {
 	maxActiveTasks: number,
 	defaultSaveDir: string,
@@ -82,6 +96,8 @@ export type AppSettings = {
 	systemNotifications: boolean,
 	closeToTray: boolean,
 	startOnBoot: boolean,
+	floatingWindowEnabled: boolean,
+	fontFamily: AppFontFamily,
 };
 
 export type BatchImportItem = {
@@ -104,16 +120,59 @@ export type BatchImportResult = {
 	duplicateCount: number,
 };
 
+export type BrowserCaptureSettings = {
+	autoIntercept: boolean,
+	forwardHeaders: boolean,
+	forwardHeadersMode: BrowserForwardHeadersMode,
+	minSizeBytes: string,
+	fileExtensions: string[],
+	siteRules: BrowserSiteRule[],
+};
+
+export type BrowserCaptureSettingsInput = {
+	autoIntercept: boolean | null,
+	forwardHeaders: boolean | null,
+	forwardHeadersMode: BrowserForwardHeadersMode | null,
+	minSizeBytes: string | null,
+	fileExtensions: string[] | null,
+	siteRules: BrowserSiteRule[] | null,
+};
+
+export type BrowserExtensionExportResult = {
+	outputDir: string,
+	installGuidePath: string,
+	packages: BrowserExtensionPackage[],
+};
+
+export type BrowserExtensionPackage = {
+	target: string,
+	packagePath: string,
+	sha256: string,
+	installNote: string,
+};
+
+export type BrowserForwardHeadersMode = "ask" | "enabled" | "disabled";
+
+export type BrowserForwardedHeader = {
+	name: string,
+	value: string,
+};
+
 export type BrowserHandoffInput = {
 	version: number,
 	requestId: string,
 	browser: BrowserKind,
 	action: string,
 	url: string,
+	source: string | null,
+	browserDownloadId: string | null,
 	pageUrl: string | null,
 	referrer: string | null,
 	userAgent: string | null,
 	suggestedFileName: string | null,
+	totalBytes: string | null,
+	mime: string | null,
+	forwardedHeaders: BrowserForwardedHeader[] | null,
 };
 
 export type BrowserHandoffResult = {
@@ -140,6 +199,8 @@ export type BrowserIntegrationStatus = {
 	nativeHostName: string,
 	nativeHostPath: string | null,
 	extensionCorePath: string | null,
+	realtime: BrowserRealtimeStatus,
+	capture: BrowserCaptureSettings,
 	browsers: BrowserIntegrationEntry[],
 };
 
@@ -148,6 +209,23 @@ export type BrowserIntegrationUpdateInput = {
 };
 
 export type BrowserKind = "chrome" | "edge" | "firefox" | "safari" | "brave" | "opera" | "vivaldi" | "chromium";
+
+export type BrowserRealtimeStatus = {
+	wsUrl: string | null,
+	connected: boolean,
+};
+
+export type BrowserSiteRule = {
+	id: string,
+	hostPattern: string,
+	includeSubdomains: boolean,
+	mode: BrowserSiteRuleMode,
+	minSizeBytes: string | null,
+	fileExtensions: string[],
+	forwardHeaders: boolean | null,
+};
+
+export type BrowserSiteRuleMode = "auto" | "ask" | "never";
 
 export type CreateTaskInput = {
 	url: string,
@@ -186,6 +264,26 @@ export type ListSegmentsInput = {
 	pageSize: number | null,
 };
 
+export type ListTasksInput = {
+	nav: string | null,
+	search: string | null,
+	sortKey: string | null,
+	sortDirection: string | null,
+	fileType: string | null,
+	source: string | null,
+	failure: string | null,
+	resume: string | null,
+	page: number | null,
+	pageSize: number | null,
+};
+
+export type ListTasksResult = {
+	items: Task[],
+	total: string,
+	page: number,
+	pageSize: number,
+};
+
 export type ProbeTaskInput = {
 	url: string,
 };
@@ -208,7 +306,7 @@ export type ProbedFile = {
 	contentType: string | null,
 };
 
-export type RecoveryAction = "retry" | "retry_later" | "choose_another_name" | "choose_another_folder" | "restart" | "open_folder" | "check_url";
+export type RecoveryAction = "retry" | "retry_later" | "choose_another_name" | "choose_another_folder" | "restart" | "open_folder" | "check_url" | "free_disk_space";
 
 export type RequestDiagnostic = {
 	id: string,
@@ -268,6 +366,9 @@ export type Task = {
 	speedBps: string,
 	healthSummary: string | null,
 	errorMessage: string | null,
+	errorCode: string | null,
+	recoveryActions: RecoveryAction[],
+	retryAfterAt: string | null,
 	expectedHashSha256: string | null,
 	actualHashSha256: string | null,
 	hashStatus: HashVerificationStatus,
@@ -332,6 +433,8 @@ export type TaskUpdatedPayload = {
 	task: Task,
 };
 
+export type TrayMenuAction = "openApp" | "newDownload" | "openDownloads" | "settings" | "quit";
+
 export type UpdateSettingsInput = {
 	maxActiveTasks: number | null,
 	defaultSaveDir: string | null,
@@ -342,6 +445,8 @@ export type UpdateSettingsInput = {
 	systemNotifications: boolean | null,
 	closeToTray: boolean | null,
 	startOnBoot: boolean | null,
+	floatingWindowEnabled: boolean | null,
+	fontFamily: AppFontFamily | null,
 };
 
 /* Tauri Specta runtime */

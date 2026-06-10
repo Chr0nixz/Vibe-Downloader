@@ -7,7 +7,7 @@ use std::{
 };
 
 use reqwest::Url;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use specta::Type;
 use tauri::{AppHandle, State};
@@ -21,11 +21,11 @@ use crate::{
     logging::sanitize_url,
     models::{
         task::now_iso, AppErrorPayload, BatchImportItem, BatchImportResult, HashVerificationState,
-        HashVerificationStatus, ProbeTaskPayload, RecoveryAction, RequestDiagnostic,
+        BrowserKind, HashVerificationStatus, ProbeTaskPayload, RecoveryAction, RequestDiagnostic,
         SegmentSummary, Task, TaskEvent, TaskFileRecord, TaskRecord, TaskSegment,
         TaskSegmentRecord, TaskStatus,
     },
-    platform, AppState, DownloadControl,
+    platform, AppState, DownloadControl, TaskRequestHeaders,
 };
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -69,6 +69,30 @@ pub struct ImportUrlsInput {
     pub create: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ListTasksInput {
+    pub nav: Option<String>,
+    pub search: Option<String>,
+    pub sort_key: Option<String>,
+    pub sort_direction: Option<String>,
+    pub file_type: Option<String>,
+    pub source: Option<String>,
+    pub failure: Option<String>,
+    pub resume: Option<String>,
+    pub page: Option<i32>,
+    pub page_size: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ListTasksResult {
+    pub items: Vec<Task>,
+    pub total: String,
+    pub page: i32,
+    pub page_size: i32,
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn list_tasks(state: State<'_, AppState>) -> Result<Vec<Task>, String> {
@@ -78,6 +102,44 @@ pub async fn list_tasks(state: State<'_, AppState>) -> Result<Vec<Task>, String>
         tasks.push(task_from_record_with_files(&state.pool, record).await?);
     }
     Ok(tasks)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_tasks_page(
+    state: State<'_, AppState>,
+    input: ListTasksInput,
+) -> Result<ListTasksResult, String> {
+    let query = db::TaskListQuery {
+        nav: input.nav.unwrap_or_else(|| "all".to_string()),
+        search: input.search.unwrap_or_default(),
+        sort_key: input.sort_key.unwrap_or_else(|| "updated_at".to_string()),
+        sort_direction: match input.sort_direction.as_deref() {
+            Some("asc") => "asc".to_string(),
+            _ => "desc".to_string(),
+        },
+        file_type: input.file_type.unwrap_or_else(|| "all".to_string()),
+        source: input.source.unwrap_or_else(|| "all".to_string()),
+        failure: input.failure.unwrap_or_else(|| "all".to_string()),
+        resume: input.resume.unwrap_or_else(|| "all".to_string()),
+        page: i64::from(input.page.unwrap_or(0)),
+        page_size: i64::from(
+            input
+                .page_size
+                .unwrap_or(i32::try_from(db::DEFAULT_TASK_PAGE_SIZE).unwrap_or(100)),
+        ),
+    };
+    let page = db::list_task_records_page(&state.pool, &query).await?;
+    let mut tasks = Vec::with_capacity(page.items.len());
+    for record in page.items {
+        tasks.push(task_from_record_with_files(&state.pool, record).await?);
+    }
+    Ok(ListTasksResult {
+        items: tasks,
+        total: page.total.to_string(),
+        page: i32::try_from(page.page).unwrap_or(0),
+        page_size: i32::try_from(page.page_size).unwrap_or(100),
+    })
 }
 
 #[tauri::command]
@@ -162,6 +224,7 @@ pub async fn probe_task(
         .probe(ProbeRequest {
             uri: url.to_string(),
             source: None,
+            request_headers: Vec::new(),
         })
         .await?;
     tracing::debug!(
@@ -288,6 +351,7 @@ pub async fn import_urls(
                         .probe(ProbeRequest {
                             uri: normalized_url.clone(),
                             source: None,
+                            request_headers: Vec::new(),
                         })
                         .await
                 }
@@ -351,6 +415,16 @@ pub(crate) async fn create_task_with_state(
     state: &AppState,
     input: CreateTaskInput,
 ) -> Result<Task, String> {
+    create_task_with_state_and_headers(app, state, input, Vec::new(), None).await
+}
+
+pub(crate) async fn create_task_with_state_and_headers(
+    app: AppHandle,
+    state: &AppState,
+    input: CreateTaskInput,
+    request_headers: Vec<(String, String)>,
+    source_browser: Option<BrowserKind>,
+) -> Result<Task, String> {
     let url = input.url.trim();
     if url.is_empty() {
         return Err("Enter a download URL.".to_string());
@@ -361,6 +435,7 @@ pub(crate) async fn create_task_with_state(
         .probe(ProbeRequest {
             uri: url.to_string(),
             source: None,
+            request_headers: request_headers.clone(),
         })
         .await?;
     let settings =
@@ -425,6 +500,9 @@ pub(crate) async fn create_task_with_state(
         speed_bps: 0,
         health_summary: Some("Queued".to_string()),
         error_message: None,
+        error_code: None,
+        recovery_actions: Vec::new(),
+        retry_after_at: None,
         expected_hash_sha256,
         actual_hash_sha256: None,
         hash_status,
@@ -447,6 +525,20 @@ pub(crate) async fn create_task_with_state(
         db::insert_task_file_record(&state.pool, &file_record).await?;
     }
     db::ensure_task_segments_with_settings(&state.pool, &record, &settings).await?;
+    if !request_headers.is_empty() {
+        state
+            .request_headers
+            .lock()
+            .await
+            .insert(record.id.clone(), request_headers.clone());
+        db::upsert_task_request_headers(
+            &state.pool,
+            &record.id,
+            &request_headers,
+            source_browser,
+        )
+        .await?;
+    }
     tracing::info!(
         task_id = %record.id,
         url = %sanitize_url(url),
@@ -630,7 +722,7 @@ pub async fn resolve_task_attention(
     let error_code = task_error_code(&task);
 
     match input.action {
-        RecoveryAction::Retry | RecoveryAction::RetryLater => {
+        RecoveryAction::Retry => {
             if task.status == TaskStatus::NeedsAttention
                 && error_code
                     .as_deref()
@@ -642,6 +734,29 @@ pub async fn resolve_task_attention(
             }
             db::insert_task_event(&state.pool, id, "retrying", None).await?;
             let task = queue_task_for_retry(&app, state.inner(), id).await?;
+            task_from_record_with_files(&state.pool, task).await
+        }
+        RecoveryAction::RetryLater => {
+            if task.status == TaskStatus::NeedsAttention
+                && error_code
+                    .as_deref()
+                    .is_some_and(restart_required_error_code)
+            {
+                return Err(
+                    "This task must be restarted before it can continue safely.".to_string()
+                );
+            }
+            let retry_after_at = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+            db::insert_task_event(
+                &state.pool,
+                id,
+                "retry_later",
+                Some(&format!("Retry scheduled for {retry_after_at}.")),
+            )
+            .await?;
+            let task =
+                queue_task_for_retry_at(&app, state.inner(), id, Some(&retry_after_at)).await?;
+            spawn_schedule_queued_tasks_after(app.clone(), state.inner(), std::time::Duration::from_secs(300));
             task_from_record_with_files(&state.pool, task).await
         }
         RecoveryAction::ChooseAnotherName | RecoveryAction::ChooseAnotherFolder => {
@@ -667,7 +782,7 @@ pub async fn resolve_task_attention(
             let task = restart_task_from_beginning(&app, state.inner(), &task).await?;
             task_from_record_with_files(&state.pool, task).await
         }
-        RecoveryAction::OpenFolder | RecoveryAction::CheckUrl => {
+        RecoveryAction::OpenFolder | RecoveryAction::CheckUrl | RecoveryAction::FreeDiskSpace => {
             task_from_record_with_files(&state.pool, task).await
         }
     }
@@ -837,6 +952,7 @@ pub(crate) async fn schedule_queued_tasks(app: AppHandle, state: &AppState) {
         app,
         state.pool.clone(),
         state.downloads.clone(),
+        state.request_headers.clone(),
         state.scheduler.clone(),
         state.speed_limiter.clone(),
         state.engine_registry.clone(),
@@ -848,6 +964,7 @@ async fn schedule_queued_tasks_inner(
     app: AppHandle,
     pool: sqlx::SqlitePool,
     downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
+    request_headers: TaskRequestHeaders,
     scheduler: Arc<tokio::sync::Mutex<()>>,
     speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
     engine_registry: Arc<EngineRegistry>,
@@ -925,6 +1042,7 @@ async fn schedule_queued_tasks_inner(
                 app.clone(),
                 pool.clone(),
                 downloads.clone(),
+                request_headers.clone(),
                 scheduler.clone(),
                 speed_limiter.clone(),
                 engine_registry.clone(),
@@ -960,13 +1078,17 @@ async fn start_task_download(
     app: AppHandle,
     pool: sqlx::SqlitePool,
     downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
+    request_headers: TaskRequestHeaders,
     scheduler: Arc<tokio::sync::Mutex<()>>,
     speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
     engine_registry: Arc<EngineRegistry>,
     task: TaskRecord,
     connection_limit: usize,
 ) -> Result<(), String> {
-    let task = prepare_task_for_download(&pool, &engine_registry, task).await?;
+    let task_request_headers =
+        resolve_task_request_headers(&pool, request_headers.clone(), &task.id).await?;
+    let task =
+        prepare_task_for_download(&pool, &engine_registry, task, &task_request_headers).await?;
     if downloads.lock().await.contains_key(&task.id) {
         tracing::debug!(task_id = %task.id, "download already active, skipping start");
         return Ok(());
@@ -1018,6 +1140,7 @@ async fn start_task_download(
                     task_app.clone(),
                     task_pool.clone(),
                     downloads_map.clone(),
+                    request_headers.clone(),
                     task_scheduler.clone(),
                     state_speed_limiter.clone(),
                     task_engine_registry.clone(),
@@ -1034,10 +1157,12 @@ async fn start_task_download(
                 cancel: task_cancel.clone(),
                 speed_limiter: state_speed_limiter.clone(),
                 connection_limit,
+                request_headers: task_request_headers.clone(),
             })
             .await;
         let canceled = task_cancel.load(Ordering::SeqCst);
         let _ = downloads_map.lock().await.remove(&task_id);
+        let _ = request_headers.lock().await.remove(&task_id);
 
         if let Err(error) = result {
             if !canceled {
@@ -1070,6 +1195,7 @@ async fn start_task_download(
             task_app,
             task_pool,
             downloads_map,
+            request_headers,
             task_scheduler,
             state_speed_limiter,
             task_engine_registry,
@@ -1107,6 +1233,7 @@ fn spawn_schedule_queued_tasks(
     app: AppHandle,
     pool: sqlx::SqlitePool,
     downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
+    request_headers: TaskRequestHeaders,
     scheduler: Arc<tokio::sync::Mutex<()>>,
     speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
     engine_registry: Arc<EngineRegistry>,
@@ -1116,6 +1243,7 @@ fn spawn_schedule_queued_tasks(
             app,
             pool,
             downloads,
+            request_headers,
             scheduler,
             speed_limiter,
             engine_registry,
@@ -1124,10 +1252,59 @@ fn spawn_schedule_queued_tasks(
     });
 }
 
+fn spawn_schedule_queued_tasks_after(app: AppHandle, state: &AppState, delay: std::time::Duration) {
+    let pool = state.pool.clone();
+    let downloads = state.downloads.clone();
+    let request_headers = state.request_headers.clone();
+    let scheduler = state.scheduler.clone();
+    let speed_limiter = state.speed_limiter.clone();
+    let engine_registry = state.engine_registry.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        schedule_queued_tasks_inner(
+            app,
+            pool,
+            downloads,
+            request_headers,
+            scheduler,
+            speed_limiter,
+            engine_registry,
+        )
+        .await;
+    });
+}
+
+async fn resolve_task_request_headers(
+    pool: &sqlx::SqlitePool,
+    request_headers: TaskRequestHeaders,
+    task_id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    if let Some(headers) = request_headers.lock().await.get(task_id).cloned() {
+        return Ok(headers);
+    }
+    let persisted = db::resolve_task_request_headers(pool, task_id).await?;
+    if !persisted.is_empty() {
+        request_headers
+            .lock()
+            .await
+            .insert(task_id.to_string(), persisted.clone());
+    }
+    Ok(persisted)
+}
+
 async fn queue_task_for_retry(
     app: &AppHandle,
     state: &AppState,
     id: &str,
+) -> Result<TaskRecord, String> {
+    queue_task_for_retry_at(app, state, id, None).await
+}
+
+async fn queue_task_for_retry_at(
+    app: &AppHandle,
+    state: &AppState,
+    id: &str,
+    retry_after_at: Option<&str>,
 ) -> Result<TaskRecord, String> {
     db::update_task_status(
         &state.pool,
@@ -1139,6 +1316,7 @@ async fn queue_task_for_retry(
         None,
     )
     .await?;
+    db::update_task_retry_after(&state.pool, id, retry_after_at).await?;
     db::update_segments_status_for_task(
         &state.pool,
         id,
@@ -1150,7 +1328,9 @@ async fn queue_task_for_retry(
     emit_task_progress_snapshot(app, &task);
     emit_task_updated_record(app, &state.pool, &task).await;
     emit_queue_changed(app);
-    schedule_queued_tasks(app.clone(), state).await;
+    if retry_after_at.is_none() {
+        schedule_queued_tasks(app.clone(), state).await;
+    }
     require_task(&state.pool, id).await
 }
 
@@ -1217,10 +1397,13 @@ async fn restart_task_from_beginning(
     }
 
     let engine = state.engine_registry.engine_for_uri(&task.url)?;
+    let request_headers =
+        resolve_task_request_headers(&state.pool, state.request_headers.clone(), &task.id).await?;
     let probe = engine
         .probe(ProbeRequest {
             uri: task.url.clone(),
             source: None,
+            request_headers,
         })
         .await?;
     db::update_task_remote_metadata(
@@ -1264,6 +1447,9 @@ fn restart_required_error_code(code: &str) -> bool {
 }
 
 fn task_error_code(task: &TaskRecord) -> Option<String> {
+    if let Some(code) = task.error_code.clone() {
+        return Some(code);
+    }
     let error = task.error_message.as_deref()?;
     if let Ok(payload) = serde_json::from_str::<AppErrorPayload>(error) {
         return Some(payload.code);
@@ -1287,6 +1473,7 @@ async fn prepare_task_for_download(
     pool: &sqlx::SqlitePool,
     engine_registry: &EngineRegistry,
     task: TaskRecord,
+    request_headers: &[(String, String)],
 ) -> Result<TaskRecord, String> {
     if task.status == TaskStatus::NeedsAttention {
         return Err("Remote file changed. Restart download to avoid corruption.".to_string());
@@ -1318,7 +1505,13 @@ async fn prepare_task_for_download(
     if temp_size > 0 {
         let uri = task.final_url.as_deref().unwrap_or(&task.url).to_string();
         let engine = engine_registry.engine_for_uri(&uri)?;
-        let probe = engine.probe(ProbeRequest { uri, source: None }).await?;
+        let probe = engine
+            .probe(ProbeRequest {
+                uri,
+                source: None,
+                request_headers: request_headers.to_vec(),
+            })
+            .await?;
         if let Some(message) = resume_mismatch_message(&task, &probe) {
             db::update_task_status(
                 pool,
@@ -1562,7 +1755,7 @@ async fn mark_download_failed(
     tracing::error!(task_id = %task_id, error = %error, "download failed");
     let payload = serde_json::from_str::<AppErrorPayload>(&error).ok();
     let status = match payload.as_ref().map(|payload| payload.code.as_str()) {
-        Some("final_path_conflict") => TaskStatus::NeedsAttention,
+        Some("final_path_conflict" | "auth_headers_expired") => TaskStatus::NeedsAttention,
         _ => TaskStatus::Failed,
     };
     if let Err(db_error) =
@@ -1986,6 +2179,9 @@ fn mock_task(
         speed_bps,
         health_summary,
         error_message,
+        error_code: None,
+        recovery_actions: Vec::new(),
+        retry_after_at: None,
         expected_hash_sha256: None,
         actual_hash_sha256: None,
         hash_status: HashVerificationStatus::NotRequested,

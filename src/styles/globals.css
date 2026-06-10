@@ -1,6 +1,44 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
+@font-face {
+  font-family: "Vibe Source Han Sans SC";
+  src: url("/fonts/source-han-sans-sc/SourceHanSansSC-Normal.otf") format("opentype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Vibe Source Han Sans SC";
+  src: url("/fonts/source-han-sans-sc/SourceHanSansSC-Regular.otf") format("opentype");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Vibe Source Han Sans SC";
+  src: url("/fonts/source-han-sans-sc/SourceHanSansSC-Medium.otf") format("opentype");
+  font-style: normal;
+  font-weight: 600 700;
+  font-display: swap;
+}
+
+:root {
+  --vibe-font-sans-system: Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --vibe-font-sans-source-han: Inter, "Segoe UI Variable", "Segoe UI", "Vibe Source Han Sans SC", "Source Han Sans SC", "Noto Sans CJK SC", "Source Han Sans CN", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+  --vibe-font-sans: var(--vibe-font-sans-source-han);
+}
+
+:root[data-font-family="system"] {
+  --vibe-font-sans: var(--vibe-font-sans-system);
+}
+
+:root[data-font-family="source_han_sans_sc"] {
+  --vibe-font-sans: var(--vibe-font-sans-source-han);
+}
+
 @theme inline {
   --color-surface-root: var(--surface-root);
   --color-surface-base: var(--surface-base);
@@ -19,7 +57,7 @@
   --color-status-success: var(--status-success);
   --color-status-warning: var(--status-warning);
   --color-status-danger: var(--status-danger);
-  --font-sans: Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-sans: var(--vibe-font-sans);
   --font-mono: "Geist Mono", "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
 }
 
@@ -37,6 +75,20 @@
   body {
     @apply bg-surface-root text-text-primary font-sans antialiased;
     font-variant-numeric: tabular-nums;
+  }
+
+  :root[data-surface="tray-menu"],
+  :root[data-surface="tray-menu"] body,
+  :root[data-surface="tray-menu"] #root,
+  :root[data-surface="floating-status"],
+  :root[data-surface="floating-status"] body,
+  :root[data-surface="floating-status"] #root {
+    background: transparent;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    @apply font-sans;
   }
 
   button:not(:disabled),

@@ -1,22 +1,20 @@
 use std::time::Duration;
 
 use reqwest::{
-    header::{ACCEPT_ENCODING, RANGE, RETRY_AFTER},
-    Client, Response, StatusCode,
+    header::{HeaderName, HeaderValue, ACCEPT_ENCODING, RANGE, RETRY_AFTER},
+    Client, RequestBuilder, Response, StatusCode,
 };
 
 pub(super) async fn send_head_with_retry(
     client: &Client,
     url: &str,
+    headers: &[(String, String)],
 ) -> Result<Response, reqwest::Error> {
     let mut last_error = None;
     for attempt in 0..3 {
-        match client
-            .head(url)
-            .header(ACCEPT_ENCODING, "identity")
-            .send()
-            .await
-        {
+        let request =
+            apply_forwarded_headers(client.head(url), headers).header(ACCEPT_ENCODING, "identity");
+        match request.send().await {
             Ok(response) => return Ok(response),
             Err(error) => {
                 last_error = Some(error);
@@ -33,10 +31,12 @@ pub(super) async fn send_get_with_retry(
     client: &Client,
     url: &str,
     range: Option<String>,
+    headers: &[(String, String)],
 ) -> Result<Response, String> {
     let mut last_error = None;
     for attempt in 0..3 {
-        let mut request = client.get(url).header(ACCEPT_ENCODING, "identity");
+        let mut request =
+            apply_forwarded_headers(client.get(url), headers).header(ACCEPT_ENCODING, "identity");
         if let Some(range) = range.as_deref() {
             request = request.header(RANGE, range);
         }
@@ -57,6 +57,22 @@ pub(super) async fn send_get_with_retry(
             .map(|error| error.to_string())
             .unwrap_or_else(|| "request failed".to_string())
     ))
+}
+
+pub(super) fn apply_forwarded_headers(
+    mut request: RequestBuilder,
+    headers: &[(String, String)],
+) -> RequestBuilder {
+    for (name, value) in headers {
+        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let Ok(value) = HeaderValue::from_str(value) else {
+            continue;
+        };
+        request = request.header(name, value);
+    }
+    request
 }
 
 pub(super) fn is_retryable_status(status: StatusCode) -> bool {

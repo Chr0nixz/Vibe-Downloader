@@ -3,9 +3,11 @@ const api = globalThis.browser ?? globalThis.chrome;
 const button = document.querySelector("#send-current");
 const status = document.querySelector("#status");
 const recentTasks = document.querySelector("#recent-tasks");
-const RECENT_KEY = "vibeRecentHandoffs";
+const liveTasks = document.querySelector("#live-tasks");
+const autoIntercept = document.querySelector("#auto-intercept");
+const forwardHeadersMode = document.querySelector("#forward-headers-mode");
 
-void renderRecent();
+void refresh();
 
 button.addEventListener("click", async () => {
   status.textContent = "Sending...";
@@ -15,41 +17,87 @@ button.addEventListener("click", async () => {
     if (!tab?.url || !/^https?:\/\//i.test(tab.url)) {
       throw new Error("Current tab is not an HTTP download URL.");
     }
-    log.info("sending current tab url", { url: tab.url });
-    const response = await api.runtime.sendMessage({
+    const response = await sendRuntimeMessage({
       type: "vibe-download-current-tab",
       url: tab.url,
       pageUrl: tab.url,
     });
     if (!response?.ok) {
-      throw new Error(response?.error ?? "Native host did not accept the URL.");
+      throw new Error(response?.error ?? "Vibe did not accept the URL.");
     }
-    log.info("download handoff accepted");
     status.textContent = "Sent";
-    await renderRecent();
+    await refresh();
   } catch (error) {
     log.error("popup handoff failed", error);
     status.textContent = String(error?.message ?? error);
-    await renderRecent();
   } finally {
     button.disabled = false;
   }
 });
 
-async function renderRecent() {
-  if (!recentTasks) return;
+autoIntercept.addEventListener("change", () => {
+  void updateSettings({ autoIntercept: autoIntercept.checked });
+});
+
+forwardHeadersMode.addEventListener("change", () => {
+  void updateSettings({ forwardHeadersMode: forwardHeadersMode.value });
+});
+
+async function refresh() {
   try {
-    const stored = await api.storage.local.get(RECENT_KEY);
-    const recent = Array.isArray(stored?.[RECENT_KEY]) ? stored[RECENT_KEY] : [];
-    recentTasks.replaceChildren(
-      ...(recent.length > 0
-        ? recent.map((item) => recentItem(item))
-        : [emptyRecentItem()]),
+    const response = await sendRuntimeMessage({ type: "vibe-popup-status" });
+    if (!response?.ok) throw new Error(response?.error ?? "Status unavailable");
+    const snapshot = response.status;
+    status.textContent = snapshot.bridgeStatus ?? "unknown";
+    autoIntercept.checked = snapshot.settings?.autoIntercept !== false;
+    forwardHeadersMode.value = snapshot.settings?.forwardHeadersMode ?? (
+      snapshot.settings?.forwardHeaders === true ? "enabled" : "ask"
     );
+    renderRecent(snapshot.recent ?? []);
+    renderLive(snapshot.tasks ?? []);
   } catch (error) {
-    log.warn("failed to render recent handoffs", error);
-    recentTasks.replaceChildren(emptyRecentItem("Recent tasks unavailable"));
+    log.warn("failed to refresh popup", error);
+    status.textContent = "Disconnected";
+    renderRecent([]);
+    renderLive([]);
   }
+}
+
+async function updateSettings(patch) {
+  try {
+    const response = await sendRuntimeMessage({
+      type: "vibe-update-capture-settings",
+      patch,
+    });
+    if (!response?.ok) throw new Error(response?.error ?? "Settings update failed");
+    await refresh();
+  } catch (error) {
+    log.error("settings update failed", error);
+    status.textContent = String(error?.message ?? error);
+  }
+}
+
+function renderRecent(recent) {
+  if (!recentTasks) return;
+  recentTasks.replaceChildren(
+    ...(recent.length > 0 ? recent.map((item) => recentItem(item)) : [emptyItem("No recent tasks")]),
+  );
+}
+
+function renderLive(tasks) {
+  if (!liveTasks) return;
+  liveTasks.replaceChildren(
+    ...(tasks.length > 0
+      ? tasks.map((task) =>
+          recentItem({
+            url: task.url,
+            status: task.status,
+            createdAt: task.updatedAt ?? task.createdAt,
+            errorMessage: task.errorMessage,
+          }),
+        )
+      : [emptyItem("No live tasks")]),
+  );
 }
 
 function recentItem(item) {
@@ -81,11 +129,26 @@ function recentItem(item) {
   return li;
 }
 
-function emptyRecentItem(text = "No recent tasks") {
+function emptyItem(text) {
   const li = document.createElement("li");
   li.className = "recent-meta";
   li.textContent = text;
   return li;
+}
+
+function sendRuntimeMessage(message) {
+  return new Promise((resolve, reject) => {
+    try {
+      const maybePromise = api.runtime.sendMessage(message, (response) => {
+        const lastError = api.runtime.lastError;
+        if (lastError) reject(new Error(lastError.message));
+        else resolve(response);
+      });
+      if (maybePromise?.then) maybePromise.then(resolve).catch(reject);
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
 
 function fileNameFromUrl(value) {

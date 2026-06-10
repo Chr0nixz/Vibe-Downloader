@@ -132,6 +132,9 @@ pub struct Task {
     pub speed_bps: String,
     pub health_summary: Option<String>,
     pub error_message: Option<String>,
+    pub error_code: Option<String>,
+    pub recovery_actions: Vec<RecoveryAction>,
+    pub retry_after_at: Option<String>,
     pub expected_hash_sha256: Option<String>,
     pub actual_hash_sha256: Option<String>,
     pub hash_status: HashVerificationStatus,
@@ -167,6 +170,9 @@ pub struct TaskRecord {
     pub speed_bps: i64,
     pub health_summary: Option<String>,
     pub error_message: Option<String>,
+    pub error_code: Option<String>,
+    pub recovery_actions: Vec<RecoveryAction>,
+    pub retry_after_at: Option<String>,
     pub expected_hash_sha256: Option<String>,
     pub actual_hash_sha256: Option<String>,
     pub hash_status: HashVerificationStatus,
@@ -392,6 +398,9 @@ impl From<TaskRecord> for Task {
             speed_bps: record.speed_bps.to_string(),
             health_summary: record.health_summary,
             error_message: record.error_message,
+            error_code: record.error_code,
+            recovery_actions: record.recovery_actions,
+            retry_after_at: record.retry_after_at,
             expected_hash_sha256: record.expected_hash_sha256,
             actual_hash_sha256: record.actual_hash_sha256,
             hash_status: record.hash_status,
@@ -472,6 +481,22 @@ pub struct ProbedFile {
     pub content_type: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AppFontFamily {
+    System,
+    SourceHanSansSc,
+}
+
+impl AppFontFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::SourceHanSansSc => "source_han_sans_sc",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -484,6 +509,8 @@ pub struct AppSettings {
     pub system_notifications: bool,
     pub close_to_tray: bool,
     pub start_on_boot: bool,
+    pub floating_window_enabled: bool,
+    pub font_family: AppFontFamily,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -505,6 +532,36 @@ pub enum RecoveryAction {
     Restart,
     OpenFolder,
     CheckUrl,
+    FreeDiskSpace,
+}
+
+impl RecoveryAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::RetryLater => "retry_later",
+            Self::ChooseAnotherName => "choose_another_name",
+            Self::ChooseAnotherFolder => "choose_another_folder",
+            Self::Restart => "restart",
+            Self::OpenFolder => "open_folder",
+            Self::CheckUrl => "check_url",
+            Self::FreeDiskSpace => "free_disk_space",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "retry" => Some(Self::Retry),
+            "retry_later" => Some(Self::RetryLater),
+            "choose_another_name" => Some(Self::ChooseAnotherName),
+            "choose_another_folder" => Some(Self::ChooseAnotherFolder),
+            "restart" => Some(Self::Restart),
+            "open_folder" => Some(Self::OpenFolder),
+            "check_url" => Some(Self::CheckUrl),
+            "free_disk_space" => Some(Self::FreeDiskSpace),
+            _ => None,
+        }
+    }
 }
 
 impl AppErrorPayload {
@@ -553,6 +610,15 @@ impl AppErrorPayload {
             vec!["check_url", "retry"]
         };
         Self::new(code, message, recoverable, actions)
+    }
+
+    pub fn auth_headers_expired() -> Self {
+        Self::new(
+            "auth_headers_expired",
+            "Browser authentication headers expired. Send this download from the browser again or restart it.",
+            true,
+            vec!["check_url", "restart"],
+        )
     }
 }
 

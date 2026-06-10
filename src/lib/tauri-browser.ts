@@ -1,11 +1,15 @@
 import type {
   AppSettings,
   BatchImportResult,
+  BrowserCaptureSettings,
+  BrowserCaptureSettingsInput,
+  BrowserExtensionExportResult,
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
   CreateTaskInput,
   HashVerificationState,
   ImportUrlsInput,
+  ListTasksInput,
   ProbeTaskInput,
   ProbeTaskPayload,
   RequestDiagnostic,
@@ -24,6 +28,7 @@ import { createLogger } from "@/lib/logger";
 const log = createLogger("browser-mock");
 const STORAGE_KEY = "vibe-browser-mock-tasks";
 const SETTINGS_STORAGE_KEY = "vibe-browser-settings";
+const BROWSER_CAPTURE_SETTINGS_KEY = "vibe-browser-capture-settings";
 
 type BrowserListener = (payload: TaskProgressPayload) => void;
 type TaskUpdatedListener = (task: Task) => void;
@@ -41,6 +46,8 @@ let settings: AppSettings = loadStoredSettings() ?? {
   systemNotifications: true,
   closeToTray: false,
   startOnBoot: false,
+  floatingWindowEnabled: false,
+  fontFamily: "source_han_sans_sc",
 };
 let progressTimer: ReturnType<typeof setInterval> | undefined;
 const progressListeners = new Set<BrowserListener>();
@@ -49,6 +56,8 @@ const queueListeners = new Set<() => void>();
 const settingsListeners = new Set<() => void>();
 const browserIntegrationListeners = new Set<() => void>();
 const browserIntegrationInstalled = new Set(["chrome", "edge"]);
+let browserCaptureSettings: BrowserCaptureSettings =
+  loadStoredBrowserCaptureSettings() ?? defaultBrowserCaptureSettings();
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -116,12 +125,63 @@ function loadStoredSettings(): AppSettings | null {
           typeof parsed.closeToTray === "boolean" ? parsed.closeToTray : false,
         startOnBoot:
           typeof parsed.startOnBoot === "boolean" ? parsed.startOnBoot : false,
+        floatingWindowEnabled:
+          typeof parsed.floatingWindowEnabled === "boolean"
+            ? parsed.floatingWindowEnabled
+            : false,
+        fontFamily:
+          parsed.fontFamily === "system" || parsed.fontFamily === "source_han_sans_sc"
+            ? parsed.fontFamily
+            : "source_han_sans_sc",
       };
     }
     return null;
   } catch {
     return null;
   }
+}
+
+function defaultBrowserCaptureSettings(): BrowserCaptureSettings {
+  return {
+    autoIntercept: true,
+    forwardHeaders: false,
+    forwardHeadersMode: "ask",
+    minSizeBytes: "0",
+    fileExtensions: ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf"],
+    siteRules: [],
+  };
+}
+
+function loadStoredBrowserCaptureSettings(): BrowserCaptureSettings | null {
+  try {
+    const raw = localStorage.getItem(BROWSER_CAPTURE_SETTINGS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return {
+      ...defaultBrowserCaptureSettings(),
+      ...parsed,
+      forwardHeadersMode:
+        parsed.forwardHeadersMode ??
+        (typeof parsed.forwardHeaders === "boolean"
+          ? parsed.forwardHeaders
+            ? "enabled"
+            : "disabled"
+          : "ask"),
+      forwardHeaders:
+        parsed.forwardHeadersMode === "enabled" ||
+        (parsed.forwardHeadersMode == null && parsed.forwardHeaders === true),
+      fileExtensions: Array.isArray(parsed.fileExtensions)
+        ? parsed.fileExtensions
+        : defaultBrowserCaptureSettings().fileExtensions,
+      siteRules: Array.isArray(parsed.siteRules) ? parsed.siteRules : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistBrowserCaptureSettings() {
+  localStorage.setItem(BROWSER_CAPTURE_SETTINGS_KEY, JSON.stringify(browserCaptureSettings));
 }
 
 function emitQueueChanged(): void {
@@ -195,6 +255,9 @@ function browserTask(
     speedBps: String(speedBps),
     healthSummary,
     errorMessage: needsError ? healthSummary : null,
+    errorCode: null,
+    recoveryActions: [],
+    retryAfterAt: null,
     expectedHashSha256: null,
     actualHashSha256: null,
     hashStatus: "not_requested",
@@ -418,6 +481,19 @@ export async function listTaskSegments(taskId: string): Promise<TaskSegment[]> {
   ];
 }
 
+export async function listTasksPage(input: ListTasksInput) {
+  const pageSize = Math.max(1, Math.min(500, input.pageSize ?? 100));
+  const page = Math.max(0, input.page ?? 0);
+  const all = await listTasks();
+  const start = page * pageSize;
+  return {
+    items: all.slice(start, start + pageSize),
+    total: all.length,
+    page,
+    pageSize,
+  };
+}
+
 export async function listSegments(taskId: string, _page = 0, _pageSize = 100): Promise<TaskSegment[]> {
   return listTaskSegments(taskId);
 }
@@ -509,6 +585,9 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
     systemNotifications: input.systemNotifications ?? settings.systemNotifications,
     closeToTray: input.closeToTray ?? settings.closeToTray,
     startOnBoot: input.startOnBoot ?? settings.startOnBoot,
+    floatingWindowEnabled:
+      input.floatingWindowEnabled ?? settings.floatingWindowEnabled,
+    fontFamily: input.fontFamily ?? settings.fontFamily,
   };
   persistSettings();
   emitSettingsChanged();
@@ -537,6 +616,11 @@ export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationS
     nativeHostName: "com.vibe_downloader.native_host",
     nativeHostPath: "~/Applications/Vibe Downloader/vibe-native-host",
     extensionCorePath: "browser/extension-core",
+    realtime: {
+      wsUrl: "ws://127.0.0.1:48365/browser/ws",
+      connected: true,
+    },
+    capture: { ...browserCaptureSettings },
     browsers: [
       "chrome",
       "edge",
@@ -566,6 +650,34 @@ export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationS
   };
 }
 
+export async function getBrowserCaptureSettings(): Promise<BrowserCaptureSettings> {
+  return { ...browserCaptureSettings };
+}
+
+export async function updateBrowserCaptureSettings(
+  input: BrowserCaptureSettingsInput,
+): Promise<BrowserCaptureSettings> {
+  const forwardHeadersMode =
+    input.forwardHeadersMode ??
+    (input.forwardHeaders == null
+      ? browserCaptureSettings.forwardHeadersMode
+      : input.forwardHeaders
+        ? "enabled"
+        : "disabled");
+  browserCaptureSettings = {
+    ...browserCaptureSettings,
+    autoIntercept: input.autoIntercept ?? browserCaptureSettings.autoIntercept,
+    forwardHeadersMode,
+    forwardHeaders: forwardHeadersMode === "enabled",
+    minSizeBytes: input.minSizeBytes ?? browserCaptureSettings.minSizeBytes,
+    fileExtensions: input.fileExtensions ?? browserCaptureSettings.fileExtensions,
+    siteRules: input.siteRules ?? browserCaptureSettings.siteRules,
+  };
+  persistBrowserCaptureSettings();
+  emitBrowserIntegrationChanged();
+  return { ...browserCaptureSettings };
+}
+
 export async function installBrowserIntegration(
   input: BrowserIntegrationUpdateInput,
 ): Promise<BrowserIntegrationStatus> {
@@ -580,6 +692,25 @@ export async function uninstallBrowserIntegration(
   input.browsers.forEach((browser) => browserIntegrationInstalled.delete(browser));
   emitBrowserIntegrationChanged();
   return getBrowserIntegrationStatus();
+}
+
+export async function exportBrowserExtensionPackages(): Promise<BrowserExtensionExportResult> {
+  const outputDir = "~/Downloads/Vibe Downloader Extensions/v0.1.0";
+  return {
+    outputDir,
+    installGuidePath: `${outputDir}/INSTALL.md`,
+    packages: [
+      ["Chrome, Brave, Vivaldi, Chromium", "vibe-downloader-chromium-v0.1.0.zip"],
+      ["Microsoft Edge", "vibe-downloader-edge-v0.1.0.zip"],
+      ["Mozilla Firefox", "vibe-downloader-firefox-v0.1.0.xpi"],
+      ["Opera", "vibe-downloader-opera-v0.1.0.zip"],
+    ].map(([target, fileName]) => ({
+      target,
+      packagePath: `${outputDir}/${fileName}`,
+      sha256: "mock-sha256",
+      installNote: "Mock browser preview package.",
+    })),
+  };
 }
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {

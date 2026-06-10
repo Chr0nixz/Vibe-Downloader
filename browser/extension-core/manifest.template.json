@@ -1,9 +1,19 @@
 {
   "manifest_version": 3,
   "name": "Vibe Downloader",
-  "description": "Send download links to Vibe Downloader.",
+  "description": "Send and manage browser downloads with Vibe Downloader.",
   "version": "0.1.0",
-  "permissions": ["nativeMessaging", "contextMenus", "activeTab", "tabs", "storage"],
+  "permissions": [
+    "nativeMessaging",
+    "contextMenus",
+    "activeTab",
+    "tabs",
+    "storage",
+    "downloads",
+    "cookies",
+    "webRequest"
+  ],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js"
   },

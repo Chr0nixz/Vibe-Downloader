@@ -78,7 +78,82 @@ pub struct BrowserIntegrationStatus {
     pub native_host_name: String,
     pub native_host_path: Option<String>,
     pub extension_core_path: Option<String>,
+    pub realtime: BrowserRealtimeStatus,
+    pub capture: BrowserCaptureSettings,
     pub browsers: Vec<BrowserIntegrationEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserRealtimeStatus {
+    pub ws_url: Option<String>,
+    pub connected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCaptureSettings {
+    pub auto_intercept: bool,
+    pub forward_headers: bool,
+    pub forward_headers_mode: BrowserForwardHeadersMode,
+    pub min_size_bytes: String,
+    pub file_extensions: Vec<String>,
+    pub site_rules: Vec<BrowserSiteRule>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserForwardHeadersMode {
+    Ask,
+    Enabled,
+    Disabled,
+}
+
+impl BrowserForwardHeadersMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSiteRule {
+    pub id: String,
+    pub host_pattern: String,
+    pub include_subdomains: bool,
+    pub mode: BrowserSiteRuleMode,
+    pub min_size_bytes: Option<String>,
+    pub file_extensions: Vec<String>,
+    pub forward_headers: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserSiteRuleMode {
+    Auto,
+    Ask,
+    Never,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserExtensionPackage {
+    pub target: String,
+    pub package_path: String,
+    pub sha256: String,
+    pub install_note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserExtensionExportResult {
+    pub output_dir: String,
+    pub install_guide_path: String,
+    pub packages: Vec<BrowserExtensionPackage>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -89,16 +164,39 @@ pub struct BrowserIntegrationUpdateInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct BrowserCaptureSettingsInput {
+    pub auto_intercept: Option<bool>,
+    pub forward_headers: Option<bool>,
+    pub forward_headers_mode: Option<BrowserForwardHeadersMode>,
+    pub min_size_bytes: Option<String>,
+    pub file_extensions: Option<Vec<String>>,
+    pub site_rules: Option<Vec<BrowserSiteRule>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserForwardedHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct BrowserHandoffInput {
     pub version: i32,
     pub request_id: String,
     pub browser: BrowserKind,
     pub action: String,
     pub url: String,
+    pub source: Option<String>,
+    pub browser_download_id: Option<String>,
     pub page_url: Option<String>,
     pub referrer: Option<String>,
     pub user_agent: Option<String>,
     pub suggested_file_name: Option<String>,
+    pub total_bytes: Option<String>,
+    pub mime: Option<String>,
+    pub forwarded_headers: Option<Vec<BrowserForwardedHeader>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

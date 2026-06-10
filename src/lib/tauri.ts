@@ -3,17 +3,23 @@ import { createLogger } from "@/lib/logger";
 import { parseAppError } from "@/lib/errors";
 import type {
   AppSettings,
+  BrowserCaptureSettings,
+  BrowserCaptureSettingsInput,
+  BrowserExtensionExportResult,
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
   BatchImportResult,
   CreateTaskInput,
   HashVerificationState,
   ImportUrlsInput,
+  ListTasksInput,
+  ListTasksResult,
   RequestDiagnostic,
   ProbeTaskInput,
   ProbeTaskPayload,
   SegmentSummary,
   TaskEvent,
+  TrayMenuAction,
   ResolveTaskAttentionInput,
   TaskUpdatedPayload,
   UpdateSettingsInput,
@@ -29,6 +35,8 @@ export const EVENT_TASK_UPDATED = "task.updated";
 export const EVENT_QUEUE_CHANGED = "queue.changed";
 export const EVENT_SETTINGS_CHANGED = "settings.changed";
 export const EVENT_BROWSER_INTEGRATION_CHANGED = "browser.integration.changed";
+export const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED = "tray.new-download.requested";
+export const EVENT_TRAY_SETTINGS_REQUESTED = "tray.settings.requested";
 export const canSeedMockTasks = !isTauriRuntime() || import.meta.env.DEV;
 
 const log = createLogger("tauri");
@@ -88,6 +96,29 @@ export async function listTaskSegments(taskId: string): Promise<TaskSegment[]> {
   const commands = await loadNativeCommands();
   const segments = await runCommand("listTaskSegments", () => commands.listTaskSegments(taskId));
   return segments.map(normalizeTaskSegment);
+}
+
+export interface TaskPage {
+  items: Task[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export async function listTasksPage(input: ListTasksInput): Promise<TaskPage> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listTasksPage(input);
+  }
+  const commands = await loadNativeCommands();
+  const result: ListTasksResult = await runCommand("listTasksPage", () =>
+    commands.listTasksPage(input),
+  );
+  return {
+    items: result.items.map(normalizeTask),
+    total: Number(result.total) || 0,
+    page: result.page,
+    pageSize: result.pageSize,
+  };
 }
 
 export async function listSegments(taskId: string, page = 0, pageSize = 100): Promise<TaskSegment[]> {
@@ -191,6 +222,83 @@ export async function uninstallBrowserIntegration(
   }
   const commands = await loadNativeCommands();
   return runCommand("uninstallBrowserIntegration", () => commands.uninstallBrowserIntegration(input));
+}
+
+export async function exportBrowserExtensionPackages(): Promise<BrowserExtensionExportResult> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).exportBrowserExtensionPackages();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("exportBrowserExtensionPackages", () =>
+    commands.exportBrowserExtensionPackages(),
+  );
+}
+
+export async function runTrayMenuAction(action: TrayMenuAction): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock tray menu action", action);
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("runTrayMenuAction", () => commands.runTrayMenuAction(action));
+}
+
+export async function showFloatingStatusWindow(): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock show floating status window");
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("showFloatingStatusWindow", () => commands.showFloatingStatusWindow());
+}
+
+export async function hideFloatingStatusWindow(): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock hide floating status window");
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("hideFloatingStatusWindow", () => commands.hideFloatingStatusWindow());
+}
+
+export async function toggleFloatingStatusWindow(): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock toggle floating status window");
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("toggleFloatingStatusWindow", () => commands.toggleFloatingStatusWindow());
+}
+
+export async function focusMainWindowFromFloating(): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock focus main window from floating status");
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("focusMainWindowFromFloating", () =>
+    commands.focusMainWindowFromFloating(),
+  );
+}
+
+export async function getBrowserCaptureSettings(): Promise<BrowserCaptureSettings> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getBrowserCaptureSettings();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("getBrowserCaptureSettings", () => commands.getBrowserCaptureSettings());
+}
+
+export async function updateBrowserCaptureSettings(
+  input: BrowserCaptureSettingsInput,
+): Promise<BrowserCaptureSettings> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).updateBrowserCaptureSettings(input);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("updateBrowserCaptureSettings", () =>
+    commands.updateBrowserCaptureSettings(input),
+  );
 }
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {
@@ -335,6 +443,28 @@ export function onSettingsChanged(handler: () => void): Promise<() => void> {
   }
   return import("@tauri-apps/api/event").then(({ listen }) =>
     listen(EVENT_SETTINGS_CHANGED, () => {
+      handler();
+    }).then((unlisten) => unlisten),
+  );
+}
+
+export function onTrayNewDownloadRequested(handler: () => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(() => {});
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen(EVENT_TRAY_NEW_DOWNLOAD_REQUESTED, () => {
+      handler();
+    }).then((unlisten) => unlisten),
+  );
+}
+
+export function onTraySettingsRequested(handler: () => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(() => {});
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen(EVENT_TRAY_SETTINGS_REQUESTED, () => {
       handler();
     }).then((unlisten) => unlisten),
   );

@@ -6,8 +6,8 @@ use tauri_app_lib::{
     db,
     download::ProbeResult,
     models::{
-        AppSettings, BrowserKind, HashVerificationStatus, SegmentStatus, Task, TaskKind,
-        TaskRecord, TaskStatus, TaskUpdatedPayload,
+        AppFontFamily, AppSettings, BrowserKind, HashVerificationStatus, SegmentStatus, Task,
+        TaskKind, TaskRecord, TaskStatus, TaskUpdatedPayload,
     },
 };
 
@@ -107,6 +107,8 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         system_notifications: true,
         close_to_tray: false,
         start_on_boot: false,
+        floating_window_enabled: false,
+        font_family: AppFontFamily::SourceHanSansSc,
     };
 
     let segments = db::ensure_task_segments_with_settings(&pool, &task, &settings)
@@ -220,6 +222,8 @@ async fn settings_defaults_use_download_dir_and_two_active_tasks() {
         settings.max_connections_per_host,
         db::DEFAULT_MAX_CONNECTIONS_PER_HOST
     );
+    assert!(!settings.floating_window_enabled);
+    assert_eq!(settings.font_family, AppFontFamily::SourceHanSansSc);
 }
 
 #[tokio::test]
@@ -237,6 +241,8 @@ async fn settings_upsert_and_clamp_active_task_count() {
             system_notifications: true,
             close_to_tray: false,
             start_on_boot: false,
+            floating_window_enabled: false,
+            font_family: AppFontFamily::System,
         },
     )
     .await
@@ -250,6 +256,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
     assert_eq!(settings.multi_connection_threshold_bytes, "1048576");
     assert_eq!(settings.segment_count, db::MAX_SEGMENT_COUNT);
     assert_eq!(settings.max_connections_per_host, 12);
+    assert_eq!(settings.font_family, AppFontFamily::System);
 
     db::upsert_settings(
         &pool,
@@ -263,6 +270,8 @@ async fn settings_upsert_and_clamp_active_task_count() {
             system_notifications: false,
             close_to_tray: true,
             start_on_boot: true,
+            floating_window_enabled: true,
+            font_family: AppFontFamily::SourceHanSansSc,
         },
     )
     .await
@@ -594,7 +603,7 @@ async fn test_pool(label: &str) -> sqlx::SqlitePool {
         .expect("time")
         .as_nanos();
     let path = std::env::temp_dir().join(format!("vibe-db-{label}-{id}.sqlite"));
-    db::connect(&path).await.expect("connect")
+    db::connect(&path).await.expect("connect").pool
 }
 
 fn sample_task(id: &str, total_size: i64) -> TaskRecord {
@@ -633,6 +642,9 @@ fn sample_task(id: &str, total_size: i64) -> TaskRecord {
         speed_bps: 0,
         health_summary: Some("Queued".to_string()),
         error_message: None,
+        error_code: None,
+        recovery_actions: Vec::new(),
+        retry_after_at: None,
         expected_hash_sha256: None,
         actual_hash_sha256: None,
         hash_status: HashVerificationStatus::NotRequested,

@@ -1,6 +1,6 @@
 # Vibe Downloader Roadmap
 
-Last updated: 2026-06-09
+Last updated: 2026-06-10
 
 This roadmap reflects the current repository state. Product and design constraints live in [PRODUCT.md](../PRODUCT.md) and [DESIGN.md](../DESIGN.md).
 
@@ -14,7 +14,7 @@ The app now includes a working HTTP/HTTPS desktop download manager with:
 - HTTP probe, unknown-size single stream downloads, Range segmented downloads, resume validation, segment retry, global speed limit, per-host scheduling, and queue persistence.
 - SQLite persistence for tasks, files, work units, events, request diagnostics, settings, browser handoff messages, and hash verification state.
 - Task list search, filtering, sorting, multi-select, batch actions, command palette, task details, Chunks, Connections, Requests, Logs, toast notifications, recovery actions, and English/Simplified Chinese i18n.
-- Browser Native Messaging handoff with manifest install/uninstall diagnostics, dev/release extension identity support, popup recent handoff panel, request id de-duplication, and atomic handoff files.
+- Browser Native Messaging handoff plus local WebSocket bridge with manifest install/uninstall diagnostics, dev/release extension identity support, popup live status, automatic browser download takeover, optional Cookie/header forwarding, request id de-duplication, and atomic handoff files.
 - Batch URL import preview/create flow and SHA-256 integrity verification.
 
 ## Completed: P0/P1/P2/P3/P4 First Pass
@@ -41,8 +41,8 @@ The app now includes a working HTTP/HTTPS desktop download manager with:
 - Browser integration exposes dev/release profile, extension id, native host path, manifest path, extension path, and copyable diagnostics in Settings.
 - Native Messaging manifests derive allowed origins/extensions from the active browser profile.
 - Extension build output syncs the extension version from `package.json` and emits Chrome/Edge/Firefox/Opera variants.
-- Extension popup includes a recent handoff panel backed by extension local storage.
-- Cookie/header forwarding and automatic browser download takeover remain intentionally out of scope until a separate privacy design exists.
+- Extension popup includes bridge status, capture toggles, live tasks, and a recent handoff panel backed by extension local storage.
+- Automatic browser download takeover, optional Cookie/header forwarding, browser task status, and site-rule data models have a first implementation behind explicit settings.
 
 ### P4 First Pass
 
@@ -55,7 +55,7 @@ The app now includes a working HTTP/HTTPS desktop download manager with:
 
 - Safari wrapper/signing/review is not implemented.
 - Browser store IDs are represented by release placeholders and must be replaced before store submission.
-- Cookie/header forwarding, site rules, and auto-takeover require a separate privacy and permissions design.
+- Site-rule management UI and the final privacy copy/permission review for browser capture are still follow-up items.
 - Task list virtualization for very large history is still a follow-up performance item.
 - HLS/BT and plugin protocol work should use mature engines/adapters when scheduled.
 
