@@ -53,7 +53,7 @@ export function SpeedSparkline({
   return (
     <div
       className={cn(
-        "flex h-12 min-w-36 items-center gap-3 rounded-md border border-border-subtle/75 bg-surface-root/55 px-3",
+        "flex h-12 min-w-36 items-center gap-3 rounded-md border border-border-panel bg-surface-root/55 px-3",
         className,
       )}
     >

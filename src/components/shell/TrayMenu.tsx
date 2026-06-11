@@ -85,11 +85,11 @@ export function TrayMenu() {
   return (
     <main className="flex h-full items-center justify-center p-1.5">
       <section
-        className="w-full overflow-hidden rounded-lg border border-border-subtle/80 bg-surface-overlay backdrop-blur-xl"
+        className="w-full overflow-hidden rounded-lg border border-border-container bg-surface-overlay backdrop-blur-xl"
         aria-label={t("trayMenu.title")}
         role="dialog"
       >
-        <div className="flex h-10 items-center gap-2.5 border-b border-border-subtle/70 px-2.5">
+        <div className="flex h-10 items-center gap-2.5 border-b border-border-divider px-2.5">
           <div
             className="grid h-7 w-7 place-items-center rounded-md bg-accent-primary/12 text-accent-primary ring-1 ring-accent-primary/25"
             aria-hidden
@@ -146,7 +146,7 @@ function TrayMenuButton({
       type="button"
       className={cn(
         "group flex h-9 w-full items-center gap-2.5 rounded-md px-2 text-left outline-none transition duration-ui ease-out hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-accent-primary/70",
-        separated && "mt-1 border-t border-border-subtle/60 pt-1.5",
+        separated && "mt-1 border-t border-border-separator pt-1.5",
         item.tone === "danger" && "hover:bg-status-danger/10",
       )}
       disabled={pending}
@@ -154,7 +154,7 @@ function TrayMenuButton({
     >
       <span
         className={cn(
-          "grid h-7 w-7 shrink-0 place-items-center rounded-md bg-surface-raised text-text-secondary ring-1 ring-border-subtle/70 transition",
+          "grid h-7 w-7 shrink-0 place-items-center rounded-md bg-surface-raised text-text-secondary ring-1 ring-border-divider transition",
           item.tone === "primary" &&
             "bg-accent-primary text-text-on-accent ring-accent-primary",
           item.tone === "danger" &&

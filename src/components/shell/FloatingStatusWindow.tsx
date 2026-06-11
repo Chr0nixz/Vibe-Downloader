@@ -93,7 +93,7 @@ export function FloatingStatusWindow() {
       }}
     >
       <section
-        className="flex h-full w-full flex-col overflow-hidden rounded-lg border border-border-subtle/80 bg-surface-overlay px-3 py-2 text-text-primary shadow-[0_16px_34px_oklch(0.12_0.01_255_/_0.28)]"
+        className="flex h-full w-full flex-col overflow-hidden rounded-lg border border-border-container bg-surface-overlay px-3 py-2 text-text-primary shadow-[0_16px_34px_oklch(0.12_0.01_255_/_0.28)]"
         aria-label={t("floatingStatus.title")}
       >
         <div className="flex min-h-0 items-start gap-2">
@@ -101,7 +101,7 @@ export function FloatingStatusWindow() {
             className={cn(
               "grid h-7 w-7 shrink-0 place-items-center rounded-md ring-1",
               idle
-                ? "bg-surface-raised text-text-muted ring-border-subtle/70"
+                ? "bg-surface-raised text-text-muted ring-border-divider"
                 : "bg-accent-primary text-text-on-accent ring-accent-primary",
             )}
             aria-hidden
@@ -110,7 +110,7 @@ export function FloatingStatusWindow() {
           </div>
           <div className="min-w-0 flex-1">
             <p className="flex min-w-0 items-baseline gap-2">
-              <span className="text-[0.68rem] font-medium uppercase tracking-normal text-text-muted">
+              <span className="text-[0.68rem] font-semibold text-text-muted">
                 {t("floatingStatus.totalSpeed")}
               </span>
               <span

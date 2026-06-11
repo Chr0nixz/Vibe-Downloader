@@ -7,7 +7,7 @@ use std::{
 
 use librqbit::{
     api::{Api, ApiAddTorrentResponse, TorrentDetailsResponse, TorrentIdOrHash},
-    AddTorrent, AddTorrentOptions, Session,
+    AddTorrent, AddTorrentOptions, ConnectionOptions, Session, SessionOptions,
 };
 use magnet_url::Magnet;
 use reqwest::Url;
@@ -21,19 +21,32 @@ use crate::{
         EngineCapabilities, ProbedFile, SegmentStatus, TaskFileRecord, TaskKind,
         TaskProgressPayload, TaskStatus,
     },
+    proxy::SharedProxyConfig,
 };
 
 const PROTOCOL_BT: &str = "bt";
 const SOURCE_BT_PREFIX: &str = "bt:";
+const BT_METADATA_STATUS_INTERVAL: Duration = Duration::from_secs(10);
+const BT_METADATA_TIMEOUT: Duration = Duration::from_secs(90);
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct BtEngine {
     sessions: Arc<Mutex<HashMap<String, Arc<Api>>>>,
+    proxy_config: SharedProxyConfig,
+}
+
+impl Default for BtEngine {
+    fn default() -> Self {
+        Self::new(crate::proxy::ResolvedProxyConfig::shared_default())
+    }
 }
 
 impl BtEngine {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(proxy_config: SharedProxyConfig) -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            proxy_config,
+        }
     }
 
     pub async fn delete_runtime_task(&self, source_key: &str, delete_files: bool) {
@@ -58,20 +71,31 @@ impl BtEngine {
     }
 
     async fn api_for_output_folder(&self, output_folder: &str) -> Result<Arc<Api>, String> {
+        let proxy_config = self.proxy_config.read().await.clone();
+        let proxy_fingerprint = proxy_config.fingerprint();
         let key = PathBuf::from(output_folder)
             .canonicalize()
             .unwrap_or_else(|_| PathBuf::from(output_folder))
             .to_string_lossy()
             .to_string();
+        let key = format!("{key}|proxy:{proxy_fingerprint}");
 
         let mut sessions = self.sessions.lock().await;
         if let Some(api) = sessions.get(&key) {
             return Ok(api.clone());
         }
 
-        std::fs::create_dir_all(&key)
+        std::fs::create_dir_all(output_folder)
             .map_err(|e| format!("Could not create the torrent download directory: {e}"))?;
-        let session = Session::new(PathBuf::from(&key))
+        let output_path = output_folder.to_string();
+        let mut options = SessionOptions::default();
+        if let Some(proxy_url) = proxy_config.custom_socks5_url_with_auth() {
+            options.connect = Some(ConnectionOptions {
+                proxy_url: Some(proxy_url),
+                ..Default::default()
+            });
+        }
+        let session = Session::new_with_opts(PathBuf::from(&output_path), options)
             .await
             .map_err(|e| format!("Could not start BitTorrent session: {e:#}"))?;
         let api = Arc::new(Api::new(session, None));
@@ -203,18 +227,17 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
 
     let api = engine.api_for_output_folder(&task.save_dir).await?;
     let add = add_torrent_source(&task.url).await?;
-    let response = api
-        .api_add_torrent(
-            add,
-            Some(AddTorrentOptions {
-                paused: false,
-                overwrite: true,
-                output_folder: Some(task.save_dir.clone()),
-                ..Default::default()
-            }),
-        )
-        .await
-        .map_err(|e| format!("Could not add torrent: {e:#}"))?;
+    mark_torrent_metadata_fetching(&app, &pool, &task).await?;
+    let response = wait_for_torrent_metadata(
+        &engine,
+        api.clone(),
+        add,
+        &app,
+        &pool,
+        &task,
+        cancel.clone(),
+    )
+    .await?;
 
     persist_torrent_details(&pool, &task, &response).await?;
     if let Some(current) = db::get_task_record(&pool, &task.id).await? {
@@ -224,6 +247,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     let torrent_id = TorrentIdOrHash::try_from(response.details.info_hash.as_str())
         .map_err(|e| format!("Torrent info hash is invalid: {e:#}"))?;
     let mut last_progress = 0_i64;
+    let mut last_health_summary = Some("Fetching torrent metadata".to_string());
     let mut last_tick = Instant::now();
 
     loop {
@@ -231,6 +255,16 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             let _ = api.api_torrent_action_pause(torrent_id).await;
             db::update_task_progress(&pool, &task.id, last_progress, 0, 0, TaskStatus::Paused)
                 .await?;
+            if let Some(segment) = db::get_first_segment_record(&pool, &task.id).await? {
+                db::update_segment_runtime_progress(
+                    &pool,
+                    &segment.id,
+                    last_progress,
+                    0,
+                    SegmentStatus::Pending,
+                )
+                .await?;
+            }
             return Ok(());
         }
 
@@ -262,16 +296,53 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         } else {
             0.0
         };
+        let peer_stats = stats.live.as_ref().map(|live| &live.snapshot.peer_stats);
+        let live_peers = peer_stats.map(|stats| stats.live).unwrap_or(0);
+        let connecting_peers = peer_stats.map(|stats| stats.connecting).unwrap_or(0);
+        let queued_peers = peer_stats.map(|stats| stats.queued).unwrap_or(0);
+        let seen_peers = peer_stats.map(|stats| stats.seen).unwrap_or(0);
+        let completed_pieces = stats
+            .live
+            .as_ref()
+            .map(|live| {
+                i64::try_from(live.snapshot.downloaded_and_checked_pieces).unwrap_or(i64::MAX)
+            })
+            .unwrap_or(0);
+        let live_peer_count = i32::try_from(live_peers).unwrap_or(i32::MAX);
+        let peer_count = i64::from(live_peers)
+            .saturating_add(i64::from(connecting_peers))
+            .saturating_add(i64::from(queued_peers));
+        let metadata_status = torrent_metadata_status(
+            speed,
+            live_peers,
+            connecting_peers,
+            queued_peers,
+            seen_peers,
+        );
+        let health_summary = torrent_health_summary(
+            speed,
+            live_peers,
+            connecting_peers,
+            queued_peers,
+            seen_peers,
+        );
 
         db::update_task_progress(
             &pool,
             &task.id,
             downloaded,
             speed,
-            task.connection_count.max(1),
+            live_peer_count,
             TaskStatus::Downloading,
         )
         .await?;
+        if last_health_summary.as_deref() != Some(health_summary.as_str()) {
+            db::update_task_health_summary(&pool, &task.id, Some(health_summary.as_str())).await?;
+            if let Some(current) = db::get_task_record(&pool, &task.id).await? {
+                emit_task_updated_record(&app, &pool, &current).await;
+            }
+            last_health_summary = Some(health_summary);
+        }
         if let Some(segment) = db::get_first_segment_record(&pool, &task.id).await? {
             db::update_segment_runtime_progress(
                 &pool,
@@ -285,10 +356,10 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         db::upsert_torrent_runtime_snapshot(
             &pool,
             &task.id,
-            "ready",
-            0,
-            0,
-            0,
+            metadata_status,
+            completed_pieces,
+            completed_pieces,
+            peer_count,
             0,
             uploaded,
             upload_speed,
@@ -302,12 +373,15 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 downloaded_bytes: downloaded.to_string(),
                 total_size: total.to_string(),
                 speed_bps: speed.to_string(),
-                connection_count: task.connection_count.max(1),
+                connection_count: live_peer_count,
                 status: TaskStatus::Downloading,
             },
         );
 
         if stats.finished || (total > 0 && downloaded >= total) {
+            if let Some(segment) = db::get_first_segment_record(&pool, &task.id).await? {
+                db::complete_segment(&pool, &segment.id).await?;
+            }
             db::complete_task(&pool, &task.id).await?;
             if let Some(current) = db::get_task_record(&pool, &task.id).await? {
                 emit_task_updated_record(&app, &pool, &current).await;
@@ -318,6 +392,192 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         last_progress = downloaded;
         last_tick = Instant::now();
         tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn wait_for_torrent_metadata(
+    engine: &BtEngine,
+    api: Arc<Api>,
+    add: AddTorrent<'static>,
+    app: &tauri::AppHandle,
+    pool: &sqlx::SqlitePool,
+    task: &crate::models::TaskRecord,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<ApiAddTorrentResponse, String> {
+    let options = Some(AddTorrentOptions {
+        paused: false,
+        overwrite: true,
+        output_folder: Some(task.save_dir.clone()),
+        ..Default::default()
+    });
+    let add_torrent = api.api_add_torrent(add, options);
+    tokio::pin!(add_torrent);
+
+    let started = Instant::now();
+    let mut interval = tokio::time::interval(BT_METADATA_STATUS_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            result = &mut add_torrent => {
+                return result.map_err(|e| format!("Could not add torrent: {e:#}"));
+            }
+            _ = interval.tick() => {
+                if cancel.load(Ordering::SeqCst) {
+                    engine.delete_runtime_task(&task.source_key, false).await;
+                    return Err("Torrent metadata fetch was canceled.".to_string());
+                }
+
+                let elapsed = started.elapsed();
+                if elapsed >= BT_METADATA_TIMEOUT {
+                    engine.delete_runtime_task(&task.source_key, false).await;
+                    return Err(format!(
+                        "Could not fetch torrent metadata after {} seconds. No reachable peers returned metadata through DHT, trackers, or the magnet link.",
+                        BT_METADATA_TIMEOUT.as_secs()
+                    ));
+                }
+
+                mark_torrent_metadata_still_fetching(app, pool, task, elapsed).await?;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if cancel.load(Ordering::SeqCst) {
+                    engine.delete_runtime_task(&task.source_key, false).await;
+                    return Err("Torrent metadata fetch was canceled.".to_string());
+                }
+            }
+        }
+    }
+}
+
+async fn mark_torrent_metadata_fetching(
+    app: &tauri::AppHandle,
+    pool: &sqlx::SqlitePool,
+    task: &crate::models::TaskRecord,
+) -> Result<(), String> {
+    db::update_task_progress(
+        pool,
+        &task.id,
+        task.downloaded_bytes,
+        0,
+        0,
+        TaskStatus::Downloading,
+    )
+    .await?;
+    db::update_task_health_summary(pool, &task.id, Some("Fetching torrent metadata")).await?;
+    if let Some(segment) = db::get_first_segment_record(pool, &task.id).await? {
+        db::update_segment_runtime_progress(
+            pool,
+            &segment.id,
+            task.downloaded_bytes,
+            0,
+            SegmentStatus::Downloading,
+        )
+        .await?;
+    }
+    db::upsert_torrent_runtime_snapshot(pool, &task.id, "fetching_metadata", 0, 0, 0, 0, 0, 0, 0.0)
+        .await?;
+    db::insert_task_event(pool, &task.id, "bt_metadata_fetching", None).await?;
+    emit_task_progress(
+        app,
+        &TaskProgressPayload {
+            task_id: task.id.clone(),
+            downloaded_bytes: task.downloaded_bytes.to_string(),
+            total_size: task.total_size.to_string(),
+            speed_bps: "0".to_string(),
+            connection_count: 0,
+            status: TaskStatus::Downloading,
+        },
+    );
+    if let Some(current) = db::get_task_record(pool, &task.id).await? {
+        emit_task_updated_record(app, pool, &current).await;
+    }
+    Ok(())
+}
+
+async fn mark_torrent_metadata_still_fetching(
+    app: &tauri::AppHandle,
+    pool: &sqlx::SqlitePool,
+    task: &crate::models::TaskRecord,
+    elapsed: Duration,
+) -> Result<(), String> {
+    let elapsed_seconds = elapsed.as_secs().max(1);
+    let remaining_seconds = BT_METADATA_TIMEOUT.saturating_sub(elapsed).as_secs().max(1);
+    let summary = format!(
+        "Fetching torrent metadata via DHT and trackers ({}s elapsed, {}s before timeout)",
+        elapsed_seconds, remaining_seconds
+    );
+    db::update_task_health_summary(pool, &task.id, Some(summary.as_str())).await?;
+    db::upsert_torrent_runtime_snapshot(pool, &task.id, "fetching_metadata", 0, 0, 0, 0, 0, 0, 0.0)
+        .await?;
+    emit_task_progress(
+        app,
+        &TaskProgressPayload {
+            task_id: task.id.clone(),
+            downloaded_bytes: task.downloaded_bytes.to_string(),
+            total_size: task.total_size.to_string(),
+            speed_bps: "0".to_string(),
+            connection_count: 0,
+            status: TaskStatus::Downloading,
+        },
+    );
+    if let Some(current) = db::get_task_record(pool, &task.id).await? {
+        emit_task_updated_record(app, pool, &current).await;
+    }
+    Ok(())
+}
+
+fn torrent_metadata_status(
+    speed_bps: i64,
+    live_peers: u32,
+    connecting_peers: u32,
+    queued_peers: u32,
+    seen_peers: u32,
+) -> &'static str {
+    if speed_bps > 0 {
+        "downloading"
+    } else if live_peers > 0 {
+        "connected"
+    } else if connecting_peers > 0 {
+        "connecting_peers"
+    } else if queued_peers > 0 {
+        "queued_peers"
+    } else if seen_peers > 0 {
+        "waiting_peers"
+    } else {
+        "searching_peers"
+    }
+}
+
+fn torrent_health_summary(
+    speed_bps: i64,
+    live_peers: u32,
+    connecting_peers: u32,
+    queued_peers: u32,
+    seen_peers: u32,
+) -> String {
+    if speed_bps > 0 && live_peers > 0 {
+        return format!("Downloading from {}", peer_label(live_peers));
+    }
+    if live_peers > 0 {
+        return format!("Connected to {}; waiting for data", peer_label(live_peers));
+    }
+    if connecting_peers > 0 {
+        return format!("Connecting to {}", peer_label(connecting_peers));
+    }
+    if queued_peers > 0 {
+        return format!("Queued {}; waiting to connect", peer_label(queued_peers));
+    }
+    if seen_peers > 0 {
+        return "Peers found but none are reachable".to_string();
+    }
+    "Searching DHT and trackers for peers".to_string()
+}
+
+fn peer_label(count: u32) -> String {
+    if count == 1 {
+        "1 peer".to_string()
+    } else {
+        format!("{count} peers")
     }
 }
 

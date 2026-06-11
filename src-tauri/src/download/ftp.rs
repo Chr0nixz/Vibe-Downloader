@@ -1,6 +1,10 @@
 use std::{
     collections::{HashMap, VecDeque},
+    future::Future,
+    io,
+    net::SocketAddr,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
         Arc,
@@ -11,9 +15,12 @@ use std::{
 use chrono::{DateTime, NaiveDateTime, Utc};
 use sqlx::SqlitePool;
 use suppaftp::{
-    tokio::{AsyncFtpStream, AsyncRustlsConnector, AsyncRustlsFtpStream},
+    tokio::{
+        AsyncFtpStream, AsyncRustlsConnector, AsyncRustlsFtpStream, ImplAsyncFtpStream,
+        TokioTlsStream,
+    },
     tokio_rustls::rustls::{ClientConfig, RootCertStore},
-    types::FileType,
+    types::{FileType, FtpError, FtpResult},
     Mode,
 };
 use tauri::AppHandle;
@@ -38,6 +45,7 @@ use crate::{
         EngineCapabilities, ProbedFile, RequestDiagnosticRecord, SegmentStatus, TaskKind,
         TaskProgressPayload, TaskRecord, TaskSegmentRecord, TaskStatus,
     },
+    proxy::{socks5_connect, ResolvedProxyConfig, SharedProxyConfig},
 };
 
 const FTP_MAX_DYNAMIC_CONNECTIONS: usize = 4;
@@ -48,7 +56,9 @@ const FTP_WORKER_RETRIES: i32 = 2;
 const FTP_READ_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
-pub struct FtpEngine;
+pub struct FtpEngine {
+    proxy_config: SharedProxyConfig,
+}
 
 #[derive(Debug, Clone)]
 struct FtpTarget {
@@ -104,6 +114,7 @@ struct WorkerRequest {
     cancel: Arc<AtomicBool>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     progress_tx: mpsc::UnboundedSender<WorkerProgress>,
+    proxy_config: ResolvedProxyConfig,
 }
 
 #[derive(Debug)]
@@ -120,12 +131,13 @@ struct WorkerFinished {
 }
 
 impl FtpEngine {
-    pub fn new() -> Self {
-        Self
+    pub fn new(proxy_config: SharedProxyConfig) -> Self {
+        Self { proxy_config }
     }
 
     async fn probe_target(&self, target: FtpTarget) -> Result<ProbeOutput, String> {
-        let mut session = connect_session(&target).await?;
+        let proxy_config = self.proxy_config.read().await.clone();
+        let mut session = connect_session(&target, &proxy_config).await?;
         session.transfer_type(FileType::Binary).await?;
         session.set_mode(Mode::Passive);
 
@@ -175,13 +187,14 @@ impl FtpEngine {
                 .as_deref()
                 .unwrap_or(&context.task.url),
         )?;
-        run_ftp_download(target, context).await
+        let proxy_config = self.proxy_config.read().await.clone();
+        run_ftp_download(target, context, proxy_config).await
     }
 }
 
 impl Default for FtpEngine {
     fn default() -> Self {
-        Self::new()
+        Self::new(ResolvedProxyConfig::shared_default())
     }
 }
 
@@ -207,7 +220,11 @@ impl DownloadEngine for FtpEngine {
     }
 }
 
-async fn run_ftp_download(target: FtpTarget, context: DownloadContext) -> Result<(), String> {
+async fn run_ftp_download(
+    target: FtpTarget,
+    context: DownloadContext,
+    proxy_config: ResolvedProxyConfig,
+) -> Result<(), String> {
     let DownloadContext {
         app,
         pool,
@@ -279,6 +296,7 @@ async fn run_ftp_download(target: FtpTarget, context: DownloadContext) -> Result
         &mut pending,
         &mut running,
         &mut workers,
+        &proxy_config,
     );
     emit_ftp_progress(&app, &pool, &task, &progress, running.len()).await?;
 
@@ -380,6 +398,7 @@ async fn run_ftp_download(target: FtpTarget, context: DownloadContext) -> Result
                 &mut pending,
                 &mut running,
                 &mut workers,
+                &proxy_config,
             );
         }
 
@@ -452,6 +471,7 @@ fn start_next_ftp_worker(
     pending: &mut VecDeque<TaskSegmentRecord>,
     running: &mut HashMap<String, SegmentRuntime>,
     workers: &mut JoinSet<WorkerFinished>,
+    proxy_config: &ResolvedProxyConfig,
 ) {
     let Some(segment) = pending.pop_front() else {
         return;
@@ -474,6 +494,7 @@ fn start_next_ftp_worker(
         cancel: cancel.clone(),
         speed_limiter: speed_limiter.clone(),
         progress_tx: progress_tx.clone(),
+        proxy_config: proxy_config.clone(),
     };
     workers.spawn(async move {
         let segment_id = request.segment.id.clone();
@@ -506,7 +527,7 @@ async fn download_ftp_segment(request: WorkerRequest) -> Result<i64, String> {
 }
 
 async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, String> {
-    let mut session = connect_session(&request.target).await?;
+    let mut session = connect_session(&request.target, &request.proxy_config).await?;
     session.transfer_type(FileType::Binary).await?;
     session.set_mode(Mode::Passive);
 
@@ -831,13 +852,24 @@ fn planned_ftp_split(segment: &SegmentProgress) -> Option<FtpSplit> {
     })
 }
 
-async fn connect_session(target: &FtpTarget) -> Result<FtpSession, String> {
+async fn connect_session(
+    target: &FtpTarget,
+    proxy_config: &ResolvedProxyConfig,
+) -> Result<FtpSession, String> {
     let addr = format!("{}:{}", target.host, target.port);
     let result = match target.mode {
         FtpSecurityMode::Plain => {
-            let mut session = AsyncFtpStream::connect(addr)
-                .await
-                .map_err(ftp_connect_error)?;
+            let mut session = if proxy_config.is_custom_socks5() {
+                let stream = socks5_control_stream(target, proxy_config).await?;
+                AsyncFtpStream::connect_with_stream(stream)
+                    .await
+                    .map_err(ftp_connect_error)?
+            } else {
+                AsyncFtpStream::connect(addr)
+                    .await
+                    .map_err(ftp_connect_error)?
+            };
+            session = apply_passive_proxy(session, proxy_config);
             session
                 .login(&target.username, &target.password)
                 .await
@@ -846,13 +878,21 @@ async fn connect_session(target: &FtpTarget) -> Result<FtpSession, String> {
         }
         FtpSecurityMode::ExplicitTls => {
             let connector = rustls_connector();
-            let session = AsyncRustlsFtpStream::connect(addr)
-                .await
-                .map_err(ftp_connect_error)?;
+            let session = if proxy_config.is_custom_socks5() {
+                let stream = socks5_control_stream(target, proxy_config).await?;
+                AsyncRustlsFtpStream::connect_with_stream(stream)
+                    .await
+                    .map_err(ftp_connect_error)?
+            } else {
+                AsyncRustlsFtpStream::connect(addr)
+                    .await
+                    .map_err(ftp_connect_error)?
+            };
             let mut session = session
                 .into_secure(connector, &target.host)
                 .await
                 .map_err(ftp_connect_error)?;
+            session = apply_passive_proxy(session, proxy_config);
             session
                 .login(&target.username, &target.password)
                 .await
@@ -860,6 +900,12 @@ async fn connect_session(target: &FtpTarget) -> Result<FtpSession, String> {
             Ok(FtpSession::Secure(session))
         }
         FtpSecurityMode::ImplicitTls => {
+            if proxy_config.is_custom_socks5() {
+                tracing::warn!(
+                    url = %target.sanitized_uri,
+                    "implicit FTPS proxy is not supported; connecting directly"
+                );
+            }
             let connector = rustls_connector();
             let mut session =
                 AsyncRustlsFtpStream::connect_secure_implicit(addr, connector, &target.host)
@@ -873,6 +919,67 @@ async fn connect_session(target: &FtpTarget) -> Result<FtpSession, String> {
         }
     };
     result
+}
+
+async fn socks5_control_stream(
+    target: &FtpTarget,
+    proxy_config: &ResolvedProxyConfig,
+) -> Result<tokio::net::TcpStream, String> {
+    let proxy_url = proxy_config
+        .url
+        .as_deref()
+        .ok_or_else(|| "SOCKS5 proxy URL is not configured.".to_string())?;
+    socks5_connect(
+        proxy_url,
+        proxy_config.username.as_deref(),
+        proxy_config.password.as_deref(),
+        &target.host,
+        target.port,
+    )
+    .await
+    .map_err(|error| format!("FTP proxy connection failed: {error}"))
+}
+
+fn apply_passive_proxy<T>(
+    session: ImplAsyncFtpStream<T>,
+    proxy_config: &ResolvedProxyConfig,
+) -> ImplAsyncFtpStream<T>
+where
+    T: TokioTlsStream + Send + 'static,
+{
+    let Some(proxy_url) = proxy_config
+        .url
+        .clone()
+        .filter(|_| proxy_config.is_custom_socks5())
+    else {
+        return session;
+    };
+    let username = proxy_config.username.clone();
+    let password = proxy_config.password.clone();
+    session.passive_stream_builder(move |address| {
+        let proxy_url = proxy_url.clone();
+        let username = username.clone();
+        let password = password.clone();
+        Box::pin(async move { socks5_passive_stream(proxy_url, username, password, address).await })
+            as Pin<Box<dyn Future<Output = FtpResult<tokio::net::TcpStream>> + Send + Sync>>
+    })
+}
+
+async fn socks5_passive_stream(
+    proxy_url: String,
+    username: Option<String>,
+    password: Option<String>,
+    address: SocketAddr,
+) -> FtpResult<tokio::net::TcpStream> {
+    socks5_connect(
+        &proxy_url,
+        username.as_deref(),
+        password.as_deref(),
+        &address.ip().to_string(),
+        address.port(),
+    )
+    .await
+    .map_err(|error| FtpError::ConnectionError(io::Error::new(error.kind(), error.to_string())))
 }
 
 fn ftp_connect_error(error: suppaftp::FtpError) -> String {

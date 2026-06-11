@@ -9,6 +9,7 @@ use tauri::AppHandle;
 
 use super::{BtEngine, FtpEngine, GlobalSpeedLimiter, HttpEngine};
 use crate::models::{EngineCapabilities, ProbedFile, TaskKind, TaskRecord};
+use crate::proxy::{ResolvedProxyConfig, SharedProxyConfig};
 
 pub(crate) type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -56,6 +57,7 @@ pub trait DownloadEngine: Send + Sync {
 pub struct EngineRegistry {
     engines: Vec<Arc<dyn DownloadEngine>>,
     bt_engine: Arc<BtEngine>,
+    proxy_config: SharedProxyConfig,
 }
 
 impl Default for EngineRegistry {
@@ -66,15 +68,21 @@ impl Default for EngineRegistry {
 
 impl EngineRegistry {
     pub fn new() -> Result<Self, String> {
-        let bt_engine = Arc::new(BtEngine::new());
+        let proxy_config = ResolvedProxyConfig::shared_default();
+        let bt_engine = Arc::new(BtEngine::new(proxy_config.clone()));
         Ok(Self {
             engines: vec![
                 bt_engine.clone(),
-                Arc::new(HttpEngine::new()?),
-                Arc::new(FtpEngine::new()),
+                Arc::new(HttpEngine::with_proxy_config(proxy_config.clone())?),
+                Arc::new(FtpEngine::new(proxy_config.clone())),
             ],
             bt_engine,
+            proxy_config,
         })
+    }
+
+    pub async fn set_proxy_config(&self, config: ResolvedProxyConfig) {
+        *self.proxy_config.write().await = config;
     }
 
     pub fn engine_for_uri(&self, uri: &str) -> Result<Arc<dyn DownloadEngine>, String> {

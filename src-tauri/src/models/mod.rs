@@ -9,10 +9,10 @@ pub use browser::{
     BrowserSiteRuleMode,
 };
 pub use task::{
-    AppErrorPayload, AppFontFamily, AppSettings, BatchImportItem, BatchImportResult,
-    EngineCapabilities, HashVerificationState, HashVerificationStatus, ProbeTaskPayload,
-    ProbedFile, RecoveryAction, RequestDiagnostic, RequestDiagnosticRecord, SegmentStatus,
-    SegmentSummary, Task, TaskEvent, TaskFailureCategory, TaskFile, TaskFileRecord, TaskKind,
-    TaskProgressPayload, TaskRecord, TaskSegment, TaskSegmentRecord, TaskStatus,
+    AppAccentColor, AppErrorPayload, AppFontFamily, AppSettings, BatchImportItem,
+    BatchImportResult, EngineCapabilities, HashVerificationState, HashVerificationStatus,
+    ProbeTaskPayload, ProbedFile, RecoveryAction, RequestDiagnostic, RequestDiagnosticRecord,
+    SegmentStatus, SegmentSummary, Task, TaskEvent, TaskFailureCategory, TaskFile, TaskFileRecord,
+    TaskKind, TaskProgressPayload, TaskRecord, TaskSegment, TaskSegmentRecord, TaskStatus,
     TaskUpdatedPayload,
 };

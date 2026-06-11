@@ -10,7 +10,7 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, NoProxy, Proxy, StatusCode};
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 
@@ -18,6 +18,7 @@ use super::GlobalSpeedLimiter;
 use crate::{
     logging::sanitize_url,
     models::{EngineCapabilities, ProbedFile, TaskKind, TaskRecord, TaskSegmentRecord},
+    proxy::{AppProxyMode, ResolvedProxyConfig, SharedProxyConfig},
 };
 
 use self::{
@@ -68,18 +69,21 @@ pub struct DirectSegmentedDownloadRequest {
 
 #[derive(Debug, Clone)]
 pub struct HttpEngine {
-    client: Client,
+    proxy_config: SharedProxyConfig,
 }
 
 impl HttpEngine {
     pub fn new() -> Result<Self, String> {
-        let client = Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .user_agent("VibeDownloader/0.1")
-            .build()
-            .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+        Self::with_proxy_config(ResolvedProxyConfig::shared_default())
+    }
 
-        Ok(Self { client })
+    pub fn with_proxy_config(proxy_config: SharedProxyConfig) -> Result<Self, String> {
+        Ok(Self { proxy_config })
+    }
+
+    async fn client(&self) -> Result<Client, String> {
+        let config = self.proxy_config.read().await;
+        build_client(&config)
     }
 
     pub async fn probe(&self, url: &str) -> Result<ProbeResult, String> {
@@ -91,8 +95,9 @@ impl HttpEngine {
         url: &str,
         request_headers: &[(String, String)],
     ) -> Result<ProbeResult, String> {
+        let client = self.client().await?;
         let sanitized = sanitize_url(url);
-        let head = send_head_with_retry(&self.client, url, request_headers).await;
+        let head = send_head_with_retry(&client, url, request_headers).await;
         if let Ok(response) = head {
             if response.status().is_success() {
                 let probe = probe_from_response(url, &response, false)?;
@@ -115,13 +120,9 @@ impl HttpEngine {
             );
         }
 
-        let response = send_get_with_retry(
-            &self.client,
-            url,
-            Some("bytes=0-0".to_string()),
-            request_headers,
-        )
-        .await?;
+        let response =
+            send_get_with_retry(&client, url, Some("bytes=0-0".to_string()), request_headers)
+                .await?;
 
         if !response.status().is_success() {
             return Err(format_http_status(response.status()));
@@ -154,8 +155,9 @@ impl HttpEngine {
         connection_limit: usize,
         request_headers: Vec<(String, String)>,
     ) -> Result<(), String> {
+        let client = self.client().await?;
         run_segmented_download(
-            &self.client,
+            &client,
             app,
             pool,
             task,
@@ -172,13 +174,8 @@ impl HttpEngine {
         request: DirectDownloadRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<i64, String> {
-        run_direct_download(
-            &self.client,
-            request,
-            cancel,
-            GlobalSpeedLimiter::disabled(),
-        )
-        .await
+        let client = self.client().await?;
+        run_direct_download(&client, request, cancel, GlobalSpeedLimiter::disabled()).await
     }
 
     pub async fn download_direct_with_limiter(
@@ -187,7 +184,8 @@ impl HttpEngine {
         cancel: Arc<AtomicBool>,
         speed_limiter: Arc<GlobalSpeedLimiter>,
     ) -> Result<i64, String> {
-        run_direct_download(&self.client, request, cancel, speed_limiter).await
+        let client = self.client().await?;
+        run_direct_download(&client, request, cancel, speed_limiter).await
     }
 
     pub async fn download_segmented_direct(
@@ -195,13 +193,50 @@ impl HttpEngine {
         request: DirectSegmentedDownloadRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<i64, String> {
-        run_direct_segmented_download(
-            &self.client,
-            request,
-            cancel,
-            GlobalSpeedLimiter::disabled(),
-        )
-        .await
+        let client = self.client().await?;
+        run_direct_segmented_download(&client, request, cancel, GlobalSpeedLimiter::disabled())
+            .await
+    }
+}
+
+fn build_client(config: &ResolvedProxyConfig) -> Result<Client, String> {
+    let mut builder = Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .user_agent("VibeDownloader/0.1");
+
+    match config.mode {
+        AppProxyMode::Off => {
+            builder = builder.no_proxy();
+        }
+        AppProxyMode::System => {}
+        AppProxyMode::Custom => {
+            let url = config
+                .url
+                .as_deref()
+                .ok_or_else(|| "Custom proxy URL is not configured.".to_string())?;
+            let mut proxy =
+                Proxy::all(url).map_err(|_| "Custom proxy URL is invalid.".to_string())?;
+            if let Some(no_proxy) = config.no_proxy.as_deref() {
+                proxy = proxy.no_proxy(NoProxy::from_string(no_proxy));
+            }
+            if let Some(username) = &config.username {
+                proxy = proxy.basic_auth(username, config.password.as_deref().unwrap_or(""));
+            }
+            builder = builder.proxy(proxy);
+        }
+    }
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", sanitize_proxy_error(e)))
+}
+
+fn sanitize_proxy_error(error: reqwest::Error) -> String {
+    let message = error.to_string();
+    if message.contains('@') {
+        "proxy configuration is invalid".to_string()
+    } else {
+        message
     }
 }
 

@@ -7,7 +7,8 @@ use tauri::{AppHandle, Manager, State};
 use crate::{
     db,
     events::{emit_queue_changed, emit_settings_changed},
-    models::{AppFontFamily, AppSettings},
+    models::{AppAccentColor, AppFontFamily, AppSettings},
+    proxy::{self, AppProxyMode},
     AppState,
 };
 
@@ -25,6 +26,13 @@ pub struct UpdateSettingsInput {
     pub start_on_boot: Option<bool>,
     pub floating_window_enabled: Option<bool>,
     pub font_family: Option<AppFontFamily>,
+    pub accent_color: Option<AppAccentColor>,
+    pub proxy_mode: Option<AppProxyMode>,
+    pub proxy_url: Option<String>,
+    pub proxy_no_proxy: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+    pub clear_proxy_password: Option<bool>,
 }
 
 #[tauri::command]
@@ -77,6 +85,56 @@ pub async fn update_settings(
         .floating_window_enabled
         .unwrap_or(current.floating_window_enabled);
     let font_family = input.font_family.unwrap_or(current.font_family);
+    let accent_color = input.accent_color.unwrap_or(current.accent_color);
+    let proxy_mode = input.proxy_mode.unwrap_or(current.proxy_mode);
+    let proxy_url = input
+        .proxy_url
+        .as_deref()
+        .and_then(db::normalize_proxy_url)
+        .unwrap_or_else(|| {
+            if input.proxy_url.is_some() {
+                String::new()
+            } else {
+                current.proxy_url.clone()
+            }
+        });
+    let proxy_no_proxy = input
+        .proxy_no_proxy
+        .as_deref()
+        .and_then(db::normalize_proxy_no_proxy)
+        .unwrap_or_else(|| {
+            if input.proxy_no_proxy.is_some() {
+                String::new()
+            } else {
+                current.proxy_no_proxy.clone()
+            }
+        });
+    let mut proxy_username = input
+        .proxy_username
+        .as_deref()
+        .and_then(db::normalize_proxy_optional)
+        .unwrap_or_else(|| {
+            if input.proxy_username.is_some() {
+                String::new()
+            } else {
+                current.proxy_username.clone()
+            }
+        });
+    proxy::validate_proxy_settings(proxy_mode, &proxy_url, &proxy_username)?;
+    let mut proxy_password_saved = current.proxy_password_saved;
+    if input.clear_proxy_password.unwrap_or(false) {
+        proxy::clear_proxy_password()?;
+        proxy_password_saved = false;
+    }
+    if let Some(password) = input.proxy_password.as_deref().map(str::trim) {
+        if !password.is_empty() {
+            proxy::save_proxy_password(password)?;
+            proxy_password_saved = true;
+        }
+    }
+    if proxy_mode != AppProxyMode::Custom {
+        proxy_username.clear();
+    }
     let settings = AppSettings {
         max_active_tasks,
         default_save_dir,
@@ -89,9 +147,19 @@ pub async fn update_settings(
         start_on_boot,
         floating_window_enabled,
         font_family,
+        accent_color,
+        proxy_mode,
+        proxy_url,
+        proxy_no_proxy,
+        proxy_username,
+        proxy_password_saved,
     };
 
     db::upsert_settings(&state.pool, &settings).await?;
+    state
+        .engine_registry
+        .set_proxy_config(proxy::ResolvedProxyConfig::from_settings(&settings))
+        .await;
     state.speed_limiter.set_limit(db::parse_speed_limit_bps(
         settings.global_speed_limit_bps.as_deref(),
     ));

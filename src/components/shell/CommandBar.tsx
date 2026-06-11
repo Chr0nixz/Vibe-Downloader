@@ -171,19 +171,19 @@ export function CommandBar({
 
   return (
     <section
-      className="flex min-w-0 items-center gap-1 border-b border-border-subtle bg-surface-base px-2 py-1.5 md:gap-2 md:px-3 md:py-2"
+      className="flex min-w-0 items-center gap-1.5 border-b border-border-subtle bg-surface-base px-2 py-1.5 md:gap-2.5 md:px-3 md:py-2"
       aria-label={t("commandBar.toolbarAria")}
     >
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             variant="default"
-            size="icon"
-            className="h-11 w-11 shrink-0 md:h-8 md:w-8"
+            className="h-11 shrink-0 gap-2 px-4 text-sm font-semibold md:h-9 md:px-3.5"
             aria-label={t("commandBar.newDownloadAria")}
             onClick={onNewDownload}
           >
             <Plus className="h-4 w-4" />
+            <span className="hidden md:inline">{t("commandBar.newDownload")}</span>
           </Button>
         </TooltipTrigger>
         <TooltipContent>{t("commandBar.newDownload")}</TooltipContent>
@@ -306,11 +306,11 @@ export function CommandBar({
       <Button
         variant="outline"
         size="sm"
-        className="hidden shrink-0 md:inline-flex"
+        className="hidden shrink-0 gap-2 md:inline-flex"
         onClick={onOpenPalette}
       >
         {t("commandBar.palette")}
-        <kbd className="ml-2 rounded border border-border-subtle px-1.5 py-0.5 font-mono text-[10px] text-text-muted">
+        <kbd className="ml-1 rounded border border-border-subtle bg-surface-root px-1.5 py-0.5 font-mono text-[10px] font-semibold text-text-secondary">
           {formatShortcut("mod+K", platform)}
         </kbd>
       </Button>

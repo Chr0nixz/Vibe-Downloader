@@ -56,6 +56,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
 
         if (task.status === "completed") {
           notifiedStatuses.current.add(notificationKey);
+          useTaskStore.getState().markCompletionFlash(task.id);
           addToast({
             tone: "success",
             title: i18n.t("toast.taskCompleted", { name: task.fileName }),

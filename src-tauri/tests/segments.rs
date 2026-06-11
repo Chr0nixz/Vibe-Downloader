@@ -6,8 +6,8 @@ use tauri_app_lib::{
     db,
     download::ProbeResult,
     models::{
-        AppFontFamily, AppSettings, BrowserKind, HashVerificationStatus, SegmentStatus, Task,
-        TaskKind, TaskRecord, TaskStatus, TaskUpdatedPayload,
+        AppAccentColor, AppFontFamily, AppSettings, BrowserKind, HashVerificationStatus,
+        SegmentStatus, Task, TaskKind, TaskRecord, TaskStatus, TaskUpdatedPayload,
     },
 };
 
@@ -109,6 +109,12 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         start_on_boot: false,
         floating_window_enabled: false,
         font_family: AppFontFamily::SourceHanSansSc,
+        accent_color: AppAccentColor::Blue,
+        proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
+        proxy_url: String::new(),
+        proxy_no_proxy: String::new(),
+        proxy_username: String::new(),
+        proxy_password_saved: false,
     };
 
     let segments = db::ensure_task_segments_with_settings(&pool, &task, &settings)
@@ -151,6 +157,12 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
         start_on_boot: false,
         floating_window_enabled: false,
         font_family: AppFontFamily::SourceHanSansSc,
+        accent_color: AppAccentColor::Blue,
+        proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
+        proxy_url: String::new(),
+        proxy_no_proxy: String::new(),
+        proxy_username: String::new(),
+        proxy_password_saved: false,
     };
 
     let planned_slots = db::planned_segment_count_with_plan(
@@ -298,6 +310,11 @@ async fn settings_defaults_use_download_dir_and_two_active_tasks() {
     );
     assert!(!settings.floating_window_enabled);
     assert_eq!(settings.font_family, AppFontFamily::SourceHanSansSc);
+    assert_eq!(settings.proxy_mode, tauri_app_lib::proxy::AppProxyMode::Off);
+    assert!(settings.proxy_url.is_empty());
+    assert!(settings.proxy_no_proxy.is_empty());
+    assert!(settings.proxy_username.is_empty());
+    assert!(!settings.proxy_password_saved);
 }
 
 #[tokio::test]
@@ -317,6 +334,12 @@ async fn settings_upsert_and_clamp_active_task_count() {
             start_on_boot: false,
             floating_window_enabled: false,
             font_family: AppFontFamily::System,
+            accent_color: AppAccentColor::Blue,
+            proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
+            proxy_url: String::new(),
+            proxy_no_proxy: String::new(),
+            proxy_username: String::new(),
+            proxy_password_saved: false,
         },
     )
     .await
@@ -346,6 +369,12 @@ async fn settings_upsert_and_clamp_active_task_count() {
             start_on_boot: true,
             floating_window_enabled: true,
             font_family: AppFontFamily::SourceHanSansSc,
+            accent_color: AppAccentColor::Blue,
+            proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
+            proxy_url: String::new(),
+            proxy_no_proxy: String::new(),
+            proxy_username: String::new(),
+            proxy_password_saved: false,
         },
     )
     .await

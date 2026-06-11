@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+use crate::proxy::AppProxyMode;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -500,6 +502,34 @@ impl AppFontFamily {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AppAccentColor {
+    Blue,
+    Purple,
+    Teal,
+    Green,
+    Orange,
+    Rose,
+    Indigo,
+    Amber,
+}
+
+impl AppAccentColor {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blue => "blue",
+            Self::Purple => "purple",
+            Self::Teal => "teal",
+            Self::Green => "green",
+            Self::Orange => "orange",
+            Self::Rose => "rose",
+            Self::Indigo => "indigo",
+            Self::Amber => "amber",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -514,6 +544,12 @@ pub struct AppSettings {
     pub start_on_boot: bool,
     pub floating_window_enabled: bool,
     pub font_family: AppFontFamily,
+    pub accent_color: AppAccentColor,
+    pub proxy_mode: AppProxyMode,
+    pub proxy_url: String,
+    pub proxy_no_proxy: String,
+    pub proxy_username: String,
+    pub proxy_password_saved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
