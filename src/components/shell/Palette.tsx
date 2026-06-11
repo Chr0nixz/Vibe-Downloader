@@ -7,6 +7,7 @@ import {
   FolderOpen,
   Gauge,
   ListChecks,
+  Moon,
   Pause,
   Play,
   Plus,
@@ -14,13 +15,16 @@ import {
   Search,
   Settings,
   SlidersHorizontal,
+  Sun,
   Trash2,
 } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { useTheme } from "next-themes";
 import { useTranslation } from "react-i18next";
 
 import type { AppSettings } from "@/generated/bindings";
+import type { Platform } from "@/lib/platform";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -107,6 +111,7 @@ const DEFAULT_FILTERS = {
 export function Palette({
   open,
   onOpenChange,
+  platform,
   selectedTask,
   onNewDownload,
   onStart,
@@ -124,6 +129,7 @@ export function Palette({
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
+  platform: Platform;
   selectedTask: Task | null;
   onNewDownload: () => void;
   onStart: () => void;
@@ -165,6 +171,7 @@ export function Palette({
   const settings = useSettingsStore((s) => s.settings);
   const setSettings = useSettingsStore((s) => s.setSettings);
   const addToast = useToastStore((s) => s.addToast);
+  const { setTheme } = useTheme();
 
   const visibleTasks = useMemo(
     () => filterTasks(tasks, nav, taskSearch, sortKey, sortDirection, filters),
@@ -190,6 +197,7 @@ export function Palette({
     () =>
       buildCommands({
         t,
+        platform,
         selectedTask,
         selectedTasks,
         selectedCount: selectedIds.length,
@@ -223,6 +231,7 @@ export function Palette({
         setSettings,
         setTasks,
         setError,
+        setTheme,
       }),
     [
       clearSelectedIds,
@@ -243,6 +252,7 @@ export function Palette({
       onRetry,
       onSetNav,
       onStart,
+      platform,
       selectedIds.length,
       selectedTask,
       selectedTasks,
@@ -253,6 +263,7 @@ export function Palette({
       setSettings,
       setSort,
       setTasks,
+      setTheme,
       settings,
       sortDirection,
       sortKey,
@@ -425,7 +436,7 @@ export function Palette({
             ) : (
               groupedCommands.map((entry) => (
                 <div key={entry.group} className="py-1">
-                  <p className="px-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-text-muted">
+                  <p className="px-2 pb-1 text-[11px] font-semibold text-text-muted">
                     {t(`palette.groups.${entry.group}`)}
                   </p>
                   <div className="space-y-1">
@@ -518,6 +529,7 @@ function CommandRow({
 
 function buildCommands({
   t,
+  platform,
   selectedTask,
   selectedTasks,
   selectedCount,
@@ -551,8 +563,10 @@ function buildCommands({
   setSettings,
   setTasks,
   setError,
+  setTheme,
 }: {
   t: TFunction;
+  platform: Platform;
   selectedTask: Task | null;
   selectedTasks: Task[];
   selectedCount: number;
@@ -586,6 +600,7 @@ function buildCommands({
   setSettings: (settings: AppSettings) => void;
   setTasks: (tasks: Task[]) => void;
   setError: (error: string | null) => void;
+  setTheme: (theme: string) => void;
 }): PaletteCommand[] {
   const noTask = t("palette.disabled.noTask");
   const noSelection = t("palette.disabled.noSelection");
@@ -593,6 +608,7 @@ function buildCommands({
   const settingsUnavailable = t("palette.disabled.settingsUnavailable");
   const selectedName = selectedTask?.fileName ?? "";
   const currentLimit = Number(settings?.globalSpeedLimitBps ?? 0);
+  const mod = platform === "macos" ? "\u2318" : "Ctrl+";
 
   const canStart =
     !!selectedTask &&
@@ -640,6 +656,7 @@ function buildCommands({
     group: "app",
     icon: Plus,
     keywords: keyword("new", "download", "add", "url", "新建", "下载", "添加"),
+    shortcut: `${mod}N`,
     enabled: true,
     featured: true,
     run: onNewDownload,
@@ -663,10 +680,33 @@ function buildCommands({
     group: "app",
     icon: Settings,
     keywords: keyword("settings", "preferences", "配置", "设置"),
+    shortcut: `${mod},`,
     enabled: true,
     active: nav === "settings",
     featured: true,
     run: () => onSetNav("settings"),
+  });
+  push({
+    id: "app.theme.dark",
+    label: t("palette.commands.themeDark"),
+    description: t("palette.descriptions.themeDark"),
+    group: "app",
+    icon: Moon,
+    keywords: keyword("dark", "theme", "深色", "暗夜", "模式"),
+    enabled: true,
+    active: false,
+    run: () => setTheme("dark"),
+  });
+  push({
+    id: "app.theme.light",
+    label: t("palette.commands.themeLight"),
+    description: t("palette.descriptions.themeLight"),
+    group: "app",
+    icon: Sun,
+    keywords: keyword("light", "theme", "浅色", "亮色", "模式"),
+    enabled: true,
+    active: false,
+    run: () => setTheme("light"),
   });
 
   push({
@@ -712,6 +752,7 @@ function buildCommands({
     group: "task",
     icon: File,
     keywords: keyword("open", "file", "打开", "文件"),
+    shortcut: `${mod}\u21B5`,
     enabled: canOpenFile,
     disabledReason: selectedTask ? t("palette.disabled.completedOnly") : noTask,
     featured: true,
@@ -724,6 +765,7 @@ function buildCommands({
     group: "task",
     icon: FolderOpen,
     keywords: keyword("open", "folder", "directory", "打开", "文件夹", "目录"),
+    shortcut: `${mod}O`,
     enabled: !!selectedTask,
     disabledReason: noTask,
     featured: true,
@@ -738,6 +780,7 @@ function buildCommands({
     group: "task",
     icon: detailOpen ? EyeOff : Eye,
     keywords: keyword("details", "drawer", "inspect", "详情", "详细"),
+    shortcut: `${mod}D`,
     enabled: !!selectedTask,
     disabledReason: noTask,
     featured: true,
@@ -750,6 +793,7 @@ function buildCommands({
     group: "task",
     icon: Trash2,
     keywords: keyword("delete", "remove", "删除", "移除"),
+    shortcut: "Del",
     enabled: !!selectedTask,
     disabledReason: noTask,
     danger: true,
@@ -764,6 +808,7 @@ function buildCommands({
     group: "bulk",
     icon: ListChecks,
     keywords: keyword("select", "visible", "current", "选择", "当前结果"),
+    shortcut: `${mod}A`,
     enabled: visibleTasks.length > 0,
     disabledReason: noVisibleTasks,
     featured: true,
@@ -776,6 +821,7 @@ function buildCommands({
     group: "bulk",
     icon: ListChecks,
     keywords: keyword("clear", "selection", "unselect", "清除", "取消选择"),
+    shortcut: `${mod}Shift+A`,
     enabled: selectedCount > 0,
     disabledReason: noSelection,
     featured: true,

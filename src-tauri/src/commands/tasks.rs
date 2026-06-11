@@ -837,7 +837,20 @@ pub async fn pause_task(
     id: String,
 ) -> Result<Task, String> {
     tracing::info!(task_id = %id, "pausing task");
-    if let Some(control) = state.downloads.lock().await.get(&id) {
+    let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
+    if task_for_runtime
+        .as_ref()
+        .is_some_and(|task| is_bt_protocol(&task.protocol))
+    {
+        if let Some(control) = state.downloads.lock().await.remove(&id) {
+            control.cancel.store(true, Ordering::SeqCst);
+            control.handle.abort();
+        }
+        if let Some(task) = task_for_runtime.as_ref() {
+            state.engine_registry.delete_runtime_task(task, false).await;
+        }
+        let _ = state.request_headers.lock().await.remove(&id);
+    } else if let Some(control) = state.downloads.lock().await.get(&id) {
         control.cancel.store(true, Ordering::SeqCst);
     }
     db::update_task_status(
@@ -920,7 +933,20 @@ pub async fn cancel_task(
     id: String,
 ) -> Result<Task, String> {
     tracing::info!(task_id = %id, "canceling task");
-    if let Some(control) = state.downloads.lock().await.get(&id) {
+    let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
+    if task_for_runtime
+        .as_ref()
+        .is_some_and(|task| is_bt_protocol(&task.protocol))
+    {
+        if let Some(control) = state.downloads.lock().await.remove(&id) {
+            control.cancel.store(true, Ordering::SeqCst);
+            control.handle.abort();
+        }
+        if let Some(task) = task_for_runtime.as_ref() {
+            state.engine_registry.delete_runtime_task(task, false).await;
+        }
+        let _ = state.request_headers.lock().await.remove(&id);
+    } else if let Some(control) = state.downloads.lock().await.get(&id) {
         control.cancel.store(true, Ordering::SeqCst);
     }
     db::update_task_status(
@@ -1308,14 +1334,19 @@ async fn schedule_queued_tasks_inner(
             break;
         }
 
-        let queued =
-            match db::list_queued_task_records(&pool, i64::from(settings.max_active_tasks)).await {
-                Ok(tasks) => tasks,
-                Err(error) => {
-                    tracing::error!(error = %error, "failed to load queued tasks");
-                    break;
-                }
-            };
+        let queued_limit = i64::from(settings.max_active_tasks)
+            .saturating_mul(i64::from(settings.max_connections_per_host).max(1))
+            .clamp(
+                i64::from(settings.max_active_tasks).max(1),
+                db::DEFAULT_TASK_PAGE_SIZE,
+            );
+        let queued = match db::list_queued_task_records(&pool, queued_limit).await {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to load queued tasks");
+                break;
+            }
+        };
         if queued.is_empty() {
             break;
         }

@@ -30,7 +30,7 @@ export function TaskRecoveryActions({
   if (!task.errorMessage || actions.length === 0) return null;
 
   return (
-    <div className="rounded-md border border-status-danger/25 bg-status-danger/10 px-3 py-2">
+    <div className="rounded-md border border-border-danger-subtle bg-status-danger/10 px-3 py-2">
       <p className="text-xs leading-5 text-status-danger">
         {errorMessage(task.errorMessage)}
       </p>

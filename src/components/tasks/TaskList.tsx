@@ -2,7 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useReducedMotion } from "framer-motion";
-import { ChevronDown, SlidersHorizontal } from "lucide-react";
+import { ChevronDown, Plus, Search, SlidersHorizontal } from "lucide-react";
 
 const SettingsPage = lazy(() =>
   import("@/components/settings/SettingsPage").then((m) => ({
@@ -244,17 +244,17 @@ export function TaskList({
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-root">
       {error ? (
         <div
-          className="border-b border-status-danger/30 bg-status-danger/10 px-4 py-2 text-sm text-status-danger"
+          className="border-b border-border-danger bg-status-danger/10 px-4 py-2 text-sm text-status-danger"
           role="alert"
         >
           {error}
         </div>
       ) : null}
 
-      <div className="border-b border-border-subtle bg-surface-base px-3 py-2 text-xs">
+      <div className="border-b border-border-subtle bg-surface-base/70 px-3 py-2 text-xs">
         <Button
           type="button"
-          variant="outline"
+          variant="ghost"
           size="sm"
           aria-expanded={toolPanelOpen}
           aria-controls="task-list-tool-panel"
@@ -262,6 +262,7 @@ export function TaskList({
             toolPanelOpen ? "taskList.hideToolPanel" : "taskList.showToolPanel",
           )}
           onClick={() => setToolPanelOpen((open) => !open)}
+          className="text-text-muted"
         >
           <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
           {t("taskList.toolPanel")}
@@ -417,17 +418,38 @@ export function TaskList({
         className="min-h-0 flex-1 overflow-y-auto"
       >
         {loading ? (
-          <p className="px-4 py-8 text-sm text-text-muted">{t("taskList.loading")}</p>
+          <div className="flex flex-col items-center justify-center gap-3 px-4 py-16">
+            <div className="h-8 w-8 animate-spin rounded-full border-2 border-border-subtle border-t-accent-primary" />
+            <p className="text-sm text-text-muted">{t("taskList.loading")}</p>
+          </div>
         ) : filtered.length === 0 ? (
-          <p className="px-4 py-8 text-sm text-text-muted">{t("taskList.empty")}</p>
+          <div className="flex flex-col items-center justify-center gap-4 px-6 py-20 text-center">
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-accent-primary/8">
+              {search ? (
+                <Search className="h-7 w-7 text-text-muted" />
+              ) : (
+                <Plus className="h-7 w-7 text-accent-primary/70" />
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium text-text-primary">
+                {search ? t("taskList.emptySearch") : t("taskList.empty")}
+              </p>
+              {!search ? (
+                <p className="max-w-xs text-xs leading-relaxed text-text-muted">
+                  {t("taskList.emptyHint")}
+                </p>
+              ) : null}
+            </div>
+          </div>
         ) : (
           <>
             <div
               role="listbox"
               aria-label={t("taskList.aria")}
               onKeyDown={handleListboxKeyDown}
-              className="relative p-2.5 sm:p-3 md:p-4"
-              style={{ height: virtualizer.getTotalSize() }}
+              className="relative [--lp:10px] sm:[--lp:12px] md:[--lp:16px] p-2.5 sm:p-3 md:p-4 pt-[var(--lp)]! pb-[var(--lp)]!"
+              style={{ height: `calc(${virtualizer.getTotalSize()}px + var(--lp, 16px) * 2)` }}
             >
               {virtualizer.getVirtualItems().map((virtualRow) => {
                 const task = filtered[virtualRow.index];
@@ -439,7 +461,7 @@ export function TaskList({
                     className="absolute inset-x-2.5 sm:inset-x-3 md:inset-x-4"
                     style={{
                       top: 0,
-                      transform: `translateY(${virtualRow.start}px)`,
+                      transform: `translateY(calc(${virtualRow.start}px + var(--lp, 16px)))`,
                       paddingBottom: virtualRow.index < filtered.length - 1 ? 10 : 0,
                     }}
                   >
@@ -488,13 +510,15 @@ function SelectControl({
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="flex h-11 items-center gap-1 text-text-muted md:h-8">
-      <span className="sr-only">{label}</span>
+    <label className="flex h-11 items-center gap-1.5 text-text-muted md:h-8">
+      <span className="text-[11px] font-medium text-text-muted/70">
+        {label}
+      </span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
         aria-label={label}
-        className="h-full rounded-md border border-border-subtle bg-surface-root px-2 text-xs text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+        className="h-full cursor-pointer rounded-md border border-border-subtle bg-surface-root px-2.5 text-xs font-medium text-text-secondary transition-colors hover:border-border-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
         title={label}
       >
         {options.map(([optionValue, optionLabel]) => (

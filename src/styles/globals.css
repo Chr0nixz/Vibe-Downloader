@@ -46,6 +46,18 @@
   --color-surface-overlay: var(--surface-overlay);
   --color-surface-scrim: var(--surface-scrim);
   --color-border-subtle: var(--border-subtle);
+  --color-border-divider: var(--border-divider);
+  --color-border-panel: var(--border-panel);
+  --color-border-separator: var(--border-separator);
+  --color-border-container: var(--border-container);
+  --color-border-danger: var(--border-danger);
+  --color-border-danger-strong: var(--border-danger-strong);
+  --color-border-danger-subtle: var(--border-danger-subtle);
+  --color-border-success: var(--border-success);
+  --color-border-success-strong: var(--border-success-strong);
+  --color-border-accent: var(--border-accent);
+  --color-border-accent-subtle: var(--border-accent-subtle);
+  --color-border-hover: var(--border-hover);
   --color-text-primary: var(--text-primary);
   --color-text-secondary: var(--text-secondary);
   --color-text-muted: var(--text-muted);
@@ -106,6 +118,49 @@
 
   to {
     opacity: 1;
+  }
+}
+
+@keyframes completion-glow {
+  0% {
+    box-shadow: 0 0 0 0 oklch(0.72 0.14 150 / 0);
+    border-color: var(--border-subtle);
+  }
+  20% {
+    box-shadow: 0 0 0 3px oklch(0.72 0.14 150 / 0.3), 0 0 16px oklch(0.72 0.14 150 / 0.2);
+    border-color: var(--status-success);
+  }
+  100% {
+    box-shadow: 0 0 0 0 oklch(0.72 0.14 150 / 0);
+    border-color: var(--status-success);
+  }
+}
+
+@keyframes progress-burst {
+  0% {
+    filter: brightness(1);
+  }
+  30% {
+    filter: brightness(1.6);
+  }
+  100% {
+    filter: brightness(1);
+  }
+}
+
+.completion-flash {
+  animation: completion-glow 1.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.completion-flash-progress {
+  animation: progress-burst 1.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .completion-flash,
+  .completion-flash-progress {
+    animation: none !important;
+    transition: none !important;
   }
 }
 

@@ -52,6 +52,12 @@ let settings: AppSettings = loadStoredSettings() ?? {
   startOnBoot: false,
   floatingWindowEnabled: false,
   fontFamily: "source_han_sans_sc",
+  accentColor: "blue",
+  proxyMode: "off",
+  proxyUrl: "",
+  proxyNoProxy: "",
+  proxyUsername: "",
+  proxyPasswordSaved: false,
 };
 let progressTimer: ReturnType<typeof setInterval> | undefined;
 const progressListeners = new Set<BrowserListener>();
@@ -137,6 +143,23 @@ function loadStoredSettings(): AppSettings | null {
           parsed.fontFamily === "system" || parsed.fontFamily === "source_han_sans_sc"
             ? parsed.fontFamily
             : "source_han_sans_sc",
+        accentColor:
+          parsed.accentColor === "blue" ||
+          parsed.accentColor === "purple" ||
+          parsed.accentColor === "teal" ||
+          parsed.accentColor === "green" ||
+          parsed.accentColor === "orange" ||
+          parsed.accentColor === "rose" ||
+          parsed.accentColor === "indigo" ||
+          parsed.accentColor === "amber"
+            ? parsed.accentColor
+            : "blue",
+        proxyMode:
+          parsed.proxyMode === "system" || parsed.proxyMode === "custom" ? parsed.proxyMode : "off",
+        proxyUrl: typeof parsed.proxyUrl === "string" ? parsed.proxyUrl : "",
+        proxyNoProxy: typeof parsed.proxyNoProxy === "string" ? parsed.proxyNoProxy : "",
+        proxyUsername: typeof parsed.proxyUsername === "string" ? parsed.proxyUsername : "",
+        proxyPasswordSaved: Boolean(parsed.proxyPasswordSaved),
       };
     }
     return null;
@@ -658,6 +681,16 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
     floatingWindowEnabled:
       input.floatingWindowEnabled ?? settings.floatingWindowEnabled,
     fontFamily: input.fontFamily ?? settings.fontFamily,
+    accentColor: input.accentColor ?? settings.accentColor,
+    proxyMode: input.proxyMode ?? settings.proxyMode,
+    proxyUrl: input.proxyUrl ?? settings.proxyUrl,
+    proxyNoProxy: input.proxyNoProxy ?? settings.proxyNoProxy,
+    proxyUsername: input.proxyUsername ?? settings.proxyUsername,
+    proxyPasswordSaved: input.clearProxyPassword
+      ? false
+      : input.proxyPassword
+        ? true
+        : settings.proxyPasswordSaved,
   };
   persistSettings();
   emitSettingsChanged();

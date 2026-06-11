@@ -6,6 +6,7 @@ pub mod events;
 pub mod logging;
 pub mod models;
 pub mod platform;
+pub mod proxy;
 pub mod secure_headers;
 
 use std::{
@@ -137,6 +138,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     builder
         .typ::<models::AppErrorPayload>()
         .typ::<models::AppSettings>()
+        .typ::<proxy::AppProxyMode>()
         .typ::<models::TaskUpdatedPayload>()
         .typ::<models::TaskProgressPayload>()
         .typ::<models::TaskFailureCategory>()
@@ -358,6 +360,11 @@ pub fn run() {
                 db::parse_speed_limit_bps(settings.global_speed_limit_bps.as_deref()),
             ));
             let engine_registry = Arc::new(download::EngineRegistry::new()?);
+            tauri::async_runtime::block_on(async {
+                engine_registry
+                    .set_proxy_config(proxy::ResolvedProxyConfig::from_settings(&settings))
+                    .await
+            });
             let browser_realtime = browser_realtime::BrowserRealtimeState::new();
 
             app.manage(AppState {
@@ -376,6 +383,7 @@ pub fn run() {
             {
                 let state = handle.state::<AppState>();
                 tauri::async_runtime::block_on(async {
+                    commands::tasks::schedule_queued_tasks(handle.clone(), state.inner()).await;
                     commands::tasks::schedule_retry_after_wakeup(handle.clone(), state.inner())
                         .await
                 });

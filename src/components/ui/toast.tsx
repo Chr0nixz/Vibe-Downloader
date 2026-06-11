@@ -95,8 +95,8 @@ function ToastItem({
       transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
       className={cn(
         "pointer-events-auto grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3 rounded-lg border bg-surface-overlay px-3 py-3 shadow-lg backdrop-blur-sm",
-        toast.tone === "success" && "border-status-success/35",
-        toast.tone === "error" && "border-status-danger/45",
+        toast.tone === "success" && "border-border-success-strong",
+        toast.tone === "error" && "border-border-danger-strong",
         toast.tone === "info" && "border-border-subtle",
       )}
       onMouseEnter={pauseTimer}

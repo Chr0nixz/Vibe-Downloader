@@ -17,5 +17,12 @@ export async function applyGlobalSpeedLimit(
     startOnBoot: settings.startOnBoot,
     floatingWindowEnabled: settings.floatingWindowEnabled,
     fontFamily: settings.fontFamily,
+    accentColor: settings.accentColor,
+    proxyMode: settings.proxyMode,
+    proxyUrl: settings.proxyUrl,
+    proxyNoProxy: settings.proxyNoProxy,
+    proxyUsername: settings.proxyUsername,
+    proxyPassword: null,
+    clearProxyPassword: false,
   });
 }

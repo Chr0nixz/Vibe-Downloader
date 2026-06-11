@@ -26,26 +26,35 @@ export function StatusBar({ className }: { className?: string }) {
   return (
     <footer
       className={cn(
-        "order-2 flex h-9 shrink-0 items-center justify-between gap-3 border-t border-border-subtle bg-surface-base px-3 text-xs text-text-secondary md:order-none md:h-8 md:px-4",
+        "order-2 flex h-9 shrink-0 items-center justify-between gap-3 border-t border-border-subtle bg-surface-base px-3 text-xs md:order-none md:h-8 md:px-4",
         className,
       )}
       role="contentinfo"
       aria-live="polite"
       aria-atomic="false"
     >
-      <span className="min-w-0 truncate">
-        {t("statusBar.total")}{" "}
-        <span className="font-mono text-text-primary">
+      <span className="flex min-w-0 items-center gap-2">
+        <span className="text-text-muted">{t("statusBar.total")}</span>
+        <span className={cn(
+          "font-mono font-semibold tabular-nums",
+          stats.totalSpeed > 0 ? "text-accent-primary text-sm" : "text-text-secondary",
+        )}>
           {formatSpeed(stats.totalSpeed)}
         </span>
       </span>
-      <span className="shrink-0">
-        {t("statusBar.active")}{" "}
-        <span className="font-mono text-text-primary">{stats.active}</span>
+      <span className="flex shrink-0 items-center gap-1.5 text-text-muted">
+        <span>{t("statusBar.active")}</span>
+        <span className={cn(
+          "font-mono font-bold tabular-nums",
+          stats.active > 0 ? "text-accent-primary" : "text-text-secondary",
+        )}>{stats.active}</span>
         <span className="hidden sm:inline">
-          {" · "}
-          {t("statusBar.queued")}{" "}
-          <span className="font-mono text-text-primary">{stats.queued}</span>
+          <span className="text-border-subtle">·</span>
+          {" "}{t("statusBar.queued")}{" "}
+          <span className={cn(
+            "font-mono font-bold tabular-nums",
+            stats.queued > 0 ? "text-text-primary" : "text-text-secondary",
+          )}>{stats.queued}</span>
         </span>
       </span>
       <span className="flex min-w-0 items-center justify-end gap-2">

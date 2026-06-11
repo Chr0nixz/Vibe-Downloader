@@ -8,10 +8,12 @@ use sqlx::{
 };
 
 use crate::models::{
-    AppErrorPayload, AppFontFamily, AppSettings, BrowserKind, HashVerificationStatus,
-    RecoveryAction, RequestDiagnostic, RequestDiagnosticRecord, SegmentStatus, SegmentSummary,
-    TaskEvent, TaskFileRecord, TaskKind, TaskRecord, TaskSegmentRecord, TaskStatus,
+    AppAccentColor, AppErrorPayload, AppFontFamily, AppSettings, BrowserKind,
+    HashVerificationStatus, RecoveryAction, RequestDiagnostic, RequestDiagnosticRecord,
+    SegmentStatus, SegmentSummary, TaskEvent, TaskFileRecord, TaskKind, TaskRecord,
+    TaskSegmentRecord, TaskStatus,
 };
+use crate::proxy::{self, AppProxyMode};
 
 pub const DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;
 pub const MIN_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 0;
@@ -40,6 +42,12 @@ const SETTING_CLOSE_TO_TRAY: &str = "close_to_tray";
 const SETTING_START_ON_BOOT: &str = "start_on_boot";
 const SETTING_FLOATING_WINDOW_ENABLED: &str = "floating_window_enabled";
 const SETTING_FONT_FAMILY: &str = "font_family";
+const SETTING_ACCENT_COLOR: &str = "accent_color";
+const SETTING_PROXY_MODE: &str = "proxy_mode";
+const SETTING_PROXY_URL: &str = "proxy_url";
+const SETTING_PROXY_NO_PROXY: &str = "proxy_no_proxy";
+const SETTING_PROXY_USERNAME: &str = "proxy_username";
+const SETTING_PROXY_PASSWORD_SAVED: &str = "proxy_password_saved";
 
 pub struct DbConnection {
     pub pool: SqlitePool,
@@ -996,6 +1004,27 @@ pub async fn get_settings(
         .await?
         .map(|value| normalize_font_family(&value))
         .unwrap_or(AppFontFamily::SourceHanSansSc);
+    let accent_color = get_setting_value(pool, SETTING_ACCENT_COLOR)
+        .await?
+        .map(|value| normalize_accent_color(&value))
+        .unwrap_or(AppAccentColor::Blue);
+    let proxy_mode = get_setting_value(pool, SETTING_PROXY_MODE)
+        .await?
+        .map(|value| normalize_proxy_mode(&value))
+        .unwrap_or(AppProxyMode::Off);
+    let proxy_url = get_setting_value(pool, SETTING_PROXY_URL)
+        .await?
+        .and_then(|value| normalize_proxy_url(&value))
+        .unwrap_or_default();
+    let proxy_no_proxy = get_setting_value(pool, SETTING_PROXY_NO_PROXY)
+        .await?
+        .and_then(|value| normalize_proxy_no_proxy(&value))
+        .unwrap_or_default();
+    let proxy_username = get_setting_value(pool, SETTING_PROXY_USERNAME)
+        .await?
+        .and_then(|value| normalize_proxy_optional(&value))
+        .unwrap_or_default();
+    let proxy_password_saved = get_bool_setting(pool, SETTING_PROXY_PASSWORD_SAVED, false).await?;
 
     Ok(AppSettings {
         max_active_tasks,
@@ -1009,6 +1038,12 @@ pub async fn get_settings(
         start_on_boot,
         floating_window_enabled,
         font_family,
+        accent_color,
+        proxy_mode,
+        proxy_url,
+        proxy_no_proxy,
+        proxy_username,
+        proxy_password_saved,
     })
 }
 
@@ -1068,7 +1103,18 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         bool_setting_value(settings.floating_window_enabled),
     )
     .await?;
-    upsert_setting_value(pool, SETTING_FONT_FAMILY, settings.font_family.as_str()).await
+    upsert_setting_value(pool, SETTING_FONT_FAMILY, settings.font_family.as_str()).await?;
+    upsert_setting_value(pool, SETTING_ACCENT_COLOR, settings.accent_color.as_str()).await?;
+    upsert_setting_value(pool, SETTING_PROXY_MODE, settings.proxy_mode.as_str()).await?;
+    upsert_setting_value(pool, SETTING_PROXY_URL, &settings.proxy_url).await?;
+    upsert_setting_value(pool, SETTING_PROXY_NO_PROXY, &settings.proxy_no_proxy).await?;
+    upsert_setting_value(pool, SETTING_PROXY_USERNAME, &settings.proxy_username).await?;
+    upsert_setting_value(
+        pool,
+        SETTING_PROXY_PASSWORD_SAVED,
+        bool_setting_value(settings.proxy_password_saved),
+    )
+    .await
 }
 
 pub fn normalize_font_family(value: &str) -> AppFontFamily {
@@ -1077,6 +1123,36 @@ pub fn normalize_font_family(value: &str) -> AppFontFamily {
         "source_han_sans_sc" => AppFontFamily::SourceHanSansSc,
         _ => AppFontFamily::SourceHanSansSc,
     }
+}
+
+pub fn normalize_accent_color(value: &str) -> AppAccentColor {
+    match value.trim() {
+        "blue" => AppAccentColor::Blue,
+        "purple" => AppAccentColor::Purple,
+        "teal" => AppAccentColor::Teal,
+        "green" => AppAccentColor::Green,
+        "orange" => AppAccentColor::Orange,
+        "rose" => AppAccentColor::Rose,
+        "indigo" => AppAccentColor::Indigo,
+        "amber" => AppAccentColor::Amber,
+        _ => AppAccentColor::Blue,
+    }
+}
+
+pub fn normalize_proxy_mode(value: &str) -> AppProxyMode {
+    proxy::normalize_proxy_mode(value)
+}
+
+pub fn normalize_proxy_url(value: &str) -> Option<String> {
+    proxy::normalize_proxy_url(value)
+}
+
+pub fn normalize_proxy_no_proxy(value: &str) -> Option<String> {
+    proxy::normalize_proxy_no_proxy(value)
+}
+
+pub fn normalize_proxy_optional(value: &str) -> Option<String> {
+    proxy::normalize_proxy_optional(value)
 }
 
 pub fn normalize_speed_limit_bps(value: &str) -> Option<String> {
@@ -1937,6 +2013,30 @@ pub async fn update_task_progress(
     )
     .bind(downloaded_bytes)
     .bind(status.as_str())
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn update_task_health_summary(
+    pool: &SqlitePool,
+    task_id: &str,
+    health_summary: Option<&str>,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET health_summary = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(health_summary)
+    .bind(&updated_at)
     .bind(task_id)
     .execute(pool)
     .await

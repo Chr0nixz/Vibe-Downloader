@@ -56,22 +56,23 @@ interface TaskRowProps {
 
 const EMPTY_SPEED_HISTORY: SpeedSample[] = [];
 
-function statusTone(status: Task["status"]): string {
+function statusBadge(status: Task["status"]): string {
   switch (status) {
     case "downloading":
     case "retrying":
-      return "text-accent-primary";
+      return "bg-accent-primary/15 text-accent-primary";
     case "completed":
-      return "text-status-success";
+      return "bg-status-success/12 text-status-success";
     case "failed":
     case "needs_attention":
-      return "text-status-danger";
+      return "bg-status-danger/12 text-status-danger";
     case "paused":
+      return "bg-surface-raised text-text-muted";
     case "queued":
     case "waiting_network":
-      return "text-text-muted";
+      return "bg-surface-raised text-text-secondary";
     default:
-      return "text-text-secondary";
+      return "bg-surface-raised text-text-secondary";
   }
 }
 
@@ -94,6 +95,7 @@ export const TaskRow = memo(function TaskRow({
 }: TaskRowProps) {
   const { t } = useTranslation();
   const expanded = useTaskStore((s) => s.expandedTaskIds.includes(task.id));
+  const completionFlash = useTaskStore((s) => s.completionFlashIds.includes(task.id));
   const speedHistory = useTaskStore(
     (s) => s.speedHistoryByTaskId[task.id] ?? EMPTY_SPEED_HISTORY,
   );
@@ -160,14 +162,15 @@ export const TaskRow = memo(function TaskRow({
         }
       }}
       className={cn(
-        "relative overflow-hidden rounded-lg border border-border-subtle/70 bg-surface-base/85 px-3 py-3.5 shadow-[0_1px_2px_oklch(0_0_0_/_0.05),0_1px_0_oklch(1_0_0_/_0.025)_inset] transition-[background-color,border-color,box-shadow,transform] duration-ui ease-out hover:-translate-y-px hover:border-text-muted/30 hover:bg-surface-raised/70 hover:shadow-[0_6px_18px_oklch(0_0_0_/_0.08),0_1px_0_oklch(1_0_0_/_0.035)_inset] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70 sm:px-3.5 md:px-4",
+        "group relative overflow-hidden rounded-lg border border-transparent bg-surface-base/60 px-3 py-3.5 transition-[background-color,border-color,box-shadow,transform] duration-ui ease-out hover:-translate-y-px hover:bg-surface-raised/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70 sm:px-3.5 md:px-4",
         "grid gap-x-4 gap-y-3 md:grid-cols-[minmax(0,1fr)_auto] md:gap-y-2",
+        completionFlash && "completion-flash",
         selected &&
-          "border-accent-primary/35 bg-surface-raised ring-1 ring-accent-primary/45 shadow-[0_8px_24px_oklch(0_0_0_/_0.10),0_1px_0_oklch(1_0_0_/_0.04)_inset]",
-        multiSelected && !selected && "border-accent-primary/25 bg-accent-primary/5",
-        task.status === "completed" && "border-status-success/30",
-        (task.status === "failed" || task.status === "needs_attention") &&
-          "border-status-danger/35",
+          "border-border-accent bg-accent-primary/[0.06] shadow-[0_0_0_1px_var(--accent-primary)_/_0.2]",
+        multiSelected && !selected && "border-border-accent-subtle bg-accent-primary/[0.04]",
+        task.status === "completed" && !selected && "border-border-success",
+        (task.status === "failed" || task.status === "needs_attention") && !selected &&
+          "border-border-danger-subtle",
       )}
       transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
     >
@@ -190,10 +193,13 @@ export const TaskRow = memo(function TaskRow({
         <div className="min-w-0 flex-1 space-y-2">
         <div className="flex min-w-0 items-start justify-between gap-2 md:block">
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
               <div
                 id={nameId}
-                className="truncate text-sm font-medium text-text-primary"
+                className={cn(
+                  "truncate text-[0.9rem] font-semibold leading-snug text-text-primary",
+                  isActive && "text-[0.95rem]",
+                )}
               >
                 {task.fileName}
               </div>
@@ -203,7 +209,10 @@ export const TaskRow = memo(function TaskRow({
                 initial={reduceMotion ? false : { opacity: 0, scale: 0.96 }}
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-                className={cn("shrink-0 text-xs font-medium", statusTone(task.status))}
+                className={cn(
+                  "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold leading-none tracking-wide",
+                  statusBadge(task.status),
+                )}
               >
                 {t(`task.status.${task.status}`)}
               </motion.span>
@@ -217,43 +226,58 @@ export const TaskRow = memo(function TaskRow({
         <p
           id={diagnosticId}
           className={cn(
-            "truncate text-xs text-text-secondary",
-            speedTrend.tone === "warning" && !task.healthSummary && "text-status-warning",
-            speedTrend.tone === "stable" && !task.healthSummary && "text-accent-energy",
+            "truncate text-xs",
+            speedTrend.tone === "warning" && !task.healthSummary
+              ? "font-medium text-status-warning"
+              : speedTrend.tone === "stable" && !task.healthSummary
+                ? "font-medium text-accent-energy"
+                : "text-text-secondary",
           )}
         >
           {diagnosticLabel}
         </p>
 
-        <ProgressBar value={progress} label={progressLabel} active={isActive} smooth={!isActive} />
+        <ProgressBar
+          value={progress}
+          label={progressLabel}
+          active={isActive}
+          smooth={!isActive}
+          size={isActive ? "lg" : "default"}
+          className={completionFlash ? "completion-flash-progress" : undefined}
+        />
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs text-text-muted md:hidden">
-          <span className="text-text-primary">{formatSpeed(task.speedBps)}</span>
-          <span>
+          <span className={cn("text-text-primary", isActive && "text-sm font-semibold text-accent-primary")}>{formatSpeed(task.speedBps)}</span>
+          <span className="opacity-60 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
             {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
           </span>
-          <span>
+          <span className="opacity-60 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
             {formatPercent(task.downloadedBytes, task.totalSize)} · {t("task.eta")}{" "}
             {formatEta(task.downloadedBytes, task.totalSize, task.speedBps)}
           </span>
           {task.connectionCount > 0 ? (
-            <span>{t("task.connections", { count: task.connectionCount })}</span>
+            <span className="opacity-60 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
+              {t("task.connections", { count: task.connectionCount })}
+            </span>
           ) : null}
         </div>
         </div>
       </div>
 
       <div className="hidden min-w-36 flex-col items-end gap-1 text-right font-mono text-xs md:flex">
-        <span className="text-sm text-text-primary">{formatSpeed(task.speedBps)}</span>
-        <span className="text-text-muted">
+        <span className={cn(
+          "text-sm text-text-primary",
+          isActive && "text-base font-bold text-accent-primary",
+        )}>{formatSpeed(task.speedBps)}</span>
+        <span className="text-text-muted opacity-50 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
           {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
         </span>
-        <span className="text-text-muted">
+        <span className="text-text-muted opacity-50 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
           {formatPercent(task.downloadedBytes, task.totalSize)} · {t("task.eta")}{" "}
           {formatEta(task.downloadedBytes, task.totalSize, task.speedBps)}
         </span>
         {task.connectionCount > 0 ? (
-          <span className="text-text-muted">
+          <span className="text-text-muted opacity-50 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
             {t("task.connections", { count: task.connectionCount })}
           </span>
         ) : null}
@@ -292,7 +316,7 @@ export const TaskRow = memo(function TaskRow({
             exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -4 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
           >
-            <div className="grid gap-3 border-t border-border-subtle/70 pt-3 md:grid-cols-[minmax(0,1fr)_minmax(10rem,15rem)] md:items-center">
+            <div className="grid gap-3 border-t border-border-divider pt-3 md:grid-cols-[minmax(0,1fr)_minmax(10rem,15rem)] md:items-center">
               <div className="min-w-0 space-y-2 text-xs text-text-secondary">
                 <DetailLine label={t("task.expanded.saveDir")} value={task.saveDir} />
                 <DetailLine

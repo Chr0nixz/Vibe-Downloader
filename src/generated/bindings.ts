@@ -82,6 +82,8 @@ export const commands = {
 };
 
 /* Types */
+export type AppAccentColor = "blue" | "purple" | "teal" | "green" | "orange" | "rose" | "indigo" | "amber";
+
 export type AppErrorPayload = {
 	code: string,
 	message: string,
@@ -90,6 +92,8 @@ export type AppErrorPayload = {
 };
 
 export type AppFontFamily = "system" | "source_han_sans_sc";
+
+export type AppProxyMode = "off" | "system" | "custom";
 
 export type AppSettings = {
 	maxActiveTasks: number,
@@ -103,6 +107,12 @@ export type AppSettings = {
 	startOnBoot: boolean,
 	floatingWindowEnabled: boolean,
 	fontFamily: AppFontFamily,
+	accentColor: AppAccentColor,
+	proxyMode: AppProxyMode,
+	proxyUrl: string,
+	proxyNoProxy: string,
+	proxyUsername: string,
+	proxyPasswordSaved: boolean,
 };
 
 export type BatchImportItem = {
@@ -503,6 +513,13 @@ export type UpdateSettingsInput = {
 	startOnBoot: boolean | null,
 	floatingWindowEnabled: boolean | null,
 	fontFamily: AppFontFamily | null,
+	accentColor: AppAccentColor | null,
+	proxyMode: AppProxyMode | null,
+	proxyUrl: string | null,
+	proxyNoProxy: string | null,
+	proxyUsername: string | null,
+	proxyPassword: string | null,
+	clearProxyPassword: boolean | null,
 };
 
 /* Tauri Specta runtime */

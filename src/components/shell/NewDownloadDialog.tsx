@@ -294,12 +294,12 @@ export function NewDownloadDialog({
               </p>
             ) : null}
             {submitStatus ? (
-              <p role="status" className="rounded-md border border-accent-primary/30 bg-accent-primary/10 px-3 py-2 text-xs text-accent-primary">
+              <p role="status" className="rounded-md border border-border-accent bg-accent-primary/10 px-3 py-2 text-xs text-accent-primary">
                 {submitStatus}
               </p>
             ) : null}
             {error ? (
-              <div role="alert" className="rounded-md border border-status-danger/35 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+              <div role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
                 <p>{error}</p>
                 <p className="mt-1 text-text-secondary">
                   {t("newDownload.probeFailedHint")}
@@ -350,7 +350,7 @@ function BatchResultSummary({ result }: { result: BatchImportResult }) {
       {result.items.slice(0, 5).map((item) => (
         <div
           key={`${item.inputUrl}-${item.normalizedUrl ?? "invalid"}`}
-          className="grid gap-1 rounded-md border border-border-subtle/70 bg-surface-raised/50 px-2 py-1"
+          className="grid gap-1 rounded-md border border-border-divider bg-surface-raised/50 px-2 py-1"
         >
           <span className="truncate font-mono text-text-primary">
             {item.fileName ?? sanitizeUrlForDisplay(item.normalizedUrl ?? item.inputUrl)}

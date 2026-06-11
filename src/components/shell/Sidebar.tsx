@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -34,6 +35,17 @@ export function Sidebar() {
   const { t } = useTranslation();
   const nav = useTaskStore((s) => s.nav);
   const setNav = useTaskStore((s) => s.setNav);
+  const tasks = useTaskStore((s) => s.tasks);
+
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { all: tasks.length };
+    for (const task of tasks) {
+      c[task.status] = (c[task.status] ?? 0) + 1;
+    }
+    c.paused = (c.paused ?? 0) + (c.queued ?? 0) + (c.waiting_network ?? 0);
+    c.failed = (c.failed ?? 0) + (c.needs_attention ?? 0);
+    return c;
+  }, [tasks]);
 
   return (
     <nav
@@ -46,6 +58,8 @@ export function Sidebar() {
         const Icon = item.icon;
         const active = nav === item.id;
         const label = t(item.labelKey);
+        const count = item.id !== "settings" ? (counts[item.id] ?? 0) : 0;
+        const showBadge = item.id !== "settings" && item.id !== "all" && count > 0;
 
         return (
           <Tooltip key={item.id}>
@@ -57,18 +71,33 @@ export function Sidebar() {
                 aria-current={active ? "page" : undefined}
                 aria-label={label}
                 className={cn(
-                  "h-12 min-w-11 flex-1 justify-center gap-2 px-0 text-sm md:h-11 md:w-full md:flex-none md:justify-start lg:h-9 lg:px-3",
+                  "relative h-12 min-w-11 flex-1 justify-center gap-2.5 px-0 text-sm md:h-10 md:w-full md:flex-none md:justify-start lg:h-9 lg:px-3",
                   active
-                    ? "bg-accent-primary/10 text-text-primary ring-1 ring-accent-primary/35"
+                    ? "bg-accent-primary/12 font-semibold text-accent-primary shadow-[inset_3px_0_0_var(--accent-primary)] md:shadow-[inset_3px_0_0_var(--accent-primary)]"
                     : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
                 )}
               >
-                <Icon className="mx-auto h-4 w-4 shrink-0 lg:mx-0" aria-hidden />
+                <Icon className="mx-auto h-[18px] w-[18px] shrink-0 lg:mx-0" aria-hidden />
                 <span className="hidden lg:inline">{label}</span>
+                {showBadge ? (
+                  <span
+                    className={cn(
+                      "hidden rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none tabular-nums lg:inline-flex",
+                      active
+                        ? "bg-accent-primary/20 text-accent-primary"
+                        : item.id === "failed"
+                          ? "bg-status-danger/15 text-status-danger"
+                          : "bg-surface-raised text-text-muted",
+                    )}
+                  >
+                    {count > 99 ? "99+" : count}
+                  </span>
+                ) : null}
               </Button>
             </TooltipTrigger>
             <TooltipContent side="top" className="lg:hidden">
               {label}
+              {showBadge ? ` (${count})` : null}
             </TooltipContent>
           </Tooltip>
         );

@@ -61,9 +61,19 @@ const DeleteTaskDialog = lazy(() =>
     default: module.DeleteTaskDialog,
   })),
 );
+const BulkDeleteDialog = lazy(() =>
+  import("@/components/shell/BulkDeleteDialog").then((module) => ({
+    default: module.BulkDeleteDialog,
+  })),
+);
 const ResolveAttentionDialog = lazy(() =>
   import("@/components/shell/ResolveAttentionDialog").then((module) => ({
     default: module.ResolveAttentionDialog,
+  })),
+);
+const ShortcutPanel = lazy(() =>
+  import("@/components/shell/ShortcutPanel").then((module) => ({
+    default: module.ShortcutPanel,
   })),
 );
 
@@ -85,8 +95,10 @@ export function AppShell() {
   const { t } = useTranslation();
   const [platform, setPlatform] = useState<Platform>("unknown");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
+  const [bulkDeleteTargets, setBulkDeleteTargets] = useState<Task[]>([]);
   const [attentionRequest, setAttentionRequest] =
     useState<AttentionDialogRequest | null>(null);
 
@@ -216,17 +228,19 @@ export function AppShell() {
 
   const bulkDelete = useCallback((selectedTasks: Task[]) => {
     if (selectedTasks.length === 0) return;
-    const confirmed = window.confirm(
-      t("deleteDialog.bulkMessage", { count: selectedTasks.length }),
-    );
-    if (!confirmed) return;
+    setBulkDeleteTargets(selectedTasks);
+  }, []);
+
+  const confirmBulkDelete = useCallback((deleteFile: boolean) => {
+    const targets = bulkDeleteTargets;
+    setBulkDeleteTargets([]);
     void (async () => {
-      for (const task of selectedTasks) {
-        await runTaskAction(() => deleteTask(task.id, false));
+      for (const task of targets) {
+        await runTaskAction(() => deleteTask(task.id, deleteFile));
       }
       clearSelectedIds();
     })();
-  }, [clearSelectedIds, runTaskAction, t]);
+  }, [bulkDeleteTargets, clearSelectedIds, runTaskAction]);
 
   const submitAttentionResolution = useCallback((
     task: Task,
@@ -393,15 +407,54 @@ export function AppShell() {
   }, [settings?.fontFamily]);
 
   useEffect(() => {
+    document.documentElement.dataset.accent =
+      settings?.accentColor ?? "blue";
+  }, [settings?.accentColor]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      const isInput =
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable;
+
       if (matchesShortcut(event, "mod+k", platform)) {
         event.preventDefault();
         setPaletteOpen(true);
+        return;
+      }
+
+      if (matchesShortcut(event, "mod+/", platform)) {
+        event.preventDefault();
+        setShortcutPanelOpen((prev) => !prev);
+        return;
+      }
+
+      if (!isInput) {
+        if (event.key === "?") {
+          event.preventDefault();
+          setShortcutPanelOpen((prev) => !prev);
+          return;
+        }
+      }
+
+      if (matchesShortcut(event, "mod+n", platform)) {
+        event.preventDefault();
+        setNewDownloadOpen(true);
+        return;
+      }
+
+      if (matchesShortcut(event, "mod+,", platform)) {
+        event.preventDefault();
+        useTaskStore.getState().setNav("settings");
+        setDetailOpen(false);
+        return;
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [platform]);
+  }, [platform, setDetailOpen]);
 
   return (
     <div className="flex h-full flex-col">
@@ -463,6 +516,7 @@ export function AppShell() {
           <Palette
             open={paletteOpen}
             onOpenChange={setPaletteOpen}
+            platform={platform}
             selectedTask={taskSurfaceActive ? selected : null}
             onNewDownload={() => setNewDownloadOpen(true)}
             onStart={() => {
@@ -527,6 +581,18 @@ export function AppShell() {
           />
         </Suspense>
       ) : null}
+      {bulkDeleteTargets.length > 0 ? (
+        <Suspense fallback={null}>
+          <BulkDeleteDialog
+            tasks={bulkDeleteTargets}
+            open={bulkDeleteTargets.length > 0}
+            onOpenChange={(open) => {
+              if (!open) setBulkDeleteTargets([]);
+            }}
+            onDelete={confirmBulkDelete}
+          />
+        </Suspense>
+      ) : null}
       {attentionRequest ? (
         <Suspense fallback={null}>
           <ResolveAttentionDialog
@@ -544,6 +610,15 @@ export function AppShell() {
                 });
               }
             }}
+          />
+        </Suspense>
+      ) : null}
+      {shortcutPanelOpen ? (
+        <Suspense fallback={null}>
+          <ShortcutPanel
+            open={shortcutPanelOpen}
+            onOpenChange={setShortcutPanelOpen}
+            platform={platform}
           />
         </Suspense>
       ) : null}

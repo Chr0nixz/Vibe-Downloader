@@ -60,6 +60,7 @@ interface TaskStore {
   filters: TaskFilters;
   detailOpen: boolean;
   expandedTaskIds: string[];
+  completionFlashIds: string[];
   speedHistoryByTaskId: Record<string, SpeedSample[]>;
   loading: boolean;
   error: string | null;
@@ -86,6 +87,7 @@ interface TaskStore {
   setDetailOpen: (open: boolean) => void;
   toggleTaskExpanded: (id: string) => void;
   collapseTask: (id: string) => void;
+  markCompletionFlash: (id: string) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
 }
@@ -115,6 +117,7 @@ export const useTaskStore = create<TaskStore>((set) => ({
   },
   detailOpen: false,
   expandedTaskIds: [],
+  completionFlashIds: [],
   speedHistoryByTaskId: {},
   loading: true,
   error: null,
@@ -132,6 +135,7 @@ export const useTaskStore = create<TaskStore>((set) => ({
         hasMore: false,
         selectedIds: state.selectedIds.filter((id) => ids.has(id)),
         expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
+        completionFlashIds: state.completionFlashIds.filter((id) => ids.has(id)),
         speedHistoryByTaskId,
       };
     }),
@@ -151,6 +155,7 @@ export const useTaskStore = create<TaskStore>((set) => ({
         hasMore: nextTasks.length < total,
         selectedIds: state.selectedIds.filter((id) => ids.has(id)),
         expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
+        completionFlashIds: state.completionFlashIds.filter((id) => ids.has(id)),
         speedHistoryByTaskId,
       };
     }),
@@ -170,6 +175,7 @@ export const useTaskStore = create<TaskStore>((set) => ({
         filterOptions,
         selectedIds: state.selectedIds.filter((id) => ids.has(id)),
         expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
+        completionFlashIds: state.completionFlashIds.filter((id) => ids.has(id)),
         speedHistoryByTaskId,
       };
     }),
@@ -260,6 +266,18 @@ export const useTaskStore = create<TaskStore>((set) => ({
     set((state) => ({
       expandedTaskIds: state.expandedTaskIds.filter((taskId) => taskId !== id),
     })),
+  markCompletionFlash: (id) => {
+    set((state) => ({
+      completionFlashIds: state.completionFlashIds.includes(id)
+        ? state.completionFlashIds
+        : [...state.completionFlashIds, id],
+    }));
+    setTimeout(() => {
+      set((state) => ({
+        completionFlashIds: state.completionFlashIds.filter((taskId) => taskId !== id),
+      }));
+    }, 1800);
+  },
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
 }));
