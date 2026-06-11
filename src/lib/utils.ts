@@ -41,6 +41,17 @@ export function formatPercent(downloaded: number, total: number): string {
   return `${Math.min(100, (downloaded / total) * 100).toFixed(1)}%`;
 }
 
+export function sanitizeUrlForDisplay(value: string): string {
+  try {
+    const url = new URL(value);
+    url.username = url.username ? "user" : "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    return value.replace(/\/\/([^/@\s]+):([^/@\s]+)@/, "//user@");
+  }
+}
+
 export function formatShortcut(shortcut: string, platform: Platform): string {
   const mod = platform === "macos" ? "⌘" : "Ctrl";
   return shortcut.replace(/mod\+/gi, `${mod}+`);

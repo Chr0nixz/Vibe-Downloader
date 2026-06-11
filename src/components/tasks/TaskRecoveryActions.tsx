@@ -58,19 +58,19 @@ export function TaskRecoveryActions({
 function RecoveryIcon({ action }: { action: RecoveryAction }) {
   switch (action) {
     case "choose_another_name":
-      return <FilePenLine className="h-4 w-4" />;
+      return <FilePenLine className="h-4 w-4" aria-hidden />;
     case "choose_another_folder":
     case "open_folder":
-      return <FolderOpen className="h-4 w-4" />;
+      return <FolderOpen className="h-4 w-4" aria-hidden />;
     case "free_disk_space":
-      return <HardDrive className="h-4 w-4" />;
+      return <HardDrive className="h-4 w-4" aria-hidden />;
     case "check_url":
-      return <Link className="h-4 w-4" />;
+      return <Link className="h-4 w-4" aria-hidden />;
     case "retry_later":
-      return <Clock className="h-4 w-4" />;
+      return <Clock className="h-4 w-4" aria-hidden />;
     case "restart":
     case "retry":
     default:
-      return <RotateCcw className="h-4 w-4" />;
+      return <RotateCcw className="h-4 w-4" aria-hidden />;
   }
 }

@@ -28,6 +28,8 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
+suppaftp = { version = "8.0.4", default-features = false, features = ["tokio-rustls-ring", "deprecated"] }
+webpki-roots = "1.0.4"
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "migrate"] }
 tokio = { version = "1.52.3", features = ["fs", "io-util", "net", "sync", "time", "macros", "rt-multi-thread"] }
 specta = { version = "2.0.0-rc.25", features = ["derive", "chrono", "uuid"] }
@@ -48,5 +50,10 @@ sha2 = "0.10"
 zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 axum = { version = "0.8.7", features = ["ws"] }
 futures-util = "0.3"
+base64 = "0.22"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+keyring = "3"
+librqbit = { version = "9.0.0-rc.0", default-features = false, features = ["rust-tls"] }
+magnet-url = "3.0.0"
 
 [dev-dependencies]

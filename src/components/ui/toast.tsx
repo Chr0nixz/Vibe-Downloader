@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -47,10 +47,37 @@ function ToastItem({
   dismissLabel: string;
   onDismiss: () => void;
 }) {
-  useEffect(() => {
-    const timer = window.setTimeout(onDismiss, TOAST_TIMEOUT_MS);
-    return () => window.clearTimeout(timer);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const remainingRef = useRef(TOAST_TIMEOUT_MS);
+  const startedAtRef = useRef(Date.now());
+  const pausedRef = useRef(false);
+
+  const startTimer = useCallback(() => {
+    startedAtRef.current = Date.now();
+    pausedRef.current = false;
+    timerRef.current = setTimeout(onDismiss, remainingRef.current);
   }, [onDismiss]);
+
+  const pauseTimer = useCallback(() => {
+    if (pausedRef.current) return;
+    clearTimeout(timerRef.current);
+    remainingRef.current -= Date.now() - startedAtRef.current;
+    if (remainingRef.current < 0) remainingRef.current = 0;
+    pausedRef.current = true;
+  }, []);
+
+  const resumeTimer = useCallback(() => {
+    if (remainingRef.current <= 0) {
+      onDismiss();
+      return;
+    }
+    startTimer();
+  }, [onDismiss, startTimer]);
+
+  useEffect(() => {
+    startTimer();
+    return () => clearTimeout(timerRef.current);
+  }, [startTimer]);
 
   const Icon =
     toast.tone === "success"
@@ -72,6 +99,10 @@ function ToastItem({
         toast.tone === "error" && "border-status-danger/45",
         toast.tone === "info" && "border-border-subtle",
       )}
+      onMouseEnter={pauseTimer}
+      onMouseLeave={resumeTimer}
+      onFocusCapture={pauseTimer}
+      onBlurCapture={resumeTimer}
       role={toast.tone === "error" ? "alert" : "status"}
     >
       <Icon

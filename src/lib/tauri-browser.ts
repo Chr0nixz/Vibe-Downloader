@@ -7,9 +7,12 @@ import type {
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
   CreateTaskInput,
+  CursorPageInput,
   HashVerificationState,
   ImportUrlsInput,
+  ListTasksCursorInput,
   ListTasksInput,
+  ListTasksCursorResult,
   ProbeTaskInput,
   ProbeTaskPayload,
   RequestDiagnostic,
@@ -24,6 +27,7 @@ import type { TaskSegment } from "@/types/task-segment";
 import { normalizeTaskSegment } from "@/types/task-segment";
 import type { TaskProgressPayload } from "@/types/task-progress";
 import { createLogger } from "@/lib/logger";
+import { sanitizeUrlForDisplay } from "@/lib/utils";
 
 const log = createLogger("browser-mock");
 const STORAGE_KEY = "vibe-browser-mock-tasks";
@@ -231,11 +235,13 @@ function browserTask(
   timestamp: string,
 ): Task {
   const needsError = status === "failed" || status === "needs_attention";
+  const parsed = safeUrl(url);
+  const protocol = parsed?.protocol.replace(":", "") || "https";
   return normalizeTask({
     id,
     url,
     finalUrl: url,
-    protocol: "https",
+    protocol,
     taskKind: "single_file",
     fileName,
     saveDir: "~/Downloads",
@@ -258,6 +264,7 @@ function browserTask(
     errorCode: null,
     recoveryActions: [],
     retryAfterAt: null,
+    failureCategory: needsError ? "other" : null,
     expectedHashSha256: null,
     actualHashSha256: null,
     hashStatus: "not_requested",
@@ -494,8 +501,42 @@ export async function listTasksPage(input: ListTasksInput) {
   };
 }
 
+export async function listTasksCursor(input: ListTasksCursorInput) {
+  const pageSize = Math.max(1, Math.min(500, input.pageSize ?? 100));
+  const start = Math.max(0, Number(input.cursor ?? 0) || 0);
+  const all = await listTasks();
+  const items = all.slice(start, start + pageSize);
+  const next = start + items.length;
+  const failureCategories = Array.from(
+    new Set(all.map((task) => task.failureCategory ?? mockFailureCategory(task)).filter(Boolean)),
+  ).sort() as string[];
+  return {
+    items,
+    nextCursor: next < all.length ? String(next) : null,
+    totalEstimate: all.length,
+    filterOptions: {
+      sources: Array.from(new Set(all.map((task) => task.sourceKey).filter(Boolean))).sort(),
+      failureCategories,
+    },
+  } satisfies {
+    items: Task[];
+    nextCursor: string | null;
+    totalEstimate: number;
+    filterOptions: ListTasksCursorResult["filterOptions"];
+  };
+}
+
 export async function listSegments(taskId: string, _page = 0, _pageSize = 100): Promise<TaskSegment[]> {
   return listTaskSegments(taskId);
+}
+
+export async function listSegmentsPage(input: CursorPageInput) {
+  const pageSize = Math.max(1, Math.min(500, input.pageSize ?? 100));
+  const start = Math.max(0, Number(input.cursor ?? 0) || 0);
+  const all = await listTaskSegments(input.taskId);
+  const items = all.slice(start, start + pageSize);
+  const next = start + items.length;
+  return { items, nextCursor: next < all.length ? String(next) : null };
 }
 
 export async function getSegmentSummary(taskId: string): Promise<SegmentSummary> {
@@ -520,6 +561,15 @@ export async function listTaskEvents(taskId: string): Promise<TaskEvent[]> {
   return taskEvents.filter((event) => event.taskId === taskId).slice(0, 100);
 }
 
+export async function listTaskEventsPage(input: CursorPageInput) {
+  const pageSize = Math.max(1, Math.min(500, input.pageSize ?? 100));
+  const start = Math.max(0, Number(input.cursor ?? 0) || 0);
+  const all = taskEvents.filter((event) => event.taskId === input.taskId);
+  const items = all.slice(start, start + pageSize);
+  const next = start + items.length;
+  return { items, nextCursor: next < all.length ? String(next) : null };
+}
+
 export async function listTaskRequests(taskId: string): Promise<RequestDiagnostic[]> {
   const task = tasks.find((entry) => entry.id === taskId);
   if (!task) return [];
@@ -529,7 +579,7 @@ export async function listTaskRequests(taskId: string): Promise<RequestDiagnosti
         id: `${taskId}-request-0`,
         taskId,
         method: "GET",
-        url: task.url,
+        url: sanitizeUrlForDisplay(task.url),
         rangeHeader: task.supportsParallel ? "bytes=0-" : null,
         statusCode: task.status === "failed" ? 503 : 206,
         etag: task.etag,
@@ -544,6 +594,26 @@ export async function listTaskRequests(taskId: string): Promise<RequestDiagnosti
     ];
   }
   return taskRequests.filter((request) => request.taskId === taskId).slice(0, 100);
+}
+
+export async function listTaskRequestsPage(input: CursorPageInput) {
+  const pageSize = Math.max(1, Math.min(500, input.pageSize ?? 100));
+  const start = Math.max(0, Number(input.cursor ?? 0) || 0);
+  const all = await listTaskRequests(input.taskId);
+  const items = all.slice(start, start + pageSize);
+  const next = start + items.length;
+  return { items, nextCursor: next < all.length ? String(next) : null };
+}
+
+function mockFailureCategory(task: Task): string | null {
+  if (!task.errorCode && !task.errorMessage) return null;
+  if (task.errorCode?.startsWith("http_")) return "http";
+  if (task.errorCode?.includes("disk")) return "disk_write";
+  if (task.errorCode?.includes("temp_file")) return "temp_file";
+  if (task.errorCode?.includes("resume")) return "resume_unavailable";
+  if (task.errorCode?.includes("remote")) return "remote_changed";
+  if (task.errorCode?.includes("auth_headers")) return "auth";
+  return "other";
 }
 
 export async function seedMockTasks(): Promise<Task[]> {
@@ -715,27 +785,37 @@ export async function exportBrowserExtensionPackages(): Promise<BrowserExtension
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {
   const now = nowIso();
-  const fileName = input.fileName?.trim() || "download.bin";
+  const probe = await probeTask({ url: input.url });
+  const fileName = input.fileName?.trim() || probe.fileName || "download.bin";
+  const parsed = safeUrl(input.url);
   const task = browserTask(
     `mock-${crypto.randomUUID()}`,
     fileName,
     input.url,
-    new URL(input.url).host,
+    probe.sourceKey || parsed?.host || "example.com",
     "queued",
-    0,
+    Number(probe.totalSize) || 0,
     0,
     0,
     0,
     null,
     now,
   );
-  tasks = [{ ...task, saveDir: input.saveDir?.trim() || settings.defaultSaveDir }, ...tasks];
+  const nextTask = {
+    ...task,
+    protocol: probe.protocol,
+    taskKind: probe.taskKind,
+    supportsMultiFile: probe.capabilities.supportsMultiFile,
+    sourceKey: probe.sourceKey,
+    saveDir: input.saveDir?.trim() || settings.defaultSaveDir,
+  };
+  tasks = [nextTask, ...tasks];
   logTaskEvent(task.id, "created");
   persistTasks();
   scheduleBrowserQueue();
   emitQueueChanged();
-  emitTaskUpdated(task);
-  return task;
+  emitTaskUpdated(nextTask);
+  return nextTask;
 }
 
 export async function importUrls(input: ImportUrlsInput): Promise<BatchImportResult> {
@@ -811,16 +891,33 @@ export async function verifyTaskHash(id: string): Promise<HashVerificationState>
 }
 
 export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload> {
-  let host = "example.com";
-  try {
-    host = new URL(input.url).host;
-  } catch {
-    /* keep fallback host */
+  if (input.url.trim().startsWith("magnet:")) {
+    const hash = input.url.match(/btih:([^&]+)/i)?.[1]?.toLowerCase() ?? "mock";
+    const name = decodeURIComponent(input.url.match(/[?&]dn=([^&]+)/)?.[1] ?? `magnet-${hash}`);
+    return {
+      finalUrl: input.url,
+      fileName: name,
+      protocol: "bt",
+      taskKind: "multi_file",
+      capabilities: {
+        supportsResume: true,
+        supportsParallel: true,
+        supportsMultiFile: true,
+      },
+      files: [],
+      totalSize: "0",
+      sourceKey: `bt:${hash}`,
+      contentType: "application/x-magnet",
+    };
   }
+
+  const parsed = safeUrl(input.url);
+  const protocol = parsed?.protocol.replace(":", "") || "http";
+  const host = parsed?.host ?? "example.com";
   return {
     finalUrl: input.url,
     fileName: "download.bin",
-    protocol: input.url.startsWith("https:") ? "https" : "http",
+    protocol,
     taskKind: "single_file",
     capabilities: {
       supportsResume: true,
@@ -835,9 +932,17 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       },
     ],
     totalSize: "1048576",
-    sourceKey: host,
+    sourceKey: `${protocol}://${host}`,
     contentType: "application/octet-stream",
   };
+}
+
+function safeUrl(value: string): URL | null {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
 }
 
 export async function pauseTask(id: string): Promise<Task> {

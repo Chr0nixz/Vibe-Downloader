@@ -3,7 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use sqlx::{migrate::MigrateError, sqlite::SqlitePoolOptions, QueryBuilder, Row, Sqlite, SqlitePool};
+use sqlx::{
+    migrate::MigrateError, sqlite::SqlitePoolOptions, QueryBuilder, Row, Sqlite, SqlitePool,
+};
 
 use crate::models::{
     AppErrorPayload, AppFontFamily, AppSettings, BrowserKind, HashVerificationStatus,
@@ -56,6 +58,8 @@ pub struct TaskListQuery {
     pub resume: String,
     pub page: i64,
     pub page_size: i64,
+    pub cursor_value: Option<String>,
+    pub cursor_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +68,13 @@ pub struct TaskListPage {
     pub total: i64,
     pub page: i64,
     pub page_size: i64,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskFilterOptions {
+    pub sources: Vec<String>,
+    pub failure_categories: Vec<String>,
 }
 
 pub async fn connect(db_path: &Path) -> Result<DbConnection, String> {
@@ -249,21 +260,95 @@ pub async fn list_task_records_page(
         .map_err(|e| e.to_string())?;
 
     Ok(TaskListPage {
-        items: rows.iter().map(row_to_task).collect::<Result<Vec<_>, _>>()?,
+        items: rows
+            .iter()
+            .map(row_to_task)
+            .collect::<Result<Vec<_>, _>>()?,
         total,
         page,
         page_size,
+        has_more: offset + page_size < total,
     })
 }
 
-fn append_task_filters(query: &mut QueryBuilder<'_, Sqlite>, input: &TaskListQuery) {
+pub async fn list_task_records_cursor(
+    pool: &SqlitePool,
+    input: &TaskListQuery,
+) -> Result<TaskListPage, String> {
+    let page_size = input.page_size.clamp(1, MAX_TASK_PAGE_SIZE);
+    let mut query = QueryBuilder::<Sqlite>::new(
+        r#"
+        SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
+               total_size, downloaded_bytes, status, etag, last_modified, content_type,
+               supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               health_summary, error_message, error_code, recovery_actions, retry_after_at,
+               expected_hash_sha256, actual_hash_sha256,
+               hash_status, hash_error, hash_verified_at, created_at, updated_at
+        FROM tasks
+        "#,
+    );
+    let mut has_where = append_task_filters(&mut query, input);
+    append_cursor_filter(&mut query, &mut has_where, input);
+    query.push(" ORDER BY ");
+    query.push(task_sort_sql(&input.sort_key));
+    query.push(if input.sort_direction == "asc" {
+        " ASC"
+    } else {
+        " DESC"
+    });
+    query.push(", id ASC LIMIT ");
+    query.push_bind(page_size + 1);
+
+    let rows = query
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut items = rows
+        .iter()
+        .map(row_to_task)
+        .collect::<Result<Vec<_>, _>>()?;
+    let total = estimate_task_count(pool, input).await?;
+    let has_more = i64::try_from(items.len()).unwrap_or(0) > page_size;
+    if has_more {
+        items.truncate(usize::try_from(page_size).unwrap_or(100));
+    }
+
+    Ok(TaskListPage {
+        items,
+        total,
+        page: 0,
+        page_size,
+        has_more,
+    })
+}
+
+async fn estimate_task_count(pool: &SqlitePool, input: &TaskListQuery) -> Result<i64, String> {
+    let mut count_query = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM tasks");
+    append_task_filters(&mut count_query, input);
+    count_query
+        .build_query_scalar()
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn append_task_filters(query: &mut QueryBuilder<'_, Sqlite>, input: &TaskListQuery) -> bool {
     let mut has_where = false;
 
     match input.nav.as_str() {
-        "downloading" => push_static_filter(query, &mut has_where, "status IN ('downloading', 'retrying')"),
+        "downloading" => push_static_filter(
+            query,
+            &mut has_where,
+            "status IN ('downloading', 'retrying')",
+        ),
         "paused" => push_static_filter(query, &mut has_where, "status = 'paused'"),
         "completed" => push_static_filter(query, &mut has_where, "status = 'completed'"),
-        "failed" => push_static_filter(query, &mut has_where, "status IN ('failed', 'needs_attention')"),
+        "failed" => push_static_filter(
+            query,
+            &mut has_where,
+            "status IN ('failed', 'needs_attention')",
+        ),
         "settings" => push_static_filter(query, &mut has_where, "0 = 1"),
         _ => {}
     }
@@ -288,8 +373,9 @@ fn append_task_filters(query: &mut QueryBuilder<'_, Sqlite>, input: &TaskListQue
     }
 
     if input.failure != "all" {
-        push_filter_prefix(query, &mut has_where);
-        query.push("error_code = ").push_bind(input.failure.clone());
+        if let Some(filter) = failure_category_filter_sql(&input.failure) {
+            push_static_filter(query, &mut has_where, filter);
+        }
     }
 
     match input.resume.as_str() {
@@ -301,6 +387,37 @@ fn append_task_filters(query: &mut QueryBuilder<'_, Sqlite>, input: &TaskListQue
     if let Some(filter) = file_type_filter_sql(&input.file_type) {
         push_static_filter(query, &mut has_where, filter);
     }
+    has_where
+}
+
+fn append_cursor_filter(
+    query: &mut QueryBuilder<'_, Sqlite>,
+    has_where: &mut bool,
+    input: &TaskListQuery,
+) {
+    let (Some(value), Some(id)) = (&input.cursor_value, &input.cursor_id) else {
+        return;
+    };
+    let expr = task_sort_sql(&input.sort_key);
+    push_filter_prefix(query, has_where);
+    query.push("(").push(expr);
+    if input.sort_direction == "asc" {
+        query.push(" > ");
+    } else {
+        query.push(" < ");
+    }
+    if is_numeric_sort(&input.sort_key) {
+        query.push_bind(value.parse::<f64>().unwrap_or(0.0));
+    } else {
+        query.push_bind(value.clone());
+    }
+    query.push(" OR (").push(expr).push(" = ");
+    if is_numeric_sort(&input.sort_key) {
+        query.push_bind(value.parse::<f64>().unwrap_or(0.0));
+    } else {
+        query.push_bind(value.clone());
+    }
+    query.push(" AND id > ").push_bind(id.clone()).push("))");
 }
 
 fn push_filter_prefix(query: &mut QueryBuilder<'_, Sqlite>, has_where: &mut bool) {
@@ -330,6 +447,10 @@ fn task_sort_sql(sort_key: &str) -> &'static str {
     }
 }
 
+fn is_numeric_sort(sort_key: &str) -> bool {
+    matches!(sort_key, "file_size" | "progress" | "speed" | "status")
+}
+
 fn file_type_filter_sql(file_type: &str) -> Option<&'static str> {
     match file_type {
         "archive" => Some(
@@ -350,6 +471,19 @@ fn file_type_filter_sql(file_type: &str) -> Option<&'static str> {
         "other" => Some(
             "NOT ((LOWER(COALESCE(content_type, '')) LIKE '%zip%' OR LOWER(file_name) LIKE '%.zip' OR LOWER(file_name) LIKE '%.rar' OR LOWER(file_name) LIKE '%.7z' OR LOWER(file_name) LIKE '%.tar' OR LOWER(file_name) LIKE '%.gz' OR LOWER(file_name) LIKE '%.bz2' OR LOWER(file_name) LIKE '%.xz') OR (LOWER(COALESCE(content_type, '')) LIKE 'image/%' OR LOWER(file_name) LIKE '%.png' OR LOWER(file_name) LIKE '%.jpg' OR LOWER(file_name) LIKE '%.jpeg' OR LOWER(file_name) LIKE '%.gif' OR LOWER(file_name) LIKE '%.webp' OR LOWER(file_name) LIKE '%.avif' OR LOWER(file_name) LIKE '%.svg') OR (LOWER(COALESCE(content_type, '')) LIKE 'video/%' OR LOWER(file_name) LIKE '%.mp4' OR LOWER(file_name) LIKE '%.mkv' OR LOWER(file_name) LIKE '%.mov' OR LOWER(file_name) LIKE '%.webm' OR LOWER(file_name) LIKE '%.avi') OR (LOWER(file_name) LIKE '%.pdf' OR LOWER(file_name) LIKE '%.doc' OR LOWER(file_name) LIKE '%.docx' OR LOWER(file_name) LIKE '%.xls' OR LOWER(file_name) LIKE '%.xlsx' OR LOWER(file_name) LIKE '%.ppt' OR LOWER(file_name) LIKE '%.pptx' OR LOWER(file_name) LIKE '%.txt' OR LOWER(file_name) LIKE '%.md') OR (LOWER(file_name) LIKE '%.exe' OR LOWER(file_name) LIKE '%.msi' OR LOWER(file_name) LIKE '%.dmg' OR LOWER(file_name) LIKE '%.pkg' OR LOWER(file_name) LIKE '%.deb' OR LOWER(file_name) LIKE '%.rpm' OR LOWER(file_name) LIKE '%.appimage'))",
         ),
+        _ => None,
+    }
+}
+
+fn failure_category_filter_sql(category: &str) -> Option<&'static str> {
+    match category {
+        "remote_changed" => Some("error_code = 'remote_changed'"),
+        "resume_unavailable" => Some("error_code = 'resume_unavailable'"),
+        "temp_file" => Some("error_code IN ('temp_file_missing', 'temp_file_smaller_than_progress')"),
+        "disk_write" => Some("error_code = 'disk_write_failed'"),
+        "http" => Some("(error_code LIKE 'http_%' OR error_code = 'server_rate_limited')"),
+        "auth" => Some("error_code IN ('auth_headers_expired', 'auth_headers_unavailable')"),
+        "other" => Some("(error_code IS NOT NULL AND error_code NOT IN ('remote_changed', 'resume_unavailable', 'temp_file_missing', 'temp_file_smaller_than_progress', 'disk_write_failed', 'auth_headers_expired', 'auth_headers_unavailable', 'server_rate_limited') AND error_code NOT LIKE 'http_%')"),
         _ => None,
     }
 }
@@ -414,6 +548,42 @@ pub async fn list_task_events(
     )
     .bind(task_id)
     .bind(limit.clamp(1, 500))
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| TaskEvent {
+            id: row.get::<i64, _>("id").to_string(),
+            task_id: row.get("task_id"),
+            event_type: row.get("event_type"),
+            payload: row.get("payload"),
+            created_at: row.get("created_at"),
+        })
+        .collect())
+}
+
+pub async fn list_task_events_page(
+    pool: &SqlitePool,
+    task_id: &str,
+    before_id: Option<i64>,
+    limit: i64,
+) -> Result<Vec<TaskEvent>, String> {
+    let limit = limit.clamp(1, 500);
+    let rows = sqlx::query(
+        r#"
+        SELECT id, task_id, event_type, payload, created_at
+        FROM task_events
+        WHERE task_id = ? AND (? IS NULL OR id < ?)
+        ORDER BY id DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(task_id)
+    .bind(before_id)
+    .bind(before_id)
+    .bind(limit + 1)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -505,6 +675,53 @@ pub async fn list_request_diagnostics(
         .collect())
 }
 
+pub async fn list_request_diagnostics_page(
+    pool: &SqlitePool,
+    task_id: &str,
+    before_id: Option<i64>,
+    limit: i64,
+) -> Result<Vec<RequestDiagnostic>, String> {
+    let limit = limit.clamp(1, 500);
+    let rows = sqlx::query(
+        r#"
+        SELECT id, task_id, method, url, range_header, status_code, etag, last_modified,
+               content_length, error_message, retry_count, duration_ms, created_at
+        FROM task_requests
+        WHERE task_id = ? AND (? IS NULL OR id < ?)
+        ORDER BY id DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(task_id)
+    .bind(before_id)
+    .bind(before_id)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| RequestDiagnostic {
+            id: row.get::<i64, _>("id").to_string(),
+            task_id: row.get("task_id"),
+            method: row.get("method"),
+            url: row.get("url"),
+            range_header: row.get("range_header"),
+            status_code: row.get("status_code"),
+            etag: row.get("etag"),
+            last_modified: row.get("last_modified"),
+            content_length: row
+                .get::<Option<i64>, _>("content_length")
+                .map(|value| value.to_string()),
+            error_message: row.get("error_message"),
+            retry_count: row.get("retry_count"),
+            duration_ms: row.get::<i64, _>("duration_ms").to_string(),
+            created_at: row.get("created_at"),
+        })
+        .collect())
+}
+
 pub async fn list_queued_task_records(
     pool: &SqlitePool,
     limit: i64,
@@ -530,6 +747,21 @@ pub async fn list_queued_task_records(
     .map_err(|e| e.to_string())?;
 
     rows.iter().map(row_to_task).collect()
+}
+
+pub async fn next_retry_after_at(pool: &SqlitePool) -> Result<Option<String>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT retry_after_at FROM tasks
+        WHERE status = 'queued' AND retry_after_at IS NOT NULL
+        ORDER BY retry_after_at ASC
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(row.map(|row| row.get("retry_after_at")))
 }
 
 fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
@@ -594,7 +826,7 @@ fn task_recovery_actions_from_row(row: &sqlx::sqlite::SqliteRow) -> Vec<Recovery
         if let Ok(values) = serde_json::from_str::<Vec<String>>(&raw) {
             let actions = values
                 .iter()
-                .filter_map(|value| RecoveryAction::from_str(value))
+                .filter_map(|value| value.parse().ok())
                 .collect::<Vec<_>>();
             if !actions.is_empty() {
                 return actions;
@@ -610,7 +842,7 @@ fn task_recovery_actions_from_row(row: &sqlx::sqlite::SqliteRow) -> Vec<Recovery
             payload
                 .actions
                 .iter()
-                .filter_map(|value| RecoveryAction::from_str(value))
+                .filter_map(|value| value.parse().ok())
                 .collect()
         })
         .unwrap_or_default()
@@ -624,9 +856,7 @@ fn recovery_actions_json(actions: &[RecoveryAction]) -> Result<String, String> {
     serde_json::to_string(&values).map_err(|e| e.to_string())
 }
 
-fn error_state_from_message(
-    error_message: Option<&str>,
-) -> (Option<String>, Vec<RecoveryAction>) {
+fn error_state_from_message(error_message: Option<&str>) -> (Option<String>, Vec<RecoveryAction>) {
     let Some(error) = error_message else {
         return (None, Vec::new());
     };
@@ -634,7 +864,7 @@ fn error_state_from_message(
         let actions = payload
             .actions
             .iter()
-            .filter_map(|value| RecoveryAction::from_str(value))
+            .filter_map(|value| value.parse().ok())
             .collect();
         return (Some(payload.code), actions);
     }
@@ -1009,6 +1239,58 @@ pub async fn latest_browser_error(
     Ok(row.map(|row| row.get("error_message")))
 }
 
+pub async fn task_filter_options(pool: &SqlitePool) -> Result<TaskFilterOptions, String> {
+    let source_rows = sqlx::query(
+        r#"
+        SELECT DISTINCT source_key FROM tasks
+        WHERE source_key IS NOT NULL AND TRIM(source_key) != ''
+        ORDER BY source_key ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let sources = source_rows
+        .iter()
+        .map(|row| row.get::<String, _>("source_key"))
+        .collect();
+
+    let error_rows = sqlx::query(
+        r#"
+        SELECT DISTINCT error_code FROM tasks
+        WHERE error_code IS NOT NULL AND TRIM(error_code) != ''
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let mut failure_categories = error_rows
+        .iter()
+        .filter_map(|row| {
+            crate::models::task::failure_category_for_code(Some(
+                row.get::<String, _>("error_code").as_str(),
+            ))
+        })
+        .map(|category| match category {
+            crate::models::TaskFailureCategory::RemoteChanged => "remote_changed",
+            crate::models::TaskFailureCategory::ResumeUnavailable => "resume_unavailable",
+            crate::models::TaskFailureCategory::TempFile => "temp_file",
+            crate::models::TaskFailureCategory::DiskWrite => "disk_write",
+            crate::models::TaskFailureCategory::Http => "http",
+            crate::models::TaskFailureCategory::Auth => "auth",
+            crate::models::TaskFailureCategory::Other => "other",
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    failure_categories.sort();
+    failure_categories.dedup();
+
+    Ok(TaskFilterOptions {
+        sources,
+        failure_categories,
+    })
+}
+
 pub async fn upsert_task_request_headers(
     pool: &SqlitePool,
     task_id: &str,
@@ -1019,22 +1301,26 @@ pub async fn upsert_task_request_headers(
         return Ok(());
     }
     let now = crate::models::task::now_iso();
-    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(TASK_REQUEST_HEADERS_TTL_HOURS))
-        .to_rfc3339();
+    let expires_at =
+        (chrono::Utc::now() + chrono::Duration::hours(TASK_REQUEST_HEADERS_TTL_HOURS)).to_rfc3339();
     let headers_json = serde_json::to_string(headers).map_err(|e| e.to_string())?;
+    let (headers_ciphertext, nonce) = crate::secure_headers::encrypt_headers(&headers_json)?;
     sqlx::query(
         r#"
         INSERT INTO task_request_headers (
-            task_id, headers_json, expires_at, created_at, last_used_at, source_browser
-        ) VALUES (?, ?, ?, ?, NULL, ?)
+            task_id, headers_json, headers_ciphertext, nonce, expires_at, created_at, last_used_at, source_browser
+        ) VALUES (?, '', ?, ?, ?, ?, NULL, ?)
         ON CONFLICT(task_id) DO UPDATE SET
-            headers_json = excluded.headers_json,
+            headers_json = '',
+            headers_ciphertext = excluded.headers_ciphertext,
+            nonce = excluded.nonce,
             expires_at = excluded.expires_at,
             source_browser = excluded.source_browser
         "#,
     )
     .bind(task_id)
-    .bind(headers_json)
+    .bind(headers_ciphertext)
+    .bind(nonce)
     .bind(expires_at)
     .bind(&now)
     .bind(source_browser.map(BrowserKind::as_str))
@@ -1052,7 +1338,7 @@ pub async fn resolve_task_request_headers(
     let now = crate::models::task::now_iso();
     let row = sqlx::query(
         r#"
-        SELECT headers_json, expires_at FROM task_request_headers
+        SELECT headers_json, headers_ciphertext, nonce, expires_at FROM task_request_headers
         WHERE task_id = ?
         "#,
     )
@@ -1077,7 +1363,30 @@ pub async fn resolve_task_request_headers(
         .await
         .map_err(|e| e.to_string())?;
 
-    serde_json::from_str(&row.get::<String, _>("headers_json")).map_err(|e| e.to_string())
+    let ciphertext: Option<String> = row.get("headers_ciphertext");
+    let nonce: Option<String> = row.get("nonce");
+    let headers_json = match (ciphertext, nonce) {
+        (Some(ciphertext), Some(nonce)) if !ciphertext.is_empty() && !nonce.is_empty() => {
+            crate::secure_headers::decrypt_headers(&ciphertext, &nonce).map_err(|error| {
+                AppErrorPayload::auth_headers_unavailable(format!(
+                    "Browser authentication headers are unavailable: {error}"
+                ))
+                .command_error()
+            })?
+        }
+        _ => {
+            let raw: String = row.get("headers_json");
+            if raw.is_empty() {
+                return Ok(Vec::new());
+            }
+            if let Ok(headers) = serde_json::from_str::<Vec<(String, String)>>(&raw) {
+                let _ = upsert_task_request_headers(pool, task_id, &headers, None).await;
+            }
+            raw
+        }
+    };
+
+    serde_json::from_str(&headers_json).map_err(|e| e.to_string())
 }
 
 pub async fn delete_task_request_headers(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
@@ -1279,7 +1588,16 @@ pub fn planned_segment_count_with_plan(
     multi_connection_threshold_bytes: i64,
     segment_count: i32,
 ) -> usize {
+    if is_bt_protocol(&task.protocol) {
+        return 1;
+    }
+
     let segment_count = segment_count.clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT) as usize;
+    let segment_count = if is_ftp_protocol(&task.protocol) {
+        segment_count.min(4)
+    } else {
+        segment_count
+    };
     if task.supports_parallel
         && task.total_size > 0
         && task.total_size >= multi_connection_threshold_bytes.max(0)
@@ -1303,29 +1621,21 @@ pub fn planned_segments_for_task_with_plan(
     multi_connection_threshold_bytes: i64,
     segment_count: i32,
 ) -> Vec<TaskSegmentRecord> {
+    if is_bt_protocol(&task.protocol) {
+        return vec![single_segment_for_task(task, "bt_piece")];
+    }
+
+    if is_ftp_protocol(&task.protocol) {
+        return vec![single_segment_for_task(task, "ftp_rest")];
+    }
+
     let count =
         planned_segment_count_with_plan(task, multi_connection_threshold_bytes, segment_count);
     let total_size = task.total_size.max(0);
     let completed = task.downloaded_bytes >= total_size && total_size > 0;
 
     if count == 1 || total_size == 0 {
-        return vec![TaskSegmentRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            task_id: task.id.clone(),
-            file_id: None,
-            unit_kind: "http_range".to_string(),
-            range_start: 0,
-            range_end: total_size.saturating_sub(1).max(0),
-            downloaded_until: task.downloaded_bytes.max(0),
-            speed_bps: 0,
-            status: if completed {
-                SegmentStatus::Completed
-            } else {
-                SegmentStatus::Pending
-            },
-            retry_count: 0,
-            last_error: None,
-        }];
+        return vec![single_segment_for_task(task, "http_range")];
     }
 
     let count_i64 = i64::try_from(count).unwrap_or(1);
@@ -1364,6 +1674,36 @@ pub fn planned_segments_for_task_with_plan(
             segment
         })
         .collect()
+}
+
+fn is_ftp_protocol(protocol: &str) -> bool {
+    matches!(protocol, "ftp" | "ftps")
+}
+
+fn is_bt_protocol(protocol: &str) -> bool {
+    matches!(protocol, "bt" | "magnet")
+}
+
+fn single_segment_for_task(task: &TaskRecord, unit_kind: &str) -> TaskSegmentRecord {
+    let total_size = task.total_size.max(0);
+    let completed = task.downloaded_bytes >= total_size && total_size > 0;
+    TaskSegmentRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        task_id: task.id.clone(),
+        file_id: None,
+        unit_kind: unit_kind.to_string(),
+        range_start: 0,
+        range_end: total_size.saturating_sub(1).max(0),
+        downloaded_until: task.downloaded_bytes.max(0),
+        speed_bps: 0,
+        status: if completed {
+            SegmentStatus::Completed
+        } else {
+            SegmentStatus::Pending
+        },
+        retry_count: 0,
+        last_error: None,
+    }
 }
 
 pub async fn list_segment_records(
@@ -1408,6 +1748,34 @@ pub async fn list_segment_records_paged(
     .bind(task_id)
     .bind(limit)
     .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    rows.iter().map(row_to_segment).collect()
+}
+
+pub async fn list_segment_records_cursor(
+    pool: &SqlitePool,
+    task_id: &str,
+    after_range_start: Option<i64>,
+    limit: i64,
+) -> Result<Vec<TaskSegmentRecord>, String> {
+    let limit = limit.clamp(1, 500);
+    let rows = sqlx::query(
+        r#"
+        SELECT id, task_id, file_id, unit_kind, range_start, range_end, downloaded_until,
+               speed_bps, status, retry_count, last_error
+        FROM task_work_units
+        WHERE task_id = ? AND (? IS NULL OR range_start > ?)
+        ORDER BY range_start ASC
+        LIMIT ?
+        "#,
+    )
+    .bind(task_id)
+    .bind(after_range_start)
+    .bind(after_range_start)
+    .bind(limit + 1)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -1489,6 +1857,14 @@ fn row_to_segment(row: &sqlx::sqlite::SqliteRow) -> Result<TaskSegmentRecord, St
 }
 
 pub async fn clear_tasks(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query("DELETE FROM torrent_runtime_snapshots")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM torrent_tasks")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM task_request_headers")
         .execute(pool)
         .await
@@ -1510,6 +1886,15 @@ pub async fn clear_tasks(pool: &SqlitePool) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM tasks")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn delete_task_files_for_task(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM task_files WHERE task_id = ?")
+        .bind(task_id)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -1658,6 +2043,27 @@ pub async fn update_segment_downloaded_until(
         "#,
     )
     .bind(downloaded_until)
+    .bind(segment_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn update_segment_range_end(
+    pool: &SqlitePool,
+    segment_id: &str,
+    range_end: i64,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE task_work_units
+        SET range_end = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(range_end)
     .bind(segment_id)
     .execute(pool)
     .await
@@ -1893,6 +2299,141 @@ pub async fn update_task_remote_metadata(
     .await
     .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_task_torrent_metadata(
+    pool: &SqlitePool,
+    task_id: &str,
+    final_url: &str,
+    file_name: &str,
+    total_size: i64,
+    source_key: &str,
+    supports_multi_file: bool,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET final_url = ?, file_name = ?, total_size = ?, content_type = ?,
+            supports_resume = 1, supports_parallel = 1, supports_multi_file = ?,
+            source_key = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(final_url)
+    .bind(file_name)
+    .bind(total_size)
+    .bind("application/x-bittorrent")
+    .bind(if supports_multi_file { 1 } else { 0 })
+    .bind(source_key)
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_torrent_task(
+    pool: &SqlitePool,
+    task_id: &str,
+    info_hash: &str,
+    name: &str,
+    magnet_uri: Option<&str>,
+    torrent_blob: Option<&[u8]>,
+    piece_length: i64,
+    piece_count: i64,
+    private: bool,
+    trackers_json: Option<&str>,
+) -> Result<(), String> {
+    let now = crate::models::task::now_iso();
+    sqlx::query(
+        r#"
+        INSERT INTO torrent_tasks (
+            task_id, info_hash, name, magnet_uri, torrent_blob, piece_length,
+            piece_count, private, trackers_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+            info_hash = excluded.info_hash,
+            name = excluded.name,
+            magnet_uri = excluded.magnet_uri,
+            torrent_blob = COALESCE(excluded.torrent_blob, torrent_tasks.torrent_blob),
+            piece_length = excluded.piece_length,
+            piece_count = excluded.piece_count,
+            private = excluded.private,
+            trackers_json = excluded.trackers_json,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(task_id)
+    .bind(info_hash)
+    .bind(name)
+    .bind(magnet_uri)
+    .bind(torrent_blob)
+    .bind(piece_length)
+    .bind(piece_count)
+    .bind(if private { 1 } else { 0 })
+    .bind(trackers_json)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_torrent_runtime_snapshot(
+    pool: &SqlitePool,
+    task_id: &str,
+    metadata_status: &str,
+    completed_pieces: i64,
+    verified_pieces: i64,
+    peer_count: i64,
+    seed_count: i64,
+    upload_bytes: i64,
+    upload_speed_bps: i64,
+    ratio: f64,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+    sqlx::query(
+        r#"
+        INSERT INTO torrent_runtime_snapshots (
+            task_id, metadata_status, completed_pieces, verified_pieces, peer_count,
+            seed_count, upload_bytes, upload_speed_bps, ratio, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+            metadata_status = excluded.metadata_status,
+            completed_pieces = excluded.completed_pieces,
+            verified_pieces = excluded.verified_pieces,
+            peer_count = excluded.peer_count,
+            seed_count = excluded.seed_count,
+            upload_bytes = excluded.upload_bytes,
+            upload_speed_bps = excluded.upload_speed_bps,
+            ratio = excluded.ratio,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(task_id)
+    .bind(metadata_status)
+    .bind(completed_pieces)
+    .bind(verified_pieces)
+    .bind(peer_count)
+    .bind(seed_count)
+    .bind(upload_bytes)
+    .bind(upload_speed_bps)
+    .bind(ratio)
+    .bind(&updated_at)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

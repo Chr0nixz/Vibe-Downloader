@@ -22,9 +22,10 @@ use crate::{
     logging::sanitize_url,
     models::{
         BrowserCaptureSettings, BrowserCaptureSettingsInput, BrowserExtensionExportResult,
-        BrowserExtensionPackage, BrowserForwardedHeader, BrowserHandoffInput, BrowserHandoffResult,
-        BrowserIntegrationEntry, BrowserIntegrationStatus, BrowserIntegrationUpdateInput,
-        BrowserForwardHeadersMode, BrowserKind, BrowserRealtimeStatus,
+        BrowserExtensionPackage, BrowserForwardHeadersMode, BrowserForwardedHeader,
+        BrowserHandoffInput, BrowserHandoffResult, BrowserIntegrationEntry,
+        BrowserIntegrationStatus, BrowserIntegrationUpdateInput, BrowserKind,
+        BrowserRealtimeStatus,
     },
     AppState,
 };
@@ -151,7 +152,10 @@ pub async fn update_browser_capture_settings(
         site_rules: input.site_rules.unwrap_or(current.site_rules),
     };
     upsert_browser_capture_settings(&state.pool, &next).await?;
-    if matches!(next.forward_headers_mode, BrowserForwardHeadersMode::Disabled) {
+    if matches!(
+        next.forward_headers_mode,
+        BrowserForwardHeadersMode::Disabled
+    ) {
         db::clear_all_task_request_headers(&state.pool).await?;
         state.request_headers.lock().await.clear();
     }
@@ -199,7 +203,8 @@ pub async fn create_browser_handoff_task_with_state(
     let request_headers = if matches!(
         capture_settings.forward_headers_mode,
         BrowserForwardHeadersMode::Enabled
-    ) {
+    ) || input.header_consent_state.as_deref() == Some("allowed")
+    {
         forwarded_headers
     } else {
         Vec::new()
@@ -561,6 +566,9 @@ fn validate_handoff(
 
     let url = input.url.trim();
     let parsed = Url::parse(url).map_err(|_| "Browser handoff URL is invalid.".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Browser handoff only supports HTTP and HTTPS URLs.".to_string());
+    }
     registry.engine_for_uri(parsed.as_str())?;
     if parsed.username() != "" || parsed.password().is_some() {
         return Err("Browser handoff URLs must not contain embedded credentials.".to_string());

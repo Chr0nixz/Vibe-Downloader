@@ -12,7 +12,10 @@ import { useTranslation } from "react-i18next";
 
 import type { TrayMenuAction } from "@/generated/bindings";
 import { cn } from "@/lib/utils";
+import { createLogger } from "@/lib/logger";
 import { runTrayMenuAction } from "@/lib/tauri";
+
+const log = createLogger("tray-menu");
 
 interface TrayMenuItem {
   action: TrayMenuAction;
@@ -72,6 +75,8 @@ export function TrayMenu() {
     setPendingAction(action);
     try {
       await runTrayMenuAction(action);
+    } catch (err) {
+      log.error("tray menu action failed", action, err);
     } finally {
       setPendingAction(null);
     }
@@ -82,6 +87,7 @@ export function TrayMenu() {
       <section
         className="w-full overflow-hidden rounded-lg border border-border-subtle/80 bg-surface-overlay backdrop-blur-xl"
         aria-label={t("trayMenu.title")}
+        role="dialog"
       >
         <div className="flex h-10 items-center gap-2.5 border-b border-border-subtle/70 px-2.5">
           <div
@@ -105,7 +111,7 @@ export function TrayMenu() {
           </button>
         </div>
 
-        <div className="p-1">
+        <nav className="p-1" role="group" aria-label={t("trayMenu.title")}>
           {items.map((item, index) => (
             <TrayMenuButton
               key={item.action}
@@ -115,7 +121,7 @@ export function TrayMenu() {
               onClick={() => void runAction(item.action)}
             />
           ))}
-        </div>
+        </nav>
       </section>
     </main>
   );
@@ -139,7 +145,7 @@ function TrayMenuButton({
     <button
       type="button"
       className={cn(
-        "group flex h-9 w-full items-center gap-2.5 rounded-md px-2 text-left outline-none transition duration-150 ease-out hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-accent-primary/70",
+        "group flex h-9 w-full items-center gap-2.5 rounded-md px-2 text-left outline-none transition duration-ui ease-out hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-accent-primary/70",
         separated && "mt-1 border-t border-border-subtle/60 pt-1.5",
         item.tone === "danger" && "hover:bg-status-danger/10",
       )}

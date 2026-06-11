@@ -4,14 +4,14 @@ import i18n from "@/i18n";
 import { createLogger } from "@/lib/logger";
 import {
   isTauriRuntime,
-  listTasksPage,
+  listTasksCursor,
   onQueueChanged,
   onTaskProgress,
   onTaskUpdated,
 } from "@/lib/tauri";
 
 const log = createLogger("task-events");
-import { mergeTasksFromServer, taskPageInput, useTaskStore } from "@/stores/task-store";
+import { mergeTasksFromServer, taskCursorInput, useTaskStore } from "@/stores/task-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
 import { errorMessage } from "@/lib/errors";
@@ -105,11 +105,16 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
           void (async () => {
             try {
               const previous = useTaskStore.getState().tasks;
-              const page = await listTasksPage(taskPageInput(0));
+              const page = await listTasksCursor(taskCursorInput(null));
               const fresh = page.items;
               if (cancelled) return;
               const merged = mergeTasksFromServer(previous, fresh);
-              useTaskStore.getState().setTaskPage(merged, page.total, page.page, page.pageSize);
+              useTaskStore.getState().setTaskCursorPage(
+                merged,
+                page.totalEstimate,
+                page.nextCursor,
+                page.filterOptions,
+              );
               notifyTaskStatusChanges(previous, merged);
             } catch (error) {
               log.warn("queue refresh failed", error);

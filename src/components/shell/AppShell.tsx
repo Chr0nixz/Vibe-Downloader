@@ -18,12 +18,13 @@ import {
   trafficLightsInsetPx,
   type Platform,
 } from "@/lib/platform";
+import { sanitizeUrlForDisplay } from "@/lib/utils";
 
 const log = createLogger("app-shell");
 import {
   deleteTask,
   getSettings,
-  listTasksPage,
+  listTasksCursor,
   onSettingsChanged,
   onTrayNewDownloadRequested,
   onTraySettingsRequested,
@@ -36,7 +37,7 @@ import {
   resumeTask,
 } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settings-store";
-import { taskPageInput, useTaskStore } from "@/stores/task-store";
+import { taskCursorInput, useTaskStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 
@@ -93,7 +94,7 @@ export function AppShell() {
   const selectedId = useTaskStore((s) => s.selectedId);
   const nav = useTaskStore((s) => s.nav);
   const detailOpen = useTaskStore((s) => s.detailOpen);
-  const setTaskPage = useTaskStore((s) => s.setTaskPage);
+  const setTaskCursorPage = useTaskStore((s) => s.setTaskCursorPage);
   const upsertTask = useTaskStore((s) => s.upsertTask);
   const setLoading = useTaskStore((s) => s.setLoading);
   const setError = useTaskStore((s) => s.setError);
@@ -110,9 +111,9 @@ export function AppShell() {
   const taskSurfaceActive = nav !== "settings";
 
   const refreshTasks = useCallback(async (selectId?: string) => {
-    const page = await listTasksPage(taskPageInput(0));
+    const page = await listTasksCursor(taskCursorInput(null));
     const data = page.items;
-    setTaskPage(data, page.total, page.page, page.pageSize);
+    setTaskCursorPage(data, page.totalEstimate, page.nextCursor, page.filterOptions);
     if (selectId) {
       selectTask(selectId);
     } else {
@@ -126,7 +127,7 @@ export function AppShell() {
         selectTask(null);
       }
     }
-  }, [selectTask, setTaskPage]);
+  }, [selectTask, setTaskCursorPage]);
 
   const runTaskAction = useCallback(async (action: () => Promise<Task | void>, selectId?: string) => {
     try {
@@ -260,7 +261,7 @@ export function AppShell() {
       addToast({
         tone: "info",
         title: t("recovery.checkUrlToast"),
-        description: task.url,
+        description: sanitizeUrlForDisplay(task.url),
       });
       return;
     }
@@ -304,16 +305,11 @@ export function AppShell() {
 
     void (async () => {
       try {
-          const page = await listTasksPage(taskPageInput(0));
-          const data = page.items;
+        await refreshTasks();
         if (!cancelled) {
-          setTaskPage(data, page.total, page.page, page.pageSize);
-          const currentSelectedId = useTaskStore.getState().selectedId;
-          if (data.length > 0 && !currentSelectedId) {
-            selectTask(data[0].id);
-            if (readShellLayout() === "wide") {
-              setDetailOpen(true);
-            }
+          const selectedId = useTaskStore.getState().selectedId;
+          if (selectedId && readShellLayout() === "wide") {
+            setDetailOpen(true);
           }
         }
       } catch (err) {
@@ -329,7 +325,7 @@ export function AppShell() {
     return () => {
       cancelled = true;
     };
-  }, [selectTask, setDetailOpen, setError, setLoading, setTaskPage]);
+  }, [refreshTasks, setDetailOpen, setError, setLoading]);
 
   useEffect(() => {
     let cancelled = false;

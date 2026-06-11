@@ -19,7 +19,7 @@ import { errorMessage } from "@/lib/errors";
 import { createTask, importUrls, openDirectoryPicker, probeTask } from "@/lib/tauri";
 
 const log = createLogger("new-download");
-import { formatBytes } from "@/lib/utils";
+import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
 import { parseByteCount } from "@/types/task";
 import { normalizeTask } from "@/types/task";
@@ -49,6 +49,7 @@ export function NewDownloadDialog({
   const [error, setError] = useState<string | null>(null);
   const [submitStatus, setSubmitStatus] = useState<string | null>(null);
   const probeRequestId = useRef(0);
+  const isTorrentProbe = probe?.protocol === "bt" || probe?.protocol === "magnet";
 
   async function detect(nextUrl = url.trim(), automatic = false) {
     if (!nextUrl) return;
@@ -106,7 +107,7 @@ export function NewDownloadDialog({
         url: url.trim(),
         saveDir: saveDir.trim() || null,
         fileName: fileName.trim() || null,
-        expectedHashSha256: expectedHashSha256.trim() || null,
+        expectedHashSha256: isTorrentProbe ? null : expectedHashSha256.trim() || null,
       });
       onCreated(task);
       setUrl("");
@@ -229,15 +230,17 @@ export function NewDownloadDialog({
                 className="h-11 md:h-8"
               />
             </label>
-            <label className="flex flex-col gap-1 text-xs text-text-muted">
-              {t("newDownload.sha256")}
-              <Input
-                value={expectedHashSha256}
-                onChange={(event) => setExpectedHashSha256(event.target.value)}
-                placeholder={t("newDownload.sha256Placeholder")}
-                className="h-11 font-mono md:h-8"
-              />
-            </label>
+            {!isTorrentProbe ? (
+              <label className="flex flex-col gap-1 text-xs text-text-muted">
+                {t("newDownload.sha256")}
+                <Input
+                  value={expectedHashSha256}
+                  onChange={(event) => setExpectedHashSha256(event.target.value)}
+                  placeholder={t("newDownload.sha256Placeholder")}
+                  className="h-11 font-mono md:h-8"
+                />
+              </label>
+            ) : null}
             {probe ? (
               <div className="grid grid-cols-1 gap-2 rounded-md border border-border-subtle bg-surface-raised/60 p-3 text-xs sm:grid-cols-2">
                 <Info label={t("newDownload.probeFile")} value={probe.fileName} />
@@ -291,12 +294,12 @@ export function NewDownloadDialog({
               </p>
             ) : null}
             {submitStatus ? (
-              <p className="rounded-md border border-accent-primary/30 bg-accent-primary/10 px-3 py-2 text-xs text-accent-primary">
+              <p role="status" className="rounded-md border border-accent-primary/30 bg-accent-primary/10 px-3 py-2 text-xs text-accent-primary">
                 {submitStatus}
               </p>
             ) : null}
             {error ? (
-              <div className="rounded-md border border-status-warning/35 bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
+              <div role="alert" className="rounded-md border border-status-danger/35 bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
                 <p>{error}</p>
                 <p className="mt-1 text-text-secondary">
                   {t("newDownload.probeFailedHint")}
@@ -315,7 +318,15 @@ export function NewDownloadDialog({
               {t("newDownload.cancel")}
             </Button>
             <Button type="submit" className="w-full sm:w-auto" disabled={submitting}>
-              {submitting ? t("newDownload.starting") : t("newDownload.start")}
+              {submitting ? (
+                <>
+                  <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  {t("newDownload.starting")}
+                </>
+              ) : t("newDownload.start")}
             </Button>
           </DialogFooter>
         </form>
@@ -342,7 +353,7 @@ function BatchResultSummary({ result }: { result: BatchImportResult }) {
           className="grid gap-1 rounded-md border border-border-subtle/70 bg-surface-raised/50 px-2 py-1"
         >
           <span className="truncate font-mono text-text-primary">
-            {item.fileName ?? item.normalizedUrl ?? item.inputUrl}
+            {item.fileName ?? sanitizeUrlForDisplay(item.normalizedUrl ?? item.inputUrl)}
           </span>
           <span className={item.valid ? "text-text-muted" : "text-status-danger"}>
             {item.errorMessage ?? (item.task ? t("newDownload.batchCreated") : t("newDownload.batchReady"))}

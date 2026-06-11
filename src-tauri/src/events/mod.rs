@@ -7,15 +7,15 @@ use crate::{
     models::{Task, TaskProgressPayload, TaskRecord, TaskUpdatedPayload},
 };
 
-pub const EVENT_TASK_PROGRESS: &str = "task.progress";
-pub const EVENT_TASK_UPDATED: &str = "task.updated";
-pub const EVENT_QUEUE_CHANGED: &str = "queue.changed";
-pub const EVENT_SETTINGS_CHANGED: &str = "settings.changed";
-pub const EVENT_BROWSER_HANDOFF_RECEIVED: &str = "browser.handoff.received";
-pub const EVENT_BROWSER_HANDOFF_FAILED: &str = "browser.handoff.failed";
-pub const EVENT_BROWSER_INTEGRATION_CHANGED: &str = "browser.integration.changed";
-pub const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED: &str = "tray.new-download.requested";
-pub const EVENT_TRAY_SETTINGS_REQUESTED: &str = "tray.settings.requested";
+pub const EVENT_TASK_PROGRESS: &str = "task-progress";
+pub const EVENT_TASK_UPDATED: &str = "task-updated";
+pub const EVENT_QUEUE_CHANGED: &str = "queue-changed";
+pub const EVENT_SETTINGS_CHANGED: &str = "settings-changed";
+pub const EVENT_BROWSER_HANDOFF_RECEIVED: &str = "browser-handoff-received";
+pub const EVENT_BROWSER_HANDOFF_FAILED: &str = "browser-handoff-failed";
+pub const EVENT_BROWSER_INTEGRATION_CHANGED: &str = "browser-integration-changed";
+pub const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED: &str = "tray-new-download-requested";
+pub const EVENT_TRAY_SETTINGS_REQUESTED: &str = "tray-settings-requested";
 
 pub fn emit_task_progress(app: &AppHandle, payload: &TaskProgressPayload) {
     emit_payload(app, EVENT_TASK_PROGRESS, payload);

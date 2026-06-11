@@ -28,6 +28,7 @@ let ws = null;
 let bridge = null;
 let reconnectTimer = null;
 let lastStatus = "disconnected";
+let captureSettingsCache = normalizeCaptureSettings(null);
 
 api.runtime.onInstalled.addListener(() => {
   log.info("extension installed, registering context menus");
@@ -129,9 +130,8 @@ async function handleBrowserDownload(download) {
   }
 
   try {
-    const headers = shouldForwardHeaders(download.url, settings)
-      ? await forwardedHeaders(download.url)
-      : [];
+    const headerConsent = headerForwardingDecision(download.url, settings);
+    const headers = headerConsent.forward ? await forwardedHeaders(download.url) : [];
     const result = await sendDownloadUrl({
       url: download.url,
       pageUrl: download.referrer ?? null,
@@ -144,6 +144,8 @@ async function handleBrowserDownload(download) {
         : null,
       mime: download.mime ?? null,
       forwardedHeaders: headers,
+      headersAvailable: headerConsent.available || headers.length > 0,
+      headerConsentState: headerConsent.state,
     });
     if (result?.status === "failed") throw new Error(result.errorMessage ?? "Vibe rejected the download.");
     await callApi(api.downloads.cancel, download.id);
@@ -172,6 +174,8 @@ async function sendDownloadUrl({
   totalBytes = null,
   mime = null,
   forwardedHeaders = [],
+  headersAvailable = false,
+  headerConsentState = null,
 }) {
   const payload = {
     version: 1,
@@ -188,6 +192,8 @@ async function sendDownloadUrl({
     totalBytes,
     mime,
     forwardedHeaders,
+    headersAvailable,
+    headerConsentState,
   };
 
   try {
@@ -344,6 +350,8 @@ async function nativeMessage(payload) {
 
 function cacheRequestHeaders(details) {
   cleanupHeaderCache();
+  const headerConsent = headerForwardingDecision(details.url, captureSettingsCache);
+  if (!headerConsent.forward) return {};
   const headers = (details.requestHeaders ?? [])
     .map((header) => ({
       name: header.name,
@@ -386,11 +394,13 @@ function cleanupHeaderCache() {
 
 async function getCaptureSettings() {
   const stored = await api.storage.local.get(SETTINGS_KEY);
-  return normalizeCaptureSettings(stored?.[SETTINGS_KEY]);
+  captureSettingsCache = normalizeCaptureSettings(stored?.[SETTINGS_KEY]);
+  return captureSettingsCache;
 }
 
 async function saveLocalCaptureSettings(settings) {
   const normalized = normalizeCaptureSettings(settings);
+  captureSettingsCache = normalized;
   await api.storage.local.set({ [SETTINGS_KEY]: normalized });
   return normalized;
 }
@@ -427,10 +437,26 @@ function normalizeCaptureSettings(value) {
 }
 
 function shouldForwardHeaders(url, settings) {
+  return headerForwardingDecision(url, settings).forward;
+}
+
+function headerForwardingDecision(url, settings) {
   const parsed = new URL(url);
   const rule = matchingRule(parsed.hostname, settings.siteRules);
-  if (typeof rule?.forwardHeaders === "boolean") return rule.forwardHeaders;
-  return settings.forwardHeadersMode === "enabled";
+  if (typeof rule?.forwardHeaders === "boolean") {
+    return {
+      forward: rule.forwardHeaders,
+      state: rule.forwardHeaders ? "allowed" : "denied",
+      available: true,
+    };
+  }
+  if (settings.forwardHeadersMode === "enabled") {
+    return { forward: true, state: "allowed", available: true };
+  }
+  if (settings.forwardHeadersMode === "ask") {
+    return { forward: false, state: "ask", available: true };
+  }
+  return { forward: false, state: "denied", available: false };
 }
 
 function shouldIntercept(download, settings) {

@@ -196,6 +196,8 @@ pub struct BrowserHandoffInput {
     pub suggested_file_name: Option<String>,
     pub total_bytes: Option<String>,
     pub mime: Option<String>,
+    pub headers_available: Option<bool>,
+    pub header_consent_state: Option<String>,
     pub forwarded_headers: Option<Vec<BrowserForwardedHeader>>,
 }
 

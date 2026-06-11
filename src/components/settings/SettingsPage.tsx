@@ -80,7 +80,9 @@ export function SettingsPage() {
   const [browserCaptureSaving, setBrowserCaptureSaving] = useState(false);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveVersion = useRef(0);
-  const currentLocale = (i18n.language === "zh-CN" ? "zh-CN" : "en") as Locale;
+  const currentLocale = (["zh-CN", "zh-TW", "ja", "ko", "ru", "es", "en"].includes(i18n.language)
+    ? (i18n.language as Locale)
+    : "en") as Locale;
   const controlsDisabled = loading;
 
   useEffect(() => {
@@ -463,6 +465,7 @@ export function SettingsPage() {
                   onChange={setGlobalSpeedLimitBps}
                   placeholder={t("settings.globalSpeedLimitPlaceholder")}
                   disabled={controlsDisabled}
+                  unitAriaLabel={t("settings.speedUnit")}
                   units={[
                     ["1", "B/s"],
                     ["1024", "KB/s"],
@@ -482,6 +485,7 @@ export function SettingsPage() {
                   valueBytes={multiConnectionThresholdBytes}
                   onChange={setMultiConnectionThresholdBytes}
                   disabled={controlsDisabled}
+                  unitAriaLabel={t("settings.sizeUnit")}
                   units={[
                     ["1048576", "MB"],
                     ["1073741824", "GB"],
@@ -552,6 +556,11 @@ export function SettingsPage() {
                 >
                   <option value="en">{t("locale.en")}</option>
                   <option value="zh-CN">{t("locale.zhCN")}</option>
+                  <option value="zh-TW">{t("locale.zhTW")}</option>
+                  <option value="ja">{t("locale.ja")}</option>
+                  <option value="ko">{t("locale.ko")}</option>
+                  <option value="ru">{t("locale.ru")}</option>
+                  <option value="es">{t("locale.es")}</option>
                 </select>
               </SettingsRow>
               <SettingsRow title={t("settings.fontFamily")} htmlFor="font-family-select">
@@ -635,6 +644,7 @@ export function SettingsPage() {
                       <select
                         value={browserCapture.forwardHeadersMode}
                         disabled={browserLoading || browserCaptureSaving}
+                        aria-label={t("settings.browserForwardHeadersMode")}
                         onChange={(event) =>
                           void updateBrowserCapture({
                             forwardHeadersMode: event.target.value as BrowserForwardHeadersMode,
@@ -745,7 +755,7 @@ export function SettingsPage() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-8"
+                      className="h-11 md:h-8"
                       onClick={() => void exportBrowserPackages()}
                       disabled={browserExporting || browserLoading}
                     >
@@ -760,7 +770,7 @@ export function SettingsPage() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-8"
+                      className="h-11 md:h-8"
                       onClick={() => void copyBrowserDiagnostics()}
                     >
                       <Clipboard className="h-4 w-4" />
@@ -850,6 +860,7 @@ function ByteUnitInput({
   disabled,
   placeholder,
   allowEmpty,
+  unitAriaLabel,
 }: {
   id: string;
   valueBytes: string;
@@ -858,6 +869,7 @@ function ByteUnitInput({
   disabled?: boolean;
   placeholder?: string;
   allowEmpty?: boolean;
+  unitAriaLabel?: string;
 }) {
   const initialUnit = bestUnit(valueBytes, units);
   const [unit, setUnit] = useState(initialUnit);
@@ -878,7 +890,7 @@ function ByteUnitInput({
   }
 
   return (
-    <div className="flex max-w-xs gap-2">
+    <div className="flex w-full max-w-full gap-2 sm:max-w-xs">
       <Input
         id={id}
         type="number"
@@ -897,6 +909,7 @@ function ByteUnitInput({
           commit(amount, event.target.value);
         }}
         disabled={disabled}
+        aria-label={unitAriaLabel}
         className="h-11 rounded-md border border-border-subtle bg-surface-root px-2 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
       >
         {units.map(([value, label]) => (
@@ -958,7 +971,7 @@ function SettingsToggle({
         checked={checked}
         disabled={disabled}
         onChange={(event) => onChange(event.target.checked)}
-        className="h-5 w-5 accent-accent-primary"
+        className="h-6 w-6 accent-accent-primary md:h-5 md:w-5"
       />
     </label>
   );

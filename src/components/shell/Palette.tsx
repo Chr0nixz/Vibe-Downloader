@@ -17,7 +17,7 @@ import {
   Trash2,
 } from "lucide-react";
 import type { TFunction } from "i18next";
-import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AppSettings } from "@/generated/bindings";
@@ -31,7 +31,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { errorMessage } from "@/lib/errors";
+import { createLogger } from "@/lib/logger";
 import { applyGlobalSpeedLimit } from "@/lib/settings";
+
+const log = createLogger("palette");
 import { canSeedMockTasks, seedMockTasks } from "@/lib/tauri";
 import { cn, formatSpeed } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -138,6 +141,7 @@ export function Palette({
 }) {
   const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [runningId, setRunningId] = useState<string | null>(null);
@@ -290,6 +294,27 @@ export function Palette({
     setActiveIndex(firstEnabled >= 0 ? firstEnabled : 0);
   }, [visibleCommands]);
 
+  useEffect(() => {
+    if (listRef.current == null) return;
+    const id = commandDomId(visibleCommands[activeIndex]?.id ?? "");
+    const element = listRef.current.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
+    element?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, visibleCommands]);
+
+  const findEnabledIndex = useCallback(
+    (from: number, direction: 1 | -1) => {
+      const length = visibleCommands.length;
+      if (length === 0) return -1;
+      let index = from;
+      for (let step = 0; step < length; step++) {
+        index = (index + direction + length) % length;
+        if (visibleCommands[index]?.enabled) return index;
+      }
+      return from;
+    },
+    [visibleCommands],
+  );
+
   async function runCommand(command: PaletteCommand) {
     if (!command.enabled || runningId) return;
 
@@ -298,6 +323,7 @@ export function Palette({
       await command.run();
       onOpenChange(false);
     } catch (err) {
+      log.error("command execution failed", command.id, err);
       const message = errorMessage(err);
       setError(message);
       addToast({
@@ -318,28 +344,34 @@ export function Palette({
 
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      setActiveIndex((index) => Math.min(visibleCommands.length - 1, index + 1));
+      setActiveIndex((index) => findEnabledIndex(index, 1));
       return;
     }
     if (event.key === "ArrowUp") {
       event.preventDefault();
-      setActiveIndex((index) => Math.max(0, index - 1));
+      setActiveIndex((index) => findEnabledIndex(index, -1));
       return;
     }
     if (event.key === "Home") {
       event.preventDefault();
-      setActiveIndex(0);
+      const firstEnabled = visibleCommands.findIndex((c) => c.enabled);
+      if (firstEnabled >= 0) setActiveIndex(firstEnabled);
       return;
     }
     if (event.key === "End") {
       event.preventDefault();
-      setActiveIndex(visibleCommands.length - 1);
+      for (let i = visibleCommands.length - 1; i >= 0; i--) {
+        if (visibleCommands[i]?.enabled) {
+          setActiveIndex(i);
+          break;
+        }
+      }
       return;
     }
     if (event.key === "Enter") {
       event.preventDefault();
       const command = visibleCommands[activeIndex];
-      if (command) void runCommand(command);
+      if (command?.enabled) void runCommand(command);
       return;
     }
     if (event.key === "Escape") {
@@ -380,6 +412,7 @@ export function Palette({
           </div>
 
           <div
+            ref={listRef}
             id="command-palette-results"
             role="listbox"
             aria-label={t("palette.resultsAria")}

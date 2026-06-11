@@ -127,6 +127,80 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
 }
 
 #[tokio::test]
+async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
+    let pool = test_pool("ftp-planning").await;
+    let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES * 4;
+    let mut task = sample_task("task-ftp", total_size);
+    task.url = "ftp://user:password@example.com/file.bin".to_string();
+    task.final_url = Some(task.url.clone());
+    task.protocol = "ftp".to_string();
+    task.source_key = "ftp://example.com:21".to_string();
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert ftp task");
+
+    let settings = AppSettings {
+        max_active_tasks: 2,
+        default_save_dir: "C:\\Downloads".to_string(),
+        global_speed_limit_bps: None,
+        multi_connection_threshold_bytes: db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES.to_string(),
+        segment_count: 8,
+        max_connections_per_host: 8,
+        system_notifications: true,
+        close_to_tray: false,
+        start_on_boot: false,
+        floating_window_enabled: false,
+        font_family: AppFontFamily::SourceHanSansSc,
+    };
+
+    let planned_slots = db::planned_segment_count_with_plan(
+        &task,
+        db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
+        settings.segment_count,
+    );
+    let segments = db::ensure_task_segments_with_settings(&pool, &task, &settings)
+        .await
+        .expect("ftp segments");
+
+    assert_eq!(planned_slots, 4);
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].unit_kind, "ftp_rest");
+    assert_eq!(segments[0].range_start, 0);
+    assert_eq!(segments[0].range_end, total_size - 1);
+}
+
+#[tokio::test]
+async fn bt_task_creates_single_piece_work_unit() {
+    let pool = test_pool("bt-planning").await;
+    let mut task = sample_task("task-bt", 0);
+    task.url = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel".to_string();
+    task.final_url = Some("bt:08ada5a7a6183aae1e09d831df6748d566095a10".to_string());
+    task.protocol = "bt".to_string();
+    task.task_kind = TaskKind::MultiFile;
+    task.source_key = "bt:08ada5a7a6183aae1e09d831df6748d566095a10".to_string();
+    task.supports_parallel = true;
+    task.supports_multi_file = true;
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert bt task");
+
+    let planned_slots = db::planned_segment_count_with_plan(
+        &task,
+        db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
+        db::MAX_SEGMENT_COUNT,
+    );
+    let segments = db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("bt segments");
+
+    assert_eq!(planned_slots, 1);
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].unit_kind, "bt_piece");
+    assert_eq!(segments[0].range_start, 0);
+    assert_eq!(segments[0].range_end, 0);
+}
+
+#[tokio::test]
 async fn splitting_largest_remaining_segment_keeps_ranges_contiguous() {
     let pool = test_pool("split-segment").await;
     let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES + 7;
@@ -437,6 +511,81 @@ async fn queued_task_query_uses_fifo_order() {
             .collect::<Vec<_>>(),
         vec!["task-first", "task-second"]
     );
+}
+
+#[tokio::test]
+async fn cursor_task_query_pages_and_maps_failure_categories() {
+    let pool = test_pool("cursor-tasks").await;
+    for index in 0..12 {
+        let mut task = sample_task(&format!("task-cursor-{index:02}"), 100);
+        task.updated_at = format!("2024-01-01T00:{index:02}:00Z");
+        task.created_at = task.updated_at.clone();
+        task.source_key = if index % 2 == 0 {
+            "source-a".to_string()
+        } else {
+            "source-b".to_string()
+        };
+        if index == 3 || index == 7 {
+            task.status = TaskStatus::NeedsAttention;
+            task.error_code = Some("auth_headers_expired".to_string());
+        }
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert cursor task");
+    }
+
+    let first_query = db::TaskListQuery {
+        nav: "all".to_string(),
+        search: String::new(),
+        sort_key: "updated_at".to_string(),
+        sort_direction: "desc".to_string(),
+        file_type: "all".to_string(),
+        source: "all".to_string(),
+        failure: "all".to_string(),
+        resume: "all".to_string(),
+        page: 0,
+        page_size: 5,
+        cursor_value: None,
+        cursor_id: None,
+    };
+    let first = db::list_task_records_cursor(&pool, &first_query)
+        .await
+        .expect("first cursor page");
+    assert_eq!(first.items.len(), 5);
+    assert!(first.has_more);
+    assert_eq!(first.items[0].id, "task-cursor-11");
+
+    let last = first.items.last().expect("last first page");
+    let second = db::list_task_records_cursor(
+        &pool,
+        &db::TaskListQuery {
+            cursor_value: Some(last.updated_at.clone()),
+            cursor_id: Some(last.id.clone()),
+            ..first_query.clone()
+        },
+    )
+    .await
+    .expect("second cursor page");
+    assert_eq!(second.items[0].id, "task-cursor-06");
+    assert!(!second.items.iter().any(|task| task.id == last.id));
+
+    let auth = db::list_task_records_cursor(
+        &pool,
+        &db::TaskListQuery {
+            failure: "auth".to_string(),
+            page_size: 10,
+            cursor_value: None,
+            cursor_id: None,
+            ..first_query
+        },
+    )
+    .await
+    .expect("auth category page");
+    assert_eq!(auth.items.len(), 2);
+    assert!(auth
+        .items
+        .iter()
+        .all(|task| task.error_code.as_deref() == Some("auth_headers_expired")));
 }
 
 #[tokio::test]

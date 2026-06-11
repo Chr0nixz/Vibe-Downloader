@@ -6,6 +6,7 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	listTasks: () => typedError<Task[], string>(__TAURI_INVOKE("list_tasks")),
 	listTasksPage: (input: ListTasksInput) => typedError<ListTasksResult, string>(__TAURI_INVOKE("list_tasks_page", { input })),
+	listTasksCursor: (input: ListTasksCursorInput) => typedError<ListTasksCursorResult, string>(__TAURI_INVOKE("list_tasks_cursor", { input })),
 	getTask: (id: string) => typedError<{
 	id: string,
 	url: string,
@@ -33,6 +34,7 @@ export const commands = {
 	errorCode: string | null,
 	recoveryActions: RecoveryAction[],
 	retryAfterAt: string | null,
+	failureCategory: TaskFailureCategory | null,
 	expectedHashSha256: string | null,
 	actualHashSha256: string | null,
 	hashStatus: HashVerificationStatus,
@@ -44,9 +46,12 @@ export const commands = {
 } | null, string>(__TAURI_INVOKE("get_task", { id })),
 	listTaskSegments: (taskId: string) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_task_segments", { taskId })),
 	listSegments: (input: ListSegmentsInput) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_segments", { input })),
+	listSegmentsPage: (input: CursorPageInput) => typedError<TaskSegmentsPageResult, string>(__TAURI_INVOKE("list_segments_page", { input })),
 	getSegmentSummary: (taskId: string) => typedError<SegmentSummary, string>(__TAURI_INVOKE("get_segment_summary", { taskId })),
 	listTaskEvents: (taskId: string) => typedError<TaskEvent[], string>(__TAURI_INVOKE("list_task_events", { taskId })),
+	listTaskEventsPage: (input: CursorPageInput) => typedError<TaskEventsPageResult, string>(__TAURI_INVOKE("list_task_events_page", { input })),
 	listTaskRequests: (taskId: string) => typedError<RequestDiagnostic[], string>(__TAURI_INVOKE("list_task_requests", { taskId })),
+	listTaskRequestsPage: (input: CursorPageInput) => typedError<TaskRequestsPageResult, string>(__TAURI_INVOKE("list_task_requests_page", { input })),
 	getSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("get_settings")),
 	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
 	getBrowserIntegrationStatus: () => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("get_browser_integration_status")),
@@ -172,6 +177,8 @@ export type BrowserHandoffInput = {
 	suggestedFileName: string | null,
 	totalBytes: string | null,
 	mime: string | null,
+	headersAvailable: boolean | null,
+	headerConsentState: string | null,
 	forwardedHeaders: BrowserForwardedHeader[] | null,
 };
 
@@ -234,6 +241,12 @@ export type CreateTaskInput = {
 	expectedHashSha256: string | null,
 };
 
+export type CursorPageInput = {
+	taskId: string,
+	cursor: string | null,
+	pageSize: number | null,
+};
+
 export type EngineCapabilities = {
 	supportsResume: boolean,
 	supportsParallel: boolean,
@@ -262,6 +275,26 @@ export type ListSegmentsInput = {
 	taskId: string,
 	page: number | null,
 	pageSize: number | null,
+};
+
+export type ListTasksCursorInput = {
+	nav: string | null,
+	search: string | null,
+	sortKey: string | null,
+	sortDirection: string | null,
+	fileType: string | null,
+	source: string | null,
+	failureCategory: string | null,
+	resume: string | null,
+	cursor: string | null,
+	pageSize: number | null,
+};
+
+export type ListTasksCursorResult = {
+	items: Task[],
+	nextCursor: string | null,
+	totalEstimate: string,
+	filterOptions: TaskFilterOptions,
 };
 
 export type ListTasksInput = {
@@ -369,6 +402,7 @@ export type Task = {
 	errorCode: string | null,
 	recoveryActions: RecoveryAction[],
 	retryAfterAt: string | null,
+	failureCategory: TaskFailureCategory | null,
 	expectedHashSha256: string | null,
 	actualHashSha256: string | null,
 	hashStatus: HashVerificationStatus,
@@ -387,6 +421,13 @@ export type TaskEvent = {
 	createdAt: string,
 };
 
+export type TaskEventsPageResult = {
+	items: TaskEvent[],
+	nextCursor: string | null,
+};
+
+export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "other";
+
 export type TaskFile = {
 	id: string,
 	taskId: string,
@@ -402,6 +443,11 @@ export type TaskFile = {
 	contentType: string | null,
 };
 
+export type TaskFilterOptions = {
+	sources: string[],
+	failureCategories: string[],
+};
+
 export type TaskKind = "single_file" | "multi_file" | "manifest";
 
 export type TaskProgressPayload = {
@@ -411,6 +457,11 @@ export type TaskProgressPayload = {
 	speedBps: string,
 	connectionCount: number,
 	status: TaskStatus,
+};
+
+export type TaskRequestsPageResult = {
+	items: RequestDiagnostic[],
+	nextCursor: string | null,
 };
 
 export type TaskSegment = {
@@ -425,6 +476,11 @@ export type TaskSegment = {
 	status: SegmentStatus,
 	retryCount: number,
 	lastError: string | null,
+};
+
+export type TaskSegmentsPageResult = {
+	items: TaskSegment[],
+	nextCursor: string | null,
 };
 
 export type TaskStatus = "queued" | "downloading" | "paused" | "completed" | "failed" | "retrying" | "waiting_network" | "needs_attention";

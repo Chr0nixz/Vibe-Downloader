@@ -152,6 +152,9 @@ fn validate_handoff(input: &BrowserHandoffInput) -> Result<(), String> {
     }
 
     let url = Url::parse(input.url.trim()).map_err(|_| "Handoff URL is invalid.".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Handoff only supports HTTP and HTTPS URLs.".to_string());
+    }
     EngineRegistry::new()?.engine_for_uri(url.as_str())?;
     if url.username() != "" || url.password().is_some() {
         return Err("Handoff URLs must not contain embedded credentials.".to_string());

@@ -9,7 +9,7 @@ import {
   Search,
   Trash2,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -56,6 +56,8 @@ export function CommandBar({
   const [customLimit, setCustomLimit] = useState("");
   const [savingSpeed, setSavingSpeed] = useState(false);
   const speedMenuRef = useRef<HTMLDivElement>(null);
+  const speedTriggerRef = useRef<HTMLButtonElement>(null);
+  const speedListRef = useRef<HTMLDivElement>(null);
   const canStart =
     !!selectedTask &&
     (selectedTask.status === "paused" ||
@@ -86,6 +88,62 @@ export function CommandBar({
     window.addEventListener("pointerdown", onPointerDown);
     return () => window.removeEventListener("pointerdown", onPointerDown);
   }, [speedMenuOpen]);
+
+  // Auto-focus the first menu item when the speed menu opens
+  useEffect(() => {
+    if (speedMenuOpen && speedListRef.current) {
+      const firstItem = speedListRef.current.querySelector<HTMLElement>(
+        '[role="menuitemradio"]',
+      );
+      firstItem?.focus();
+    }
+  }, [speedMenuOpen]);
+
+  const handleSpeedMenuKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      const menu = speedListRef.current;
+      if (!menu) return;
+
+      const items = Array.from(
+        menu.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+      );
+      if (items.length === 0) return;
+
+      const currentIndex = items.indexOf(document.activeElement as HTMLElement);
+
+      switch (event.key) {
+        case "ArrowDown": {
+          event.preventDefault();
+          const next = currentIndex < items.length - 1 ? currentIndex + 1 : 0;
+          items[next]?.focus();
+          break;
+        }
+        case "ArrowUp": {
+          event.preventDefault();
+          const prev = currentIndex > 0 ? currentIndex - 1 : items.length - 1;
+          items[prev]?.focus();
+          break;
+        }
+        case "Home": {
+          event.preventDefault();
+          items[0]?.focus();
+          break;
+        }
+        case "End": {
+          event.preventDefault();
+          items[items.length - 1]?.focus();
+          break;
+        }
+        case "Escape": {
+          event.preventDefault();
+          setSpeedMenuOpen(false);
+          speedTriggerRef.current?.focus();
+          break;
+        }
+      }
+    },
+    [],
+  );
 
   async function setSpeedLimit(limit: number | null) {
     try {
@@ -163,12 +221,17 @@ export function CommandBar({
             className={cn("hidden md:inline-flex", savingSpeed && "animate-spin")}
             onClick={() => setSpeedMenuOpen((open) => !open)}
             disabled={!settings || savingSpeed}
+            buttonRef={speedTriggerRef}
+            ariaHasPopup="menu"
+            ariaExpanded={speedMenuOpen}
           />
           {speedMenuOpen ? (
             <div
+              ref={speedListRef}
               className="absolute left-0 top-10 z-30 w-64 rounded-md border border-border-subtle bg-surface-overlay p-1.5 shadow-xl"
               role="menu"
               aria-label={t("commandBar.speedLimit")}
+              onKeyDown={handleSpeedMenuKeyDown}
             >
               <SpeedPreset
                 label={t("speedLimit.unlimited")}
@@ -276,6 +339,7 @@ function SpeedPreset({
       type="button"
       role="menuitemradio"
       aria-checked={active}
+      tabIndex={-1}
       className={cn(
         "flex h-8 w-full items-center justify-between rounded px-2 text-left text-sm text-text-secondary hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
         active && "bg-surface-raised text-text-primary",
@@ -294,20 +358,29 @@ function ActionIcon({
   onClick,
   disabled,
   className,
+  buttonRef,
+  ariaHasPopup,
+  ariaExpanded,
 }: {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   onClick?: () => void;
   disabled?: boolean;
   className?: string;
+  buttonRef?: React.Ref<HTMLButtonElement>;
+  ariaHasPopup?: React.AriaAttributes["aria-haspopup"];
+  ariaExpanded?: boolean;
 }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <Button
+          ref={buttonRef}
           variant="ghost"
           size="icon"
           aria-label={label}
+          aria-haspopup={ariaHasPopup}
+          aria-expanded={ariaExpanded}
           onClick={onClick}
           disabled={disabled}
           className={className}

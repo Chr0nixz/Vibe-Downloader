@@ -1,5 +1,5 @@
 import { memo, useCallback, type MouseEventHandler, type ReactNode } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import {
   Activity,
@@ -40,6 +40,8 @@ interface TaskRowProps {
   task: Task;
   selected: boolean;
   multiSelected: boolean;
+  isFirstFocusable: boolean;
+  reduceMotion: boolean;
   position: number;
   setSize: number;
   onSelectTask: (taskId: string) => void;
@@ -77,6 +79,8 @@ export const TaskRow = memo(function TaskRow({
   task,
   selected,
   multiSelected,
+  isFirstFocusable,
+  reduceMotion,
   position,
   setSize,
   onSelectTask,
@@ -89,7 +93,6 @@ export const TaskRow = memo(function TaskRow({
   onResolveAttention,
 }: TaskRowProps) {
   const { t } = useTranslation();
-  const reduceMotion = useReducedMotion();
   const expanded = useTaskStore((s) => s.expandedTaskIds.includes(task.id));
   const speedHistory = useTaskStore(
     (s) => s.speedHistoryByTaskId[task.id] ?? EMPTY_SPEED_HISTORY,
@@ -133,7 +136,7 @@ export const TaskRow = memo(function TaskRow({
       aria-setsize={setSize}
       aria-labelledby={nameId}
       aria-describedby={`${statusId} ${hostId} ${diagnosticId}`}
-      tabIndex={selected ? 0 : -1}
+      tabIndex={selected || isFirstFocusable ? 0 : -1}
       onClick={(event) => {
         if ((event.target as HTMLElement).closest("[data-row-action]")) return;
         onSelect();
@@ -157,7 +160,7 @@ export const TaskRow = memo(function TaskRow({
         }
       }}
       className={cn(
-        "relative overflow-hidden rounded-lg border border-border-subtle/70 bg-surface-base/85 px-3 py-3.5 shadow-[0_1px_2px_oklch(0_0_0_/_0.05),0_1px_0_oklch(1_0_0_/_0.025)_inset] transition-[background-color,border-color,box-shadow,transform] duration-200 ease-out hover:-translate-y-px hover:border-text-muted/30 hover:bg-surface-raised/70 hover:shadow-[0_6px_18px_oklch(0_0_0_/_0.08),0_1px_0_oklch(1_0_0_/_0.035)_inset] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70 sm:px-3.5 md:px-4",
+        "relative overflow-hidden rounded-lg border border-border-subtle/70 bg-surface-base/85 px-3 py-3.5 shadow-[0_1px_2px_oklch(0_0_0_/_0.05),0_1px_0_oklch(1_0_0_/_0.025)_inset] transition-[background-color,border-color,box-shadow,transform] duration-ui ease-out hover:-translate-y-px hover:border-text-muted/30 hover:bg-surface-raised/70 hover:shadow-[0_6px_18px_oklch(0_0_0_/_0.08),0_1px_0_oklch(1_0_0_/_0.035)_inset] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70 sm:px-3.5 md:px-4",
         "grid gap-x-4 gap-y-3 md:grid-cols-[minmax(0,1fr)_auto] md:gap-y-2",
         selected &&
           "border-accent-primary/35 bg-surface-raised ring-1 ring-accent-primary/45 shadow-[0_8px_24px_oklch(0_0_0_/_0.10),0_1px_0_oklch(1_0_0_/_0.04)_inset]",
@@ -392,7 +395,7 @@ function RowActions({
         }}
       >
         <ChevronDown
-          className={cn("h-4 w-4 transition-transform duration-200", expanded && "rotate-180")}
+          className={cn("h-4 w-4 transition-transform duration-ui", expanded && "rotate-180")}
         />
       </ActionButton>
       <ActionButton

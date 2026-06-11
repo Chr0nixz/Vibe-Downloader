@@ -49,7 +49,7 @@ export function ProgressBar({
         className={cn(
           "absolute inset-y-0 left-0 w-full origin-left rounded-full",
           smooth
-            ? "transition-transform duration-200 ease-out will-change-transform motion-reduce:transition-none"
+            ? "transition-transform duration-ui ease-out will-change-transform motion-reduce:transition-none"
             : "transition-none",
           active ? toneClass[tone] : toneClass.neutral,
         )}

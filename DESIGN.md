@@ -53,7 +53,7 @@ Recommended dark tokens:
 - `border.subtle`: `oklch(0.33 0.012 255)`
 - `text.primary`: `oklch(0.93 0.006 255)`
 - `text.secondary`: `oklch(0.72 0.008 255)`
-- `text.muted`: `oklch(0.56 0.008 255)`
+- `text.muted`: `oklch(0.78 0.008 255)`
 - `accent.primary`: `oklch(0.72 0.14 235)`
 - `accent.energy`: `oklch(0.78 0.18 170)`
 - `accent.peak`: `oklch(0.74 0.18 305)`
@@ -68,11 +68,11 @@ Recommended light tokens:
 - `surface.raised`: `oklch(0.99 0.003 255)`
 - `border.subtle`: `oklch(0.84 0.01 255)`
 - `text.primary`: `oklch(0.22 0.012 255)`
-- `text.secondary`: `oklch(0.43 0.012 255)`
-- `text.muted`: `oklch(0.58 0.01 255)`
-- `accent.primary`: `oklch(0.58 0.16 235)`
-- `accent.energy`: `oklch(0.58 0.16 165)`
-- `status.danger`: `oklch(0.55 0.18 25)`
+- `text.secondary`: `oklch(0.28 0.015 255)`
+- `text.muted`: `oklch(0.39 0.01 255)`
+- `accent.primary`: `oklch(0.30 0.16 235)`
+- `accent.energy`: `oklch(0.26 0.14 165)`
+- `status.danger`: `oklch(0.45 0.18 25)`
 
 ## Typography
 

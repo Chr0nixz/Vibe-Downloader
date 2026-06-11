@@ -7,7 +7,7 @@ use std::{
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 
-use super::{GlobalSpeedLimiter, HttpEngine};
+use super::{BtEngine, FtpEngine, GlobalSpeedLimiter, HttpEngine};
 use crate::models::{EngineCapabilities, ProbedFile, TaskKind, TaskRecord};
 
 pub(crate) type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -55,6 +55,7 @@ pub trait DownloadEngine: Send + Sync {
 #[derive(Clone)]
 pub struct EngineRegistry {
     engines: Vec<Arc<dyn DownloadEngine>>,
+    bt_engine: Arc<BtEngine>,
 }
 
 impl Default for EngineRegistry {
@@ -65,8 +66,14 @@ impl Default for EngineRegistry {
 
 impl EngineRegistry {
     pub fn new() -> Result<Self, String> {
+        let bt_engine = Arc::new(BtEngine::new());
         Ok(Self {
-            engines: vec![Arc::new(HttpEngine::new()?)],
+            engines: vec![
+                bt_engine.clone(),
+                Arc::new(HttpEngine::new()?),
+                Arc::new(FtpEngine::new()),
+            ],
+            bt_engine,
         })
     }
 
@@ -74,13 +81,32 @@ impl EngineRegistry {
         let parsed =
             reqwest::Url::parse(uri.trim()).map_err(|_| "Download URL is invalid.".to_string())?;
         let scheme = parsed.scheme();
+        if scheme == "magnet" || scheme == "file" || is_torrent_url(&parsed) {
+            return Ok(self.bt_engine.clone());
+        }
         self.engines
             .iter()
             .find(|engine| engine.supports_scheme(scheme))
             .cloned()
             .ok_or_else(|| format!("The {scheme} protocol is not supported yet."))
     }
+
+    pub async fn delete_runtime_task(&self, task: &TaskRecord, delete_files: bool) {
+        if matches!(task.protocol.as_str(), "bt" | "magnet") {
+            self.bt_engine
+                .delete_runtime_task(&task.source_key, delete_files)
+                .await;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExternalEngineAdapter;
+
+fn is_torrent_url(url: &reqwest::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".torrent"))
+}

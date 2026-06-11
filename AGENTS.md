@@ -101,6 +101,7 @@ Important current constants:
 - Keep changes scoped to the requested area.
 - Prefer existing patterns over new abstractions.
 - Use generated Specta bindings rather than hand-writing IPC types when Rust models or commands change.
+- Treat English and Simplified Chinese (`en`/`zh-CN`) as the only actively supported locales for now. Add other locale translations later when explicitly prioritized.
 - Preserve the current browser handoff security boundary: only HTTP/HTTPS URLs, no embedded credentials, no browser-controlled local save path, and no Cookie/header forwarding in the current stage.
 - Keep debug-only mock behavior out of production builds. `seed_mock_tasks` is intentionally debug-only.
 - When changing download or resume logic, add or update Rust tests under `src-tauri/tests`.

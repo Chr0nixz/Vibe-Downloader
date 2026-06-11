@@ -5,7 +5,7 @@ use tokio::fs;
 
 use crate::{db, models::AppErrorPayload};
 
-pub(super) async fn finalize_download_file(
+pub(crate) async fn finalize_download_file(
     temp_path: &Path,
     preferred_final_path: &Path,
 ) -> Result<PathBuf, String> {
@@ -51,7 +51,7 @@ async fn available_final_path(preferred_final_path: &Path) -> Result<PathBuf, St
     )
 }
 
-pub(super) async fn persist_completed_path(
+pub(crate) async fn persist_completed_path(
     pool: &SqlitePool,
     task_id: &str,
     completed_path: &Path,

@@ -1,8 +1,8 @@
 # Vibe Downloader Roadmap
 
-Last updated: 2026-06-10
+Last updated: 2026-06-11
 
-This roadmap reflects the current repository state. Product and design constraints live in [PRODUCT.md](../PRODUCT.md) and [DESIGN.md](../DESIGN.md).
+This roadmap reflects the current repository state. Product and design constraints live in [PRODUCT.md](../PRODUCT.md) and [DESIGN.md](../DESIGN.md). Error and browser header-forwarding details live in [error-codes.md](error-codes.md) and [browser-header-forwarding.md](browser-header-forwarding.md).
 
 ## Current Baseline
 
@@ -42,7 +42,7 @@ The app now includes a working HTTP/HTTPS desktop download manager with:
 - Native Messaging manifests derive allowed origins/extensions from the active browser profile.
 - Extension build output syncs the extension version from `package.json` and emits Chrome/Edge/Firefox/Opera variants.
 - Extension popup includes bridge status, capture toggles, live tasks, and a recent handoff panel backed by extension local storage.
-- Automatic browser download takeover, optional Cookie/header forwarding, browser task status, and site-rule data models have a first implementation behind explicit settings.
+- Automatic browser download takeover, ask/enabled/disabled Cookie/header forwarding, browser task status, encrypted per-task header restore, and minimal site-rule management are implemented behind explicit settings.
 
 ### P4 First Pass
 
@@ -55,8 +55,8 @@ The app now includes a working HTTP/HTTPS desktop download manager with:
 
 - Safari wrapper/signing/review is not implemented.
 - Browser store IDs are represented by release placeholders and must be replaced before store submission.
-- Site-rule management UI and the final privacy copy/permission review for browser capture are still follow-up items.
-- Task list virtualization for very large history is still a follow-up performance item.
+- Browser capture still needs final store review copy and a full end-to-end permission review before public extension submission.
+- Task list uses backend cursor pagination plus frontend windowing for large histories; future work should benchmark production-scale databases on each target OS.
 - HLS/BT and plugin protocol work should use mature engines/adapters when scheduled.
 
 ## Verification Baseline

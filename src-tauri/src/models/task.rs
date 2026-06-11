@@ -135,6 +135,7 @@ pub struct Task {
     pub error_code: Option<String>,
     pub recovery_actions: Vec<RecoveryAction>,
     pub retry_after_at: Option<String>,
+    pub failure_category: Option<TaskFailureCategory>,
     pub expected_hash_sha256: Option<String>,
     pub actual_hash_sha256: Option<String>,
     pub hash_status: HashVerificationStatus,
@@ -374,6 +375,7 @@ impl From<TaskFileRecord> for TaskFile {
 
 impl From<TaskRecord> for Task {
     fn from(record: TaskRecord) -> Self {
+        let failure_category = failure_category_for_code(record.error_code.as_deref());
         Self {
             id: record.id,
             url: record.url,
@@ -401,6 +403,7 @@ impl From<TaskRecord> for Task {
             error_code: record.error_code,
             recovery_actions: record.recovery_actions,
             retry_after_at: record.retry_after_at,
+            failure_category,
             expected_hash_sha256: record.expected_hash_sha256,
             actual_hash_sha256: record.actual_hash_sha256,
             hash_status: record.hash_status,
@@ -535,6 +538,34 @@ pub enum RecoveryAction {
     FreeDiskSpace,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskFailureCategory {
+    RemoteChanged,
+    ResumeUnavailable,
+    TempFile,
+    DiskWrite,
+    Http,
+    Auth,
+    Other,
+}
+
+pub fn failure_category_for_code(code: Option<&str>) -> Option<TaskFailureCategory> {
+    match code? {
+        "remote_changed" => Some(TaskFailureCategory::RemoteChanged),
+        "resume_unavailable" => Some(TaskFailureCategory::ResumeUnavailable),
+        "temp_file_missing" | "temp_file_smaller_than_progress" => {
+            Some(TaskFailureCategory::TempFile)
+        }
+        "disk_write_failed" => Some(TaskFailureCategory::DiskWrite),
+        "auth_headers_expired" | "auth_headers_unavailable" => Some(TaskFailureCategory::Auth),
+        value if value.starts_with("http_") || value == "server_rate_limited" => {
+            Some(TaskFailureCategory::Http)
+        }
+        _ => Some(TaskFailureCategory::Other),
+    }
+}
+
 impl RecoveryAction {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -548,18 +579,22 @@ impl RecoveryAction {
             Self::FreeDiskSpace => "free_disk_space",
         }
     }
+}
 
-    pub fn from_str(value: &str) -> Option<Self> {
+impl std::str::FromStr for RecoveryAction {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "retry" => Some(Self::Retry),
-            "retry_later" => Some(Self::RetryLater),
-            "choose_another_name" => Some(Self::ChooseAnotherName),
-            "choose_another_folder" => Some(Self::ChooseAnotherFolder),
-            "restart" => Some(Self::Restart),
-            "open_folder" => Some(Self::OpenFolder),
-            "check_url" => Some(Self::CheckUrl),
-            "free_disk_space" => Some(Self::FreeDiskSpace),
-            _ => None,
+            "retry" => Ok(Self::Retry),
+            "retry_later" => Ok(Self::RetryLater),
+            "choose_another_name" => Ok(Self::ChooseAnotherName),
+            "choose_another_folder" => Ok(Self::ChooseAnotherFolder),
+            "restart" => Ok(Self::Restart),
+            "open_folder" => Ok(Self::OpenFolder),
+            "check_url" => Ok(Self::CheckUrl),
+            "free_disk_space" => Ok(Self::FreeDiskSpace),
+            _ => Err(()),
         }
     }
 }
@@ -616,6 +651,15 @@ impl AppErrorPayload {
         Self::new(
             "auth_headers_expired",
             "Browser authentication headers expired. Send this download from the browser again or restart it.",
+            true,
+            vec!["check_url", "restart"],
+        )
+    }
+
+    pub fn auth_headers_unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            "auth_headers_unavailable",
+            message,
             true,
             vec!["check_url", "restart"],
         )

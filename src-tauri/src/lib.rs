@@ -6,6 +6,7 @@ pub mod events;
 pub mod logging;
 pub mod models;
 pub mod platform;
+pub mod secure_headers;
 
 use std::{
     collections::HashMap,
@@ -52,12 +53,16 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
         commands::tasks::list_tasks,
         commands::tasks::list_tasks_page,
+        commands::tasks::list_tasks_cursor,
         commands::tasks::get_task,
         commands::tasks::list_task_segments,
         commands::tasks::list_segments,
+        commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
         commands::tasks::list_task_events,
+        commands::tasks::list_task_events_page,
         commands::tasks::list_task_requests,
+        commands::tasks::list_task_requests_page,
         commands::settings::get_settings,
         commands::settings::update_settings,
         commands::browser::get_browser_integration_status,
@@ -91,12 +96,16 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
         commands::tasks::list_tasks,
         commands::tasks::list_tasks_page,
+        commands::tasks::list_tasks_cursor,
         commands::tasks::get_task,
         commands::tasks::list_task_segments,
         commands::tasks::list_segments,
+        commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
         commands::tasks::list_task_events,
+        commands::tasks::list_task_events_page,
         commands::tasks::list_task_requests,
+        commands::tasks::list_task_requests_page,
         commands::settings::get_settings,
         commands::settings::update_settings,
         commands::browser::get_browser_integration_status,
@@ -130,7 +139,13 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::AppSettings>()
         .typ::<models::TaskUpdatedPayload>()
         .typ::<models::TaskProgressPayload>()
+        .typ::<models::TaskFailureCategory>()
         .typ::<commands::tasks::ListTasksResult>()
+        .typ::<commands::tasks::ListTasksCursorResult>()
+        .typ::<commands::tasks::TaskFilterOptions>()
+        .typ::<commands::tasks::TaskEventsPageResult>()
+        .typ::<commands::tasks::TaskRequestsPageResult>()
+        .typ::<commands::tasks::TaskSegmentsPageResult>()
         .typ::<models::RequestDiagnostic>()
         .typ::<models::SegmentSummary>()
         .typ::<models::HashVerificationState>()
@@ -242,12 +257,16 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         commands::tasks::list_tasks,
         commands::tasks::list_tasks_page,
+        commands::tasks::list_tasks_cursor,
         commands::tasks::get_task,
         commands::tasks::list_task_segments,
         commands::tasks::list_segments,
+        commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
         commands::tasks::list_task_events,
+        commands::tasks::list_task_events_page,
         commands::tasks::list_task_requests,
+        commands::tasks::list_task_requests_page,
         commands::settings::get_settings,
         commands::settings::update_settings,
         commands::browser::get_browser_integration_status,
@@ -281,12 +300,16 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         commands::tasks::list_tasks,
         commands::tasks::list_tasks_page,
+        commands::tasks::list_tasks_cursor,
         commands::tasks::get_task,
         commands::tasks::list_task_segments,
         commands::tasks::list_segments,
+        commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
         commands::tasks::list_task_events,
+        commands::tasks::list_task_events_page,
         commands::tasks::list_task_requests,
+        commands::tasks::list_task_requests_page,
         commands::settings::get_settings,
         commands::settings::update_settings,
         commands::browser::get_browser_integration_status,
@@ -350,6 +373,13 @@ pub fn run() {
             tauri::async_runtime::block_on(async {
                 browser_realtime::start(handle.clone(), browser_realtime).await
             })?;
+            {
+                let state = handle.state::<AppState>();
+                tauri::async_runtime::block_on(async {
+                    commands::tasks::schedule_retry_after_wakeup(handle.clone(), state.inner())
+                        .await
+                });
+            }
             create_tray(&handle)?;
             process_browser_handoff_files_from_args(
                 &handle,
@@ -519,15 +549,14 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     tracing::warn!(error = %error, "failed to show custom tray menu");
                 }
             }
-            TrayIconEvent::DoubleClick { button, .. } => {
-                if button == MouseButton::Left {
-                    if let Some(window) =
-                        tray.app_handle().get_webview_window(TRAY_MENU_WINDOW_LABEL)
-                    {
-                        let _ = window.hide();
-                    }
-                    focus_main_window(tray.app_handle());
+            TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some(window) = tray.app_handle().get_webview_window(TRAY_MENU_WINDOW_LABEL) {
+                    let _ = window.hide();
                 }
+                focus_main_window(tray.app_handle());
             }
             _ => {}
         });

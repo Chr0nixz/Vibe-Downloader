@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
-import type { ListTasksInput } from "@/generated/bindings";
+import type { ListTasksCursorInput, ListTasksInput, TaskFilterOptions } from "@/generated/bindings";
+import { sanitizeUrlForDisplay } from "@/lib/utils";
 import type { Task } from "@/types/task";
 import { parseByteCount } from "@/types/task";
 import {
@@ -47,7 +48,9 @@ interface TaskStore {
   total: number;
   page: number;
   pageSize: number;
+  nextCursor: string | null;
   hasMore: boolean;
+  filterOptions: TaskFilterOptions;
   selectedId: string | null;
   selectedIds: string[];
   nav: NavFilter;
@@ -62,6 +65,13 @@ interface TaskStore {
   error: string | null;
   setTasks: (tasks: Task[]) => void;
   setTaskPage: (tasks: Task[], total: number, page: number, pageSize: number, append?: boolean) => void;
+  setTaskCursorPage: (
+    tasks: Task[],
+    totalEstimate: number,
+    nextCursor: string | null,
+    filterOptions: TaskFilterOptions,
+    append?: boolean,
+  ) => void;
   upsertTask: (task: Task) => void;
   patchTask: (payload: TaskProgressPayload | unknown) => void;
   selectTask: (id: string | null) => void;
@@ -85,7 +95,12 @@ export const useTaskStore = create<TaskStore>((set) => ({
   total: 0,
   page: 0,
   pageSize: 100,
+  nextCursor: null,
   hasMore: false,
+  filterOptions: {
+    sources: [],
+    failureCategories: [],
+  },
   selectedId: null,
   selectedIds: [],
   nav: "all",
@@ -113,6 +128,7 @@ export const useTaskStore = create<TaskStore>((set) => ({
         tasks,
         total: tasks.length,
         page: 0,
+        nextCursor: null,
         hasMore: false,
         selectedIds: state.selectedIds.filter((id) => ids.has(id)),
         expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
@@ -131,7 +147,27 @@ export const useTaskStore = create<TaskStore>((set) => ({
         total,
         page,
         pageSize,
+        nextCursor: null,
         hasMore: nextTasks.length < total,
+        selectedIds: state.selectedIds.filter((id) => ids.has(id)),
+        expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
+        speedHistoryByTaskId,
+      };
+    }),
+  setTaskCursorPage: (tasks, totalEstimate, nextCursor, filterOptions, append = false) =>
+    set((state) => {
+      const nextTasks = append ? mergePagedTasks(state.tasks, tasks) : tasks;
+      const ids = new Set(nextTasks.map((task) => task.id));
+      const speedHistoryByTaskId = Object.fromEntries(
+        Object.entries(state.speedHistoryByTaskId).filter(([id]) => ids.has(id)),
+      );
+      return {
+        tasks: nextTasks,
+        total: totalEstimate,
+        page: append ? state.page + 1 : 0,
+        nextCursor,
+        hasMore: Boolean(nextCursor),
+        filterOptions,
         selectedIds: state.selectedIds.filter((id) => ids.has(id)),
         expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
         speedHistoryByTaskId,
@@ -308,7 +344,7 @@ export function filterTasks(
     return (
       task.fileName.toLowerCase().includes(query) ||
       task.sourceKey.toLowerCase().includes(query) ||
-      task.url.toLowerCase().includes(query)
+      sanitizeUrlForDisplay(task.url).toLowerCase().includes(query)
     );
   });
 
@@ -328,6 +364,22 @@ export function filterTasks(
       return true;
     })
     .sort((a, b) => compareTasks(a, b, sortKey, sortDirection));
+}
+
+export function taskCursorInput(cursor: string | null = null): ListTasksCursorInput {
+  const state = useTaskStore.getState();
+  return {
+    nav: state.nav,
+    search: state.search,
+    sortKey: state.sortKey,
+    sortDirection: state.sortDirection,
+    fileType: state.filters.fileType,
+    source: state.filters.source,
+    failureCategory: state.filters.failure,
+    resume: state.filters.resume,
+    cursor,
+    pageSize: state.pageSize,
+  };
 }
 
 function compareTasks(
@@ -415,6 +467,7 @@ export function taskFileType(task: Task): FileTypeFilter {
 
 export function failureKind(task: Task): string {
   if (task.status !== "failed" && task.status !== "needs_attention") return "none";
+  if (task.failureCategory) return task.failureCategory;
   if (task.errorCode) {
     if (task.errorCode === "remote_changed") return "remote_changed";
     if (task.errorCode === "resume_unavailable") return "resume_unavailable";

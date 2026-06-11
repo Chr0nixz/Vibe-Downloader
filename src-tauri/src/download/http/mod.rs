@@ -1,6 +1,6 @@
 mod direct;
 mod error;
-mod file;
+pub(crate) mod file;
 mod probe;
 mod request;
 mod segmented;

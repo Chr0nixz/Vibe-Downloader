@@ -27,7 +27,7 @@
 
 :root {
   --vibe-font-sans-system: Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  --vibe-font-sans-source-han: Inter, "Segoe UI Variable", "Segoe UI", "Vibe Source Han Sans SC", "Source Han Sans SC", "Noto Sans CJK SC", "Source Han Sans CN", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+  --vibe-font-sans-source-han: Inter, "Segoe UI Variable", "Segoe UI", "Vibe Source Han Sans SC", "Source Han Sans SC", "Noto Sans CJK SC", "Noto Sans CJK JP", "Source Han Sans CN", "Source Han Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic", "MS PGothic", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
   --vibe-font-sans: var(--vibe-font-sans-source-han);
 }
 
@@ -57,6 +57,8 @@
   --color-status-success: var(--status-success);
   --color-status-warning: var(--status-warning);
   --color-status-danger: var(--status-danger);
+  --duration-ui: var(--motion-ui);
+  --ease-ui: ease-out;
   --font-sans: var(--vibe-font-sans);
   --font-mono: "Geist Mono", "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
 }

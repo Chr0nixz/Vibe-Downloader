@@ -6,12 +6,15 @@ import { useTaskEvents } from "@/hooks/use-task-events";
 import {
   focusMainWindowFromFloating,
   hideFloatingStatusWindow,
-  listTasksPage,
+  listTasksCursor,
 } from "@/lib/tauri";
 import { startWindowDrag } from "@/lib/window-controls";
 import { cn, formatPercent, formatSpeed } from "@/lib/utils";
+import { createLogger } from "@/lib/logger";
 import { useTaskStore } from "@/stores/task-store";
 import type { Task } from "@/types/task";
+
+const log = createLogger("floating-status");
 
 export function FloatingStatusWindow() {
   const { t } = useTranslation();
@@ -22,23 +25,40 @@ export function FloatingStatusWindow() {
   useTaskEvents({ notify: false });
 
   useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        void hideFloatingStatusWindow();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        void focusMainWindowFromFloating();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     void (async () => {
       try {
-        const data = await listTasksPage({
+        const data = await listTasksCursor({
           nav: "downloading",
           search: null,
           sortKey: "speed",
           sortDirection: "desc",
           fileType: "all",
           source: "all",
-          failure: "all",
+          failureCategory: "all",
           resume: "all",
-          page: 0,
+          cursor: null,
           pageSize: 50,
         });
         if (!cancelled) setTasks(data.items);
+      } catch (err) {
+        if (!cancelled) log.error("initial task load failed", err);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -137,7 +157,7 @@ export function FloatingStatusWindow() {
           >
             <div
               className={cn(
-                "h-full rounded-full transition-[width] duration-200 ease-out",
+                "h-full rounded-full transition-[width] duration-ui ease-out",
                 idle ? "bg-text-muted/45" : "bg-accent-energy",
               )}
               style={{ width: `${percent}%` }}

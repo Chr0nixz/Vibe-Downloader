@@ -20,10 +20,10 @@ use crate::{
     events::{emit_queue_changed, emit_task_progress, emit_task_updated, emit_task_updated_record},
     logging::sanitize_url,
     models::{
-        task::now_iso, AppErrorPayload, BatchImportItem, BatchImportResult, HashVerificationState,
-        BrowserKind, HashVerificationStatus, ProbeTaskPayload, RecoveryAction, RequestDiagnostic,
-        SegmentSummary, Task, TaskEvent, TaskFileRecord, TaskRecord, TaskSegment,
-        TaskSegmentRecord, TaskStatus,
+        task::now_iso, AppErrorPayload, BatchImportItem, BatchImportResult, BrowserKind,
+        HashVerificationState, HashVerificationStatus, ProbeTaskPayload, RecoveryAction,
+        RequestDiagnostic, SegmentSummary, Task, TaskEvent, TaskFileRecord, TaskRecord,
+        TaskSegment, TaskSegmentRecord, TaskStatus,
     },
     platform, AppState, DownloadControl, TaskRequestHeaders,
 };
@@ -58,6 +58,35 @@ pub struct ListSegmentsInput {
     pub task_id: String,
     pub page: Option<i32>,
     pub page_size: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorPageInput {
+    pub task_id: String,
+    pub cursor: Option<String>,
+    pub page_size: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskEventsPageResult {
+    pub items: Vec<TaskEvent>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRequestsPageResult {
+    pub items: Vec<RequestDiagnostic>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSegmentsPageResult {
+    pub items: Vec<TaskSegment>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -128,6 +157,8 @@ pub async fn list_tasks_page(
                 .page_size
                 .unwrap_or(i32::try_from(db::DEFAULT_TASK_PAGE_SIZE).unwrap_or(100)),
         ),
+        cursor_value: None,
+        cursor_id: None,
     };
     let page = db::list_task_records_page(&state.pool, &query).await?;
     let mut tasks = Vec::with_capacity(page.items.len());
@@ -140,6 +171,135 @@ pub async fn list_tasks_page(
         page: i32::try_from(page.page).unwrap_or(0),
         page_size: i32::try_from(page.page_size).unwrap_or(100),
     })
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ListTasksCursorInput {
+    pub nav: Option<String>,
+    pub search: Option<String>,
+    pub sort_key: Option<String>,
+    pub sort_direction: Option<String>,
+    pub file_type: Option<String>,
+    pub source: Option<String>,
+    pub failure_category: Option<String>,
+    pub resume: Option<String>,
+    pub cursor: Option<String>,
+    pub page_size: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskFilterOptions {
+    pub sources: Vec<String>,
+    pub failure_categories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ListTasksCursorResult {
+    pub items: Vec<Task>,
+    pub next_cursor: Option<String>,
+    pub total_estimate: String,
+    pub filter_options: TaskFilterOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskCursor {
+    sort_value: String,
+    id: String,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_tasks_cursor(
+    state: State<'_, AppState>,
+    input: ListTasksCursorInput,
+) -> Result<ListTasksCursorResult, String> {
+    let cursor = input
+        .cursor
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<TaskCursor>(value).ok());
+    let sort_key = input.sort_key.unwrap_or_else(|| "updated_at".to_string());
+    let query = db::TaskListQuery {
+        nav: input.nav.unwrap_or_else(|| "all".to_string()),
+        search: input.search.unwrap_or_default(),
+        sort_key: sort_key.clone(),
+        sort_direction: match input.sort_direction.as_deref() {
+            Some("asc") => "asc".to_string(),
+            _ => "desc".to_string(),
+        },
+        file_type: input.file_type.unwrap_or_else(|| "all".to_string()),
+        source: input.source.unwrap_or_else(|| "all".to_string()),
+        failure: input.failure_category.unwrap_or_else(|| "all".to_string()),
+        resume: input.resume.unwrap_or_else(|| "all".to_string()),
+        page: 0,
+        page_size: i64::from(
+            input
+                .page_size
+                .unwrap_or(i32::try_from(db::DEFAULT_TASK_PAGE_SIZE).unwrap_or(100)),
+        ),
+        cursor_value: cursor.as_ref().map(|cursor| cursor.sort_value.clone()),
+        cursor_id: cursor.as_ref().map(|cursor| cursor.id.clone()),
+    };
+    let page = db::list_task_records_cursor(&state.pool, &query).await?;
+    let next_cursor = page
+        .has_more
+        .then(|| {
+            let record = page.items.last()?;
+            serde_json::to_string(&TaskCursor {
+                sort_value: task_cursor_value(record, &sort_key),
+                id: record.id.clone(),
+            })
+            .unwrap_or_default()
+            .into()
+        })
+        .flatten();
+    let mut tasks = Vec::with_capacity(page.items.len());
+    for record in page.items {
+        tasks.push(task_from_record_with_files(&state.pool, record).await?);
+    }
+    let options = db::task_filter_options(&state.pool).await?;
+    Ok(ListTasksCursorResult {
+        items: tasks,
+        next_cursor,
+        total_estimate: page.total.to_string(),
+        filter_options: TaskFilterOptions {
+            sources: options.sources,
+            failure_categories: options.failure_categories,
+        },
+    })
+}
+
+fn task_cursor_value(task: &TaskRecord, sort_key: &str) -> String {
+    match sort_key {
+        "created_at" => task.created_at.clone(),
+        "file_size" => task.total_size.to_string(),
+        "progress" => {
+            if task.total_size > 0 {
+                ((task.downloaded_bytes as f64) / (task.total_size as f64)).to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        "speed" => task.speed_bps.to_string(),
+        "status" => status_rank(task.status).to_string(),
+        _ => task.updated_at.clone(),
+    }
+}
+
+fn status_rank(status: TaskStatus) -> i32 {
+    match status {
+        TaskStatus::Downloading => 0,
+        TaskStatus::Retrying => 1,
+        TaskStatus::Queued => 2,
+        TaskStatus::Paused => 3,
+        TaskStatus::WaitingNetwork => 4,
+        TaskStatus::NeedsAttention => 5,
+        TaskStatus::Failed => 6,
+        TaskStatus::Completed => 7,
+    }
 }
 
 #[tauri::command]
@@ -182,6 +342,31 @@ pub async fn list_segments(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn list_segments_page(
+    state: State<'_, AppState>,
+    input: CursorPageInput,
+) -> Result<TaskSegmentsPageResult, String> {
+    let page_size = input.page_size.unwrap_or(100).clamp(1, 500);
+    let cursor = input
+        .cursor
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok());
+    let mut records =
+        db::list_segment_records_cursor(&state.pool, &input.task_id, cursor, i64::from(page_size))
+            .await?;
+    let next_cursor = if records.len() > usize::try_from(page_size).unwrap_or(100) {
+        records.pop().map(|segment| segment.range_start.to_string())
+    } else {
+        None
+    };
+    Ok(TaskSegmentsPageResult {
+        items: records.into_iter().map(TaskSegment::from).collect(),
+        next_cursor,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn get_segment_summary(
     state: State<'_, AppState>,
     task_id: String,
@@ -200,11 +385,59 @@ pub async fn list_task_events(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn list_task_events_page(
+    state: State<'_, AppState>,
+    input: CursorPageInput,
+) -> Result<TaskEventsPageResult, String> {
+    let page_size = input.page_size.unwrap_or(100).clamp(1, 500);
+    let cursor = input
+        .cursor
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok());
+    let mut items =
+        db::list_task_events_page(&state.pool, &input.task_id, cursor, i64::from(page_size))
+            .await?;
+    let next_cursor = if items.len() > usize::try_from(page_size).unwrap_or(100) {
+        items.pop().map(|event| event.id)
+    } else {
+        None
+    };
+    Ok(TaskEventsPageResult { items, next_cursor })
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn list_task_requests(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<Vec<RequestDiagnostic>, String> {
     db::list_request_diagnostics(&state.pool, &task_id, 100).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_task_requests_page(
+    state: State<'_, AppState>,
+    input: CursorPageInput,
+) -> Result<TaskRequestsPageResult, String> {
+    let page_size = input.page_size.unwrap_or(100).clamp(1, 500);
+    let cursor = input
+        .cursor
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok());
+    let mut items = db::list_request_diagnostics_page(
+        &state.pool,
+        &input.task_id,
+        cursor,
+        i64::from(page_size),
+    )
+    .await?;
+    let next_cursor = if items.len() > usize::try_from(page_size).unwrap_or(100) {
+        items.pop().map(|request| request.id)
+    } else {
+        None
+    };
+    Ok(TaskRequestsPageResult { items, next_cursor })
 }
 
 #[tauri::command]
@@ -279,7 +512,12 @@ pub async fn import_urls(
         .filter(|line| !line.is_empty())
     {
         let parsed = match Url::parse(raw_url) {
-            Ok(url) if matches!(url.scheme(), "http" | "https") => url,
+            Ok(url)
+                if matches!(url.scheme(), "http" | "https" | "ftp" | "ftps" | "magnet")
+                    || is_torrent_url(&url) =>
+            {
+                url
+            }
             Ok(_) => {
                 failed_count += 1;
                 items.push(BatchImportItem {
@@ -291,7 +529,10 @@ pub async fn import_urls(
                     total_size: None,
                     content_type: None,
                     supports_resume: false,
-                    error_message: Some("Only HTTP and HTTPS URLs are supported.".to_string()),
+                    error_message: Some(
+                        "Only HTTP, HTTPS, FTP, FTPS, magnet links, and .torrent URLs are supported."
+                            .to_string(),
+                    ),
                     task: None,
                 });
                 continue;
@@ -525,19 +766,53 @@ pub(crate) async fn create_task_with_state_and_headers(
         db::insert_task_file_record(&state.pool, &file_record).await?;
     }
     db::ensure_task_segments_with_settings(&state.pool, &record, &settings).await?;
+    if is_bt_protocol(&record.protocol) {
+        if let Some(info_hash) = record.source_key.strip_prefix("bt:") {
+            db::upsert_torrent_task(
+                &state.pool,
+                &record.id,
+                info_hash,
+                &record.file_name,
+                record
+                    .url
+                    .starts_with("magnet:")
+                    .then_some(record.url.as_str()),
+                None,
+                0,
+                0,
+                false,
+                None,
+            )
+            .await?;
+        }
+    }
     if !request_headers.is_empty() {
         state
             .request_headers
             .lock()
             .await
             .insert(record.id.clone(), request_headers.clone());
-        db::upsert_task_request_headers(
+        if let Err(error) = db::upsert_task_request_headers(
             &state.pool,
             &record.id,
             &request_headers,
             source_browser,
         )
-        .await?;
+        .await
+        {
+            tracing::warn!(
+                task_id = %record.id,
+                error = %error,
+                "browser request headers kept in memory only"
+            );
+            db::insert_task_event(
+                &state.pool,
+                &record.id,
+                "headers_not_persisted",
+                Some(&error),
+            )
+            .await?;
+        }
     }
     tracing::info!(
         task_id = %record.id,
@@ -659,6 +934,7 @@ pub async fn cancel_task(
     )
     .await?;
     db::insert_task_event(&state.pool, &id, "failed", Some("Canceled by user.")).await?;
+    db::update_task_retry_after(&state.pool, &id, None).await?;
     db::update_segments_status_for_task(
         &state.pool,
         &id,
@@ -683,13 +959,25 @@ pub async fn delete_task(
     delete_file: bool,
 ) -> Result<(), String> {
     tracing::info!(task_id = %id, delete_file, "deleting task");
+    let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
     if let Some(control) = state.downloads.lock().await.remove(&id) {
         control.cancel.store(true, Ordering::SeqCst);
-        control.handle.abort();
+        if task_for_runtime
+            .as_ref()
+            .is_none_or(|task| !is_bt_protocol(&task.protocol))
+        {
+            control.handle.abort();
+        }
+    }
+    if let Some(task) = task_for_runtime.as_ref() {
+        state
+            .engine_registry
+            .delete_runtime_task(task, delete_file)
+            .await;
     }
 
     if delete_file {
-        if let Some(task) = db::get_task_record(&state.pool, &id).await? {
+        if let Some(task) = task_for_runtime {
             for file in db::list_task_file_records(&state.pool, &id).await? {
                 for path in [file.temp_path, file.final_path].into_iter().flatten() {
                     remove_task_file_path(&path)?;
@@ -756,7 +1044,11 @@ pub async fn resolve_task_attention(
             .await?;
             let task =
                 queue_task_for_retry_at(&app, state.inner(), id, Some(&retry_after_at)).await?;
-            spawn_schedule_queued_tasks_after(app.clone(), state.inner(), std::time::Duration::from_secs(300));
+            spawn_schedule_queued_tasks_after(
+                app.clone(),
+                state.inner(),
+                std::time::Duration::from_secs(300),
+            );
             task_from_record_with_files(&state.pool, task).await
         }
         RecoveryAction::ChooseAnotherName | RecoveryAction::ChooseAnotherFolder => {
@@ -958,6 +1250,31 @@ pub(crate) async fn schedule_queued_tasks(app: AppHandle, state: &AppState) {
         state.engine_registry.clone(),
     )
     .await;
+}
+
+pub(crate) async fn schedule_retry_after_wakeup(app: AppHandle, state: &AppState) {
+    let Some(next) = (match db::next_retry_after_at(&state.pool).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to inspect retry-after queue");
+            None
+        }
+    }) else {
+        return;
+    };
+    let when = chrono::DateTime::parse_from_rfc3339(&next)
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now());
+    let now = chrono::Utc::now();
+    let delay = when
+        .signed_duration_since(now)
+        .to_std()
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0));
+    if delay.is_zero() {
+        schedule_queued_tasks(app, state).await;
+    } else {
+        spawn_schedule_queued_tasks_after(app, state, delay);
+    }
 }
 
 async fn schedule_queued_tasks_inner(
@@ -1479,6 +1796,11 @@ async fn prepare_task_for_download(
         return Err("Remote file changed. Restart download to avoid corruption.".to_string());
     }
 
+    if is_bt_protocol(&task.protocol) {
+        db::ensure_task_segments(pool, &task).await?;
+        return require_task(pool, &task.id).await;
+    }
+
     let segments = db::ensure_task_segments(pool, &task).await?;
     let temp_path = task
         .temp_path
@@ -1722,6 +2044,18 @@ fn strong_etag(value: Option<&str>) -> bool {
     value.is_some_and(|value| !weak_etag(Some(value)))
 }
 
+fn is_bt_protocol(protocol: &str) -> bool {
+    matches!(protocol, "bt" | "magnet")
+}
+
+fn is_torrent_url(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".torrent"))
+}
+
 async fn fail_task_and_segments(
     pool: &sqlx::SqlitePool,
     task_id: &str,
@@ -1755,7 +2089,9 @@ async fn mark_download_failed(
     tracing::error!(task_id = %task_id, error = %error, "download failed");
     let payload = serde_json::from_str::<AppErrorPayload>(&error).ok();
     let status = match payload.as_ref().map(|payload| payload.code.as_str()) {
-        Some("final_path_conflict" | "auth_headers_expired") => TaskStatus::NeedsAttention,
+        Some("final_path_conflict" | "auth_headers_expired" | "auth_headers_unavailable") => {
+            TaskStatus::NeedsAttention
+        }
         _ => TaskStatus::Failed,
     };
     if let Err(db_error) =

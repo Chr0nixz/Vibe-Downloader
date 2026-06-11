@@ -97,11 +97,11 @@ fn position_floating_status_window(
 }
 
 fn floating_status_position(app: &AppHandle) -> PhysicalPosition<i32> {
-    let monitor = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .or_else(|| app.available_monitors().ok().and_then(|mut monitors| monitors.pop()));
+    let monitor = app.primary_monitor().ok().flatten().or_else(|| {
+        app.available_monitors()
+            .ok()
+            .and_then(|mut monitors| monitors.pop())
+    });
 
     let scale_factor = monitor
         .as_ref()

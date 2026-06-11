@@ -12,6 +12,9 @@ import type {
   CreateTaskInput,
   HashVerificationState,
   ImportUrlsInput,
+  CursorPageInput,
+  ListTasksCursorInput,
+  ListTasksCursorResult,
   ListTasksInput,
   ListTasksResult,
   RequestDiagnostic,
@@ -30,13 +33,13 @@ import type { TaskSegment } from "@/types/task-segment";
 import { normalizeTaskSegment } from "@/types/task-segment";
 import type { TaskProgressPayload } from "@/types/task-progress";
 
-export const EVENT_TASK_PROGRESS = "task.progress";
-export const EVENT_TASK_UPDATED = "task.updated";
-export const EVENT_QUEUE_CHANGED = "queue.changed";
-export const EVENT_SETTINGS_CHANGED = "settings.changed";
-export const EVENT_BROWSER_INTEGRATION_CHANGED = "browser.integration.changed";
-export const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED = "tray.new-download.requested";
-export const EVENT_TRAY_SETTINGS_REQUESTED = "tray.settings.requested";
+export const EVENT_TASK_PROGRESS = "task-progress";
+export const EVENT_TASK_UPDATED = "task-updated";
+export const EVENT_QUEUE_CHANGED = "queue-changed";
+export const EVENT_SETTINGS_CHANGED = "settings-changed";
+export const EVENT_BROWSER_INTEGRATION_CHANGED = "browser-integration-changed";
+export const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED = "tray-new-download-requested";
+export const EVENT_TRAY_SETTINGS_REQUESTED = "tray-settings-requested";
 export const canSeedMockTasks = !isTauriRuntime() || import.meta.env.DEV;
 
 const log = createLogger("tauri");
@@ -105,6 +108,34 @@ export interface TaskPage {
   pageSize: number;
 }
 
+export interface TaskCursorPage {
+  items: Task[];
+  nextCursor: string | null;
+  totalEstimate: number;
+  filterOptions: ListTasksCursorResult["filterOptions"];
+}
+
+export interface CursorPage<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+export async function listTasksCursor(input: ListTasksCursorInput): Promise<TaskCursorPage> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listTasksCursor(input);
+  }
+  const commands = await loadNativeCommands();
+  const result: ListTasksCursorResult = await runCommand("listTasksCursor", () =>
+    commands.listTasksCursor(input),
+  );
+  return {
+    items: result.items.map(normalizeTask),
+    nextCursor: result.nextCursor,
+    totalEstimate: Number(result.totalEstimate) || result.items.length,
+    filterOptions: result.filterOptions,
+  };
+}
+
 export async function listTasksPage(input: ListTasksInput): Promise<TaskPage> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).listTasksPage(input);
@@ -132,6 +163,18 @@ export async function listSegments(taskId: string, page = 0, pageSize = 100): Pr
   return segments.map(normalizeTaskSegment);
 }
 
+export async function listSegmentsPage(input: CursorPageInput): Promise<CursorPage<TaskSegment>> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listSegmentsPage(input);
+  }
+  const commands = await loadNativeCommands();
+  const result = await runCommand("listSegmentsPage", () => commands.listSegmentsPage(input));
+  return {
+    items: result.items.map(normalizeTaskSegment),
+    nextCursor: result.nextCursor,
+  };
+}
+
 export async function getSegmentSummary(taskId: string): Promise<SegmentSummary> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).getSegmentSummary(taskId);
@@ -148,12 +191,30 @@ export async function listTaskEvents(taskId: string): Promise<TaskEvent[]> {
   return runCommand("listTaskEvents", () => commands.listTaskEvents(taskId));
 }
 
+export async function listTaskEventsPage(input: CursorPageInput): Promise<CursorPage<TaskEvent>> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listTaskEventsPage(input);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("listTaskEventsPage", () => commands.listTaskEventsPage(input));
+}
+
 export async function listTaskRequests(taskId: string): Promise<RequestDiagnostic[]> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).listTaskRequests(taskId);
   }
   const commands = await loadNativeCommands();
   return runCommand("listTaskRequests", () => commands.listTaskRequests(taskId));
+}
+
+export async function listTaskRequestsPage(
+  input: CursorPageInput,
+): Promise<CursorPage<RequestDiagnostic>> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listTaskRequestsPage(input);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("listTaskRequestsPage", () => commands.listTaskRequestsPage(input));
 }
 
 export async function seedMockTasks(): Promise<Task[]> {
