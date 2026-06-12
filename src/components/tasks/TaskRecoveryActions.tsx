@@ -23,9 +23,10 @@ export function TaskRecoveryActions({
   compact?: boolean;
 }) {
   const { t } = useTranslation();
+  const recoveryActions = task.recoveryActions ?? [];
   const actions =
-    task.recoveryActions.length > 0
-      ? task.recoveryActions
+    recoveryActions.length > 0
+      ? recoveryActions
       : recoveryActionsForError(task.errorMessage);
   if (!task.errorMessage || actions.length === 0) return null;
 

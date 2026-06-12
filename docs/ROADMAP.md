@@ -15,6 +15,7 @@ The app now includes a working HTTP/HTTPS desktop download manager with:
 - SQLite persistence for tasks, files, work units, events, request diagnostics, settings, browser handoff messages, and hash verification state.
 - Task list search, filtering, sorting, multi-select, batch actions, command palette, task details, Chunks, Connections, Requests, Logs, toast notifications, recovery actions, and English/Simplified Chinese i18n.
 - Browser Native Messaging handoff plus local WebSocket bridge with manifest install/uninstall diagnostics, dev/release extension identity support, popup live status, automatic browser download takeover, optional Cookie/header forwarding, request id de-duplication, and atomic handoff files.
+- Clipboard monitoring for supported download links while the desktop app is running, with user confirmation through the New download flow.
 - Batch URL import preview/create flow and SHA-256 integrity verification.
 
 ## Completed: P0/P1/P2/P3/P4 First Pass
@@ -26,6 +27,7 @@ The app now includes a working HTTP/HTTPS desktop download manager with:
 - Task events are written for lifecycle, resume checks, and hash verification.
 - Task list supports multi-select, batch actions, sorting, and filters by file type, source, failure reason, and resume capability.
 - Settings support friendly speed/size units, advanced download grouping, system notifications, tray behavior, close-to-tray, and autostart.
+- Settings include a clipboard monitoring toggle for the app-run-time link detector.
 
 ### P2
 

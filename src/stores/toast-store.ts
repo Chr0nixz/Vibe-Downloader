@@ -18,6 +18,7 @@ export interface AppToast {
 interface ToastStore {
   toasts: AppToast[];
   addToast: (toast: Omit<AppToast, "id">) => string;
+  updateToast: (id: string, patch: Partial<Pick<AppToast, "title" | "description" | "tone">>) => void;
   dismissToast: (id: string) => void;
   clearToasts: () => void;
 }
@@ -33,6 +34,12 @@ export const useToastStore = create<ToastStore>((set) => ({
     }));
     return id;
   },
+  updateToast: (id, patch) =>
+    set((state) => ({
+      toasts: state.toasts.map((toast) =>
+        toast.id === id ? { ...toast, ...patch } : toast,
+      ),
+    })),
   dismissToast: (id) =>
     set((state) => ({
       toasts: state.toasts.filter((toast) => toast.id !== id),

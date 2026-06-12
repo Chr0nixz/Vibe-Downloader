@@ -13,6 +13,9 @@ const manifestTemplatePath = path.join(
 const distDir = path.join(root, "browser", "dist");
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const profile = process.env.VIBE_BROWSER_PROFILE === "release" ? "release" : "dev";
+const experimentalCapture = ["1", "true", "yes", "on"].includes(
+  String(process.env.VIBE_BROWSER_EXPERIMENTAL_CAPTURE ?? "").toLowerCase(),
+);
 
 const variants = [
   {
@@ -55,15 +58,34 @@ await mkdir(distDir, { recursive: true });
 const manifestTemplate = JSON.parse(await readFile(manifestTemplatePath, "utf8"));
 const backgroundTemplate = await readFile(path.join(sourceDir, "background.js"), "utf8");
 
+function withCapturePermissions(manifest) {
+  if (!experimentalCapture) {
+    const { host_permissions: _hostPermissions, ...rest } = manifest;
+    return {
+      ...rest,
+      permissions: (manifest.permissions ?? []).filter(
+        (permission) => !["downloads", "cookies", "webRequest"].includes(permission),
+      ),
+    };
+  }
+  return {
+    ...manifest,
+    permissions: Array.from(
+      new Set([...(manifest.permissions ?? []), "downloads", "cookies", "webRequest"]),
+    ),
+    host_permissions: ["http://*/*", "https://*/*"],
+  };
+}
+
 for (const variant of variants) {
   const target = path.join(distDir, variant.id);
   await mkdir(target, { recursive: true });
 
-  const manifest = {
+  const manifest = withCapturePermissions({
     ...manifestTemplate,
     name: variant.id === "firefox" ? "Vibe Downloader (Firefox)" : manifestTemplate.name,
     version: packageJson.version,
-  };
+  });
   if (variant.extensionId) {
     manifest.key = undefined;
   }
@@ -79,7 +101,9 @@ for (const variant of variants) {
   await writeFile(path.join(target, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   await writeFile(
     path.join(target, "background.js"),
-    backgroundTemplate.replaceAll("__VIBE_BROWSER_KIND__", variant.browserKind),
+    backgroundTemplate
+      .replaceAll("__VIBE_BROWSER_KIND__", variant.browserKind)
+      .replaceAll("__VIBE_EXPERIMENTAL_CAPTURE__", experimentalCapture ? "true" : "false"),
   );
   for (const file of ["logger.js", "popup.html", "popup.js", "popup.css"]) {
     await copyFile(path.join(sourceDir, file), path.join(target, file));

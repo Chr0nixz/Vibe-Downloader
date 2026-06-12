@@ -9,6 +9,13 @@ const SettingsPage = lazy(() =>
     default: m.SettingsPage,
   })),
 );
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { TaskRow } from "@/components/tasks/TaskRow";
 import {
@@ -19,6 +26,7 @@ import {
   type ResumeFilter,
   type TaskSortKey,
 } from "@/stores/task-store";
+import { readShellLayout } from "@/hooks/use-shell-layout";
 import { listTasksCursor } from "@/lib/tauri";
 import { errorMessage } from "@/lib/errors";
 import type { Task } from "@/types/task";
@@ -77,6 +85,15 @@ export function TaskList({
   const error = useTaskStore((s) => s.error);
   const setError = useTaskStore((s) => s.setError);
 
+  const activeFilterCount = useMemo(() => {
+    let n = 0;
+    if (filters.fileType !== "all") n++;
+    if (filters.source !== "all") n++;
+    if (filters.failure !== "all") n++;
+    if (filters.resume !== "all") n++;
+    return n;
+  }, [filters]);
+
   const filtered = tasks;
   const filteredRef = useRef(filtered);
   filteredRef.current = filtered;
@@ -95,6 +112,20 @@ export function TaskList({
         result.filterOptions,
         append,
       );
+      if (!append) {
+        const currentSelectedId = useTaskStore.getState().selectedId;
+        if (
+          result.items.length > 0 &&
+          (!currentSelectedId || !result.items.some((task) => task.id === currentSelectedId))
+        ) {
+          selectTask(result.items[0].id);
+          if (readShellLayout() === "wide") {
+            setDetailOpen(true);
+          }
+        } else if (result.items.length === 0) {
+          selectTask(null);
+        }
+      }
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
@@ -102,7 +133,7 @@ export function TaskList({
       setLoading(false);
       loadingPageRef.current = false;
     }
-  }, [setError, setLoading, setTaskCursorPage]);
+  }, [selectTask, setDetailOpen, setError, setLoading, setTaskCursorPage]);
 
   useEffect(() => {
     void loadPage(null, false);
@@ -258,13 +289,23 @@ export function TaskList({
           size="sm"
           aria-expanded={toolPanelOpen}
           aria-controls="task-list-tool-panel"
-          aria-label={t(
-            toolPanelOpen ? "taskList.hideToolPanel" : "taskList.showToolPanel",
-          )}
+          aria-label={
+            !toolPanelOpen && activeFilterCount > 0
+              ? t("taskList.toolPanelActive", { count: activeFilterCount })
+              : t(toolPanelOpen ? "taskList.hideToolPanel" : "taskList.showToolPanel")
+          }
           onClick={() => setToolPanelOpen((open) => !open)}
           className="text-text-muted"
         >
           <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+          {!toolPanelOpen && activeFilterCount > 0 ? (
+            <span
+              className="flex h-4 min-w-4 items-center justify-center rounded-full bg-accent-primary px-1 text-[10px] font-bold leading-none text-white"
+              aria-hidden="true"
+            >
+              {activeFilterCount}
+            </span>
+          ) : null}
           {t("taskList.toolPanel")}
           <ChevronDown
             className={`h-4 w-4 transition-transform duration-ui ${
@@ -418,10 +459,7 @@ export function TaskList({
         className="min-h-0 flex-1 overflow-y-auto"
       >
         {loading ? (
-          <div className="flex flex-col items-center justify-center gap-3 px-4 py-16">
-            <div className="h-8 w-8 animate-spin rounded-full border-2 border-border-subtle border-t-accent-primary" />
-            <p className="text-sm text-text-muted">{t("taskList.loading")}</p>
-          </div>
+          <TaskListLoadingSkeleton label={t("taskList.loading")} />
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-4 px-6 py-20 text-center">
             <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-accent-primary/8">
@@ -498,6 +536,49 @@ export function TaskList({
   );
 }
 
+function TaskListLoadingSkeleton({ label }: { label: string }) {
+  return (
+    <div className="p-2.5 sm:p-3 md:p-4" role="status" aria-live="polite" aria-label={label}>
+      <span className="sr-only">{label}</span>
+      <div className="space-y-2.5">
+        {Array.from({ length: 5 }).map((_, index) => (
+          <div
+            key={index}
+            className="overflow-hidden rounded-lg border border-border-subtle/60 bg-surface-base/60 px-3 py-3.5 sm:px-3.5 md:px-4"
+          >
+            <div className="animate-pulse">
+              <div className="flex min-w-0 gap-3">
+                <div className="mt-0.5 h-8 w-8 shrink-0 rounded bg-surface-raised" />
+                <div className="min-w-0 flex-1 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <div className="h-4 w-44 max-w-[52%] rounded bg-surface-raised" />
+                    <div className="h-4 w-20 rounded-full bg-surface-raised/80" />
+                  </div>
+                  <div className="h-3 w-32 rounded bg-surface-raised/70" />
+                  <div className="h-3 w-3/5 rounded bg-surface-raised/70" />
+                  <div className="h-2.5 rounded-full bg-surface-raised">
+                    <div className="h-full w-1/3 rounded-full bg-accent-primary/25" />
+                  </div>
+                </div>
+                <div className="hidden min-w-36 flex-col items-end gap-2 md:flex">
+                  <div className="h-5 w-20 rounded bg-surface-raised" />
+                  <div className="h-3 w-28 rounded bg-surface-raised/70" />
+                  <div className="h-3 w-24 rounded bg-surface-raised/70" />
+                  <div className="mt-1 flex gap-1.5">
+                    <div className="h-8 w-8 rounded bg-surface-raised" />
+                    <div className="h-8 w-8 rounded bg-surface-raised" />
+                    <div className="h-8 w-8 rounded bg-surface-raised" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SelectControl({
   label,
   value,
@@ -514,19 +595,22 @@ function SelectControl({
       <span className="text-[11px] font-medium text-text-muted/70">
         {label}
       </span>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        aria-label={label}
-        className="h-full cursor-pointer rounded-md border border-border-subtle bg-surface-root px-2.5 text-xs font-medium text-text-secondary transition-colors hover:border-border-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
-        title={label}
-      >
-        {options.map(([optionValue, optionLabel]) => (
-          <option key={optionValue} value={optionValue}>
-            {optionLabel}
-          </option>
-        ))}
-      </select>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger
+          aria-label={label}
+          title={label}
+          className="w-auto min-w-[6rem] px-2.5 text-xs font-medium"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map(([optionValue, optionLabel]) => (
+            <SelectItem key={optionValue} value={optionValue}>
+              {optionLabel}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </label>
   );
 }

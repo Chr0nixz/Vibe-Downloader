@@ -8,12 +8,8 @@
     "contextMenus",
     "activeTab",
     "tabs",
-    "storage",
-    "downloads",
-    "cookies",
-    "webRequest"
+    "storage"
   ],
-  "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js"
   },

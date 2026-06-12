@@ -12,6 +12,16 @@
     "core:window:allow-set-focus",
     "core:window:allow-hide",
     "dialog:allow-open",
+    {
+      "identifier": "fs:default",
+      "allow": [
+        { "path": "**" },
+        { "path": "$HOME/**" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOCUMENT/**" }
+      ]
+    },
     "os:default",
     "notification:default",
     "autostart:default",

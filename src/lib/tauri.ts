@@ -9,6 +9,7 @@ import type {
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
   BatchImportResult,
+  ClipboardLinkDetectedPayload,
   CreateTaskInput,
   HashVerificationState,
   ImportUrlsInput,
@@ -40,6 +41,7 @@ export const EVENT_SETTINGS_CHANGED = "settings-changed";
 export const EVENT_BROWSER_INTEGRATION_CHANGED = "browser-integration-changed";
 export const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED = "tray-new-download-requested";
 export const EVENT_TRAY_SETTINGS_REQUESTED = "tray-settings-requested";
+export const EVENT_CLIPBOARD_LINK_DETECTED = "clipboard-link-detected";
 export const canSeedMockTasks = !isTauriRuntime() || import.meta.env.DEV;
 
 const log = createLogger("tauri");
@@ -257,6 +259,35 @@ export async function openDirectoryPicker(): Promise<string | null> {
   return path;
 }
 
+export interface PickedFile {
+  path: string;
+  name: string;
+}
+
+export async function openFilePicker(
+  filters?: { name: string; extensions: string[] }[],
+): Promise<PickedFile | null> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).openFilePicker(filters);
+  }
+  log.debug("→ openFilePicker");
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    filters: filters ?? [
+      { name: "Download files", extensions: ["torrent", "txt"] },
+    ],
+  });
+  if (typeof selected !== "string") {
+    log.debug("✓ openFilePicker (canceled)");
+    return null;
+  }
+  const name = selected.replace(/[\\/]/g, "/").split("/").pop() ?? selected;
+  log.debug("✓ openFilePicker", selected);
+  return { path: selected, name };
+}
+
 export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationStatus> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).getBrowserIntegrationStatus();
@@ -339,6 +370,20 @@ export async function focusMainWindowFromFloating(): Promise<void> {
   const commands = await loadNativeCommands();
   await runCommand("focusMainWindowFromFloating", () =>
     commands.focusMainWindowFromFloating(),
+  );
+}
+
+export async function showTrayMenuAt(
+  logicalX: number,
+  logicalY: number,
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock show tray menu at", logicalX, logicalY);
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("showTrayMenuAt", () =>
+    commands.showTrayMenuAt(logicalX, logicalY),
   );
 }
 
@@ -527,6 +572,21 @@ export function onTraySettingsRequested(handler: () => void): Promise<() => void
   return import("@tauri-apps/api/event").then(({ listen }) =>
     listen(EVENT_TRAY_SETTINGS_REQUESTED, () => {
       handler();
+    }).then((unlisten) => unlisten),
+  );
+}
+
+export function onClipboardLinkDetected(
+  handler: (payload: ClipboardLinkDetectedPayload) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return import("@/lib/tauri-browser").then((adapter) =>
+      adapter.onClipboardLinkDetected(handler),
+    );
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<ClipboardLinkDetectedPayload>(EVENT_CLIPBOARD_LINK_DETECTED, (event) => {
+      handler(event.payload);
     }).then((unlisten) => unlisten),
   );
 }

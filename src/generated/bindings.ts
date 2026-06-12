@@ -65,6 +65,7 @@ export const commands = {
 	hideFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("hide_floating_status_window")),
 	toggleFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("toggle_floating_status_window")),
 	focusMainWindowFromFloating: () => typedError<null, string>(__TAURI_INVOKE("focus_main_window_from_floating")),
+	showTrayMenuAt: (logicalX: number | null, logicalY: number | null) => typedError<null, string>(__TAURI_INVOKE("show_tray_menu_at", { logicalX, logicalY })),
 	runTrayMenuAction: (action: TrayMenuAction) => typedError<null, string>(__TAURI_INVOKE("run_tray_menu_action", { action })),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
@@ -106,6 +107,7 @@ export type AppSettings = {
 	closeToTray: boolean,
 	startOnBoot: boolean,
 	floatingWindowEnabled: boolean,
+	clipboardMonitorEnabled: boolean,
 	fontFamily: AppFontFamily,
 	accentColor: AppAccentColor,
 	proxyMode: AppProxyMode,
@@ -216,6 +218,7 @@ export type BrowserIntegrationStatus = {
 	nativeHostName: string,
 	nativeHostPath: string | null,
 	extensionCorePath: string | null,
+	experimentalCaptureEnabled: boolean,
 	realtime: BrowserRealtimeStatus,
 	capture: BrowserCaptureSettings,
 	browsers: BrowserIntegrationEntry[],
@@ -243,6 +246,13 @@ export type BrowserSiteRule = {
 };
 
 export type BrowserSiteRuleMode = "auto" | "ask" | "never";
+
+export type ClipboardLinkDetectedPayload = {
+	id: string,
+	urls: string[],
+	primaryUrl: string,
+	detectedAt: string,
+};
 
 export type CreateTaskInput = {
 	url: string,
@@ -512,6 +522,7 @@ export type UpdateSettingsInput = {
 	closeToTray: boolean | null,
 	startOnBoot: boolean | null,
 	floatingWindowEnabled: boolean | null,
+	clipboardMonitorEnabled: boolean | null,
 	fontFamily: AppFontFamily | null,
 	accentColor: AppAccentColor | null,
 	proxyMode: AppProxyMode | null,

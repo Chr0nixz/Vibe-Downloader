@@ -108,6 +108,7 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         close_to_tray: false,
         start_on_boot: false,
         floating_window_enabled: false,
+        clipboard_monitor_enabled: true,
         font_family: AppFontFamily::SourceHanSansSc,
         accent_color: AppAccentColor::Blue,
         proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
@@ -156,6 +157,7 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
         close_to_tray: false,
         start_on_boot: false,
         floating_window_enabled: false,
+        clipboard_monitor_enabled: true,
         font_family: AppFontFamily::SourceHanSansSc,
         accent_color: AppAccentColor::Blue,
         proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
@@ -310,6 +312,7 @@ async fn settings_defaults_use_download_dir_and_two_active_tasks() {
     );
     assert!(!settings.floating_window_enabled);
     assert_eq!(settings.font_family, AppFontFamily::SourceHanSansSc);
+    assert!(settings.clipboard_monitor_enabled);
     assert_eq!(settings.proxy_mode, tauri_app_lib::proxy::AppProxyMode::Off);
     assert!(settings.proxy_url.is_empty());
     assert!(settings.proxy_no_proxy.is_empty());
@@ -333,6 +336,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
             close_to_tray: false,
             start_on_boot: false,
             floating_window_enabled: false,
+            clipboard_monitor_enabled: true,
             font_family: AppFontFamily::System,
             accent_color: AppAccentColor::Blue,
             proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
@@ -354,6 +358,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
     assert_eq!(settings.segment_count, db::MAX_SEGMENT_COUNT);
     assert_eq!(settings.max_connections_per_host, 12);
     assert_eq!(settings.font_family, AppFontFamily::System);
+    assert!(settings.clipboard_monitor_enabled);
 
     db::upsert_settings(
         &pool,
@@ -368,6 +373,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
             close_to_tray: true,
             start_on_boot: true,
             floating_window_enabled: true,
+            clipboard_monitor_enabled: false,
             font_family: AppFontFamily::SourceHanSansSc,
             accent_color: AppAccentColor::Blue,
             proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
@@ -390,6 +396,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
         settings.max_connections_per_host,
         db::MAX_MAX_CONNECTIONS_PER_HOST
     );
+    assert!(!settings.clipboard_monitor_enabled);
 }
 
 #[tokio::test]

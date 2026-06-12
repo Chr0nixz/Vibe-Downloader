@@ -14,16 +14,23 @@ use tauri::{AppHandle, State};
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
+use super::task_file_planning::{
+    normalize_sha256, normalized_probe_files, task_file_records_from_probe, unique_final_path,
+};
+pub use super::task_resume::{
+    local_resume_error, resume_decision_message, resume_mismatch_message, segment_resume_error,
+};
+
 use crate::{
     db,
-    download::{DownloadContext, EngineRegistry, ProbeOutput, ProbeRequest},
+    download::{DownloadContext, EngineRegistry, ProbeRequest},
     events::{emit_queue_changed, emit_task_progress, emit_task_updated, emit_task_updated_record},
     logging::sanitize_url,
     models::{
         task::now_iso, AppErrorPayload, BatchImportItem, BatchImportResult, BrowserKind,
         HashVerificationState, HashVerificationStatus, ProbeTaskPayload, RecoveryAction,
         RequestDiagnostic, SegmentSummary, Task, TaskEvent, TaskFileRecord, TaskRecord,
-        TaskSegment, TaskSegmentRecord, TaskStatus,
+        TaskSegment, TaskStatus,
     },
     platform, AppState, DownloadControl, TaskRequestHeaders,
 };
@@ -126,11 +133,7 @@ pub struct ListTasksResult {
 #[specta::specta]
 pub async fn list_tasks(state: State<'_, AppState>) -> Result<Vec<Task>, String> {
     let records = db::list_task_records(&state.pool).await?;
-    let mut tasks = Vec::with_capacity(records.len());
-    for record in records {
-        tasks.push(task_from_record_with_files(&state.pool, record).await?);
-    }
-    Ok(tasks)
+    tasks_from_records_with_files(&state.pool, records).await
 }
 
 #[tauri::command]
@@ -161,10 +164,7 @@ pub async fn list_tasks_page(
         cursor_id: None,
     };
     let page = db::list_task_records_page(&state.pool, &query).await?;
-    let mut tasks = Vec::with_capacity(page.items.len());
-    for record in page.items {
-        tasks.push(task_from_record_with_files(&state.pool, record).await?);
-    }
+    let tasks = tasks_from_records_with_files(&state.pool, page.items).await?;
     Ok(ListTasksResult {
         items: tasks,
         total: page.total.to_string(),
@@ -256,11 +256,15 @@ pub async fn list_tasks_cursor(
             .into()
         })
         .flatten();
-    let mut tasks = Vec::with_capacity(page.items.len());
-    for record in page.items {
-        tasks.push(task_from_record_with_files(&state.pool, record).await?);
-    }
-    let options = db::task_filter_options(&state.pool).await?;
+    let tasks = tasks_from_records_with_files(&state.pool, page.items).await?;
+    let options = if cursor.is_some() {
+        db::TaskFilterOptions {
+            sources: Vec::new(),
+            failure_categories: Vec::new(),
+        }
+    } else {
+        db::task_filter_options(&state.pool).await?
+    };
     Ok(ListTasksCursorResult {
         items: tasks,
         next_cursor,
@@ -1907,180 +1911,12 @@ async fn prepare_task_for_download(
     require_task(pool, &task.id).await
 }
 
-pub fn local_resume_error(
-    recorded_progress: i64,
-    temp_exists: bool,
-    temp_size: i64,
-    total_size: i64,
-    supports_parallel: bool,
-) -> Option<&'static str> {
-    if temp_size > total_size && total_size > 0 {
-        return Some("Temporary file is larger than the remote file.");
-    }
-    if recorded_progress > 0 && !temp_exists {
-        return Some("Temporary file is missing. Restart this download.");
-    }
-    if recorded_progress > temp_size {
-        return Some("Temporary file is smaller than the recorded progress.");
-    }
-    if temp_size > 0 && !supports_parallel {
-        return Some("Resume unavailable. Restart this download from the beginning.");
-    }
-    None
-}
-
-pub fn segment_resume_error(
-    segments: &[TaskSegmentRecord],
-    task_downloaded_bytes: i64,
-    temp_exists: bool,
-    temp_size: i64,
-    total_size: i64,
-    supports_parallel: bool,
-) -> Option<&'static str> {
-    if segments.is_empty() {
-        return Some("Task has no segment records. Restart this download.");
-    }
-    if temp_size > total_size && total_size > 0 {
-        return Some("Temporary file is larger than the remote file.");
-    }
-
-    let mut expected_start = 0_i64;
-    let mut highest_recorded_offset = 0_i64;
-    let mut downloaded_bytes = 0_i64;
-
-    for segment in segments {
-        if segment.range_start != expected_start || segment.range_end < segment.range_start {
-            return Some("Segment records are inconsistent. Restart this download.");
-        }
-        if segment.downloaded_until < segment.range_start
-            || segment.downloaded_until > segment.range_end.saturating_add(1)
-        {
-            return Some("Segment progress is outside its byte range. Restart this download.");
-        }
-
-        let clamped_until = segment
-            .downloaded_until
-            .clamp(segment.range_start, segment.range_end.saturating_add(1));
-        if clamped_until > segment.range_start {
-            highest_recorded_offset = highest_recorded_offset.max(clamped_until);
-        }
-        downloaded_bytes += clamped_until.saturating_sub(segment.range_start);
-        expected_start = segment.range_end.saturating_add(1);
-    }
-
-    if total_size > 0 && expected_start != total_size {
-        return Some("Segment records do not match the remote file size. Restart this download.");
-    }
-
-    let recorded_progress = task_downloaded_bytes
-        .max(downloaded_bytes)
-        .max(highest_recorded_offset);
-    if recorded_progress > 0 && !temp_exists {
-        return Some("Temporary file is missing. Restart this download.");
-    }
-    if highest_recorded_offset > temp_size {
-        return Some("Temporary file is smaller than the recorded progress.");
-    }
-    if temp_size > 0 && !supports_parallel {
-        return Some("Resume unavailable. Restart this download from the beginning.");
-    }
-    None
-}
-
-pub trait ResumeProbe {
-    fn total_size(&self) -> i64;
-    fn supports_resume(&self) -> bool;
-    fn etag(&self) -> Option<&String>;
-    fn last_modified(&self) -> Option<&String>;
-}
-
-impl ResumeProbe for crate::download::ProbeOutput {
-    fn total_size(&self) -> i64 {
-        self.total_size
-    }
-
-    fn supports_resume(&self) -> bool {
-        self.capabilities.supports_resume
-    }
-
-    fn etag(&self) -> Option<&String> {
-        self.etag.as_ref()
-    }
-
-    fn last_modified(&self) -> Option<&String> {
-        self.last_modified.as_ref()
-    }
-}
-
-impl ResumeProbe for crate::download::ProbeResult {
-    fn total_size(&self) -> i64 {
-        self.total_size
-    }
-
-    fn supports_resume(&self) -> bool {
-        self.supports_resume
-    }
-
-    fn etag(&self) -> Option<&String> {
-        self.etag.as_ref()
-    }
-
-    fn last_modified(&self) -> Option<&String> {
-        self.last_modified.as_ref()
-    }
-}
-
-pub fn resume_mismatch_message<P: ResumeProbe>(task: &TaskRecord, probe: &P) -> Option<String> {
-    if task.total_size != probe.total_size() {
-        return Some("Remote file changed. Restart download to avoid corruption.".to_string());
-    }
-    if !probe.supports_resume() {
-        return Some("Server no longer supports resume. Restart this download.".to_string());
-    }
-    if strong_etag(task.etag.as_deref())
-        && strong_etag(probe.etag().map(String::as_str))
-        && task.etag.as_ref() != probe.etag()
-    {
-        return Some("Remote file changed. Restart download to avoid corruption.".to_string());
-    }
-    if task.last_modified.is_some()
-        && probe.last_modified().is_some()
-        && task.last_modified.as_ref() != probe.last_modified()
-    {
-        return Some("Remote file changed. Restart download to avoid corruption.".to_string());
-    }
-    None
-}
-
-pub fn resume_decision_message<P: ResumeProbe>(task: &TaskRecord, probe: &P) -> Option<String> {
-    if weak_etag(task.etag.as_deref()) || weak_etag(probe.etag().map(String::as_str)) {
-        return Some(
-            "Resume allowed with weak ETag metadata. Verify the file if the source is unstable."
-                .to_string(),
-        );
-    }
-    if task.etag.is_none() && task.last_modified.is_none() {
-        return Some("Resume allowed without remote validators. Range metadata matched, but integrity depends on the server.".to_string());
-    }
-    Some("Resume metadata matched. Continuing from the temporary file.".to_string())
-}
-
-fn weak_etag(value: Option<&str>) -> bool {
-    value
-        .map(str::trim_start)
-        .is_some_and(|value| value.starts_with("W/") || value.starts_with("w/"))
-}
-
-fn strong_etag(value: Option<&str>) -> bool {
-    value.is_some_and(|value| !weak_etag(Some(value)))
-}
-
 fn is_bt_protocol(protocol: &str) -> bool {
     matches!(protocol, "bt" | "magnet")
 }
 
 fn is_torrent_url(url: &Url) -> bool {
-    matches!(url.scheme(), "http" | "https")
+    matches!(url.scheme(), "http" | "https" | "file")
         && url
             .path_segments()
             .and_then(|mut segments| segments.next_back())
@@ -2173,119 +2009,37 @@ async fn task_payload(pool: &sqlx::SqlitePool, id: &str) -> Result<Task, String>
     task_from_record_with_files(pool, record).await
 }
 
+async fn tasks_from_records_with_files(
+    pool: &sqlx::SqlitePool,
+    records: Vec<TaskRecord>,
+) -> Result<Vec<Task>, String> {
+    let task_ids = records
+        .iter()
+        .map(|record| record.id.clone())
+        .collect::<Vec<_>>();
+    let mut files_by_task_id = db::list_task_file_records_for_tasks(pool, &task_ids).await?;
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            let files = files_by_task_id.remove(&record.id).unwrap_or_default();
+            task_from_record_and_files(record, files)
+        })
+        .collect())
+}
+
 async fn task_from_record_with_files(
     pool: &sqlx::SqlitePool,
     record: TaskRecord,
 ) -> Result<Task, String> {
     let files = db::list_task_file_records(pool, &record.id)
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect();
+        .await?;
+    Ok(task_from_record_and_files(record, files))
+}
+
+fn task_from_record_and_files(record: TaskRecord, files: Vec<TaskFileRecord>) -> Task {
     let mut task = Task::from(record);
-    task.files = files;
-    Ok(task)
-}
-
-fn normalized_probe_files(probe: &ProbeOutput) -> Vec<crate::models::ProbedFile> {
-    if probe.files.is_empty() {
-        return vec![crate::models::ProbedFile {
-            relative_path: probe.display_name.clone(),
-            size: probe.total_size.to_string(),
-            content_type: probe.content_type.clone(),
-        }];
-    }
-    probe.files.clone()
-}
-
-fn task_file_records_from_probe(
-    task: &TaskRecord,
-    files: &[crate::models::ProbedFile],
-    save_dir: &Path,
-    single_final_path: &Path,
-    single_temp_path: &Path,
-    single_file_name: &str,
-) -> Result<Vec<TaskFileRecord>, String> {
-    let single_file = files.len() == 1;
-    let mut records = Vec::with_capacity(files.len());
-    for file in files {
-        let (relative_path, file_name, final_path, temp_path) = if single_file {
-            (
-                single_file_name.to_string(),
-                single_file_name.to_string(),
-                single_final_path.to_path_buf(),
-                single_temp_path.to_path_buf(),
-            )
-        } else {
-            let relative_path = sanitize_relative_path(&file.relative_path);
-            let parent = save_dir.join(relative_path.parent().unwrap_or_else(|| Path::new("")));
-            std::fs::create_dir_all(&parent)
-                .map_err(|e| format!("Could not create the download directory: {e}"))?;
-            let requested_name = relative_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("download");
-            let final_path = unique_final_path(&parent, requested_name);
-            let relative_path = final_path
-                .strip_prefix(save_dir)
-                .unwrap_or(&final_path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let file_name = final_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or(requested_name)
-                .to_string();
-            let temp_path = PathBuf::from(format!("{}.vibe-downloading", final_path.display()));
-            (relative_path, file_name, final_path, temp_path)
-        };
-
-        records.push(TaskFileRecord {
-            id: Uuid::new_v4().to_string(),
-            task_id: task.id.clone(),
-            relative_path,
-            file_name,
-            save_dir: task.save_dir.clone(),
-            temp_path: Some(temp_path.to_string_lossy().to_string()),
-            final_path: Some(final_path.to_string_lossy().to_string()),
-            total_size: parse_probed_file_size(&file.size),
-            downloaded_bytes: 0,
-            selected: true,
-            status: TaskStatus::Queued,
-            content_type: file.content_type.clone(),
-        });
-    }
-    Ok(records)
-}
-
-fn sanitize_relative_path(value: &str) -> PathBuf {
-    let mut path = PathBuf::new();
-    for component in value
-        .split(['/', '\\'])
-        .map(str::trim)
-        .filter(|component| !component.is_empty() && *component != "." && *component != "..")
-    {
-        path.push(sanitize_file_name(component));
-    }
-    if path.as_os_str().is_empty() {
-        path.push(format!("download-{}", chrono::Utc::now().timestamp()));
-    }
-    path
-}
-
-fn parse_probed_file_size(value: &str) -> i64 {
-    value.parse::<i64>().unwrap_or(0)
-}
-
-fn normalize_sha256(value: Option<&str>) -> Result<Option<String>, String> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(None);
-    };
-    let normalized = value.to_ascii_lowercase();
-    if normalized.len() != 64 || !normalized.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err("SHA-256 must be 64 hexadecimal characters.".to_string());
-    }
-    Ok(Some(normalized))
+    task.files = files.into_iter().map(Into::into).collect();
+    task
 }
 
 async fn sha256_file(path: &Path) -> Result<String, String> {
@@ -2325,55 +2079,6 @@ fn emit_task_progress_snapshot(app: &AppHandle, task: &TaskRecord) {
         status: task.status,
     };
     emit_task_progress(app, &payload);
-}
-
-fn unique_final_path(save_dir: &Path, requested_file_name: &str) -> PathBuf {
-    let sanitized = sanitize_file_name(requested_file_name);
-    let candidate = save_dir.join(&sanitized);
-    if !candidate.exists()
-        && !PathBuf::from(format!("{}.vibe-downloading", candidate.display())).exists()
-    {
-        return candidate;
-    }
-
-    let path = Path::new(&sanitized);
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("download");
-    let extension = path.extension().and_then(|value| value.to_str());
-
-    for index in 1..10_000 {
-        let name = match extension {
-            Some(extension) if !extension.is_empty() => format!("{stem} ({index}).{extension}"),
-            _ => format!("{stem} ({index})"),
-        };
-        let candidate = save_dir.join(name);
-        if !candidate.exists()
-            && !PathBuf::from(format!("{}.vibe-downloading", candidate.display())).exists()
-        {
-            return candidate;
-        }
-    }
-
-    save_dir.join(format!("download-{}", chrono::Utc::now().timestamp()))
-}
-
-fn sanitize_file_name(value: &str) -> String {
-    let cleaned: String = value
-        .chars()
-        .map(|ch| match ch {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
-            ch if ch.is_control() => '_',
-            ch => ch,
-        })
-        .collect();
-    let trimmed = cleaned.trim().trim_matches('.').to_string();
-    if trimmed.is_empty() {
-        format!("download-{}", chrono::Utc::now().timestamp())
-    } else {
-        trimmed
-    }
 }
 
 #[cfg(debug_assertions)]

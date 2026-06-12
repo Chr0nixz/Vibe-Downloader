@@ -32,7 +32,7 @@ export function TitleBar({ platform }: TitleBarProps) {
   return (
     <header
       className={cn(
-        "flex h-[var(--titlebar-height)] shrink-0 items-center border-b border-border-subtle bg-surface-base/90",
+        "titlebar relative flex h-[var(--titlebar-height)] shrink-0 items-center bg-surface-base/90",
         platform === "macos" && "pl-[var(--traffic-lights-inset)]",
       )}
       data-tauri-drag-region
@@ -41,8 +41,19 @@ export function TitleBar({ platform }: TitleBarProps) {
         void startWindowDrag();
       }}
     >
-      <div className="flex min-w-0 flex-1 items-center gap-2 px-3" data-tauri-drag-region>
-        <span className="truncate text-sm font-medium text-text-primary">
+      <div
+        className="flex min-w-0 flex-1 items-center gap-2.5 px-3"
+        data-tauri-drag-region
+      >
+        <img
+          src="/logo-48.png"
+          alt=""
+          width={20}
+          height={20}
+          className="shrink-0 select-none titlebar-logo"
+          draggable={false}
+        />
+        <span className="truncate text-[13px] font-semibold tracking-wide text-text-primary">
           {t("app.name")}
         </span>
       </div>
@@ -92,7 +103,7 @@ function WindowControl({
           variant="ghost"
           size="icon"
           className={cn(
-            "h-[var(--titlebar-height)] w-11 rounded-none hover:bg-surface-raised",
+            "h-[var(--titlebar-height)] w-11 rounded-none transition-colors duration-150 hover:bg-surface-raised",
             className,
           )}
           aria-label={label}

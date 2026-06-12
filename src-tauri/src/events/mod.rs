@@ -3,6 +3,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
     browser_realtime::BrowserRealtimeEvent,
+    clipboard::ClipboardLinkDetectedPayload,
     db,
     models::{Task, TaskProgressPayload, TaskRecord, TaskUpdatedPayload},
 };
@@ -16,6 +17,7 @@ pub const EVENT_BROWSER_HANDOFF_FAILED: &str = "browser-handoff-failed";
 pub const EVENT_BROWSER_INTEGRATION_CHANGED: &str = "browser-integration-changed";
 pub const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED: &str = "tray-new-download-requested";
 pub const EVENT_TRAY_SETTINGS_REQUESTED: &str = "tray-settings-requested";
+pub const EVENT_CLIPBOARD_LINK_DETECTED: &str = "clipboard-link-detected";
 
 pub fn emit_task_progress(app: &AppHandle, payload: &TaskProgressPayload) {
     emit_payload(app, EVENT_TASK_PROGRESS, payload);
@@ -84,6 +86,10 @@ pub fn emit_tray_new_download_requested(app: &AppHandle) {
 
 pub fn emit_tray_settings_requested(app: &AppHandle) {
     emit_empty(app, EVENT_TRAY_SETTINGS_REQUESTED);
+}
+
+pub fn emit_clipboard_link_detected(app: &AppHandle, payload: &ClipboardLinkDetectedPayload) {
+    emit_payload(app, EVENT_CLIPBOARD_LINK_DETECTED, payload);
 }
 
 fn emit_empty(app: &AppHandle, event: &str) {

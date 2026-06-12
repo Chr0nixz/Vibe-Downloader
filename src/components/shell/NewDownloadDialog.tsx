@@ -1,6 +1,18 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { FolderOpen } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  File,
+  FileArchive,
+  FileAudio,
+  FileImage,
+  FileText,
+  FileVideo,
+  FolderOpen,
+  Pencil,
+  X,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -13,10 +25,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import type { BatchImportResult, ProbeTaskPayload } from "@/generated/bindings";
+import type {
+  BatchImportResult,
+  ProbeTaskPayload,
+  ProbedFile,
+} from "@/generated/bindings";
 import { createLogger } from "@/lib/logger";
 import { errorMessage } from "@/lib/errors";
-import { createTask, importUrls, openDirectoryPicker, probeTask } from "@/lib/tauri";
+import {
+  createTask,
+  importUrls,
+  openDirectoryPicker,
+  openFilePicker,
+  probeTask,
+} from "@/lib/tauri";
 
 const log = createLogger("new-download");
 import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
@@ -25,14 +47,71 @@ import { parseByteCount } from "@/types/task";
 import { normalizeTask } from "@/types/task";
 import type { Task } from "@/types/task";
 
+/* ------------------------------------------------------------------ */
+/*  Local file picker types                                            */
+/* ------------------------------------------------------------------ */
+
+interface SelectedLocalFile {
+  path: string;
+  name: string;
+  kind: "torrent" | "text";
+}
+
+function getLocalFileKind(name: string): SelectedLocalFile["kind"] {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "torrent") return "torrent";
+  return "text";
+}
+
+function readFileAsText(filePath: string): Promise<string> {
+  return import("@tauri-apps/plugin-fs").then(({ readTextFile }) =>
+    readTextFile(filePath),
+  );
+}
+
+function localFileKindLabel(kind: SelectedLocalFile["kind"], t: (key: string) => string): string {
+  return kind === "torrent" ? t("newDownload.fileKindTorrent") : t("newDownload.fileKindText");
+}
+
+/* ------------------------------------------------------------------ */
+/*  File icon helper                                                    */
+/* ------------------------------------------------------------------ */
+
+function fileIcon(name: string, className = "h-4 w-4") {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst"].includes(ext))
+    return <FileArchive className={className} />;
+  if (["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "ts"].includes(ext))
+    return <FileVideo className={className} />;
+  if (["mp3", "flac", "wav", "aac", "ogg", "m4a", "opus"].includes(ext))
+    return <FileAudio className={className} />;
+  if (["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "ico"].includes(ext))
+    return <FileImage className={className} />;
+  if (["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "epub"].includes(ext))
+    return <FileText className={className} />;
+  return <File className={className} />;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Main component                                                      */
+/* ------------------------------------------------------------------ */
+
 export function NewDownloadDialog({
   open,
   onOpenChange,
   onCreated,
+  initialUrl,
+  initialBatchInput,
+  initialSourceId,
+  onDraftStateChange,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: (task: Task) => void;
+  initialUrl?: string;
+  initialBatchInput?: string;
+  initialSourceId?: string;
+  onDraftStateChange?: (dirty: boolean) => void;
 }) {
   const { t } = useTranslation();
   const settings = useSettingsStore((s) => s.settings);
@@ -48,8 +127,27 @@ export function NewDownloadDialog({
   const [batchResult, setBatchResult] = useState<BatchImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitStatus, setSubmitStatus] = useState<string | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [selectedLocalFile, setSelectedLocalFile] = useState<SelectedLocalFile | null>(null);
+  const [fileLoading, setFileLoading] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+
+  // Multi-file selection: set of selected indices from probe.files
+  const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
+
   const probeRequestId = useRef(0);
+  const appliedInitialSourceId = useRef<string | undefined>(undefined);
   const isTorrentProbe = probe?.protocol === "bt" || probe?.protocol === "magnet";
+  const isMultiFile = probe != null && probe.files.length > 1;
+
+  // Initialize selectedFiles when probe changes
+  useEffect(() => {
+    if (probe && probe.files.length > 1) {
+      setSelectedFiles(new Set(probe.files.map((_, i) => i)));
+    } else {
+      setSelectedFiles(new Set());
+    }
+  }, [probe]);
 
   async function detect(nextUrl = url.trim(), automatic = false) {
     if (!nextUrl) return;
@@ -110,14 +208,7 @@ export function NewDownloadDialog({
         expectedHashSha256: isTorrentProbe ? null : expectedHashSha256.trim() || null,
       });
       onCreated(task);
-      setUrl("");
-      setSaveDir("");
-      setFileName("");
-      setExpectedHashSha256("");
-      setProbe(null);
-      setProbeUrl("");
-      setBatchResult(null);
-      setSubmitStatus(null);
+      resetForm();
       onOpenChange(false);
     } catch (err) {
       log.error("create task failed", err);
@@ -128,18 +219,78 @@ export function NewDownloadDialog({
     }
   }
 
+  function resetForm() {
+    setUrl("");
+    setSaveDir("");
+    setFileName("");
+    setExpectedHashSha256("");
+    setProbe(null);
+    setProbeUrl("");
+    setBatchResult(null);
+    setSubmitStatus(null);
+    setAdvancedOpen(false);
+    setSelectedLocalFile(null);
+    setSelectedFiles(new Set());
+    setEditingName(false);
+  }
+
   async function chooseDirectory() {
     const selected = await openDirectoryPicker();
     if (selected) setSaveDir(selected);
   }
 
-  async function runBatch(create: boolean) {
-    if (!batchInput.trim()) return;
+  async function chooseLocalFile() {
+    setFileLoading(true);
+    try {
+      const picked = await openFilePicker([
+        { name: "Torrent / Text", extensions: ["torrent", "txt"] },
+      ]);
+      if (!picked) return;
+
+      const kind = getLocalFileKind(picked.name);
+      const file: SelectedLocalFile = { path: picked.path, name: picked.name, kind };
+      setSelectedLocalFile(file);
+
+      if (kind === "torrent") {
+        const fileUrl = `file://${picked.path}`;
+        setUrl(fileUrl);
+        setProbe(null);
+        setProbeUrl("");
+      } else {
+        try {
+          const text = await readFileAsText(picked.path);
+          setBatchInput(text);
+          setAdvancedOpen(true);
+        } catch (err) {
+          log.warn("failed to read text file", err);
+          setError(errorMessage(err));
+        }
+      }
+    } catch (err) {
+      log.error("file picker failed", err);
+      setError(errorMessage(err));
+    } finally {
+      setFileLoading(false);
+    }
+  }
+
+  function clearSelectedLocalFile() {
+    setSelectedLocalFile(null);
+    if (selectedLocalFile?.kind === "torrent") {
+      setUrl("");
+      setProbe(null);
+      setProbeUrl("");
+    }
+  }
+
+  async function runBatch(create: boolean, inputOverride?: string) {
+    const input = inputOverride ?? batchInput;
+    if (!input.trim()) return;
     setSubmitting(create);
     setError(null);
     try {
       const result = await importUrls({
-        input: batchInput,
+        input,
         saveDir: saveDir.trim() || null,
         probe: true,
         create,
@@ -159,6 +310,75 @@ export function NewDownloadDialog({
     }
   }
 
+  useEffect(() => {
+    if (!initialSourceId || appliedInitialSourceId.current === initialSourceId) return;
+    appliedInitialSourceId.current = initialSourceId;
+    resetForm();
+
+    const nextBatchInput = initialBatchInput?.trim() ? initialBatchInput : "";
+    const nextUrl = initialUrl?.trim() ? initialUrl : "";
+    if (nextBatchInput) {
+      setBatchInput(nextBatchInput);
+      setAdvancedOpen(true);
+      void runBatch(false, nextBatchInput);
+      return;
+    }
+    if (nextUrl) {
+      setUrl(nextUrl);
+    }
+  }, [initialBatchInput, initialSourceId, initialUrl]);
+
+  useEffect(() => {
+    onDraftStateChange?.(
+      Boolean(
+        url.trim() ||
+          saveDir.trim() ||
+          fileName.trim() ||
+          expectedHashSha256.trim() ||
+          batchInput.trim() ||
+          selectedLocalFile,
+      ),
+    );
+  }, [
+    batchInput,
+    expectedHashSha256,
+    fileName,
+    onDraftStateChange,
+    saveDir,
+    selectedLocalFile,
+    url,
+  ]);
+
+  // Toggle all files
+  function toggleAllFiles() {
+    if (!probe) return;
+    if (selectedFiles.size === probe.files.length) {
+      setSelectedFiles(new Set());
+    } else {
+      setSelectedFiles(new Set(probe.files.map((_, i) => i)));
+    }
+  }
+
+  // Toggle single file
+  function toggleFile(index: number) {
+    setSelectedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }
+
+  // Computed totals
+  const selectedTotal = useMemo(() => {
+    if (!probe) return 0;
+    let total = 0;
+    for (const idx of selectedFiles) {
+      total += parseByteCount(probe.files[idx]?.size ?? "0");
+    }
+    return total;
+  }, [probe, selectedFiles]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -170,134 +390,280 @@ export function NewDownloadDialog({
         </DialogHeader>
         <form className="flex min-h-0 flex-1 flex-col overflow-hidden" onSubmit={submit}>
           <DialogBody className="flex flex-col gap-3 py-4">
+            {/* URL input */}
             <label className="flex flex-col gap-1 text-xs text-text-muted">
               {t("newDownload.url")}
-              <Input
-                value={url}
-                onChange={(event) => {
-                  setUrl(event.target.value);
-                  setProbe(null);
-                  setProbeUrl("");
-                }}
-                placeholder={t("newDownload.urlPlaceholder")}
-                className="h-11 md:h-8"
-                autoFocus
-                required
-              />
+              <div className="flex gap-2">
+                <Input
+                  value={url}
+                  onChange={(event) => {
+                    setUrl(event.target.value);
+                    setProbe(null);
+                    setProbeUrl("");
+                    if (selectedLocalFile?.kind === "torrent") {
+                      setSelectedLocalFile(null);
+                    }
+                  }}
+                  placeholder={t("newDownload.urlPlaceholder")}
+                  className="h-11 min-w-0 flex-1 md:h-8"
+                  autoFocus
+                  required
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-11 shrink-0 md:h-8"
+                  onClick={chooseLocalFile}
+                  disabled={fileLoading || submitting}
+                  title={t("newDownload.chooseFile")}
+                >
+                  <File className="h-4 w-4" />
+                  <span className="hidden sm:inline">{t("newDownload.chooseFile")}</span>
+                </Button>
+              </div>
             </label>
-            <div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-11 md:h-8"
-                onClick={() => void detect()}
-                title={t("newDownload.detectHint")}
-                disabled={probing || !url.trim()}
-              >
-                {probing ? t("newDownload.detecting") : t("newDownload.detect")}
-              </Button>
-            </div>
+
+            {/* Selected local file card (from file picker) */}
+            {selectedLocalFile ? (
+              <div className="flex items-center gap-3 rounded-md border border-border-subtle bg-surface-raised/60 px-3 py-2.5">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent-primary/10 text-accent-primary">
+                  {selectedLocalFile.kind === "torrent" ? (
+                    <File className="h-5 w-5" />
+                  ) : (
+                    <FileText className="h-5 w-5" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm text-text-primary">{selectedLocalFile.name}</p>
+                  <p className="text-xs text-text-muted">
+                    {localFileKindLabel(selectedLocalFile.kind, t)}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearSelectedLocalFile}
+                  className="shrink-0 rounded p-1 text-text-muted transition-colors hover:bg-surface-raised hover:text-text-secondary"
+                  title={t("newDownload.removeFile")}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            ) : null}
+
+            {/* Save directory */}
             <label className="flex flex-col gap-1 text-xs text-text-muted">
               {t("newDownload.saveDir")}
-              <div className="flex flex-col gap-2 md:flex-row">
+              <div className="flex gap-2">
                 <Input
                   value={saveDir}
                   onChange={(event) => setSaveDir(event.target.value)}
                   placeholder={
                     settings?.defaultSaveDir ?? t("newDownload.saveDirPlaceholder")
                   }
-                  className="h-11 md:h-8"
+                  className="h-11 min-w-0 flex-1 md:h-8"
                 />
                 <Button
                   type="button"
                   variant="outline"
-                  className="h-11 shrink-0 md:h-8"
+                  size="icon"
+                  className="h-11 shrink-0 md:h-8 md:w-8"
                   onClick={chooseDirectory}
                   disabled={submitting}
+                  title={t("newDownload.chooseDirectory")}
                 >
                   <FolderOpen className="h-4 w-4" />
-                  {t("newDownload.chooseDirectory")}
                 </Button>
               </div>
             </label>
-            <label className="flex flex-col gap-1 text-xs text-text-muted">
-              {t("newDownload.fileName")}
-              <Input
-                value={fileName}
-                onChange={(event) => setFileName(event.target.value)}
-                placeholder={t("newDownload.fileNamePlaceholder")}
-                className="h-11 md:h-8"
-              />
-            </label>
-            {!isTorrentProbe ? (
-              <label className="flex flex-col gap-1 text-xs text-text-muted">
-                {t("newDownload.sha256")}
-                <Input
-                  value={expectedHashSha256}
-                  onChange={(event) => setExpectedHashSha256(event.target.value)}
-                  placeholder={t("newDownload.sha256Placeholder")}
-                  className="h-11 font-mono md:h-8"
-                />
-              </label>
-            ) : null}
+
+            {/* ---- File selection card (from probe) ---- */}
             {probe ? (
-              <div className="grid grid-cols-1 gap-2 rounded-md border border-border-subtle bg-surface-raised/60 p-3 text-xs sm:grid-cols-2">
-                <Info label={t("newDownload.probeFile")} value={probe.fileName} />
-                <Info label={t("newDownload.probeSize")} value={formatBytes(parseByteCount(probe.totalSize))} />
-                <Info label={t("newDownload.probeHost")} value={probe.sourceKey} />
-                <Info
-                  label={t("newDownload.probeResume")}
-                  value={probe.capabilities.supportsResume ? t("newDownload.resumeSupported") : t("newDownload.resumeUnavailable")}
-                />
+              <div className="rounded-md border border-border-subtle bg-surface-raised/40 overflow-hidden">
+                {/* === Multi-file mode === */}
+                {isMultiFile ? (
+                  <>
+                    {/* Header bar */}
+                    <div className="flex items-center justify-between border-b border-border-subtle px-3 py-2">
+                      <button
+                        type="button"
+                        onClick={toggleAllFiles}
+                        className="flex items-center gap-2 text-xs text-text-secondary transition-colors hover:text-text-primary"
+                      >
+                        <span
+                          className={`flex h-4 w-4 items-center justify-center rounded border transition-colors ${
+                            selectedFiles.size === probe.files.length
+                              ? "border-accent-primary bg-accent-primary text-text-on-accent"
+                              : "border-border-subtle"
+                          }`}
+                        >
+                          {selectedFiles.size === probe.files.length ? (
+                            <Check className="h-3 w-3" />
+                          ) : null}
+                        </span>
+                        {selectedFiles.size === probe.files.length
+                          ? t("newDownload.deselectAll")
+                          : t("newDownload.selectAll")}
+                      </button>
+                      <span className="text-xs text-text-muted">
+                        {t("newDownload.selectedCount", {
+                          count: selectedFiles.size,
+                          total: probe.files.length,
+                        })}
+                      </span>
+                    </div>
+
+                    {/* File list */}
+                    <div className="max-h-48 overflow-y-auto overscroll-contain">
+                      {probe.files.map((file, idx) => (
+                        <FileRow
+                          key={`${file.relativePath}-${idx}`}
+                          file={file}
+                          index={idx}
+                          checked={selectedFiles.has(idx)}
+                          onToggle={() => toggleFile(idx)}
+                        />
+                      ))}
+                    </div>
+
+                    {/* Footer summary */}
+                    <div className="flex items-center justify-between border-t border-border-subtle px-3 py-2 text-xs text-text-muted">
+                      <span>{t("newDownload.totalSize")}</span>
+                      <span className="font-mono text-text-primary">
+                        {formatBytes(selectedTotal)}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  /* === Single-file mode === */
+                  <div className="flex items-center gap-3 px-3 py-2.5">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent-primary/10 text-accent-primary">
+                      {fileIcon(probe.fileName, "h-5 w-5")}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      {editingName ? (
+                        <Input
+                          value={fileName}
+                          onChange={(e) => setFileName(e.target.value)}
+                          onBlur={() => setEditingName(false)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              setEditingName(false);
+                            }
+                          }}
+                          className="h-7 text-sm"
+                          autoFocus
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setEditingName(true)}
+                          className="group flex w-full items-center gap-1.5 text-left"
+                          title={t("newDownload.editFileName")}
+                        >
+                          <span className="truncate text-sm text-text-primary">
+                            {fileName || probe.fileName}
+                          </span>
+                          <Pencil className="h-3 w-3 shrink-0 text-text-muted opacity-0 transition-opacity group-hover:opacity-100" />
+                        </button>
+                      )}
+                      <div className="mt-0.5 flex items-center gap-3 text-xs text-text-muted">
+                        <span>{formatBytes(parseByteCount(probe.totalSize))}</span>
+                        <span>
+                          {probe.capabilities.supportsResume
+                            ? t("newDownload.resumeSupported")
+                            : t("newDownload.resumeUnavailable")}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : null}
-            <div className="grid gap-2 rounded-md border border-border-subtle bg-surface-root/40 p-3">
-              <label className="flex flex-col gap-1 text-xs text-text-muted">
-                {t("newDownload.batchUrls")}
-                <textarea
-                  value={batchInput}
-                  onChange={(event) => setBatchInput(event.target.value)}
-                  placeholder={t("newDownload.batchUrlsPlaceholder")}
-                  className="min-h-24 resize-y rounded-md border border-border-subtle bg-surface-base px-3 py-2 font-mono text-xs text-text-primary outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
-                />
-              </label>
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-9"
-                  onClick={() => void runBatch(false)}
-                  disabled={submitting || !batchInput.trim()}
-                >
-                  {t("newDownload.previewBatch")}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-9"
-                  onClick={() => void runBatch(true)}
-                  disabled={submitting || !batchInput.trim()}
-                >
-                  {t("newDownload.createBatch")}
-                </Button>
-              </div>
-              {batchResult ? (
-                <BatchResultSummary result={batchResult} />
-              ) : null}
-            </div>
+
+            {/* Auto-detecting indicator */}
             {!probe && probing ? (
-              <p className="rounded-md border border-border-subtle bg-surface-raised/60 px-3 py-2 text-xs text-text-secondary">
+              <p className="text-xs text-text-muted">
                 {t("newDownload.autoDetecting")}
               </p>
             ) : null}
+
+            {/* Advanced options toggle */}
+            <button
+              type="button"
+              onClick={() => setAdvancedOpen((v) => !v)}
+              className="flex items-center gap-1.5 self-start text-xs text-text-secondary transition-colors hover:text-text-primary"
+            >
+              <ChevronDown
+                className={`h-3.5 w-3.5 transition-transform duration-200 ${advancedOpen ? "" : "-rotate-90"}`}
+              />
+              {t("newDownload.advancedOptions")}
+            </button>
+
+            {/* Advanced section */}
+            {advancedOpen ? (
+              <div className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3">
+                {!isTorrentProbe ? (
+                  <label className="flex flex-col gap-1 text-xs text-text-muted">
+                    {t("newDownload.sha256")}
+                    <Input
+                      value={expectedHashSha256}
+                      onChange={(event) => setExpectedHashSha256(event.target.value)}
+                      placeholder={t("newDownload.sha256Placeholder")}
+                      className="h-8 font-mono"
+                    />
+                  </label>
+                ) : null}
+
+                {/* Batch import */}
+                <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
+                  <span className="text-xs text-text-muted">
+                    {t("newDownload.batchUrls")}
+                  </span>
+                  <textarea
+                    value={batchInput}
+                    onChange={(event) => setBatchInput(event.target.value)}
+                    placeholder={t("newDownload.batchUrlsPlaceholder")}
+                    className="min-h-20 resize-y rounded-md border border-border-subtle bg-surface-base px-3 py-2 font-mono text-xs text-text-primary outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8"
+                      onClick={() => void runBatch(false)}
+                      disabled={submitting || !batchInput.trim()}
+                    >
+                      {t("newDownload.previewBatch")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8"
+                      onClick={() => void runBatch(true)}
+                      disabled={submitting || !batchInput.trim()}
+                    >
+                      {t("newDownload.createBatch")}
+                    </Button>
+                  </div>
+                  {batchResult ? (
+                    <BatchResultSummary result={batchResult} />
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
+            {/* Submit status */}
             {submitStatus ? (
               <p role="status" className="rounded-md border border-border-accent bg-accent-primary/10 px-3 py-2 text-xs text-accent-primary">
                 {submitStatus}
               </p>
             ) : null}
+
+            {/* Error */}
             {error ? (
               <div role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
                 <p>{error}</p>
@@ -335,6 +701,61 @@ export function NewDownloadDialog({
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  Sub-components                                                      */
+/* ------------------------------------------------------------------ */
+
+function FileRow({
+  file,
+  index,
+  checked,
+  onToggle,
+}: {
+  file: ProbedFile;
+  index: number;
+  checked: boolean;
+  onToggle: () => void;
+}) {
+  const size = parseByteCount(file.size);
+  // Show just the filename if the relativePath is a single segment
+  const displayName = file.relativePath.split("/").pop() ?? file.relativePath;
+  const hasPath = file.relativePath.includes("/");
+
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-raised/60 ${
+        index > 0 ? "border-t border-border-subtle/50" : ""
+      }`}
+    >
+      <span
+        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
+          checked
+            ? "border-accent-primary bg-accent-primary text-text-on-accent"
+            : "border-border-subtle"
+        }`}
+      >
+        {checked ? <Check className="h-3 w-3" /> : null}
+      </span>
+      <span className="shrink-0 text-text-muted">{fileIcon(displayName)}</span>
+      <div className="min-w-0 flex-1">
+        <p className={`truncate text-sm ${checked ? "text-text-primary" : "text-text-muted"}`}>
+          {displayName}
+        </p>
+        {hasPath ? (
+          <p className="truncate text-[10px] text-text-muted">
+            {file.relativePath.slice(0, file.relativePath.length - displayName.length - 1)}
+          </p>
+        ) : null}
+      </div>
+      <span className={`shrink-0 font-mono text-xs tabular-nums ${checked ? "text-text-secondary" : "text-text-muted"}`}>
+        {formatBytes(size)}
+      </span>
+    </button>
+  );
+}
+
 function BatchResultSummary({ result }: { result: BatchImportResult }) {
   const { t } = useTranslation();
   return (
@@ -360,15 +781,6 @@ function BatchResultSummary({ result }: { result: BatchImportResult }) {
           </span>
         </div>
       ))}
-    </div>
-  );
-}
-
-function Info({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0">
-      <div className="text-text-muted">{label}</div>
-      <div className="truncate text-text-primary">{value}</div>
     </div>
   );
 }

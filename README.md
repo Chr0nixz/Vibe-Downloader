@@ -1,5 +1,10 @@
 # Vibe Downloader
 
+Current clipboard workflow: while the desktop app is running, Vibe can monitor
+plain-text clipboard content for supported download links and open the New
+download flow for confirmation. Clipboard monitoring is enabled by default and
+can be disabled in Settings > Desktop integration.
+
 Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下载、断点续传、任务队列和浏览器交接变得更清楚、更可靠，也比传统下载工具更符合现在的桌面审美。
 
 项目目前处于早期开发阶段，但已经可以作为 HTTP/HTTPS 下载器原型运行。它不是一个已经完整替代 IDM 的成品，适合尝鲜、参与开发、验证下载引擎和桌面体验。

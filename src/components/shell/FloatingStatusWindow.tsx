@@ -1,5 +1,5 @@
-import { Activity, Gauge, X } from "lucide-react";
-import { useEffect, useMemo } from "react";
+import { X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useTaskEvents } from "@/hooks/use-task-events";
@@ -7,20 +7,25 @@ import {
   focusMainWindowFromFloating,
   hideFloatingStatusWindow,
   listTasksCursor,
+  showTrayMenuAt,
 } from "@/lib/tauri";
 import { startWindowDrag } from "@/lib/window-controls";
-import { cn, formatPercent, formatSpeed } from "@/lib/utils";
+import { cn, formatSpeed } from "@/lib/utils";
 import { createLogger } from "@/lib/logger";
 import { useTaskStore } from "@/stores/task-store";
 import type { Task } from "@/types/task";
 
 const log = createLogger("floating-status");
 
+const RING_R = 28;
+const RING_C = 2 * Math.PI * RING_R;
+
 export function FloatingStatusWindow() {
   const { t } = useTranslation();
   const tasks = useTaskStore((s) => s.tasks);
   const setTasks = useTaskStore((s) => s.setTasks);
   const setLoading = useTaskStore((s) => s.setLoading);
+  const [hovering, setHovering] = useState(false);
 
   useTaskEvents({ notify: false });
 
@@ -70,101 +75,140 @@ export function FloatingStatusWindow() {
   }, [setLoading, setTasks]);
 
   const stats = useMemo(() => buildFloatingStats(tasks), [tasks]);
-  const percent =
-    stats.featuredTask && stats.featuredTask.totalSize > 0
-      ? Math.min(100, (stats.featuredTask.downloadedBytes / stats.featuredTask.totalSize) * 100)
-      : 0;
-  const progressLabel = stats.featuredTask
-    ? formatPercent(stats.featuredTask.downloadedBytes, stats.featuredTask.totalSize)
-    : t("floatingStatus.noTask");
+  const percent = stats.totalBytes > 0
+    ? Math.min(100, (stats.totalDownloaded / stats.totalBytes) * 100)
+    : 0;
   const idle = stats.active === 0;
+  const dashoffset = RING_C * (1 - percent / 100);
+
+  const speedText = useMemo(() => {
+    if (idle) return "";
+    const s = formatSpeed(stats.totalSpeed);
+    return s === "—" ? "" : s;
+  }, [idle, stats.totalSpeed]);
+
+  const compact = speedText.length > 6;
+
+  const handleDrag = useCallback((event: React.MouseEvent) => {
+    if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
+    void startWindowDrag();
+  }, []);
+
+  const handleDoubleClick = useCallback((event: React.MouseEvent) => {
+    if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
+    void focusMainWindowFromFloating();
+  }, []);
+
+  const handleContextMenu = useCallback(
+    async (event: React.MouseEvent) => {
+      event.preventDefault();
+      try {
+        await showTrayMenuAt(event.screenX, event.screenY);
+      } catch (err) {
+        log.error("show tray menu failed", err);
+      }
+    },
+    [],
+  );
 
   return (
     <main
-      className="flex h-full select-none items-center justify-center p-1.5"
-      onMouseDown={(event) => {
-        if (event.button !== 0) return;
-        if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
-        void startWindowDrag();
-      }}
-      onDoubleClick={(event) => {
-        if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
-        void focusMainWindowFromFloating();
-      }}
+      className="group relative flex h-full select-none items-center justify-center"
+      onMouseDown={handleDrag}
+      onDoubleClick={handleDoubleClick}
+      onContextMenu={handleContextMenu}
+      onMouseEnter={() => setHovering(true)}
+      onMouseLeave={() => setHovering(false)}
     >
-      <section
-        className="flex h-full w-full flex-col overflow-hidden rounded-lg border border-border-container bg-surface-overlay px-3 py-2 text-text-primary shadow-[0_16px_34px_oklch(0.12_0.01_255_/_0.28)]"
+      {/* Tooltip */}
+      <div className="pointer-events-none absolute -top-9 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-surface-overlay px-2.5 py-1 text-[0.65rem] leading-4 text-text-secondary opacity-0 shadow-lg ring-1 ring-border-container transition-opacity duration-200 group-hover:opacity-100 group-hover:[&:has(~_button:hover)]:opacity-0">
+        {idle ? t("floatingStatus.idle") : `${speedText} · ${Math.round(percent)}%`}
+      </div>
+
+      {/* Close button — visible on hover */}
+      <button
+        type="button"
+        data-no-drag
+        className={cn(
+          "absolute -top-0.5 right-0 z-20 grid h-5 w-5 place-items-center rounded-full",
+          "bg-surface-raised text-text-muted shadow-md ring-1 ring-border-container",
+          "opacity-0 transition-all duration-150 hover:bg-status-danger hover:text-text-on-danger hover:ring-status-danger/30",
+          hovering && "opacity-100",
+        )}
+        aria-label={t("floatingStatus.close")}
+        onClick={() => void hideFloatingStatusWindow()}
+      >
+        <X className="h-2.5 w-2.5" aria-hidden />
+      </button>
+
+      {/* Ball */}
+      <div
+        className={cn(
+          "relative grid h-16 w-16 place-items-center rounded-full transition-shadow duration-300",
+          idle
+            ? "bg-surface-overlay shadow-lg ring-1 ring-border-container"
+            : "bg-surface-overlay shadow-xl shadow-accent-primary/25 ring-1 ring-accent-primary/25 floating-ball-glow",
+        )}
         aria-label={t("floatingStatus.title")}
       >
-        <div className="flex min-h-0 items-start gap-2">
-          <div
-            className={cn(
-              "grid h-7 w-7 shrink-0 place-items-center rounded-md ring-1",
-              idle
-                ? "bg-surface-raised text-text-muted ring-border-divider"
-                : "bg-accent-primary text-text-on-accent ring-accent-primary",
-            )}
-            aria-hidden
-          >
-            {idle ? <Activity className="h-3.5 w-3.5" /> : <Gauge className="h-3.5 w-3.5" />}
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="flex min-w-0 items-baseline gap-2">
-              <span className="text-[0.68rem] font-semibold text-text-muted">
-                {t("floatingStatus.totalSpeed")}
-              </span>
+        {/* SVG progress ring */}
+        <svg
+          viewBox="0 0 64 64"
+          className="absolute inset-0 h-full w-full -rotate-90"
+          aria-hidden
+        >
+          <circle
+            cx="32"
+            cy="32"
+            r={RING_R}
+            fill="none"
+            strokeWidth="2.5"
+            className="stroke-border-subtle opacity-25"
+          />
+          {!idle && percent > 0 && (
+            <circle
+              cx="32"
+              cy="32"
+              r={RING_R}
+              fill="none"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeDasharray={RING_C}
+              strokeDashoffset={dashoffset}
+              className="stroke-accent-energy transition-[stroke-dashoffset] duration-500 ease-out"
+            />
+          )}
+        </svg>
+
+        {/* Content */}
+        <div className="relative z-10 flex flex-col items-center gap-px">
+          {idle ? (
+            <img
+              src="/logo-48.png"
+              alt=""
+              width={28}
+              height={28}
+              className="select-none opacity-70"
+              draggable={false}
+            />
+          ) : (
+            <>
               <span
                 className={cn(
-                  "truncate font-mono text-[1.08rem] font-semibold leading-6",
-                  idle ? "text-text-secondary" : "text-accent-energy",
+                  "font-mono font-bold leading-none text-text-primary",
+                  compact ? "text-[8px]" : "text-[10px]",
                 )}
               >
-                {formatSpeed(stats.totalSpeed)}
+                {speedText}
               </span>
-            </p>
-            <p className="mt-0.5 truncate text-[0.7rem] leading-4 text-text-muted">
-              {t("floatingStatus.counts", {
-                active: stats.active,
-                queued: stats.queued,
-              })}
-            </p>
-          </div>
-          <button
-            type="button"
-            data-no-drag
-            className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-text-muted outline-none transition hover:bg-surface-raised hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent-primary/70"
-            aria-label={t("floatingStatus.close")}
-            onClick={() => void hideFloatingStatusWindow()}
-          >
-            <X className="h-3.5 w-3.5" aria-hidden />
-          </button>
+              <span className="text-[7.5px] leading-none text-text-muted">
+                {Math.round(percent)}%
+              </span>
+            </>
+          )}
         </div>
-
-        <div className="mt-2 min-w-0">
-          <div className="flex min-w-0 items-center justify-between gap-2 text-[0.72rem] leading-4">
-            <span className="min-w-0 truncate text-text-secondary">
-              {stats.featuredTask?.fileName ?? t("floatingStatus.idle")}
-            </span>
-            <span className="shrink-0 font-mono text-text-muted">{progressLabel}</span>
-          </div>
-          <div
-            className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface-raised"
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(percent)}
-            aria-label={stats.featuredTask?.fileName ?? t("floatingStatus.idle")}
-          >
-            <div
-              className={cn(
-                "h-full rounded-full transition-[width] duration-ui ease-out",
-                idle ? "bg-text-muted/45" : "bg-accent-energy",
-              )}
-              style={{ width: `${percent}%` }}
-            />
-          </div>
-        </div>
-      </section>
+      </div>
     </main>
   );
 }
@@ -175,19 +219,34 @@ function buildFloatingStats(tasks: Task[]) {
   );
   const queued = tasks.filter((task) => task.status === "queued").length;
   const totalSpeed = activeTasks.reduce((sum, task) => sum + task.speedBps, 0);
+  const totalDownloaded = activeTasks.reduce(
+    (sum, task) => sum + task.downloadedBytes,
+    0,
+  );
+  const totalBytes = activeTasks.reduce((sum, task) => sum + task.totalSize, 0);
   const featuredTask =
     [...activeTasks].sort((a, b) => b.speedBps - a.speedBps)[0] ??
     [...tasks]
       .filter((task) =>
-        ["queued", "paused", "failed", "needs_attention", "waiting_network"].includes(task.status),
+        [
+          "queued",
+          "paused",
+          "failed",
+          "needs_attention",
+          "waiting_network",
+        ].includes(task.status),
       )
-      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0] ??
+      .sort(
+        (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
+      )[0] ??
     null;
 
   return {
     active: activeTasks.length,
     queued,
     totalSpeed,
+    totalDownloaded,
+    totalBytes,
     featuredTask,
   };
 }

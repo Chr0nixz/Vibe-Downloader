@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
 };
@@ -14,6 +15,12 @@ use crate::models::{
     TaskSegmentRecord, TaskStatus,
 };
 use crate::proxy::{self, AppProxyMode};
+
+mod segment_planner;
+pub use self::segment_planner::{
+    planned_segment_count, planned_segment_count_with_plan, planned_segments_for_task,
+    planned_segments_for_task_with_plan,
+};
 
 pub const DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;
 pub const MIN_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 0;
@@ -41,6 +48,7 @@ const SETTING_SYSTEM_NOTIFICATIONS: &str = "system_notifications";
 const SETTING_CLOSE_TO_TRAY: &str = "close_to_tray";
 const SETTING_START_ON_BOOT: &str = "start_on_boot";
 const SETTING_FLOATING_WINDOW_ENABLED: &str = "floating_window_enabled";
+const SETTING_CLIPBOARD_MONITOR_ENABLED: &str = "clipboard_monitor_enabled";
 const SETTING_FONT_FAMILY: &str = "font_family";
 const SETTING_ACCENT_COLOR: &str = "accent_color";
 const SETTING_PROXY_MODE: &str = "proxy_mode";
@@ -316,11 +324,11 @@ pub async fn list_task_records_cursor(
         .iter()
         .map(row_to_task)
         .collect::<Result<Vec<_>, _>>()?;
-    let total = estimate_task_count(pool, input).await?;
     let has_more = i64::try_from(items.len()).unwrap_or(0) > page_size;
     if has_more {
         items.truncate(usize::try_from(page_size).unwrap_or(100));
     }
+    let total = i64::try_from(items.len()).unwrap_or(0) + if has_more { 1 } else { 0 };
 
     Ok(TaskListPage {
         items,
@@ -329,16 +337,6 @@ pub async fn list_task_records_cursor(
         page_size,
         has_more,
     })
-}
-
-async fn estimate_task_count(pool: &SqlitePool, input: &TaskListQuery) -> Result<i64, String> {
-    let mut count_query = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM tasks");
-    append_task_filters(&mut count_query, input);
-    count_query
-        .build_query_scalar()
-        .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string())
 }
 
 fn append_task_filters(query: &mut QueryBuilder<'_, Sqlite>, input: &TaskListQuery) -> bool {
@@ -1000,6 +998,8 @@ pub async fn get_settings(
     let start_on_boot = get_bool_setting(pool, SETTING_START_ON_BOOT, false).await?;
     let floating_window_enabled =
         get_bool_setting(pool, SETTING_FLOATING_WINDOW_ENABLED, false).await?;
+    let clipboard_monitor_enabled =
+        get_bool_setting(pool, SETTING_CLIPBOARD_MONITOR_ENABLED, true).await?;
     let font_family = get_setting_value(pool, SETTING_FONT_FAMILY)
         .await?
         .map(|value| normalize_font_family(&value))
@@ -1037,6 +1037,7 @@ pub async fn get_settings(
         close_to_tray,
         start_on_boot,
         floating_window_enabled,
+        clipboard_monitor_enabled,
         font_family,
         accent_color,
         proxy_mode,
@@ -1103,6 +1104,12 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         bool_setting_value(settings.floating_window_enabled),
     )
     .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_CLIPBOARD_MONITOR_ENABLED,
+        bool_setting_value(settings.clipboard_monitor_enabled),
+    )
+    .await?;
     upsert_setting_value(pool, SETTING_FONT_FAMILY, settings.font_family.as_str()).await?;
     upsert_setting_value(pool, SETTING_ACCENT_COLOR, settings.accent_color.as_str()).await?;
     upsert_setting_value(pool, SETTING_PROXY_MODE, settings.proxy_mode.as_str()).await?;
@@ -1115,6 +1122,10 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         bool_setting_value(settings.proxy_password_saved),
     )
     .await
+}
+
+pub async fn clipboard_monitor_enabled(pool: &SqlitePool) -> Result<bool, String> {
+    get_bool_setting(pool, SETTING_CLIPBOARD_MONITOR_ENABLED, true).await
 }
 
 pub fn normalize_font_family(value: &str) -> AppFontFamily {
@@ -1544,6 +1555,45 @@ pub async fn list_task_file_records(
     rows.iter().map(row_to_task_file).collect()
 }
 
+pub async fn list_task_file_records_for_tasks(
+    pool: &SqlitePool,
+    task_ids: &[String],
+) -> Result<HashMap<String, Vec<TaskFileRecord>>, String> {
+    if task_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut query = QueryBuilder::<Sqlite>::new(
+        r#"
+        SELECT id, task_id, relative_path, file_name, save_dir, temp_path, final_path,
+               total_size, downloaded_bytes, selected, status, content_type
+        FROM task_files
+        WHERE task_id IN (
+        "#,
+    );
+    let mut separated = query.separated(", ");
+    for task_id in task_ids {
+        separated.push_bind(task_id);
+    }
+    separated.push_unseparated(") ORDER BY task_id ASC, relative_path ASC");
+
+    let rows = query
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut files_by_task_id: HashMap<String, Vec<TaskFileRecord>> = HashMap::new();
+    for row in rows {
+        let file = row_to_task_file(&row)?;
+        files_by_task_id
+            .entry(file.task_id.clone())
+            .or_default()
+            .push(file);
+    }
+    Ok(files_by_task_id)
+}
+
 fn row_to_task_file(row: &sqlx::sqlite::SqliteRow) -> Result<TaskFileRecord, String> {
     Ok(TaskFileRecord {
         id: row.get("id"),
@@ -1649,137 +1699,6 @@ async fn ensure_task_segments_with_plan(
         insert_segment_record(pool, segment).await?;
     }
     Ok(task_work_units)
-}
-
-pub fn planned_segment_count(task: &TaskRecord) -> usize {
-    planned_segment_count_with_plan(
-        task,
-        DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
-        DEFAULT_SEGMENT_COUNT,
-    )
-}
-
-pub fn planned_segment_count_with_plan(
-    task: &TaskRecord,
-    multi_connection_threshold_bytes: i64,
-    segment_count: i32,
-) -> usize {
-    if is_bt_protocol(&task.protocol) {
-        return 1;
-    }
-
-    let segment_count = segment_count.clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT) as usize;
-    let segment_count = if is_ftp_protocol(&task.protocol) {
-        segment_count.min(4)
-    } else {
-        segment_count
-    };
-    if task.supports_parallel
-        && task.total_size > 0
-        && task.total_size >= multi_connection_threshold_bytes.max(0)
-    {
-        segment_count
-    } else {
-        1
-    }
-}
-
-pub fn planned_segments_for_task(task: &TaskRecord) -> Vec<TaskSegmentRecord> {
-    planned_segments_for_task_with_plan(
-        task,
-        DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
-        DEFAULT_SEGMENT_COUNT,
-    )
-}
-
-pub fn planned_segments_for_task_with_plan(
-    task: &TaskRecord,
-    multi_connection_threshold_bytes: i64,
-    segment_count: i32,
-) -> Vec<TaskSegmentRecord> {
-    if is_bt_protocol(&task.protocol) {
-        return vec![single_segment_for_task(task, "bt_piece")];
-    }
-
-    if is_ftp_protocol(&task.protocol) {
-        return vec![single_segment_for_task(task, "ftp_rest")];
-    }
-
-    let count =
-        planned_segment_count_with_plan(task, multi_connection_threshold_bytes, segment_count);
-    let total_size = task.total_size.max(0);
-    let completed = task.downloaded_bytes >= total_size && total_size > 0;
-
-    if count == 1 || total_size == 0 {
-        return vec![single_segment_for_task(task, "http_range")];
-    }
-
-    let count_i64 = i64::try_from(count).unwrap_or(1);
-    let base = total_size / count_i64;
-    let remainder = total_size % count_i64;
-    let mut start = 0_i64;
-
-    (0..count)
-        .map(|index| {
-            let extra = if i64::try_from(index).unwrap_or(0) < remainder {
-                1
-            } else {
-                0
-            };
-            let length = base + extra;
-            let end = start + length - 1;
-            let downloaded_until = if completed { end + 1 } else { start };
-            let segment = TaskSegmentRecord {
-                id: uuid::Uuid::new_v4().to_string(),
-                task_id: task.id.clone(),
-                file_id: None,
-                unit_kind: "http_range".to_string(),
-                range_start: start,
-                range_end: end,
-                downloaded_until,
-                status: if completed {
-                    SegmentStatus::Completed
-                } else {
-                    SegmentStatus::Pending
-                },
-                speed_bps: 0,
-                retry_count: 0,
-                last_error: None,
-            };
-            start = end + 1;
-            segment
-        })
-        .collect()
-}
-
-fn is_ftp_protocol(protocol: &str) -> bool {
-    matches!(protocol, "ftp" | "ftps")
-}
-
-fn is_bt_protocol(protocol: &str) -> bool {
-    matches!(protocol, "bt" | "magnet")
-}
-
-fn single_segment_for_task(task: &TaskRecord, unit_kind: &str) -> TaskSegmentRecord {
-    let total_size = task.total_size.max(0);
-    let completed = task.downloaded_bytes >= total_size && total_size > 0;
-    TaskSegmentRecord {
-        id: uuid::Uuid::new_v4().to_string(),
-        task_id: task.id.clone(),
-        file_id: None,
-        unit_kind: unit_kind.to_string(),
-        range_start: 0,
-        range_end: total_size.saturating_sub(1).max(0),
-        downloaded_until: task.downloaded_bytes.max(0),
-        speed_bps: 0,
-        status: if completed {
-            SegmentStatus::Completed
-        } else {
-            SegmentStatus::Pending
-        },
-        retry_count: 0,
-        last_error: None,
-    }
 }
 
 pub async fn list_segment_records(

@@ -38,6 +38,8 @@ tauri-specta = { version = "2.0.0-rc.25", features = ["typescript"] }
 uuid = { version = "1.23.2", features = ["v4", "serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 tauri-plugin-dialog = "2.7.1"
+tauri-plugin-fs = "2"
+tauri-plugin-clipboard-manager = "2.3.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
 tracing-appender = "0.2"

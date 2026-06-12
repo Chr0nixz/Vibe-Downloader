@@ -56,6 +56,17 @@ const FORWARDED_HEADER_ALLOWLIST: &[&str] = &[
     "pragma",
 ];
 
+fn browser_experimental_capture_enabled() -> bool {
+    std::env::var("VIBE_BROWSER_EXPERIMENTAL_CAPTURE")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn get_browser_integration_status(
@@ -135,7 +146,7 @@ pub async fn update_browser_capture_settings(
             })
         })
         .unwrap_or(current.forward_headers_mode);
-    let next = BrowserCaptureSettings {
+    let next = enforce_browser_capture_settings_policy(BrowserCaptureSettings {
         auto_intercept: input.auto_intercept.unwrap_or(current.auto_intercept),
         forward_headers: matches!(forward_headers_mode, BrowserForwardHeadersMode::Enabled),
         forward_headers_mode,
@@ -150,7 +161,7 @@ pub async fn update_browser_capture_settings(
             .map(normalize_extensions)
             .unwrap_or(current.file_extensions),
         site_rules: input.site_rules.unwrap_or(current.site_rules),
-    };
+    });
     upsert_browser_capture_settings(&state.pool, &next).await?;
     if matches!(
         next.forward_headers_mode,
@@ -198,8 +209,12 @@ pub async fn create_browser_handoff_task_with_state(
         });
     }
 
-    let forwarded_headers = sanitize_forwarded_headers(input.forwarded_headers.as_deref());
     let capture_settings = browser_capture_settings(&state.pool).await?;
+    let forwarded_headers = if browser_experimental_capture_enabled() {
+        sanitize_forwarded_headers(input.forwarded_headers.as_deref())
+    } else {
+        Vec::new()
+    };
     let request_headers = if matches!(
         capture_settings.forward_headers_mode,
         BrowserForwardHeadersMode::Enabled
@@ -316,14 +331,15 @@ pub async fn browser_capture_settings(
     let mut parsed = parse_browser_capture_settings(&raw);
     parsed.min_size_bytes = normalize_non_negative_i64_string(&parsed.min_size_bytes)?;
     parsed.file_extensions = normalize_extensions(parsed.file_extensions);
-    Ok(parsed)
+    Ok(enforce_browser_capture_settings_policy(parsed))
 }
 
 pub async fn upsert_browser_capture_settings(
     pool: &sqlx::SqlitePool,
     settings: &BrowserCaptureSettings,
 ) -> Result<(), String> {
-    let raw = serde_json::to_string(settings).map_err(|e| e.to_string())?;
+    let settings = enforce_browser_capture_settings_policy(settings.clone());
+    let raw = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
     sqlx::query(
         r#"
         INSERT INTO settings (key, value)
@@ -340,10 +356,15 @@ pub async fn upsert_browser_capture_settings(
 }
 
 fn default_browser_capture_settings() -> BrowserCaptureSettings {
+    let experimental = browser_experimental_capture_enabled();
     BrowserCaptureSettings {
-        auto_intercept: true,
+        auto_intercept: experimental,
         forward_headers: false,
-        forward_headers_mode: BrowserForwardHeadersMode::Ask,
+        forward_headers_mode: if experimental {
+            BrowserForwardHeadersMode::Ask
+        } else {
+            BrowserForwardHeadersMode::Disabled
+        },
         min_size_bytes: DEFAULT_BROWSER_MIN_SIZE_BYTES.to_string(),
         file_extensions: DEFAULT_BROWSER_EXTENSIONS
             .iter()
@@ -351,6 +372,17 @@ fn default_browser_capture_settings() -> BrowserCaptureSettings {
             .collect(),
         site_rules: Vec::new(),
     }
+}
+
+pub fn enforce_browser_capture_settings_policy(
+    mut settings: BrowserCaptureSettings,
+) -> BrowserCaptureSettings {
+    if !browser_experimental_capture_enabled() {
+        settings.auto_intercept = false;
+        settings.forward_headers = false;
+        settings.forward_headers_mode = BrowserForwardHeadersMode::Disabled;
+    }
+    settings
 }
 
 fn parse_browser_capture_settings(raw: &str) -> BrowserCaptureSettings {
@@ -475,7 +507,7 @@ async fn export_extension_packages(
         }
 
         let manifest = extension_manifest(&manifest_template, &variant)?;
-        let background = background_template.replace("__VIBE_BROWSER_KIND__", variant.browser_kind);
+        let background = extension_background(&background_template, variant.browser_kind);
         write_extension_package(
             &package_path,
             &source_dir,
@@ -544,6 +576,7 @@ async fn integration_status(
         native_host_name: NATIVE_HOST_NAME.to_string(),
         native_host_path,
         extension_core_path,
+        experimental_capture_enabled: browser_experimental_capture_enabled(),
         realtime: BrowserRealtimeStatus {
             ws_url: realtime.ws_url,
             connected: realtime.connected,
@@ -664,6 +697,7 @@ fn extension_manifest(template: &str, variant: &ExtensionPackageVariant) -> Resu
     let mut manifest: serde_json::Value = serde_json::from_str(template)
         .map_err(|e| format!("Invalid extension manifest template: {e}"))?;
     manifest["version"] = serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string());
+    apply_extension_capture_permissions(&mut manifest);
     if variant.id == "firefox" {
         manifest["name"] = serde_json::Value::String("Vibe Downloader (Firefox)".to_string());
     }
@@ -676,6 +710,47 @@ fn extension_manifest(template: &str, variant: &ExtensionPackageVariant) -> Resu
         });
     }
     serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())
+}
+
+fn extension_background(template: &str, browser_kind: &str) -> String {
+    template
+        .replace("__VIBE_BROWSER_KIND__", browser_kind)
+        .replace(
+            "__VIBE_EXPERIMENTAL_CAPTURE__",
+            if browser_experimental_capture_enabled() {
+                "true"
+            } else {
+                "false"
+            },
+        )
+}
+
+fn apply_extension_capture_permissions(manifest: &mut serde_json::Value) {
+    if browser_experimental_capture_enabled() {
+        let permissions = manifest
+            .get_mut("permissions")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("extension manifest permissions must be an array");
+        for permission in ["downloads", "cookies", "webRequest"] {
+            if !permissions
+                .iter()
+                .any(|value| value.as_str() == Some(permission))
+            {
+                permissions.push(serde_json::Value::String(permission.to_string()));
+            }
+        }
+        manifest["host_permissions"] = serde_json::json!(["http://*/*", "https://*/*"]);
+    } else if let Some(object) = manifest.as_object_mut() {
+        object.remove("host_permissions");
+        if let Some(permissions) = object
+            .get_mut("permissions")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            permissions.retain(|value| {
+                !matches!(value.as_str(), Some("downloads" | "cookies" | "webRequest"))
+            });
+        }
+    }
 }
 
 fn write_extension_package(

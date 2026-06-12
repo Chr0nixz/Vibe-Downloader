@@ -260,17 +260,19 @@ async fn handle_client_message(app: &AppHandle, raw: &str) -> String {
                         })
                     })
                     .unwrap_or(current.forward_headers_mode);
-                let next = crate::models::BrowserCaptureSettings {
-                    auto_intercept: input.auto_intercept.unwrap_or(current.auto_intercept),
-                    forward_headers: matches!(
+                let next = commands::browser::enforce_browser_capture_settings_policy(
+                    crate::models::BrowserCaptureSettings {
+                        auto_intercept: input.auto_intercept.unwrap_or(current.auto_intercept),
+                        forward_headers: matches!(
+                            forward_headers_mode,
+                            crate::models::BrowserForwardHeadersMode::Enabled
+                        ),
                         forward_headers_mode,
-                        crate::models::BrowserForwardHeadersMode::Enabled
-                    ),
-                    forward_headers_mode,
-                    min_size_bytes: input.min_size_bytes.unwrap_or(current.min_size_bytes),
-                    file_extensions: input.file_extensions.unwrap_or(current.file_extensions),
-                    site_rules: input.site_rules.unwrap_or(current.site_rules),
-                };
+                        min_size_bytes: input.min_size_bytes.unwrap_or(current.min_size_bytes),
+                        file_extensions: input.file_extensions.unwrap_or(current.file_extensions),
+                        site_rules: input.site_rules.unwrap_or(current.site_rules),
+                    },
+                );
                 commands::browser::upsert_browser_capture_settings(&state.pool, &next).await?;
                 if matches!(
                     next.forward_headers_mode,

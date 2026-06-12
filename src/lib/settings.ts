@@ -16,6 +16,7 @@ export async function applyGlobalSpeedLimit(
     closeToTray: settings.closeToTray,
     startOnBoot: settings.startOnBoot,
     floatingWindowEnabled: settings.floatingWindowEnabled,
+    clipboardMonitorEnabled: settings.clipboardMonitorEnabled,
     fontFamily: settings.fontFamily,
     accentColor: settings.accentColor,
     proxyMode: settings.proxyMode,

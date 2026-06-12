@@ -15,12 +15,20 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { BrowserCaptureControls } from "@/components/settings/BrowserCaptureControls";
 import type {
   AppAccentColor,
   AppFontFamily,
@@ -28,7 +36,6 @@ import type {
   AppSettings,
   BrowserCaptureSettings,
   BrowserExtensionExportResult,
-  BrowserForwardHeadersMode,
   BrowserIntegrationStatus,
 } from "@/generated/bindings";
 import { setLocale, type Locale } from "@/i18n";
@@ -89,6 +96,7 @@ export function SettingsPage() {
   const [closeToTray, setCloseToTray] = useState(false);
   const [startOnBoot, setStartOnBoot] = useState(false);
   const [floatingWindowEnabled, setFloatingWindowEnabled] = useState(false);
+  const [clipboardMonitorEnabled, setClipboardMonitorEnabled] = useState(true);
   const [fontFamily, setFontFamily] = useState<AppFontFamily>("source_han_sans_sc");
   const [accentColor, setAccentColor] = useState<AppAccentColor>("blue");
   const [proxyMode, setProxyMode] = useState<AppProxyMode>("off");
@@ -108,6 +116,8 @@ export function SettingsPage() {
     useState<BrowserExtensionExportResult | null>(null);
   const [browserCapture, setBrowserCapture] = useState<BrowserCaptureSettings | null>(null);
   const [browserCaptureSaving, setBrowserCaptureSaving] = useState(false);
+  const browserExperimentalCaptureEnabled =
+    browserStatus?.experimentalCaptureEnabled ?? false;
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveVersion = useRef(0);
   const currentLocale = (["zh-CN", "zh-TW", "ja", "ko", "ru", "es", "en"].includes(i18n.language)
@@ -127,6 +137,7 @@ export function SettingsPage() {
     setCloseToTray(settings.closeToTray);
     setStartOnBoot(settings.startOnBoot);
     setFloatingWindowEnabled(settings.floatingWindowEnabled);
+    setClipboardMonitorEnabled(settings.clipboardMonitorEnabled);
     setFontFamily(settings.fontFamily);
     setAccentColor(settings.accentColor);
     setProxyMode(settings.proxyMode);
@@ -152,6 +163,7 @@ export function SettingsPage() {
       closeToTray === settings.closeToTray &&
       startOnBoot === settings.startOnBoot &&
       floatingWindowEnabled === settings.floatingWindowEnabled &&
+      clipboardMonitorEnabled === settings.clipboardMonitorEnabled &&
       fontFamily === settings.fontFamily &&
       accentColor === settings.accentColor &&
       proxyMode === settings.proxyMode &&
@@ -178,6 +190,7 @@ export function SettingsPage() {
         closeToTray,
         startOnBoot,
         floatingWindowEnabled,
+        clipboardMonitorEnabled,
         fontFamily,
         accentColor,
         proxyMode,
@@ -204,6 +217,7 @@ export function SettingsPage() {
     closeToTray,
     startOnBoot,
     floatingWindowEnabled,
+    clipboardMonitorEnabled,
     fontFamily,
     accentColor,
     proxyMode,
@@ -251,6 +265,7 @@ export function SettingsPage() {
         closeToTray: nextSettings.closeToTray,
         startOnBoot: nextSettings.startOnBoot,
         floatingWindowEnabled: nextSettings.floatingWindowEnabled,
+        clipboardMonitorEnabled: nextSettings.clipboardMonitorEnabled,
         fontFamily: nextSettings.fontFamily,
         accentColor: nextSettings.accentColor,
         proxyMode: nextSettings.proxyMode,
@@ -624,17 +639,20 @@ export function SettingsPage() {
               description={t("settings.networkDescription")}
             >
               <SettingsRow title={t("settings.proxyMode")} htmlFor="proxy-mode-select">
-                <select
-                  id="proxy-mode-select"
+                <Select
                   value={proxyMode}
-                  onChange={(event) => setProxyMode(event.target.value as AppProxyMode)}
-                  className="h-11 w-full max-w-xs rounded-md border border-border-subtle bg-surface-root px-3 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
+                  onValueChange={(value) => setProxyMode(value as AppProxyMode)}
                   disabled={controlsDisabled}
                 >
-                  <option value="off">{t("settings.proxyOff")}</option>
-                  <option value="system">{t("settings.proxySystem")}</option>
-                  <option value="custom">{t("settings.proxyCustom")}</option>
-                </select>
+                  <SelectTrigger id="proxy-mode-select" className="w-full max-w-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="off">{t("settings.proxyOff")}</SelectItem>
+                    <SelectItem value="system">{t("settings.proxySystem")}</SelectItem>
+                    <SelectItem value="custom">{t("settings.proxyCustom")}</SelectItem>
+                  </SelectContent>
+                </Select>
               </SettingsRow>
 
               <SettingsRow title={t("settings.proxyUrl")} htmlFor="proxy-url">
@@ -712,47 +730,53 @@ export function SettingsPage() {
 
             <SettingsSection title={t("settings.interface")}>
               <SettingsRow title={t("settings.themeMode")} htmlFor="theme-mode-select">
-                <select
-                  id="theme-mode-select"
-                  value={theme ?? "system"}
-                  onChange={(event) => setTheme(event.target.value)}
-                  className="h-11 w-full max-w-xs rounded-md border border-border-subtle bg-surface-root px-3 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
-                >
-                  <option value="system">{t("settings.themeSystem")}</option>
-                  <option value="light">{t("settings.themeLight")}</option>
-                  <option value="dark">{t("settings.themeDark")}</option>
-                </select>
+                <Select value={theme ?? "system"} onValueChange={(value) => setTheme(value)}>
+                  <SelectTrigger id="theme-mode-select" className="w-full max-w-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="system">{t("settings.themeSystem")}</SelectItem>
+                    <SelectItem value="light">{t("settings.themeLight")}</SelectItem>
+                    <SelectItem value="dark">{t("settings.themeDark")}</SelectItem>
+                  </SelectContent>
+                </Select>
               </SettingsRow>
               <SettingsRow title={t("locale.label")} htmlFor="locale-select">
-                <select
-                  id="locale-select"
+                <Select
                   value={currentLocale}
-                  onChange={(event) => setLocale(event.target.value as Locale)}
-                  className="h-11 w-full max-w-xs rounded-md border border-border-subtle bg-surface-root px-3 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
+                  onValueChange={(value) => setLocale(value as Locale)}
                   disabled={controlsDisabled}
                 >
-                  <option value="en">{t("locale.en")}</option>
-                  <option value="zh-CN">{t("locale.zhCN")}</option>
-                  <option value="zh-TW">{t("locale.zhTW")}</option>
-                  <option value="ja">{t("locale.ja")}</option>
-                  <option value="ko">{t("locale.ko")}</option>
-                  <option value="ru">{t("locale.ru")}</option>
-                  <option value="es">{t("locale.es")}</option>
-                </select>
+                  <SelectTrigger id="locale-select" className="w-full max-w-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="en">{t("locale.en")}</SelectItem>
+                    <SelectItem value="zh-CN">{t("locale.zhCN")}</SelectItem>
+                    <SelectItem value="zh-TW">{t("locale.zhTW")}</SelectItem>
+                    <SelectItem value="ja">{t("locale.ja")}</SelectItem>
+                    <SelectItem value="ko">{t("locale.ko")}</SelectItem>
+                    <SelectItem value="ru">{t("locale.ru")}</SelectItem>
+                    <SelectItem value="es">{t("locale.es")}</SelectItem>
+                  </SelectContent>
+                </Select>
               </SettingsRow>
               <SettingsRow title={t("settings.fontFamily")} htmlFor="font-family-select">
-                <select
-                  id="font-family-select"
+                <Select
                   value={fontFamily}
-                  onChange={(event) => setFontFamily(event.target.value as AppFontFamily)}
-                  className="h-11 w-full max-w-xs rounded-md border border-border-subtle bg-surface-root px-3 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
+                  onValueChange={(value) => setFontFamily(value as AppFontFamily)}
                   disabled={controlsDisabled}
                 >
-                  <option value="source_han_sans_sc">
-                    {t("settings.fontFamilySourceHanSans")}
-                  </option>
-                  <option value="system">{t("settings.fontFamilySystem")}</option>
-                </select>
+                  <SelectTrigger id="font-family-select" className="w-full max-w-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="source_han_sans_sc">
+                      {t("settings.fontFamilySourceHanSans")}
+                    </SelectItem>
+                    <SelectItem value="system">{t("settings.fontFamilySystem")}</SelectItem>
+                  </SelectContent>
+                </Select>
               </SettingsRow>
               <SettingsRow title={t("settings.accentColor")} htmlFor="accent-color-picker">
                 <div id="accent-color-picker" className="flex flex-wrap items-center gap-2.5">
@@ -829,57 +853,25 @@ export function SettingsPage() {
                 disabled={controlsDisabled}
                 onChange={setFloatingWindowEnabled}
               />
+              <SettingsToggle
+                title={t("settings.clipboardMonitor")}
+                description={t("settings.clipboardMonitorDescription")}
+                checked={clipboardMonitorEnabled}
+                disabled={controlsDisabled}
+                onChange={setClipboardMonitorEnabled}
+              />
             </SettingsSection>
 
             <SettingsSection
               title={t("settings.browserIntegration")}
               description={t("settings.browserIntegrationDescription")}
             >
-              {browserCapture ? (
-                <div className="grid border-b border-border-divider">
-                  <SettingsToggle
-                    title={t("settings.browserAutoIntercept")}
-                    description={t("settings.browserAutoInterceptDescription")}
-                    checked={browserCapture.autoIntercept}
-                    disabled={browserLoading || browserCaptureSaving}
-                    onChange={(autoIntercept) => void updateBrowserCapture({ autoIntercept })}
-                  />
-                  <SettingsToggle
-                    title={t("settings.browserForwardHeaders")}
-                    description={t("settings.browserForwardHeadersDescription")}
-                    checked={browserCapture.forwardHeadersMode === "enabled"}
-                    disabled={browserLoading || browserCaptureSaving}
-                    onChange={(forwardHeaders) =>
-                      void updateBrowserCapture({
-                        forwardHeadersMode: forwardHeaders ? "enabled" : "disabled",
-                      })
-                    }
-                  />
-                  <SettingsRow
-                    title={t("settings.browserForwardHeadersMode")}
-                  >
-                    <div className="grid gap-1">
-                      <select
-                        value={browserCapture.forwardHeadersMode}
-                        disabled={browserLoading || browserCaptureSaving}
-                        aria-label={t("settings.browserForwardHeadersMode")}
-                        onChange={(event) =>
-                          void updateBrowserCapture({
-                            forwardHeadersMode: event.target.value as BrowserForwardHeadersMode,
-                          })
-                        }
-                        className="h-11 w-full max-w-xs rounded-md border border-border-subtle bg-surface-root px-3 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
-                      >
-                        <option value="ask">{t("settings.browserForwardHeadersAsk")}</option>
-                        <option value="enabled">{t("settings.browserForwardHeadersEnabled")}</option>
-                        <option value="disabled">{t("settings.browserForwardHeadersDisabled")}</option>
-                      </select>
-                      <p className="max-w-xl text-xs leading-5 text-text-muted">
-                        {t("settings.browserForwardHeadersModeDescription")}
-                      </p>
-                    </div>
-                  </SettingsRow>
-                </div>
+              {browserCapture && browserExperimentalCaptureEnabled ? (
+                <BrowserCaptureControls
+                  settings={browserCapture}
+                  disabled={browserLoading || browserCaptureSaving}
+                  onUpdate={(patch) => void updateBrowserCapture(patch)}
+                />
               ) : null}
               <div className="grid">
                 {browserStatus?.browsers.map((browser) => {
@@ -1120,22 +1112,25 @@ function ByteUnitInput({
         disabled={disabled}
         className="h-11 min-w-0 bg-surface-root text-center font-mono md:h-8"
       />
-      <select
+      <Select
         value={unit}
-        onChange={(event) => {
-          setUnit(event.target.value);
-          commit(amount, event.target.value);
+        onValueChange={(value) => {
+          setUnit(value);
+          commit(amount, value);
         }}
         disabled={disabled}
-        aria-label={unitAriaLabel}
-        className="h-11 rounded-md border border-border-subtle bg-surface-root px-2 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary md:h-8"
       >
-        {units.map(([value, label]) => (
-          <option key={value} value={value}>
-            {label}
-          </option>
-        ))}
-      </select>
+        <SelectTrigger aria-label={unitAriaLabel} className="w-auto min-w-[4rem] px-2">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {units.map(([value, label]) => (
+            <SelectItem key={value} value={value}>
+              {label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }
@@ -1220,7 +1215,7 @@ function SettingsRow({
               <button
                 type="button"
                 className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-text-muted/60 transition-colors hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/50"
-                tabIndex={-1}
+                tabIndex={0}
                 aria-label={tip}
               >
                 <Info className="h-3.5 w-3.5" />

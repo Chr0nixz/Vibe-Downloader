@@ -1,4 +1,5 @@
 pub mod browser_realtime;
+pub mod clipboard;
 pub mod commands;
 pub mod db;
 pub mod download;
@@ -77,6 +78,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::floating::hide_floating_status_window,
         commands::floating::toggle_floating_status_window,
         commands::floating::focus_main_window_from_floating,
+        commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
         commands::tasks::probe_task,
         commands::tasks::create_task,
@@ -120,6 +122,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::floating::hide_floating_status_window,
         commands::floating::toggle_floating_status_window,
         commands::floating::focus_main_window_from_floating,
+        commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
         commands::tasks::probe_task,
         commands::tasks::create_task,
@@ -138,6 +141,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     builder
         .typ::<models::AppErrorPayload>()
         .typ::<models::AppSettings>()
+        .typ::<clipboard::ClipboardLinkDetectedPayload>()
         .typ::<proxy::AppProxyMode>()
         .typ::<models::TaskUpdatedPayload>()
         .typ::<models::TaskProgressPayload>()
@@ -212,6 +216,8 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_notification::init())
@@ -282,6 +288,7 @@ pub fn run() {
         commands::floating::hide_floating_status_window,
         commands::floating::toggle_floating_status_window,
         commands::floating::focus_main_window_from_floating,
+        commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
         commands::tasks::probe_task,
         commands::tasks::create_task,
@@ -325,6 +332,7 @@ pub fn run() {
         commands::floating::hide_floating_status_window,
         commands::floating::toggle_floating_status_window,
         commands::floating::focus_main_window_from_floating,
+        commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
         commands::tasks::probe_task,
         commands::tasks::create_task,
@@ -377,6 +385,7 @@ pub fn run() {
                 engine_registry,
                 quit_requested: Arc::new(AtomicBool::new(false)),
             });
+            clipboard::start(handle.clone());
             tauri::async_runtime::block_on(async {
                 browser_realtime::start(handle.clone(), browser_realtime).await
             })?;

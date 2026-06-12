@@ -1,0 +1,54 @@
+use tauri_app_lib::clipboard::extract_download_urls;
+
+#[test]
+fn extracts_single_url_and_trims_trailing_punctuation() {
+    assert_eq!(
+        extract_download_urls("Download: https://example.com/file.zip)."),
+        vec!["https://example.com/file.zip".to_string()]
+    );
+}
+
+#[test]
+fn extracts_multiple_urls_and_deduplicates_normalized_values() {
+    assert_eq!(
+        extract_download_urls(
+            "https://example.com/file.zip\nhttps://example.com/file.zip ftp://mirror.example.org/a.iso",
+        ),
+        vec![
+            "https://example.com/file.zip".to_string(),
+            "ftp://mirror.example.org/a.iso".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn accepts_supported_download_protocols() {
+    let urls = extract_download_urls(
+        "https://example.com/a.torrent ftps://files.example.com/b.bin magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10 file:///C:/Downloads/sample.torrent",
+    );
+
+    assert_eq!(
+        urls,
+        vec![
+            "https://example.com/a.torrent".to_string(),
+            "ftps://files.example.com/b.bin".to_string(),
+            "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string(),
+            "file:///C:/Downloads/sample.torrent".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn rejects_unsupported_or_sensitive_urls() {
+    let urls = extract_download_urls(
+        "ssh://example.com/file https://user:pass@example.com/secret.zip file:///C:/Downloads/readme.txt",
+    );
+
+    assert!(urls.is_empty());
+}
+
+#[test]
+fn ignores_oversized_clipboard_text() {
+    let text = format!("{} https://example.com/file.zip", "x".repeat(64 * 1024));
+    assert!(extract_download_urls(&text).is_empty());
+}

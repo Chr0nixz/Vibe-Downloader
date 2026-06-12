@@ -4,6 +4,7 @@ const button = document.querySelector("#send-current");
 const status = document.querySelector("#status");
 const recentTasks = document.querySelector("#recent-tasks");
 const liveTasks = document.querySelector("#live-tasks");
+const captureControls = document.querySelector("#capture-controls");
 const autoIntercept = document.querySelector("#auto-intercept");
 const forwardHeadersMode = document.querySelector("#forward-headers-mode");
 
@@ -49,6 +50,9 @@ async function refresh() {
     if (!response?.ok) throw new Error(response?.error ?? "Status unavailable");
     const snapshot = response.status;
     status.textContent = snapshot.bridgeStatus ?? "unknown";
+    if (captureControls) {
+      captureControls.hidden = snapshot.experimentalCapture !== true;
+    }
     autoIntercept.checked = snapshot.settings?.autoIntercept !== false;
     forwardHeadersMode.value = snapshot.settings?.forwardHeadersMode ?? (
       snapshot.settings?.forwardHeaders === true ? "enabled" : "ask"

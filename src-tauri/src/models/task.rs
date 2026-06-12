@@ -543,6 +543,7 @@ pub struct AppSettings {
     pub close_to_tray: bool,
     pub start_on_boot: bool,
     pub floating_window_enabled: bool,
+    pub clipboard_monitor_enabled: bool,
     pub font_family: AppFontFamily,
     pub accent_color: AppAccentColor,
     pub proxy_mode: AppProxyMode,

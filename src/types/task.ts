@@ -35,10 +35,11 @@ function parseByteCount(value: string | number | null | undefined): number {
 export function normalizeTask(task: GeneratedTask): Task {
   return {
     ...task,
+    recoveryActions: task.recoveryActions ?? [],
     totalSize: parseByteCount(task.totalSize),
     downloadedBytes: parseByteCount(task.downloadedBytes),
     speedBps: parseByteCount(task.speedBps),
-    files: task.files.map((file) => ({
+    files: (task.files ?? []).map((file) => ({
       ...file,
       totalSize: parseByteCount(file.totalSize),
       downloadedBytes: parseByteCount(file.downloadedBytes),

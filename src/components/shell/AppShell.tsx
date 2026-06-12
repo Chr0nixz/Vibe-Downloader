@@ -8,7 +8,6 @@ import { TitleBar } from "@/components/shell/TitleBar";
 import { TaskList } from "@/components/tasks/TaskList";
 import { ToastViewport } from "@/components/ui/toast";
 import type { AttentionDialogRequest } from "@/components/shell/ResolveAttentionDialog";
-import { readShellLayout } from "@/hooks/use-shell-layout";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import { createLogger } from "@/lib/logger";
 import { errorMessage } from "@/lib/errors";
@@ -25,6 +24,7 @@ import {
   deleteTask,
   getSettings,
   listTasksCursor,
+  onClipboardLinkDetected,
   onSettingsChanged,
   onTrayNewDownloadRequested,
   onTraySettingsRequested,
@@ -40,6 +40,12 @@ import { useSettingsStore } from "@/stores/settings-store";
 import { taskCursorInput, useTaskStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
+
+interface NewDownloadInitialState {
+  sourceId: string;
+  url?: string;
+  batchInput?: string;
+}
 
 const TaskDetails = lazy(() =>
   import("@/components/shell/TaskDetails").then((module) => ({
@@ -97,6 +103,9 @@ export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
+  const [newDownloadInitialState, setNewDownloadInitialState] =
+    useState<NewDownloadInitialState | null>(null);
+  const [newDownloadDraftDirty, setNewDownloadDraftDirty] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
   const [bulkDeleteTargets, setBulkDeleteTargets] = useState<Task[]>([]);
   const [attentionRequest, setAttentionRequest] =
@@ -108,7 +117,6 @@ export function AppShell() {
   const detailOpen = useTaskStore((s) => s.detailOpen);
   const setTaskCursorPage = useTaskStore((s) => s.setTaskCursorPage);
   const upsertTask = useTaskStore((s) => s.upsertTask);
-  const setLoading = useTaskStore((s) => s.setLoading);
   const setError = useTaskStore((s) => s.setError);
   const selectTask = useTaskStore((s) => s.selectTask);
   const clearSelectedIds = useTaskStore((s) => s.clearSelectedIds);
@@ -118,6 +126,8 @@ export function AppShell() {
   const setSettingsLoading = useSettingsStore((s) => s.setLoading);
   const setSettingsError = useSettingsStore((s) => s.setError);
   const addToast = useToastStore((s) => s.addToast);
+  const updateToast = useToastStore((s) => s.updateToast);
+  const dismissToast = useToastStore((s) => s.dismissToast);
 
   const selected = tasks.find((t) => t.id === selectedId) ?? null;
   const taskSurfaceActive = nav !== "settings";
@@ -186,11 +196,28 @@ export function AppShell() {
   const runBulkTaskAction = useCallback(async (
     selectedTasks: Task[],
     action: (task: Task) => Promise<Task | void>,
+    label: string,
   ) => {
+    if (selectedTasks.length === 0) return;
+    const total = selectedTasks.length;
+    const toastId = addToast({
+      tone: "info",
+      title: t("toast.bulkProgress", { action: label, done: 0, total }),
+    });
+    let done = 0;
     for (const task of selectedTasks) {
       await runTaskAction(() => action(task), task.id);
+      done++;
+      updateToast(toastId, {
+        description: t("toast.bulkProgress", { action: label, done, total }),
+      });
     }
-  }, [runTaskAction]);
+    dismissToast(toastId);
+    addToast({
+      tone: "success",
+      title: t("toast.bulkComplete", { action: label, done, total }),
+    });
+  }, [addToast, dismissToast, runTaskAction, t, updateToast]);
 
   const bulkPause = useCallback((selectedTasks: Task[]) => {
     void runBulkTaskAction(
@@ -200,8 +227,9 @@ export function AppShell() {
         task.status === "queued",
       ),
       (task) => pauseTask(task.id),
+      t("taskList.bulkPause"),
     );
-  }, [runBulkTaskAction]);
+  }, [runBulkTaskAction, t]);
 
   const bulkResume = useCallback((selectedTasks: Task[]) => {
     void runBulkTaskAction(
@@ -211,15 +239,17 @@ export function AppShell() {
         task.status === "waiting_network",
       ),
       (task) => resumeTask(task.id),
+      t("taskList.bulkResume"),
     );
-  }, [runBulkTaskAction]);
+  }, [runBulkTaskAction, t]);
 
   const bulkRetry = useCallback((selectedTasks: Task[]) => {
     void runBulkTaskAction(
       selectedTasks.filter((task) => task.status !== "completed"),
       (task) => retryTask(task.id),
+      t("taskList.bulkRetry"),
     );
-  }, [runBulkTaskAction]);
+  }, [runBulkTaskAction, t]);
 
   const bulkOpenFolder = useCallback((selectedTasks: Task[]) => {
     const first = selectedTasks[0];
@@ -234,13 +264,52 @@ export function AppShell() {
   const confirmBulkDelete = useCallback((deleteFile: boolean) => {
     const targets = bulkDeleteTargets;
     setBulkDeleteTargets([]);
+    if (targets.length === 0) return;
     void (async () => {
+      const total = targets.length;
+      const label = t("taskList.bulkDelete", { count: total });
+      const toastId = addToast({
+        tone: "info",
+        title: t("toast.bulkProgress", { action: label, done: 0, total }),
+      });
+      let done = 0;
       for (const task of targets) {
         await runTaskAction(() => deleteTask(task.id, deleteFile));
+        done++;
+        updateToast(toastId, {
+          description: t("toast.bulkProgress", { action: label, done, total }),
+        });
       }
+      dismissToast(toastId);
+      addToast({
+        tone: "success",
+        title: t("toast.bulkComplete", { action: label, done, total }),
+      });
       clearSelectedIds();
     })();
-  }, [bulkDeleteTargets, clearSelectedIds, runTaskAction]);
+  }, [addToast, bulkDeleteTargets, clearSelectedIds, dismissToast, runTaskAction, t, updateToast]);
+
+  const openNewDownload = useCallback((initialState?: NewDownloadInitialState) => {
+    if (initialState) {
+      setNewDownloadInitialState(initialState);
+    } else {
+      setNewDownloadInitialState(null);
+    }
+    setNewDownloadOpen(true);
+  }, []);
+
+  const applyClipboardDownload = useCallback(
+    (sourceId: string, urls: string[]) => {
+      if (urls.length === 0) return;
+      setNewDownloadInitialState({
+        sourceId,
+        url: urls.length === 1 ? urls[0] : undefined,
+        batchInput: urls.length > 1 ? urls.join("\n") : undefined,
+      });
+      setNewDownloadOpen(true);
+    },
+    [],
+  );
 
   const submitAttentionResolution = useCallback((
     task: Task,
@@ -316,33 +385,6 @@ export function AppShell() {
 
   useEffect(() => {
     let cancelled = false;
-
-    void (async () => {
-      try {
-        await refreshTasks();
-        if (!cancelled) {
-          const selectedId = useTaskStore.getState().selectedId;
-          if (selectedId && readShellLayout() === "wide") {
-            setDetailOpen(true);
-          }
-        }
-      } catch (err) {
-        if (!cancelled) {
-          log.error("initial task load failed", err);
-          setError(errorMessage(err));
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshTasks, setDetailOpen, setError, setLoading]);
-
-  useEffect(() => {
-    let cancelled = false;
     let unlistenSettings: (() => void) | undefined;
 
     async function refreshSettings() {
@@ -381,7 +423,7 @@ export function AppShell() {
 
     void (async () => {
       unlistenNewDownload = await onTrayNewDownloadRequested(() => {
-        setNewDownloadOpen(true);
+        openNewDownload();
       });
       unlistenSettings = await onTraySettingsRequested(() => {
         useTaskStore.getState().setNav("settings");
@@ -399,7 +441,51 @@ export function AppShell() {
       unlistenNewDownload?.();
       unlistenSettings?.();
     };
-  }, [setDetailOpen]);
+  }, [openNewDownload, setDetailOpen]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenClipboard: (() => void) | undefined;
+
+    void (async () => {
+      unlistenClipboard = await onClipboardLinkDetected((payload) => {
+        if (payload.urls.length === 0) return;
+        if (newDownloadOpen && newDownloadDraftDirty) {
+          addToast({
+            tone: "info",
+            title:
+              payload.urls.length > 1
+                ? t("toast.clipboardLinksDetected", { count: payload.urls.length })
+                : t("toast.clipboardLinkDetected"),
+            description:
+              payload.urls.length > 1
+                ? t("toast.clipboardLinksDetectedDescription", {
+                    count: payload.urls.length,
+                  })
+                : sanitizeUrlForDisplay(payload.primaryUrl),
+            action: {
+              label: t("toast.useClipboardLink"),
+              onClick: () => applyClipboardDownload(payload.id, payload.urls),
+            },
+          });
+          return;
+        }
+        applyClipboardDownload(payload.id, payload.urls);
+      });
+      if (cancelled) unlistenClipboard?.();
+    })();
+
+    return () => {
+      cancelled = true;
+      unlistenClipboard?.();
+    };
+  }, [
+    addToast,
+    applyClipboardDownload,
+    newDownloadDraftDirty,
+    newDownloadOpen,
+    t,
+  ]);
 
   useEffect(() => {
     document.documentElement.dataset.fontFamily =
@@ -441,7 +527,7 @@ export function AppShell() {
 
       if (matchesShortcut(event, "mod+n", platform)) {
         event.preventDefault();
-        setNewDownloadOpen(true);
+        openNewDownload();
         return;
       }
 
@@ -454,7 +540,7 @@ export function AppShell() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [platform, setDetailOpen]);
+  }, [openNewDownload, platform, setDetailOpen]);
 
   return (
     <div className="flex h-full flex-col">
@@ -463,7 +549,7 @@ export function AppShell() {
         platform={platform}
         selectedTask={taskSurfaceActive ? selected : null}
         onOpenPalette={() => setPaletteOpen(true)}
-        onNewDownload={() => setNewDownloadOpen(true)}
+        onNewDownload={() => openNewDownload()}
         onStart={() => {
           if (selected) void runTaskAction(() => resumeTask(selected.id), selected.id);
         }}
@@ -518,7 +604,7 @@ export function AppShell() {
             onOpenChange={setPaletteOpen}
             platform={platform}
             selectedTask={taskSurfaceActive ? selected : null}
-            onNewDownload={() => setNewDownloadOpen(true)}
+            onNewDownload={() => openNewDownload()}
             onStart={() => {
               if (selected) void runTaskAction(() => resumeTask(selected.id), selected.id);
             }}
@@ -555,7 +641,14 @@ export function AppShell() {
         <Suspense fallback={null}>
           <NewDownloadDialog
             open={newDownloadOpen}
-            onOpenChange={setNewDownloadOpen}
+            onOpenChange={(open) => {
+              setNewDownloadOpen(open);
+              if (!open) setNewDownloadDraftDirty(false);
+            }}
+            initialSourceId={newDownloadInitialState?.sourceId}
+            initialUrl={newDownloadInitialState?.url}
+            initialBatchInput={newDownloadInitialState?.batchInput}
+            onDraftStateChange={setNewDownloadDraftDirty}
             onCreated={(task) => {
               useTaskStore.getState().upsertTask(task);
               selectTask(task.id);

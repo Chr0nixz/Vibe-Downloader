@@ -25,6 +25,7 @@ pub struct UpdateSettingsInput {
     pub close_to_tray: Option<bool>,
     pub start_on_boot: Option<bool>,
     pub floating_window_enabled: Option<bool>,
+    pub clipboard_monitor_enabled: Option<bool>,
     pub font_family: Option<AppFontFamily>,
     pub accent_color: Option<AppAccentColor>,
     pub proxy_mode: Option<AppProxyMode>,
@@ -84,6 +85,9 @@ pub async fn update_settings(
     let floating_window_enabled = input
         .floating_window_enabled
         .unwrap_or(current.floating_window_enabled);
+    let clipboard_monitor_enabled = input
+        .clipboard_monitor_enabled
+        .unwrap_or(current.clipboard_monitor_enabled);
     let font_family = input.font_family.unwrap_or(current.font_family);
     let accent_color = input.accent_color.unwrap_or(current.accent_color);
     let proxy_mode = input.proxy_mode.unwrap_or(current.proxy_mode);
@@ -146,6 +150,7 @@ pub async fn update_settings(
         close_to_tray,
         start_on_boot,
         floating_window_enabled,
+        clipboard_monitor_enabled,
         font_family,
         accent_color,
         proxy_mode,

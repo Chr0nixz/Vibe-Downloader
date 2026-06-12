@@ -3,6 +3,7 @@ importScripts("logger.js");
 const log = createLogger("background");
 const HOST_NAME = "com.vibe_downloader.native_host";
 const BROWSER_KIND = "__VIBE_BROWSER_KIND__";
+const EXPERIMENTAL_CAPTURE = "__VIBE_EXPERIMENTAL_CAPTURE__" === "true";
 const RECENT_KEY = "vibeRecentHandoffs";
 const SETTINGS_KEY = "vibeBrowserCaptureSettings";
 const HEADER_CACHE_TTL_MS = 30_000;
@@ -90,13 +91,13 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
-if (api.downloads?.onCreated) {
+if (EXPERIMENTAL_CAPTURE && api.downloads?.onCreated) {
   api.downloads.onCreated.addListener((download) => {
     void handleBrowserDownload(download);
   });
 }
 
-if (api.webRequest?.onBeforeSendHeaders) {
+if (EXPERIMENTAL_CAPTURE && api.webRequest?.onBeforeSendHeaders) {
   try {
     api.webRequest.onBeforeSendHeaders.addListener(
       cacheRequestHeaders,
@@ -115,6 +116,7 @@ if (api.webRequest?.onBeforeSendHeaders) {
 void ensureBridge();
 
 async function handleBrowserDownload(download) {
+  if (!EXPERIMENTAL_CAPTURE) return;
   if (!download?.url || !/^https?:\/\//i.test(download.url)) return;
   const settings = await getCaptureSettings();
   const decision = shouldIntercept(download, settings);
@@ -349,6 +351,7 @@ async function nativeMessage(payload) {
 }
 
 function cacheRequestHeaders(details) {
+  if (!EXPERIMENTAL_CAPTURE) return {};
   cleanupHeaderCache();
   const headerConsent = headerForwardingDecision(details.url, captureSettingsCache);
   if (!headerConsent.forward) return {};
@@ -366,6 +369,7 @@ function cacheRequestHeaders(details) {
 }
 
 async function forwardedHeaders(url) {
+  if (!EXPERIMENTAL_CAPTURE) return [];
   const cached = headerCache.get(url);
   const headers = cached && Date.now() - cached.createdAt < HEADER_CACHE_TTL_MS
     ? [...cached.headers]
@@ -420,6 +424,18 @@ async function updateCaptureSettings(patch) {
 }
 
 function normalizeCaptureSettings(value) {
+  if (!EXPERIMENTAL_CAPTURE) {
+    return {
+      autoIntercept: false,
+      forwardHeadersMode: "disabled",
+      forwardHeaders: false,
+      minSizeBytes: String(Number(value?.minSizeBytes ?? 0) || 0),
+      fileExtensions: Array.isArray(value?.fileExtensions)
+        ? value.fileExtensions
+        : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv"],
+      siteRules: Array.isArray(value?.siteRules) ? value.siteRules : [],
+    };
+  }
   return {
     autoIntercept: value?.autoIntercept !== false,
     forwardHeadersMode: value?.forwardHeadersMode ??
@@ -498,6 +514,7 @@ async function popupStatus() {
   const stored = await api.storage.local.get(RECENT_KEY);
   return {
     bridgeStatus: lastStatus,
+    experimentalCapture: EXPERIMENTAL_CAPTURE,
     settings: await getCaptureSettings(),
     recent: Array.isArray(stored?.[RECENT_KEY]) ? stored[RECENT_KEY] : [],
     tasks: Array.from(liveTasks.values()).slice(0, 8),

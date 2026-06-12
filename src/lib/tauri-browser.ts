@@ -6,6 +6,7 @@ import type {
   BrowserExtensionExportResult,
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
+  ClipboardLinkDetectedPayload,
   CreateTaskInput,
   CursorPageInput,
   HashVerificationState,
@@ -33,6 +34,9 @@ const log = createLogger("browser-mock");
 const STORAGE_KEY = "vibe-browser-mock-tasks";
 const SETTINGS_STORAGE_KEY = "vibe-browser-settings";
 const BROWSER_CAPTURE_SETTINGS_KEY = "vibe-browser-capture-settings";
+const browserExperimentalCaptureEnabled = ["1", "true", "yes", "on"].includes(
+  String(import.meta.env.VITE_BROWSER_EXPERIMENTAL_CAPTURE ?? "").toLowerCase(),
+);
 
 type BrowserListener = (payload: TaskProgressPayload) => void;
 type TaskUpdatedListener = (task: Task) => void;
@@ -51,6 +55,7 @@ let settings: AppSettings = loadStoredSettings() ?? {
   closeToTray: false,
   startOnBoot: false,
   floatingWindowEnabled: false,
+  clipboardMonitorEnabled: true,
   fontFamily: "source_han_sans_sc",
   accentColor: "blue",
   proxyMode: "off",
@@ -139,6 +144,10 @@ function loadStoredSettings(): AppSettings | null {
           typeof parsed.floatingWindowEnabled === "boolean"
             ? parsed.floatingWindowEnabled
             : false,
+        clipboardMonitorEnabled:
+          typeof parsed.clipboardMonitorEnabled === "boolean"
+            ? parsed.clipboardMonitorEnabled
+            : true,
         fontFamily:
           parsed.fontFamily === "system" || parsed.fontFamily === "source_han_sans_sc"
             ? parsed.fontFamily
@@ -170,9 +179,9 @@ function loadStoredSettings(): AppSettings | null {
 
 function defaultBrowserCaptureSettings(): BrowserCaptureSettings {
   return {
-    autoIntercept: true,
+    autoIntercept: browserExperimentalCaptureEnabled,
     forwardHeaders: false,
-    forwardHeadersMode: "ask",
+    forwardHeadersMode: browserExperimentalCaptureEnabled ? "ask" : "disabled",
     minSizeBytes: "0",
     fileExtensions: ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf"],
     siteRules: [],
@@ -184,7 +193,7 @@ function loadStoredBrowserCaptureSettings(): BrowserCaptureSettings | null {
     const raw = localStorage.getItem(BROWSER_CAPTURE_SETTINGS_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    return {
+    return clampBrowserCaptureSettings({
       ...defaultBrowserCaptureSettings(),
       ...parsed,
       forwardHeadersMode:
@@ -201,10 +210,20 @@ function loadStoredBrowserCaptureSettings(): BrowserCaptureSettings | null {
         ? parsed.fileExtensions
         : defaultBrowserCaptureSettings().fileExtensions,
       siteRules: Array.isArray(parsed.siteRules) ? parsed.siteRules : [],
-    };
+    });
   } catch {
     return null;
   }
+}
+
+function clampBrowserCaptureSettings(settings: BrowserCaptureSettings): BrowserCaptureSettings {
+  if (browserExperimentalCaptureEnabled) return settings;
+  return {
+    ...settings,
+    autoIntercept: false,
+    forwardHeaders: false,
+    forwardHeadersMode: "disabled",
+  };
 }
 
 function persistBrowserCaptureSettings() {
@@ -680,6 +699,8 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
     startOnBoot: input.startOnBoot ?? settings.startOnBoot,
     floatingWindowEnabled:
       input.floatingWindowEnabled ?? settings.floatingWindowEnabled,
+    clipboardMonitorEnabled:
+      input.clipboardMonitorEnabled ?? settings.clipboardMonitorEnabled,
     fontFamily: input.fontFamily ?? settings.fontFamily,
     accentColor: input.accentColor ?? settings.accentColor,
     proxyMode: input.proxyMode ?? settings.proxyMode,
@@ -714,11 +735,23 @@ export async function openDirectoryPicker(): Promise<string | null> {
   return "~/Downloads";
 }
 
+export interface PickedFile {
+  path: string;
+  name: string;
+}
+
+export async function openFilePicker(
+  _filters?: { name: string; extensions: string[] }[],
+): Promise<PickedFile | null> {
+  return null;
+}
+
 export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationStatus> {
   return {
     nativeHostName: "com.vibe_downloader.native_host",
     nativeHostPath: "~/Applications/Vibe Downloader/vibe-native-host",
     extensionCorePath: "browser/extension-core",
+    experimentalCaptureEnabled: browserExperimentalCaptureEnabled,
     realtime: {
       wsUrl: "ws://127.0.0.1:48365/browser/ws",
       connected: true,
@@ -767,7 +800,7 @@ export async function updateBrowserCaptureSettings(
       : input.forwardHeaders
         ? "enabled"
         : "disabled");
-  browserCaptureSettings = {
+  browserCaptureSettings = clampBrowserCaptureSettings({
     ...browserCaptureSettings,
     autoIntercept: input.autoIntercept ?? browserCaptureSettings.autoIntercept,
     forwardHeadersMode,
@@ -775,7 +808,7 @@ export async function updateBrowserCaptureSettings(
     minSizeBytes: input.minSizeBytes ?? browserCaptureSettings.minSizeBytes,
     fileExtensions: input.fileExtensions ?? browserCaptureSettings.fileExtensions,
     siteRules: input.siteRules ?? browserCaptureSettings.siteRules,
-  };
+  });
   persistBrowserCaptureSettings();
   emitBrowserIntegrationChanged();
   return { ...browserCaptureSettings };
@@ -1081,6 +1114,12 @@ export function onSettingsChanged(handler: () => void): Promise<() => void> {
   return Promise.resolve(() => {
     settingsListeners.delete(handler);
   });
+}
+
+export function onClipboardLinkDetected(
+  _handler: (payload: ClipboardLinkDetectedPayload) => void,
+): Promise<() => void> {
+  return Promise.resolve(() => {});
 }
 
 export function onBrowserIntegrationChanged(handler: () => void): Promise<() => void> {

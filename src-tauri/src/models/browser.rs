@@ -78,6 +78,7 @@ pub struct BrowserIntegrationStatus {
     pub native_host_name: String,
     pub native_host_path: Option<String>,
     pub extension_core_path: Option<String>,
+    pub experimental_capture_enabled: bool,
     pub realtime: BrowserRealtimeStatus,
     pub capture: BrowserCaptureSettings,
     pub browsers: Vec<BrowserIntegrationEntry>,
