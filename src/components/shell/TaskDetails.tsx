@@ -1,14 +1,21 @@
 import { useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { X } from "lucide-react";
+import { ChevronDown, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import type { Task } from "@/types/task";
 import type { TaskSegment } from "@/types/task-segment";
-import type { HashVerificationState, RecoveryAction, RequestDiagnostic, TaskEvent } from "@/generated/bindings";
+import type {
+  HashVerificationState,
+  RecoveryAction,
+  RequestDiagnostic,
+  TaskEvent,
+  TorrentRuntimeSnapshot,
+} from "@/generated/bindings";
 import {
+  getTorrentRuntimeSnapshot,
   listSegmentsPage,
   listTaskEventsPage,
   listTaskRequestsPage,
@@ -147,6 +154,7 @@ function TaskDetailsPanel({
 }) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("overview");
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [segments, setSegments] = useState<TaskSegment[]>([]);
   const [segmentsCursor, setSegmentsCursor] = useState<string | null>(null);
   const [segmentError, setSegmentError] = useState<string | null>(null);
@@ -158,10 +166,16 @@ function TaskDetailsPanel({
   const [requestsError, setRequestsError] = useState<string | null>(null);
   const [hashState, setHashState] = useState<HashVerificationState | null>(null);
   const [verifyingHash, setVerifyingHash] = useState(false);
+  const [torrentSnapshot, setTorrentSnapshot] = useState<TorrentRuntimeSnapshot | null>(null);
+  const [torrentSnapshotError, setTorrentSnapshotError] = useState<string | null>(null);
+  const isTorrentTask = task.protocol === "bt" || task.protocol === "magnet";
 
   useEffect(() => {
     setActiveTab("overview");
+    setDiagnosticsOpen(task.status === "failed" || task.status === "needs_attention");
     setHashState(null);
+    setTorrentSnapshot(null);
+    setTorrentSnapshotError(null);
     setSegments([]);
     setSegmentsCursor(null);
     setEvents([]);
@@ -169,6 +183,12 @@ function TaskDetailsPanel({
     setRequests([]);
     setRequestsCursor(null);
   }, [task.id]);
+
+  useEffect(() => {
+    if (task.status === "failed" || task.status === "needs_attention") {
+      setDiagnosticsOpen(true);
+    }
+  }, [task.status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -247,6 +267,45 @@ function TaskDetailsPanel({
       if (intervalId) clearInterval(intervalId);
     };
   }, [activeTab, task.id, task.status]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+
+    if (!isTorrentTask || activeTab !== "overview") {
+      setTorrentSnapshot(null);
+      setTorrentSnapshotError(null);
+      return;
+    }
+
+    const loadSnapshot = () => {
+      void getTorrentRuntimeSnapshot(task.id)
+        .then((snapshot) => {
+          if (!cancelled) {
+            setTorrentSnapshot(snapshot);
+            setTorrentSnapshotError(null);
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) setTorrentSnapshotError(errorMessage(error));
+        });
+    };
+
+    loadSnapshot();
+
+    const isLive =
+      task.status === "downloading" ||
+      task.status === "retrying" ||
+      task.status === "queued";
+    if (isLive) {
+      intervalId = setInterval(loadSnapshot, SEGMENT_REFRESH_MS);
+    }
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [activeTab, isTorrentTask, task.id, task.status]);
 
   async function runHashVerification() {
     setVerifyingHash(true);
@@ -355,11 +414,104 @@ function TaskDetailsPanel({
     >
         <TabsList className="w-full justify-start overflow-x-auto">
           <TabsTrigger value="overview">{t("taskDetails.overview")}</TabsTrigger>
-          <TabsTrigger value="chunks">{t("taskDetails.chunks")}</TabsTrigger>
-          <TabsTrigger value="connections">{t("taskDetails.connections")}</TabsTrigger>
-          <TabsTrigger value="requests">{t("taskDetails.requests")}</TabsTrigger>
           <TabsTrigger value="logs">{t("taskDetails.logs")}</TabsTrigger>
         </TabsList>
+
+        {/* Diagnostics disclosure */}
+        <div className="mt-2 rounded-md border border-border-subtle/60">
+          <button
+            type="button"
+            onClick={() => setDiagnosticsOpen((v) => !v)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-raised/40 hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary/70"
+            aria-expanded={diagnosticsOpen}
+          >
+            <ChevronDown
+              className={cn(
+                "h-3.5 w-3.5 shrink-0 transition-transform duration-200",
+                !diagnosticsOpen && "-rotate-90",
+              )}
+            />
+            <span>{t("taskDetails.diagnostics")}</span>
+            {!diagnosticsOpen && segments.length > 0 && (
+              <span className="ml-auto font-mono text-[11px] text-text-muted">
+                {segments.filter((s) => s.status === "failed").length > 0
+                  ? `${segments.filter((s) => s.status === "failed").length} ${t("taskDetails.diagFailedShort")}`
+                  : `${segments.length} ${t("taskDetails.diagSegmentsShort")}`}
+              </span>
+            )}
+          </button>
+
+          {diagnosticsOpen && (
+            <div className="border-t border-border-subtle/60 px-2 py-2">
+              <div
+                role="tablist"
+                aria-label={t("taskDetails.diagnostics")}
+                className="mb-2 flex gap-1"
+              >
+                {(["chunks", "connections", "requests"] as const).map((key) => (
+                  <button
+                    key={key}
+                    role="tab"
+                    aria-selected={activeTab === key}
+                    tabIndex={activeTab === key ? 0 : -1}
+                    onClick={() => {
+                      setActiveTab(key);
+                    }}
+                    className={cn(
+                      "rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70",
+                      activeTab === key
+                        ? "bg-accent-primary/12 text-accent-primary"
+                        : "text-text-muted hover:bg-surface-raised/60 hover:text-text-secondary",
+                    )}
+                  >
+                    {t(`taskDetails.${key}`)}
+                  </button>
+                ))}
+              </div>
+
+              <TabsContent value="chunks">
+                <ChunkList
+                  segments={segments}
+                  error={segmentError}
+                  emptyLabel={t("taskDetails.noChunks")}
+                  rangeLabel={t("taskDetails.chunkRange")}
+                  progressLabel={t("taskDetails.chunkProgress")}
+                  retryLabel={t("taskDetails.chunkRetries")}
+                  hasMore={Boolean(segmentsCursor)}
+                  loadMoreLabel={t("taskDetails.loadMore")}
+                  onLoadMore={() => void loadMoreSegments()}
+                />
+              </TabsContent>
+              <TabsContent value="connections">
+                <ConnectionList
+                  segments={segments}
+                  taskSpeedBps={task.speedBps}
+                  error={segmentError}
+                  emptyLabel={t("taskDetails.noConnections")}
+                  connectionLabel={t("taskDetails.connection")}
+                  rangeLabel={t("taskDetails.connectionRange")}
+                  progressLabel={t("taskDetails.connectionProgress")}
+                  speedLabel={t("taskDetails.connectionSpeed")}
+                  hasMore={Boolean(segmentsCursor)}
+                  loadMoreLabel={t("taskDetails.loadMore")}
+                  onLoadMore={() => void loadMoreSegments()}
+                />
+              </TabsContent>
+              <TabsContent value="requests">
+                <RequestList
+                  requests={requests}
+                  error={requestsError}
+                  emptyLabel={t("taskDetails.noRequests")}
+                  hasMore={Boolean(requestsCursor)}
+                  loadMoreLabel={t("taskDetails.loadMore")}
+                  onLoadMore={() => void loadMoreRequests()}
+                />
+              </TabsContent>
+            </div>
+          )}
+        </div>
+
         <ScrollArea className="min-h-0 flex-1">
           <TabsContent value="overview" className="space-y-3 text-sm">
             <div className="space-y-2">
@@ -387,45 +539,12 @@ function TaskDetailsPanel({
               verifying={verifyingHash}
               onVerify={() => void runHashVerification()}
             />
+            <TorrentRuntimePanel
+              task={task}
+              snapshot={torrentSnapshot}
+              error={torrentSnapshotError}
+            />
             <TaskRecoveryActions task={task} onResolve={onResolveAttention} />
-          </TabsContent>
-          <TabsContent value="chunks">
-            <ChunkList
-              segments={segments}
-              error={segmentError}
-              emptyLabel={t("taskDetails.noChunks")}
-              rangeLabel={t("taskDetails.chunkRange")}
-              progressLabel={t("taskDetails.chunkProgress")}
-              retryLabel={t("taskDetails.chunkRetries")}
-              hasMore={Boolean(segmentsCursor)}
-              loadMoreLabel={t("taskDetails.loadMore")}
-              onLoadMore={() => void loadMoreSegments()}
-            />
-          </TabsContent>
-          <TabsContent value="connections">
-            <ConnectionList
-              segments={segments}
-              taskSpeedBps={task.speedBps}
-              error={segmentError}
-              emptyLabel={t("taskDetails.noConnections")}
-              connectionLabel={t("taskDetails.connection")}
-              rangeLabel={t("taskDetails.connectionRange")}
-              progressLabel={t("taskDetails.connectionProgress")}
-              speedLabel={t("taskDetails.connectionSpeed")}
-              hasMore={Boolean(segmentsCursor)}
-              loadMoreLabel={t("taskDetails.loadMore")}
-              onLoadMore={() => void loadMoreSegments()}
-            />
-          </TabsContent>
-          <TabsContent value="requests">
-            <RequestList
-              requests={requests}
-              error={requestsError}
-              emptyLabel={t("taskDetails.noRequests")}
-              hasMore={Boolean(requestsCursor)}
-              loadMoreLabel={t("taskDetails.loadMore")}
-              onLoadMore={() => void loadMoreRequests()}
-            />
           </TabsContent>
           <TabsContent value="logs">
             <EventList
@@ -511,6 +630,81 @@ function HashPanel({
         ) : null}
       </div>
       {error ? <p className="mt-2 text-status-danger">{error}</p> : null}
+    </div>
+  );
+}
+
+function TorrentRuntimePanel({
+  task,
+  snapshot,
+  error,
+}: {
+  task: Task;
+  snapshot: TorrentRuntimeSnapshot | null;
+  error: string | null;
+}) {
+  const { t } = useTranslation();
+  if (task.protocol !== "bt" && task.protocol !== "magnet") return null;
+
+  if (error) {
+    return (
+      <p className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+        {error}
+      </p>
+    );
+  }
+
+  if (!snapshot) {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-3 px-1">
+          <span className="text-xs font-medium text-text-secondary">
+            {t("taskDetails.btRuntime")}
+          </span>
+          <span className="text-[11px] text-text-muted">
+            {t("taskDetails.btSpeedLimitUnsupported")}
+          </span>
+        </div>
+        <p className="rounded-md border border-border-divider bg-surface-root/50 px-3 py-2 text-xs text-text-secondary">
+          {t("taskDetails.btNoRuntime")}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3 px-1">
+        <span className="text-xs font-medium text-text-secondary">
+          {t("taskDetails.btRuntime")}
+        </span>
+        <span className="text-[11px] text-text-muted">
+          {t("taskDetails.btSpeedLimitUnsupported")}
+        </span>
+      </div>
+      <div className="space-y-0.5">
+        <Row
+          label={t("taskDetails.btMetadataStatus")}
+          value={snapshot.metadataStatus}
+          mono={false}
+        />
+        <Row
+          label={t("taskDetails.btPeers")}
+          value={`${snapshot.peerCount} / ${snapshot.seedCount}`}
+        />
+        <Row
+          label={t("taskDetails.btPieces")}
+          value={`${snapshot.completedPieces} / ${snapshot.verifiedPieces}`}
+        />
+        <Row
+          label={t("taskDetails.btUpload")}
+          value={`${formatBytes(parseSnapshotNumber(snapshot.uploadBytes))} / ${formatSpeed(parseSnapshotNumber(snapshot.uploadSpeedBps))}`}
+        />
+        <Row
+          label={t("taskDetails.btRatio")}
+          value={snapshot.ratio == null ? "-" : snapshot.ratio.toFixed(3)}
+        />
+      </div>
     </div>
   );
 }
@@ -907,6 +1101,11 @@ function formatEventTime(value: string): string {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+function parseSnapshotNumber(value: string): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 function hashTone(status: Task["hashStatus"]): string {

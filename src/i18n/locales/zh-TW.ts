@@ -428,6 +428,9 @@ const zhTW = {
     closeBackdrop: "關閉詳細資訊",
     drawerAria: "工作詳細資訊",
     drawerDescription: "{{name}} 的詳細資訊",
+    diagnostics: "診斷資訊",
+    diagFailedShort: "個失敗",
+    diagSegmentsShort: "個分塊",
   },
   taskEvent: {
     created: "已建立",

@@ -44,13 +44,22 @@ export const commands = {
 	createdAt: string,
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_task", { id })),
-	listTaskSegments: (taskId: string) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_task_segments", { taskId })),
 	listSegments: (input: ListSegmentsInput) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_segments", { input })),
 	listSegmentsPage: (input: CursorPageInput) => typedError<TaskSegmentsPageResult, string>(__TAURI_INVOKE("list_segments_page", { input })),
 	getSegmentSummary: (taskId: string) => typedError<SegmentSummary, string>(__TAURI_INVOKE("get_segment_summary", { taskId })),
-	listTaskEvents: (taskId: string) => typedError<TaskEvent[], string>(__TAURI_INVOKE("list_task_events", { taskId })),
+	getTorrentRuntimeSnapshot: (taskId: string) => typedError<{
+	taskId: string,
+	metadataStatus: string,
+	completedPieces: string,
+	verifiedPieces: string,
+	peerCount: string,
+	seedCount: string,
+	uploadBytes: string,
+	uploadSpeedBps: string,
+	ratio: number | null,
+	updatedAt: string,
+} | null, string>(__TAURI_INVOKE("get_torrent_runtime_snapshot", { taskId })),
 	listTaskEventsPage: (input: CursorPageInput) => typedError<TaskEventsPageResult, string>(__TAURI_INVOKE("list_task_events_page", { input })),
-	listTaskRequests: (taskId: string) => typedError<RequestDiagnostic[], string>(__TAURI_INVOKE("list_task_requests", { taskId })),
 	listTaskRequestsPage: (input: CursorPageInput) => typedError<TaskRequestsPageResult, string>(__TAURI_INVOKE("list_task_requests_page", { input })),
 	getSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("get_settings")),
 	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
@@ -259,6 +268,8 @@ export type CreateTaskInput = {
 	saveDir: string | null,
 	fileName: string | null,
 	expectedHashSha256: string | null,
+	probeSnapshot: ProbeTaskPayload | null,
+	selectedFilePaths: string[] | null,
 };
 
 export type CursorPageInput = {
@@ -342,6 +353,7 @@ export type ProbeTaskInput = {
 };
 
 export type ProbeTaskPayload = {
+	inputUrl: string,
 	finalUrl: string,
 	fileName: string,
 	protocol: string,
@@ -351,6 +363,9 @@ export type ProbeTaskPayload = {
 	totalSize: string,
 	sourceKey: string,
 	contentType: string | null,
+	etag: string | null,
+	lastModified: string | null,
+	probedAt: string,
 };
 
 export type ProbedFile = {
@@ -507,6 +522,19 @@ export type TaskStatus = "queued" | "downloading" | "paused" | "completed" | "fa
 
 export type TaskUpdatedPayload = {
 	task: Task,
+};
+
+export type TorrentRuntimeSnapshot = {
+	taskId: string,
+	metadataStatus: string,
+	completedPieces: string,
+	verifiedPieces: string,
+	peerCount: string,
+	seedCount: string,
+	uploadBytes: string,
+	uploadSpeedBps: string,
+	ratio: number | null,
+	updatedAt: string,
 };
 
 export type TrayMenuAction = "openApp" | "newDownload" | "openDownloads" | "settings" | "quit";

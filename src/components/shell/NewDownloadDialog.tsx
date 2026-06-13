@@ -69,6 +69,23 @@ function readFileAsText(filePath: string): Promise<string> {
   );
 }
 
+function encodePathSegments(path: string): string {
+  return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}
+
+function pathToFileUrl(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/");
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    const drive = normalized.slice(0, 2);
+    return `file:///${drive}${encodePathSegments(normalized.slice(2))}`;
+  }
+  if (normalized.startsWith("//")) {
+    const [host = "", ...segments] = normalized.slice(2).split("/");
+    return `file://${encodeURIComponent(host)}/${segments.map((segment) => encodeURIComponent(segment)).join("/")}`;
+  }
+  return `file://${encodePathSegments(normalized.startsWith("/") ? normalized : `/${normalized}`)}`;
+}
+
 function localFileKindLabel(kind: SelectedLocalFile["kind"], t: (key: string) => string): string {
   return kind === "torrent" ? t("newDownload.fileKindTorrent") : t("newDownload.fileKindText");
 }
@@ -139,6 +156,11 @@ export function NewDownloadDialog({
   const appliedInitialSourceId = useRef<string | undefined>(undefined);
   const isTorrentProbe = probe?.protocol === "bt" || probe?.protocol === "magnet";
   const isMultiFile = probe != null && probe.files.length > 1;
+  const shouldShowTorrentProtocolHint =
+    isTorrentProbe ||
+    selectedLocalFile?.kind === "torrent" ||
+    /\.torrent(?:[?#].*)?$/i.test(url.trim());
+  const torrentSelectionRequired = isTorrentProbe && isMultiFile && selectedFiles.size === 0;
 
   // Initialize selectedFiles when probe changes
   useEffect(() => {
@@ -193,19 +215,43 @@ export function NewDownloadDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const currentUrl = url.trim();
+    const currentProbe = probe && probeUrl === currentUrl ? probe : null;
+    const currentIsTorrentProbe =
+      currentProbe?.protocol === "bt" || currentProbe?.protocol === "magnet";
+    const selectedFilePaths =
+      currentProbe && currentIsTorrentProbe && currentProbe.files.length > 1
+        ? Array.from(selectedFiles)
+            .sort((left, right) => left - right)
+            .map((index) => currentProbe.files[index]?.relativePath)
+            .filter((path): path is string => Boolean(path))
+        : null;
+    if (
+      currentProbe &&
+      currentIsTorrentProbe &&
+      currentProbe.files.length > 1 &&
+      selectedFilePaths?.length === 0
+    ) {
+      setError(t("newDownload.torrentSelectionRequired"));
+      setSubmitStatus(null);
+      return;
+    }
+
     setSubmitting(true);
     setError(null);
     setSubmitStatus(
-      probe && probeUrl === url.trim()
+      currentProbe
         ? t("newDownload.usingProbe")
         : t("newDownload.revalidating"),
     );
     try {
       const task = await createTask({
-        url: url.trim(),
+        url: currentUrl,
         saveDir: saveDir.trim() || null,
         fileName: fileName.trim() || null,
-        expectedHashSha256: isTorrentProbe ? null : expectedHashSha256.trim() || null,
+        expectedHashSha256: currentIsTorrentProbe ? null : expectedHashSha256.trim() || null,
+        probeSnapshot: currentProbe,
+        selectedFilePaths,
       });
       onCreated(task);
       resetForm();
@@ -252,7 +298,7 @@ export function NewDownloadDialog({
       setSelectedLocalFile(file);
 
       if (kind === "torrent") {
-        const fileUrl = `file://${picked.path}`;
+        const fileUrl = pathToFileUrl(picked.path);
         setUrl(fileUrl);
         setProbe(null);
         setProbeUrl("");
@@ -424,6 +470,12 @@ export function NewDownloadDialog({
               </div>
             </label>
 
+            {shouldShowTorrentProtocolHint ? (
+              <p className="text-[11px] leading-4 text-text-muted">
+                {t("newDownload.torrentProtocolHint")}
+              </p>
+            ) : null}
+
             {/* Selected local file card (from file picker) */}
             {selectedLocalFile ? (
               <div className="flex items-center gap-3 rounded-md border border-border-subtle bg-surface-raised/60 px-3 py-2.5">
@@ -487,10 +539,18 @@ export function NewDownloadDialog({
                     <div className="flex items-center justify-between border-b border-border-subtle px-3 py-2">
                       <button
                         type="button"
+                        role="checkbox"
+                        aria-checked={selectedFiles.size === probe.files.length}
+                        aria-label={
+                          selectedFiles.size === probe.files.length
+                            ? t("newDownload.deselectAll")
+                            : t("newDownload.selectAll")
+                        }
                         onClick={toggleAllFiles}
-                        className="flex items-center gap-2 text-xs text-text-secondary transition-colors hover:text-text-primary"
+                        className="flex items-center gap-2 text-xs text-text-secondary transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70"
                       >
                         <span
+                          aria-hidden="true"
                           className={`flex h-4 w-4 items-center justify-center rounded border transition-colors ${
                             selectedFiles.size === probe.files.length
                               ? "border-accent-primary bg-accent-primary text-text-on-accent"
@@ -683,7 +743,11 @@ export function NewDownloadDialog({
             >
               {t("newDownload.cancel")}
             </Button>
-            <Button type="submit" className="w-full sm:w-auto" disabled={submitting}>
+            <Button
+              type="submit"
+              className="w-full sm:w-auto"
+              disabled={submitting || torrentSelectionRequired || !url.trim()}
+            >
               {submitting ? (
                 <>
                   <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -724,12 +788,16 @@ function FileRow({
   return (
     <button
       type="button"
+      role="checkbox"
+      aria-checked={checked}
+      aria-label={displayName}
       onClick={onToggle}
-      className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-raised/60 ${
+      className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-raised/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary/70 ${
         index > 0 ? "border-t border-border-subtle/50" : ""
       }`}
     >
       <span
+        aria-hidden="true"
         className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
           checked
             ? "border-accent-primary bg-accent-primary text-text-on-accent"

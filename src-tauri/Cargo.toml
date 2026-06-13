@@ -15,7 +15,6 @@ default-run = "vibe-downloader"
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "tauri_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
-test = false
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

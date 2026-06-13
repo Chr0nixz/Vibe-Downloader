@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use uuid::Uuid;
 
@@ -25,10 +28,12 @@ pub fn task_file_records_from_probe(
     single_final_path: &Path,
     single_temp_path: &Path,
     single_file_name: &str,
+    selected_relative_paths: Option<&HashSet<String>>,
 ) -> Result<Vec<TaskFileRecord>, String> {
     let single_file = files.len() == 1;
     let mut records = Vec::with_capacity(files.len());
     for file in files {
+        let selection_key = sanitize_probe_relative_path(&file.relative_path);
         let (relative_path, file_name, final_path, temp_path) = if single_file {
             (
                 single_file_name.to_string(),
@@ -60,6 +65,10 @@ pub fn task_file_records_from_probe(
             (relative_path, file_name, final_path, temp_path)
         };
 
+        let selected = selected_relative_paths
+            .map(|paths| paths.contains(&selection_key))
+            .unwrap_or(true);
+
         records.push(TaskFileRecord {
             id: Uuid::new_v4().to_string(),
             task_id: task.id.clone(),
@@ -70,7 +79,7 @@ pub fn task_file_records_from_probe(
             final_path: Some(final_path.to_string_lossy().to_string()),
             total_size: parse_probed_file_size(&file.size),
             downloaded_bytes: 0,
-            selected: true,
+            selected,
             status: TaskStatus::Queued,
             content_type: file.content_type.clone(),
         });
@@ -119,6 +128,12 @@ pub fn unique_final_path(save_dir: &Path, requested_file_name: &str) -> PathBuf 
     }
 
     save_dir.join(format!("download-{}", chrono::Utc::now().timestamp()))
+}
+
+pub fn sanitize_probe_relative_path(value: &str) -> String {
+    sanitize_relative_path(value)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn sanitize_relative_path(value: &str) -> PathBuf {

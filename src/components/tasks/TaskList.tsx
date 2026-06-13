@@ -60,6 +60,7 @@ export function TaskList({
   const [toolPanelOpen, setToolPanelOpen] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const loadingPageRef = useRef(false);
+  const initialLoadDoneRef = useRef(false);
   const tasks = useTaskStore((s) => s.tasks);
   const total = useTaskStore((s) => s.total);
   const nextCursor = useTaskStore((s) => s.nextCursor);
@@ -132,6 +133,7 @@ export function TaskList({
     } finally {
       setLoading(false);
       loadingPageRef.current = false;
+      if (!append) initialLoadDoneRef.current = true;
     }
   }, [selectTask, setDetailOpen, setError, setLoading, setTaskCursorPage]);
 
@@ -458,7 +460,7 @@ export function TaskList({
         ref={scrollContainerRef}
         className="min-h-0 flex-1 overflow-y-auto"
       >
-        {loading ? (
+        {loading && !initialLoadDoneRef.current ? (
           <TaskListLoadingSkeleton label={t("taskList.loading")} />
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-4 px-6 py-20 text-center">
@@ -592,7 +594,7 @@ function SelectControl({
 }) {
   return (
     <label className="flex h-11 items-center gap-1.5 text-text-muted md:h-8">
-      <span className="text-[11px] font-medium text-text-muted/70">
+      <span className="text-[11px] font-medium text-text-muted">
         {label}
       </span>
       <Select value={value} onValueChange={onChange}>

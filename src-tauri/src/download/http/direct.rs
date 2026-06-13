@@ -164,6 +164,7 @@ pub(super) async fn run_direct_segmented_download(
             url: request.url.clone(),
             temp_path: request.temp_path.clone(),
             segment,
+            total_size: request.total_size,
             segment_count,
             supports_parallel: request.supports_parallel,
             cancel: cancel.clone(),
@@ -171,6 +172,7 @@ pub(super) async fn run_direct_segmented_download(
             live_ends: live_ends.clone(),
             speed_limiter: speed_limiter.clone(),
             request_headers: Vec::new(),
+            if_range: None,
         }));
     }
     drop(progress_tx);

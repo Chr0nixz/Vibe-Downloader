@@ -459,6 +459,8 @@ async fn run_ftp_download(
     Ok(())
 }
 
+// FTP worker launch is the remaining protocol orchestration boundary; split it
+// only when FTP runtime state gets its own coordinator module.
 #[allow(clippy::too_many_arguments)]
 fn start_next_ftp_worker(
     target: &FtpTarget,
@@ -782,6 +784,44 @@ mod tests {
 
         assert_eq!(total_downloaded_from_progress(&progress, 100), 100);
     }
+
+    #[test]
+    fn ftp_target_sanitizes_credentials_for_display_and_source_key() {
+        let target = FtpTarget::parse("ftp://alice:s3cret@example.com:2121/private/file.bin")
+            .expect("ftp target");
+
+        assert_eq!(target.username, "alice");
+        assert_eq!(target.password, "s3cret");
+        assert_eq!(target.source_key, "ftp://example.com:2121");
+        assert!(!target.sanitized_uri.contains("alice"));
+        assert!(!target.sanitized_uri.contains("s3cret"));
+        assert!(!target.source_key.contains("alice"));
+        assert!(!target.source_key.contains("s3cret"));
+    }
+
+    #[test]
+    fn ftps_mode_uses_explicit_tls_on_port_21_otherwise_implicit_tls() {
+        let explicit =
+            FtpTarget::parse("ftps://example.com:21/file.bin").expect("explicit ftps target");
+        let implicit =
+            FtpTarget::parse("ftps://example.com/file.bin").expect("implicit ftps target");
+
+        assert_eq!(explicit.mode, FtpSecurityMode::ExplicitTls);
+        assert_eq!(explicit.port, 21);
+        assert_eq!(implicit.mode, FtpSecurityMode::ImplicitTls);
+        assert_eq!(implicit.port, 990);
+    }
+
+    #[test]
+    fn ftp_connect_error_mentions_ftps_mode() {
+        let error = suppaftp::FtpError::ConnectionError(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "refused",
+        ));
+
+        assert!(ftp_connect_error(FtpSecurityMode::ExplicitTls, error)
+            .contains("explicit FTPS on port 21"));
+    }
 }
 
 fn split_largest_remaining_segment(
@@ -863,17 +903,17 @@ async fn connect_session(
                 let stream = socks5_control_stream(target, proxy_config).await?;
                 AsyncFtpStream::connect_with_stream(stream)
                     .await
-                    .map_err(ftp_connect_error)?
+                    .map_err(|error| ftp_connect_error(target.mode, error))?
             } else {
                 AsyncFtpStream::connect(addr)
                     .await
-                    .map_err(ftp_connect_error)?
+                    .map_err(|error| ftp_connect_error(target.mode, error))?
             };
             session = apply_passive_proxy(session, proxy_config);
             session
                 .login(&target.username, &target.password)
                 .await
-                .map_err(ftp_connect_error)?;
+                .map_err(|error| ftp_connect_error(target.mode, error))?;
             Ok(FtpSession::Plain(session))
         }
         FtpSecurityMode::ExplicitTls => {
@@ -882,21 +922,21 @@ async fn connect_session(
                 let stream = socks5_control_stream(target, proxy_config).await?;
                 AsyncRustlsFtpStream::connect_with_stream(stream)
                     .await
-                    .map_err(ftp_connect_error)?
+                    .map_err(|error| ftp_connect_error(target.mode, error))?
             } else {
                 AsyncRustlsFtpStream::connect(addr)
                     .await
-                    .map_err(ftp_connect_error)?
+                    .map_err(|error| ftp_connect_error(target.mode, error))?
             };
             let mut session = session
                 .into_secure(connector, &target.host)
                 .await
-                .map_err(ftp_connect_error)?;
+                .map_err(|error| ftp_connect_error(target.mode, error))?;
             session = apply_passive_proxy(session, proxy_config);
             session
                 .login(&target.username, &target.password)
                 .await
-                .map_err(ftp_connect_error)?;
+                .map_err(|error| ftp_connect_error(target.mode, error))?;
             Ok(FtpSession::Secure(session))
         }
         FtpSecurityMode::ImplicitTls => {
@@ -910,11 +950,11 @@ async fn connect_session(
             let mut session =
                 AsyncRustlsFtpStream::connect_secure_implicit(addr, connector, &target.host)
                     .await
-                    .map_err(ftp_connect_error)?;
+                    .map_err(|error| ftp_connect_error(target.mode, error))?;
             session
                 .login(&target.username, &target.password)
                 .await
-                .map_err(ftp_connect_error)?;
+                .map_err(|error| ftp_connect_error(target.mode, error))?;
             Ok(FtpSession::Secure(session))
         }
     };
@@ -982,8 +1022,13 @@ async fn socks5_passive_stream(
     .map_err(|error| FtpError::ConnectionError(io::Error::new(error.kind(), error.to_string())))
 }
 
-fn ftp_connect_error(error: suppaftp::FtpError) -> String {
-    format!("FTP connection failed: {error}")
+fn ftp_connect_error(mode: FtpSecurityMode, error: suppaftp::FtpError) -> String {
+    let mode_hint = match mode {
+        FtpSecurityMode::Plain => "plain FTP",
+        FtpSecurityMode::ExplicitTls => "explicit FTPS on port 21",
+        FtpSecurityMode::ImplicitTls => "implicit FTPS on port 990",
+    };
+    format!("FTP connection failed while using {mode_hint}: {error}")
 }
 
 fn rustls_connector() -> AsyncRustlsConnector {

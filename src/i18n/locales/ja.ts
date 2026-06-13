@@ -425,6 +425,9 @@ const ja = {
     closeBackdrop: "\u8a73\u7d30\u3092\u9589\u3058\u308b",
     drawerAria: "\u30bf\u30b9\u30af\u8a73\u7d30",
     drawerDescription: "{{name}} \u306e\u8a73\u7d30",
+    diagnostics: "\u8a3a\u65ad\u60c5\u5831",
+    diagFailedShort: "\u4ef6\u5931\u6557",
+    diagSegmentsShort: "\u4ef6\u306e\u30bb\u30b0\u30e1\u30f3\u30c8",
   },
   taskEvent: {
     created: "\u4f5c\u6210\u6e08\u307f",

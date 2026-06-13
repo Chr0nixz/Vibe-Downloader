@@ -423,6 +423,9 @@ const ko = {
     closeBackdrop: "\uc138\ubd80 \uc815\ubcf4 \ub2eb\uae30",
     drawerAria: "\ud0dc\uc2a4\ud06c \uc138\ubd80 \uc815\ubcf4",
     drawerDescription: "{{name}} \uc758 \uc138\ubd80 \uc815\ubcf4",
+    diagnostics: "\uc9c4\ub2e8 \uc815\ubcf4",
+    diagFailedShort: "\uac1c \uc2e4\ud328",
+    diagSegmentsShort: "\uac1c \uc138\uadf8\uba3c\ud2b8",
   },
   taskEvent: {
     created: "\uc0dd\uc131\ub428",

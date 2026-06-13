@@ -3,7 +3,7 @@ use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuild
 use crate::focus_main_window;
 
 pub(crate) const FLOATING_STATUS_WINDOW_LABEL: &str = "floating-status";
-const FLOATING_STATUS_SIZE: f64 = 72.0;
+const FLOATING_STATUS_SIZE: f64 = 84.0;
 const FLOATING_STATUS_SCREEN_MARGIN: f64 = 16.0;
 const TRAY_MENU_WINDOW_LABEL: &str = "tray-menu";
 const TRAY_MENU_WIDTH: f64 = 232.0;

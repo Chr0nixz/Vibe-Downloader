@@ -494,7 +494,7 @@ function CommandRow({
         active && "bg-surface-raised",
         command.enabled
           ? "text-text-primary hover:bg-surface-raised"
-          : "cursor-not-allowed text-text-muted opacity-65",
+          : "cursor-not-allowed text-text-muted",
         command.danger && command.enabled && "text-status-danger",
       )}
     >

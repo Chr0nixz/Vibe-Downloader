@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
@@ -227,6 +227,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
 
     let api = engine.api_for_output_folder(&task.save_dir).await?;
     let add = add_torrent_source(&task.url).await?;
+    let selected_paths = selected_torrent_paths(&pool, &task).await?;
     mark_torrent_metadata_fetching(&app, &pool, &task).await?;
     let response = wait_for_torrent_metadata(
         &engine,
@@ -239,13 +240,21 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     )
     .await?;
 
-    persist_torrent_details(&pool, &task, &response).await?;
+    let torrent_id = TorrentIdOrHash::try_from(response.details.info_hash.as_str())
+        .map_err(|e| format!("Torrent info hash is invalid: {e:#}"))?;
+    let selected_indices = selected_torrent_indices(selected_paths.as_ref(), &response.details)?;
+    if let Some(indices) = &selected_indices {
+        api.api_torrent_action_update_only_files(torrent_id, indices)
+            .await
+            .map_err(|e| format!("Could not select torrent files: {e:#}"))?;
+        db::insert_task_event(&pool, &task.id, "bt_file_selection_applied", None).await?;
+    }
+
+    persist_torrent_details(&pool, &task, &response, selected_paths.as_ref()).await?;
     if let Some(current) = db::get_task_record(&pool, &task.id).await? {
         emit_task_updated_record(&app, &pool, &current).await;
     }
 
-    let torrent_id = TorrentIdOrHash::try_from(response.details.info_hash.as_str())
-        .map_err(|e| format!("Torrent info hash is invalid: {e:#}"))?;
     let mut last_progress = 0_i64;
     let mut last_health_summary = Some("Fetching torrent metadata".to_string());
     let mut last_tick = Instant::now();
@@ -356,14 +365,16 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         db::upsert_torrent_runtime_snapshot(
             &pool,
             &task.id,
-            metadata_status,
-            completed_pieces,
-            completed_pieces,
-            peer_count,
-            0,
-            uploaded,
-            upload_speed,
-            ratio,
+            db::TorrentRuntimeSnapshotUpsert {
+                metadata_status,
+                completed_pieces,
+                verified_pieces: completed_pieces,
+                peer_count,
+                seed_count: 0,
+                upload_bytes: uploaded,
+                upload_speed_bps: upload_speed,
+                ratio,
+            },
         )
         .await?;
         emit_task_progress(
@@ -474,8 +485,21 @@ async fn mark_torrent_metadata_fetching(
         )
         .await?;
     }
-    db::upsert_torrent_runtime_snapshot(pool, &task.id, "fetching_metadata", 0, 0, 0, 0, 0, 0, 0.0)
-        .await?;
+    db::upsert_torrent_runtime_snapshot(
+        pool,
+        &task.id,
+        db::TorrentRuntimeSnapshotUpsert {
+            metadata_status: "fetching_metadata",
+            completed_pieces: 0,
+            verified_pieces: 0,
+            peer_count: 0,
+            seed_count: 0,
+            upload_bytes: 0,
+            upload_speed_bps: 0,
+            ratio: 0.0,
+        },
+    )
+    .await?;
     db::insert_task_event(pool, &task.id, "bt_metadata_fetching", None).await?;
     emit_task_progress(
         app,
@@ -507,8 +531,21 @@ async fn mark_torrent_metadata_still_fetching(
         elapsed_seconds, remaining_seconds
     );
     db::update_task_health_summary(pool, &task.id, Some(summary.as_str())).await?;
-    db::upsert_torrent_runtime_snapshot(pool, &task.id, "fetching_metadata", 0, 0, 0, 0, 0, 0, 0.0)
-        .await?;
+    db::upsert_torrent_runtime_snapshot(
+        pool,
+        &task.id,
+        db::TorrentRuntimeSnapshotUpsert {
+            metadata_status: "fetching_metadata",
+            completed_pieces: 0,
+            verified_pieces: 0,
+            peer_count: 0,
+            seed_count: 0,
+            upload_bytes: 0,
+            upload_speed_bps: 0,
+            ratio: 0.0,
+        },
+    )
+    .await?;
     emit_task_progress(
         app,
         &TaskProgressPayload {
@@ -585,10 +622,11 @@ async fn persist_torrent_details(
     pool: &sqlx::SqlitePool,
     task: &crate::models::TaskRecord,
     response: &ApiAddTorrentResponse,
+    selected_paths: Option<&HashSet<String>>,
 ) -> Result<(), String> {
     let details = &response.details;
     let files = torrent_files_from_details(details);
-    let total_size = files.iter().map(|file| parse_i64(&file.size)).sum::<i64>();
+    let total_size = selected_torrent_total_size(&files, selected_paths);
     let source_key = format!("{SOURCE_BT_PREFIX}{}", details.info_hash);
     let name = details
         .name
@@ -599,31 +637,35 @@ async fn persist_torrent_details(
     db::update_task_torrent_metadata(
         pool,
         &task.id,
-        &source_key,
-        &name,
-        total_size,
-        &source_key,
-        files.len() > 1,
+        db::TaskTorrentMetadataUpdate {
+            final_url: &source_key,
+            file_name: &name,
+            total_size,
+            source_key: &source_key,
+            supports_multi_file: files.len() > 1,
+        },
     )
     .await?;
     db::upsert_torrent_task(
         pool,
         &task.id,
-        &details.info_hash,
-        &name,
-        task.url.starts_with("magnet:").then_some(task.url.as_str()),
-        None,
-        0,
-        i64::from(details.total_pieces),
-        false,
-        None,
+        db::TorrentTaskUpsert {
+            info_hash: &details.info_hash,
+            name: &name,
+            magnet_uri: task.url.starts_with("magnet:").then_some(task.url.as_str()),
+            torrent_blob: None,
+            piece_length: 0,
+            piece_count: i64::from(details.total_pieces),
+            private: false,
+            trackers_json: None,
+        },
     )
     .await?;
 
     if !files.is_empty() {
         db::delete_task_files_for_task(pool, &task.id).await?;
         for file in files {
-            let record = task_file_record_from_probed_file(task, &file);
+            let record = task_file_record_from_probed_file(task, &file, selected_paths);
             db::insert_task_file_record(pool, &record).await?;
         }
     }
@@ -633,8 +675,10 @@ async fn persist_torrent_details(
 fn task_file_record_from_probed_file(
     task: &crate::models::TaskRecord,
     file: &ProbedFile,
+    selected_paths: Option<&HashSet<String>>,
 ) -> TaskFileRecord {
     let relative = sanitize_relative_path(&file.relative_path);
+    let relative_path = relative.to_string_lossy().replace('\\', "/");
     let final_path = PathBuf::from(&task.save_dir).join(&relative);
     let file_name = relative
         .file_name()
@@ -645,17 +689,86 @@ fn task_file_record_from_probed_file(
     TaskFileRecord {
         id: uuid::Uuid::new_v4().to_string(),
         task_id: task.id.clone(),
-        relative_path: relative.to_string_lossy().replace('\\', "/"),
+        relative_path: relative_path.clone(),
         file_name,
         save_dir: task.save_dir.clone(),
         temp_path: None,
         final_path: Some(final_path.to_string_lossy().to_string()),
         total_size: parse_i64(&file.size),
         downloaded_bytes: 0,
-        selected: true,
+        selected: selected_paths
+            .map(|paths| paths.contains(&relative_path))
+            .unwrap_or(true),
         status: TaskStatus::Queued,
         content_type: file.content_type.clone(),
     }
+}
+
+async fn selected_torrent_paths(
+    pool: &sqlx::SqlitePool,
+    task: &crate::models::TaskRecord,
+) -> Result<Option<HashSet<String>>, String> {
+    let files = db::list_task_file_records(pool, &task.id).await?;
+    if files.len() <= 1 {
+        return Ok(None);
+    }
+
+    let all = files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<HashSet<_>>();
+    let selected = files
+        .iter()
+        .filter(|file| file.selected)
+        .map(|file| file.relative_path.clone())
+        .collect::<HashSet<_>>();
+    if selected.is_empty() {
+        return Err("Select at least one torrent file to download.".to_string());
+    }
+    if selected.len() == all.len() {
+        return Ok(None);
+    }
+    Ok(Some(selected))
+}
+
+fn selected_torrent_indices(
+    selected_paths: Option<&HashSet<String>>,
+    details: &TorrentDetailsResponse,
+) -> Result<Option<HashSet<usize>>, String> {
+    let Some(selected_paths) = selected_paths else {
+        return Ok(None);
+    };
+    let mut indices = HashSet::new();
+    for (index, file) in torrent_files_from_details(details).iter().enumerate() {
+        let relative = sanitize_relative_path(&file.relative_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if selected_paths.contains(&relative) {
+            indices.insert(index);
+        }
+    }
+    if indices.is_empty() {
+        return Err("Selected torrent files are no longer available in metadata.".to_string());
+    }
+    Ok(Some(indices))
+}
+
+fn selected_torrent_total_size(
+    files: &[ProbedFile],
+    selected_paths: Option<&HashSet<String>>,
+) -> i64 {
+    files
+        .iter()
+        .filter(|file| {
+            selected_paths.is_none_or(|paths| {
+                let relative = sanitize_relative_path(&file.relative_path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                paths.contains(&relative)
+            })
+        })
+        .map(|file| parse_i64(&file.size))
+        .sum()
 }
 
 async fn add_torrent_source(uri: &str) -> Result<AddTorrent<'static>, String> {
@@ -773,4 +886,51 @@ fn content_type_for_path(path: &str) -> Option<String> {
         _ => return None,
     };
     Some(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librqbit::AddTorrent;
+
+    #[tokio::test]
+    async fn add_torrent_source_reads_file_urls_with_spaces_and_unicode() {
+        let dir = std::env::temp_dir().join(format!("vibe-bt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("样本 torrent.torrent");
+        let bytes = b"d4:infode";
+        std::fs::write(&path, bytes).expect("write torrent file");
+        let url = Url::from_file_path(&path).expect("file url").to_string();
+
+        let add = add_torrent_source(&url)
+            .await
+            .expect("local torrent source");
+
+        match add {
+            AddTorrent::TorrentFileBytes(actual) => assert_eq!(actual.as_ref(), bytes),
+            AddTorrent::Url(value) => panic!("expected torrent bytes, got URL {value}"),
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn selected_torrent_total_size_uses_sanitized_selected_paths() {
+        let files = vec![
+            ProbedFile {
+                relative_path: "folder/keep.bin".to_string(),
+                size: "100".to_string(),
+                content_type: None,
+            },
+            ProbedFile {
+                relative_path: "folder/skip.bin".to_string(),
+                size: "250".to_string(),
+                content_type: None,
+            },
+        ];
+        let selected = HashSet::from(["folder/keep.bin".to_string()]);
+
+        assert_eq!(selected_torrent_total_size(&files, Some(&selected)), 100);
+        assert_eq!(selected_torrent_total_size(&files, None), 350);
+    }
 }

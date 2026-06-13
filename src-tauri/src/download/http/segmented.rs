@@ -8,25 +8,29 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reqwest::{
-    header::{ACCEPT_ENCODING, CONTENT_LENGTH, ETAG, LAST_MODIFIED, RANGE},
-    Client, StatusCode,
-};
+use reqwest::Client;
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 use tokio::{
     fs,
-    io::{AsyncSeekExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     sync::{mpsc, RwLock},
     task::JoinSet,
 };
 
+mod diagnostics;
+mod worker;
+
+use self::diagnostics::{
+    if_range_header_value, persist_error_diagnostic, persist_response_diagnostic,
+    RequestDiagnosticContext,
+};
+pub(super) use self::worker::{download_segment_worker, SegmentWorkerRequest};
+
 use super::{
     error::format_http_status,
     file::{finalize_download_file, persist_completed_path},
-    request::{
-        apply_forwarded_headers, is_retryable_status, retry_after_duration, send_get_with_retry,
-    },
+    request::send_get_with_retry,
 };
 use crate::{
     db,
@@ -39,9 +43,8 @@ use crate::{
     },
 };
 
-#[allow(clippy::too_many_arguments)]
-async fn run_unknown_size_download(
-    client: &Client,
+struct UnknownSizeDownloadContext<'a> {
+    client: &'a Client,
     app: AppHandle,
     pool: SqlitePool,
     task: TaskRecord,
@@ -50,9 +53,23 @@ async fn run_unknown_size_download(
     segments: Vec<TaskSegmentRecord>,
     cancel: Arc<AtomicBool>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
-    _connection_limit: usize,
     request_headers: Vec<(String, String)>,
-) -> Result<(), String> {
+}
+
+async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> Result<(), String> {
+    let UnknownSizeDownloadContext {
+        client,
+        app,
+        pool,
+        task,
+        temp_path_buf,
+        final_path_buf,
+        segments,
+        cancel,
+        speed_limiter,
+        request_headers,
+    } = context;
+
     let segment = segments
         .into_iter()
         .next()
@@ -93,28 +110,32 @@ async fn run_unknown_size_download(
     let mut response = match send_get_with_retry(client, &url, None, &request_headers).await {
         Ok(response) => {
             persist_response_diagnostic(
-                &pool,
-                &task.id,
-                "GET",
-                &url,
-                None,
+                RequestDiagnosticContext {
+                    pool: &pool,
+                    task_id: &task.id,
+                    method: "GET",
+                    url: &url,
+                    range_header: None,
+                    retry_count: 0,
+                    duration: started_at.elapsed(),
+                },
                 &response,
-                0,
-                started_at.elapsed(),
             )
             .await;
             response
         }
         Err(error) => {
             persist_error_diagnostic(
-                &pool,
-                &task.id,
-                "GET",
-                &url,
-                None,
+                RequestDiagnosticContext {
+                    pool: &pool,
+                    task_id: &task.id,
+                    method: "GET",
+                    url: &url,
+                    range_header: None,
+                    retry_count: 0,
+                    duration: started_at.elapsed(),
+                },
                 &error,
-                0,
-                started_at.elapsed(),
             )
             .await;
             return Err(error);
@@ -246,18 +267,32 @@ pub(super) struct SegmentFailure {
     pub(super) error: String,
 }
 
-#[tracing::instrument(skip(client, app, pool, cancel), fields(task_id = %task.id))]
-#[allow(clippy::too_many_arguments)]
+pub(super) struct SegmentedDownloadContext<'a> {
+    pub(super) client: &'a Client,
+    pub(super) app: AppHandle,
+    pub(super) pool: SqlitePool,
+    pub(super) task: TaskRecord,
+    pub(super) cancel: Arc<AtomicBool>,
+    pub(super) speed_limiter: Arc<GlobalSpeedLimiter>,
+    pub(super) connection_limit: usize,
+    pub(super) request_headers: Vec<(String, String)>,
+}
+
+#[tracing::instrument(skip(context), fields(task_id = %context.task.id))]
 pub(super) async fn run_segmented_download(
-    client: &Client,
-    app: AppHandle,
-    pool: SqlitePool,
-    task: TaskRecord,
-    cancel: Arc<AtomicBool>,
-    speed_limiter: Arc<GlobalSpeedLimiter>,
-    connection_limit: usize,
-    request_headers: Vec<(String, String)>,
+    context: SegmentedDownloadContext<'_>,
 ) -> Result<(), String> {
+    let SegmentedDownloadContext {
+        client,
+        app,
+        pool,
+        task,
+        cancel,
+        speed_limiter,
+        connection_limit,
+        request_headers,
+    } = context;
+
     tracing::info!(
         task_id = %task.id,
         url = %sanitize_url(task.final_url.as_deref().unwrap_or(&task.url)),
@@ -279,7 +314,7 @@ pub(super) async fn run_segmented_download(
     let final_path_buf = PathBuf::from(&final_path);
     let segments = db::ensure_task_segments(&pool, &task).await?;
     if task.total_size <= 0 {
-        return run_unknown_size_download(
+        return run_unknown_size_download(UnknownSizeDownloadContext {
             client,
             app,
             pool,
@@ -289,9 +324,8 @@ pub(super) async fn run_segmented_download(
             segments,
             cancel,
             speed_limiter,
-            connection_limit.max(1),
             request_headers,
-        )
+        })
         .await;
     }
     let segment_count = segments.len();
@@ -364,6 +398,7 @@ pub(super) async fn run_segmented_download(
             .collect::<HashMap<_, _>>(),
     ));
     let mut pending_segments = VecDeque::new();
+    let if_range = if_range_header_value(&task);
 
     for segment in segments {
         let offset = segment
@@ -391,6 +426,8 @@ pub(super) async fn run_segmented_download(
         &live_ends,
         speed_limiter.clone(),
         &request_headers,
+        task.total_size,
+        if_range.as_deref(),
     )
     .await?;
 
@@ -407,14 +444,16 @@ pub(super) async fn run_segmented_download(
         tokio::select! {
             Some(message) = progress_rx.recv() => {
                 handle_segment_message(
-                    &app,
-                    &pool,
-                    &task.id,
-                    task.total_size,
-                    active_connection_count,
+                    SegmentMessageContext {
+                        app: &app,
+                        pool: &pool,
+                        task_id: &task.id,
+                        total_size: task.total_size,
+                        connection_count: active_connection_count,
+                        update_task: !cancel.load(Ordering::SeqCst),
+                    },
                     &mut last_speeds,
                     message,
-                    !cancel.load(Ordering::SeqCst),
                 )
                 .await?;
                 if !cancel.load(Ordering::SeqCst) && last_emit.elapsed() >= Duration::from_millis(300) {
@@ -495,6 +534,8 @@ pub(super) async fn run_segmented_download(
                     &live_ends,
                     speed_limiter.clone(),
                     &request_headers,
+                    task.total_size,
+                    if_range.as_deref(),
                 )
                 .await?;
                 active_connection_count = i32::try_from(active_workers.max(1)).unwrap_or(1);
@@ -530,6 +571,7 @@ pub(super) async fn run_segmented_download(
                     started_at,
                     max_worker_count,
                     &request_headers,
+                    if_range.as_deref(),
                 )
                 .await?;
             }
@@ -544,14 +586,16 @@ pub(super) async fn run_segmented_download(
 
     while let Ok(message) = progress_rx.try_recv() {
         handle_segment_message(
-            &app,
-            &pool,
-            &task.id,
-            task.total_size,
-            active_connection_count,
+            SegmentMessageContext {
+                app: &app,
+                pool: &pool,
+                task_id: &task.id,
+                total_size: task.total_size,
+                connection_count: active_connection_count,
+                update_task: false,
+            },
             &mut last_speeds,
             message,
-            false,
         )
         .await?;
     }
@@ -598,6 +642,8 @@ pub(super) async fn run_segmented_download(
     Ok(())
 }
 
+// Worker spawning still binds the live worker queue, segment queue, and shared
+// runtime state; keep this narrow exception until worker state becomes a struct.
 #[allow(clippy::too_many_arguments)]
 async fn spawn_segment_workers(
     client: &Client,
@@ -615,6 +661,8 @@ async fn spawn_segment_workers(
     live_ends: &Arc<RwLock<HashMap<String, i64>>>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     request_headers: &[(String, String)],
+    total_size: i64,
+    if_range: Option<&str>,
 ) -> Result<(), String> {
     while *active_workers < max_worker_count {
         let Some(segment) = pending_segments.pop_front() else {
@@ -638,6 +686,7 @@ async fn spawn_segment_workers(
             url: url.to_string(),
             temp_path: temp_path.to_path_buf(),
             segment,
+            total_size,
             segment_count,
             supports_parallel,
             cancel: cancel.clone(),
@@ -645,6 +694,7 @@ async fn spawn_segment_workers(
             live_ends: live_ends.clone(),
             speed_limiter: speed_limiter.clone(),
             request_headers: request_headers.to_vec(),
+            if_range: if_range.map(str::to_string),
         }));
     }
 
@@ -657,6 +707,8 @@ struct AccelerationCheck {
     started_at: Instant,
 }
 
+// Auto-acceleration coordinates worker state, speed history, and live ranges;
+// keep this exception until acceleration gets a dedicated coordinator object.
 #[allow(clippy::too_many_arguments)]
 async fn maybe_accelerate_segments(
     client: &Client,
@@ -679,6 +731,7 @@ async fn maybe_accelerate_segments(
     started_at: Instant,
     max_worker_count: usize,
     request_headers: &[(String, String)],
+    if_range: Option<&str>,
 ) -> Result<(), String> {
     if *acceleration_disabled || cancel.load(Ordering::SeqCst) || !task.supports_parallel {
         return Ok(());
@@ -754,6 +807,7 @@ async fn maybe_accelerate_segments(
         url: url.to_string(),
         temp_path: temp_path.to_path_buf(),
         segment: split.tail_segment,
+        total_size: task.total_size,
         segment_count: *active_connection_count as usize,
         supports_parallel: task.supports_parallel,
         cancel: cancel.clone(),
@@ -761,6 +815,7 @@ async fn maybe_accelerate_segments(
         live_ends: live_ends.clone(),
         speed_limiter,
         request_headers: request_headers.to_vec(),
+        if_range: if_range.map(str::to_string),
     }));
 
     *pending_acceleration = Some(AccelerationCheck {
@@ -799,479 +854,29 @@ fn speed_is_stable(speed_history: &VecDeque<(Instant, i64)>) -> bool {
     average > 0.0 && (max - min) as f64 <= average * 0.15
 }
 
-pub(super) struct SegmentWorkerRequest {
-    pub(super) client: Client,
-    pub(super) task_id: String,
-    pub(super) url: String,
-    pub(super) temp_path: PathBuf,
-    pub(super) segment: TaskSegmentRecord,
-    pub(super) segment_count: usize,
-    pub(super) supports_parallel: bool,
-    pub(super) cancel: Arc<AtomicBool>,
-    pub(super) progress_tx: mpsc::Sender<SegmentMessage>,
-    pub(super) live_ends: Arc<RwLock<HashMap<String, i64>>>,
-    pub(super) speed_limiter: Arc<GlobalSpeedLimiter>,
-    pub(super) request_headers: Vec<(String, String)>,
-}
-
-pub(super) async fn download_segment_worker(
-    request: SegmentWorkerRequest,
-) -> Result<(), SegmentFailure> {
-    let SegmentWorkerRequest {
-        client,
-        task_id,
-        url,
-        temp_path,
-        segment,
-        segment_count,
-        supports_parallel,
-        cancel,
-        progress_tx,
-        live_ends,
-        speed_limiter,
-        request_headers,
-    } = request;
-
-    let mut offset = segment
-        .downloaded_until
-        .clamp(segment.range_start, segment.range_end.saturating_add(1));
-    let mut retry_count = segment.retry_count.max(0);
-
-    loop {
-        if cancel.load(Ordering::SeqCst) {
-            send_segment_progress(&progress_tx, &segment.id, offset, 0).await?;
-            return Ok(());
-        }
-
-        match download_segment_once(SegmentAttemptRequest {
-            client: &client,
-            task_id: &task_id,
-            url: &url,
-            temp_path: &temp_path,
-            segment: &segment,
-            segment_count,
-            supports_parallel,
-            cancel: &cancel,
-            progress_tx: &progress_tx,
-            live_ends: &live_ends,
-            speed_limiter: &speed_limiter,
-            request_headers: &request_headers,
-            offset,
-        })
-        .await
-        {
-            Ok(_) => return Ok(()),
-            Err(error) if error.retryable && retry_count < MAX_SEGMENT_RETRIES => {
-                offset = error.failure.downloaded_until;
-                retry_count += 1;
-                send_segment_retry(
-                    &progress_tx,
-                    &segment.id,
-                    offset,
-                    retry_count,
-                    &error.failure.error,
-                )
-                .await?;
-                tokio::time::sleep(
-                    error
-                        .retry_after
-                        .unwrap_or_else(|| retry_delay(retry_count)),
-                )
-                .await;
-            }
-            Err(error) => return Err(error.failure),
-        }
-    }
-}
-
-struct SegmentAttemptRequest<'a> {
-    client: &'a Client,
+struct SegmentMessageContext<'a> {
+    app: &'a AppHandle,
+    pool: &'a SqlitePool,
     task_id: &'a str,
-    url: &'a str,
-    temp_path: &'a Path,
-    segment: &'a TaskSegmentRecord,
-    segment_count: usize,
-    supports_parallel: bool,
-    cancel: &'a Arc<AtomicBool>,
-    progress_tx: &'a mpsc::Sender<SegmentMessage>,
-    live_ends: &'a Arc<RwLock<HashMap<String, i64>>>,
-    speed_limiter: &'a Arc<GlobalSpeedLimiter>,
-    request_headers: &'a [(String, String)],
-    offset: i64,
-}
-
-struct SegmentAttemptError {
-    failure: SegmentFailure,
-    retryable: bool,
-    retry_after: Option<Duration>,
-}
-
-async fn download_segment_once(
-    request: SegmentAttemptRequest<'_>,
-) -> Result<i64, SegmentAttemptError> {
-    let SegmentAttemptRequest {
-        client,
-        task_id,
-        url,
-        temp_path,
-        segment,
-        segment_count,
-        supports_parallel,
-        cancel,
-        progress_tx,
-        live_ends,
-        speed_limiter,
-        request_headers,
-        mut offset,
-    } = request;
-
-    let range_end = live_segment_end(live_ends, segment).await;
-    if offset > range_end {
-        send_segment_progress(progress_tx, &segment.id, offset, 0)
-            .await
-            .map_err(non_retryable_attempt)?;
-        return Ok(offset);
-    }
-
-    let use_range = segment_count > 1 || offset > segment.range_start;
-    if use_range && !supports_parallel {
-        return Err(non_retryable(segment_failure(
-            segment,
-            offset,
-            "Resume unavailable. Restart this download from the beginning.",
-        )));
-    }
-
-    let mut http_request = apply_forwarded_headers(client.get(url), request_headers)
-        .header(ACCEPT_ENCODING, "identity");
-    let range_header = if use_range {
-        Some(format!("bytes={offset}-{range_end}"))
-    } else {
-        None
-    };
-    if use_range {
-        http_request = http_request.header(RANGE, range_header.as_deref().unwrap_or_default());
-    }
-
-    let started_at = Instant::now();
-    let mut response = match http_request.send().await {
-        Ok(response) => {
-            let record = response_diagnostic_record(
-                task_id,
-                "GET",
-                url,
-                range_header.clone(),
-                &response,
-                segment.retry_count,
-                started_at.elapsed(),
-            );
-            send_request_diagnostic(progress_tx, record)
-                .await
-                .map_err(non_retryable_attempt)?;
-            response
-        }
-        Err(error) => {
-            let message = format!("Could not connect to the server: {error}");
-            let record = error_diagnostic_record(
-                task_id,
-                "GET",
-                url,
-                range_header.clone(),
-                &message,
-                segment.retry_count,
-                started_at.elapsed(),
-            );
-            send_request_diagnostic(progress_tx, record)
-                .await
-                .map_err(non_retryable_attempt)?;
-            return Err(retryable(segment_failure(segment, offset, &message)));
-        }
-    };
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let retry_after = retry_after_duration(&response);
-        let failure = segment_failure(segment, offset, &format_http_status(status));
-        return if is_retryable_status(status) {
-            Err(retryable_with_delay(failure, retry_after))
-        } else {
-            Err(non_retryable(failure))
-        };
-    }
-
-    if use_range && response.status() != StatusCode::PARTIAL_CONTENT {
-        return Err(non_retryable(segment_failure(
-            segment,
-            offset,
-            "Resume unavailable. The server did not honor the byte range request.",
-        )));
-    }
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(temp_path)
-        .await
-        .map_err(|e| {
-            non_retryable(segment_failure(
-                segment,
-                offset,
-                &format!("Could not open the temporary file: {e}"),
-            ))
-        })?;
-
-    file.seek(std::io::SeekFrom::Start(u64::try_from(offset).unwrap_or(0)))
-        .await
-        .map_err(|e| {
-            non_retryable(segment_failure(
-                segment,
-                offset,
-                &format!("Could not seek in the temporary file: {e}"),
-            ))
-        })?;
-
-    let mut last_emit = Instant::now();
-    let mut last_tick = Instant::now();
-    let mut last_bytes = offset;
-
-    while let Some(chunk) = response.chunk().await.map_err(|e| {
-        retryable(segment_failure(
-            segment,
-            offset,
-            &format!("The connection failed while downloading: {e}"),
-        ))
-    })? {
-        if cancel.load(Ordering::SeqCst) {
-            file.flush().await.map_err(|e| {
-                non_retryable(segment_failure(
-                    segment,
-                    offset,
-                    &format!("Could not flush the temporary file: {e}"),
-                ))
-            })?;
-            send_segment_progress(progress_tx, &segment.id, offset, 0)
-                .await
-                .map_err(non_retryable_attempt)?;
-            return Ok(offset);
-        }
-
-        let current_end = live_segment_end(live_ends, segment).await;
-        if offset > current_end {
-            send_segment_progress(progress_tx, &segment.id, offset, 0)
-                .await
-                .map_err(non_retryable_attempt)?;
-            return Ok(offset);
-        }
-
-        let allowed = current_end.saturating_add(1).saturating_sub(offset);
-        let write_len = i64::try_from(chunk.len()).unwrap_or(0).min(allowed);
-        if write_len <= 0 {
-            return Ok(offset);
-        }
-        if i64::try_from(chunk.len()).unwrap_or(0) > allowed && current_end == range_end {
-            return Err(non_retryable(segment_failure(
-                segment,
-                offset,
-                "The server sent more bytes than the requested segment range.",
-            )));
-        }
-
-        let write_len_usize = usize::try_from(write_len).unwrap_or(0);
-        speed_limiter.throttle(write_len_usize).await;
-        file.write_all(&chunk[..write_len_usize])
-            .await
-            .map_err(|e| {
-                non_retryable(segment_failure(
-                    segment,
-                    offset,
-                    &AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
-                        .command_error(),
-                ))
-            })?;
-        offset += write_len;
-
-        if last_emit.elapsed() >= Duration::from_millis(300) {
-            let elapsed = last_tick.elapsed().as_secs_f64().max(0.001);
-            let speed_bps = ((offset - last_bytes) as f64 / elapsed) as i64;
-            send_segment_progress(progress_tx, &segment.id, offset, speed_bps)
-                .await
-                .map_err(non_retryable_attempt)?;
-            last_emit = Instant::now();
-            last_tick = Instant::now();
-            last_bytes = offset;
-        }
-
-        if write_len_usize < chunk.len() {
-            send_segment_progress(progress_tx, &segment.id, offset, 0)
-                .await
-                .map_err(non_retryable_attempt)?;
-            return Ok(offset);
-        }
-    }
-
-    file.flush().await.map_err(|e| {
-        non_retryable(segment_failure(
-            segment,
-            offset,
-            &format!("Could not flush the temporary file: {e}"),
-        ))
-    })?;
-
-    let final_end = live_segment_end(live_ends, segment).await;
-    if offset <= final_end {
-        return Err(retryable(segment_failure(
-            segment,
-            offset,
-            "The download ended before all bytes were received.",
-        )));
-    }
-
-    send_segment_progress(progress_tx, &segment.id, offset, 0)
-        .await
-        .map_err(non_retryable_attempt)?;
-    Ok(offset)
-}
-
-async fn live_segment_end(
-    live_ends: &Arc<RwLock<HashMap<String, i64>>>,
-    segment: &TaskSegmentRecord,
-) -> i64 {
-    live_ends
-        .read()
-        .await
-        .get(&segment.id)
-        .copied()
-        .unwrap_or(segment.range_end)
-}
-
-fn retryable(failure: SegmentFailure) -> SegmentAttemptError {
-    retryable_with_delay(failure, None)
-}
-
-fn retryable_with_delay(
-    failure: SegmentFailure,
-    retry_after: Option<Duration>,
-) -> SegmentAttemptError {
-    SegmentAttemptError {
-        failure,
-        retryable: true,
-        retry_after,
-    }
-}
-
-fn non_retryable(failure: SegmentFailure) -> SegmentAttemptError {
-    SegmentAttemptError {
-        failure,
-        retryable: false,
-        retry_after: None,
-    }
-}
-
-fn non_retryable_attempt(failure: SegmentFailure) -> SegmentAttemptError {
-    non_retryable(failure)
-}
-
-fn retry_delay(retry_count: i32) -> Duration {
-    if std::env::var_os("VIBE_FAST_RETRY_DELAYS").is_some() {
-        return match retry_count {
-            1 => Duration::from_millis(10),
-            2 => Duration::from_millis(20),
-            3 => Duration::from_millis(40),
-            4 => Duration::from_millis(80),
-            _ => Duration::from_millis(150),
-        };
-    }
-
-    match retry_count {
-        1 => Duration::from_secs(1),
-        2 => Duration::from_secs(2),
-        3 => Duration::from_secs(4),
-        4 => Duration::from_secs(8),
-        _ => Duration::from_secs(15),
-    }
-}
-
-async fn send_segment_progress(
-    progress_tx: &mpsc::Sender<SegmentMessage>,
-    segment_id: &str,
-    downloaded_until: i64,
-    speed_bps: i64,
-) -> Result<(), SegmentFailure> {
-    progress_tx
-        .send(SegmentMessage::Progress {
-            segment_id: segment_id.to_string(),
-            downloaded_until,
-            speed_bps,
-        })
-        .await
-        .map_err(|_| SegmentFailure {
-            segment_id: segment_id.to_string(),
-            downloaded_until,
-            error: "Progress channel closed before the segment completed.".to_string(),
-        })
-}
-
-async fn send_segment_retry(
-    progress_tx: &mpsc::Sender<SegmentMessage>,
-    segment_id: &str,
-    downloaded_until: i64,
-    retry_count: i32,
-    error: &str,
-) -> Result<(), SegmentFailure> {
-    progress_tx
-        .send(SegmentMessage::Retry {
-            segment_id: segment_id.to_string(),
-            downloaded_until,
-            retry_count,
-            error: error.to_string(),
-        })
-        .await
-        .map_err(|_| SegmentFailure {
-            segment_id: segment_id.to_string(),
-            downloaded_until,
-            error: "Progress channel closed before the segment completed.".to_string(),
-        })
-}
-
-async fn send_request_diagnostic(
-    progress_tx: &mpsc::Sender<SegmentMessage>,
-    record: RequestDiagnosticRecord,
-) -> Result<(), SegmentFailure> {
-    progress_tx
-        .send(SegmentMessage::Request { record })
-        .await
-        .map_err(|_| SegmentFailure {
-            segment_id: String::new(),
-            downloaded_until: 0,
-            error: "Progress channel closed before request diagnostics could be recorded."
-                .to_string(),
-        })
-}
-
-fn segment_failure(
-    segment: &TaskSegmentRecord,
-    downloaded_until: i64,
-    error: &str,
-) -> SegmentFailure {
-    SegmentFailure {
-        segment_id: segment.id.clone(),
-        downloaded_until,
-        error: error.to_string(),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_segment_message(
-    app: &AppHandle,
-    pool: &SqlitePool,
-    task_id: &str,
     total_size: i64,
     connection_count: i32,
+    update_task: bool,
+}
+
+async fn handle_segment_message(
+    context: SegmentMessageContext<'_>,
     last_speeds: &mut HashMap<String, i64>,
     message: SegmentMessage,
-    update_task: bool,
 ) -> Result<(), String> {
+    let SegmentMessageContext {
+        app,
+        pool,
+        task_id,
+        total_size,
+        connection_count,
+        update_task,
+    } = context;
+
     match message {
         SegmentMessage::Progress {
             segment_id,
@@ -1332,132 +937,6 @@ async fn handle_segment_message(
         }
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn persist_response_diagnostic(
-    pool: &SqlitePool,
-    task_id: &str,
-    method: &str,
-    url: &str,
-    range_header: Option<String>,
-    response: &reqwest::Response,
-    retry_count: i32,
-    duration: Duration,
-) {
-    let record = response_diagnostic_record(
-        task_id,
-        method,
-        url,
-        range_header,
-        response,
-        retry_count,
-        duration,
-    );
-    if let Err(error) = db::insert_request_diagnostic(pool, &record).await {
-        tracing::warn!(task_id, error = %error, "failed to persist request diagnostic");
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn persist_error_diagnostic(
-    pool: &SqlitePool,
-    task_id: &str,
-    method: &str,
-    url: &str,
-    range_header: Option<String>,
-    error_message: &str,
-    retry_count: i32,
-    duration: Duration,
-) {
-    let record = RequestDiagnosticRecord {
-        task_id: task_id.to_string(),
-        method: method.to_string(),
-        url: sanitize_url(url),
-        range_header,
-        status_code: None,
-        etag: None,
-        last_modified: None,
-        content_length: None,
-        error_message: Some(error_message.to_string()),
-        retry_count,
-        duration_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
-    };
-    if let Err(error) = db::insert_request_diagnostic(pool, &record).await {
-        tracing::warn!(task_id, error = %error, "failed to persist request diagnostic");
-    }
-}
-
-fn response_diagnostic_record(
-    task_id: &str,
-    method: &str,
-    url: &str,
-    range_header: Option<String>,
-    response: &reqwest::Response,
-    retry_count: i32,
-    duration: Duration,
-) -> RequestDiagnosticRecord {
-    let headers = response.headers();
-    RequestDiagnosticRecord {
-        task_id: task_id.to_string(),
-        method: method.to_string(),
-        url: sanitize_url(response.url().as_str()).if_empty(|| sanitize_url(url)),
-        range_header,
-        status_code: Some(i32::from(response.status().as_u16())),
-        etag: headers
-            .get(ETAG)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string),
-        last_modified: headers
-            .get(LAST_MODIFIED)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string),
-        content_length: headers
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok()),
-        error_message: None,
-        retry_count,
-        duration_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
-    }
-}
-
-fn error_diagnostic_record(
-    task_id: &str,
-    method: &str,
-    url: &str,
-    range_header: Option<String>,
-    error_message: &str,
-    retry_count: i32,
-    duration: Duration,
-) -> RequestDiagnosticRecord {
-    RequestDiagnosticRecord {
-        task_id: task_id.to_string(),
-        method: method.to_string(),
-        url: sanitize_url(url),
-        range_header,
-        status_code: None,
-        etag: None,
-        last_modified: None,
-        content_length: None,
-        error_message: Some(error_message.to_string()),
-        retry_count,
-        duration_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
-    }
-}
-
-trait EmptyFallback {
-    fn if_empty<F: FnOnce() -> String>(self, fallback: F) -> String;
-}
-
-impl EmptyFallback for String {
-    fn if_empty<F: FnOnce() -> String>(self, fallback: F) -> String {
-        if self.trim().is_empty() {
-            fallback()
-        } else {
-            self
-        }
-    }
 }
 
 async fn emit_aggregate_progress(

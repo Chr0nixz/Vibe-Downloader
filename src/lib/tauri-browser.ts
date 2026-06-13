@@ -20,6 +20,7 @@ import type {
   ResolveTaskAttentionInput,
   SegmentSummary,
   TaskEvent,
+  TorrentRuntimeSnapshot,
   UpdateSettingsInput,
 } from "@/generated/bindings";
 import type { Task, TaskStatus } from "@/types/task";
@@ -501,7 +502,7 @@ export async function getTask(id: string): Promise<Task | null> {
   return tasks.find((task) => task.id === id) ?? null;
 }
 
-export async function listTaskSegments(taskId: string): Promise<TaskSegment[]> {
+async function mockTaskSegmentsForTask(taskId: string): Promise<TaskSegment[]> {
   const task = tasks.find((entry) => entry.id === taskId);
   if (!task) return [];
   const total = Math.max(1, task.totalSize);
@@ -569,20 +570,20 @@ export async function listTasksCursor(input: ListTasksCursorInput) {
 }
 
 export async function listSegments(taskId: string, _page = 0, _pageSize = 100): Promise<TaskSegment[]> {
-  return listTaskSegments(taskId);
+  return mockTaskSegmentsForTask(taskId);
 }
 
 export async function listSegmentsPage(input: CursorPageInput) {
   const pageSize = Math.max(1, Math.min(500, input.pageSize ?? 100));
   const start = Math.max(0, Number(input.cursor ?? 0) || 0);
-  const all = await listTaskSegments(input.taskId);
+  const all = await mockTaskSegmentsForTask(input.taskId);
   const items = all.slice(start, start + pageSize);
   const next = start + items.length;
   return { items, nextCursor: next < all.length ? String(next) : null };
 }
 
 export async function getSegmentSummary(taskId: string): Promise<SegmentSummary> {
-  const segments = await listTaskSegments(taskId);
+  const segments = await mockTaskSegmentsForTask(taskId);
   return {
     total: segments.length,
     active: segments.filter((segment) => segment.status === "downloading").length,
@@ -599,20 +600,42 @@ export async function getSegmentSummary(taskId: string): Promise<SegmentSummary>
   };
 }
 
-export async function listTaskEvents(taskId: string): Promise<TaskEvent[]> {
+export async function getTorrentRuntimeSnapshot(
+  taskId: string,
+): Promise<TorrentRuntimeSnapshot | null> {
+  const task = tasks.find((entry) => entry.id === taskId);
+  if (!task || (task.protocol !== "bt" && task.protocol !== "magnet")) return null;
+  const live = task.status === "downloading" || task.status === "retrying";
+  const uploadSpeedBps = live ? Math.max(64_000, Math.floor(task.speedBps / 12)) : 0;
+  const uploaded = Math.floor(task.downloadedBytes / 20);
+  return {
+    taskId,
+    metadataStatus: task.files.length > 0 ? "ready" : "fetching",
+    completedPieces: String(Math.floor(task.downloadedBytes / (4 * 1024 * 1024))),
+    verifiedPieces: String(Math.floor(task.downloadedBytes / (4 * 1024 * 1024))),
+    peerCount: live ? "12" : "0",
+    seedCount: live ? "4" : "0",
+    uploadBytes: String(uploaded),
+    uploadSpeedBps: String(uploadSpeedBps),
+    ratio: task.downloadedBytes > 0 ? uploaded / task.downloadedBytes : 0,
+    updatedAt: task.updatedAt,
+  };
+}
+
+async function mockTaskEventsForTask(taskId: string): Promise<TaskEvent[]> {
   return taskEvents.filter((event) => event.taskId === taskId).slice(0, 100);
 }
 
 export async function listTaskEventsPage(input: CursorPageInput) {
   const pageSize = Math.max(1, Math.min(500, input.pageSize ?? 100));
   const start = Math.max(0, Number(input.cursor ?? 0) || 0);
-  const all = taskEvents.filter((event) => event.taskId === input.taskId);
+  const all = await mockTaskEventsForTask(input.taskId);
   const items = all.slice(start, start + pageSize);
   const next = start + items.length;
   return { items, nextCursor: next < all.length ? String(next) : null };
 }
 
-export async function listTaskRequests(taskId: string): Promise<RequestDiagnostic[]> {
+async function mockTaskRequestsForTask(taskId: string): Promise<RequestDiagnostic[]> {
   const task = tasks.find((entry) => entry.id === taskId);
   if (!task) return [];
   if (!taskRequests.some((request) => request.taskId === taskId)) {
@@ -641,7 +664,7 @@ export async function listTaskRequests(taskId: string): Promise<RequestDiagnosti
 export async function listTaskRequestsPage(input: CursorPageInput) {
   const pageSize = Math.max(1, Math.min(500, input.pageSize ?? 100));
   const start = Math.max(0, Number(input.cursor ?? 0) || 0);
-  const all = await listTaskRequests(input.taskId);
+  const all = await mockTaskRequestsForTask(input.taskId);
   const items = all.slice(start, start + pageSize);
   const next = start + items.length;
   return { items, nextCursor: next < all.length ? String(next) : null };
@@ -851,8 +874,38 @@ export async function exportBrowserExtensionPackages(): Promise<BrowserExtension
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {
   const now = nowIso();
-  const probe = await probeTask({ url: input.url });
+  const normalizedUrl = input.url.trim();
+  const probe =
+    input.probeSnapshot?.inputUrl.trim() === normalizedUrl
+      ? input.probeSnapshot
+      : await probeTask({ url: input.url });
   const fileName = input.fileName?.trim() || probe.fileName || "download.bin";
+  const isTorrentMultiFile =
+    (probe.protocol === "bt" || probe.protocol === "magnet") && probe.files.length > 1;
+  if (isTorrentMultiFile && input.selectedFilePaths && input.selectedFilePaths.length === 0) {
+    throw new Error("Select at least one torrent file to download.");
+  }
+  const selectedFilePaths = new Set(
+    isTorrentMultiFile ? (input.selectedFilePaths ?? []).filter(Boolean) : [],
+  );
+  if (selectedFilePaths.size > 0) {
+    const availablePaths = new Set(probe.files.map((file) => file.relativePath));
+    const unknown = Array.from(selectedFilePaths).filter((path) => !availablePaths.has(path));
+    if (unknown.length > 0) {
+      throw new Error(`Unknown torrent file selection: ${unknown[0]}`);
+    }
+  }
+  const probeFiles =
+    probe.files.length > 0
+      ? probe.files
+      : [{ relativePath: fileName, size: probe.totalSize, contentType: probe.contentType }];
+  const taskFiles =
+    selectedFilePaths.size > 0
+      ? probeFiles.filter((file) => selectedFilePaths.has(file.relativePath))
+      : probeFiles;
+  const taskTotalSize =
+    taskFiles.reduce((sum, file) => sum + parseNumericString(file.size), 0) ||
+    parseNumericString(probe.totalSize);
   const parsed = safeUrl(input.url);
   const task = browserTask(
     `mock-${crypto.randomUUID()}`,
@@ -860,7 +913,7 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
     input.url,
     probe.sourceKey || parsed?.host || "example.com",
     "queued",
-    Number(probe.totalSize) || 0,
+    taskTotalSize,
     0,
     0,
     0,
@@ -869,11 +922,26 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   );
   const nextTask = {
     ...task,
+    totalSize: taskTotalSize,
     protocol: probe.protocol,
     taskKind: probe.taskKind,
     supportsMultiFile: probe.capabilities.supportsMultiFile,
     sourceKey: probe.sourceKey,
     saveDir: input.saveDir?.trim() || settings.defaultSaveDir,
+    files: taskFiles.map((file, index) => ({
+      id: `${task.id}-file-${index}`,
+      taskId: task.id,
+      relativePath: file.relativePath,
+      fileName: fileNameFromRelativePath(file.relativePath),
+      saveDir: input.saveDir?.trim() || settings.defaultSaveDir,
+      tempPath: null,
+      finalPath: null,
+      totalSize: parseNumericString(file.size),
+      downloadedBytes: 0,
+      selected: selectedFilePaths.size === 0 || selectedFilePaths.has(file.relativePath),
+      status: "queued" as const,
+      contentType: file.contentType,
+    })),
   };
   tasks = [nextTask, ...tasks];
   logTaskEvent(task.id, "created");
@@ -920,6 +988,8 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
             saveDir: input.saveDir,
             fileName: probe?.fileName ?? null,
             expectedHashSha256: null,
+            probeSnapshot: probe,
+            selectedFilePaths: null,
           })
         : null;
     items.push({
@@ -961,6 +1031,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
     const hash = input.url.match(/btih:([^&]+)/i)?.[1]?.toLowerCase() ?? "mock";
     const name = decodeURIComponent(input.url.match(/[?&]dn=([^&]+)/)?.[1] ?? `magnet-${hash}`);
     return {
+      inputUrl: input.url,
       finalUrl: input.url,
       fileName: name,
       protocol: "bt",
@@ -974,6 +1045,9 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       totalSize: "0",
       sourceKey: `bt:${hash}`,
       contentType: "application/x-magnet",
+      etag: null,
+      lastModified: null,
+      probedAt: nowIso(),
     };
   }
 
@@ -981,6 +1055,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
   const protocol = parsed?.protocol.replace(":", "") || "http";
   const host = parsed?.host ?? "example.com";
   return {
+    inputUrl: input.url,
     finalUrl: input.url,
     fileName: "download.bin",
     protocol,
@@ -1000,6 +1075,9 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
     totalSize: "1048576",
     sourceKey: `${protocol}://${host}`,
     contentType: "application/octet-stream",
+    etag: "\"mock-etag\"",
+    lastModified: nowIso(),
+    probedAt: nowIso(),
   };
 }
 
@@ -1009,6 +1087,15 @@ function safeUrl(value: string): URL | null {
   } catch {
     return null;
   }
+}
+
+function parseNumericString(value: string | null | undefined): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+
+function fileNameFromRelativePath(value: string): string {
+  return value.replace(/[\\/]/g, "/").split("/").pop() || value || "download.bin";
 }
 
 export async function pauseTask(id: string): Promise<Task> {

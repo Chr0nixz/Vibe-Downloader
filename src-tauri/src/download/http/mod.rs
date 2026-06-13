@@ -11,13 +11,11 @@ use std::{
 };
 
 use reqwest::{Client, NoProxy, Proxy, StatusCode};
-use sqlx::SqlitePool;
-use tauri::AppHandle;
 
 use super::GlobalSpeedLimiter;
 use crate::{
     logging::sanitize_url,
-    models::{EngineCapabilities, ProbedFile, TaskKind, TaskRecord, TaskSegmentRecord},
+    models::{EngineCapabilities, ProbedFile, TaskKind, TaskSegmentRecord},
     proxy::{AppProxyMode, ResolvedProxyConfig, SharedProxyConfig},
 };
 
@@ -144,28 +142,18 @@ impl HttpEngine {
         Ok(probe)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn download(
-        &self,
-        app: AppHandle,
-        pool: SqlitePool,
-        task: TaskRecord,
-        cancel: Arc<AtomicBool>,
-        speed_limiter: Arc<GlobalSpeedLimiter>,
-        connection_limit: usize,
-        request_headers: Vec<(String, String)>,
-    ) -> Result<(), String> {
+    pub async fn download(&self, context: DownloadContext) -> Result<(), String> {
         let client = self.client().await?;
-        run_segmented_download(
-            &client,
-            app,
-            pool,
-            task,
-            cancel,
-            speed_limiter,
-            connection_limit,
-            request_headers,
-        )
+        run_segmented_download(segmented::SegmentedDownloadContext {
+            client: &client,
+            app: context.app,
+            pool: context.pool,
+            task: context.task,
+            cancel: context.cancel,
+            speed_limiter: context.speed_limiter,
+            connection_limit: context.connection_limit,
+            request_headers: context.request_headers,
+        })
         .await
     }
 
@@ -281,18 +269,6 @@ impl DownloadEngine for HttpEngine {
     }
 
     fn download<'a>(&'a self, context: DownloadContext) -> EngineFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            HttpEngine::download(
-                self,
-                context.app,
-                context.pool,
-                context.task,
-                context.cancel,
-                context.speed_limiter,
-                context.connection_limit,
-                context.request_headers,
-            )
-            .await
-        })
+        Box::pin(async move { HttpEngine::download(self, context).await })
     }
 }

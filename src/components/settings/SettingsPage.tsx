@@ -1214,7 +1214,7 @@ function SettingsRow({
             <TooltipTrigger asChild>
               <button
                 type="button"
-                className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-text-muted/60 transition-colors hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/50"
+                className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-text-muted transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/50"
                 tabIndex={0}
                 aria-label={tip}
               >

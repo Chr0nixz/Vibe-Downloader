@@ -230,6 +230,8 @@ pub async fn create_browser_handoff_task_with_state(
         save_dir: None,
         file_name: sanitize_suggested_file_name(input.suggested_file_name.as_deref()),
         expected_hash_sha256: None,
+        probe_snapshot: None,
+        selected_file_paths: None,
     });
 
     let create_input = match task_result {

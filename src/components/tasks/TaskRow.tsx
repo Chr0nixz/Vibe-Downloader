@@ -248,15 +248,15 @@ export const TaskRow = memo(function TaskRow({
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs text-text-muted md:hidden">
           <span className={cn("text-text-primary", isActive && "text-sm font-semibold text-accent-primary")}>{formatSpeed(task.speedBps)}</span>
-          <span className="opacity-50 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
+          <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
             {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
           </span>
-          <span className="opacity-50 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
+          <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
             {formatPercent(task.downloadedBytes, task.totalSize)} · {t("task.eta")}{" "}
             {formatEta(task.downloadedBytes, task.totalSize, task.speedBps)}
           </span>
           {task.connectionCount > 0 ? (
-            <span className="opacity-50 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
+            <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
               {t("task.connections", { count: task.connectionCount })}
             </span>
           ) : null}
@@ -269,15 +269,15 @@ export const TaskRow = memo(function TaskRow({
           "text-sm text-text-primary",
           isActive && "text-base font-bold text-accent-primary",
         )}>{formatSpeed(task.speedBps)}</span>
-        <span className="text-text-muted opacity-50 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
+        <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
           {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
         </span>
-        <span className="text-text-muted opacity-50 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
+        <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
           {formatPercent(task.downloadedBytes, task.totalSize)} · {t("task.eta")}{" "}
           {formatEta(task.downloadedBytes, task.totalSize, task.speedBps)}
         </span>
         {task.connectionCount > 0 ? (
-          <span className="text-text-muted opacity-50 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
+          <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
             {t("task.connections", { count: task.connectionCount })}
           </span>
         ) : null}

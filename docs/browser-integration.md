@@ -2,6 +2,8 @@
 
 Vibe Downloader 当前使用 Native Messaging 启动和引导浏览器集成，再通过本地 WebSocket 提供实时任务状态、设置同步和自动下载接管。没有建立 WebSocket 时，扩展仍会回退到 Native Messaging handoff。
 
+浏览器 handoff 和自动接管当前只支持 HTTP/HTTPS URL。FTP/FTPS、magnet、HTTP/HTTPS `.torrent` URL 和本地 `file://*.torrent` 通过手动新建或剪贴板确认流程进入；HTTP/HTTPS `.torrent` 默认创建 BitTorrent 任务。
+
 ## 当前状态
 
 已实现：
@@ -10,7 +12,7 @@ Vibe Downloader 当前使用 Native Messaging 启动和引导浏览器集成，�
 - 扩展开发包构建：`pnpm build:extensions`。
 - 独立 Rust native host：`vibe-native-host`。
 - Settings 页面展示浏览器检测、manifest 路径、安装/卸载状态。
-- Tauri 命令：获取集成状态、安装/卸载 manifest、创建 browser handoff task。
+- Tauri 命令：获取集成状态、安装/卸载 manifest、创建 HTTP/HTTPS browser handoff task。
 - 单实例转发：应用已运行时，第二次启动参数会转发给现有实例。
 - SQLite `browser_messages` 表：request id 去重和错误诊断。
 - 本地 WebSocket bridge：扩展可读取实时任务快照、任务进度和队列变化。
@@ -20,7 +22,7 @@ Vibe Downloader 当前使用 Native Messaging 启动和引导浏览器集成，�
 
 扩展当前入口：
 
-- 右键链接：`Download with Vibe Downloader`。
+- 右键 HTTP/HTTPS 链接：`Download with Vibe Downloader`。
 - 右键选中文本：从文本中提取第一个 HTTP/HTTPS URL。
 - popup：发送当前 tab URL、查看 bridge 状态、切换自动接管和 Cookie/header 转发、查看实时任务与最近 handoff。
 
@@ -28,6 +30,7 @@ Vibe Downloader 当前使用 Native Messaging 启动和引导浏览器集成，�
 
 - 完整站点规则管理 UI。
 - 自动大文件提示 UI。
+- FTP/FTPS、magnet 和 `.torrent` 的浏览器自动接管。
 - 生产 Safari Web Extension wrapper。
 - Chrome Web Store / Edge Add-ons / Firefox AMO 的正式 ID、签名和审核流程。
 
@@ -147,6 +150,7 @@ Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messagin
 安全规则：
 
 - 只接受 `http` 和 `https` URL。
+- FTP/FTPS、magnet、`.torrent` 和 `file://` 不进入浏览器 handoff payload。
 - 拒绝带内嵌用户名或密码的 URL。
 - 扩展不能指定本地保存路径。
 - Cookie/header 转发必须由设置开启，并经过后端 allowlist 过滤。

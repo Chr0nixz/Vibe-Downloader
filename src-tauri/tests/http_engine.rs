@@ -475,6 +475,68 @@ async fn segmented_direct_failure_does_not_rename_temp_file() {
     std::env::remove_var("VIBE_FAST_RETRY_DELAYS");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segmented_direct_fails_on_mismatched_content_range() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("segmented-bad-content-range");
+    let payload = large_payload();
+
+    let error = engine
+        .download_segmented_direct(
+            DirectSegmentedDownloadRequest {
+                url: format!("{}/bad-content-range", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: payload.len() as i64,
+                supports_resume: true,
+
+                supports_parallel: true,
+                segments: direct_segments("segmented-bad-content-range", payload.len() as i64),
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect_err("mismatched Content-Range should fail");
+
+    assert_eq!(
+        error,
+        "Resume unavailable. The server returned a mismatched Content-Range."
+    );
+    assert!(!paths.final_path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segmented_direct_fails_when_range_is_not_honored() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("segmented-range-ignored");
+    let payload = large_payload();
+
+    let error = engine
+        .download_segmented_direct(
+            DirectSegmentedDownloadRequest {
+                url: format!("{}/range-ignored", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: payload.len() as i64,
+                supports_resume: true,
+
+                supports_parallel: true,
+                segments: direct_segments("segmented-range-ignored", payload.len() as i64),
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect_err("ignored Range should fail");
+
+    assert_eq!(
+        error,
+        "Resume unavailable. The server did not honor the byte range request."
+    );
+    assert!(!paths.final_path.exists());
+}
+
 struct TestServer {
     base_url: String,
     stop: Arc<AtomicBool>,
@@ -685,6 +747,18 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
             "large.bin",
             false,
         ),
+        "/bad-content-range" => {
+            respond_bad_content_range(&mut stream, method, &large_payload(), byte_range)
+        }
+        "/range-ignored" => respond_file(
+            &mut stream,
+            method,
+            &large_payload(),
+            None,
+            false,
+            "range-ignored.bin",
+            false,
+        ),
         "/segment-error" if byte_range.is_some_and(|range| range.start > 0) => {
             write_response(&mut stream, 500, &[], b"segment failed", false)
         }
@@ -760,6 +834,43 @@ fn respond_file(
     }
 
     write_response(stream, status, &headers, body, slow);
+}
+
+fn respond_bad_content_range(
+    stream: &mut TcpStream,
+    method: &str,
+    payload: &[u8],
+    byte_range: Option<ByteRange>,
+) {
+    let Some(range) = byte_range else {
+        respond_file(stream, method, payload, None, true, "bad-range.bin", false);
+        return;
+    };
+    let start = range.start.min(payload.len());
+    let end = range
+        .end
+        .unwrap_or_else(|| payload.len().saturating_sub(1))
+        .min(payload.len().saturating_sub(1));
+    let body = if method == "HEAD" || start > end {
+        &[][..]
+    } else {
+        &payload[start..=end]
+    };
+    let content_length = if method == "HEAD" {
+        payload.len().to_string()
+    } else {
+        body.len().to_string()
+    };
+    let content_range = format!("bytes {}-{end}/{}", start.saturating_add(1), payload.len());
+    let disposition = "attachment; filename=\"bad-range.bin\"";
+    let headers = vec![
+        ("Content-Length", content_length.as_str()),
+        ("Content-Type", "application/octet-stream"),
+        ("Content-Disposition", disposition),
+        ("Accept-Ranges", "bytes"),
+        ("Content-Range", content_range.as_str()),
+    ];
+    write_response(stream, 206, &headers, body, false);
 }
 
 fn respond_file_without_disposition(

@@ -467,6 +467,7 @@ pub struct TaskUpdatedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeTaskPayload {
+    pub input_url: String,
     pub final_url: String,
     pub file_name: String,
     pub protocol: String,
@@ -476,6 +477,9 @@ pub struct ProbeTaskPayload {
     pub total_size: String,
     pub source_key: String,
     pub content_type: Option<String>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub probed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -484,6 +488,52 @@ pub struct ProbedFile {
     pub relative_path: String,
     pub size: String,
     pub content_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentRuntimeSnapshot {
+    pub task_id: String,
+    pub metadata_status: String,
+    pub completed_pieces: String,
+    pub verified_pieces: String,
+    pub peer_count: String,
+    pub seed_count: String,
+    pub upload_bytes: String,
+    pub upload_speed_bps: String,
+    pub ratio: f64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TorrentRuntimeSnapshotRecord {
+    pub task_id: String,
+    pub metadata_status: String,
+    pub completed_pieces: i64,
+    pub verified_pieces: i64,
+    pub peer_count: i64,
+    pub seed_count: i64,
+    pub upload_bytes: i64,
+    pub upload_speed_bps: i64,
+    pub ratio: f64,
+    pub updated_at: String,
+}
+
+impl From<TorrentRuntimeSnapshotRecord> for TorrentRuntimeSnapshot {
+    fn from(record: TorrentRuntimeSnapshotRecord) -> Self {
+        Self {
+            task_id: record.task_id,
+            metadata_status: record.metadata_status,
+            completed_pieces: record.completed_pieces.to_string(),
+            verified_pieces: record.verified_pieces.to_string(),
+            peer_count: record.peer_count.to_string(),
+            seed_count: record.seed_count.to_string(),
+            upload_bytes: record.upload_bytes.to_string(),
+            upload_speed_bps: record.upload_speed_bps.to_string(),
+            ratio: record.ratio,
+            updated_at: record.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

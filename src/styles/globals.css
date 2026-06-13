@@ -121,6 +121,27 @@
   }
 }
 
+@keyframes splash-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes splash-breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1);
+  }
+}
+
 @keyframes completion-glow {
   0% {
     box-shadow: 0 0 0 0 oklch(0.72 0.14 150 / 0);
@@ -174,6 +195,31 @@
   .floating-ball-glow {
     animation: none !important;
   }
+
+  .floating-ball {
+    transition: none !important;
+  }
+
+  .floating-ball:hover {
+    transform: none;
+  }
+
+  .floating-ball:active {
+    transform: none;
+  }
+
+  .floating-ring {
+    transition: none !important;
+  }
+
+  .splash-overlay {
+    animation-duration: 0.01ms !important;
+  }
+
+  .splash-indicator {
+    animation: none !important;
+    opacity: 0.4 !important;
+  }
 }
 
 /* ── Titlebar ── */
@@ -210,6 +256,33 @@
 
 /* ── Floating ball ── */
 
+.floating-ball {
+  transition:
+    transform 320ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 320ms ease-out,
+    ring-color 320ms ease-out;
+  will-change: transform;
+}
+
+.floating-ball:hover {
+  transform: scale(1.12);
+}
+
+.floating-ball:active {
+  transform: scale(0.96);
+  transition-duration: 80ms;
+}
+
+.floating-ring {
+  transition:
+    filter 320ms ease-out,
+    opacity 320ms ease-out;
+}
+
+.floating-ball:hover .floating-ring circle {
+  filter: brightness(1.35) saturate(1.2);
+}
+
 .floating-ball-glow {
   animation: floating-glow 2.8s ease-in-out infinite;
 }
@@ -218,12 +291,12 @@
   0%,
   100% {
     box-shadow:
-      0 4px 14px oklch(0.48 0.18 235 / 0.12),
+      0 0 14px oklch(0.48 0.18 235 / 0.15),
       0 0 0 0 oklch(0.44 0.15 165 / 0);
   }
   50% {
     box-shadow:
-      0 4px 18px oklch(0.48 0.18 235 / 0.3),
+      0 0 18px oklch(0.48 0.18 235 / 0.35),
       0 0 0 4px oklch(0.44 0.15 165 / 0.08);
   }
 }
@@ -236,12 +309,12 @@
   0%,
   100% {
     box-shadow:
-      0 4px 14px oklch(0.72 0.14 235 / 0.12),
+      0 0 14px oklch(0.72 0.14 235 / 0.15),
       0 0 0 0 oklch(0.78 0.18 170 / 0);
   }
   50% {
     box-shadow:
-      0 4px 18px oklch(0.72 0.14 235 / 0.3),
+      0 0 18px oklch(0.72 0.14 235 / 0.35),
       0 0 0 4px oklch(0.78 0.18 170 / 0.08);
   }
 }

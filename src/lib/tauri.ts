@@ -23,6 +23,7 @@ import type {
   ProbeTaskPayload,
   SegmentSummary,
   TaskEvent,
+  TorrentRuntimeSnapshot,
   TrayMenuAction,
   ResolveTaskAttentionInput,
   TaskUpdatedPayload,
@@ -92,15 +93,6 @@ export async function getTask(id: string): Promise<Task | null> {
   const commands = await loadNativeCommands();
   const task = await runCommand("getTask", () => commands.getTask(id));
   return task ? normalizeTask(task) : null;
-}
-
-export async function listTaskSegments(taskId: string): Promise<TaskSegment[]> {
-  if (!isTauriRuntime()) {
-    return (await loadBrowserAdapter()).listTaskSegments(taskId);
-  }
-  const commands = await loadNativeCommands();
-  const segments = await runCommand("listTaskSegments", () => commands.listTaskSegments(taskId));
-  return segments.map(normalizeTaskSegment);
 }
 
 export interface TaskPage {
@@ -185,12 +177,16 @@ export async function getSegmentSummary(taskId: string): Promise<SegmentSummary>
   return runCommand("getSegmentSummary", () => commands.getSegmentSummary(taskId));
 }
 
-export async function listTaskEvents(taskId: string): Promise<TaskEvent[]> {
+export async function getTorrentRuntimeSnapshot(
+  taskId: string,
+): Promise<TorrentRuntimeSnapshot | null> {
   if (!isTauriRuntime()) {
-    return (await loadBrowserAdapter()).listTaskEvents(taskId);
+    return (await loadBrowserAdapter()).getTorrentRuntimeSnapshot(taskId);
   }
   const commands = await loadNativeCommands();
-  return runCommand("listTaskEvents", () => commands.listTaskEvents(taskId));
+  return runCommand("getTorrentRuntimeSnapshot", () =>
+    commands.getTorrentRuntimeSnapshot(taskId),
+  );
 }
 
 export async function listTaskEventsPage(input: CursorPageInput): Promise<CursorPage<TaskEvent>> {
@@ -199,14 +195,6 @@ export async function listTaskEventsPage(input: CursorPageInput): Promise<Cursor
   }
   const commands = await loadNativeCommands();
   return runCommand("listTaskEventsPage", () => commands.listTaskEventsPage(input));
-}
-
-export async function listTaskRequests(taskId: string): Promise<RequestDiagnostic[]> {
-  if (!isTauriRuntime()) {
-    return (await loadBrowserAdapter()).listTaskRequests(taskId);
-  }
-  const commands = await loadNativeCommands();
-  return runCommand("listTaskRequests", () => commands.listTaskRequests(taskId));
 }
 
 export async function listTaskRequestsPage(

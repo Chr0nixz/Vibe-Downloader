@@ -428,6 +428,9 @@ const es = {
     closeBackdrop: "Cerrar detalles",
     drawerAria: "Detalles de la tarea",
     drawerDescription: "Detalles de {{name}}",
+    diagnostics: "Diagn\u00f3stico",
+    diagFailedShort: "fallidos",
+    diagSegmentsShort: "segmentos",
   },
   taskEvent: {
     created: "Creada",

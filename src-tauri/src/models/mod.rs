@@ -14,5 +14,5 @@ pub use task::{
     ProbeTaskPayload, ProbedFile, RecoveryAction, RequestDiagnostic, RequestDiagnosticRecord,
     SegmentStatus, SegmentSummary, Task, TaskEvent, TaskFailureCategory, TaskFile, TaskFileRecord,
     TaskKind, TaskProgressPayload, TaskRecord, TaskSegment, TaskSegmentRecord, TaskStatus,
-    TaskUpdatedPayload,
+    TaskUpdatedPayload, TorrentRuntimeSnapshot, TorrentRuntimeSnapshotRecord,
 };

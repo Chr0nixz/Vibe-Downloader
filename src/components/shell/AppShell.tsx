@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { CommandBar } from "@/components/shell/CommandBar";
@@ -17,7 +17,7 @@ import {
   trafficLightsInsetPx,
   type Platform,
 } from "@/lib/platform";
-import { sanitizeUrlForDisplay } from "@/lib/utils";
+import { cn, sanitizeUrlForDisplay } from "@/lib/utils";
 
 const log = createLogger("app-shell");
 import {
@@ -128,6 +128,38 @@ export function AppShell() {
   const addToast = useToastStore((s) => s.addToast);
   const updateToast = useToastStore((s) => s.updateToast);
   const dismissToast = useToastStore((s) => s.dismissToast);
+  const taskLoading = useTaskStore((s) => s.loading);
+
+  /* ── Splash overlay ── */
+  const initialLoadDoneRef = useRef(false);
+  const [splashVisible, setSplashVisible] = useState(true);
+  const [splashDismissing, setSplashDismissing] = useState(false);
+
+  const dismissSplash = useCallback(() => {
+    if (initialLoadDoneRef.current) return;
+    initialLoadDoneRef.current = true;
+    const fadeTimer = setTimeout(() => setSplashDismissing(true), 200);
+    const removeTimer = setTimeout(() => setSplashVisible(false), 420);
+    return () => {
+      clearTimeout(fadeTimer);
+      clearTimeout(removeTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!taskLoading) dismissSplash();
+  }, [taskLoading, dismissSplash]);
+
+  // Safety timeout: force-dismiss splash after 3 seconds regardless of loading state
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (!initialLoadDoneRef.current) {
+        dismissSplash();
+        useTaskStore.getState().setLoading(false);
+      }
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [dismissSplash]);
 
   const selected = tasks.find((t) => t.id === selectedId) ?? null;
   const taskSurfaceActive = nav !== "settings";
@@ -714,6 +746,39 @@ export function AppShell() {
             platform={platform}
           />
         </Suspense>
+      ) : null}
+      {splashVisible ? (
+        <div
+          className={cn(
+            "splash-overlay fixed inset-0 z-50 flex items-center justify-center bg-surface-root",
+            splashDismissing && "pointer-events-none",
+          )}
+          style={
+            splashDismissing
+              ? { animation: "splash-fade-out 220ms ease-out forwards" }
+              : undefined
+          }
+          role="status"
+          aria-label={t("app.name")}
+        >
+          <div className="flex flex-col items-center gap-4">
+            <img
+              src="/logo-64.png"
+              alt=""
+              width={72}
+              height={72}
+              className="select-none"
+              draggable={false}
+            />
+            <span className="text-lg font-semibold tracking-wide text-text-primary">
+              {t("app.name")}
+            </span>
+            <div
+              className="splash-indicator mt-1 h-2 w-2 rounded-full bg-accent-primary"
+              style={{ animation: "splash-breathe 1.5s ease-in-out infinite" }}
+            />
+          </div>
+        </div>
       ) : null}
     </div>
   );

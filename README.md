@@ -7,7 +7,7 @@ can be disabled in Settings > Desktop integration.
 
 Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下载、断点续传、任务队列和浏览器交接变得更清楚、更可靠，也比传统下载工具更符合现在的桌面审美。
 
-项目目前处于早期开发阶段，但已经可以作为 HTTP/HTTPS 下载器原型运行。它不是一个已经完整替代 IDM 的成品，适合尝鲜、参与开发、验证下载引擎和桌面体验。
+项目目前处于早期开发阶段，但已经可以作为以 HTTP/HTTPS 为主的下载器原型运行；FTP/FTPS、magnet 和 `.torrent` 已接入，成熟度仍低于 HTTP/HTTPS。它不是一个已经完整替代 IDM 的成品，适合尝鲜、参与开发、验证下载引擎和桌面体验。
 
 > 说明：这个项目基本是通过 vibe coding 完成的。产品方向、取舍和验收由人工把关，大部分代码、文档和迭代实现由 AI 辅助完成。
 
@@ -16,6 +16,8 @@ Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下�
 当前版本已经支持：
 
 - 新建 HTTP/HTTPS 下载任务。
+- 手动新建和剪贴板确认流程支持 FTP/FTPS、magnet、HTTP/HTTPS `.torrent` URL 和本地 `file://*.torrent`。
+- HTTP/HTTPS `.torrent` URL 默认创建 BitTorrent 任务，而不是把 `.torrent` 文件本身当作普通文件下载。
 - 自动探测文件名、文件大小、来源 host 和 Range 支持情况。
 - 大文件分段下载，默认 16 MB 以上启用多连接。
 - 暂停、继续、重试、删除任务。
@@ -27,7 +29,7 @@ Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下�
 - 下载完成后打开文件或所在目录。
 - 基础错误恢复动作，例如重试、另存为、更换目录、重新开始。
 - 简体中文和英文界面。
-- 浏览器扩展开发包，通过 Native Messaging 和本地 WebSocket 把链接、下载捕获和实时任务状态连接到桌面应用。
+- 浏览器扩展开发包，通过 Native Messaging 和本地 WebSocket 把 HTTP/HTTPS 链接、下载捕获和实时任务状态连接到桌面应用。
 - 浏览器原生下载自动接管基础能力，可在设置中开启或关闭。
 - Cookie/header 转发基础能力，可在设置中开启或关闭，并只转发受控 allowlist header。
 - 自动更新基础配置，正式发布前仍需要完整端到端验证。
@@ -36,7 +38,7 @@ Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下�
 
 这些功能还在后续计划中，不要把当前版本当成完整下载器使用：
 
-- BT、HLS、网盘解析或视频嗅探。
+- HLS/m3u8 流媒体解析、SFTP、网盘解析或视频嗅探；`.m3u8` 当前按普通 HTTP 文件处理。
 - 系统托盘、完成通知、开机启动、关闭到托盘。
 - 批量导入、批量操作、任务优先级、单任务限速。
 - 完整命令面板。
@@ -122,6 +124,7 @@ Chrome、Edge、Brave、Vivaldi、Chromium 可以加载 Chromium 包。Firefox �
 | `pnpm build` | TypeScript 编译并构建前端 |
 | `pnpm typecheck` | TypeScript 类型检查 |
 | `pnpm lint` | 当前等同于 `tsc --noEmit` |
+| `pnpm test:frontend` | 运行 Vitest 纯 TS 逻辑测试 |
 | `pnpm tauri dev` | 启动桌面应用 |
 | `pnpm dev:tauri` | 带 Rust 调试日志启动桌面应用 |
 | `pnpm specta` | 从 Rust 导出 `src/generated/bindings.ts` |
@@ -134,6 +137,7 @@ Chrome、Edge、Brave、Vivaldi、Chromium 可以加载 Chromium 包。Firefox �
 
 ```bash
 pnpm typecheck
+pnpm test:frontend
 pnpm build
 pnpm check:bindings
 pnpm test:rust

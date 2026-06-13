@@ -73,7 +73,7 @@ export function Sidebar() {
                 className={cn(
                   "relative h-12 min-w-11 flex-1 justify-center gap-2.5 px-0 text-sm md:h-10 md:w-full md:flex-none md:justify-start lg:h-9 lg:px-3",
                   active
-                    ? "bg-accent-primary/12 font-semibold text-accent-primary shadow-[inset_3px_0_0_var(--accent-primary)] md:shadow-[inset_3px_0_0_var(--accent-primary)]"
+                    ? "bg-accent-primary/12 font-semibold text-accent-primary shadow-[inset_0_-3px_0_var(--accent-primary)] md:shadow-[inset_3px_0_0_var(--accent-primary)]"
                     : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
                 )}
               >

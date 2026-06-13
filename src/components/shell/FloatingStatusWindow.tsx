@@ -1,5 +1,4 @@
-import { X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useTaskEvents } from "@/hooks/use-task-events";
@@ -25,7 +24,6 @@ export function FloatingStatusWindow() {
   const tasks = useTaskStore((s) => s.tasks);
   const setTasks = useTaskStore((s) => s.setTasks);
   const setLoading = useTaskStore((s) => s.setLoading);
-  const [hovering, setHovering] = useState(false);
 
   useTaskEvents({ notify: false });
 
@@ -114,48 +112,30 @@ export function FloatingStatusWindow() {
 
   return (
     <main
-      className="group relative flex h-full select-none items-center justify-center"
+      className="group relative flex h-full select-none items-center justify-center overflow-visible"
       onMouseDown={handleDrag}
       onDoubleClick={handleDoubleClick}
       onContextMenu={handleContextMenu}
-      onMouseEnter={() => setHovering(true)}
-      onMouseLeave={() => setHovering(false)}
     >
       {/* Tooltip */}
-      <div className="pointer-events-none absolute -top-9 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-surface-overlay px-2.5 py-1 text-[0.65rem] leading-4 text-text-secondary opacity-0 shadow-lg ring-1 ring-border-container transition-opacity duration-200 group-hover:opacity-100 group-hover:[&:has(~_button:hover)]:opacity-0">
+      <div className="pointer-events-none absolute -top-9 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-surface-overlay px-2.5 py-1 text-[0.65rem] leading-4 text-text-secondary opacity-0 shadow-lg ring-1 ring-border-container transition-opacity duration-200 group-hover:opacity-100">
         {idle ? t("floatingStatus.idle") : `${speedText} · ${Math.round(percent)}%`}
       </div>
-
-      {/* Close button — visible on hover */}
-      <button
-        type="button"
-        data-no-drag
-        className={cn(
-          "absolute -top-0.5 right-0 z-20 grid h-5 w-5 place-items-center rounded-full",
-          "bg-surface-raised text-text-muted shadow-md ring-1 ring-border-container",
-          "opacity-0 transition-all duration-150 hover:bg-status-danger hover:text-text-on-danger hover:ring-status-danger/30",
-          hovering && "opacity-100",
-        )}
-        aria-label={t("floatingStatus.close")}
-        onClick={() => void hideFloatingStatusWindow()}
-      >
-        <X className="h-2.5 w-2.5" aria-hidden />
-      </button>
 
       {/* Ball */}
       <div
         className={cn(
-          "relative grid h-16 w-16 place-items-center rounded-full transition-shadow duration-300",
+          "floating-ball relative grid h-16 w-16 place-items-center rounded-full",
           idle
-            ? "bg-surface-overlay shadow-lg ring-1 ring-border-container"
-            : "bg-surface-overlay shadow-xl shadow-accent-primary/25 ring-1 ring-accent-primary/25 floating-ball-glow",
+            ? "bg-surface-overlay shadow-[0_0_8px_oklch(0.12_0.01_255_/_0.15)] ring-1 ring-border-container"
+            : "bg-surface-overlay ring-1 ring-accent-primary/25 floating-ball-glow",
         )}
         aria-label={t("floatingStatus.title")}
       >
         {/* SVG progress ring */}
         <svg
           viewBox="0 0 64 64"
-          className="absolute inset-0 h-full w-full -rotate-90"
+          className="floating-ring absolute inset-0 h-full w-full -rotate-90"
           aria-hidden
         >
           <circle

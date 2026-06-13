@@ -6,7 +6,7 @@ This file gives coding agents the local project context and working rules for Vi
 
 Vibe Downloader is a desktop download manager built with Tauri 2, React 19, TypeScript, Rust, SQLite, and WebExtension Native Messaging.
 
-The project is currently at `0.1.0`. It is not a finished IDM replacement yet. Treat it as a working HTTP/HTTPS download manager foundation with a polished desktop shell and browser handoff prototype.
+The project is currently at `0.1.0`. It is not a finished IDM replacement yet. Treat HTTP/HTTPS as the most mature path, with lower-maturity FTP/FTPS and BitTorrent entry points already present.
 
 Implemented today:
 
@@ -15,19 +15,21 @@ Implemented today:
 - Single-stream downloads, unknown-size downloads, segmented Range downloads, resume validation, segment retry, and final file auto-renaming.
 - Queue scheduling with max active task count and per-host connection slot limits.
 - Global speed limiting through a Rust token bucket.
-- React task list, status filters, search, settings page, task details, Chunks/Connections views, toast, delete confirmation, recovery actions, and en/zh-CN i18n.
-- WebExtension development packages, Native Messaging host, manifest install/uninstall, duplicate request handling, and Tauri single-instance forwarding.
+- React task list, status filters, search, sorting, multi-select, batch actions, command palette, settings page, task details, Chunks/Connections/Requests/Logs views, toast, delete confirmation, recovery actions, and en/zh-CN i18n.
+- Clipboard link monitoring while the desktop app is running.
+- FTP/FTPS task creation and downloads, plus BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files.
+- Browser Native Messaging host, local WebSocket bridge, manifest install/uninstall diagnostics, duplicate request handling, Tauri single-instance forwarding, browser download takeover, and optional allowlisted Cookie/header forwarding.
 - CI, Tauri build matrix, Release workflow, Specta bindings, and Tauri updater configuration.
+- Vitest coverage for pure frontend logic plus Rust unit/integration tests.
 
 Not implemented yet:
 
-- Full command palette, batch operations, and sorting/filtering beyond the current basics.
-- Top-bar speed limit menu behavior.
-- Auto-probe and probe result reuse in the new-download flow.
-- Logs/Request detail tabs and task lifecycle event writes.
-- Real per-connection speed diagnostics.
-- Browser download interception, Cookie/header forwarding, store extension IDs, signing, and Safari wrapper.
-- Tray, notifications, startup launch, close-to-tray, per-task speed limits, priorities, file classification rules, BT/HLS, or plugin protocols.
+- HLS/m3u8 parsing, SFTP, cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols.
+- Safari wrapper, browser store submission IDs, production extension signing, and final browser permission review copy.
+- FTP credential hardening through encrypted task credentials.
+- BT/FTP reliability and diagnostics parity with the HTTP/HTTPS path.
+- Per-task speed limits, task priorities, and full file classification automation.
+- OS code-signed production distribution.
 
 ## Key Directories
 
@@ -55,6 +57,7 @@ Useful checks:
 
 ```bash
 pnpm typecheck
+pnpm test:frontend
 pnpm build
 pnpm check:bindings
 pnpm test:rust
@@ -65,15 +68,16 @@ pnpm build:extensions
 
 Run `pnpm build:extensions` when touching `browser/extension-core`, Native Messaging behavior, or related documentation.
 
-Run `pnpm check:bindings` after Rust command or model changes that affect frontend IPC types.
+Run `pnpm specta` and `pnpm check:bindings` after Rust command or model changes that affect frontend IPC types.
 
 ## Architecture Notes
 
 - Frontend state lives in Zustand stores under `src/stores`.
 - Native command wrappers live in `src/lib/tauri.ts`; browser preview mocks live in `src/lib/tauri-browser.ts`.
 - Rust command registration and Specta export live in `src-tauri/src/lib.rs`.
-- Download behavior is centered in `src-tauri/src/download/mod.rs`.
-- SQLite access and planning constants live in `src-tauri/src/db/mod.rs`.
+- Download behavior is organized under `src-tauri/src/download/`; HTTP segmented downloads keep coordinator, worker, and diagnostics helpers separated.
+- SQLite access lives under `src-tauri/src/db/`; `db/mod.rs` is the re-export and shared-constant entry point.
+- Task commands are split under `src-tauri/src/commands/tasks/` for create/import, query/detail paging, actions/hash, and debug mock seed helpers.
 - Tauri events are defined in `src-tauri/src/events/mod.rs`.
 - Browser handoff commands live in `src-tauri/src/commands/browser.rs`.
 - The Native Messaging host binary lives in `src-tauri/src/bin/vibe-native-host.rs`.
@@ -102,10 +106,10 @@ Important current constants:
 - Prefer existing patterns over new abstractions.
 - Use generated Specta bindings rather than hand-writing IPC types when Rust models or commands change.
 - Treat English and Simplified Chinese (`en`/`zh-CN`) as the only actively supported locales for now. Add other locale translations later when explicitly prioritized.
-- Preserve the current browser handoff security boundary: only HTTP/HTTPS URLs, no embedded credentials, no browser-controlled local save path, and no Cookie/header forwarding in the current stage.
+- Preserve the current browser handoff security boundary: browser handoff is HTTP/HTTPS only, URLs may not contain embedded credentials, browsers do not control local save paths, and Cookie/header forwarding must stay explicit, allowlisted, and encrypted when persisted.
 - Keep debug-only mock behavior out of production builds. `seed_mock_tasks` is intentionally debug-only.
 - When changing download or resume logic, add or update Rust tests under `src-tauri/tests`.
-- When changing frontend behavior, run at least `pnpm typecheck`; run `pnpm build` for UI or bundling changes.
+- When changing frontend behavior, run at least `pnpm typecheck` and `pnpm test:frontend`; run `pnpm build` for UI or bundling changes.
 
 ## UX Direction
 
