@@ -20,6 +20,7 @@ const SETTING_MAX_CONNECTIONS_PER_HOST: &str = "max_connections_per_host";
 const SETTING_SYSTEM_NOTIFICATIONS: &str = "system_notifications";
 const SETTING_CLOSE_TO_TRAY: &str = "close_to_tray";
 const SETTING_START_ON_BOOT: &str = "start_on_boot";
+const SETTING_AUTO_RESUME_ON_STARTUP: &str = "auto_resume_on_startup";
 const SETTING_FLOATING_WINDOW_ENABLED: &str = "floating_window_enabled";
 const SETTING_CLIPBOARD_MONITOR_ENABLED: &str = "clipboard_monitor_enabled";
 const SETTING_FONT_FAMILY: &str = "font_family";
@@ -64,6 +65,8 @@ pub async fn get_settings(
     let system_notifications = get_bool_setting(pool, SETTING_SYSTEM_NOTIFICATIONS, true).await?;
     let close_to_tray = get_bool_setting(pool, SETTING_CLOSE_TO_TRAY, false).await?;
     let start_on_boot = get_bool_setting(pool, SETTING_START_ON_BOOT, false).await?;
+    let auto_resume_on_startup =
+        get_bool_setting(pool, SETTING_AUTO_RESUME_ON_STARTUP, false).await?;
     let floating_window_enabled =
         get_bool_setting(pool, SETTING_FLOATING_WINDOW_ENABLED, false).await?;
     let clipboard_monitor_enabled =
@@ -104,6 +107,7 @@ pub async fn get_settings(
         system_notifications,
         close_to_tray,
         start_on_boot,
+        auto_resume_on_startup,
         floating_window_enabled,
         clipboard_monitor_enabled,
         font_family,
@@ -164,6 +168,12 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         pool,
         SETTING_START_ON_BOOT,
         bool_setting_value(settings.start_on_boot),
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_AUTO_RESUME_ON_STARTUP,
+        bool_setting_value(settings.auto_resume_on_startup),
     )
     .await?;
     upsert_setting_value(

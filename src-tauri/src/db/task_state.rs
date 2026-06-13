@@ -6,6 +6,14 @@ use super::task_records::{error_state_from_message, recovery_actions_json};
 use super::{delete_task_request_headers, insert_task_event};
 
 pub async fn clear_tasks(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query("DELETE FROM hls_segments")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM hls_tasks")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM torrent_runtime_snapshots")
         .execute(pool)
         .await
@@ -499,6 +507,18 @@ pub async fn complete_unknown_size_task(
 }
 
 pub async fn delete_task_record(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM hls_segments WHERE task_id = ?")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("DELETE FROM hls_tasks WHERE task_id = ?")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     sqlx::query("DELETE FROM task_request_headers WHERE task_id = ?")
         .bind(task_id)
         .execute(pool)
@@ -538,19 +558,27 @@ pub async fn delete_task_record(pool: &SqlitePool, task_id: &str) -> Result<(), 
     Ok(())
 }
 
-pub async fn reset_interrupted_tasks(pool: &SqlitePool) -> Result<(), String> {
+pub async fn reset_interrupted_tasks(pool: &SqlitePool, auto_resume: bool) -> Result<(), String> {
     let updated_at = crate::models::task::now_iso();
+    let next_status = if auto_resume { "queued" } else { "paused" };
+    let health_summary = if auto_resume {
+        "Queued after app restart"
+    } else {
+        "Paused after app restart"
+    };
 
     sqlx::query(
         r#"
         UPDATE tasks
-        SET status = 'paused', speed_bps = 0, connection_count = 0,
-            health_summary = 'Paused after app restart', error_message = NULL,
+        SET status = ?, speed_bps = 0, connection_count = 0,
+            health_summary = ?, error_message = NULL,
             error_code = NULL, recovery_actions = NULL,
             updated_at = ?
         WHERE status IN ('downloading', 'retrying')
         "#,
     )
+    .bind(next_status)
+    .bind(health_summary)
     .bind(&updated_at)
     .execute(pool)
     .await

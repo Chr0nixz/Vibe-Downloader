@@ -55,6 +55,7 @@ let settings: AppSettings = loadStoredSettings() ?? {
   systemNotifications: true,
   closeToTray: false,
   startOnBoot: false,
+  autoResumeOnStartup: false,
   floatingWindowEnabled: false,
   clipboardMonitorEnabled: true,
   fontFamily: "source_han_sans_sc",
@@ -141,6 +142,10 @@ function loadStoredSettings(): AppSettings | null {
           typeof parsed.closeToTray === "boolean" ? parsed.closeToTray : false,
         startOnBoot:
           typeof parsed.startOnBoot === "boolean" ? parsed.startOnBoot : false,
+        autoResumeOnStartup:
+          typeof parsed.autoResumeOnStartup === "boolean"
+            ? parsed.autoResumeOnStartup
+            : false,
         floatingWindowEnabled:
           typeof parsed.floatingWindowEnabled === "boolean"
             ? parsed.floatingWindowEnabled
@@ -184,7 +189,7 @@ function defaultBrowserCaptureSettings(): BrowserCaptureSettings {
     forwardHeaders: false,
     forwardHeadersMode: browserExperimentalCaptureEnabled ? "ask" : "disabled",
     minSizeBytes: "0",
-    fileExtensions: ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf"],
+    fileExtensions: ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "m3u8"],
     siteRules: [],
   };
 }
@@ -646,6 +651,7 @@ async function mockTaskRequestsForTask(taskId: string): Promise<RequestDiagnosti
         method: "GET",
         url: sanitizeUrlForDisplay(task.url),
         rangeHeader: task.supportsParallel ? "bytes=0-" : null,
+        ifRangeHeader: task.supportsParallel ? (task.etag ?? task.lastModified) : null,
         statusCode: task.status === "failed" ? 503 : 206,
         etag: task.etag,
         lastModified: task.lastModified,
@@ -720,6 +726,8 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
     systemNotifications: input.systemNotifications ?? settings.systemNotifications,
     closeToTray: input.closeToTray ?? settings.closeToTray,
     startOnBoot: input.startOnBoot ?? settings.startOnBoot,
+    autoResumeOnStartup:
+      input.autoResumeOnStartup ?? settings.autoResumeOnStartup,
     floatingWindowEnabled:
       input.floatingWindowEnabled ?? settings.floatingWindowEnabled,
     clipboardMonitorEnabled:
@@ -879,6 +887,15 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
     input.probeSnapshot?.inputUrl.trim() === normalizedUrl
       ? input.probeSnapshot
       : await probeTask({ url: input.url });
+  const duplicate = duplicateTaskForProbe(normalizedUrl, probe);
+  if (duplicate && !input.allowDuplicate) {
+    throw JSON.stringify({
+      code: "duplicate_task",
+      message: `A task for this download already exists: ${duplicate.fileName}`,
+      recoverable: true,
+      actions: [],
+    });
+  }
   const fileName = input.fileName?.trim() || probe.fileName || "download.bin";
   const isTorrentMultiFile =
     (probe.protocol === "bt" || probe.protocol === "magnet") && probe.files.length > 1;
@@ -981,8 +998,10 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
     const duplicate = seen.has(normalized);
     seen.add(normalized);
     const probe = duplicate ? null : await probeTask({ url: normalized });
+    const existingTask = !duplicate && probe ? duplicateTaskForProbe(normalized, probe) : null;
+    const isDuplicate = duplicate || Boolean(existingTask);
     const task =
-      !duplicate && input.create
+      !isDuplicate && input.create
         ? await createTask({
             url: normalized,
             saveDir: input.saveDir,
@@ -990,18 +1009,23 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
             expectedHashSha256: null,
             probeSnapshot: probe,
             selectedFilePaths: null,
+            allowDuplicate: false,
           })
         : null;
     items.push({
       inputUrl: raw,
       normalizedUrl: normalized,
-      duplicate,
+      duplicate: isDuplicate,
       valid: !duplicate,
-      fileName: probe?.fileName ?? null,
-      totalSize: probe?.totalSize ?? null,
-      contentType: probe?.contentType ?? null,
-      supportsResume: probe?.capabilities.supportsResume ?? false,
-      errorMessage: duplicate ? "Duplicate URL in this import." : null,
+      fileName: existingTask?.fileName ?? probe?.fileName ?? null,
+      totalSize: existingTask ? String(existingTask.totalSize) : (probe?.totalSize ?? null),
+      contentType: existingTask?.contentType ?? probe?.contentType ?? null,
+      supportsResume: existingTask?.supportsResume ?? probe?.capabilities.supportsResume ?? false,
+      errorMessage: duplicate
+        ? "Duplicate URL in this import."
+        : existingTask
+          ? `Task already exists: ${existingTask.fileName}`
+          : null,
       task: task as unknown as BatchImportResult["items"][number]["task"],
     });
   }
@@ -1011,6 +1035,16 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
     failedCount: items.filter((item) => !item.valid).length,
     duplicateCount: items.filter((item) => item.duplicate).length,
   };
+}
+
+function duplicateTaskForProbe(url: string, probe: ProbeTaskPayload): Task | null {
+  return (
+    tasks.find((task) => {
+      if (task.url === url || task.finalUrl === url) return true;
+      if (task.url === probe.finalUrl || task.finalUrl === probe.finalUrl) return true;
+      return probe.sourceKey.startsWith("bt:") && task.sourceKey === probe.sourceKey;
+    }) ?? null
+  );
 }
 
 export async function verifyTaskHash(id: string): Promise<HashVerificationState> {
@@ -1054,6 +1088,36 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
   const parsed = safeUrl(input.url);
   const protocol = parsed?.protocol.replace(":", "") || "http";
   const host = parsed?.host ?? "example.com";
+  const path = parsed?.pathname ?? "";
+  if ((protocol === "http" || protocol === "https") && /\.m3u8$/i.test(path)) {
+    const sourceName = fileNameFromRelativePath(path) || "playlist.m3u8";
+    const fileName = sourceName.replace(/\.m3u8$/i, ".mp4");
+    return {
+      inputUrl: input.url,
+      finalUrl: input.url,
+      fileName,
+      protocol: "hls",
+      taskKind: "manifest",
+      capabilities: {
+        supportsResume: true,
+        supportsParallel: true,
+        supportsMultiFile: false,
+      },
+      files: [
+        {
+          relativePath: fileName,
+          size: "0",
+          contentType: "video/mp4",
+        },
+      ],
+      totalSize: "0",
+      sourceKey: `${protocol}://${host}`,
+      contentType: "application/vnd.apple.mpegurl",
+      etag: null,
+      lastModified: null,
+      probedAt: nowIso(),
+    };
+  }
   return {
     inputUrl: input.url,
     finalUrl: input.url,
@@ -1124,6 +1188,17 @@ export async function resumeTask(id: string): Promise<Task> {
 export async function retryTask(id: string): Promise<Task> {
   logTaskEvent(id, "retrying");
   return resumeTask(id);
+}
+
+export async function finishLiveRecording(id: string): Promise<Task> {
+  const task = tasks.find((entry) => entry.id === id);
+  if (!task) throw new Error(`Task not found: ${id}`);
+  if (task.protocol !== "hls") throw new Error("Only HLS live recordings can be finished.");
+  const next = updateTask(id, {
+    healthSummary: "Finishing HLS recording",
+  });
+  logTaskEvent(id, "hls_finish_requested");
+  return next;
 }
 
 export async function resolveTaskAttention(input: ResolveTaskAttentionInput): Promise<Task> {

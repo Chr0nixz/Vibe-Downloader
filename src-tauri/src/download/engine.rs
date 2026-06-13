@@ -7,7 +7,7 @@ use std::{
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 
-use super::{BtEngine, FtpEngine, GlobalSpeedLimiter, HttpEngine};
+use super::{BtEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine};
 use crate::models::{EngineCapabilities, ProbedFile, TaskKind, TaskRecord};
 use crate::proxy::{ResolvedProxyConfig, SharedProxyConfig};
 
@@ -41,6 +41,7 @@ pub struct DownloadContext {
     pub pool: SqlitePool,
     pub task: TaskRecord,
     pub cancel: Arc<AtomicBool>,
+    pub finish: Arc<AtomicBool>,
     pub speed_limiter: Arc<GlobalSpeedLimiter>,
     pub connection_limit: usize,
     pub request_headers: Vec<(String, String)>,
@@ -73,6 +74,7 @@ impl EngineRegistry {
         Ok(Self {
             engines: vec![
                 bt_engine.clone(),
+                Arc::new(HlsEngine::new(proxy_config.clone())),
                 Arc::new(HttpEngine::with_proxy_config(proxy_config.clone())?),
                 Arc::new(FtpEngine::new(proxy_config.clone())),
             ],
@@ -91,6 +93,14 @@ impl EngineRegistry {
         let scheme = parsed.scheme();
         if scheme == "magnet" || scheme == "file" || is_torrent_url(&parsed) {
             return Ok(self.bt_engine.clone());
+        }
+        if is_hls_url(&parsed) {
+            return self
+                .engines
+                .iter()
+                .find(|engine| engine.id() == "hls")
+                .cloned()
+                .ok_or_else(|| "HLS engine is not available.".to_string());
         }
         self.engines
             .iter()
@@ -117,4 +127,12 @@ fn is_torrent_url(url: &reqwest::Url) -> bool {
             .path_segments()
             .and_then(|mut segments| segments.next_back())
             .is_some_and(|name| name.to_ascii_lowercase().ends_with(".torrent"))
+}
+
+fn is_hls_url(url: &reqwest::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".m3u8"))
 }

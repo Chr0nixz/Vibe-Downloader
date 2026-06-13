@@ -12,8 +12,8 @@ use crate::{
     events::{emit_queue_changed, emit_task_updated},
     logging::sanitize_url,
     models::{
-        task::now_iso, BatchImportItem, BatchImportResult, BrowserKind, HashVerificationStatus,
-        ProbeTaskPayload, Task, TaskRecord, TaskStatus,
+        task::now_iso, AppErrorPayload, BatchImportItem, BatchImportResult, BrowserKind,
+        HashVerificationStatus, ProbeTaskPayload, Task, TaskRecord, TaskStatus,
     },
     AppState,
 };
@@ -34,6 +34,7 @@ pub struct CreateTaskInput {
     pub expected_hash_sha256: Option<String>,
     pub probe_snapshot: Option<ProbeTaskPayload>,
     pub selected_file_paths: Option<Vec<String>>,
+    pub allow_duplicate: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -202,6 +203,59 @@ fn selected_total_size(
     )
 }
 
+fn storage_url_for_input(url: &str) -> String {
+    db::legacy_credentials_from_url(url)
+        .map(|credentials| credentials.sanitized_url)
+        .unwrap_or_else(|| url.to_string())
+}
+
+fn storage_url_for_probe(probe: &ProbeOutput) -> String {
+    db::legacy_credentials_from_url(&probe.resolved_uri)
+        .map(|credentials| credentials.sanitized_url)
+        .unwrap_or_else(|| probe.resolved_uri.clone())
+}
+
+fn duplicate_source_key_for_probe(probe: &ProbeOutput) -> Option<&str> {
+    probe
+        .source_key
+        .starts_with("bt:")
+        .then_some(probe.source_key.as_str())
+}
+
+async fn duplicate_task_for_probe(
+    state: &AppState,
+    storage_url: &str,
+    storage_final_url: &str,
+    probe: &ProbeOutput,
+) -> Result<Option<TaskRecord>, String> {
+    db::find_duplicate_task_record(
+        &state.pool,
+        storage_url,
+        Some(storage_final_url),
+        duplicate_source_key_for_probe(probe),
+    )
+    .await
+}
+
+fn duplicate_import_item(
+    raw_url: &str,
+    normalized_url: String,
+    task: &TaskRecord,
+) -> BatchImportItem {
+    BatchImportItem {
+        input_url: raw_url.to_string(),
+        normalized_url: Some(normalized_url),
+        duplicate: true,
+        valid: true,
+        file_name: Some(task.file_name.clone()),
+        total_size: Some(task.total_size.to_string()),
+        content_type: task.content_type.clone(),
+        supports_resume: task.supports_resume,
+        error_message: Some(format!("Task already exists: {}", task.file_name)),
+        task: None,
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn create_task(
@@ -293,6 +347,7 @@ pub async fn import_urls(
             });
             continue;
         }
+        let storage_url = storage_url_for_input(&normalized_url);
 
         let mut item = BatchImportItem {
             input_url: raw_url.to_string(),
@@ -322,10 +377,23 @@ pub async fn import_urls(
             };
             match probe_result {
                 Ok(probe) => {
-                    item.file_name = Some(probe.display_name);
+                    item.file_name = Some(probe.display_name.clone());
                     item.total_size = Some(probe.total_size.to_string());
-                    item.content_type = probe.content_type;
+                    item.content_type = probe.content_type.clone();
                     item.supports_resume = probe.capabilities.supports_resume;
+                    let storage_final_url = storage_url_for_probe(&probe);
+                    if let Some(duplicate) = duplicate_task_for_probe(
+                        state.inner(),
+                        &storage_url,
+                        &storage_final_url,
+                        &probe,
+                    )
+                    .await?
+                    {
+                        duplicate_count += 1;
+                        items.push(duplicate_import_item(raw_url, normalized_url, &duplicate));
+                        continue;
+                    }
                 }
                 Err(error) => {
                     item.valid = false;
@@ -335,6 +403,12 @@ pub async fn import_urls(
                     continue;
                 }
             }
+        } else if let Some(duplicate) =
+            db::find_duplicate_task_record(&state.pool, &storage_url, None, None).await?
+        {
+            duplicate_count += 1;
+            items.push(duplicate_import_item(raw_url, normalized_url, &duplicate));
+            continue;
         }
 
         if should_create {
@@ -348,6 +422,7 @@ pub async fn import_urls(
                     expected_hash_sha256: None,
                     probe_snapshot: None,
                     selected_file_paths: None,
+                    allow_duplicate: Some(false),
                 },
             )
             .await
@@ -394,9 +469,25 @@ pub(crate) async fn create_task_with_state_and_headers(
     if url.is_empty() {
         return Err("Enter a download URL.".to_string());
     }
+    let captured_credentials = db::legacy_credentials_from_url(url);
+    if captured_credentials.is_some() {
+        crate::secure_headers::ensure_secret_encryption_available()?;
+    }
 
     let probe =
         resolve_create_probe(state, url, input.probe_snapshot.as_ref(), &request_headers).await?;
+    let storage_url = captured_credentials
+        .as_ref()
+        .map(|credentials| credentials.sanitized_url.clone())
+        .unwrap_or_else(|| url.to_string());
+    let storage_final_url = storage_url_for_probe(&probe);
+    if !input.allow_duplicate.unwrap_or(false) {
+        if let Some(duplicate) =
+            duplicate_task_for_probe(state, &storage_url, &storage_final_url, &probe).await?
+        {
+            return Err(AppErrorPayload::duplicate_task(&duplicate.file_name).command_error());
+        }
+    }
     let settings = db::get_settings(
         &state.pool,
         super::super::settings::default_download_dir(&app)?,
@@ -438,7 +529,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         .to_string();
     let temp_path = PathBuf::from(format!("{}.vibe-downloading", final_path.display()));
     let now = now_iso();
-    let expected_hash_sha256 = if is_bt_protocol(&probe.protocol) {
+    let expected_hash_sha256 = if is_bt_protocol(&probe.protocol) || probe.protocol == "hls" {
         None
     } else {
         normalize_sha256(input.expected_hash_sha256.as_deref())?
@@ -451,8 +542,8 @@ pub(crate) async fn create_task_with_state_and_headers(
 
     let record = TaskRecord {
         id: Uuid::new_v4().to_string(),
-        url: url.to_string(),
-        final_url: Some(probe.resolved_uri.clone()),
+        url: storage_url,
+        final_url: Some(storage_final_url),
         protocol: probe.protocol.clone(),
         task_kind: probe.task_kind,
         file_name: file_name.clone(),
@@ -486,6 +577,16 @@ pub(crate) async fn create_task_with_state_and_headers(
     };
 
     db::insert_task_record(&state.pool, &record).await?;
+    if let Some(credentials) = captured_credentials {
+        db::upsert_task_credentials(
+            &state.pool,
+            &record.id,
+            &record.protocol,
+            &credentials.username,
+            &credentials.password,
+        )
+        .await?;
+    }
     db::insert_task_event(&state.pool, &record.id, "created", None).await?;
     for file_record in task_file_records_from_probe(
         &record,
@@ -651,6 +752,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn storage_url_for_input_strips_ftp_credentials() {
+        assert_eq!(
+            storage_url_for_input("ftp://alice:s3cret@example.com/file.bin"),
+            "ftp://example.com/file.bin"
+        );
+        assert_eq!(
+            storage_url_for_input("https://example.com/file.bin"),
+            "https://example.com/file.bin"
+        );
+    }
+
+    #[test]
+    fn duplicate_source_key_only_uses_bt_info_hashes() {
+        let bt = probe_output("bt", "bt:0123456789abcdef");
+        let http = probe_output("https", "example.com");
+        let ftp = probe_output("ftp", "ftp://example.com:21");
+
+        assert_eq!(
+            duplicate_source_key_for_probe(&bt),
+            Some("bt:0123456789abcdef")
+        );
+        assert_eq!(duplicate_source_key_for_probe(&http), None);
+        assert_eq!(duplicate_source_key_for_probe(&ftp), None);
+    }
+
     fn probe_snapshot(
         input_url: &str,
         probed_at: chrono::DateTime<chrono::Utc>,
@@ -677,6 +804,30 @@ mod tests {
             etag: Some("\"strong\"".to_string()),
             last_modified: Some("Tue, 02 Jan 2024 00:00:00 GMT".to_string()),
             probed_at: probed_at.to_rfc3339(),
+        }
+    }
+
+    fn probe_output(protocol: &str, source_key: &str) -> ProbeOutput {
+        ProbeOutput {
+            protocol: protocol.to_string(),
+            task_kind: TaskKind::SingleFile,
+            resolved_uri: "https://example.com/file.bin".to_string(),
+            display_name: "file.bin".to_string(),
+            total_size: 1024,
+            source_key: source_key.to_string(),
+            capabilities: EngineCapabilities {
+                supports_resume: true,
+                supports_parallel: true,
+                supports_multi_file: false,
+            },
+            files: vec![ProbedFile {
+                relative_path: "file.bin".to_string(),
+                size: "1024".to_string(),
+                content_type: Some("application/octet-stream".to_string()),
+            }],
+            etag: None,
+            last_modified: None,
+            content_type: Some("application/octet-stream".to_string()),
         }
     }
 }

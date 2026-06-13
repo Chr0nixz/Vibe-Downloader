@@ -31,7 +31,7 @@ import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 
 const log = createLogger("task-details");
 
-const SEGMENT_REFRESH_MS = 2500;
+const SEGMENT_REFRESH_MS = 10_000;
 
 interface TaskDetailsProps {
   task: Task | null;
@@ -1034,6 +1034,10 @@ function RequestList({
             <span>{t("taskDetails.requestRange")}</span>
             <span className="truncate text-right font-mono text-text-secondary">
               {request.rangeHeader ?? "-"}
+            </span>
+            <span>{t("taskDetails.requestIfRange")}</span>
+            <span className="truncate text-right font-mono text-text-secondary">
+              {request.ifRangeHeader ?? "-"}
             </span>
             <span>{t("taskDetails.requestLength")}</span>
             <span className="text-right font-mono text-text-secondary">

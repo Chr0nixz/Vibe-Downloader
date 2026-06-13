@@ -10,6 +10,7 @@ import {
   FileText,
   FileVideo,
   FolderOpen,
+  ListPlus,
   Pencil,
   X,
 } from "lucide-react";
@@ -31,7 +32,7 @@ import type {
   ProbedFile,
 } from "@/generated/bindings";
 import { createLogger } from "@/lib/logger";
-import { errorMessage } from "@/lib/errors";
+import { errorMessage, parseAppError } from "@/lib/errors";
 import {
   createTask,
   importUrls,
@@ -143,6 +144,7 @@ export function NewDownloadDialog({
   const [batchInput, setBatchInput] = useState("");
   const [batchResult, setBatchResult] = useState<BatchImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [duplicateOverrideAvailable, setDuplicateOverrideAvailable] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [selectedLocalFile, setSelectedLocalFile] = useState<SelectedLocalFile | null>(null);
@@ -153,8 +155,10 @@ export function NewDownloadDialog({
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
 
   const probeRequestId = useRef(0);
+  const batchInputRef = useRef<HTMLTextAreaElement | null>(null);
   const appliedInitialSourceId = useRef<string | undefined>(undefined);
   const isTorrentProbe = probe?.protocol === "bt" || probe?.protocol === "magnet";
+  const isHlsProbe = probe?.protocol === "hls";
   const isMultiFile = probe != null && probe.files.length > 1;
   const shouldShowTorrentProtocolHint =
     isTorrentProbe ||
@@ -175,6 +179,7 @@ export function NewDownloadDialog({
     if (!nextUrl) return;
     const requestId = ++probeRequestId.current;
     setProbing(true);
+    setDuplicateOverrideAvailable(false);
     if (!automatic) setError(null);
     setProbe(null);
     setProbeUrl("");
@@ -199,6 +204,7 @@ export function NewDownloadDialog({
   useEffect(() => {
     const nextUrl = url.trim();
     setSubmitStatus(null);
+    setDuplicateOverrideAvailable(false);
     if (!nextUrl) {
       setProbe(null);
       setProbeUrl("");
@@ -215,10 +221,19 @@ export function NewDownloadDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    await submitCurrent(false);
+  }
+
+  async function submitDuplicateOverride() {
+    await submitCurrent(true);
+  }
+
+  async function submitCurrent(allowDuplicate: boolean) {
     const currentUrl = url.trim();
     const currentProbe = probe && probeUrl === currentUrl ? probe : null;
     const currentIsTorrentProbe =
       currentProbe?.protocol === "bt" || currentProbe?.protocol === "magnet";
+    const currentIsHlsProbe = currentProbe?.protocol === "hls";
     const selectedFilePaths =
       currentProbe && currentIsTorrentProbe && currentProbe.files.length > 1
         ? Array.from(selectedFiles)
@@ -239,6 +254,7 @@ export function NewDownloadDialog({
 
     setSubmitting(true);
     setError(null);
+    setDuplicateOverrideAvailable(false);
     setSubmitStatus(
       currentProbe
         ? t("newDownload.usingProbe")
@@ -249,15 +265,19 @@ export function NewDownloadDialog({
         url: currentUrl,
         saveDir: saveDir.trim() || null,
         fileName: fileName.trim() || null,
-        expectedHashSha256: currentIsTorrentProbe ? null : expectedHashSha256.trim() || null,
+        expectedHashSha256:
+          currentIsTorrentProbe || currentIsHlsProbe ? null : expectedHashSha256.trim() || null,
         probeSnapshot: currentProbe,
         selectedFilePaths,
+        allowDuplicate,
       });
       onCreated(task);
       resetForm();
       onOpenChange(false);
     } catch (err) {
       log.error("create task failed", err);
+      const appError = parseAppError(err);
+      setDuplicateOverrideAvailable(appError?.code === "duplicate_task");
       setError(errorMessage(err));
     } finally {
       setSubmitting(false);
@@ -273,6 +293,7 @@ export function NewDownloadDialog({
     setProbe(null);
     setProbeUrl("");
     setBatchResult(null);
+    setDuplicateOverrideAvailable(false);
     setSubmitStatus(null);
     setAdvancedOpen(false);
     setSelectedLocalFile(null);
@@ -354,6 +375,11 @@ export function NewDownloadDialog({
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function openBatchImport() {
+    setAdvancedOpen(true);
+    window.setTimeout(() => batchInputRef.current?.focus(), 0);
   }
 
   useEffect(() => {
@@ -532,6 +558,19 @@ export function NewDownloadDialog({
             {/* ---- File selection card (from probe) ---- */}
             {probe ? (
               <div className="rounded-md border border-border-subtle bg-surface-raised/40 overflow-hidden">
+                <div className="flex items-center gap-2 border-b border-border-separator px-3 py-1.5 text-[11px] text-text-muted">
+                  <span className="rounded bg-surface-raised px-1.5 py-0.5 font-medium text-text-secondary">
+                    {probe.protocol === "bt" ? "BT" :
+                     probe.protocol === "magnet" ? "Magnet" :
+                     probe.protocol === "hls" ? "HLS" :
+                     probe.protocol === "ftp" ? "FTP" : "HTTP"}
+                  </span>
+                  {probe.capabilities.supportsResume ? (
+                    <span>{t("newDownload.probeResumable")}</span>
+                  ) : (
+                    <span>{t("newDownload.probeSingleConnection")}</span>
+                  )}
+                </div>
                 {/* === Multi-file mode === */}
                 {isMultiFile ? (
                   <>
@@ -660,11 +699,21 @@ export function NewDownloadDialog({
               />
               {t("newDownload.advancedOptions")}
             </button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 self-start px-2 text-xs"
+              onClick={openBatchImport}
+            >
+              <ListPlus className="h-4 w-4" />
+              {t("newDownload.batchImport")}
+            </Button>
 
             {/* Advanced section */}
             {advancedOpen ? (
               <div className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3">
-                {!isTorrentProbe ? (
+                {!isTorrentProbe && !isHlsProbe ? (
                   <label className="flex flex-col gap-1 text-xs text-text-muted">
                     {t("newDownload.sha256")}
                     <Input
@@ -682,6 +731,7 @@ export function NewDownloadDialog({
                     {t("newDownload.batchUrls")}
                   </span>
                   <textarea
+                    ref={batchInputRef}
                     value={batchInput}
                     onChange={(event) => setBatchInput(event.target.value)}
                     placeholder={t("newDownload.batchUrlsPlaceholder")}
@@ -727,9 +777,27 @@ export function NewDownloadDialog({
             {error ? (
               <div role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
                 <p>{error}</p>
-                <p className="mt-1 text-text-secondary">
-                  {t("newDownload.probeFailedHint")}
-                </p>
+                {duplicateOverrideAvailable ? (
+                  <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-text-secondary">
+                      {t("newDownload.duplicateHint")}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 shrink-0"
+                      disabled={submitting}
+                      onClick={() => void submitDuplicateOverride()}
+                    >
+                      {t("newDownload.createDuplicate")}
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="mt-1 text-text-secondary">
+                    {t("newDownload.probeFailedHint")}
+                  </p>
+                )}
               </div>
             ) : null}
           </DialogBody>

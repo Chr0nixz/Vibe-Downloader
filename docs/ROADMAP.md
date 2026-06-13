@@ -12,13 +12,13 @@ The app now includes a working HTTP/HTTPS desktop download manager, plus lower-m
 
 - Tauri 2 + React 19 + Rust shell for Windows/macOS/Linux.
 - HTTP probe, unknown-size single stream downloads, Range segmented downloads, resume validation, segment retry, global speed limit, per-host scheduling, and queue persistence.
-- FTP/FTPS task creation and downloads, with credential-bearing URLs accepted but still requiring a later encrypted task-credential migration before FTP credential safety can be considered complete.
-- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files. HTTP/HTTPS `.torrent` URLs are routed as BitTorrent tasks by default.
+- FTP/FTPS task creation and downloads, with credential-bearing URLs moved into encrypted task credentials and sanitized URLs persisted for task records, events, logs, and diagnostics.
+- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files. HTTP/HTTPS `.torrent` URLs are routed as BitTorrent tasks by default, selected-file tasks apply file selection before starting, and BitTorrent sessions inherit the global download speed limit.
 - SQLite persistence for tasks, files, work units, events, request diagnostics, settings, browser handoff messages, and hash verification state.
 - Task list search, filtering, sorting, multi-select, batch actions, command palette, task details, Chunks, Connections, Requests, Logs, toast notifications, recovery actions, and English/Simplified Chinese i18n.
 - Browser Native Messaging handoff plus local WebSocket bridge for HTTP/HTTPS URLs, with manifest install/uninstall diagnostics, dev/release extension identity support, popup live status, automatic browser download takeover, optional Cookie/header forwarding, request id de-duplication, and atomic handoff files.
 - Clipboard monitoring for supported manual links while the desktop app is running, including HTTP/HTTPS, FTP/FTPS, magnet, HTTP/HTTPS `.torrent`, and local `file://*.torrent`, with user confirmation through the New download flow.
-- Batch URL import preview/create flow and SHA-256 integrity verification.
+- Batch URL import preview/create flow, cross-task duplicate detection with explicit manual duplicate override, and SHA-256 integrity verification.
 
 ## Completed: P0/P1/P2/P3/P4 First Pass
 
@@ -28,13 +28,12 @@ The app now includes a working HTTP/HTTPS desktop download manager, plus lower-m
 - New download flow performs automatic probe and supports optional SHA-256 input.
 - Task events are written for lifecycle, resume checks, and hash verification.
 - Task list supports multi-select, batch actions, sorting, and filters by file type, source, failure reason, and resume capability.
-- Settings support friendly speed/size units, advanced download grouping, system notifications, tray behavior, close-to-tray, and autostart.
-- Settings include a clipboard monitoring toggle for the app-run-time link detector.
+- Settings support friendly speed/size units, advanced download grouping, system notifications, tray behavior, close-to-tray, autostart, clipboard monitoring, and optional startup auto-resume for interrupted tasks.
 
 ### P2
 
 - Request diagnostics are persisted in `task_requests` and exposed through paged task request commands.
-- Task details include a Requests tab with URL, method, status, Range, content length, ETag, duration, retry count, and errors.
+- Task details include a Requests tab with URL, method, status, Range, If-Range, content length, ETag, duration, retry count, and errors.
 - Segment runtime speed is persisted on `task_work_units.speed_bps`; Connections uses real per-segment speed instead of averaging task speed.
 - Segment cursor/page and summary commands are available through task detail APIs.
 - Resume validation distinguishes strong ETag, weak/missing validators, Last-Modified changes, Range support loss, and local temp/segment corruption, with diagnostic task events.
@@ -54,7 +53,7 @@ The app now includes a working HTTP/HTTPS desktop download manager, plus lower-m
 - SHA-256 can be supplied at task creation; completed files are verified automatically and can be rechecked manually.
 - Hash verification records expected hash, actual hash, status, error, and verification timestamp without deleting failed files.
 - HLS/m3u8 stream parsing, SFTP, cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols remain deferred. `.m3u8` URLs are treated as ordinary HTTP files.
-- BT and FTP/FTPS are integrated but still need deeper reliability, diagnostics, and credential hardening before they should be described as mature.
+- BT and FTP/FTPS are integrated but still need deeper reliability and diagnostics before they should be described as mature.
 
 ## Known Boundaries
 
@@ -62,7 +61,7 @@ The app now includes a working HTTP/HTTPS desktop download manager, plus lower-m
 - Browser store IDs are represented by release placeholders and must be replaced before store submission.
 - Browser capture still needs final store review copy and a full end-to-end permission review before public extension submission.
 - Browser handoff remains HTTP/HTTPS only; FTP/FTPS, magnet, and `.torrent` are manual/clipboard flows.
-- Task list uses backend cursor pagination plus frontend windowing for large histories; future work should benchmark production-scale databases on each target OS.
+- Task list uses backend cursor pagination plus frontend windowing for large histories; browser realtime snapshots send active tasks plus a bounded recent history, and the extension caps its live task cache. Future work should benchmark production-scale databases on each target OS.
 - BT/FTP hardening and any future HLS/SFTP/plugin protocol work should use mature engines/adapters when scheduled.
 
 ## Verification Baseline

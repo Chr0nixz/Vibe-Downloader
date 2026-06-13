@@ -24,6 +24,7 @@ pub struct UpdateSettingsInput {
     pub system_notifications: Option<bool>,
     pub close_to_tray: Option<bool>,
     pub start_on_boot: Option<bool>,
+    pub auto_resume_on_startup: Option<bool>,
     pub floating_window_enabled: Option<bool>,
     pub clipboard_monitor_enabled: Option<bool>,
     pub font_family: Option<AppFontFamily>,
@@ -82,6 +83,9 @@ pub async fn update_settings(
         .unwrap_or(current.system_notifications);
     let close_to_tray = input.close_to_tray.unwrap_or(current.close_to_tray);
     let start_on_boot = input.start_on_boot.unwrap_or(current.start_on_boot);
+    let auto_resume_on_startup = input
+        .auto_resume_on_startup
+        .unwrap_or(current.auto_resume_on_startup);
     let floating_window_enabled = input
         .floating_window_enabled
         .unwrap_or(current.floating_window_enabled);
@@ -149,6 +153,7 @@ pub async fn update_settings(
         system_notifications,
         close_to_tray,
         start_on_boot,
+        auto_resume_on_startup,
         floating_window_enabled,
         clipboard_monitor_enabled,
         font_family,

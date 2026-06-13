@@ -31,6 +31,7 @@ import {
   openTaskFile,
   openTaskFolder,
   openDirectoryPicker,
+  finishLiveRecording,
   pauseTask,
   resolveTaskAttention,
   retryTask,
@@ -215,6 +216,10 @@ export function AppShell() {
 
   const retry = useCallback((task: Task) => {
     void runTaskAction(() => retryTask(task.id), task.id);
+  }, [runTaskAction]);
+
+  const finishRecording = useCallback((task: Task) => {
+    void runTaskAction(() => finishLiveRecording(task.id), task.id);
   }, [runTaskAction]);
 
   const openFile = useCallback((task: Task) => {
@@ -599,6 +604,7 @@ export function AppShell() {
           <TaskList
             onToggleTransfer={toggleTransfer}
             onRetry={retry}
+            onFinishLiveRecording={finishRecording}
             onOpenFile={openFile}
             onOpenFolder={openFolder}
             onResolveAttention={resolveAttention}

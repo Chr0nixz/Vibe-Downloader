@@ -2,11 +2,13 @@ mod browser_messages;
 mod connection;
 mod events;
 mod hash;
+mod hls;
 mod request_diagnostics;
 mod request_headers;
 mod segment_planner;
 mod segments;
 mod settings;
+mod task_credentials;
 mod task_files;
 mod task_records;
 mod task_state;
@@ -18,6 +20,12 @@ pub use self::browser_messages::{
 pub use self::connection::{connect, DbConnection};
 pub use self::events::{insert_task_event, list_task_events_page};
 pub use self::hash::update_hash_verification;
+pub use self::hls::{
+    get_hls_task, hls_finish_requested, list_hls_segments, request_hls_finish,
+    reset_hls_segments_for_task, update_hls_last_media_sequence, update_hls_segment_status,
+    upsert_hls_segment, upsert_hls_task, HlsSegmentRecord, HlsSegmentUpsert, HlsTaskRecord,
+    HlsTaskUpsert,
+};
 pub use self::request_diagnostics::{insert_request_diagnostic, list_request_diagnostics_page};
 pub use self::request_headers::{
     clear_all_task_request_headers, clear_expired_task_request_headers,
@@ -43,13 +51,17 @@ pub use self::settings::{
     normalize_proxy_optional, normalize_proxy_url, normalize_speed_limit_bps,
     parse_multi_connection_threshold_bytes, parse_speed_limit_bps, upsert_settings,
 };
+pub use self::task_credentials::{
+    legacy_credentials_from_url, migrate_legacy_ftp_credentials, resolve_task_credentials,
+    upsert_task_credentials, TaskCredentials,
+};
 pub use self::task_files::{
     insert_task_file_record, list_task_file_records, list_task_file_records_for_tasks,
 };
 pub use self::task_records::{
-    get_task_record, insert_task_record, list_queued_task_records, list_task_records,
-    list_task_records_cursor, list_task_records_page, next_retry_after_at, task_filter_options,
-    TaskFilterOptions, TaskListPage, TaskListQuery,
+    find_duplicate_task_record, get_task_record, insert_task_record, list_queued_task_records,
+    list_task_records, list_task_records_cursor, list_task_records_page, next_retry_after_at,
+    task_filter_options, TaskFilterOptions, TaskListPage, TaskListQuery,
 };
 pub use self::task_state::{
     clear_tasks, complete_segment, complete_task, complete_task_segment,

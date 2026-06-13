@@ -1,4 +1,5 @@
 import {
+  ArrowUpDown,
   Check,
   Command,
   Gauge,
@@ -15,6 +16,13 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
@@ -23,7 +31,10 @@ import type { Platform } from "@/lib/platform";
 import { applyGlobalSpeedLimit } from "@/lib/settings";
 import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
-import { useTaskStore } from "@/stores/task-store";
+import {
+  useTaskStore,
+  type TaskSortKey,
+} from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 
@@ -52,6 +63,9 @@ export function CommandBar({
   const settings = useSettingsStore((s) => s.settings);
   const setSettings = useSettingsStore((s) => s.setSettings);
   const addToast = useToastStore((s) => s.addToast);
+  const sortKey = useTaskStore((s) => s.sortKey);
+  const sortDirection = useTaskStore((s) => s.sortDirection);
+  const setSort = useTaskStore((s) => s.setSort);
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
   const [customLimit, setCustomLimit] = useState("");
   const [savingSpeed, setSavingSpeed] = useState(false);
@@ -275,6 +289,33 @@ export function CommandBar({
             </div>
           ) : null}
         </div>
+      </div>
+
+      <div className="hidden shrink-0 items-center md:flex">
+        <Select
+          value={`${sortKey}:${sortDirection}`}
+          onValueChange={(value) => {
+            const [key, direction] = value.split(":") as [TaskSortKey, "asc" | "desc"];
+            setSort(key, direction);
+          }}
+        >
+          <SelectTrigger
+            aria-label={t("taskList.sort")}
+            title={t("taskList.sort")}
+            className="h-8 w-auto gap-1.5 px-2 text-xs font-medium text-text-muted"
+          >
+            <ArrowUpDown className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="updated_at:desc">{t("taskList.sortUpdatedDesc")}</SelectItem>
+            <SelectItem value="created_at:desc">{t("taskList.sortCreatedDesc")}</SelectItem>
+            <SelectItem value="file_size:desc">{t("taskList.sortSizeDesc")}</SelectItem>
+            <SelectItem value="progress:desc">{t("taskList.sortProgressDesc")}</SelectItem>
+            <SelectItem value="speed:desc">{t("taskList.sortSpeedDesc")}</SelectItem>
+            <SelectItem value="status:asc">{t("taskList.sortStatusAsc")}</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="relative min-w-0 flex-1">

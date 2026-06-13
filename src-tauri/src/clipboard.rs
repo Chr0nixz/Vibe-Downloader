@@ -6,16 +6,13 @@ use specta::Type;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use crate::{
-    db,
-    events::emit_clipboard_link_detected,
-    models::task::now_iso,
-    AppState,
-};
+use crate::{db, events::emit_clipboard_link_detected, models::task::now_iso, AppState};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const MAX_CLIPBOARD_TEXT_LEN: usize = 64 * 1024;
-const URL_PREFIXES: [&str; 6] = ["http://", "https://", "ftp://", "ftps://", "magnet:", "file://"];
+const URL_PREFIXES: [&str; 6] = [
+    "http://", "https://", "ftp://", "ftps://", "magnet:", "file://",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]

@@ -15,6 +15,7 @@ pub(in crate::download::http::segmented) struct RequestDiagnosticContext<'a> {
     pub(in crate::download::http::segmented) method: &'a str,
     pub(in crate::download::http::segmented) url: &'a str,
     pub(in crate::download::http::segmented) range_header: Option<String>,
+    pub(in crate::download::http::segmented) if_range_header: Option<String>,
     pub(in crate::download::http::segmented) retry_count: i32,
     pub(in crate::download::http::segmented) duration: Duration,
 }
@@ -29,6 +30,7 @@ pub(in crate::download::http::segmented) async fn persist_response_diagnostic(
         method,
         url,
         range_header,
+        if_range_header,
         retry_count,
         duration,
     } = context;
@@ -37,6 +39,7 @@ pub(in crate::download::http::segmented) async fn persist_response_diagnostic(
         method,
         url,
         range_header,
+        if_range_header,
         response,
         retry_count,
         duration,
@@ -56,6 +59,7 @@ pub(in crate::download::http::segmented) async fn persist_error_diagnostic(
         method,
         url,
         range_header,
+        if_range_header,
         retry_count,
         duration,
     } = context;
@@ -64,6 +68,7 @@ pub(in crate::download::http::segmented) async fn persist_error_diagnostic(
         method: method.to_string(),
         url: sanitize_url(url),
         range_header,
+        if_range_header,
         status_code: None,
         etag: None,
         last_modified: None,
@@ -77,11 +82,13 @@ pub(in crate::download::http::segmented) async fn persist_error_diagnostic(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::download::http::segmented) fn response_diagnostic_record(
     task_id: &str,
     method: &str,
     url: &str,
     range_header: Option<String>,
+    if_range_header: Option<String>,
     response: &reqwest::Response,
     retry_count: i32,
     duration: Duration,
@@ -92,6 +99,7 @@ pub(in crate::download::http::segmented) fn response_diagnostic_record(
         method: method.to_string(),
         url: sanitize_url(response.url().as_str()).if_empty(|| sanitize_url(url)),
         range_header,
+        if_range_header,
         status_code: Some(i32::from(response.status().as_u16())),
         etag: headers
             .get(ETAG)
@@ -111,11 +119,13 @@ pub(in crate::download::http::segmented) fn response_diagnostic_record(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::download::http::segmented) fn error_diagnostic_record(
     task_id: &str,
     method: &str,
     url: &str,
     range_header: Option<String>,
+    if_range_header: Option<String>,
     error_message: &str,
     retry_count: i32,
     duration: Duration,
@@ -125,6 +135,7 @@ pub(in crate::download::http::segmented) fn error_diagnostic_record(
         method: method.to_string(),
         url: sanitize_url(url),
         range_header,
+        if_range_header,
         status_code: None,
         etag: None,
         last_modified: None,
@@ -136,15 +147,13 @@ pub(in crate::download::http::segmented) fn error_diagnostic_record(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::download::http::segmented) struct ParsedContentRange {
-    pub(in crate::download::http::segmented) start: i64,
-    pub(in crate::download::http::segmented) end: i64,
-    pub(in crate::download::http::segmented) total: i64,
+pub(in crate::download::http) struct ParsedContentRange {
+    pub(in crate::download::http) start: i64,
+    pub(in crate::download::http) end: i64,
+    pub(in crate::download::http) total: i64,
 }
 
-pub(in crate::download::http::segmented) fn parse_content_range(
-    value: &str,
-) -> Option<ParsedContentRange> {
+pub(in crate::download::http) fn parse_content_range(value: &str) -> Option<ParsedContentRange> {
     let value = value.trim();
     let (unit, value) = value.split_once(' ')?;
     if !unit.eq_ignore_ascii_case("bytes") {
@@ -162,11 +171,16 @@ pub(in crate::download::http::segmented) fn parse_content_range(
 pub(in crate::download::http::segmented) fn if_range_header_value(
     task: &TaskRecord,
 ) -> Option<String> {
-    task.etag
-        .as_deref()
-        .filter(|etag| !is_weak_etag(etag))
+    if_range_header_from(task.etag.as_deref(), task.last_modified.as_deref())
+}
+
+pub(in crate::download::http) fn if_range_header_from(
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> Option<String> {
+    etag.filter(|etag| !is_weak_etag(etag))
         .map(str::to_string)
-        .or_else(|| task.last_modified.clone())
+        .or_else(|| last_modified.map(str::to_string))
 }
 
 fn is_weak_etag(value: &str) -> bool {
@@ -223,6 +237,25 @@ mod tests {
             if_range_header_value(&task).as_deref(),
             Some("Tue, 02 Jan 2024 00:00:00 GMT")
         );
+    }
+
+    #[test]
+    fn error_diagnostic_record_keeps_if_range_header() {
+        let record = error_diagnostic_record(
+            "task",
+            "GET",
+            "https://example.com/file.bin",
+            Some("bytes=10-99".to_string()),
+            Some("\"strong\"".to_string()),
+            "failed",
+            2,
+            Duration::from_millis(35),
+        );
+
+        assert_eq!(record.range_header.as_deref(), Some("bytes=10-99"));
+        assert_eq!(record.if_range_header.as_deref(), Some("\"strong\""));
+        assert_eq!(record.retry_count, 2);
+        assert_eq!(record.duration_ms, 35);
     }
 
     fn task_record_with_validators(etag: Option<&str>, last_modified: Option<&str>) -> TaskRecord {

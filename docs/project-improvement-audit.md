@@ -1,220 +1,135 @@
 # 项目改进审计
 
-最后更新：2026-06-08
+最后更新：2026-06-13
 
-本审计基于当前仓库代码、配置、测试和文档状态。它不替代 [docs/ROADMAP.md](ROADMAP.md)，而是按风险和用户影响列出需要继续处理的问题。
+本审计基于当前仓库代码、配置、测试和文档状态。它不替代 [ROADMAP.md](ROADMAP.md)，而是按风险和用户影响列出仍需处理的问题。
 
 ## 总体结论
 
-项目已经超过最早 HTTP MVP：后端下载核心、SQLite 持久化、分段续传、队列调度、设置、日志、浏览器 Native Messaging 基础、自动更新配置和 CI/CD 验证都已经落地。
+Vibe Downloader 已经超过最早 HTTP MVP：HTTP/HTTPS 下载核心、SQLite 持久化、分段续传、队列调度、设置、日志、浏览器 Native Messaging、WebSocket 实时桥、剪贴板监控、批量导入、命令面板和 CI 验证都已经落地。
 
-当前主要问题集中在四类：
+当前主要风险集中在四类：
 
-1. 用户操作入口还不完整：命令面板、限速快捷菜单、批量操作、排序筛选仍偏 MVP。
-2. 诊断深度不足：任务日志、请求详情、真实逐连接速度和错误时间线还没形成闭环。
-3. 浏览器集成仍是开发验证阶段：缺少商店 ID、签名、Safari wrapper、自动接管和发布安装引导。
-4. 大列表和高频进度性能仍需打磨：任务列表未虚拟化，详情页 segment 仍使用轮询。
+1. 发布前信任链路：README、路线图、审计和发布说明必须持续与代码一致。
+2. 非 HTTP 协议成熟度：FTP/FTPS 和 BitTorrent 已可用，但可靠性、诊断和恢复能力仍低于 HTTP/HTTPS。
+3. 发布级安全和分发：浏览器商店身份、扩展签名、Safari wrapper、权限文案、OS 代码签名和 updater 端到端演练仍未完成。
+4. 规模化性能：任务列表已分页和虚拟化，详情诊断已降频，但仍需要生产规模数据库和多任务压测。
 
 ## 已确认优势
 
 - HTTP probe 支持 HEAD 与 Range GET fallback，并识别文件名、大小、content type、Range 能力和来源 host。
 - 下载引擎支持未知大小单连接、Range 分段、分段 retry、断点续传校验和全局 token bucket 限速。
-- 完成文件不再覆盖同名已有文件，会自动选择可用文件名。
-- `seed_mock_tasks` 只在 debug 构建注册，生产 invoke handler 不包含该命令。
-- 设置项已包含默认保存目录、活跃任务上限、全局限速、多连接阈值、初始分段数和 per-host 最大连接数。
-- 队列调度已按 `max_active_tasks` 和 per-host 连接槽限制启动任务。
-- 结构化错误模型 `AppErrorPayload` 已存在，前端可解析恢复动作。
-- UI 已具备搜索、状态导航、行展开、详情抽屉、Chunks/Connections、toast、删除确认和基础恢复动作。
+- FTP 凭据会从 URL 中剥离并进入加密任务凭据存储；任务记录、诊断和日志只保留脱敏 URL。
+- BitTorrent 任务支持 magnet、HTTP/HTTPS `.torrent` URL 和本地 `file://*.torrent`，并继承全局下载限速。
+- UI 已具备搜索、状态导航、虚拟任务列表、多选批量操作、排序筛选、命令面板、详情抽屉、Chunks/Connections/Requests/Logs、toast、删除确认和基础恢复动作。
+- 浏览器集成已具备 Native Messaging、实时桥、manifest 安装诊断、下载接管、显式 Cookie/header 转发和 request id 去重。
 - CI 覆盖前端 typecheck/build、Rust check/clippy/test、Specta 绑定漂移和三平台 Tauri build。
 
 ## P0：发布前必须处理
 
-### 1. 命令面板只有开发命令
-
-当前 `Mod+K` 打开后，生产构建没有实际用户命令；开发构建主要是 mock reset。这会让高可见入口失去价值。
-
-建议：
-
-- 添加新建下载、暂停/继续、删除、重试、打开文件、打开目录、切换导航、打开设置。
-- 对无选中任务或状态不支持的动作禁用。
-- 生产构建完全隐藏 mock reset。
-
-### 2. 主界面限速入口未绑定行为
-
-顶部工具栏有速度限制按钮，但没有菜单或动作。真实限速只能在设置页用 B/s 输入。
-
-建议：
-
-- 接入快捷菜单：不限速、512 KB/s、1 MB/s、5 MB/s、10 MB/s、自定义。
-- 菜单值写入 `global_speed_limit_bps`。
-- 状态栏继续显示当前限速。
-
-### 3. 新建下载存在重复等待
-
-用户需要手动点击 Detect；提交时后端会再次 probe。对大文件或慢服务器会造成两次等待。
-
-建议：
-
-- URL 输入停止 500-800ms 后自动 probe。
-- 提交时复用最近一次有效 probe，或显示“正在重新验证资源”。
-- probe 失败时明确允许“仍然尝试下载”的条件和风险。
-
-### 4. 任务日志表没有业务闭环
-
-`task_events` 表已存在，但核心任务生命周期没有系统性写入，详情页也没有 Logs tab。
-
-建议：
-
-- 写入 task created/started/progress checkpoint/paused/resumed/retrying/failed/completed。
-- 写入 segment retry/fail 和 resume blocked。
-- 详情页增加 Logs tab，先展示生命周期、错误和重试记录。
-
-### 5. 发布链路需要一次端到端演练
+### 1. 发布链路端到端演练
 
 配置已经存在，但正式发布前仍需要实际验证。
-
-建议：
 
 - 用测试 tag 触发 Release workflow。
 - 确认 `latest.json`、`.sig`、安装包和版本号一致。
 - 验证打包应用能检查更新、安装并 relaunch。
 - 在 Windows/macOS 未配置代码签名前，发布说明明确 unsigned 风险。
 
+### 2. 浏览器扩展发布身份
+
+开发包和本地集成已经可用，但商店版仍缺少发布身份。
+
+- 替换 Chrome/Edge/Firefox release placeholder ID。
+- 完成正式扩展签名和权限文案。
+- 建立 Chrome/Edge/Firefox 的安装、接管、回退、卸载验证矩阵。
+- Safari wrapper 继续标记为未实现。
+
+### 3. 非 HTTP 协议可靠性
+
+FTP/FTPS 和 BT 已接入，但还不能按 HTTP 路径宣传为成熟。
+
+- 为 FTP/FTPS 增加匿名、带凭据、显式 FTPS、隐式 FTPS、代理失败、断点恢复测试。
+- 为 BT 增加限速、暂停、恢复、文件选择和元数据超时测试。
+- 统一协议错误分类和恢复动作，减少裸字符串错误。
+
 ## P1：核心体验完善
 
-### 1. 批量任务管理缺失
+### 1. 重复任务防护
 
-当前主要围绕单选任务操作，不适合大量下载任务。
+已增加跨已有任务的重复判断：手动新建、批量导入和浏览器交接共享后端判重策略，按脱敏 URL、final URL 和 BT info hash 防止误建重复任务。
 
-建议：
+- 手动新建遇到重复任务时会提示，并允许用户明确选择“仍然创建副本”。
+- 批量导入会把已有任务计入 duplicate，而不是 failed。
+- 后续仍可补充浏览器 request id 与剪贴板来源的更细粒度提示文案。
 
-- 多选任务。
-- 批量暂停、继续、删除、重试。
-- 批量打开目录可以先只对首个任务执行，避免同时打开大量窗口。
+### 2. 设置和新建任务继续降噪
 
-### 2. 排序和筛选不足
+设置页已经自动保存并支持友好单位；连续调整时成功反馈收敛到页内保存状态，不再产生连续成功 toast。
 
-已有搜索和状态导航，但缺少常用下载管理维度。
+- 保持合并保存节流，避免连续 toast。
+- 新建下载继续强化批量入口和错误文案。
+- 对 FTP 凭据安全存储不可用时提供明确重试或重新创建提示。
 
-建议：
+### 3. 启动恢复策略
 
-- 排序：创建时间、更新时间、文件大小、进度、速度、状态。
-- 筛选：来源域名、文件类型、失败原因、是否支持续传。
+设置页已增加“启动后续传中断任务”开关。默认继续保守关闭；开启后，启动时会把上次关闭时处于 downloading/retrying 的任务重新排队。
 
-### 3. 设置输入对普通用户不友好
-
-全局限速和多连接阈值仍使用原始 B/s 和字节值。
-
-建议：
-
-- 支持 KB/s、MB/s、GB/s。
-- 支持 MB、GB 阈值输入。
-- 高级项增加折叠分组，保留准确值但不强迫普通用户理解字节单位。
-
-### 4. 错误恢复动作覆盖仍不完整
-
-结构化错误模型已经存在，但后端并非所有失败都返回结构化 payload，前端也不是所有恢复动作都有完整交互。
-
-建议：
-
-- 将 remote changed、resume unavailable、temp file missing、disk write failed、HTTP 403/404/429 都稳定映射为 `AppErrorPayload`。
-- 对 `choose_another_folder`、`choose_another_name`、`restart` 提供完整确认路径。
-- 对 `retry_later` 明确是立即重新排队还是延迟调度。
+- 重新排队后仍走现有续传校验，不绕过本地临时文件与远端元数据检查。
+- 手动暂停的任务不会被自动恢复。
+- 后续可补充启动恢复摘要和失败原因统计。
 
 ## P2：可靠性和诊断
 
-### 1. Connections tab 的速度不是逐连接真实值
+### 1. 重试策略集中化
 
-当前连接详情用任务总速度按活跃 segment 平均分配。这对诊断慢连接、服务器限流、磁盘瓶颈价值有限。
+HTTP、FTP、分段 worker 和 BT 当前各有重试/超时策略。
 
-建议：
+- 建立共享 retry policy 和错误分类。
+- 记录 retry-after、退避原因、最终失败阶段。
+- 在 UI 诊断中展示协议、阶段、重试次数和下一步建议。
 
-- 后端维护 segment/connection 级实时速度。
-- `list_task_segments` 或新接口返回真实速度、最近错误、首包/重试信息。
-- UI 明确区分 segment 和 live connection。
+### 2. 数据库迁移规范
 
-### 2. 详情页缺少请求信息
+项目已从单一初始 schema 进入增量迁移阶段。
 
-用户无法在 UI 中看到最终 URL、响应状态、Range/Content-Range 和关键响应头。
+- 后续只新增 additive migration，不重写历史 migration。
+- 复杂迁移必须有旧数据升级测试。
+- 发布前准备备份、失败提示和恢复文档。
 
-建议：
+### 3. 端到端覆盖
 
-- 增加 Request tab。
-- 默认隐藏敏感 URL query 和 header。
-- 提供复制诊断摘要，而不是直接展示所有原始 header。
+Rust 单元/集成测试较强，前端和桌面/浏览器 E2E 仍偏弱。
 
-### 3. Native Messaging handoff 文件写入可更稳
-
-native host 目前直接写 request id JSON 文件，再启动主程序读取。
-
-建议：
-
-- 先写临时文件，完成后 rename。
-- request id 文件使用 create-new 避免覆盖。
-- 主程序读取失败也记录 `browser_messages` 诊断。
-- 定期清理过期 handoff 文件。
-
-### 4. 启动恢复策略偏保守
-
-启动时 downloading/retrying 会重置为 paused，不会自动恢复。
-
-建议：
-
-- 设置页增加“启动后自动恢复未完成任务”开关。
-- 默认可继续保守关闭。
-- 自动恢复前仍执行本地临时文件与远端元数据校验。
+- 补设置页、新建下载、命令面板、详情诊断的组件或集成测试。
+- 补 Native Messaging、WebSocket bridge、单实例转发和剪贴板捕获的端到端验证。
+- 保留发布前手动验证清单，直到自动化覆盖足够。
 
 ## P3：性能
 
-### 1. 任务列表未虚拟化
+### 1. 详情诊断推送化
 
-目标体验是 1000+ 历史任务仍可流畅浏览，但当前直接渲染过滤后的任务列表。
+详情页诊断轮询已降频，但本质仍是定时拉取。
 
-建议：
+- 优先用事件更新摘要。
+- 仅在 tab 可见时拉取分页数据。
+- 对大 segment/request 历史保留分页，避免一次返回过多。
 
-- 引入虚拟列表。
-- 活跃任务可置顶或单独小集合渲染。
-- 非活跃任务减少 tooltip、动画和 sparkline 成本。
+### 2. 浏览器实时桥规模化
 
-### 2. 活跃任务期间仍有完整列表刷新
+实时桥初始同步已限制为活跃任务加最近历史，扩展侧 live task map 已设置最大容量并优先保留活跃任务；WebSocket pending request 也会在响应、超时或断线时清理，但仍需要压测。
 
-前端接收 `task.progress` 和 `task.updated`，同时 `queue.changed` 会触发完整列表刷新。虽然已有 100ms debounce 和 merge，仍可能增加 DB/invoke/渲染压力。
+- 用 1k、10k 历史任务测试扩展启动速度。
+- 如果仍慢，增加专用 active/recent 查询而不是从完整列表过滤。
+- 继续观察 popup 打开耗时和长时间运行后的内存占用。
 
-建议：
+### 3. 构建体积审计
 
-- 活跃任务主要由事件更新。
-- 任务完成、失败、队列变化时刷新完整列表。
-- 兜底刷新降到 2-5 秒并保留 merge 防回退。
+目前只维护 English 和 简体中文，其他语言资源暂不暴露。
 
-### 3. 详情页 segment 轮询
-
-Chunks/Connections 打开时对活跃任务每 2.5 秒拉取 segment。
-
-建议：
-
-- 后端按详情订阅推送 segment 摘要。
-- 或先做分页/摘要接口，避免一次返回大量 segment。
-
-## P4：浏览器集成产品化
-
-### 当前已支持
-
-- 右键链接发送 URL。
-- 选中文本中的 URL 发送。
-- popup 发送当前 tab URL。
-- Native Messaging host 接收、校验、写 handoff 文件、启动/转发 app。
-- Settings 页面安装/卸载 native host manifest。
-
-### 当前未支持
-
-- 自动接管浏览器下载。
-- Cookie/header 转发。
-- 站点规则。
-- 商店扩展 ID 和签名。
-- Safari 生产 wrapper。
-- 扩展内实时任务状态面板。
-
-建议先完成 Chrome/Edge/Firefox 的端到端开发验证矩阵，再做发布身份和安装引导。
+- 跑 `pnpm build` 后记录前端 bundle 体积。
+- 检查字体、图标、语言资源和扩展包输出大小。
+- 对非必要资源做懒加载或移出默认包。
 
 ## 建议验证命令
 
@@ -222,6 +137,7 @@ Chunks/Connections 打开时对活跃任务每 2.5 秒拉取 segment。
 
 ```bash
 pnpm typecheck
+pnpm test:frontend
 pnpm build
 pnpm check:bindings
 pnpm test:rust
@@ -240,3 +156,8 @@ pnpm build:extensions
 ```bash
 pnpm tauri build --config src-tauri/tauri.ci.conf.json
 ```
+# Protocol hardening update
+
+2026-06-13: FTP/FTPS credential-bearing URLs are sanitized into task records and
+encrypted task credentials; BitTorrent selected-file tasks apply file selection
+before start; HTTP request diagnostics now include If-Range for resume analysis.

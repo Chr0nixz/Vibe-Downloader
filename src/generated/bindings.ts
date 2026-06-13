@@ -83,6 +83,7 @@ export const commands = {
 	pauseTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("pause_task", { id })),
 	resumeTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("resume_task", { id })),
 	retryTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("retry_task", { id })),
+	finishLiveRecording: (id: string) => typedError<Task, string>(__TAURI_INVOKE("finish_live_recording", { id })),
 	resolveTaskAttention: (input: ResolveTaskAttentionInput) => typedError<Task, string>(__TAURI_INVOKE("resolve_task_attention", { input })),
 	cancelTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("cancel_task", { id })),
 	deleteTask: (id: string, deleteFile: boolean) => typedError<null, string>(__TAURI_INVOKE("delete_task", { id, deleteFile })),
@@ -115,6 +116,7 @@ export type AppSettings = {
 	systemNotifications: boolean,
 	closeToTray: boolean,
 	startOnBoot: boolean,
+	autoResumeOnStartup: boolean,
 	floatingWindowEnabled: boolean,
 	clipboardMonitorEnabled: boolean,
 	fontFamily: AppFontFamily,
@@ -270,6 +272,7 @@ export type CreateTaskInput = {
 	expectedHashSha256: string | null,
 	probeSnapshot: ProbeTaskPayload | null,
 	selectedFilePaths: string[] | null,
+	allowDuplicate: boolean | null,
 };
 
 export type CursorPageInput = {
@@ -382,6 +385,7 @@ export type RequestDiagnostic = {
 	method: string,
 	url: string,
 	rangeHeader: string | null,
+	ifRangeHeader: string | null,
 	statusCode: number | null,
 	etag: string | null,
 	lastModified: string | null,
@@ -461,7 +465,7 @@ export type TaskEventsPageResult = {
 	nextCursor: string | null,
 };
 
-export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "other";
+export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "hls" | "other";
 
 export type TaskFile = {
 	id: string,
@@ -549,6 +553,7 @@ export type UpdateSettingsInput = {
 	systemNotifications: boolean | null,
 	closeToTray: boolean | null,
 	startOnBoot: boolean | null,
+	autoResumeOnStartup: boolean | null,
 	floatingWindowEnabled: boolean | null,
 	clipboardMonitorEnabled: boolean | null,
 	fontFamily: AppFontFamily | null,

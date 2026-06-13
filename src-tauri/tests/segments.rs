@@ -107,6 +107,7 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         system_notifications: true,
         close_to_tray: false,
         start_on_boot: false,
+        auto_resume_on_startup: false,
         floating_window_enabled: false,
         clipboard_monitor_enabled: true,
         font_family: AppFontFamily::SourceHanSansSc,
@@ -156,6 +157,7 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
         system_notifications: true,
         close_to_tray: false,
         start_on_boot: false,
+        auto_resume_on_startup: false,
         floating_window_enabled: false,
         clipboard_monitor_enabled: true,
         font_family: AppFontFamily::SourceHanSansSc,
@@ -313,6 +315,7 @@ async fn settings_defaults_use_download_dir_and_two_active_tasks() {
     assert!(!settings.floating_window_enabled);
     assert_eq!(settings.font_family, AppFontFamily::SourceHanSansSc);
     assert!(settings.clipboard_monitor_enabled);
+    assert!(!settings.auto_resume_on_startup);
     assert_eq!(settings.proxy_mode, tauri_app_lib::proxy::AppProxyMode::Off);
     assert!(settings.proxy_url.is_empty());
     assert!(settings.proxy_no_proxy.is_empty());
@@ -335,6 +338,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
             system_notifications: true,
             close_to_tray: false,
             start_on_boot: false,
+            auto_resume_on_startup: true,
             floating_window_enabled: false,
             clipboard_monitor_enabled: true,
             font_family: AppFontFamily::System,
@@ -372,6 +376,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
             system_notifications: false,
             close_to_tray: true,
             start_on_boot: true,
+            auto_resume_on_startup: false,
             floating_window_enabled: true,
             clipboard_monitor_enabled: false,
             font_family: AppFontFamily::SourceHanSansSc,
@@ -639,7 +644,7 @@ async fn reset_interrupted_tasks_pauses_active_records() {
             .expect("insert task");
     }
 
-    db::reset_interrupted_tasks(&pool)
+    db::reset_interrupted_tasks(&pool, false)
         .await
         .expect("reset interrupted");
 
@@ -666,6 +671,52 @@ async fn reset_interrupted_tasks_pauses_active_records() {
             .expect("task")
             .status,
         TaskStatus::Queued
+    );
+}
+
+#[tokio::test]
+async fn reset_interrupted_tasks_can_queue_active_records_for_startup_resume() {
+    let pool = test_pool("reset-interrupted-auto-resume").await;
+    let mut downloading = sample_task("task-downloading", 100);
+    downloading.status = TaskStatus::Downloading;
+    let mut retrying = sample_task("task-retrying", 100);
+    retrying.status = TaskStatus::Retrying;
+    let mut paused = sample_task("task-paused", 100);
+    paused.status = TaskStatus::Paused;
+
+    for task in [&downloading, &retrying, &paused] {
+        db::insert_task_record(&pool, task)
+            .await
+            .expect("insert task");
+    }
+
+    db::reset_interrupted_tasks(&pool, true)
+        .await
+        .expect("reset interrupted");
+
+    assert_eq!(
+        db::get_task_record(&pool, "task-downloading")
+            .await
+            .expect("load")
+            .expect("task")
+            .status,
+        TaskStatus::Queued
+    );
+    assert_eq!(
+        db::get_task_record(&pool, "task-retrying")
+            .await
+            .expect("load")
+            .expect("task")
+            .status,
+        TaskStatus::Queued
+    );
+    assert_eq!(
+        db::get_task_record(&pool, "task-paused")
+            .await
+            .expect("load")
+            .expect("task")
+            .status,
+        TaskStatus::Paused
     );
 }
 

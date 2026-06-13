@@ -52,6 +52,8 @@ pub struct DirectDownloadRequest {
     pub total_size: i64,
     pub supports_resume: bool,
     pub supports_parallel: bool,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +65,8 @@ pub struct DirectSegmentedDownloadRequest {
     pub supports_resume: bool,
     pub supports_parallel: bool,
     pub segments: Vec<TaskSegmentRecord>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,9 +122,14 @@ impl HttpEngine {
             );
         }
 
-        let response =
-            send_get_with_retry(&client, url, Some("bytes=0-0".to_string()), request_headers)
-                .await?;
+        let response = send_get_with_retry(
+            &client,
+            url,
+            Some("bytes=0-0".to_string()),
+            None,
+            request_headers,
+        )
+        .await?;
 
         if !response.status().is_success() {
             return Err(format_http_status(response.status()));
@@ -187,7 +196,7 @@ impl HttpEngine {
     }
 }
 
-fn build_client(config: &ResolvedProxyConfig) -> Result<Client, String> {
+pub(crate) fn build_client(config: &ResolvedProxyConfig) -> Result<Client, String> {
     let mut builder = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .user_agent("VibeDownloader/0.1");

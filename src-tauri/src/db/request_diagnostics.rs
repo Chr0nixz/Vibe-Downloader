@@ -10,15 +10,16 @@ pub async fn insert_request_diagnostic(
     sqlx::query(
         r#"
         INSERT INTO task_requests (
-            task_id, method, url, range_header, status_code, etag, last_modified,
+            task_id, method, url, range_header, if_range_header, status_code, etag, last_modified,
             content_length, error_message, retry_count, duration_ms, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&record.task_id)
     .bind(&record.method)
     .bind(&record.url)
     .bind(&record.range_header)
+    .bind(&record.if_range_header)
     .bind(record.status_code)
     .bind(&record.etag)
     .bind(&record.last_modified)
@@ -43,7 +44,7 @@ pub async fn list_request_diagnostics_page(
     let limit = limit.clamp(1, 500);
     let rows = sqlx::query(
         r#"
-        SELECT id, task_id, method, url, range_header, status_code, etag, last_modified,
+        SELECT id, task_id, method, url, range_header, if_range_header, status_code, etag, last_modified,
                content_length, error_message, retry_count, duration_ms, created_at
         FROM task_requests
         WHERE task_id = ? AND (? IS NULL OR id < ?)
@@ -67,6 +68,7 @@ pub async fn list_request_diagnostics_page(
             method: row.get("method"),
             url: row.get("url"),
             range_header: row.get("range_header"),
+            if_range_header: row.get("if_range_header"),
             status_code: row.get("status_code"),
             etag: row.get("etag"),
             last_modified: row.get("last_modified"),

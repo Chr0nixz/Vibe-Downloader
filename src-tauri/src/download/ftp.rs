@@ -54,6 +54,7 @@ const FTP_DYNAMIC_INTERVAL: Duration = Duration::from_secs(5);
 const FTP_MIN_SPLIT_REMAINING: i64 = 16 * 1024 * 1024;
 const FTP_WORKER_RETRIES: i32 = 2;
 const FTP_READ_BUFFER_SIZE: usize = 64 * 1024;
+const FTP_PROGRESS_INTERVAL: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone)]
 pub struct FtpEngine {
@@ -62,7 +63,6 @@ pub struct FtpEngine {
 
 #[derive(Debug, Clone)]
 struct FtpTarget {
-    original_uri: String,
     sanitized_uri: String,
     protocol: String,
     mode: FtpSecurityMode,
@@ -159,7 +159,7 @@ impl FtpEngine {
         Ok(ProbeOutput {
             protocol: target.protocol.clone(),
             task_kind: TaskKind::SingleFile,
-            resolved_uri: target.original_uri,
+            resolved_uri: target.sanitized_uri,
             display_name: target.file_name.clone(),
             total_size,
             source_key: target.source_key,
@@ -180,13 +180,19 @@ impl FtpEngine {
     }
 
     async fn run_download(&self, context: DownloadContext) -> Result<(), String> {
-        let target = FtpTarget::parse(
+        let mut target = FtpTarget::parse(
             context
                 .task
                 .final_url
                 .as_deref()
                 .unwrap_or(&context.task.url),
         )?;
+        if let Some(credentials) =
+            db::resolve_task_credentials(&context.pool, &context.task.id).await?
+        {
+            target.username = credentials.username;
+            target.password = credentials.password;
+        }
         let proxy_config = self.proxy_config.read().await.clone();
         run_ftp_download(target, context, proxy_config).await
     }
@@ -230,6 +236,7 @@ async fn run_ftp_download(
         pool,
         task,
         cancel,
+        finish: _,
         speed_limiter,
         connection_limit,
         request_headers: _,
@@ -599,7 +606,7 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
             .map_err(|e| format!("Could not write to the temporary file: {e}"))?;
         offset += i64::try_from(read).unwrap_or(0);
 
-        if last_emit.elapsed() >= Duration::from_millis(500) {
+        if last_emit.elapsed() >= FTP_PROGRESS_INTERVAL {
             let elapsed = last_emit.elapsed().as_secs_f64().max(0.001);
             let speed = ((offset - last_emit_bytes) as f64 / elapsed) as i64;
             let _ = request.progress_tx.send(WorkerProgress {
@@ -691,6 +698,7 @@ async fn persist_ftp_diagnostic(
         method: "FTP RETR".to_string(),
         url: sanitize_url(url),
         range_header,
+        if_range_header: None,
         status_code: if error.is_some() { None } else { Some(226) },
         etag: None,
         last_modified: None,
@@ -1191,7 +1199,6 @@ impl FtpTarget {
         let source_key = format!("{protocol}://{host}:{port}");
 
         Ok(Self {
-            original_uri: parsed.to_string(),
             sanitized_uri: sanitize_url(parsed.as_str()),
             protocol,
             mode,

@@ -267,6 +267,7 @@ pub struct RequestDiagnostic {
     pub method: String,
     pub url: String,
     pub range_header: Option<String>,
+    pub if_range_header: Option<String>,
     pub status_code: Option<i32>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
@@ -283,6 +284,7 @@ pub struct RequestDiagnosticRecord {
     pub method: String,
     pub url: String,
     pub range_header: Option<String>,
+    pub if_range_header: Option<String>,
     pub status_code: Option<i32>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
@@ -592,6 +594,7 @@ pub struct AppSettings {
     pub system_notifications: bool,
     pub close_to_tray: bool,
     pub start_on_boot: bool,
+    pub auto_resume_on_startup: bool,
     pub floating_window_enabled: bool,
     pub clipboard_monitor_enabled: bool,
     pub font_family: AppFontFamily,
@@ -634,6 +637,7 @@ pub enum TaskFailureCategory {
     DiskWrite,
     Http,
     Auth,
+    Hls,
     Other,
 }
 
@@ -646,6 +650,7 @@ pub fn failure_category_for_code(code: Option<&str>) -> Option<TaskFailureCatego
         }
         "disk_write_failed" => Some(TaskFailureCategory::DiskWrite),
         "auth_headers_expired" | "auth_headers_unavailable" => Some(TaskFailureCategory::Auth),
+        value if value.starts_with("hls_") => Some(TaskFailureCategory::Hls),
         value if value.starts_with("http_") || value == "server_rate_limited" => {
             Some(TaskFailureCategory::Http)
         }
@@ -713,6 +718,15 @@ impl AppErrorPayload {
             ),
             true,
             vec!["choose_another_name", "choose_another_folder", "retry"],
+        )
+    }
+
+    pub fn duplicate_task(file_name: &str) -> Self {
+        Self::new(
+            "duplicate_task",
+            format!("A task for this download already exists: {file_name}"),
+            true,
+            Vec::new(),
         )
     }
 

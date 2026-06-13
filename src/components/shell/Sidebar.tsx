@@ -71,13 +71,14 @@ export function Sidebar() {
                 aria-current={active ? "page" : undefined}
                 aria-label={label}
                 className={cn(
-                  "relative h-12 min-w-11 flex-1 justify-center gap-2.5 px-0 text-sm md:h-10 md:w-full md:flex-none md:justify-start lg:h-9 lg:px-3",
+                  "relative h-12 min-w-11 flex-1 justify-center gap-2.5 px-0 text-sm md:h-10 md:w-full md:flex-none md:flex-col md:gap-0.5 lg:h-9 lg:flex-row lg:px-3",
                   active
                     ? "bg-accent-primary/12 font-semibold text-accent-primary shadow-[inset_0_-3px_0_var(--accent-primary)] md:shadow-[inset_3px_0_0_var(--accent-primary)]"
                     : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
                 )}
               >
                 <Icon className="mx-auto h-[18px] w-[18px] shrink-0 lg:mx-0" aria-hidden />
+                <span className="hidden text-[10px] leading-tight md:inline lg:hidden">{label}</span>
                 <span className="hidden lg:inline">{label}</span>
                 {showBadge ? (
                   <span

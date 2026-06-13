@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use reqwest::{
-    header::{HeaderName, HeaderValue, ACCEPT_ENCODING, RANGE, RETRY_AFTER},
+    header::{HeaderName, HeaderValue, ACCEPT_ENCODING, IF_RANGE, RANGE, RETRY_AFTER},
     Client, RequestBuilder, Response, StatusCode,
 };
 
@@ -31,6 +31,7 @@ pub(super) async fn send_get_with_retry(
     client: &Client,
     url: &str,
     range: Option<String>,
+    if_range: Option<&str>,
     headers: &[(String, String)],
 ) -> Result<Response, String> {
     let mut last_error = None;
@@ -39,6 +40,9 @@ pub(super) async fn send_get_with_retry(
             apply_forwarded_headers(client.get(url), headers).header(ACCEPT_ENCODING, "identity");
         if let Some(range) = range.as_deref() {
             request = request.header(RANGE, range);
+            if let Some(if_range) = if_range {
+                request = request.header(IF_RANGE, if_range);
+            }
         }
         match request.send().await {
             Ok(response) => return Ok(response),

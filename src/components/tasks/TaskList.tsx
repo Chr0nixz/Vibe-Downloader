@@ -2,7 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useReducedMotion } from "framer-motion";
-import { ChevronDown, Plus, Search, SlidersHorizontal } from "lucide-react";
+import { ChevronDown, Plus, Search, SlidersHorizontal, X } from "lucide-react";
 
 const SettingsPage = lazy(() =>
   import("@/components/settings/SettingsPage").then((m) => ({
@@ -24,7 +24,6 @@ import {
   useTaskStore,
   type FileTypeFilter,
   type ResumeFilter,
-  type TaskSortKey,
 } from "@/stores/task-store";
 import { readShellLayout } from "@/hooks/use-shell-layout";
 import { listTasksCursor } from "@/lib/tauri";
@@ -35,6 +34,7 @@ import type { RecoveryAction } from "@/generated/bindings";
 export function TaskList({
   onToggleTransfer,
   onRetry,
+  onFinishLiveRecording,
   onOpenFile,
   onOpenFolder,
   onResolveAttention,
@@ -46,6 +46,7 @@ export function TaskList({
 }: {
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
+  onFinishLiveRecording: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
@@ -58,6 +59,8 @@ export function TaskList({
   const { t } = useTranslation();
   const reduceMotion = !!useReducedMotion();
   const [toolPanelOpen, setToolPanelOpen] = useState(false);
+  const [statusAnnouncement, setStatusAnnouncement] = useState("");
+  const prevTaskStatusesRef = useRef<Record<string, string>>({});
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const loadingPageRef = useRef(false);
   const initialLoadDoneRef = useRef(false);
@@ -77,7 +80,6 @@ export function TaskList({
   const setSelectedIds = useTaskStore((s) => s.setSelectedIds);
   const setTaskSelected = useTaskStore((s) => s.setTaskSelected);
   const clearSelectedIds = useTaskStore((s) => s.clearSelectedIds);
-  const setSort = useTaskStore((s) => s.setSort);
   const setFilters = useTaskStore((s) => s.setFilters);
   const setDetailOpen = useTaskStore((s) => s.setDetailOpen);
   const setTaskCursorPage = useTaskStore((s) => s.setTaskCursorPage);
@@ -98,6 +100,27 @@ export function TaskList({
   const filtered = tasks;
   const filteredRef = useRef(filtered);
   filteredRef.current = filtered;
+
+  // Announce task status changes for screen readers
+  useEffect(() => {
+    const prev = prevTaskStatusesRef.current;
+    for (const task of tasks) {
+      if (prev[task.id] && prev[task.id] !== task.status) {
+        setStatusAnnouncement(
+          t("taskList.statusChanged", {
+            name: task.fileName,
+            status: t(`task.status.${task.status}`),
+          }),
+        );
+        break;
+      }
+    }
+    const next: Record<string, string> = {};
+    for (const task of tasks) {
+      next[task.id] = task.status;
+    }
+    prevTaskStatusesRef.current = next;
+  }, [tasks, t]);
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
   const loadPage = useCallback(async (cursor: string | null, append = false) => {
@@ -284,6 +307,130 @@ export function TaskList({
         </div>
       ) : null}
 
+      {/* Screen reader status announcements */}
+      <div
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {statusAnnouncement}
+      </div>
+
+      {/* Selection bar — contextual, appears when rows are multi-selected */}
+      {selectedIds.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-border-accent-subtle bg-accent-primary/[0.04] px-3 py-1.5 text-xs md:gap-2">
+          <span className="font-medium text-text-secondary">
+            {t("taskList.selectedCount", { count: selectedIds.length })}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => setSelectedIds(filtered.map((task) => task.id))}
+            disabled={allVisibleSelected}
+          >
+            {t("taskList.selectVisible", { count: filtered.length })}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={clearSelectedIds}
+          >
+            <X className="mr-1 h-3 w-3" aria-hidden />
+            {t("taskList.clearSelection")}
+          </Button>
+          <div className="mx-1 h-4 w-px bg-border-subtle" aria-hidden />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7"
+            onClick={() => onBulkPause(selectedTasks)}
+          >
+            {t("taskList.bulkPause")}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7"
+            onClick={() => onBulkResume(selectedTasks)}
+          >
+            {t("taskList.bulkResume")}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7"
+            onClick={() => onBulkRetry(selectedTasks)}
+          >
+            {t("taskList.bulkRetry")}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7"
+            onClick={() => onBulkOpenFolder(selectedTasks)}
+          >
+            {t("taskList.bulkOpenFolder")}
+          </Button>
+          <Button
+            type="button"
+            variant="danger"
+            size="sm"
+            className="h-7"
+            onClick={() => onBulkDelete(selectedTasks)}
+          >
+            {t("taskList.bulkDelete", { count: selectedTasks.length })}
+          </Button>
+        </div>
+      ) : null}
+
+      {/* Active filter chips */}
+      {activeFilterCount > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-border-subtle px-3 py-1.5">
+          <FilterChip
+            active={filters.fileType !== "all"}
+            label={t("taskList.fileType")}
+            value={filters.fileType !== "all" ? t(`taskList.fileType${filters.fileType.charAt(0).toUpperCase() + filters.fileType.slice(1)}`) : ""}
+            onClear={() => setFilters({ fileType: "all" })}
+          />
+          <FilterChip
+            active={filters.source !== "all"}
+            label={t("taskList.source")}
+            value={filters.source !== "all" ? filters.source : ""}
+            onClear={() => setFilters({ source: "all" })}
+          />
+          <FilterChip
+            active={filters.failure !== "all"}
+            label={t("taskList.failure")}
+            value={filters.failure !== "all" ? t(`taskList.failure_${filters.failure}`, { defaultValue: filters.failure }) : ""}
+            onClear={() => setFilters({ failure: "all" })}
+          />
+          <FilterChip
+            active={filters.resume !== "all"}
+            label={t("taskList.resume")}
+            value={filters.resume !== "all" ? t(`taskList.${filters.resume === "resumable" ? "resumable" : "singleConnection"}`) : ""}
+            onClear={() => setFilters({ resume: "all" })}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-6 px-1.5 text-[10px] text-text-muted"
+            onClick={() => setFilters({ fileType: "all", source: "all", failure: "all", resume: "all" })}
+          >
+            {t("taskList.clearAllFilters")}
+          </Button>
+        </div>
+      ) : null}
+
       <div className="border-b border-border-subtle bg-surface-base/70 px-3 py-2 text-xs">
         <Button
           type="button"
@@ -302,7 +449,7 @@ export function TaskList({
           <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
           {!toolPanelOpen && activeFilterCount > 0 ? (
             <span
-              className="flex h-4 min-w-4 items-center justify-center rounded-full bg-accent-primary px-1 text-[10px] font-bold leading-none text-white"
+              className="flex h-4 min-w-4 items-center justify-center rounded-full bg-accent-primary px-1 text-[10px] font-bold leading-none text-text-on-accent"
               aria-hidden="true"
             >
               {activeFilterCount}
@@ -319,139 +466,53 @@ export function TaskList({
         {toolPanelOpen ? (
           <div
             id="task-list-tool-panel"
-            className="mt-2 flex flex-col gap-2 md:flex-row md:items-center md:justify-between"
+            className="mt-2 flex flex-wrap items-center gap-2"
           >
-            <div className="flex flex-wrap items-center gap-2">
-              <label className="flex h-11 items-center gap-2 rounded-md border border-border-subtle px-2 text-text-secondary md:h-8">
-                <input
-                  type="checkbox"
-                  checked={allVisibleSelected}
-                  disabled={filtered.length === 0}
-                  onChange={(event) => {
-                    if (event.target.checked) {
-                      setSelectedIds(filtered.map((task) => task.id));
-                    } else {
-                      clearSelectedIds();
-                    }
-                  }}
-                  className="h-5 w-5 accent-accent-primary md:h-4 md:w-4"
-                />
-                {t("taskList.selectVisible", { count: filtered.length })}
-              </label>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-11 md:h-8"
-                disabled={selectedTasks.length === 0}
-                onClick={() => onBulkPause(selectedTasks)}
-              >
-                {t("taskList.bulkPause")}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-11 md:h-8"
-                disabled={selectedTasks.length === 0}
-                onClick={() => onBulkResume(selectedTasks)}
-              >
-                {t("taskList.bulkResume")}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-11 md:h-8"
-                disabled={selectedTasks.length === 0}
-                onClick={() => onBulkRetry(selectedTasks)}
-              >
-                {t("taskList.bulkRetry")}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-11 md:h-8"
-                disabled={selectedTasks.length === 0}
-                onClick={() => onBulkOpenFolder(selectedTasks)}
-              >
-                {t("taskList.bulkOpenFolder")}
-              </Button>
-              <Button
-                type="button"
-                variant="danger"
-                size="sm"
-                className="h-11 md:h-8"
-                disabled={selectedTasks.length === 0}
-                onClick={() => onBulkDelete(selectedTasks)}
-              >
-                {t("taskList.bulkDelete", { count: selectedTasks.length })}
-              </Button>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <SelectControl
-                label={t("taskList.sort")}
-                value={`${sortKey}:${sortDirection}`}
-                onChange={(value) => {
-                  const [key, direction] = value.split(":") as [TaskSortKey, "asc" | "desc"];
-                  setSort(key, direction);
-                }}
-                options={[
-                  ["updated_at:desc", t("taskList.sortUpdatedDesc")],
-                  ["created_at:desc", t("taskList.sortCreatedDesc")],
-                  ["file_size:desc", t("taskList.sortSizeDesc")],
-                  ["progress:desc", t("taskList.sortProgressDesc")],
-                  ["speed:desc", t("taskList.sortSpeedDesc")],
-                  ["status:asc", t("taskList.sortStatusAsc")],
-                ]}
-              />
-              <SelectControl
-                label={t("taskList.fileType")}
-                value={filters.fileType}
-                onChange={(value) => setFilters({ fileType: value as FileTypeFilter })}
-                options={[
-                  ["all", t("taskList.allFileTypes")],
-                  ["archive", t("taskList.fileTypeArchive")],
-                  ["image", t("taskList.fileTypeImage")],
-                  ["video", t("taskList.fileTypeVideo")],
-                  ["document", t("taskList.fileTypeDocument")],
-                  ["app", t("taskList.fileTypeApp")],
-                  ["other", t("taskList.fileTypeOther")],
-                ]}
-              />
-              <SelectControl
-                label={t("taskList.source")}
-                value={filters.source}
-                onChange={(value) => setFilters({ source: value })}
-                options={[
-                  ["all", t("taskList.allSources")],
-                  ...sourceOptions.map((source) => [source, source] as const),
-                ]}
-              />
-              <SelectControl
-                label={t("taskList.failure")}
-                value={filters.failure}
-                onChange={(value) => setFilters({ failure: value })}
-                options={[
-                  ["all", t("taskList.allFailures")],
-                  ...failureOptions.map((failure) => [
-                    failure,
-                    t(`taskList.failure_${failure}`, { defaultValue: failure }),
-                  ] as const),
-                ]}
-              />
-              <SelectControl
-                label={t("taskList.resume")}
-                value={filters.resume}
-                onChange={(value) => setFilters({ resume: value as ResumeFilter })}
-                options={[
-                  ["all", t("taskList.allResume")],
-                  ["resumable", t("taskList.resumable")],
-                  ["single_connection", t("taskList.singleConnection")],
-                ]}
-              />
-            </div>
+            <SelectControl
+              label={t("taskList.fileType")}
+              value={filters.fileType}
+              onChange={(value) => setFilters({ fileType: value as FileTypeFilter })}
+              options={[
+                ["all", t("taskList.allFileTypes")],
+                ["archive", t("taskList.fileTypeArchive")],
+                ["image", t("taskList.fileTypeImage")],
+                ["video", t("taskList.fileTypeVideo")],
+                ["document", t("taskList.fileTypeDocument")],
+                ["app", t("taskList.fileTypeApp")],
+                ["other", t("taskList.fileTypeOther")],
+              ]}
+            />
+            <SelectControl
+              label={t("taskList.source")}
+              value={filters.source}
+              onChange={(value) => setFilters({ source: value })}
+              options={[
+                ["all", t("taskList.allSources")],
+                ...sourceOptions.map((source) => [source, source] as const),
+              ]}
+            />
+            <SelectControl
+              label={t("taskList.failure")}
+              value={filters.failure}
+              onChange={(value) => setFilters({ failure: value })}
+              options={[
+                ["all", t("taskList.allFailures")],
+                ...failureOptions.map((failure) => [
+                  failure,
+                  t(`taskList.failure_${failure}`, { defaultValue: failure }),
+                ] as const),
+              ]}
+            />
+            <SelectControl
+              label={t("taskList.resume")}
+              value={filters.resume}
+              onChange={(value) => setFilters({ resume: value as ResumeFilter })}
+              options={[
+                ["all", t("taskList.allResume")],
+                ["resumable", t("taskList.resumable")],
+                ["single_connection", t("taskList.singleConnection")],
+              ]}
+            />
           </div>
         ) : null}
       </div>
@@ -512,12 +573,13 @@ export function TaskList({
                       isFirstFocusable={!selectedId && virtualRow.index === 0}
                       reduceMotion={reduceMotion}
                       position={virtualRow.index + 1}
-                      setSize={total}
+                      setSize={filtered.length}
                       onSelectTask={selectAndFocus}
                       onToggleSelected={setTaskSelected}
                       onNavigate={navigateRow}
                       onToggleTransfer={onToggleTransfer}
                       onRetry={onRetry}
+                      onFinishLiveRecording={onFinishLiveRecording}
                       onOpenFile={onOpenFile}
                       onOpenFolder={onOpenFolder}
                       onResolveAttention={onResolveAttention}
@@ -614,5 +676,36 @@ function SelectControl({
         </SelectContent>
       </Select>
     </label>
+  );
+}
+
+function FilterChip({
+  active,
+  label,
+  value,
+  onClear,
+}: {
+  active: boolean;
+  label: string;
+  value: string;
+  onClear: () => void;
+}) {
+  if (!active) return null;
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border border-border-accent-subtle bg-accent-primary/[0.04] px-2 py-0.5 text-[11px] font-medium text-text-secondary">
+      <span className="text-text-muted">{label}:</span>
+      {value}
+      <button
+        type="button"
+        className="ml-0.5 -mr-0.5 inline-flex min-h-6 min-w-6 items-center justify-center rounded-full text-text-muted transition-colors hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:outline-none"
+        aria-label={`${label}: ${value}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onClear();
+        }}
+      >
+        <X className="h-3 w-3" aria-hidden />
+      </button>
+    </span>
   );
 }

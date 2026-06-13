@@ -314,7 +314,25 @@ async fn handle_client_message(app: &AppHandle, raw: &str) -> String {
 async fn current_tasks(app: &AppHandle) -> Result<Vec<Task>, String> {
     let state = app.state::<AppState>();
     let records = db::list_task_records(&state.pool).await?;
-    Ok(records.into_iter().map(Task::from).collect())
+    let mut active = Vec::new();
+    let mut recent = Vec::new();
+    for record in records {
+        if matches!(
+            record.status,
+            crate::models::TaskStatus::Downloading
+                | crate::models::TaskStatus::Retrying
+                | crate::models::TaskStatus::Queued
+                | crate::models::TaskStatus::Paused
+                | crate::models::TaskStatus::WaitingNetwork
+                | crate::models::TaskStatus::NeedsAttention
+        ) {
+            active.push(record);
+        } else if recent.len() < 50 {
+            recent.push(record);
+        }
+    }
+    active.extend(recent);
+    Ok(active.into_iter().map(Task::from).collect())
 }
 
 async fn send_json(

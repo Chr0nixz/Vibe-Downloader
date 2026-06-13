@@ -45,6 +45,13 @@ impl GlobalSpeedLimiter {
         }
     }
 
+    pub fn current_limit_bps(&self) -> Option<i64> {
+        match self.limit_bps.load(Ordering::SeqCst) {
+            value if value > 0 => Some(value),
+            _ => None,
+        }
+    }
+
     pub async fn throttle(&self, bytes: usize) {
         let mut remaining = bytes;
         while remaining > 0 {

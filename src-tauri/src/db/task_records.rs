@@ -328,7 +328,8 @@ fn failure_category_filter_sql(category: &str) -> Option<&'static str> {
         "disk_write" => Some("error_code = 'disk_write_failed'"),
         "http" => Some("(error_code LIKE 'http_%' OR error_code = 'server_rate_limited')"),
         "auth" => Some("error_code IN ('auth_headers_expired', 'auth_headers_unavailable')"),
-        "other" => Some("(error_code IS NOT NULL AND error_code NOT IN ('remote_changed', 'resume_unavailable', 'temp_file_missing', 'temp_file_smaller_than_progress', 'disk_write_failed', 'auth_headers_expired', 'auth_headers_unavailable', 'server_rate_limited') AND error_code NOT LIKE 'http_%')"),
+        "hls" => Some("error_code LIKE 'hls_%'"),
+        "other" => Some("(error_code IS NOT NULL AND error_code NOT IN ('remote_changed', 'resume_unavailable', 'temp_file_missing', 'temp_file_smaller_than_progress', 'disk_write_failed', 'auth_headers_expired', 'auth_headers_unavailable', 'server_rate_limited') AND error_code NOT LIKE 'http_%' AND error_code NOT LIKE 'hls_%')"),
         _ => None,
     }
 }
@@ -346,6 +347,54 @@ pub async fn get_task_record(pool: &SqlitePool, id: &str) -> Result<Option<TaskR
         "#,
     )
     .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    row.as_ref().map(row_to_task).transpose()
+}
+
+pub async fn find_duplicate_task_record(
+    pool: &SqlitePool,
+    url: &str,
+    final_url: Option<&str>,
+    bt_source_key: Option<&str>,
+) -> Result<Option<TaskRecord>, String> {
+    let final_url = final_url.unwrap_or("");
+    let bt_source_key = bt_source_key.unwrap_or("");
+    let row = sqlx::query(
+        r#"
+        SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
+               total_size, downloaded_bytes, status, etag, last_modified, content_type,
+               supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               health_summary, error_message, error_code, recovery_actions, retry_after_at,
+               expected_hash_sha256, actual_hash_sha256,
+               hash_status, hash_error, hash_verified_at, created_at, updated_at
+        FROM tasks
+        WHERE url IN (?, ?)
+           OR final_url IN (?, ?)
+           OR (? != '' AND source_key = ?)
+        ORDER BY
+            CASE status
+                WHEN 'downloading' THEN 0
+                WHEN 'retrying' THEN 1
+                WHEN 'queued' THEN 2
+                WHEN 'paused' THEN 3
+                WHEN 'waiting_network' THEN 4
+                WHEN 'needs_attention' THEN 5
+                WHEN 'failed' THEN 6
+                ELSE 7
+            END,
+            updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(url)
+    .bind(final_url)
+    .bind(url)
+    .bind(final_url)
+    .bind(bt_source_key)
+    .bind(bt_source_key)
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -628,6 +677,7 @@ pub async fn task_filter_options(pool: &SqlitePool) -> Result<TaskFilterOptions,
             crate::models::TaskFailureCategory::DiskWrite => "disk_write",
             crate::models::TaskFailureCategory::Http => "http",
             crate::models::TaskFailureCategory::Auth => "auth",
+            crate::models::TaskFailureCategory::Hls => "hls",
             crate::models::TaskFailureCategory::Other => "other",
         })
         .map(str::to_string)

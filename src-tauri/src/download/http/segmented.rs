@@ -18,7 +18,7 @@ use tokio::{
     task::JoinSet,
 };
 
-mod diagnostics;
+pub(super) mod diagnostics;
 mod worker;
 
 use self::diagnostics::{
@@ -107,7 +107,7 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
     }
 
     let started_at = Instant::now();
-    let mut response = match send_get_with_retry(client, &url, None, &request_headers).await {
+    let mut response = match send_get_with_retry(client, &url, None, None, &request_headers).await {
         Ok(response) => {
             persist_response_diagnostic(
                 RequestDiagnosticContext {
@@ -116,6 +116,7 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
                     method: "GET",
                     url: &url,
                     range_header: None,
+                    if_range_header: None,
                     retry_count: 0,
                     duration: started_at.elapsed(),
                 },
@@ -132,6 +133,7 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
                     method: "GET",
                     url: &url,
                     range_header: None,
+                    if_range_header: None,
                     retry_count: 0,
                     duration: started_at.elapsed(),
                 },

@@ -451,6 +451,16 @@ export async function retryTask(id: string): Promise<Task> {
   return normalizeTask(await runCommand("retryTask", () => commands.retryTask(id)));
 }
 
+export async function finishLiveRecording(id: string): Promise<Task> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).finishLiveRecording(id);
+  }
+  const commands = await loadNativeCommands();
+  return normalizeTask(
+    await runCommand("finishLiveRecording", () => commands.finishLiveRecording(id)),
+  );
+}
+
 export async function resolveTaskAttention(input: ResolveTaskAttentionInput): Promise<Task> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).resolveTaskAttention(input);

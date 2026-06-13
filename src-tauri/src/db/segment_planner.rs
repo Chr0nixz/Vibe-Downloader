@@ -21,6 +21,9 @@ pub fn planned_segment_count_with_plan(
     if is_bt_protocol(&task.protocol) {
         return 1;
     }
+    if is_hls_protocol(&task.protocol) {
+        return segment_count.clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT) as usize;
+    }
 
     let segment_count = segment_count.clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT) as usize;
     let segment_count = if is_ftp_protocol(&task.protocol) {
@@ -53,6 +56,10 @@ pub fn planned_segments_for_task_with_plan(
 ) -> Vec<TaskSegmentRecord> {
     if is_bt_protocol(&task.protocol) {
         return vec![single_segment_for_task(task, "bt_piece")];
+    }
+
+    if is_hls_protocol(&task.protocol) {
+        return vec![single_segment_for_task(task, "hls_segment")];
     }
 
     if is_ftp_protocol(&task.protocol) {
@@ -112,6 +119,10 @@ fn is_ftp_protocol(protocol: &str) -> bool {
 
 fn is_bt_protocol(protocol: &str) -> bool {
     matches!(protocol, "bt" | "magnet")
+}
+
+fn is_hls_protocol(protocol: &str) -> bool {
+    protocol == "hls"
 }
 
 fn single_segment_for_task(task: &TaskRecord, unit_kind: &str) -> TaskSegmentRecord {

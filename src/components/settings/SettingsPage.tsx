@@ -60,7 +60,7 @@ const log = createLogger("settings");
 import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
 
-const AUTO_SAVE_DELAY_MS = 650;
+const AUTO_SAVE_DELAY_MS = 1000;
 const MAX_SEGMENT_COUNT = 8;
 const MAX_CONNECTIONS_PER_HOST = 16;
 
@@ -95,6 +95,7 @@ export function SettingsPage() {
   const [systemNotifications, setSystemNotifications] = useState(true);
   const [closeToTray, setCloseToTray] = useState(false);
   const [startOnBoot, setStartOnBoot] = useState(false);
+  const [autoResumeOnStartup, setAutoResumeOnStartup] = useState(false);
   const [floatingWindowEnabled, setFloatingWindowEnabled] = useState(false);
   const [clipboardMonitorEnabled, setClipboardMonitorEnabled] = useState(true);
   const [fontFamily, setFontFamily] = useState<AppFontFamily>("source_han_sans_sc");
@@ -120,7 +121,7 @@ export function SettingsPage() {
     browserStatus?.experimentalCaptureEnabled ?? false;
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveVersion = useRef(0);
-  const currentLocale = (["zh-CN", "zh-TW", "ja", "ko", "ru", "es", "en"].includes(i18n.language)
+  const currentLocale = (["zh-CN", "en"].includes(i18n.language)
     ? (i18n.language as Locale)
     : "en") as Locale;
   const controlsDisabled = loading;
@@ -136,6 +137,7 @@ export function SettingsPage() {
     setSystemNotifications(settings.systemNotifications);
     setCloseToTray(settings.closeToTray);
     setStartOnBoot(settings.startOnBoot);
+    setAutoResumeOnStartup(settings.autoResumeOnStartup);
     setFloatingWindowEnabled(settings.floatingWindowEnabled);
     setClipboardMonitorEnabled(settings.clipboardMonitorEnabled);
     setFontFamily(settings.fontFamily);
@@ -162,6 +164,7 @@ export function SettingsPage() {
       systemNotifications === settings.systemNotifications &&
       closeToTray === settings.closeToTray &&
       startOnBoot === settings.startOnBoot &&
+      autoResumeOnStartup === settings.autoResumeOnStartup &&
       floatingWindowEnabled === settings.floatingWindowEnabled &&
       clipboardMonitorEnabled === settings.clipboardMonitorEnabled &&
       fontFamily === settings.fontFamily &&
@@ -189,6 +192,7 @@ export function SettingsPage() {
         systemNotifications,
         closeToTray,
         startOnBoot,
+        autoResumeOnStartup,
         floatingWindowEnabled,
         clipboardMonitorEnabled,
         fontFamily,
@@ -216,6 +220,7 @@ export function SettingsPage() {
     systemNotifications,
     closeToTray,
     startOnBoot,
+    autoResumeOnStartup,
     floatingWindowEnabled,
     clipboardMonitorEnabled,
     fontFamily,
@@ -264,6 +269,7 @@ export function SettingsPage() {
         systemNotifications: nextSettings.systemNotifications,
         closeToTray: nextSettings.closeToTray,
         startOnBoot: nextSettings.startOnBoot,
+        autoResumeOnStartup: nextSettings.autoResumeOnStartup,
         floatingWindowEnabled: nextSettings.floatingWindowEnabled,
         clipboardMonitorEnabled: nextSettings.clipboardMonitorEnabled,
         fontFamily: nextSettings.fontFamily,
@@ -284,10 +290,6 @@ export function SettingsPage() {
         setProxyPasswordSaved(next.proxyPasswordSaved);
         setClearProxyPassword(false);
         setSaveState("saved");
-        addToast({
-          tone: "success",
-          title: t("toast.settingsSaved"),
-        });
       }
     } catch (err) {
       if (version === saveVersion.current) {
@@ -753,11 +755,6 @@ export function SettingsPage() {
                   <SelectContent>
                     <SelectItem value="en">{t("locale.en")}</SelectItem>
                     <SelectItem value="zh-CN">{t("locale.zhCN")}</SelectItem>
-                    <SelectItem value="zh-TW">{t("locale.zhTW")}</SelectItem>
-                    <SelectItem value="ja">{t("locale.ja")}</SelectItem>
-                    <SelectItem value="ko">{t("locale.ko")}</SelectItem>
-                    <SelectItem value="ru">{t("locale.ru")}</SelectItem>
-                    <SelectItem value="es">{t("locale.es")}</SelectItem>
                   </SelectContent>
                 </Select>
               </SettingsRow>
@@ -845,6 +842,13 @@ export function SettingsPage() {
                 checked={startOnBoot}
                 disabled={controlsDisabled}
                 onChange={setStartOnBoot}
+              />
+              <SettingsToggle
+                title={t("settings.autoResumeOnStartup")}
+                description={t("settings.autoResumeOnStartupDescription")}
+                checked={autoResumeOnStartup}
+                disabled={controlsDisabled}
+                onChange={setAutoResumeOnStartup}
               />
               <SettingsToggle
                 title={t("settings.floatingWindow")}

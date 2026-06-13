@@ -166,6 +166,8 @@ async fn direct_download_writes_final_file() {
                 supports_resume: true,
 
                 supports_parallel: true,
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -193,6 +195,8 @@ async fn direct_unknown_size_download_writes_final_file() {
                 supports_resume: false,
 
                 supports_parallel: false,
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -221,6 +225,8 @@ async fn direct_download_renames_when_final_path_exists() {
                 supports_resume: true,
 
                 supports_parallel: true,
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -258,6 +264,8 @@ async fn direct_download_can_resume_from_temp_file() {
             supports_resume: true,
 
             supports_parallel: true,
+            etag: None,
+            last_modified: None,
         };
         async move { engine.download_direct(request, first_cancel).await }
     });
@@ -279,6 +287,8 @@ async fn direct_download_can_resume_from_temp_file() {
                 supports_resume: true,
 
                 supports_parallel: true,
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -308,6 +318,8 @@ async fn direct_download_respects_speed_limiter() {
                 supports_resume: true,
 
                 supports_parallel: true,
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
             Arc::new(GlobalSpeedLimiter::new(Some(32 * 1024))),
@@ -339,6 +351,8 @@ async fn direct_resume_fails_when_range_is_unavailable() {
                 supports_resume: false,
 
                 supports_parallel: false,
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -349,6 +363,65 @@ async fn direct_resume_fails_when_range_is_unavailable() {
         error,
         "Resume unavailable. Restart this download from the beginning."
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_resume_sends_if_range_and_validates_content_range() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("direct-if-range");
+    fs::write(&paths.temp, &SAMPLE[..5]).expect("write temp");
+
+    engine
+        .download_direct(
+            DirectDownloadRequest {
+                url: format!("{}/requires-if-range", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: SAMPLE.len() as i64,
+                supports_resume: true,
+                supports_parallel: true,
+                etag: Some("\"strong\"".to_string()),
+                last_modified: None,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("resume with If-Range");
+
+    assert_eq!(fs::read(&paths.final_path).expect("read final"), SAMPLE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_resume_fails_on_mismatched_content_range() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("direct-bad-content-range");
+    let payload = large_payload();
+    fs::write(&paths.temp, &payload[..1024]).expect("write temp");
+
+    let error = engine
+        .download_direct(
+            DirectDownloadRequest {
+                url: format!("{}/bad-content-range", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: payload.len() as i64,
+                supports_resume: true,
+                supports_parallel: true,
+                etag: None,
+                last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect_err("mismatched direct Content-Range should fail");
+
+    assert_eq!(
+        error,
+        "Resume unavailable. The server returned a mismatched Content-Range."
+    );
+    assert!(!paths.final_path.exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -370,6 +443,8 @@ async fn segmented_direct_download_writes_all_ranges_to_one_file() {
 
                 supports_parallel: true,
                 segments,
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -402,6 +477,8 @@ async fn segmented_direct_retries_transient_segment_failures() {
 
                 supports_parallel: true,
                 segments: direct_segments("segmented-retry", payload.len() as i64),
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -436,6 +513,8 @@ async fn segmented_direct_resume_skips_completed_ranges() {
 
                 supports_parallel: true,
                 segments,
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -464,6 +543,8 @@ async fn segmented_direct_failure_does_not_rename_temp_file() {
 
                 supports_parallel: true,
                 segments: direct_segments("segmented-failure", payload.len() as i64),
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -493,6 +574,8 @@ async fn segmented_direct_fails_on_mismatched_content_range() {
 
                 supports_parallel: true,
                 segments: direct_segments("segmented-bad-content-range", payload.len() as i64),
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -524,6 +607,8 @@ async fn segmented_direct_fails_when_range_is_not_honored() {
 
                 supports_parallel: true,
                 segments: direct_segments("segmented-range-ignored", payload.len() as i64),
+                etag: None,
+                last_modified: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -624,6 +709,9 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or("/");
     let byte_range = request.lines().find_map(parse_range);
+    let if_range = request
+        .lines()
+        .find_map(|line| parse_header(line, "if-range"));
     let accept_encoding_identity = request.lines().any(|line| {
         line.split_once(':').is_some_and(|(name, value)| {
             name.eq_ignore_ascii_case("accept-encoding")
@@ -653,6 +741,20 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
             byte_range,
             true,
             "sample.bin",
+            false,
+        ),
+        "/requires-if-range"
+            if byte_range.is_some() && if_range.as_deref() != Some("\"strong\"") =>
+        {
+            write_response(&mut stream, 412, &[], b"if-range required", false)
+        }
+        "/requires-if-range" => respond_file(
+            &mut stream,
+            method,
+            SAMPLE,
+            byte_range,
+            true,
+            "if-range.bin",
             false,
         ),
         "/head-no-length" if method == "HEAD" => {
@@ -1040,4 +1142,10 @@ fn parse_range(line: &str) -> Option<ByteRange> {
             Some(end.parse::<usize>().ok()?)
         },
     })
+}
+
+fn parse_header(line: &str, expected_name: &str) -> Option<String> {
+    let (name, value) = line.split_once(':')?;
+    name.eq_ignore_ascii_case(expected_name)
+        .then(|| value.trim().to_string())
 }

@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
@@ -7,6 +8,7 @@ use std::{
 
 use librqbit::{
     api::{Api, ApiAddTorrentResponse, TorrentDetailsResponse, TorrentIdOrHash},
+    limits::LimitsConfig,
     AddTorrent, AddTorrentOptions, ConnectionOptions, Session, SessionOptions,
 };
 use magnet_url::Magnet;
@@ -70,7 +72,11 @@ impl BtEngine {
         }
     }
 
-    async fn api_for_output_folder(&self, output_folder: &str) -> Result<Arc<Api>, String> {
+    async fn api_for_output_folder(
+        &self,
+        output_folder: &str,
+        download_limit_bps: Option<i64>,
+    ) -> Result<Arc<Api>, String> {
         let proxy_config = self.proxy_config.read().await.clone();
         let proxy_fingerprint = proxy_config.fingerprint();
         let key = PathBuf::from(output_folder)
@@ -82,6 +88,7 @@ impl BtEngine {
 
         let mut sessions = self.sessions.lock().await;
         if let Some(api) = sessions.get(&key) {
+            sync_session_download_limit(api, download_limit_bps);
             return Ok(api.clone());
         }
 
@@ -95,6 +102,10 @@ impl BtEngine {
                 ..Default::default()
             });
         }
+        options.ratelimits = LimitsConfig {
+            upload_bps: None,
+            download_bps: non_zero_u32(download_limit_bps),
+        };
         let session = Session::new_with_opts(PathBuf::from(&output_path), options)
             .await
             .map_err(|e| format!("Could not start BitTorrent session: {e:#}"))?;
@@ -222,10 +233,13 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         pool,
         task,
         cancel,
+        speed_limiter,
         ..
     } = context;
 
-    let api = engine.api_for_output_folder(&task.save_dir).await?;
+    let api = engine
+        .api_for_output_folder(&task.save_dir, speed_limiter.current_limit_bps())
+        .await?;
     let add = add_torrent_source(&task.url).await?;
     let selected_paths = selected_torrent_paths(&pool, &task).await?;
     mark_torrent_metadata_fetching(&app, &pool, &task).await?;
@@ -233,6 +247,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         &engine,
         api.clone(),
         add,
+        torrent_should_start_paused(selected_paths.as_ref()),
         &app,
         &pool,
         &task,
@@ -242,12 +257,29 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
 
     let torrent_id = TorrentIdOrHash::try_from(response.details.info_hash.as_str())
         .map_err(|e| format!("Torrent info hash is invalid: {e:#}"))?;
-    let selected_indices = selected_torrent_indices(selected_paths.as_ref(), &response.details)?;
+    let selected_indices =
+        match selected_torrent_indices(selected_paths.as_ref(), &response.details) {
+            Ok(indices) => indices,
+            Err(error) => {
+                let _ = api.api_torrent_action_forget(torrent_id).await;
+                return Err(error);
+            }
+        };
     if let Some(indices) = &selected_indices {
-        api.api_torrent_action_update_only_files(torrent_id, indices)
+        if let Err(error) = api
+            .api_torrent_action_update_only_files(torrent_id, indices)
             .await
-            .map_err(|e| format!("Could not select torrent files: {e:#}"))?;
+        {
+            let _ = api.api_torrent_action_forget(torrent_id).await;
+            return Err(format!("Could not select torrent files: {error:#}"));
+        }
         db::insert_task_event(&pool, &task.id, "bt_file_selection_applied", None).await?;
+        if let Err(error) = api.api_torrent_action_start(torrent_id).await {
+            let _ = api.api_torrent_action_forget(torrent_id).await;
+            return Err(format!(
+                "Could not start torrent after applying file selection: {error:#}"
+            ));
+        }
     }
 
     persist_torrent_details(&pool, &task, &response, selected_paths.as_ref()).await?;
@@ -406,17 +438,34 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     }
 }
 
+fn sync_session_download_limit(api: &Api, limit_bps: Option<i64>) {
+    api.session()
+        .ratelimits
+        .set_download_bps(non_zero_u32(limit_bps));
+}
+
+fn non_zero_u32(limit_bps: Option<i64>) -> Option<NonZeroU32> {
+    let value = limit_bps?;
+    if value <= 0 {
+        return None;
+    }
+    let value = u32::try_from(value).unwrap_or(u32::MAX);
+    NonZeroU32::new(value)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_torrent_metadata(
     engine: &BtEngine,
     api: Arc<Api>,
     add: AddTorrent<'static>,
+    start_paused: bool,
     app: &tauri::AppHandle,
     pool: &sqlx::SqlitePool,
     task: &crate::models::TaskRecord,
     cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ApiAddTorrentResponse, String> {
     let options = Some(AddTorrentOptions {
-        paused: false,
+        paused: start_paused,
         overwrite: true,
         output_folder: Some(task.save_dir.clone()),
         ..Default::default()
@@ -458,6 +507,10 @@ async fn wait_for_torrent_metadata(
             }
         }
     }
+}
+
+fn torrent_should_start_paused(selected_paths: Option<&HashSet<String>>) -> bool {
+    selected_paths.is_some()
 }
 
 async fn mark_torrent_metadata_fetching(
@@ -932,5 +985,24 @@ mod tests {
 
         assert_eq!(selected_torrent_total_size(&files, Some(&selected)), 100);
         assert_eq!(selected_torrent_total_size(&files, None), 350);
+    }
+
+    #[test]
+    fn non_zero_u32_ignores_empty_limits_and_clamps_large_values() {
+        assert_eq!(non_zero_u32(None), None);
+        assert_eq!(non_zero_u32(Some(0)), None);
+        assert_eq!(non_zero_u32(Some(-1)), None);
+        assert_eq!(non_zero_u32(Some(1024)).map(NonZeroU32::get), Some(1024));
+        assert_eq!(
+            non_zero_u32(Some(i64::MAX)).map(NonZeroU32::get),
+            Some(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn torrent_starts_paused_only_for_file_subset_selection() {
+        assert!(!torrent_should_start_paused(None));
+        let selected = HashSet::from(["video/main.mkv".to_string()]);
+        assert!(torrent_should_start_paused(Some(&selected)));
     }
 }

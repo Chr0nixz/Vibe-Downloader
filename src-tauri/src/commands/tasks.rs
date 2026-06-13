@@ -272,12 +272,14 @@ async fn start_task_download(
     }
 
     let cancel = Arc::new(AtomicBool::new(false));
+    let finish = Arc::new(AtomicBool::new(false));
     let downloads_map = downloads.clone();
     let task_id = task.id.clone();
     let map_task_id = task.id.clone();
     let source_key = task.source_key.clone();
     let task_app = app.clone();
     let task_cancel = cancel.clone();
+    let task_finish = finish.clone();
     let task_pool = pool.clone();
     let task_scheduler = scheduler.clone();
     let state_speed_limiter = speed_limiter.clone();
@@ -308,6 +310,7 @@ async fn start_task_download(
                 pool: task_pool.clone(),
                 task,
                 cancel: task_cancel.clone(),
+                finish: task_finish.clone(),
                 speed_limiter: state_speed_limiter.clone(),
                 connection_limit,
                 request_headers: task_request_headers.clone(),
@@ -359,6 +362,7 @@ async fn start_task_download(
         map_task_id,
         DownloadControl {
             cancel,
+            finish,
             handle,
             source_key,
             connection_slots: connection_limit.max(1),
@@ -540,13 +544,7 @@ async fn restart_task_from_beginning(
         control.handle.abort();
     }
     if let Some(temp_path) = task.temp_path.as_deref() {
-        match std::fs::remove_file(temp_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!("Could not delete the temporary file: {error}"));
-            }
-        }
+        remove_task_path(temp_path)?;
     }
 
     let engine = state.engine_registry.engine_for_uri(&task.url)?;
@@ -576,6 +574,9 @@ async fn restart_task_from_beginning(
     )
     .await?;
     db::delete_segments_for_task(&state.pool, &task.id).await?;
+    if task.protocol == "hls" {
+        db::reset_hls_segments_for_task(&state.pool, &task.id).await?;
+    }
     db::reset_task_download_state(&state.pool, &task.id).await?;
     let settings = db::get_settings(
         &state.pool,
@@ -634,7 +635,7 @@ async fn prepare_task_for_download(
         return Err("Remote file changed. Restart download to avoid corruption.".to_string());
     }
 
-    if is_bt_protocol(&task.protocol) {
+    if is_bt_protocol(&task.protocol) || is_hls_protocol(&task.protocol) {
         db::ensure_task_segments(pool, &task).await?;
         return require_task(pool, &task.id).await;
     }
@@ -716,6 +717,10 @@ async fn prepare_task_for_download(
 
 fn is_bt_protocol(protocol: &str) -> bool {
     matches!(protocol, "bt" | "magnet")
+}
+
+fn is_hls_protocol(protocol: &str) -> bool {
+    protocol == "hls"
 }
 
 fn is_torrent_url(url: &Url) -> bool {
@@ -854,4 +859,22 @@ fn emit_task_progress_snapshot(app: &AppHandle, task: &TaskRecord) {
         status: task.status,
     };
     emit_task_progress(app, &payload);
+}
+
+fn remove_task_path(path: &str) -> Result<(), String> {
+    if std::fs::metadata(path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+    {
+        return match std::fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Could not delete the temporary folder: {error}")),
+        };
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not delete the temporary file: {error}")),
+    }
 }

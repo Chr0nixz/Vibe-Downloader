@@ -5,6 +5,11 @@ plain-text clipboard content for supported download links and open the New
 download flow for confirmation. Clipboard monitoring is enabled by default and
 can be disabled in Settings > Desktop integration.
 
+Protocol hardening note: FTP/FTPS credential-bearing URLs are sanitized into
+task records and encrypted task credentials; BitTorrent selected-file tasks
+apply file selection before starting the runtime torrent; HTTP request
+diagnostics include Range and If-Range data for resume troubleshooting.
+
 Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下载、断点续传、任务队列和浏览器交接变得更清楚、更可靠，也比传统下载工具更符合现在的桌面审美。
 
 项目目前处于早期开发阶段，但已经可以作为以 HTTP/HTTPS 为主的下载器原型运行；FTP/FTPS、magnet 和 `.torrent` 已接入，成熟度仍低于 HTTP/HTTPS。它不是一个已经完整替代 IDM 的成品，适合尝鲜、参与开发、验证下载引擎和桌面体验。
@@ -23,11 +28,16 @@ Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下�
 - 暂停、继续、重试、删除任务。
 - 断点续传校验，避免远端文件变化后继续写坏文件。
 - 队列调度，默认同时运行 2 个下载任务。
-- 全局速度限制。
-- 下载任务搜索和状态筛选。
-- 查看任务详情、分段进度和连接摘要。
+- 全局速度限制，覆盖 HTTP/HTTPS、FTP/FTPS 和 BitTorrent 下载。
+- 下载任务搜索、状态筛选、排序、文件类型/来源/失败原因/续传能力筛选。
+- 多选任务和批量暂停、继续、重试、删除。
+- 批量 URL 导入预览和创建。
+- 手动新建、批量导入和浏览器交接会提示重复任务；手动新建可明确选择创建副本。
+- 命令面板覆盖新建下载、任务操作、视图切换、排序筛选和限速预设。
+- 查看任务详情、分段进度、连接摘要、请求诊断和日志。
 - 下载完成后打开文件或所在目录。
 - 基础错误恢复动作，例如重试、另存为、更换目录、重新开始。
+- 系统托盘、完成通知、开机启动、关闭到托盘、剪贴板监控和启动后续传中断任务开关。
 - 简体中文和英文界面。
 - 浏览器扩展开发包，通过 Native Messaging 和本地 WebSocket 把 HTTP/HTTPS 链接、下载捕获和实时任务状态连接到桌面应用。
 - 浏览器原生下载自动接管基础能力，可在设置中开启或关闭。
@@ -39,9 +49,7 @@ Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下�
 这些功能还在后续计划中，不要把当前版本当成完整下载器使用：
 
 - HLS/m3u8 流媒体解析、SFTP、网盘解析或视频嗅探；`.m3u8` 当前按普通 HTTP 文件处理。
-- 系统托盘、完成通知、开机启动、关闭到托盘。
-- 批量导入、批量操作、任务优先级、单任务限速。
-- 完整命令面板。
+- 任务优先级、单任务限速。
 - 完整站点规则管理 UI。
 - 商店版浏览器扩展、Safari wrapper 和正式扩展签名。
 - 操作系统代码签名的生产安装包。

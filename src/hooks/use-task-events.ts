@@ -9,13 +9,35 @@ import {
   onTaskProgress,
   onTaskUpdated,
 } from "@/lib/tauri";
-
-const log = createLogger("task-events");
 import { mergeTasksFromServer, taskCursorInput, useTaskStore } from "@/stores/task-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
 import { errorMessage } from "@/lib/errors";
 import type { Task } from "@/types/task";
+
+const log = createLogger("task-events");
+const MAX_NOTIFIED_STATUS_KEYS = 600;
+
+export function rememberStatusNotification(
+  notifiedStatuses: Set<string>,
+  notificationKey: string,
+  maxKeys = MAX_NOTIFIED_STATUS_KEYS,
+): boolean {
+  if (notifiedStatuses.has(notificationKey)) return false;
+  while (notifiedStatuses.size >= maxKeys) {
+    const oldest = notifiedStatuses.values().next().value;
+    if (!oldest) break;
+    notifiedStatuses.delete(oldest);
+  }
+  notifiedStatuses.add(notificationKey);
+  return true;
+}
+
+function clearTaskStatusNotifications(notifiedStatuses: Set<string>, taskId: string) {
+  notifiedStatuses.delete(`${taskId}:failed`);
+  notifiedStatuses.delete(`${taskId}:needs_attention`);
+  notifiedStatuses.delete(`${taskId}:completed`);
+}
 
 interface UseTaskEventsOptions {
   notify?: boolean;
@@ -46,16 +68,13 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
           task.status !== "failed" &&
           task.status !== "needs_attention"
         ) {
-          notifiedStatuses.current.delete(`${task.id}:failed`);
-          notifiedStatuses.current.delete(`${task.id}:needs_attention`);
-          notifiedStatuses.current.delete(`${task.id}:completed`);
+          clearTaskStatusNotifications(notifiedStatuses.current, task.id);
           continue;
         }
         const notificationKey = `${task.id}:${task.status}`;
-        if (notifiedStatuses.current.has(notificationKey)) continue;
+        if (!rememberStatusNotification(notifiedStatuses.current, notificationKey)) continue;
 
         if (task.status === "completed") {
-          notifiedStatuses.current.add(notificationKey);
           useTaskStore.getState().markCompletionFlash(task.id);
           addToast({
             tone: "success",
@@ -65,7 +84,6 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
         }
 
         if (task.status === "failed" || task.status === "needs_attention") {
-          notifiedStatuses.current.add(notificationKey);
           addToast({
             tone: "error",
             title: i18n.t("toast.taskFailed", { name: task.fileName }),

@@ -18,6 +18,7 @@ use super::{
     error::format_http_status,
     file::finalize_download_file,
     request::send_get_with_retry,
+    segmented::diagnostics::{if_range_header_from, parse_content_range},
     segmented::{download_segment_worker, SegmentMessage, SegmentWorkerRequest},
     DirectDownloadRequest, DirectSegmentedDownloadRequest,
 };
@@ -38,10 +39,12 @@ pub(super) async fn run_direct_download(
         return Err("Resume unavailable. Restart this download from the beginning.".to_string());
     }
 
+    let if_range = if_range_header_from(request.etag.as_deref(), request.last_modified.as_deref());
     let mut response = send_get_with_retry(
         client,
         &request.url,
         (resume_from > 0).then(|| format!("bytes={resume_from}-")),
+        (resume_from > 0).then_some(if_range.as_deref()).flatten(),
         &[],
     )
     .await?;
@@ -49,6 +52,11 @@ pub(super) async fn run_direct_download(
     if resume_from > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
         return Err(
             "Resume unavailable. The server did not honor the byte range request.".to_string(),
+        );
+    }
+    if resume_from > 0 && !valid_direct_content_range(&response, resume_from, request.total_size) {
+        return Err(
+            "Resume unavailable. The server returned a mismatched Content-Range.".to_string(),
         );
     }
     if !response.status().is_success() {
@@ -149,6 +157,7 @@ pub(super) async fn run_direct_segmented_download(
             .collect::<HashMap<_, _>>(),
     ));
     let mut active_workers = 0_usize;
+    let if_range = if_range_header_from(request.etag.as_deref(), request.last_modified.as_deref());
 
     for segment in request.segments {
         let offset = segment
@@ -172,7 +181,7 @@ pub(super) async fn run_direct_segmented_download(
             live_ends: live_ends.clone(),
             speed_limiter: speed_limiter.clone(),
             request_headers: Vec::new(),
-            if_range: None,
+            if_range: if_range.clone(),
         }));
     }
     drop(progress_tx);
@@ -215,4 +224,27 @@ pub(super) async fn run_direct_segmented_download(
     finalize_download_file(&request.temp_path, &request.final_path).await?;
 
     Ok(request.total_size)
+}
+
+fn valid_direct_content_range(
+    response: &reqwest::Response,
+    resume_from: i64,
+    total_size: i64,
+) -> bool {
+    let Some(range) = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_content_range)
+    else {
+        return false;
+    };
+    if range.start != resume_from {
+        return false;
+    }
+    if total_size > 0 {
+        range.end == total_size.saturating_sub(1) && range.total == total_size
+    } else {
+        range.end >= range.start
+    }
 }

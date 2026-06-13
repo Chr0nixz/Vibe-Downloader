@@ -15,6 +15,7 @@ export async function applyGlobalSpeedLimit(
     systemNotifications: settings.systemNotifications,
     closeToTray: settings.closeToTray,
     startOnBoot: settings.startOnBoot,
+    autoResumeOnStartup: settings.autoResumeOnStartup,
     floatingWindowEnabled: settings.floatingWindowEnabled,
     clipboardMonitorEnabled: settings.clipboardMonitorEnabled,
     fontFamily: settings.fontFamily,

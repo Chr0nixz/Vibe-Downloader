@@ -63,6 +63,8 @@ function isAppErrorPayload(value: unknown): value is AppErrorPayload {
 
 function fallbackActionsForCode(code: string): RecoveryAction[] {
   switch (code) {
+    case "duplicate_task":
+      return [];
     case "final_path_conflict":
       return ["choose_another_name", "choose_another_folder", "retry"];
     case "remote_changed":

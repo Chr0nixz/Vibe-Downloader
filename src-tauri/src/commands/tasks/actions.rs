@@ -122,6 +122,38 @@ pub async fn retry_task(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn finish_live_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Task, String> {
+    tracing::info!(task_id = %id, "finishing HLS live recording");
+    let task = require_task(&state.pool, &id).await?;
+    if task.protocol != "hls" {
+        return Err("Only HLS live recordings can be finished.".to_string());
+    }
+    let Some(hls_task) = db::get_hls_task(&state.pool, &id).await? else {
+        return Err("HLS recording state is not ready yet.".to_string());
+    };
+    if hls_task.playlist_kind == "vod" {
+        return Err("VOD HLS tasks finish automatically.".to_string());
+    }
+    if !matches!(task.status, TaskStatus::Downloading | TaskStatus::Retrying) {
+        return Err("The HLS recording must be downloading before it can be finished.".to_string());
+    }
+    db::request_hls_finish(&state.pool, &id).await?;
+    if let Some(control) = state.downloads.lock().await.get(&id) {
+        control.finish.store(true, Ordering::SeqCst);
+    }
+    db::update_task_health_summary(&state.pool, &id, Some("Finishing HLS recording")).await?;
+    db::insert_task_event(&state.pool, &id, "hls_finish_requested", None).await?;
+    let task = require_task(&state.pool, &id).await?;
+    emit_task_updated_record(&app, &state.pool, &task).await;
+    task_payload(&state.pool, &id).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn cancel_task(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -437,6 +469,16 @@ async fn sha256_file(path: &Path) -> Result<String, String> {
 }
 
 fn remove_task_file_path(path: &str) -> Result<(), String> {
+    if std::fs::metadata(path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+    {
+        return match std::fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Could not delete {path}: {error}")),
+        };
+    }
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

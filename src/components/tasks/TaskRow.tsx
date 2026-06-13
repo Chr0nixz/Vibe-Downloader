@@ -3,12 +3,14 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import {
   Activity,
+  AlertTriangle,
   ChevronDown,
   File,
   FolderOpen,
   Pause,
   Play,
   RotateCcw,
+  Square,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -32,7 +34,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { SpeedSample } from "@/stores/task-store";
 import { useTaskStore } from "@/stores/task-store";
-import { errorMessage } from "@/lib/errors";
+import { errorMessage, recoveryActionsForError } from "@/lib/errors";
 import type { RecoveryAction } from "@/generated/bindings";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 
@@ -49,6 +51,7 @@ interface TaskRowProps {
   onNavigate: (direction: "next" | "prev") => void;
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
+  onFinishLiveRecording: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
@@ -89,6 +92,7 @@ export const TaskRow = memo(function TaskRow({
   onNavigate,
   onToggleTransfer,
   onRetry,
+  onFinishLiveRecording,
   onOpenFile,
   onOpenFolder,
   onResolveAttention,
@@ -166,7 +170,7 @@ export const TaskRow = memo(function TaskRow({
         "grid gap-x-4 gap-y-3 md:grid-cols-[minmax(0,1fr)_auto] md:gap-y-2",
         completionFlash && "completion-flash",
         selected &&
-          "border-border-accent bg-accent-primary/[0.06] shadow-[0_0_0_1px_var(--accent-primary)_/_0.2]",
+          "border-border-accent bg-accent-primary/[0.04]",
         multiSelected && !selected && "border-border-accent-subtle bg-accent-primary/[0.04]",
         task.status === "completed" && !selected && "border-border-success",
         (task.status === "failed" || task.status === "needs_attention") && !selected &&
@@ -267,7 +271,7 @@ export const TaskRow = memo(function TaskRow({
       <div className="hidden min-w-36 flex-col items-end gap-1 text-right font-mono text-xs md:flex">
         <span className={cn(
           "text-sm text-text-primary",
-          isActive && "text-base font-bold text-accent-primary",
+          isActive && "text-base font-semibold text-accent-primary",
         )}>{formatSpeed(task.speedBps)}</span>
         <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
           {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
@@ -288,6 +292,7 @@ export const TaskRow = memo(function TaskRow({
           onToggleExpanded={onToggleExpanded}
           onToggleTransfer={onToggleTransfer}
           onRetry={onRetry}
+          onFinishLiveRecording={onFinishLiveRecording}
           onOpenFile={onOpenFile}
           onOpenFolder={onOpenFolder}
           className="mt-1"
@@ -301,10 +306,20 @@ export const TaskRow = memo(function TaskRow({
         onToggleExpanded={onToggleExpanded}
         onToggleTransfer={onToggleTransfer}
         onRetry={onRetry}
+        onFinishLiveRecording={onFinishLiveRecording}
         onOpenFile={onOpenFile}
         onOpenFolder={onOpenFolder}
         className="flex md:hidden"
       />
+
+      {(task.status === "failed" || task.status === "needs_attention") ? (
+        <InlineRecovery
+          task={task}
+          expanded={expanded}
+          onToggleExpanded={onToggleExpanded}
+          onResolve={onResolveAttention}
+        />
+      ) : null}
 
       <AnimatePresence initial={false}>
         {expanded ? (
@@ -378,6 +393,7 @@ function RowActions({
   onToggleExpanded,
   onToggleTransfer,
   onRetry,
+  onFinishLiveRecording,
   onOpenFile,
   onOpenFolder,
   className,
@@ -388,6 +404,7 @@ function RowActions({
   onToggleExpanded: () => void;
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
+  onFinishLiveRecording: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
   className?: string;
@@ -397,12 +414,18 @@ function RowActions({
     task.status === "paused" ||
     task.status === "failed" ||
     task.status === "waiting_network";
-  const transferDisabled =
+  const hideTransfer =
     task.status === "completed" || task.status === "needs_attention";
+  const canFinishLiveRecording =
+    task.protocol === "hls" && (task.status === "downloading" || task.status === "retrying");
 
   return (
     <div
-      className={cn("flex gap-1.5 [&_button]:h-11 [&_button]:w-11 md:[&_button]:h-8 md:[&_button]:w-8", className)}
+      className={cn(
+        "flex gap-1.5 [&_button]:h-11 [&_button]:w-11 md:[&_button]:h-8 md:[&_button]:w-8",
+        "opacity-60 transition-opacity duration-ui group-hover:opacity-100 group-focus-within:opacity-100",
+        className,
+      )}
       data-row-action
       data-no-drag
     >
@@ -422,29 +445,48 @@ function RowActions({
           className={cn("h-4 w-4 transition-transform duration-ui", expanded && "rotate-180")}
         />
       </ActionButton>
-      <ActionButton
-        label={showsStart ? t("actions.resume") : t("actions.pause")}
-        ariaLabel={t(showsStart ? "actions.resumeFor" : "actions.pauseFor", {
-          name: task.fileName,
-        })}
-        disabled={transferDisabled}
-        onClick={(event) => {
-          event.stopPropagation();
-          onToggleTransfer(task);
-        }}
-      >
-        {showsStart ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
-      </ActionButton>
-      {task.status === "failed" ? (
+      {!hideTransfer ? (
         <ActionButton
-          label={t("actions.retry")}
-          ariaLabel={t("actions.retryFor", { name: task.fileName })}
+          label={showsStart ? t("actions.resume") : t("actions.pause")}
+          ariaLabel={t(showsStart ? "actions.resumeFor" : "actions.pauseFor", {
+            name: task.fileName,
+          })}
           onClick={(event) => {
             event.stopPropagation();
-            onRetry(task);
+            onToggleTransfer(task);
           }}
         >
-          <RotateCcw className="h-4 w-4" />
+          {showsStart ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+        </ActionButton>
+      ) : null}
+      {task.status === "failed" ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="sm"
+              aria-label={t("actions.retryFor", { name: task.fileName })}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRetry(task);
+              }}
+            >
+              <RotateCcw className="h-4 w-4" />
+              {t("actions.retry")}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t("actions.retryFor", { name: task.fileName })}</TooltipContent>
+        </Tooltip>
+      ) : null}
+      {canFinishLiveRecording ? (
+        <ActionButton
+          label={t("actions.finishRecording")}
+          ariaLabel={t("actions.finishRecordingFor", { name: task.fileName })}
+          onClick={(event) => {
+            event.stopPropagation();
+            onFinishLiveRecording(task);
+          }}
+        >
+          <Square className="h-4 w-4" />
         </ActionButton>
       ) : null}
       {task.status === "completed" ? (
@@ -507,5 +549,65 @@ function ActionButton({
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function InlineRecovery({
+  task,
+  expanded,
+  onToggleExpanded,
+  onResolve,
+}: {
+  task: Task;
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  onResolve: (task: Task, action: RecoveryAction) => void;
+}) {
+  const { t } = useTranslation();
+
+  if (!task.errorMessage) return null;
+
+  const recoveryActions =
+    task.recoveryActions && task.recoveryActions.length > 0
+      ? task.recoveryActions
+      : recoveryActionsForError(task.errorMessage);
+
+  if (recoveryActions.length === 0) return null;
+
+  const primaryAction = recoveryActions[0];
+  const hasMoreActions = recoveryActions.length > 1;
+
+  return (
+    <div
+      className="col-span-full flex items-center gap-2"
+      data-row-action
+      data-no-drag
+    >
+      <AlertTriangle
+        className="h-3.5 w-3.5 shrink-0 text-status-danger"
+        aria-hidden
+      />
+      <Button
+        size="sm"
+        onClick={(event) => {
+          event.stopPropagation();
+          onResolve(task, primaryAction);
+        }}
+      >
+        {t(`recovery.${primaryAction}`)}
+      </Button>
+      {hasMoreActions ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={(event) => {
+            event.stopPropagation();
+            if (!expanded) onToggleExpanded();
+          }}
+        >
+          {t("actions.moreFixes")}
+        </Button>
+      ) : null}
+    </div>
   );
 }

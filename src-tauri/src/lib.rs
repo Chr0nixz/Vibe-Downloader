@@ -29,6 +29,7 @@ const TRAY_MENU_SCREEN_MARGIN: f64 = 10.0;
 
 pub struct DownloadControl {
     pub cancel: Arc<AtomicBool>,
+    pub finish: Arc<AtomicBool>,
     pub handle: JoinHandle<()>,
     pub source_key: String,
     pub connection_slots: usize,
@@ -85,6 +86,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::tasks::pause_task,
         commands::tasks::resume_task,
         commands::tasks::retry_task,
+        commands::tasks::finish_live_recording,
         commands::tasks::resolve_task_attention,
         commands::tasks::cancel_task,
         commands::tasks::delete_task,
@@ -127,6 +129,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::tasks::pause_task,
         commands::tasks::resume_task,
         commands::tasks::retry_task,
+        commands::tasks::finish_live_recording,
         commands::tasks::resolve_task_attention,
         commands::tasks::cancel_task,
         commands::tasks::delete_task,
@@ -291,6 +294,7 @@ pub fn run() {
         commands::tasks::pause_task,
         commands::tasks::resume_task,
         commands::tasks::retry_task,
+        commands::tasks::finish_live_recording,
         commands::tasks::resolve_task_attention,
         commands::tasks::cancel_task,
         commands::tasks::delete_task,
@@ -332,6 +336,7 @@ pub fn run() {
         commands::tasks::pause_task,
         commands::tasks::resume_task,
         commands::tasks::retry_task,
+        commands::tasks::finish_live_recording,
         commands::tasks::resolve_task_attention,
         commands::tasks::cancel_task,
         commands::tasks::delete_task,
@@ -350,10 +355,20 @@ pub fn run() {
                 tauri::async_runtime::block_on(async { db::connect(&db_path).await })?;
             let data_was_reset = db_connection.data_was_reset;
             let pool = db_connection.pool;
-            tauri::async_runtime::block_on(async { db::reset_interrupted_tasks(&pool).await })?;
+            tauri::async_runtime::block_on(async {
+                if let Err(error) = db::clear_expired_task_request_headers(&pool).await {
+                    tracing::warn!(error = %error, "expired browser request header cleanup failed");
+                }
+                if let Err(error) = db::migrate_legacy_ftp_credentials(&pool).await {
+                    tracing::warn!(error = %error, "legacy FTP credential migration failed");
+                }
+            });
             let default_dir = commands::settings::default_download_dir(&handle)?;
             let settings = tauri::async_runtime::block_on(async {
                 db::get_settings(&pool, default_dir).await
+            })?;
+            tauri::async_runtime::block_on(async {
+                db::reset_interrupted_tasks(&pool, settings.auto_resume_on_startup).await
             })?;
             let speed_limiter = Arc::new(download::GlobalSpeedLimiter::new(
                 db::parse_speed_limit_bps(settings.global_speed_limit_bps.as_deref()),

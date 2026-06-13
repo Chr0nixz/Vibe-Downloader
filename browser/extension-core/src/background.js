@@ -8,6 +8,15 @@ const RECENT_KEY = "vibeRecentHandoffs";
 const SETTINGS_KEY = "vibeBrowserCaptureSettings";
 const HEADER_CACHE_TTL_MS = 30_000;
 const MAX_HEADER_CACHE = 80;
+const MAX_LIVE_TASK_CACHE = 120;
+const ACTIVE_TASK_STATUSES = new Set([
+  "queued",
+  "downloading",
+  "retrying",
+  "paused",
+  "waiting_network",
+  "needs_attention",
+]);
 const ALLOWED_HEADER_NAMES = new Set([
   "accept",
   "accept-language",
@@ -245,6 +254,7 @@ function connectWs() {
     socket.addEventListener("close", () => {
       lastStatus = "disconnected";
       ws = null;
+      rejectPendingWsRequests("Realtime bridge disconnected.");
       scheduleReconnect();
     });
     socket.addEventListener("error", () => {
@@ -265,6 +275,7 @@ function handleWsMessage(raw) {
     const pending = pendingWs.get(message.payload?.id);
     if (pending) {
       pendingWs.delete(message.payload.id);
+      clearTimeout(pending.timeoutId);
       pending.resolve(message.payload.value);
     }
     return;
@@ -272,6 +283,7 @@ function handleWsMessage(raw) {
   if (message.type === "error") {
     for (const [id, pending] of pendingWs) {
       pendingWs.delete(id);
+      clearTimeout(pending.timeoutId);
       pending.reject(new Error(message.payload?.message ?? "Realtime request failed."));
       break;
     }
@@ -279,21 +291,52 @@ function handleWsMessage(raw) {
   }
   if (message.type === "tasksSnapshot") {
     liveTasks.clear();
-    for (const task of message.payload?.tasks ?? []) liveTasks.set(task.id, task);
+    for (const task of message.payload?.tasks ?? []) upsertLiveTask(task);
     return;
   }
   if (message.type === "taskUpdated") {
     const task = message.payload;
-    if (task?.id) liveTasks.set(task.id, task);
+    if (task?.id) upsertLiveTask(task);
     return;
   }
   if (message.type === "taskProgress") {
     const payload = message.payload;
     const current = liveTasks.get(payload?.taskId);
     if (current) {
-      liveTasks.set(payload.taskId, { ...current, ...payload, id: payload.taskId });
+      upsertLiveTask({
+        ...current,
+        ...payload,
+        id: payload.taskId,
+        updatedAt: new Date().toISOString(),
+      });
     }
   }
+}
+
+function upsertLiveTask(task) {
+  if (!task?.id) return;
+  liveTasks.delete(task.id);
+  liveTasks.set(task.id, task);
+  pruneLiveTasks();
+}
+
+function pruneLiveTasks() {
+  if (liveTasks.size <= MAX_LIVE_TASK_CACHE) return;
+  const ranked = Array.from(liveTasks.values()).sort((left, right) => {
+    const leftActive = ACTIVE_TASK_STATUSES.has(left.status) ? 1 : 0;
+    const rightActive = ACTIVE_TASK_STATUSES.has(right.status) ? 1 : 0;
+    if (leftActive !== rightActive) return rightActive - leftActive;
+    return taskUpdatedAt(right) - taskUpdatedAt(left);
+  });
+  liveTasks.clear();
+  for (const task of ranked.slice(0, MAX_LIVE_TASK_CACHE)) {
+    liveTasks.set(task.id, task);
+  }
+}
+
+function taskUpdatedAt(task) {
+  const parsed = Date.parse(task?.updatedAt ?? task?.createdAt ?? "");
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function sendWsRequest(type, payload) {
@@ -303,15 +346,23 @@ function sendWsRequest(type, payload) {
       return;
     }
     const id = crypto.randomUUID();
-    pendingWs.set(id, { resolve, reject });
-    ws.send(JSON.stringify({ id, type, payload }));
-    setTimeout(() => {
+    const timeoutId = setTimeout(() => {
       const pending = pendingWs.get(id);
       if (!pending) return;
       pendingWs.delete(id);
       pending.reject(new Error("Realtime request timed out."));
     }, 10_000);
+    pendingWs.set(id, { resolve, reject, timeoutId });
+    ws.send(JSON.stringify({ id, type, payload }));
   });
+}
+
+function rejectPendingWsRequests(message) {
+  for (const [id, pending] of pendingWs) {
+    pendingWs.delete(id);
+    clearTimeout(pending.timeoutId);
+    pending.reject(new Error(message));
+  }
 }
 
 function scheduleReconnect() {
@@ -432,7 +483,7 @@ function normalizeCaptureSettings(value) {
       minSizeBytes: String(Number(value?.minSizeBytes ?? 0) || 0),
       fileExtensions: Array.isArray(value?.fileExtensions)
         ? value.fileExtensions
-        : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv"],
+        : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv", "m3u8"],
       siteRules: Array.isArray(value?.siteRules) ? value.siteRules : [],
     };
   }
@@ -447,7 +498,7 @@ function normalizeCaptureSettings(value) {
     minSizeBytes: String(Number(value?.minSizeBytes ?? 0) || 0),
     fileExtensions: Array.isArray(value?.fileExtensions)
       ? value.fileExtensions
-      : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv"],
+      : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv", "m3u8"],
     siteRules: Array.isArray(value?.siteRules) ? value.siteRules : [],
   };
 }
