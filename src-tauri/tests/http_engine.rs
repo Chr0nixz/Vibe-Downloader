@@ -270,7 +270,7 @@ async fn direct_download_can_resume_from_temp_file() {
         async move { engine.download_direct(request, first_cancel).await }
     });
 
-    tokio::time::sleep(Duration::from_millis(35)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     cancel.store(true, Ordering::SeqCst);
     let partial = first.await.expect("join").expect("partial");
     assert!(partial > 0);

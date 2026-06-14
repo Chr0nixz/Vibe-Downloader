@@ -88,19 +88,19 @@ pub(super) async fn run_direct_download(
         .await
         .map_err(|e| format!("The connection failed while downloading: {e}"))?
     {
-        if cancel.load(Ordering::SeqCst) {
-            file.flush()
-                .await
-                .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
-            return Ok(downloaded);
-        }
-
         speed_limiter.throttle(chunk.len()).await;
         file.write_all(&chunk).await.map_err(|e| {
             AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
                 .command_error()
         })?;
         downloaded += i64::try_from(chunk.len()).unwrap_or(0);
+
+        if cancel.load(Ordering::SeqCst) {
+            file.flush()
+                .await
+                .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
+            return Ok(downloaded);
+        }
     }
 
     file.flush()
