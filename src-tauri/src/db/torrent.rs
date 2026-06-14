@@ -94,6 +94,9 @@ pub struct TorrentTaskUpsert<'a> {
     pub piece_count: i64,
     pub private: bool,
     pub trackers_json: Option<&'a str>,
+    pub seeding_enabled: bool,
+    pub seed_ratio_limit: Option<f64>,
+    pub seed_time_limit_seconds: Option<i64>,
 }
 
 pub async fn upsert_torrent_task(
@@ -106,9 +109,10 @@ pub async fn upsert_torrent_task(
         r#"
         INSERT INTO torrent_tasks (
             task_id, info_hash, name, magnet_uri, torrent_blob, piece_length,
-            piece_count, private, trackers_json, created_at, updated_at
+            piece_count, private, trackers_json, seeding_enabled, seed_ratio_limit,
+            seed_time_limit_seconds, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(task_id) DO UPDATE SET
             info_hash = excluded.info_hash,
             name = excluded.name,
@@ -118,6 +122,9 @@ pub async fn upsert_torrent_task(
             piece_count = excluded.piece_count,
             private = excluded.private,
             trackers_json = excluded.trackers_json,
+            seeding_enabled = torrent_tasks.seeding_enabled,
+            seed_ratio_limit = COALESCE(torrent_tasks.seed_ratio_limit, excluded.seed_ratio_limit),
+            seed_time_limit_seconds = COALESCE(torrent_tasks.seed_time_limit_seconds, excluded.seed_time_limit_seconds),
             updated_at = excluded.updated_at
         "#,
     )
@@ -130,6 +137,9 @@ pub async fn upsert_torrent_task(
     .bind(upsert.piece_count)
     .bind(if upsert.private { 1 } else { 0 })
     .bind(upsert.trackers_json)
+    .bind(if upsert.seeding_enabled { 1 } else { 0 })
+    .bind(upsert.seed_ratio_limit)
+    .bind(upsert.seed_time_limit_seconds)
     .bind(&now)
     .bind(&now)
     .execute(pool)
@@ -142,11 +152,19 @@ pub struct TorrentRuntimeSnapshotUpsert<'a> {
     pub metadata_status: &'a str,
     pub completed_pieces: i64,
     pub verified_pieces: i64,
+    pub piece_count: i64,
+    pub piece_bitfield_base64: Option<&'a str>,
     pub peer_count: i64,
     pub seed_count: i64,
+    pub dht_status: Option<&'a str>,
+    pub trackers_json: Option<&'a str>,
     pub upload_bytes: i64,
     pub upload_speed_bps: i64,
     pub ratio: f64,
+    pub seeding_enabled: bool,
+    pub seeding_state: &'a str,
+    pub last_error_code: Option<&'a str>,
+    pub last_error_message: Option<&'a str>,
 }
 
 pub async fn upsert_torrent_runtime_snapshot(
@@ -158,19 +176,29 @@ pub async fn upsert_torrent_runtime_snapshot(
     sqlx::query(
         r#"
         INSERT INTO torrent_runtime_snapshots (
-            task_id, metadata_status, completed_pieces, verified_pieces, peer_count,
-            seed_count, upload_bytes, upload_speed_bps, ratio, updated_at
+            task_id, metadata_status, completed_pieces, verified_pieces, piece_count,
+            piece_bitfield_base64, peer_count, seed_count, dht_status, trackers_json,
+            upload_bytes, upload_speed_bps, ratio, seeding_enabled, seeding_state,
+            last_error_code, last_error_message, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(task_id) DO UPDATE SET
             metadata_status = excluded.metadata_status,
             completed_pieces = excluded.completed_pieces,
             verified_pieces = excluded.verified_pieces,
+            piece_count = excluded.piece_count,
+            piece_bitfield_base64 = excluded.piece_bitfield_base64,
             peer_count = excluded.peer_count,
             seed_count = excluded.seed_count,
+            dht_status = excluded.dht_status,
+            trackers_json = excluded.trackers_json,
             upload_bytes = excluded.upload_bytes,
             upload_speed_bps = excluded.upload_speed_bps,
             ratio = excluded.ratio,
+            seeding_enabled = excluded.seeding_enabled,
+            seeding_state = excluded.seeding_state,
+            last_error_code = excluded.last_error_code,
+            last_error_message = excluded.last_error_message,
             updated_at = excluded.updated_at
         "#,
     )
@@ -178,11 +206,19 @@ pub async fn upsert_torrent_runtime_snapshot(
     .bind(snapshot.metadata_status)
     .bind(snapshot.completed_pieces)
     .bind(snapshot.verified_pieces)
+    .bind(snapshot.piece_count)
+    .bind(snapshot.piece_bitfield_base64)
     .bind(snapshot.peer_count)
     .bind(snapshot.seed_count)
+    .bind(snapshot.dht_status)
+    .bind(snapshot.trackers_json)
     .bind(snapshot.upload_bytes)
     .bind(snapshot.upload_speed_bps)
     .bind(snapshot.ratio)
+    .bind(if snapshot.seeding_enabled { 1 } else { 0 })
+    .bind(snapshot.seeding_state)
+    .bind(snapshot.last_error_code)
+    .bind(snapshot.last_error_message)
     .bind(&updated_at)
     .execute(pool)
     .await
@@ -196,8 +232,10 @@ pub async fn get_torrent_runtime_snapshot(
 ) -> Result<Option<crate::models::TorrentRuntimeSnapshotRecord>, String> {
     let row = sqlx::query(
         r#"
-        SELECT task_id, metadata_status, completed_pieces, verified_pieces, peer_count,
-               seed_count, upload_bytes, upload_speed_bps, ratio, updated_at
+        SELECT task_id, metadata_status, completed_pieces, verified_pieces, piece_count,
+               piece_bitfield_base64, peer_count, seed_count, dht_status, trackers_json,
+               upload_bytes, upload_speed_bps, ratio, seeding_enabled, seeding_state,
+               last_error_code, last_error_message, updated_at
         FROM torrent_runtime_snapshots
         WHERE task_id = ?
         "#,
@@ -212,11 +250,54 @@ pub async fn get_torrent_runtime_snapshot(
         metadata_status: row.get("metadata_status"),
         completed_pieces: row.get("completed_pieces"),
         verified_pieces: row.get("verified_pieces"),
+        piece_count: row.get("piece_count"),
+        piece_bitfield_base64: row.get("piece_bitfield_base64"),
         peer_count: row.get("peer_count"),
         seed_count: row.get("seed_count"),
+        dht_status: row.get("dht_status"),
+        trackers_json: row.get("trackers_json"),
         upload_bytes: row.get("upload_bytes"),
         upload_speed_bps: row.get("upload_speed_bps"),
         ratio: row.get("ratio"),
+        seeding_enabled: row.get::<i64, _>("seeding_enabled") != 0,
+        seeding_state: row.get("seeding_state"),
+        last_error_code: row.get("last_error_code"),
+        last_error_message: row.get("last_error_message"),
         updated_at: row.get("updated_at"),
     }))
+}
+
+pub async fn torrent_seeding_enabled(pool: &SqlitePool, task_id: &str) -> Result<bool, String> {
+    let value: Option<i64> =
+        sqlx::query_scalar("SELECT seeding_enabled FROM torrent_tasks WHERE task_id = ?")
+            .bind(task_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(value.unwrap_or(0) != 0)
+}
+
+pub async fn update_torrent_seeding(
+    pool: &SqlitePool,
+    task_id: &str,
+    enabled: bool,
+    ratio_limit: Option<f64>,
+    time_limit_seconds: Option<i64>,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE torrent_tasks
+        SET seeding_enabled = ?, seed_ratio_limit = ?, seed_time_limit_seconds = ?, updated_at = ?
+        WHERE task_id = ?
+        "#,
+    )
+    .bind(if enabled { 1 } else { 0 })
+    .bind(ratio_limit)
+    .bind(time_limit_seconds)
+    .bind(crate::models::task::now_iso())
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }

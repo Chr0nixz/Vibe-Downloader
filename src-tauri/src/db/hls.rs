@@ -42,6 +42,10 @@ pub struct HlsSegmentRecord {
     pub duration_ms: i64,
     pub byte_range_start: Option<i64>,
     pub byte_range_length: Option<i64>,
+    pub init_map_uri: Option<String>,
+    pub init_map_local_path: Option<String>,
+    pub init_map_byte_range_start: Option<i64>,
+    pub init_map_byte_range_length: Option<i64>,
     pub key_method: Option<String>,
     pub key_uri: Option<String>,
     pub key_iv: Option<String>,
@@ -62,6 +66,10 @@ pub struct HlsSegmentUpsert<'a> {
     pub duration_ms: i64,
     pub byte_range_start: Option<i64>,
     pub byte_range_length: Option<i64>,
+    pub init_map_uri: Option<&'a str>,
+    pub init_map_local_path: Option<&'a str>,
+    pub init_map_byte_range_start: Option<i64>,
+    pub init_map_byte_range_length: Option<i64>,
     pub key_method: Option<&'a str>,
     pub key_uri: Option<&'a str>,
     pub key_iv: Option<&'a str>,
@@ -196,9 +204,11 @@ pub async fn upsert_hls_segment(
         r#"
         INSERT INTO hls_segments (
             id, task_id, media_sequence, discontinuity_sequence, uri, local_path,
-            duration_ms, byte_range_start, byte_range_length, key_method, key_uri, key_iv,
+            duration_ms, byte_range_start, byte_range_length,
+            init_map_uri, init_map_local_path, init_map_byte_range_start, init_map_byte_range_length,
+            key_method, key_uri, key_iv,
             downloaded_bytes, status, retry_count, last_error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', 0, NULL, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', 0, NULL, ?, ?)
         ON CONFLICT(task_id, media_sequence, discontinuity_sequence) DO UPDATE SET
             id = excluded.id,
             uri = excluded.uri,
@@ -206,6 +216,10 @@ pub async fn upsert_hls_segment(
             duration_ms = excluded.duration_ms,
             byte_range_start = excluded.byte_range_start,
             byte_range_length = excluded.byte_range_length,
+            init_map_uri = excluded.init_map_uri,
+            init_map_local_path = excluded.init_map_local_path,
+            init_map_byte_range_start = excluded.init_map_byte_range_start,
+            init_map_byte_range_length = excluded.init_map_byte_range_length,
             key_method = excluded.key_method,
             key_uri = excluded.key_uri,
             key_iv = excluded.key_iv,
@@ -225,6 +239,10 @@ pub async fn upsert_hls_segment(
     .bind(segment.duration_ms.max(0))
     .bind(segment.byte_range_start)
     .bind(segment.byte_range_length)
+    .bind(segment.init_map_uri)
+    .bind(segment.init_map_local_path)
+    .bind(segment.init_map_byte_range_start)
+    .bind(segment.init_map_byte_range_length)
     .bind(segment.key_method)
     .bind(segment.key_uri)
     .bind(segment.key_iv)
@@ -243,8 +261,9 @@ pub async fn list_hls_segments(
     let rows = sqlx::query(
         r#"
         SELECT id, task_id, media_sequence, discontinuity_sequence, uri, local_path,
-               duration_ms, byte_range_start, byte_range_length, key_method, key_uri,
-               key_iv, downloaded_bytes, status, retry_count, last_error
+               duration_ms, byte_range_start, byte_range_length,
+               init_map_uri, init_map_local_path, init_map_byte_range_start, init_map_byte_range_length,
+               key_method, key_uri, key_iv, downloaded_bytes, status, retry_count, last_error
         FROM hls_segments
         WHERE task_id = ?
         ORDER BY discontinuity_sequence ASC, media_sequence ASC
@@ -266,6 +285,10 @@ pub async fn list_hls_segments(
             duration_ms: row.get("duration_ms"),
             byte_range_start: row.get("byte_range_start"),
             byte_range_length: row.get("byte_range_length"),
+            init_map_uri: row.get("init_map_uri"),
+            init_map_local_path: row.get("init_map_local_path"),
+            init_map_byte_range_start: row.get("init_map_byte_range_start"),
+            init_map_byte_range_length: row.get("init_map_byte_range_length"),
             key_method: row.get("key_method"),
             key_uri: row.get("key_uri"),
             key_iv: row.get("key_iv"),

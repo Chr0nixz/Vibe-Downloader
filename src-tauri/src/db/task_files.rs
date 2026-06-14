@@ -95,6 +95,28 @@ pub async fn list_task_file_records_for_tasks(
     Ok(files_by_task_id)
 }
 
+pub async fn update_task_file_selection(
+    pool: &SqlitePool,
+    task_id: &str,
+    selected_relative_paths: &[String],
+) -> Result<(), String> {
+    sqlx::query("UPDATE task_files SET selected = 0 WHERE task_id = ?")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    for path in selected_relative_paths {
+        sqlx::query("UPDATE task_files SET selected = 1 WHERE task_id = ? AND relative_path = ?")
+            .bind(task_id)
+            .bind(path)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn row_to_task_file(row: &sqlx::sqlite::SqliteRow) -> Result<TaskFileRecord, String> {
     Ok(TaskFileRecord {
         id: row.get("id"),

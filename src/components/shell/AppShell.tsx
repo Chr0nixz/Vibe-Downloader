@@ -6,12 +6,26 @@ import { Sidebar } from "@/components/shell/Sidebar";
 import { StatusBar } from "@/components/shell/StatusBar";
 import { TitleBar } from "@/components/shell/TitleBar";
 import { TaskList } from "@/components/tasks/TaskList";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ToastViewport } from "@/components/ui/toast";
 import type { AttentionDialogRequest } from "@/components/shell/ResolveAttentionDialog";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import { createLogger } from "@/lib/logger";
 import { errorMessage } from "@/lib/errors";
-import type { RecoveryAction, ResolveTaskAttentionInput } from "@/generated/bindings";
+import type {
+  CompletionActionRequestedPayload,
+  RecoveryAction,
+  ResolveTaskAttentionInput,
+} from "@/generated/bindings";
 import {
   getPlatform,
   trafficLightsInsetPx,
@@ -24,6 +38,7 @@ import {
   deleteTask,
   getSettings,
   listTasksCursor,
+  onCompletionActionRequested,
   onClipboardLinkDetected,
   onSettingsChanged,
   onTrayNewDownloadRequested,
@@ -31,11 +46,13 @@ import {
   openTaskFile,
   openTaskFolder,
   openDirectoryPicker,
+  requestSystemShutdown,
   finishLiveRecording,
   pauseTask,
   resolveTaskAttention,
   retryTask,
   resumeTask,
+  runTrayMenuAction,
 } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settings-store";
 import { taskCursorInput, useTaskStore } from "@/stores/task-store";
@@ -111,6 +128,8 @@ export function AppShell() {
   const [bulkDeleteTargets, setBulkDeleteTargets] = useState<Task[]>([]);
   const [attentionRequest, setAttentionRequest] =
     useState<AttentionDialogRequest | null>(null);
+  const [completionActionRequest, setCompletionActionRequest] =
+    useState<CompletionActionRequestedPayload | null>(null);
 
   const tasks = useTaskStore((s) => s.tasks);
   const selectedId = useTaskStore((s) => s.selectedId);
@@ -363,6 +382,28 @@ export function AppShell() {
     void runTaskAction(() => resolveTaskAttention(input), task.id);
   }, [runTaskAction]);
 
+  const runCompletionAction = useCallback(
+    async (request: CompletionActionRequestedPayload) => {
+      setCompletionActionRequest(null);
+      try {
+        if (request.action === "exit_app") {
+          await runTrayMenuAction("quit");
+        } else if (request.action === "shutdown") {
+          await requestSystemShutdown();
+        }
+      } catch (err) {
+        const message = errorMessage(err);
+        log.error("completion action failed", err);
+        addToast({
+          tone: "error",
+          title: t("toast.actionFailed"),
+          description: message,
+        });
+      }
+    },
+    [addToast, t],
+  );
+
   const resolveAttention = useCallback(async (task: Task, action: RecoveryAction) => {
     if (action === "open_folder" || action === "free_disk_space") {
       openFolder(task);
@@ -523,6 +564,24 @@ export function AppShell() {
     newDownloadOpen,
     t,
   ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenCompletionAction: (() => void) | undefined;
+
+    void (async () => {
+      unlistenCompletionAction = await onCompletionActionRequested((payload) => {
+        if (payload.action === "none") return;
+        setCompletionActionRequest(payload);
+      });
+      if (cancelled) unlistenCompletionAction?.();
+    })();
+
+    return () => {
+      cancelled = true;
+      unlistenCompletionAction?.();
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.fontFamily =
@@ -744,6 +803,14 @@ export function AppShell() {
           />
         </Suspense>
       ) : null}
+      {completionActionRequest ? (
+        <CompletionActionDialog
+          request={completionActionRequest}
+          open={!!completionActionRequest}
+          onCancel={() => setCompletionActionRequest(null)}
+          onRun={runCompletionAction}
+        />
+      ) : null}
       {shortcutPanelOpen ? (
         <Suspense fallback={null}>
           <ShortcutPanel
@@ -787,5 +854,87 @@ export function AppShell() {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function CompletionActionDialog({
+  request,
+  open,
+  onCancel,
+  onRun,
+}: {
+  request: CompletionActionRequestedPayload;
+  open: boolean;
+  onCancel: () => void;
+  onRun: (request: CompletionActionRequestedPayload) => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const [remaining, setRemaining] = useState(request.countdownSeconds);
+  const isExit = request.action === "exit_app";
+  const isShutdown = request.action === "shutdown";
+
+  useEffect(() => {
+    setRemaining(request.countdownSeconds);
+  }, [request]);
+
+  useEffect(() => {
+    if (!open || !isExit) return;
+    if (remaining <= 0) {
+      void onRun(request);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setRemaining((value) => Math.max(0, value - 1));
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [isExit, onRun, open, remaining, request]);
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      if (!nextOpen) onCancel();
+    }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {isShutdown
+              ? t("completionDialog.shutdownTitle")
+              : t("completionDialog.exitTitle")}
+          </DialogTitle>
+        </DialogHeader>
+        <DialogBody className="space-y-3 py-4">
+          <DialogDescription>
+            {isShutdown
+              ? t("completionDialog.shutdownDescription")
+              : t("completionDialog.exitDescription", { seconds: remaining })}
+          </DialogDescription>
+          {isExit ? (
+            <div className="h-1.5 overflow-hidden rounded-full bg-surface-raised">
+              <div
+                className="h-full rounded-full bg-accent-primary transition-[width] duration-300"
+                style={{
+                  width: `${Math.max(
+                    0,
+                    Math.min(100, (remaining / Math.max(1, request.countdownSeconds)) * 100),
+                  )}%`,
+                }}
+              />
+            </div>
+          ) : null}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel}>
+            {t("completionDialog.cancel")}
+          </Button>
+          <Button
+            variant={isShutdown ? "danger" : "default"}
+            onClick={() => void onRun(request)}
+          >
+            {isShutdown
+              ? t("completionDialog.confirmShutdown")
+              : t("completionDialog.exitNow")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -8,7 +8,7 @@ use sqlx::SqlitePool;
 use tauri::AppHandle;
 
 use super::{BtEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine};
-use crate::models::{EngineCapabilities, ProbedFile, TaskKind, TaskRecord};
+use crate::models::{EngineCapabilities, HlsVariant, ProbedFile, TaskKind, TaskRecord};
 use crate::proxy::{ResolvedProxyConfig, SharedProxyConfig};
 
 pub(crate) type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -33,6 +33,7 @@ pub struct ProbeOutput {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub content_type: Option<String>,
+    pub hls_variants: Vec<HlsVariant>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +46,7 @@ pub struct DownloadContext {
     pub speed_limiter: Arc<GlobalSpeedLimiter>,
     pub connection_limit: usize,
     pub request_headers: Vec<(String, String)>,
+    pub proxy_config: ResolvedProxyConfig,
 }
 
 pub trait DownloadEngine: Send + Sync {
@@ -85,6 +87,10 @@ impl EngineRegistry {
 
     pub async fn set_proxy_config(&self, config: ResolvedProxyConfig) {
         *self.proxy_config.write().await = config;
+    }
+
+    pub async fn proxy_config(&self) -> ResolvedProxyConfig {
+        self.proxy_config.read().await.clone()
     }
 
     pub fn engine_for_uri(&self, uri: &str) -> Result<Arc<dyn DownloadEngine>, String> {

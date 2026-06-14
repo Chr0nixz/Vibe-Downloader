@@ -1,6 +1,6 @@
 mod bt;
 mod engine;
-mod ftp;
+pub(crate) mod ftp;
 mod hls;
 mod http;
 mod speed;

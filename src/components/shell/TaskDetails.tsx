@@ -5,20 +5,34 @@ import { useTranslation } from "react-i18next";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type { Task } from "@/types/task";
 import type { TaskSegment } from "@/types/task-segment";
 import type {
   HashVerificationState,
   RecoveryAction,
   RequestDiagnostic,
+  TaskProxyMode,
+  TaskProxySettings,
   TaskEvent,
   TorrentRuntimeSnapshot,
 } from "@/generated/bindings";
 import {
+  getTaskProxySettings,
   getTorrentRuntimeSnapshot,
   listSegmentsPage,
   listTaskEventsPage,
   listTaskRequestsPage,
+  updateTaskProxySettings,
+  updateTorrentFileSelection,
+  updateTorrentSeeding,
   verifyTaskHash,
 } from "@/lib/tauri";
 import { errorMessage } from "@/lib/errors";
@@ -544,6 +558,7 @@ function TaskDetailsPanel({
               snapshot={torrentSnapshot}
               error={torrentSnapshotError}
             />
+            <TaskProxyPanel task={task} />
             <TaskRecoveryActions task={task} onResolve={onResolveAttention} />
           </TabsContent>
           <TabsContent value="logs">
@@ -644,7 +659,42 @@ function TorrentRuntimePanel({
   error: string | null;
 }) {
   const { t } = useTranslation();
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(
+    () => new Set(task.files.filter((file) => file.selected).map((file) => file.relativePath)),
+  );
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setSelectedFiles(new Set(task.files.filter((file) => file.selected).map((file) => file.relativePath)));
+  }, [task.id, task.files]);
   if (task.protocol !== "bt" && task.protocol !== "magnet") return null;
+
+  const canEditFiles = task.files.length > 1 && task.status !== "downloading" && task.status !== "retrying";
+  const completedPieces = snapshot ? parseSnapshotNumber(snapshot.completedPieces) : 0;
+  const pieceCount = snapshot ? Math.max(0, parseSnapshotNumber(snapshot.pieceCount)) : 0;
+  const pieceCells = pieceCount > 0
+    ? Array.from({ length: Math.min(80, pieceCount) }, (_, index) => index < Math.round((completedPieces / pieceCount) * Math.min(80, pieceCount)))
+    : [];
+
+  async function saveFileSelection() {
+    setSaving(true);
+    try {
+      await updateTorrentFileSelection({
+        taskId: task.id,
+        selectedFilePaths: [...selectedFiles],
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggleSeeding(enabled: boolean) {
+    setSaving(true);
+    try {
+      await updateTorrentSeeding({ taskId: task.id, enabled, ratioLimit: null, timeLimitSeconds: null });
+    } finally {
+      setSaving(false);
+    }
+  }
 
   if (error) {
     return (
@@ -679,7 +729,7 @@ function TorrentRuntimePanel({
           {t("taskDetails.btRuntime")}
         </span>
         <span className="text-[11px] text-text-muted">
-          {t("taskDetails.btSpeedLimitUnsupported")}
+          {snapshot.seedingEnabled ? t("taskDetails.btSeedingEnabled") : t("taskDetails.btSeedingDisabled")}
         </span>
       </div>
       <div className="space-y-0.5">
@@ -694,8 +744,16 @@ function TorrentRuntimePanel({
         />
         <Row
           label={t("taskDetails.btPieces")}
-          value={`${snapshot.completedPieces} / ${snapshot.verifiedPieces}`}
+          value={`${snapshot.completedPieces} / ${snapshot.pieceCount}`}
         />
+        <div className="grid gap-0.5 rounded-md bg-surface-root/50 px-3 py-2" style={{ gridTemplateColumns: "repeat(20, minmax(0, 1fr))" }}>
+          {pieceCells.length > 0 ? pieceCells.map((done, index) => (
+            <span
+              key={index}
+              className={cn("h-1.5 rounded-sm", done ? "bg-status-success" : "bg-border-subtle")}
+            />
+          )) : <span className="text-xs text-text-muted">{t("taskDetails.btNoPieces")}</span>}
+        </div>
         <Row
           label={t("taskDetails.btUpload")}
           value={`${formatBytes(parseSnapshotNumber(snapshot.uploadBytes))} / ${formatSpeed(parseSnapshotNumber(snapshot.uploadSpeedBps))}`}
@@ -704,6 +762,194 @@ function TorrentRuntimePanel({
           label={t("taskDetails.btRatio")}
           value={snapshot.ratio == null ? "-" : snapshot.ratio.toFixed(3)}
         />
+        <Row
+          label={t("taskDetails.btDht")}
+          value={snapshot.dhtStatus ? t("taskDetails.btDhtActive") : t("taskDetails.btDhtUnknown")}
+          mono={false}
+        />
+        {snapshot.trackers.length > 0 ? (
+          <div className="rounded-md bg-surface-root/50 px-3 py-2 text-xs">
+            <div className="mb-1 font-medium text-text-muted">{t("taskDetails.btTrackers")}</div>
+            <div className="space-y-1">
+              {snapshot.trackers.slice(0, 5).map((tracker) => (
+                <div key={tracker.url} className="flex items-center justify-between gap-2">
+                  <span className="truncate text-text-secondary">{tracker.url}</span>
+                  <span className="shrink-0 text-text-muted">{tracker.status}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {snapshot.lastErrorMessage ? (
+          <p className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+            {snapshot.lastErrorMessage}
+          </p>
+        ) : null}
+        <div className="flex items-center justify-between gap-3 rounded-md bg-surface-root/50 px-3 py-2">
+          <span className="text-xs text-text-muted">{t("taskDetails.btSeeding")}</span>
+          <input
+            type="checkbox"
+            checked={snapshot.seedingEnabled}
+            disabled={saving}
+            onChange={(event) => void toggleSeeding(event.target.checked)}
+            className="h-5 w-5 accent-accent-primary"
+          />
+        </div>
+        {task.files.length > 1 ? (
+          <div className="rounded-md bg-surface-root/50 px-3 py-2">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-text-muted">{t("taskDetails.btFiles")}</span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!canEditFiles || saving || selectedFiles.size === 0}
+                onClick={() => void saveFileSelection()}
+              >
+                {t("taskDetails.btSaveFiles")}
+              </Button>
+            </div>
+            <div className="max-h-40 space-y-1 overflow-auto pr-1">
+              {task.files.map((file) => (
+                <label key={file.id} className="flex items-center gap-2 text-xs text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={selectedFiles.has(file.relativePath)}
+                    disabled={!canEditFiles || saving}
+                    onChange={(event) => {
+                      const next = new Set(selectedFiles);
+                      if (event.target.checked) next.add(file.relativePath);
+                      else next.delete(file.relativePath);
+                      setSelectedFiles(next);
+                    }}
+                    className="h-4 w-4 accent-accent-primary"
+                  />
+                  <span className="truncate">{file.relativePath}</span>
+                  <span className="ml-auto shrink-0 font-mono text-text-muted">{formatBytes(file.totalSize)}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function TaskProxyPanel({ task }: { task: Task }) {
+  const { t } = useTranslation();
+  const [settings, setSettings] = useState<TaskProxySettings | null>(null);
+  const [mode, setMode] = useState<TaskProxyMode>("inherit");
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [proxyUsername, setProxyUsername] = useState("");
+  const [proxyPassword, setProxyPassword] = useState("");
+  const [noProxy, setNoProxy] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const editable = task.status !== "downloading" && task.status !== "retrying";
+
+  useEffect(() => {
+    let cancelled = false;
+    void getTaskProxySettings(task.id)
+      .then((value) => {
+        if (cancelled) return;
+        setSettings(value);
+        setMode(value.mode);
+        setProxyUrl(value.proxyUrl);
+        setProxyUsername(value.proxyUsername);
+        setProxyPassword("");
+        setNoProxy(value.noProxy);
+        setError(null);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(errorMessage(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task.id]);
+
+  async function saveProxy() {
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await updateTaskProxySettings({
+        taskId: task.id,
+        mode,
+        proxyUrl,
+        proxyUsername,
+        proxyPassword: proxyPassword.trim() || null,
+        clearProxyPassword: false,
+        noProxy,
+      });
+      setSettings(next);
+      setProxyPassword("");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-border-subtle bg-surface-raised/40 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs font-medium text-text-secondary">{t("taskDetails.taskProxy")}</span>
+        <span className="text-[11px] text-text-muted">
+          {settings?.proxyPasswordSaved ? t("taskDetails.proxyPasswordSaved") : t("taskDetails.proxyPasswordNotSaved")}
+        </span>
+      </div>
+      <Select value={mode} onValueChange={(value) => setMode(value as TaskProxyMode)} disabled={!editable || saving}>
+        <SelectTrigger className="h-8">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="inherit">{t("taskDetails.proxyInherit")}</SelectItem>
+          <SelectItem value="off">{t("taskDetails.proxyOff")}</SelectItem>
+          <SelectItem value="custom">{t("taskDetails.proxyCustom")}</SelectItem>
+        </SelectContent>
+      </Select>
+      {mode === "custom" ? (
+        <div className="grid gap-2">
+          <Input
+            value={proxyUrl}
+            onChange={(event) => setProxyUrl(event.target.value)}
+            placeholder={task.protocol === "bt" || task.protocol.startsWith("ftp") ? "socks5://127.0.0.1:1080" : "http://127.0.0.1:8080"}
+            disabled={!editable || saving}
+            className="h-8 bg-surface-root text-xs"
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <Input
+              value={proxyUsername}
+              onChange={(event) => setProxyUsername(event.target.value)}
+              placeholder={t("taskDetails.proxyUsername")}
+              disabled={!editable || saving}
+              className="h-8 bg-surface-root text-xs"
+            />
+            <Input
+              value={proxyPassword}
+              onChange={(event) => setProxyPassword(event.target.value)}
+              placeholder={t("taskDetails.proxyPassword")}
+              type="password"
+              disabled={!editable || saving}
+              className="h-8 bg-surface-root text-xs"
+            />
+          </div>
+          <Input
+            value={noProxy}
+            onChange={(event) => setNoProxy(event.target.value)}
+            placeholder={t("taskDetails.proxyNoProxy")}
+            disabled={!editable || saving}
+            className="h-8 bg-surface-root text-xs"
+          />
+        </div>
+      ) : null}
+      {error ? <p className="text-xs text-status-danger">{error}</p> : null}
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] text-text-muted">{t("taskDetails.taskProxyHint")}</p>
+        <Button type="button" size="sm" variant="outline" disabled={!editable || saving} onClick={() => void saveProxy()}>
+          {t("taskDetails.saveProxy")}
+        </Button>
       </div>
     </div>
   );

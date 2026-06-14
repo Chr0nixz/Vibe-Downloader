@@ -9,7 +9,9 @@ mod segment_planner;
 mod segments;
 mod settings;
 mod task_credentials;
+mod task_checksums;
 mod task_files;
+mod task_proxy;
 mod task_records;
 mod task_state;
 mod torrent;
@@ -47,21 +49,31 @@ pub use self::segments::{
 };
 pub use self::settings::{
     clipboard_monitor_enabled, get_settings, normalize_accent_color, normalize_font_family,
-    normalize_multi_connection_threshold_bytes, normalize_proxy_mode, normalize_proxy_no_proxy,
-    normalize_proxy_optional, normalize_proxy_url, normalize_speed_limit_bps,
-    parse_multi_connection_threshold_bytes, parse_speed_limit_bps, upsert_settings,
+    local_time_window_active, normalize_local_time, normalize_multi_connection_threshold_bytes,
+    normalize_proxy_mode, normalize_proxy_no_proxy, normalize_proxy_optional, normalize_proxy_url,
+    normalize_speed_limit_bps, parse_multi_connection_threshold_bytes, parse_speed_limit_bps,
+    upsert_settings,
 };
 pub use self::task_credentials::{
     legacy_credentials_from_url, migrate_legacy_ftp_credentials, resolve_task_credentials,
     upsert_task_credentials, TaskCredentials,
 };
+pub use self::task_checksums::{
+    insert_task_checksum_record, list_task_checksum_records, list_task_checksum_records_for_tasks,
+};
 pub use self::task_files::{
     insert_task_file_record, list_task_file_records, list_task_file_records_for_tasks,
+    update_task_file_selection,
+};
+pub use self::task_proxy::{
+    get_task_proxy_settings, resolve_task_proxy_config, upsert_task_proxy_settings,
+    validate_task_proxy_protocol,
 };
 pub use self::task_records::{
     find_duplicate_task_record, get_task_record, insert_task_record, list_queued_task_records,
     list_task_records, list_task_records_cursor, list_task_records_page, next_retry_after_at,
-    task_filter_options, TaskFilterOptions, TaskListPage, TaskListQuery,
+    next_queue_position, task_filter_options, update_task_transfer_options, TaskFilterOptions,
+    TaskListPage, TaskListQuery, TaskTransferOptionsUpdate,
 };
 pub use self::task_state::{
     clear_tasks, complete_segment, complete_task, complete_task_segment,
@@ -71,9 +83,10 @@ pub use self::task_state::{
     update_task_progress, update_task_retry_after, update_task_save_target, update_task_status,
 };
 pub use self::torrent::{
-    get_torrent_runtime_snapshot, update_task_remote_metadata, update_task_torrent_metadata,
-    upsert_torrent_runtime_snapshot, upsert_torrent_task, TaskRemoteMetadataUpdate,
-    TaskTorrentMetadataUpdate, TorrentRuntimeSnapshotUpsert, TorrentTaskUpsert,
+    get_torrent_runtime_snapshot, torrent_seeding_enabled, update_task_remote_metadata,
+    update_task_torrent_metadata, update_torrent_seeding, upsert_torrent_runtime_snapshot,
+    upsert_torrent_task, TaskRemoteMetadataUpdate, TaskTorrentMetadataUpdate,
+    TorrentRuntimeSnapshotUpsert, TorrentTaskUpsert,
 };
 
 pub const DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;

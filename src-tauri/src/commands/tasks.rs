@@ -19,11 +19,15 @@ pub use super::task_resume::{
 use crate::{
     db,
     download::{DownloadContext, EngineRegistry, ProbeRequest},
-    events::{emit_queue_changed, emit_task_progress, emit_task_updated_record},
+    events::{
+        emit_completion_action_requested, emit_queue_changed, emit_task_progress,
+        emit_task_updated_record,
+    },
     logging::sanitize_url,
     models::{
-        AppErrorPayload, HashVerificationStatus, RecoveryAction, Task, TaskFileRecord, TaskRecord,
-        TaskStatus,
+        AppErrorPayload, CompletionAction, CompletionActionRequestedPayload, FtpDirectoryProbe,
+        HashVerificationStatus, RecoveryAction, Task, TaskChecksumRecord, TaskFileRecord,
+        TaskProxySettings, TaskProxySettingsInput, TaskRecord, TaskStatus,
     },
     AppState, DownloadControl, TaskRequestHeaders,
 };
@@ -35,6 +39,22 @@ pub struct ResolveTaskAttentionInput {
     pub action: RecoveryAction,
     pub file_name: Option<String>,
     pub save_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTorrentFileSelectionInput {
+    pub task_id: String,
+    pub selected_file_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTorrentSeedingInput {
+    pub task_id: String,
+    pub enabled: bool,
+    pub ratio_limit: Option<f64>,
+    pub time_limit_seconds: Option<String>,
 }
 
 mod create;
@@ -54,6 +74,145 @@ mod mock_seed;
 
 #[cfg(debug_assertions)]
 pub use mock_seed::*;
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_torrent_file_selection(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: UpdateTorrentFileSelectionInput,
+) -> Result<Task, String> {
+    let task = require_task(&state.pool, &input.task_id).await?;
+    if task.protocol != "bt" {
+        return Err("File selection is only available for BitTorrent tasks.".to_string());
+    }
+    if matches!(task.status, TaskStatus::Downloading | TaskStatus::Retrying) {
+        return Err("Pause the torrent before changing file selection.".to_string());
+    }
+    let selected = input
+        .selected_file_paths
+        .iter()
+        .map(|value| value.trim().replace('\\', "/"))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(
+            crate::models::AppErrorPayload {
+                code: "bt_file_selection_required".to_string(),
+                message: "Choose at least one torrent file before downloading.".to_string(),
+                recoverable: true,
+                actions: vec!["check_url".to_string()],
+            }
+            .command_error(),
+        );
+    }
+    db::update_task_file_selection(&state.pool, &task.id, &selected).await?;
+    db::update_task_status(
+        &state.pool,
+        &task.id,
+        TaskStatus::Queued,
+        0,
+        0,
+        Some("Queued"),
+        None,
+    )
+    .await?;
+    db::insert_task_event(&state.pool, &task.id, "bt_file_selection_updated", None).await?;
+    emit_queue_changed(&app);
+    schedule_queued_tasks(app.clone(), state.inner()).await;
+    task_payload(&state.pool, &task.id).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_torrent_seeding(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: UpdateTorrentSeedingInput,
+) -> Result<Task, String> {
+    let task = require_task(&state.pool, &input.task_id).await?;
+    if task.protocol != "bt" {
+        return Err("Seeding is only available for BitTorrent tasks.".to_string());
+    }
+    let time_limit_seconds = input
+        .time_limit_seconds
+        .as_deref()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value > 0);
+    db::update_torrent_seeding(
+        &state.pool,
+        &task.id,
+        input.enabled,
+        input.ratio_limit.filter(|value| *value > 0.0),
+        time_limit_seconds,
+    )
+    .await?;
+    db::insert_task_event(
+        &state.pool,
+        &task.id,
+        if input.enabled {
+            "bt_seeding_enabled"
+        } else {
+            "bt_seeding_disabled"
+        },
+        None,
+    )
+    .await?;
+    if !input.enabled {
+        state.engine_registry.delete_runtime_task(&task, false).await;
+    }
+    if let Some(updated) = db::get_task_record(&state.pool, &task.id).await? {
+        emit_task_updated_record(&app, &state.pool, &updated).await;
+    }
+    task_payload(&state.pool, &task.id).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_task_proxy_settings(
+    state: tauri::State<'_, AppState>,
+    task_id: String,
+) -> Result<TaskProxySettings, String> {
+    db::get_task_proxy_settings(&state.pool, &task_id).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_task_proxy_settings(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: TaskProxySettingsInput,
+) -> Result<TaskProxySettings, String> {
+    let task = require_task(&state.pool, &input.task_id).await?;
+    if matches!(task.status, TaskStatus::Downloading | TaskStatus::Retrying) {
+        return Err("Pause the task before changing its proxy settings.".to_string());
+    }
+    if input.mode == crate::models::TaskProxyMode::Custom {
+        if let Some(url) = input
+            .proxy_url
+            .as_deref()
+            .and_then(crate::proxy::normalize_proxy_url)
+        {
+            db::validate_task_proxy_protocol(&task.protocol, &url)?;
+        }
+    }
+    let settings = db::upsert_task_proxy_settings(&state.pool, input).await?;
+    db::insert_task_event(&state.pool, &task.id, "task_proxy_updated", None).await?;
+    if let Some(updated) = db::get_task_record(&state.pool, &task.id).await? {
+        emit_task_updated_record(&app, &state.pool, &updated).await;
+    }
+    Ok(settings)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn probe_ftp_directory(
+    state: tauri::State<'_, AppState>,
+    url: String,
+) -> Result<FtpDirectoryProbe, String> {
+    let proxy_config = state.engine_registry.proxy_config().await;
+    crate::download::ftp::probe_ftp_directory_url(&url, proxy_config).await
+}
 
 pub(crate) async fn schedule_queued_tasks(app: AppHandle, state: &AppState) {
     schedule_queued_tasks_inner(
@@ -149,6 +308,19 @@ async fn schedule_queued_tasks_inner(
 
         let mut made_progress = false;
         for task in queued {
+            if settings.schedule_download_window_enabled
+                && task.obey_schedule
+                && !db::local_time_window_active(
+                    &settings.schedule_download_window_start,
+                    &settings.schedule_download_window_end,
+                )
+            {
+                tracing::debug!(
+                    task_id = %task.id,
+                    "scheduler deferred task outside configured download window"
+                );
+                continue;
+            }
             if downloads.lock().await.len() as i32 >= settings.max_active_tasks {
                 break;
             }
@@ -240,6 +412,9 @@ async fn start_task_download(
 
     let task_request_headers =
         resolve_task_request_headers(&pool, request_headers.clone(), &task.id).await?;
+    let global_proxy_config = engine_registry.proxy_config().await;
+    let task_proxy_config =
+        db::resolve_task_proxy_config(&pool, &task.id, &task.protocol, &global_proxy_config).await?;
     let task =
         prepare_task_for_download(&pool, &engine_registry, task, &task_request_headers).await?;
     if downloads.lock().await.contains_key(&task.id) {
@@ -304,6 +479,30 @@ async fn start_task_download(
             }
         };
 
+        let task_limit_bps = db::parse_speed_limit_bps(task.task_speed_limit_bps.as_deref());
+        let scheduled_limit_bps = db::get_settings(
+            &task_pool,
+            super::settings::default_download_dir(&task_app).unwrap_or_default(),
+        )
+        .await
+        .ok()
+        .and_then(|settings| {
+            if settings.schedule_speed_limit_window_enabled
+                && db::local_time_window_active(
+                    &settings.schedule_speed_limit_window_start,
+                    &settings.schedule_speed_limit_window_end,
+                )
+            {
+                db::parse_speed_limit_bps(settings.schedule_speed_limit_bps.as_deref())
+            } else {
+                None
+            }
+        });
+        let effective_task_limit = min_optional_limit(task_limit_bps, scheduled_limit_bps);
+        let task_speed_limiter = crate::download::GlobalSpeedLimiter::with_parent(
+            state_speed_limiter.clone(),
+            effective_task_limit,
+        );
         let result = engine
             .download(DownloadContext {
                 app: task_app.clone(),
@@ -311,9 +510,10 @@ async fn start_task_download(
                 task,
                 cancel: task_cancel.clone(),
                 finish: task_finish.clone(),
-                speed_limiter: state_speed_limiter.clone(),
+                speed_limiter: task_speed_limiter,
                 connection_limit,
                 request_headers: task_request_headers.clone(),
+                proxy_config: task_proxy_config,
             })
             .await;
         let canceled = task_cancel.load(Ordering::SeqCst);
@@ -345,6 +545,12 @@ async fn start_task_download(
                     );
                 }
             }
+            maybe_emit_completion_action(
+                &task_app,
+                &task_pool,
+                downloads_map.clone(),
+            )
+            .await;
         }
 
         spawn_schedule_queued_tasks(
@@ -384,6 +590,49 @@ async fn host_connection_slots(
         .filter(|control| control.source_key == source_key)
         .map(|control| control.connection_slots)
         .sum()
+}
+
+fn min_optional_limit(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+async fn maybe_emit_completion_action(
+    app: &AppHandle,
+    pool: &sqlx::SqlitePool,
+    downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
+) {
+    if !downloads.lock().await.is_empty() {
+        return;
+    }
+    if db::list_queued_task_records(pool, 1)
+        .await
+        .map(|tasks| !tasks.is_empty())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let Ok(settings) = db::get_settings(
+        pool,
+        super::settings::default_download_dir(app).unwrap_or_default(),
+    )
+    .await
+    else {
+        return;
+    };
+    if settings.completion_action == CompletionAction::None {
+        return;
+    }
+    emit_completion_action_requested(
+        app,
+        &CompletionActionRequestedPayload {
+            action: settings.completion_action,
+            countdown_seconds: settings.completion_countdown_seconds,
+        },
+    );
 }
 
 fn spawn_schedule_queued_tasks(
@@ -826,11 +1075,13 @@ async fn tasks_from_records_with_files(
         .map(|record| record.id.clone())
         .collect::<Vec<_>>();
     let mut files_by_task_id = db::list_task_file_records_for_tasks(pool, &task_ids).await?;
+    let mut checksums_by_task_id = db::list_task_checksum_records_for_tasks(pool, &task_ids).await?;
     Ok(records
         .into_iter()
         .map(|record| {
             let files = files_by_task_id.remove(&record.id).unwrap_or_default();
-            task_from_record_and_files(record, files)
+            let checksums = checksums_by_task_id.remove(&record.id).unwrap_or_default();
+            task_from_record_and_files(record, files, checksums)
         })
         .collect())
 }
@@ -840,12 +1091,18 @@ async fn task_from_record_with_files(
     record: TaskRecord,
 ) -> Result<Task, String> {
     let files = db::list_task_file_records(pool, &record.id).await?;
-    Ok(task_from_record_and_files(record, files))
+    let checksums = db::list_task_checksum_records(pool, &record.id).await?;
+    Ok(task_from_record_and_files(record, files, checksums))
 }
 
-fn task_from_record_and_files(record: TaskRecord, files: Vec<TaskFileRecord>) -> Task {
+fn task_from_record_and_files(
+    record: TaskRecord,
+    files: Vec<TaskFileRecord>,
+    checksums: Vec<TaskChecksumRecord>,
+) -> Task {
     let mut task = Task::from(record);
     task.files = files.into_iter().map(Into::into).collect();
+    task.checksums = checksums.into_iter().map(Into::into).collect();
     task
 }
 

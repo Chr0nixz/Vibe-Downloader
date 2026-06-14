@@ -7,7 +7,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::{
     db,
     events::{emit_queue_changed, emit_settings_changed},
-    models::{AppAccentColor, AppFontFamily, AppSettings},
+    models::{AppAccentColor, AppFontFamily, AppSettings, CompletionAction},
     proxy::{self, AppProxyMode},
     AppState,
 };
@@ -35,6 +35,15 @@ pub struct UpdateSettingsInput {
     pub proxy_username: Option<String>,
     pub proxy_password: Option<String>,
     pub clear_proxy_password: Option<bool>,
+    pub schedule_download_window_enabled: Option<bool>,
+    pub schedule_download_window_start: Option<String>,
+    pub schedule_download_window_end: Option<String>,
+    pub schedule_speed_limit_window_enabled: Option<bool>,
+    pub schedule_speed_limit_window_start: Option<String>,
+    pub schedule_speed_limit_window_end: Option<String>,
+    pub schedule_speed_limit_bps: Option<String>,
+    pub completion_action: Option<CompletionAction>,
+    pub completion_countdown_seconds: Option<i32>,
 }
 
 #[tauri::command]
@@ -143,6 +152,40 @@ pub async fn update_settings(
     if proxy_mode != AppProxyMode::Custom {
         proxy_username.clear();
     }
+    let schedule_download_window_enabled = input
+        .schedule_download_window_enabled
+        .unwrap_or(current.schedule_download_window_enabled);
+    let schedule_download_window_start = input
+        .schedule_download_window_start
+        .as_deref()
+        .and_then(db::normalize_local_time)
+        .unwrap_or_else(|| current.schedule_download_window_start.clone());
+    let schedule_download_window_end = input
+        .schedule_download_window_end
+        .as_deref()
+        .and_then(db::normalize_local_time)
+        .unwrap_or_else(|| current.schedule_download_window_end.clone());
+    let schedule_speed_limit_window_enabled = input
+        .schedule_speed_limit_window_enabled
+        .unwrap_or(current.schedule_speed_limit_window_enabled);
+    let schedule_speed_limit_window_start = input
+        .schedule_speed_limit_window_start
+        .as_deref()
+        .and_then(db::normalize_local_time)
+        .unwrap_or_else(|| current.schedule_speed_limit_window_start.clone());
+    let schedule_speed_limit_window_end = input
+        .schedule_speed_limit_window_end
+        .as_deref()
+        .and_then(db::normalize_local_time)
+        .unwrap_or_else(|| current.schedule_speed_limit_window_end.clone());
+    let schedule_speed_limit_bps = input
+        .schedule_speed_limit_bps
+        .and_then(|value| db::normalize_speed_limit_bps(&value));
+    let completion_action = input.completion_action.unwrap_or(current.completion_action);
+    let completion_countdown_seconds = input
+        .completion_countdown_seconds
+        .unwrap_or(current.completion_countdown_seconds)
+        .clamp(5, 300);
     let settings = AppSettings {
         max_active_tasks,
         default_save_dir,
@@ -163,6 +206,15 @@ pub async fn update_settings(
         proxy_no_proxy,
         proxy_username,
         proxy_password_saved,
+        schedule_download_window_enabled,
+        schedule_download_window_start,
+        schedule_download_window_end,
+        schedule_speed_limit_window_enabled,
+        schedule_speed_limit_window_start,
+        schedule_speed_limit_window_end,
+        schedule_speed_limit_bps,
+        completion_action,
+        completion_countdown_seconds,
     };
 
     db::upsert_settings(&state.pool, &settings).await?;

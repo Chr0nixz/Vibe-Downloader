@@ -42,8 +42,9 @@ use crate::{
     events::{emit_task_progress, emit_task_updated_record},
     logging::sanitize_url,
     models::{
-        EngineCapabilities, ProbedFile, RequestDiagnosticRecord, SegmentStatus, TaskKind,
-        TaskProgressPayload, TaskRecord, TaskSegmentRecord, TaskStatus,
+        EngineCapabilities, FtpDirectoryEntry, FtpDirectoryProbe, ProbedFile,
+        RequestDiagnosticRecord, SegmentStatus, TaskKind, TaskProgressPayload, TaskRecord,
+        TaskSegmentRecord, TaskStatus,
     },
     proxy::{socks5_connect, ResolvedProxyConfig, SharedProxyConfig},
 };
@@ -176,6 +177,7 @@ impl FtpEngine {
             etag: None,
             last_modified,
             content_type: None,
+            hls_variants: Vec::new(),
         })
     }
 
@@ -193,7 +195,7 @@ impl FtpEngine {
             target.username = credentials.username;
             target.password = credentials.password;
         }
-        let proxy_config = self.proxy_config.read().await.clone();
+        let proxy_config = context.proxy_config.clone();
         run_ftp_download(target, context, proxy_config).await
     }
 }
@@ -202,6 +204,48 @@ impl Default for FtpEngine {
     fn default() -> Self {
         Self::new(ResolvedProxyConfig::shared_default())
     }
+}
+
+pub async fn probe_ftp_directory_url(
+    input_url: &str,
+    proxy_config: ResolvedProxyConfig,
+) -> Result<FtpDirectoryProbe, String> {
+    let target = FtpTarget::parse_directory(input_url)?;
+    let mut diagnostics = Vec::new();
+    let mut session = connect_session(&target, &proxy_config).await?;
+    session.transfer_type(FileType::Binary).await?;
+    session.set_mode(Mode::Passive);
+    let cwd_result = session.cwd(&target.path).await;
+    match cwd_result {
+        Ok(()) => diagnostics.push(format!("CWD {} succeeded", target.path)),
+        Err(error) => diagnostics.push(format!("CWD {} failed: {error}", target.path)),
+    }
+    let current_directory = session.pwd().await.ok();
+    let mut entries = Vec::new();
+    match session.mlsd(None).await {
+        Ok(values) => {
+            diagnostics.push(format!("MLSD returned {} entries", values.len()));
+            entries = ftp_directory_entries(&target, values);
+        }
+        Err(error) => {
+            diagnostics.push(format!("MLSD failed: {error}"));
+            match session.list(None).await {
+                Ok(values) => {
+                    diagnostics.push(format!("LIST returned {} entries", values.len()));
+                    entries = ftp_directory_entries(&target, values);
+                }
+                Err(error) => diagnostics.push(format!("LIST failed: {error}")),
+            }
+        }
+    }
+    let _ = session.quit().await;
+    Ok(FtpDirectoryProbe {
+        input_url: input_url.to_string(),
+        directory_url: target.sanitized_uri,
+        current_directory,
+        entries,
+        diagnostics,
+    })
 }
 
 impl DownloadEngine for FtpEngine {
@@ -240,6 +284,7 @@ async fn run_ftp_download(
         speed_limiter,
         connection_limit,
         request_headers: _,
+        proxy_config: _,
     } = context;
 
     let temp_path = task
@@ -949,10 +994,11 @@ async fn connect_session(
         }
         FtpSecurityMode::ImplicitTls => {
             if proxy_config.is_custom_socks5() {
-                tracing::warn!(
-                    url = %target.sanitized_uri,
-                    "implicit FTPS proxy is not supported; connecting directly"
-                );
+                return Err(ftp_error_payload(
+                    "ftp_proxy_unsupported_for_implicit_tls",
+                    "Implicit FTPS over a task SOCKS5 proxy is not supported by the current FTP runtime. Use explicit FTPS on port 21, plain FTP through SOCKS5, or disable the task proxy for this task.",
+                    true,
+                ));
             }
             let connector = rustls_connector();
             let mut session =
@@ -1036,7 +1082,25 @@ fn ftp_connect_error(mode: FtpSecurityMode, error: suppaftp::FtpError) -> String
         FtpSecurityMode::ExplicitTls => "explicit FTPS on port 21",
         FtpSecurityMode::ImplicitTls => "implicit FTPS on port 990",
     };
-    format!("FTP connection failed while using {mode_hint}: {error}")
+    let code = match mode {
+        FtpSecurityMode::Plain => "ftp_connect_failed",
+        FtpSecurityMode::ExplicitTls | FtpSecurityMode::ImplicitTls => "ftp_tls_handshake_failed",
+    };
+    ftp_error_payload(
+        code,
+        &format!("FTP connection failed while using {mode_hint}: {error}"),
+        true,
+    )
+}
+
+fn ftp_error_payload(code: &str, message: &str, recoverable: bool) -> String {
+    crate::models::AppErrorPayload {
+        code: code.to_string(),
+        message: message.to_string(),
+        recoverable,
+        actions: vec!["check_url".to_string()],
+    }
+    .command_error()
 }
 
 fn rustls_connector() -> AsyncRustlsConnector {
@@ -1077,6 +1141,38 @@ impl FtpSession {
             Self::Secure(session) => session.mdtm(path).await,
         }
         .map_err(|e| format!("FTP MDTM failed: {e}"))
+    }
+
+    async fn cwd(&mut self, path: &str) -> Result<(), String> {
+        match self {
+            Self::Plain(session) => session.cwd(path).await,
+            Self::Secure(session) => session.cwd(path).await,
+        }
+        .map_err(|e| format!("FTP CWD failed: {e}"))
+    }
+
+    async fn pwd(&mut self) -> Result<String, String> {
+        match self {
+            Self::Plain(session) => session.pwd().await,
+            Self::Secure(session) => session.pwd().await,
+        }
+        .map_err(|e| format!("FTP PWD failed: {e}"))
+    }
+
+    async fn list(&mut self, path: Option<&str>) -> Result<Vec<String>, String> {
+        match self {
+            Self::Plain(session) => session.list(path).await,
+            Self::Secure(session) => session.list(path).await,
+        }
+        .map_err(|e| format!("FTP LIST failed: {e}"))
+    }
+
+    async fn mlsd(&mut self, path: Option<&str>) -> Result<Vec<String>, String> {
+        match self {
+            Self::Plain(session) => session.mlsd(path).await,
+            Self::Secure(session) => session.mlsd(path).await,
+        }
+        .map_err(|e| format!("FTP MLSD failed: {e}"))
     }
 
     async fn resume_transfer(&mut self, offset: usize) -> Result<(), String> {
@@ -1211,6 +1307,109 @@ impl FtpTarget {
             source_key,
         })
     }
+
+    fn parse_directory(input: &str) -> Result<Self, String> {
+        let parsed =
+            reqwest::Url::parse(input.trim()).map_err(|_| "FTP URL is invalid.".to_string())?;
+        let protocol = parsed.scheme().to_ascii_lowercase();
+        if !matches!(protocol.as_str(), "ftp" | "ftps") {
+            return Err(format!(
+                "The {} protocol is not supported by the FTP engine.",
+                protocol
+            ));
+        }
+        let host = parsed
+            .host_str()
+            .filter(|host| !host.is_empty())
+            .ok_or_else(|| "FTP URL is missing a host.".to_string())?
+            .to_string();
+        let mode = match protocol.as_str() {
+            "ftp" => FtpSecurityMode::Plain,
+            "ftps" if parsed.port() == Some(21) => FtpSecurityMode::ExplicitTls,
+            "ftps" => FtpSecurityMode::ImplicitTls,
+            _ => FtpSecurityMode::Plain,
+        };
+        let port = parsed.port().unwrap_or(match mode {
+            FtpSecurityMode::ImplicitTls => 990,
+            _ => 21,
+        });
+        let mut path = percent_decode_path(parsed.path());
+        if path.trim().is_empty() {
+            path = "/".to_string();
+        }
+        let username = if parsed.username().is_empty() {
+            "anonymous".to_string()
+        } else {
+            percent_decode_path(parsed.username())
+        };
+        let password = parsed
+            .password()
+            .map(percent_decode_path)
+            .unwrap_or_default();
+        let source_key = format!("{protocol}://{host}:{port}");
+
+        Ok(Self {
+            sanitized_uri: sanitize_url(parsed.as_str()),
+            protocol,
+            mode,
+            host,
+            port,
+            username,
+            password,
+            path,
+            file_name: String::new(),
+            source_key,
+        })
+    }
+}
+
+fn ftp_directory_entries(target: &FtpTarget, raw_entries: Vec<String>) -> Vec<FtpDirectoryEntry> {
+    raw_entries
+        .into_iter()
+        .take(200)
+        .filter_map(|raw| {
+            let name = ftp_entry_name(&raw)?;
+            let probable_file_url = (!looks_like_directory_listing(&raw)).then(|| {
+                let mut base = target.sanitized_uri.trim_end_matches('/').to_string();
+                base.push('/');
+                base.push_str(&name);
+                base
+            });
+            Some(FtpDirectoryEntry {
+                name,
+                raw,
+                probable_file_url,
+            })
+        })
+        .collect()
+}
+
+fn ftp_entry_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(name) = trimmed
+        .split(';')
+        .next_back()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !name.contains('=') {
+            return Some(name.to_string());
+        }
+    }
+    trimmed
+        .split_whitespace()
+        .last()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "." && *value != "..")
+        .map(str::to_string)
+}
+
+fn looks_like_directory_listing(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.starts_with('d') || lower.contains("type=dir") || lower.contains("type=cdir")
 }
 
 fn percent_decode_path(value: &str) -> String {

@@ -1,6 +1,6 @@
 # Vibe Downloader Roadmap
 
-Last updated: 2026-06-13
+Last updated: 2026-06-14
 
 This roadmap reflects the current repository state. Product and design constraints live in [PRODUCT.md](../PRODUCT.md) and [DESIGN.md](../DESIGN.md). Error and browser header-forwarding details live in [error-codes.md](error-codes.md) and [browser-header-forwarding.md](browser-header-forwarding.md).
 
@@ -13,7 +13,10 @@ The app now includes a working HTTP/HTTPS desktop download manager, plus lower-m
 - Tauri 2 + React 19 + Rust shell for Windows/macOS/Linux.
 - HTTP probe, unknown-size single stream downloads, Range segmented downloads, resume validation, segment retry, global speed limit, per-host scheduling, and queue persistence.
 - FTP/FTPS task creation and downloads, with credential-bearing URLs moved into encrypted task credentials and sanitized URLs persisted for task records, events, logs, and diagnostics.
-- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files. HTTP/HTTPS `.torrent` URLs are routed as BitTorrent tasks by default, selected-file tasks apply file selection before starting, and BitTorrent sessions inherit the global download speed limit.
+- FTP/FTPS directory probing is exposed through the New download flow so directory URLs can show diagnostics and file candidates without creating recursive directory tasks.
+- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files. HTTP/HTTPS `.torrent` URLs are routed as BitTorrent tasks by default, selected-file tasks apply file selection before starting, magnet metadata can stop in `needs_attention` for multi-file selection, and BitTorrent runtime snapshots expose piece, tracker, DHT, seeding, and recent-error data.
+- Per-task proxy overrides are persisted separately from global proxy settings. HTTP/HTTPS supports HTTP, HTTPS, and SOCKS5 task proxies; BitTorrent and FTP/explicit FTPS support SOCKS5 only and return structured diagnostics for unsupported combinations.
+- Global scheduled-download settings cover queued-task download windows, timed stricter global throttling, and completion actions. App exit uses a cancellable countdown; shutdown requires explicit confirmation.
 - SQLite persistence for tasks, files, work units, events, request diagnostics, settings, browser handoff messages, and hash verification state.
 - Task list search, filtering, sorting, multi-select, batch actions, command palette, task details, Chunks, Connections, Requests, Logs, toast notifications, recovery actions, and English/Simplified Chinese i18n.
 - Browser Native Messaging handoff plus local WebSocket bridge for HTTP/HTTPS URLs, with manifest install/uninstall diagnostics, dev/release extension identity support, popup live status, automatic browser download takeover, optional Cookie/header forwarding, request id de-duplication, and atomic handoff files.
@@ -53,7 +56,7 @@ The app now includes a working HTTP/HTTPS desktop download manager, plus lower-m
 - SHA-256 can be supplied at task creation; completed files are verified automatically and can be rechecked manually.
 - Hash verification records expected hash, actual hash, status, error, and verification timestamp without deleting failed files.
 - HLS/m3u8 stream parsing, SFTP, cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols remain deferred. `.m3u8` URLs are treated as ordinary HTTP files.
-- BT and FTP/FTPS are integrated but still need deeper reliability and diagnostics before they should be described as mature.
+- BT and FTP/FTPS have stronger diagnostics than the initial entry points, but they are still below the HTTP/HTTPS path in maturity.
 
 ## Known Boundaries
 
@@ -61,6 +64,9 @@ The app now includes a working HTTP/HTTPS desktop download manager, plus lower-m
 - Browser store IDs are represented by release placeholders and must be replaced before store submission.
 - Browser capture still needs final store review copy and a full end-to-end permission review before public extension submission.
 - Browser handoff remains HTTP/HTTPS only; FTP/FTPS, magnet, and `.torrent` are manual/clipboard flows.
+- Scheduled download windows currently gate queued task starts; they do not preemptively pause every already-running transfer when the window closes.
+- BitTorrent tracker status currently reports configured tracker entries from task metadata; deeper live tracker health depends on engine API support.
+- Implicit FTPS over SOCKS5 remains unsupported and returns a diagnostic instead of silently bypassing the task proxy.
 - Task list uses backend cursor pagination plus frontend windowing for large histories; browser realtime snapshots send active tasks plus a bounded recent history, and the extension caps its live task cache. Future work should benchmark production-scale databases on each target OS.
 - BT/FTP hardening and any future HLS/SFTP/plugin protocol work should use mature engines/adapters when scheduled.
 

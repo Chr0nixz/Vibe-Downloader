@@ -1,7 +1,8 @@
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::models::{
-    AppErrorPayload, HashVerificationStatus, RecoveryAction, TaskKind, TaskRecord, TaskStatus,
+    AppErrorPayload, HashVerificationStatus, RecoveryAction, TaskKind, TaskPriority, TaskRecord,
+    TaskStatus,
 };
 
 use super::MAX_TASK_PAGE_SIZE;
@@ -37,12 +38,21 @@ pub struct TaskFilterOptions {
     pub failure_categories: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TaskTransferOptionsUpdate {
+    pub task_speed_limit_bps: Option<String>,
+    pub priority: TaskPriority,
+    pub queue_position: i64,
+    pub category_key: Option<String>,
+}
+
 pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, String> {
     let rows = sqlx::query(
         r#"
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
                supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
                hash_status, hash_error, hash_verified_at, created_at, updated_at
@@ -89,6 +99,7 @@ pub async fn list_task_records_page(
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
                supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
                hash_status, hash_error, hash_verified_at, created_at, updated_at
@@ -136,6 +147,7 @@ pub async fn list_task_records_cursor(
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
                supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
                hash_status, hash_error, hash_verified_at, created_at, updated_at
@@ -285,6 +297,8 @@ fn task_sort_sql(sort_key: &str) -> &'static str {
         "file_size" => "total_size",
         "progress" => "CASE WHEN total_size > 0 THEN CAST(downloaded_bytes AS REAL) / total_size ELSE 0 END",
         "speed" => "speed_bps",
+        "priority" => "CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 1 END",
+        "queue_position" => "queue_position",
         "status" => {
             "CASE status WHEN 'downloading' THEN 0 WHEN 'retrying' THEN 1 WHEN 'queued' THEN 2 WHEN 'paused' THEN 3 WHEN 'waiting_network' THEN 4 WHEN 'needs_attention' THEN 5 WHEN 'failed' THEN 6 WHEN 'completed' THEN 7 ELSE 8 END"
         }
@@ -293,7 +307,10 @@ fn task_sort_sql(sort_key: &str) -> &'static str {
 }
 
 fn is_numeric_sort(sort_key: &str) -> bool {
-    matches!(sort_key, "file_size" | "progress" | "speed" | "status")
+    matches!(
+        sort_key,
+        "file_size" | "progress" | "speed" | "status" | "priority" | "queue_position"
+    )
 }
 
 fn file_type_filter_sql(file_type: &str) -> Option<&'static str> {
@@ -328,8 +345,12 @@ fn failure_category_filter_sql(category: &str) -> Option<&'static str> {
         "disk_write" => Some("error_code = 'disk_write_failed'"),
         "http" => Some("(error_code LIKE 'http_%' OR error_code = 'server_rate_limited')"),
         "auth" => Some("error_code IN ('auth_headers_expired', 'auth_headers_unavailable')"),
+        "bt" => Some("error_code LIKE 'bt_%'"),
+        "ftp" => Some("error_code LIKE 'ftp_%'"),
+        "proxy" => Some("error_code LIKE 'proxy_%'"),
+        "schedule" => Some("error_code LIKE 'schedule_%'"),
         "hls" => Some("error_code LIKE 'hls_%'"),
-        "other" => Some("(error_code IS NOT NULL AND error_code NOT IN ('remote_changed', 'resume_unavailable', 'temp_file_missing', 'temp_file_smaller_than_progress', 'disk_write_failed', 'auth_headers_expired', 'auth_headers_unavailable', 'server_rate_limited') AND error_code NOT LIKE 'http_%' AND error_code NOT LIKE 'hls_%')"),
+        "other" => Some("(error_code IS NOT NULL AND error_code NOT IN ('remote_changed', 'resume_unavailable', 'temp_file_missing', 'temp_file_smaller_than_progress', 'disk_write_failed', 'auth_headers_expired', 'auth_headers_unavailable', 'server_rate_limited') AND error_code NOT LIKE 'http_%' AND error_code NOT LIKE 'hls_%' AND error_code NOT LIKE 'bt_%' AND error_code NOT LIKE 'ftp_%' AND error_code NOT LIKE 'proxy_%' AND error_code NOT LIKE 'schedule_%')"),
         _ => None,
     }
 }
@@ -340,6 +361,7 @@ pub async fn get_task_record(pool: &SqlitePool, id: &str) -> Result<Option<TaskR
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
                supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
                hash_status, hash_error, hash_verified_at, created_at, updated_at
@@ -367,6 +389,7 @@ pub async fn find_duplicate_task_record(
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
                supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
                hash_status, hash_error, hash_verified_at, created_at, updated_at
@@ -411,12 +434,13 @@ pub async fn list_queued_task_records(
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
                supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
                hash_status, hash_error, hash_verified_at, created_at, updated_at
         FROM tasks
         WHERE status = 'queued' AND (retry_after_at IS NULL OR retry_after_at <= ?)
-        ORDER BY created_at ASC
+        ORDER BY queue_position ASC, created_at ASC
         LIMIT ?
         "#,
     )
@@ -444,6 +468,43 @@ pub async fn next_retry_after_at(pool: &SqlitePool) -> Result<Option<String>, St
     Ok(row.map(|row| row.get("retry_after_at")))
 }
 
+pub async fn next_queue_position(pool: &SqlitePool) -> Result<i64, String> {
+    let current_max: Option<i64> = sqlx::query_scalar("SELECT MAX(queue_position) FROM tasks")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(current_max.unwrap_or(0).saturating_add(1000))
+}
+
+pub async fn update_task_transfer_options(
+    pool: &SqlitePool,
+    task_id: &str,
+    update: TaskTransferOptionsUpdate,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET task_speed_limit_bps = ?,
+            priority = ?,
+            queue_position = ?,
+            category_key = ?,
+            updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&update.task_speed_limit_bps)
+    .bind(update.priority.as_str())
+    .bind(update.queue_position)
+    .bind(&update.category_key)
+    .bind(crate::models::task::now_iso())
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
     Ok(TaskRecord {
         id: row.get("id"),
@@ -467,6 +528,11 @@ fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
         source_key: row.get("source_key"),
         connection_count: row.get("connection_count"),
         speed_bps: row.get("speed_bps"),
+        task_speed_limit_bps: row.get("task_speed_limit_bps"),
+        priority: TaskPriority::from_db_str(row.get::<String, _>("priority").as_str()),
+        queue_position: row.get("queue_position"),
+        category_key: row.get("category_key"),
+        obey_schedule: row.get::<i64, _>("obey_schedule") != 0,
         health_summary: row.get("health_summary"),
         error_message: row.get("error_message"),
         error_code: task_error_code_from_row(row),
@@ -592,10 +658,11 @@ pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<
             id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
             total_size, downloaded_bytes, status, etag, last_modified, content_type,
             supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+            task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
             health_summary, error_message, error_code, recovery_actions, retry_after_at,
             expected_hash_sha256, actual_hash_sha256,
             hash_status, hash_error, hash_verified_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&task.id)
@@ -619,6 +686,11 @@ pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<
     .bind(&task.source_key)
     .bind(task.connection_count)
     .bind(task.speed_bps)
+    .bind(&task.task_speed_limit_bps)
+    .bind(task.priority.as_str())
+    .bind(task.queue_position)
+    .bind(&task.category_key)
+    .bind(if task.obey_schedule { 1 } else { 0 })
     .bind(&task.health_summary)
     .bind(&task.error_message)
     .bind(&task.error_code)
@@ -678,6 +750,10 @@ pub async fn task_filter_options(pool: &SqlitePool) -> Result<TaskFilterOptions,
             crate::models::TaskFailureCategory::Http => "http",
             crate::models::TaskFailureCategory::Auth => "auth",
             crate::models::TaskFailureCategory::Hls => "hls",
+            crate::models::TaskFailureCategory::Bt => "bt",
+            crate::models::TaskFailureCategory::Ftp => "ftp",
+            crate::models::TaskFailureCategory::Proxy => "proxy",
+            crate::models::TaskFailureCategory::Schedule => "schedule",
             crate::models::TaskFailureCategory::Other => "other",
         })
         .map(str::to_string)

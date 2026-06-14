@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use librqbit::{
     api::{Api, ApiAddTorrentResponse, TorrentDetailsResponse, TorrentIdOrHash},
     limits::LimitsConfig,
@@ -21,9 +22,9 @@ use crate::{
     events::{emit_task_progress, emit_task_updated_record},
     models::{
         EngineCapabilities, ProbedFile, SegmentStatus, TaskFileRecord, TaskKind,
-        TaskProgressPayload, TaskStatus,
+        TaskProgressPayload, TaskStatus, TorrentTrackerStatus,
     },
-    proxy::SharedProxyConfig,
+    proxy::{ResolvedProxyConfig, SharedProxyConfig},
 };
 
 const PROTOCOL_BT: &str = "bt";
@@ -34,7 +35,7 @@ const BT_METADATA_TIMEOUT: Duration = Duration::from_secs(90);
 #[derive(Clone)]
 pub struct BtEngine {
     sessions: Arc<Mutex<HashMap<String, Arc<Api>>>>,
-    proxy_config: SharedProxyConfig,
+    _proxy_config: SharedProxyConfig,
 }
 
 impl Default for BtEngine {
@@ -47,7 +48,7 @@ impl BtEngine {
     pub fn new(proxy_config: SharedProxyConfig) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            proxy_config,
+            _proxy_config: proxy_config,
         }
     }
 
@@ -76,9 +77,9 @@ impl BtEngine {
         &self,
         output_folder: &str,
         download_limit_bps: Option<i64>,
+        task_proxy_config: &ResolvedProxyConfig,
     ) -> Result<Arc<Api>, String> {
-        let proxy_config = self.proxy_config.read().await.clone();
-        let proxy_fingerprint = proxy_config.fingerprint();
+        let proxy_fingerprint = task_proxy_config.fingerprint();
         let key = PathBuf::from(output_folder)
             .canonicalize()
             .unwrap_or_else(|_| PathBuf::from(output_folder))
@@ -96,7 +97,7 @@ impl BtEngine {
             .map_err(|e| format!("Could not create the torrent download directory: {e}"))?;
         let output_path = output_folder.to_string();
         let mut options = SessionOptions::default();
-        if let Some(proxy_url) = proxy_config.custom_socks5_url_with_auth() {
+        if let Some(proxy_url) = task_proxy_config.custom_socks5_url_with_auth() {
             options.connect = Some(ConnectionOptions {
                 proxy_url: Some(proxy_url),
                 ..Default::default()
@@ -189,6 +190,7 @@ fn probe_magnet(uri: &str) -> Result<ProbeOutput, String> {
         etag: None,
         last_modified: None,
         content_type: Some("application/x-bittorrent".to_string()),
+        hls_variants: Vec::new(),
     })
 }
 
@@ -224,6 +226,7 @@ fn probe_from_torrent_details(uri: &str, details: &TorrentDetailsResponse) -> Pr
             }
             .to_string(),
         ),
+        hls_variants: Vec::new(),
     }
 }
 
@@ -234,13 +237,15 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         task,
         cancel,
         speed_limiter,
+        proxy_config,
         ..
     } = context;
 
     let api = engine
-        .api_for_output_folder(&task.save_dir, speed_limiter.current_limit_bps())
+        .api_for_output_folder(&task.save_dir, speed_limiter.current_limit_bps(), &proxy_config)
         .await?;
     let add = add_torrent_source(&task.url).await?;
+    let had_file_selection = !db::list_task_file_records(&pool, &task.id).await?.is_empty();
     let selected_paths = selected_torrent_paths(&pool, &task).await?;
     mark_torrent_metadata_fetching(&app, &pool, &task).await?;
     let response = wait_for_torrent_metadata(
@@ -283,6 +288,39 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     }
 
     persist_torrent_details(&pool, &task, &response, selected_paths.as_ref()).await?;
+    if task.url.starts_with("magnet:")
+        && !had_file_selection
+        && response.details.files.as_ref().is_some_and(|files| files.len() > 1)
+    {
+        let _ = api.api_torrent_action_pause(torrent_id).await;
+        let _ = api.api_torrent_action_forget(torrent_id).await;
+        db::update_task_file_selection(&pool, &task.id, &[]).await?;
+        db::update_task_status(
+            &pool,
+            &task.id,
+            TaskStatus::NeedsAttention,
+            0,
+            0,
+            Some("Torrent metadata is ready. Choose files before downloading."),
+            Some(
+                &crate::models::AppErrorPayload {
+                    code: "bt_file_selection_required".to_string(),
+                    message:
+                        "Torrent metadata is ready. Choose at least one file before downloading."
+                            .to_string(),
+                    recoverable: true,
+                    actions: vec!["check_url".to_string()],
+                }
+                .command_error(),
+            ),
+        )
+        .await?;
+        db::insert_task_event(&pool, &task.id, "bt_file_selection_required", None).await?;
+        if let Some(current) = db::get_task_record(&pool, &task.id).await? {
+            emit_task_updated_record(&app, &pool, &current).await;
+        }
+        return Ok(());
+    }
     if let Some(current) = db::get_task_record(&pool, &task.id).await? {
         emit_task_updated_record(&app, &pool, &current).await;
     }
@@ -349,6 +387,10 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 i64::try_from(live.snapshot.downloaded_and_checked_pieces).unwrap_or(i64::MAX)
             })
             .unwrap_or(0);
+        let (piece_bitfield_base64, piece_count) = torrent_piece_bitfield(&api, torrent_id);
+        let dht_status = torrent_dht_status(&api);
+        let trackers_json = torrent_tracker_status_json(&task.url);
+        let seeding_enabled = db::torrent_seeding_enabled(&pool, &task.id).await.unwrap_or(false);
         let live_peer_count = i32::try_from(live_peers).unwrap_or(i32::MAX);
         let peer_count = i64::from(live_peers)
             .saturating_add(i64::from(connecting_peers))
@@ -401,11 +443,19 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 metadata_status,
                 completed_pieces,
                 verified_pieces: completed_pieces,
+                piece_count,
+                piece_bitfield_base64: piece_bitfield_base64.as_deref(),
                 peer_count,
                 seed_count: 0,
+                dht_status: dht_status.as_deref(),
+                trackers_json: trackers_json.as_deref(),
                 upload_bytes: uploaded,
                 upload_speed_bps: upload_speed,
                 ratio,
+                seeding_enabled,
+                seeding_state: if seeding_enabled { "downloading" } else { "disabled" },
+                last_error_code: stats.error.as_ref().map(|_| "bt_runtime_error"),
+                last_error_message: stats.error.as_deref(),
             },
         )
         .await?;
@@ -426,6 +476,33 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 db::complete_segment(&pool, &segment.id).await?;
             }
             db::complete_task(&pool, &task.id).await?;
+            if db::torrent_seeding_enabled(&pool, &task.id).await.unwrap_or(false) {
+                db::upsert_torrent_runtime_snapshot(
+                    &pool,
+                    &task.id,
+                    db::TorrentRuntimeSnapshotUpsert {
+                        metadata_status: "seeding",
+                        completed_pieces,
+                        verified_pieces: completed_pieces,
+                        piece_count,
+                        piece_bitfield_base64: piece_bitfield_base64.as_deref(),
+                        peer_count,
+                        seed_count: 0,
+                        dht_status: dht_status.as_deref(),
+                        trackers_json: trackers_json.as_deref(),
+                        upload_bytes: uploaded,
+                        upload_speed_bps: upload_speed,
+                        ratio,
+                        seeding_enabled: true,
+                        seeding_state: "seeding",
+                        last_error_code: None,
+                        last_error_message: None,
+                    },
+                )
+                .await?;
+            } else {
+                let _ = api.api_torrent_action_forget(torrent_id).await;
+            }
             if let Some(current) = db::get_task_record(&pool, &task.id).await? {
                 emit_task_updated_record(&app, &pool, &current).await;
             }
@@ -538,6 +615,7 @@ async fn mark_torrent_metadata_fetching(
         )
         .await?;
     }
+    let trackers_json = torrent_tracker_status_json(&task.url);
     db::upsert_torrent_runtime_snapshot(
         pool,
         &task.id,
@@ -545,11 +623,19 @@ async fn mark_torrent_metadata_fetching(
             metadata_status: "fetching_metadata",
             completed_pieces: 0,
             verified_pieces: 0,
+            piece_count: 0,
+            piece_bitfield_base64: None,
             peer_count: 0,
             seed_count: 0,
+            dht_status: None,
+            trackers_json: trackers_json.as_deref(),
             upload_bytes: 0,
             upload_speed_bps: 0,
             ratio: 0.0,
+            seeding_enabled: false,
+            seeding_state: "disabled",
+            last_error_code: None,
+            last_error_message: None,
         },
     )
     .await?;
@@ -584,6 +670,7 @@ async fn mark_torrent_metadata_still_fetching(
         elapsed_seconds, remaining_seconds
     );
     db::update_task_health_summary(pool, &task.id, Some(summary.as_str())).await?;
+    let trackers_json = torrent_tracker_status_json(&task.url);
     db::upsert_torrent_runtime_snapshot(
         pool,
         &task.id,
@@ -591,11 +678,19 @@ async fn mark_torrent_metadata_still_fetching(
             metadata_status: "fetching_metadata",
             completed_pieces: 0,
             verified_pieces: 0,
+            piece_count: 0,
+            piece_bitfield_base64: None,
             peer_count: 0,
             seed_count: 0,
+            dht_status: None,
+            trackers_json: trackers_json.as_deref(),
             upload_bytes: 0,
             upload_speed_bps: 0,
             ratio: 0.0,
+            seeding_enabled: false,
+            seeding_state: "disabled",
+            last_error_code: None,
+            last_error_message: None,
         },
     )
     .await?;
@@ -671,6 +766,49 @@ fn peer_label(count: u32) -> String {
     }
 }
 
+fn torrent_piece_bitfield(api: &Api, torrent_id: TorrentIdOrHash) -> (Option<String>, i64) {
+    match api.api_dump_haves(torrent_id) {
+        Ok((bitfield, count)) => (
+            Some(STANDARD.encode(bitfield.into_boxed_slice())),
+            i64::from(count),
+        ),
+        Err(error) => {
+            tracing::debug!(error = %error, "torrent have bitfield unavailable");
+            (None, 0)
+        }
+    }
+}
+
+fn torrent_dht_status(api: &Api) -> Option<String> {
+    api.api_dht_stats()
+        .ok()
+        .and_then(|stats| serde_json::to_string(&stats).ok())
+}
+
+fn torrent_tracker_status_json(uri: &str) -> Option<String> {
+    let trackers = tracker_statuses_from_uri(uri);
+    if trackers.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&trackers).ok()
+    }
+}
+
+fn tracker_statuses_from_uri(uri: &str) -> Vec<TorrentTrackerStatus> {
+    let Ok(magnet) = Magnet::new(uri) else {
+        return Vec::new();
+    };
+    magnet
+        .trackers()
+        .iter()
+        .map(|url| TorrentTrackerStatus {
+            url: percent_decode_lossy(url),
+            status: "configured".to_string(),
+            last_error: None,
+        })
+        .collect()
+}
+
 async fn persist_torrent_details(
     pool: &sqlx::SqlitePool,
     task: &crate::models::TaskRecord,
@@ -699,6 +837,7 @@ async fn persist_torrent_details(
         },
     )
     .await?;
+    let trackers_json = torrent_tracker_status_json(&task.url);
     db::upsert_torrent_task(
         pool,
         &task.id,
@@ -710,7 +849,10 @@ async fn persist_torrent_details(
             piece_length: 0,
             piece_count: i64::from(details.total_pieces),
             private: false,
-            trackers_json: None,
+            trackers_json: trackers_json.as_deref(),
+            seeding_enabled: false,
+            seed_ratio_limit: None,
+            seed_time_limit_seconds: None,
         },
     )
     .await?;

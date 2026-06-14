@@ -5,7 +5,7 @@ use crate::{
     browser_realtime::BrowserRealtimeEvent,
     clipboard::ClipboardLinkDetectedPayload,
     db,
-    models::{Task, TaskProgressPayload, TaskRecord, TaskUpdatedPayload},
+    models::{CompletionActionRequestedPayload, Task, TaskProgressPayload, TaskRecord, TaskUpdatedPayload},
 };
 
 pub const EVENT_TASK_PROGRESS: &str = "task-progress";
@@ -18,6 +18,7 @@ pub const EVENT_BROWSER_INTEGRATION_CHANGED: &str = "browser-integration-changed
 pub const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED: &str = "tray-new-download-requested";
 pub const EVENT_TRAY_SETTINGS_REQUESTED: &str = "tray-settings-requested";
 pub const EVENT_CLIPBOARD_LINK_DETECTED: &str = "clipboard-link-detected";
+pub const EVENT_COMPLETION_ACTION_REQUESTED: &str = "completion-action-requested";
 
 pub fn emit_task_progress(app: &AppHandle, payload: &TaskProgressPayload) {
     emit_payload(app, EVENT_TASK_PROGRESS, payload);
@@ -90,6 +91,13 @@ pub fn emit_tray_settings_requested(app: &AppHandle) {
 
 pub fn emit_clipboard_link_detected(app: &AppHandle, payload: &ClipboardLinkDetectedPayload) {
     emit_payload(app, EVENT_CLIPBOARD_LINK_DETECTED, payload);
+}
+
+pub fn emit_completion_action_requested(
+    app: &AppHandle,
+    payload: &CompletionActionRequestedPayload,
+) {
+    emit_payload(app, EVENT_COMPLETION_ACTION_REQUESTED, payload);
 }
 
 fn emit_empty(app: &AppHandle, event: &str) {

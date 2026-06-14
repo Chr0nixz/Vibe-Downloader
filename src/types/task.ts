@@ -36,6 +36,7 @@ export function normalizeTask(task: GeneratedTask): Task {
   return {
     ...task,
     recoveryActions: task.recoveryActions ?? [],
+    checksums: task.checksums ?? [],
     totalSize: parseByteCount(task.totalSize),
     downloadedBytes: parseByteCount(task.downloadedBytes),
     speedBps: parseByteCount(task.speedBps),

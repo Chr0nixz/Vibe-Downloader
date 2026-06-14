@@ -29,6 +29,11 @@ export const commands = {
 	sourceKey: string,
 	connectionCount: number,
 	speedBps: string,
+	taskSpeedLimitBps: string | null,
+	priority: TaskPriority,
+	queuePosition: string,
+	categoryKey: string | null,
+	obeySchedule: boolean,
 	healthSummary: string | null,
 	errorMessage: string | null,
 	errorCode: string | null,
@@ -40,6 +45,7 @@ export const commands = {
 	hashStatus: HashVerificationStatus,
 	hashError: string | null,
 	hashVerifiedAt: string | null,
+	checksums: TaskChecksum[],
 	files: TaskFile[],
 	createdAt: string,
 	updatedAt: string,
@@ -52,13 +58,22 @@ export const commands = {
 	metadataStatus: string,
 	completedPieces: string,
 	verifiedPieces: string,
+	pieceCount: string,
+	pieceBitfieldBase64: string | null,
 	peerCount: string,
 	seedCount: string,
+	dhtStatus: string | null,
+	trackers: TorrentTrackerStatus[],
 	uploadBytes: string,
 	uploadSpeedBps: string,
 	ratio: number | null,
+	seedingEnabled: boolean,
+	seedingState: string,
+	lastErrorCode: string | null,
+	lastErrorMessage: string | null,
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_torrent_runtime_snapshot", { taskId })),
+	getTaskProxySettings: (taskId: string) => typedError<TaskProxySettings, string>(__TAURI_INVOKE("get_task_proxy_settings", { taskId })),
 	listTaskEventsPage: (input: CursorPageInput) => typedError<TaskEventsPageResult, string>(__TAURI_INVOKE("list_task_events_page", { input })),
 	listTaskRequestsPage: (input: CursorPageInput) => typedError<TaskRequestsPageResult, string>(__TAURI_INVOKE("list_task_requests_page", { input })),
 	getSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("get_settings")),
@@ -76,9 +91,15 @@ export const commands = {
 	focusMainWindowFromFloating: () => typedError<null, string>(__TAURI_INVOKE("focus_main_window_from_floating")),
 	showTrayMenuAt: (logicalX: number | null, logicalY: number | null) => typedError<null, string>(__TAURI_INVOKE("show_tray_menu_at", { logicalX, logicalY })),
 	runTrayMenuAction: (action: TrayMenuAction) => typedError<null, string>(__TAURI_INVOKE("run_tray_menu_action", { action })),
+	requestSystemShutdown: () => typedError<null, string>(__TAURI_INVOKE("request_system_shutdown")),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
+	probeFtpDirectory: (url: string) => typedError<FtpDirectoryProbe, string>(__TAURI_INVOKE("probe_ftp_directory", { url })),
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
 	importUrls: (input: ImportUrlsInput) => typedError<BatchImportResult, string>(__TAURI_INVOKE("import_urls", { input })),
+	updateTaskTransferOptions: (input: UpdateTaskTransferOptionsInput) => typedError<Task, string>(__TAURI_INVOKE("update_task_transfer_options", { input })),
+	updateTorrentFileSelection: (input: UpdateTorrentFileSelectionInput) => typedError<Task, string>(__TAURI_INVOKE("update_torrent_file_selection", { input })),
+	updateTorrentSeeding: (input: UpdateTorrentSeedingInput) => typedError<Task, string>(__TAURI_INVOKE("update_torrent_seeding", { input })),
+	updateTaskProxySettings: (input: TaskProxySettingsInput) => typedError<TaskProxySettings, string>(__TAURI_INVOKE("update_task_proxy_settings", { input })),
 	verifyTaskHash: (id: string) => typedError<HashVerificationState, string>(__TAURI_INVOKE("verify_task_hash", { id })),
 	pauseTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("pause_task", { id })),
 	resumeTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("resume_task", { id })),
@@ -126,6 +147,15 @@ export type AppSettings = {
 	proxyNoProxy: string,
 	proxyUsername: string,
 	proxyPasswordSaved: boolean,
+	scheduleDownloadWindowEnabled: boolean,
+	scheduleDownloadWindowStart: string,
+	scheduleDownloadWindowEnd: string,
+	scheduleSpeedLimitWindowEnabled: boolean,
+	scheduleSpeedLimitWindowStart: string,
+	scheduleSpeedLimitWindowEnd: string,
+	scheduleSpeedLimitBps: string | null,
+	completionAction: CompletionAction,
+	completionCountdownSeconds: number,
 };
 
 export type BatchImportItem = {
@@ -258,6 +288,8 @@ export type BrowserSiteRule = {
 
 export type BrowserSiteRuleMode = "auto" | "ask" | "never";
 
+export type ChecksumAlgorithm = "sha256" | "sha512" | "sha1" | "md5";
+
 export type ClipboardLinkDetectedPayload = {
 	id: string,
 	urls: string[],
@@ -265,11 +297,21 @@ export type ClipboardLinkDetectedPayload = {
 	detectedAt: string,
 };
 
+export type CompletionAction = "none" | "exit_app" | "shutdown";
+
+export type CompletionActionRequestedPayload = {
+	action: CompletionAction,
+	countdownSeconds: number,
+};
+
 export type CreateTaskInput = {
 	url: string,
 	saveDir: string | null,
 	fileName: string | null,
 	expectedHashSha256: string | null,
+	taskSpeedLimitBps: string | null,
+	priority: TaskPriority | null,
+	categoryKey: string | null,
 	probeSnapshot: ProbeTaskPayload | null,
 	selectedFilePaths: string[] | null,
 	allowDuplicate: boolean | null,
@@ -287,6 +329,20 @@ export type EngineCapabilities = {
 	supportsMultiFile: boolean,
 };
 
+export type FtpDirectoryEntry = {
+	name: string,
+	raw: string,
+	probableFileUrl: string | null,
+};
+
+export type FtpDirectoryProbe = {
+	inputUrl: string,
+	directoryUrl: string,
+	currentDirectory: string | null,
+	entries: FtpDirectoryEntry[],
+	diagnostics: string[],
+};
+
 export type HashVerificationState = {
 	taskId: string,
 	expectedSha256: string | null,
@@ -297,6 +353,14 @@ export type HashVerificationState = {
 };
 
 export type HashVerificationStatus = "not_requested" | "pending" | "verified" | "failed";
+
+export type HlsVariant = {
+	uri: string,
+	bandwidth: string,
+	resolution: string | null,
+	codecs: string | null,
+	selected: boolean,
+};
 
 export type ImportUrlsInput = {
 	input: string,
@@ -368,6 +432,7 @@ export type ProbeTaskPayload = {
 	contentType: string | null,
 	etag: string | null,
 	lastModified: string | null,
+	hlsVariants: HlsVariant[],
 	probedAt: string,
 };
 
@@ -436,6 +501,11 @@ export type Task = {
 	sourceKey: string,
 	connectionCount: number,
 	speedBps: string,
+	taskSpeedLimitBps: string | null,
+	priority: TaskPriority,
+	queuePosition: string,
+	categoryKey: string | null,
+	obeySchedule: boolean,
 	healthSummary: string | null,
 	errorMessage: string | null,
 	errorCode: string | null,
@@ -447,7 +517,27 @@ export type Task = {
 	hashStatus: HashVerificationStatus,
 	hashError: string | null,
 	hashVerifiedAt: string | null,
+	checksums: TaskChecksum[],
 	files: TaskFile[],
+	createdAt: string,
+	updatedAt: string,
+};
+
+export type TaskChecksum = {
+	id: string,
+	taskId: string,
+	algorithm: ChecksumAlgorithm,
+	expectedHash: string,
+	actualHash: string | null,
+	status: HashVerificationStatus,
+	sourceKind: string,
+	sourceUrl: string | null,
+	sourceLabel: string | null,
+	isPrimary: boolean,
+	weak: boolean,
+	errorMessage: string | null,
+	discoveredAt: string | null,
+	verifiedAt: string | null,
 	createdAt: string,
 	updatedAt: string,
 };
@@ -465,7 +555,7 @@ export type TaskEventsPageResult = {
 	nextCursor: string | null,
 };
 
-export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "hls" | "other";
+export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "hls" | "bt" | "ftp" | "proxy" | "schedule" | "other";
 
 export type TaskFile = {
 	id: string,
@@ -489,6 +579,8 @@ export type TaskFilterOptions = {
 
 export type TaskKind = "single_file" | "multi_file" | "manifest";
 
+export type TaskPriority = "low" | "normal" | "high";
+
 export type TaskProgressPayload = {
 	taskId: string,
 	downloadedBytes: string,
@@ -496,6 +588,27 @@ export type TaskProgressPayload = {
 	speedBps: string,
 	connectionCount: number,
 	status: TaskStatus,
+};
+
+export type TaskProxyMode = "inherit" | "off" | "custom";
+
+export type TaskProxySettings = {
+	taskId: string,
+	mode: TaskProxyMode,
+	proxyUrl: string,
+	proxyUsername: string,
+	proxyPasswordSaved: boolean,
+	noProxy: string,
+};
+
+export type TaskProxySettingsInput = {
+	taskId: string,
+	mode: TaskProxyMode,
+	proxyUrl: string | null,
+	proxyUsername: string | null,
+	proxyPassword: string | null,
+	clearProxyPassword: boolean | null,
+	noProxy: string | null,
 };
 
 export type TaskRequestsPageResult = {
@@ -533,12 +646,26 @@ export type TorrentRuntimeSnapshot = {
 	metadataStatus: string,
 	completedPieces: string,
 	verifiedPieces: string,
+	pieceCount: string,
+	pieceBitfieldBase64: string | null,
 	peerCount: string,
 	seedCount: string,
+	dhtStatus: string | null,
+	trackers: TorrentTrackerStatus[],
 	uploadBytes: string,
 	uploadSpeedBps: string,
 	ratio: number | null,
+	seedingEnabled: boolean,
+	seedingState: string,
+	lastErrorCode: string | null,
+	lastErrorMessage: string | null,
 	updatedAt: string,
+};
+
+export type TorrentTrackerStatus = {
+	url: string,
+	status: string,
+	lastError: string | null,
 };
 
 export type TrayMenuAction = "openApp" | "newDownload" | "openDownloads" | "settings" | "quit";
@@ -564,6 +691,35 @@ export type UpdateSettingsInput = {
 	proxyUsername: string | null,
 	proxyPassword: string | null,
 	clearProxyPassword: boolean | null,
+	scheduleDownloadWindowEnabled: boolean | null,
+	scheduleDownloadWindowStart: string | null,
+	scheduleDownloadWindowEnd: string | null,
+	scheduleSpeedLimitWindowEnabled: boolean | null,
+	scheduleSpeedLimitWindowStart: string | null,
+	scheduleSpeedLimitWindowEnd: string | null,
+	scheduleSpeedLimitBps: string | null,
+	completionAction: CompletionAction | null,
+	completionCountdownSeconds: number | null,
+};
+
+export type UpdateTaskTransferOptionsInput = {
+	id: string,
+	taskSpeedLimitBps: string | null,
+	priority: TaskPriority | null,
+	queuePosition: string | null,
+	categoryKey: string | null,
+};
+
+export type UpdateTorrentFileSelectionInput = {
+	taskId: string,
+	selectedFilePaths: string[],
+};
+
+export type UpdateTorrentSeedingInput = {
+	taskId: string,
+	enabled: boolean,
+	ratioLimit: number | null,
+	timeLimitSeconds: string | null,
 };
 
 /* Tauri Specta runtime */

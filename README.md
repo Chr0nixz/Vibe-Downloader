@@ -10,6 +10,12 @@ task records and encrypted task credentials; BitTorrent selected-file tasks
 apply file selection before starting the runtime torrent; HTTP request
 diagnostics include Range and If-Range data for resume troubleshooting.
 
+Scheduling/proxy note: queued tasks can opt into a global download window,
+timed global throttling can apply a stricter limit, and completion actions
+support cancellable app exit plus explicitly confirmed shutdown. Per-task proxy
+overrides are available for supported protocol/proxy combinations: HTTP(S) can
+use HTTP(S)/SOCKS5, while BT and FTP/explicit FTPS are limited to SOCKS5.
+
 Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下载、断点续传、任务队列和浏览器交接变得更清楚、更可靠，也比传统下载工具更符合现在的桌面审美。
 
 项目目前处于早期开发阶段，但已经可以作为以 HTTP/HTTPS 为主的下载器原型运行；FTP/FTPS、magnet 和 `.torrent` 已接入，成熟度仍低于 HTTP/HTTPS。它不是一个已经完整替代 IDM 的成品，适合尝鲜、参与开发、验证下载引擎和桌面体验。

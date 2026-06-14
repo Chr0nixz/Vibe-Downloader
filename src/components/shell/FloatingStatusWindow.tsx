@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useTaskEvents } from "@/hooks/use-task-events";
 import {
   focusMainWindowFromFloating,
   hideFloatingStatusWindow,
+  isTauriRuntime,
   listTasksCursor,
   showTrayMenuAt,
 } from "@/lib/tauri";
@@ -18,6 +19,60 @@ const log = createLogger("floating-status");
 
 const RING_R = 28;
 const RING_C = 2 * Math.PI * RING_R;
+const BAR_WIDTH = 180;
+const BAR_HEIGHT = 44;
+const EDGE_THRESHOLD = 30;
+const UNDOCK_THRESHOLD = 80;
+
+type TauriWindow = Awaited<ReturnType<typeof import("@tauri-apps/api/window").getCurrentWindow>>;
+type TauriMonitor = NonNullable<Awaited<ReturnType<typeof import("@tauri-apps/api/window").currentMonitor>>>;
+
+async function dockToEdge(
+  edge: "left" | "right",
+  logicalY: number,
+  win: TauriWindow,
+  monitor: TauriMonitor,
+  LogicalSizeCtor: typeof import("@tauri-apps/api/window").LogicalSize,
+  LogicalPositionCtor: typeof import("@tauri-apps/api/window").LogicalPosition,
+): Promise<void> {
+  const scale = monitor.scaleFactor;
+  const wa = monitor.workArea;
+  const waLeft = wa.position.x / scale;
+  const waRight = (wa.position.x + wa.size.width) / scale;
+
+  const x = edge === "left" ? waLeft - (BAR_WIDTH - 12) : waRight - 12;
+  const clampedY = Math.max(
+    wa.position.y / scale,
+    Math.min(logicalY, (wa.position.y + wa.size.height) / scale - BAR_HEIGHT),
+  );
+
+  await win.setSize(new LogicalSizeCtor(BAR_WIDTH, BAR_HEIGHT));
+  await win.setPosition(new LogicalPositionCtor(x, clampedY));
+}
+
+async function undock(
+  _logicalX: number,
+  logicalY: number,
+  win: TauriWindow,
+  monitor: TauriMonitor,
+  LogicalSizeCtor: typeof import("@tauri-apps/api/window").LogicalSize,
+  LogicalPositionCtor: typeof import("@tauri-apps/api/window").LogicalPosition,
+): Promise<void> {
+  const scale = monitor.scaleFactor;
+  const wa = monitor.workArea;
+  const waLeft = wa.position.x / scale;
+  const waRight = (wa.position.x + wa.size.width) / scale;
+
+  // Place the ball centered horizontally in the work area, keeping current Y
+  const centerX = waLeft + (waRight - waLeft) / 2 - 42;
+  const clampedY = Math.max(
+    wa.position.y / scale,
+    Math.min(logicalY, (wa.position.y + wa.size.height) / scale - 84),
+  );
+
+  await win.setSize(new LogicalSizeCtor(84, 84));
+  await win.setPosition(new LogicalPositionCtor(centerX, clampedY));
+}
 
 export function FloatingStatusWindow() {
   const { t } = useTranslation();
@@ -87,11 +142,108 @@ export function FloatingStatusWindow() {
 
   const compact = speedText.length > 6;
 
-  const handleDrag = useCallback((event: React.MouseEvent) => {
-    if (event.button !== 0) return;
-    if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
-    void startWindowDrag();
-  }, []);
+  // Peak speed tracking for glow intensity
+  const peakSpeedRef = useRef(0);
+  useEffect(() => {
+    if (stats.totalSpeed > peakSpeedRef.current) {
+      peakSpeedRef.current = stats.totalSpeed;
+    }
+  }, [stats.totalSpeed]);
+
+  const isPeak = !idle && stats.totalSpeed > peakSpeedRef.current * 0.8 && peakSpeedRef.current > 0;
+
+  // Completion burst detection: transition from active downloads to idle
+  const prevIdleRef = useRef(idle);
+  const [completionBurst, setCompletionBurst] = useState(false);
+  useEffect(() => {
+    if (idle && !prevIdleRef.current) {
+      setCompletionBurst(true);
+      const timer = setTimeout(() => setCompletionBurst(false), 1200);
+      return () => clearTimeout(timer);
+    }
+    prevIdleRef.current = idle;
+  }, [idle]);
+
+  // ── Edge snapping ──
+  const [dockedEdge, setDockedEdge] = useState<"left" | "right" | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | undefined;
+
+    void (async () => {
+      try {
+        const { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition } =
+          await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+
+        unlisten = await win.onMoved(async ({ payload: pos }) => {
+          if (debounceRef.current) clearTimeout(debounceRef.current);
+          debounceRef.current = setTimeout(async () => {
+            try {
+              const monitor = await currentMonitor();
+              if (!monitor) return;
+              const scale = monitor.scaleFactor;
+              const logicalX = pos.x / scale;
+              const wa = monitor.workArea;
+              const waLeft = wa.position.x / scale;
+              const waRight = (wa.position.x + wa.size.width) / scale;
+
+              if (logicalX - waLeft <= EDGE_THRESHOLD) {
+                setDockedEdge("left");
+                await dockToEdge("left", pos.y / scale, win, monitor, LogicalSize, LogicalPosition);
+              } else if (waRight - (logicalX + 84) <= EDGE_THRESHOLD) {
+                setDockedEdge("right");
+                await dockToEdge("right", pos.y / scale, win, monitor, LogicalSize, LogicalPosition);
+              } else if (
+                (dockedEdge === "left" && logicalX - waLeft > UNDOCK_THRESHOLD) ||
+                (dockedEdge === "right" && waRight - (logicalX + BAR_WIDTH) > UNDOCK_THRESHOLD)
+              ) {
+                setDockedEdge(null);
+                await undock(logicalX, pos.y / scale, win, monitor, LogicalSize, LogicalPosition);
+              }
+            } catch (err) {
+              log.error("edge check failed", err);
+            }
+          }, 200);
+        });
+      } catch (err) {
+        log.error("onMoved listener setup failed", err);
+      }
+    })();
+
+    return () => {
+      unlisten?.();
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [dockedEdge]);
+
+  const handleDrag = useCallback(
+    async (event: React.MouseEvent) => {
+      if (event.button !== 0) return;
+      if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
+      if (dockedEdge) {
+        try {
+          const { getCurrentWindow, LogicalSize } = await import("@tauri-apps/api/window");
+          const win = getCurrentWindow();
+          const scale = (await win.scaleFactor()) || 1;
+          const pos = await win.innerPosition();
+          await win.setSize(new LogicalSize(84, 84));
+          // Re-center window at roughly current position so it's visible after undock
+          if (dockedEdge === "left") {
+            const { LogicalPosition } = await import("@tauri-apps/api/window");
+            await win.setPosition(new LogicalPosition(pos.x / scale + BAR_WIDTH - 84, pos.y / scale));
+          }
+        } catch {
+          // ignore
+        }
+        setDockedEdge(null);
+      }
+      void startWindowDrag();
+    },
+    [dockedEdge],
+  );
 
   const handleDoubleClick = useCallback((event: React.MouseEvent) => {
     if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
@@ -109,6 +261,43 @@ export function FloatingStatusWindow() {
     },
     [],
   );
+
+  if (dockedEdge) {
+    return (
+      <main
+        className={cn(
+          "floating-bar group relative flex h-full w-full select-none items-center overflow-visible",
+          dockedEdge === "left" ? "floating-bar-left justify-end" : "floating-bar-right justify-start",
+        )}
+        onMouseDown={handleDrag}
+        onDoubleClick={handleDoubleClick}
+        onContextMenu={handleContextMenu}
+      >
+        {/* Tooltip */}
+        <div className="pointer-events-none absolute -top-8 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-surface-overlay px-2 py-0.5 text-[0.6rem] leading-4 text-text-secondary opacity-0 shadow-lg ring-1 ring-border-container transition-opacity duration-200 group-hover:opacity-100">
+          {idle ? t("floatingStatus.idle") : `${speedText} · ${Math.round(percent)}%`}
+        </div>
+
+        {/* Edge indicator line */}
+        <div className="floating-bar-edge" />
+
+        {/* Compressed aurora glow */}
+        {!idle && (
+          <div className="floating-aurora absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" />
+        )}
+
+        {/* Content */}
+        <div className="relative z-10 flex items-center gap-2 px-4">
+          <span className="font-mono text-[9px] font-bold leading-none text-text-primary">
+            {speedText || "—"}
+          </span>
+          <span className="text-[8px] leading-none text-text-muted">
+            {Math.round(percent)}%
+          </span>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main
@@ -128,16 +317,42 @@ export function FloatingStatusWindow() {
           "floating-ball relative grid h-16 w-16 place-items-center rounded-full",
           idle
             ? "bg-surface-overlay shadow-[0_0_8px_oklch(0.12_0.01_255_/_0.15)] ring-1 ring-border-container"
-            : "bg-surface-overlay ring-1 ring-accent-primary/25 floating-ball-glow",
+            : cn(
+                "bg-surface-overlay ring-1 ring-accent-primary/25 floating-ball-glow",
+                isPeak && "floating-ball-peak",
+                completionBurst && "floating-ball-completion",
+              ),
         )}
         aria-label={t("floatingStatus.title")}
       >
-        {/* SVG progress ring */}
+        {/* Layer 0: Aurora ambient glow */}
+        {!idle && (
+          <div className="floating-aurora absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" />
+        )}
+
+        {/* Layer 2: Surface radial tint for depth */}
+        <div className="floating-surface-tint absolute inset-0 rounded-full" />
+
+        {/* SVG progress ring with aurora gradient */}
         <svg
           viewBox="0 0 64 64"
           className="floating-ring absolute inset-0 h-full w-full -rotate-90"
           aria-hidden
         >
+          <defs>
+            <linearGradient id="aurora-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" style={{ stopColor: "var(--accent-energy)" }} />
+              <stop offset="50%" style={{ stopColor: "var(--accent-primary)" }} />
+              <stop offset="100%" style={{ stopColor: "var(--accent-peak)" }} />
+            </linearGradient>
+            <filter id="glow-dot-filter">
+              <feGaussianBlur stdDeviation="2.5" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+          </defs>
           <circle
             cx="32"
             cy="32"
@@ -147,22 +362,32 @@ export function FloatingStatusWindow() {
             className="stroke-border-subtle opacity-25"
           />
           {!idle && percent > 0 && (
-            <circle
-              cx="32"
-              cy="32"
-              r={RING_R}
-              fill="none"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeDasharray={RING_C}
-              strokeDashoffset={dashoffset}
-              className="stroke-accent-energy transition-[stroke-dashoffset] duration-500 ease-out"
-            />
+            <>
+              <circle
+                cx="32"
+                cy="32"
+                r={RING_R}
+                fill="none"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeDasharray={RING_C}
+                strokeDashoffset={dashoffset}
+                stroke="url(#aurora-grad)"
+                className="transition-[stroke-dashoffset] duration-500 ease-out"
+              />
+              <circle
+                cx={32 + RING_R * Math.cos((percent / 100) * Math.PI * 2)}
+                cy={32 + RING_R * Math.sin((percent / 100) * Math.PI * 2)}
+                r="2"
+                fill="var(--accent-energy)"
+                filter="url(#glow-dot-filter)"
+              />
+            </>
           )}
         </svg>
 
         {/* Content */}
-        <div className="relative z-10 flex flex-col items-center gap-px">
+        <div className="relative flex flex-col items-center gap-px">
           {idle ? (
             <img
               src="/logo-48.png"

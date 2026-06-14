@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 pub struct GlobalSpeedLimiter {
     limit_bps: AtomicI64,
     state: Mutex<SpeedLimitState>,
+    parent: Option<Arc<GlobalSpeedLimiter>>,
 }
 
 #[derive(Debug)]
@@ -29,11 +30,26 @@ impl GlobalSpeedLimiter {
                 tokens: limit as f64,
                 last_refill: Instant::now(),
             }),
+            parent: None,
         }
     }
 
     pub fn disabled() -> Arc<Self> {
         Arc::new(Self::new(None))
+    }
+
+    pub fn with_parent(parent: Arc<Self>, limit_bps: Option<i64>) -> Arc<Self> {
+        match limit_bps {
+            Some(limit) if limit > 0 => Arc::new(Self {
+                limit_bps: AtomicI64::new(limit),
+                state: Mutex::new(SpeedLimitState {
+                    tokens: limit as f64,
+                    last_refill: Instant::now(),
+                }),
+                parent: Some(parent),
+            }),
+            _ => parent,
+        }
     }
 
     pub fn set_limit(&self, limit_bps: Option<i64>) {
@@ -46,13 +62,31 @@ impl GlobalSpeedLimiter {
     }
 
     pub fn current_limit_bps(&self) -> Option<i64> {
-        match self.limit_bps.load(Ordering::SeqCst) {
+        let own = match self.limit_bps.load(Ordering::SeqCst) {
             value if value > 0 => Some(value),
             _ => None,
+        };
+        match (
+            own,
+            self.parent
+                .as_ref()
+                .and_then(|parent| parent.current_limit_bps()),
+        ) {
+            (Some(own), Some(parent)) => Some(own.min(parent)),
+            (Some(own), None) => Some(own),
+            (None, Some(parent)) => Some(parent),
+            (None, None) => None,
         }
     }
 
     pub async fn throttle(&self, bytes: usize) {
+        if let Some(parent) = &self.parent {
+            parent.throttle_self(bytes).await;
+        }
+        self.throttle_self(bytes).await;
+    }
+
+    async fn throttle_self(&self, bytes: usize) {
         let mut remaining = bytes;
         while remaining > 0 {
             let limit = self.limit_bps.load(Ordering::SeqCst);

@@ -10,6 +10,7 @@ import type {
   BrowserIntegrationUpdateInput,
   BatchImportResult,
   ClipboardLinkDetectedPayload,
+  CompletionActionRequestedPayload,
   CreateTaskInput,
   HashVerificationState,
   ImportUrlsInput,
@@ -21,13 +22,19 @@ import type {
   RequestDiagnostic,
   ProbeTaskInput,
   ProbeTaskPayload,
+  FtpDirectoryProbe,
   SegmentSummary,
+  TaskProxySettings,
+  TaskProxySettingsInput,
   TaskEvent,
   TorrentRuntimeSnapshot,
   TrayMenuAction,
   ResolveTaskAttentionInput,
   TaskUpdatedPayload,
   UpdateSettingsInput,
+  UpdateTaskTransferOptionsInput,
+  UpdateTorrentFileSelectionInput,
+  UpdateTorrentSeedingInput,
 } from "@/generated/bindings";
 import type { Task } from "@/types/task";
 import { normalizeTask } from "@/types/task";
@@ -43,6 +50,7 @@ export const EVENT_BROWSER_INTEGRATION_CHANGED = "browser-integration-changed";
 export const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED = "tray-new-download-requested";
 export const EVENT_TRAY_SETTINGS_REQUESTED = "tray-settings-requested";
 export const EVENT_CLIPBOARD_LINK_DETECTED = "clipboard-link-detected";
+export const EVENT_COMPLETION_ACTION_REQUESTED = "completion-action-requested";
 export const canSeedMockTasks = !isTauriRuntime() || import.meta.env.DEV;
 
 const log = createLogger("tauri");
@@ -189,6 +197,48 @@ export async function getTorrentRuntimeSnapshot(
   );
 }
 
+export async function getTaskProxySettings(taskId: string): Promise<TaskProxySettings> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getTaskProxySettings(taskId);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("getTaskProxySettings", () => commands.getTaskProxySettings(taskId));
+}
+
+export async function updateTaskProxySettings(
+  input: TaskProxySettingsInput,
+): Promise<TaskProxySettings> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).updateTaskProxySettings(input);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("updateTaskProxySettings", () => commands.updateTaskProxySettings(input));
+}
+
+export async function updateTorrentFileSelection(
+  input: UpdateTorrentFileSelectionInput,
+): Promise<Task> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).updateTorrentFileSelection(input);
+  }
+  const commands = await loadNativeCommands();
+  return normalizeTask(
+    await runCommand("updateTorrentFileSelection", () =>
+      commands.updateTorrentFileSelection(input),
+    ),
+  );
+}
+
+export async function updateTorrentSeeding(input: UpdateTorrentSeedingInput): Promise<Task> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).updateTorrentSeeding(input);
+  }
+  const commands = await loadNativeCommands();
+  return normalizeTask(
+    await runCommand("updateTorrentSeeding", () => commands.updateTorrentSeeding(input)),
+  );
+}
+
 export async function listTaskEventsPage(input: CursorPageInput): Promise<CursorPage<TaskEvent>> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).listTaskEventsPage(input);
@@ -233,6 +283,14 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
   }
   const commands = await loadNativeCommands();
   return runCommand("updateSettings", () => commands.updateSettings(input));
+}
+
+export async function probeFtpDirectory(url: string): Promise<FtpDirectoryProbe> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).probeFtpDirectory(url);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("probeFtpDirectory", () => commands.probeFtpDirectory(url));
 }
 
 export async function openDirectoryPicker(): Promise<string | null> {
@@ -323,6 +381,15 @@ export async function runTrayMenuAction(action: TrayMenuAction): Promise<void> {
   await runCommand("runTrayMenuAction", () => commands.runTrayMenuAction(action));
 }
 
+export async function requestSystemShutdown(): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock request system shutdown");
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("requestSystemShutdown", () => commands.requestSystemShutdown());
+}
+
 export async function showFloatingStatusWindow(): Promise<void> {
   if (!isTauriRuntime()) {
     log.debug("mock show floating status window");
@@ -401,6 +468,20 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   }
   const commands = await loadNativeCommands();
   return normalizeTask(await runCommand("createTask", () => commands.createTask(input)));
+}
+
+export async function updateTaskTransferOptions(
+  input: UpdateTaskTransferOptionsInput,
+): Promise<Task> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).updateTaskTransferOptions(input);
+  }
+  const commands = await loadNativeCommands();
+  return normalizeTask(
+    await runCommand("updateTaskTransferOptions", () =>
+      commands.updateTaskTransferOptions(input),
+    ),
+  );
 }
 
 export async function importUrls(input: ImportUrlsInput): Promise<BatchImportResult> {
@@ -598,6 +679,21 @@ export function onBrowserIntegrationChanged(handler: () => void): Promise<() => 
   return import("@tauri-apps/api/event").then(({ listen }) =>
     listen(EVENT_BROWSER_INTEGRATION_CHANGED, () => {
       handler();
+    }).then((unlisten) => unlisten),
+  );
+}
+
+export function onCompletionActionRequested(
+  handler: (payload: CompletionActionRequestedPayload) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return import("@/lib/tauri-browser").then((adapter) =>
+      adapter.onCompletionActionRequested(handler),
+    );
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<CompletionActionRequestedPayload>(EVENT_COMPLETION_ACTION_REQUESTED, (event) => {
+      handler(event.payload);
     }).then((unlisten) => unlisten),
   );
 }

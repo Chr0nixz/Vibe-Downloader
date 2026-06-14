@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -30,8 +31,8 @@ use crate::{
     events::{emit_task_progress, emit_task_updated_record},
     logging::sanitize_url,
     models::{
-        AppErrorPayload, EngineCapabilities, ProbedFile, RequestDiagnosticRecord, SegmentStatus,
-        TaskKind, TaskProgressPayload, TaskRecord, TaskStatus,
+        AppErrorPayload, EngineCapabilities, HlsVariant, ProbedFile, RequestDiagnosticRecord,
+        SegmentStatus, TaskKind, TaskProgressPayload, TaskRecord, TaskStatus,
     },
     proxy::SharedProxyConfig,
 };
@@ -74,6 +75,7 @@ struct MasterVariant {
     uri: String,
     bandwidth: i64,
     resolution: Option<(i64, i64)>,
+    codecs: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,7 +94,14 @@ struct HlsSegment {
     uri: String,
     duration_ms: i64,
     byte_range: Option<ByteRange>,
+    init_map: Option<HlsInitMap>,
     key: Option<HlsKey>,
+}
+
+#[derive(Debug, Clone)]
+struct HlsInitMap {
+    uri: String,
+    byte_range: Option<ByteRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +124,7 @@ struct ProbePlan {
     target_duration: i64,
     selected_bandwidth: Option<i64>,
     selected_resolution: Option<String>,
+    variants: Vec<HlsVariant>,
     display_name: String,
 }
 
@@ -126,7 +136,15 @@ struct SegmentDownloadPlan {
     uri: String,
     local_path: PathBuf,
     byte_range: Option<ByteRange>,
+    init_map: Option<ResolvedHlsInitMap>,
     key: Option<HlsKey>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedHlsInitMap {
+    uri: String,
+    local_path: PathBuf,
+    byte_range: Option<ByteRange>,
 }
 
 #[derive(Debug)]
@@ -155,9 +173,11 @@ impl HlsEngine {
         let client = self.client().await?;
         let body = fetch_text(&client, url, request_headers).await?;
         validate_playlist_syntax(&body)?;
-        let (media_url, selected_bandwidth, selected_resolution, media_body) =
+        let (media_url, selected_bandwidth, selected_resolution, variants, media_body) =
             if is_master_playlist(&body) {
                 let variant = choose_master_variant(&body)?;
+                let selected_uri = variant.uri.clone();
+                let variants = hls_variants_from_master(&body, &selected_uri);
                 let media_url = resolve_url(url, &variant.uri)?;
                 let media_body = fetch_text(&client, &media_url, request_headers).await?;
                 validate_playlist_syntax(&media_body)?;
@@ -167,10 +187,11 @@ impl HlsEngine {
                     variant
                         .resolution
                         .map(|(width, height)| format!("{width}x{height}")),
+                    variants,
                     media_body,
                 )
             } else {
-                (url.to_string(), None, None, body)
+                (url.to_string(), None, None, Vec::new(), body)
             };
         let media = parse_media_playlist(&media_body)?;
         reject_unsupported_media_playlist(&media_body)?;
@@ -180,6 +201,7 @@ impl HlsEngine {
             target_duration: media.target_duration,
             selected_bandwidth,
             selected_resolution,
+            variants,
             display_name: hls_output_name(url),
         })
     }
@@ -223,6 +245,7 @@ impl DownloadEngine for HlsEngine {
                 etag: None,
                 last_modified: None,
                 content_type: Some(HLS_CONTENT_TYPE.to_string()),
+                hls_variants: plan.variants.clone(),
             })
         })
     }
@@ -242,9 +265,10 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         speed_limiter,
         connection_limit,
         request_headers,
+        proxy_config,
     } = context;
     ensure_ffmpeg_available()?;
-    let client = engine.client().await?;
+    let client = build_client(&proxy_config)?;
     let staging_dir = task
         .temp_path
         .as_deref()
@@ -360,6 +384,18 @@ async fn persist_hls_segment_plans(
         );
         let local_path = staging_dir.join(local_name);
         let uri = resolve_url(media_url, &segment.uri)?;
+        let init_map = segment
+            .init_map
+            .as_ref()
+            .map(|map| {
+                let uri = resolve_url(media_url, &map.uri)?;
+                Ok::<_, String>(ResolvedHlsInitMap {
+                    local_path: staging_dir.join(init_map_local_name(&uri, map.byte_range.as_ref())),
+                    uri,
+                    byte_range: map.byte_range.clone(),
+                })
+            })
+            .transpose()?;
         let key_uri = segment
             .key
             .as_ref()
@@ -371,6 +407,9 @@ async fn persist_hls_segment_plans(
             uri: key_uri.clone(),
             iv: key.iv.clone(),
         });
+        let init_map_local_path = init_map
+            .as_ref()
+            .map(|map| map.local_path.to_string_lossy().to_string());
         db::upsert_hls_segment(
             pool,
             db::HlsSegmentUpsert {
@@ -383,6 +422,16 @@ async fn persist_hls_segment_plans(
                 duration_ms: segment.duration_ms,
                 byte_range_start: segment.byte_range.as_ref().and_then(|range| range.start),
                 byte_range_length: segment.byte_range.as_ref().map(|range| range.length),
+                init_map_uri: init_map.as_ref().map(|map| map.uri.as_str()),
+                init_map_local_path: init_map_local_path.as_deref(),
+                init_map_byte_range_start: init_map
+                    .as_ref()
+                    .and_then(|map| map.byte_range.as_ref())
+                    .and_then(|range| range.start),
+                init_map_byte_range_length: init_map
+                    .as_ref()
+                    .and_then(|map| map.byte_range.as_ref())
+                    .map(|range| range.length),
                 key_method: key.as_ref().map(|key| key.method.as_str()),
                 key_uri: key.as_ref().and_then(|key| key.uri.as_deref()),
                 key_iv: key.as_ref().and_then(|key| key.iv.as_deref()),
@@ -396,6 +445,7 @@ async fn persist_hls_segment_plans(
             uri,
             local_path,
             byte_range: segment.byte_range,
+            init_map,
             key,
         });
     }
@@ -589,6 +639,9 @@ async fn download_hls_segment_once(
             .await
             .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not create HLS segment folder: {e}")).command_error())?;
     }
+    if let Some(init_map) = &plan.init_map {
+        ensure_hls_init_map(client, request_headers, speed_limiter, cancel, init_map).await?;
+    }
     let mut response = apply_forwarded_headers(client.get(&plan.uri), request_headers)
         .header(ACCEPT_ENCODING, "identity");
     if let Some(range) = &plan.byte_range {
@@ -634,6 +687,43 @@ async fn download_hls_segment_once(
         .await
         .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not flush HLS segment: {e}")).command_error())?;
     Ok(bytes)
+}
+
+async fn ensure_hls_init_map(
+    client: &Client,
+    request_headers: &[(String, String)],
+    speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
+    cancel: &Arc<AtomicBool>,
+    init_map: &ResolvedHlsInitMap,
+) -> Result<(), String> {
+    if fs::try_exists(&init_map.local_path).await.unwrap_or(false) {
+        return Ok(());
+    }
+    let data = fetch_bytes(
+        client,
+        &init_map.uri,
+        request_headers,
+        init_map.byte_range.as_ref().map(byte_range_header),
+    )
+    .await?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err("Download canceled.".to_string());
+    }
+    speed_limiter.throttle(data.len()).await;
+    if let Some(parent) = init_map.local_path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not create HLS init map folder: {e}")).command_error())?;
+    }
+    let mut file = fs::File::create(&init_map.local_path)
+        .await
+        .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not create HLS init map: {e}")).command_error())?;
+    file.write_all(&data)
+        .await
+        .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not write HLS init map: {e}")).command_error())?;
+    file.flush()
+        .await
+        .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not flush HLS init map: {e}")).command_error())
 }
 
 async fn decrypt_hls_segment(
@@ -750,10 +840,22 @@ async fn write_local_hls_playlist(
         .first()
         .map(|segment| segment.discontinuity_sequence)
         .unwrap_or(0);
+    let mut previous_init_map: Option<String> = None;
     for segment in &completed {
         if segment.discontinuity_sequence != previous_discontinuity {
             text.push_str("#EXT-X-DISCONTINUITY\n");
             previous_discontinuity = segment.discontinuity_sequence;
+        }
+        if segment.init_map_local_path != previous_init_map {
+            if let Some(init_map_path) = segment.init_map_local_path.as_deref() {
+                let path = PathBuf::from(init_map_path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("init.mp4")
+                    .replace('\\', "/");
+                text.push_str(&format!("#EXT-X-MAP:URI=\"{path}\"\n"));
+            }
+            previous_init_map = segment.init_map_local_path.clone();
         }
         let duration = (segment.duration_ms.max(0) as f64) / 1000.0;
         let path = PathBuf::from(&segment.local_path)
@@ -993,6 +1095,43 @@ fn validate_playlist_syntax(body: &str) -> Result<(), String> {
 }
 
 fn choose_master_variant(body: &str) -> Result<MasterVariant, String> {
+    let variants = parse_master_variants(body);
+    variants
+        .into_iter()
+        .max_by_key(|variant| {
+            (
+                variant.bandwidth,
+                variant
+                    .resolution
+                    .map(|(width, height)| width.saturating_mul(height))
+                    .unwrap_or(0),
+            )
+        })
+        .ok_or_else(|| {
+            hls_error(
+                "hls_invalid_playlist",
+                "HLS master playlist does not contain a playable variant.",
+                false,
+            )
+        })
+}
+
+fn hls_variants_from_master(body: &str, selected_uri: &str) -> Vec<HlsVariant> {
+    parse_master_variants(body)
+        .into_iter()
+        .map(|variant| HlsVariant {
+            selected: variant.uri == selected_uri,
+            uri: variant.uri,
+            bandwidth: variant.bandwidth.to_string(),
+            resolution: variant
+                .resolution
+                .map(|(width, height)| format!("{width}x{height}")),
+            codecs: variant.codecs,
+        })
+        .collect()
+}
+
+fn parse_master_variants(body: &str) -> Vec<MasterVariant> {
     let mut variants = Vec::new();
     let mut pending_attrs: Option<HashMap<String, String>> = None;
     for raw in body.lines() {
@@ -1019,27 +1158,11 @@ fn choose_master_variant(body: &str) -> Result<MasterVariant, String> {
                 uri: line.to_string(),
                 bandwidth,
                 resolution,
+                codecs: attrs.get("CODECS").cloned(),
             });
         }
     }
     variants
-        .into_iter()
-        .max_by_key(|variant| {
-            (
-                variant.bandwidth,
-                variant
-                    .resolution
-                    .map(|(width, height)| width.saturating_mul(height))
-                    .unwrap_or(0),
-            )
-        })
-        .ok_or_else(|| {
-            hls_error(
-                "hls_invalid_playlist",
-                "HLS master playlist does not contain a playable variant.",
-                false,
-            )
-        })
 }
 
 fn parse_media_playlist(body: &str) -> Result<MediaPlaylist, String> {
@@ -1056,6 +1179,7 @@ fn parse_media_playlist(body: &str) -> Result<MediaPlaylist, String> {
     let mut discontinuity_sequence = 0_i64;
     let mut next_duration = None;
     let mut current_key: Option<HlsKey> = None;
+    let mut current_init_map: Option<HlsInitMap> = None;
     let mut current_byte_range: Option<ByteRange> = None;
     let mut next_byte_range_start: Option<i64> = None;
     let mut segments = Vec::new();
@@ -1084,12 +1208,8 @@ fn parse_media_playlist(body: &str) -> Result<MediaPlaylist, String> {
             next_byte_range_start = None;
         } else if line == "#EXT-X-ENDLIST" {
             end_list = true;
-        } else if line.starts_with("#EXT-X-MAP:") {
-            return Err(hls_error(
-                "hls_unsupported_playlist",
-                "fMP4 HLS playlists with EXT-X-MAP are not supported in this version.",
-                false,
-            ));
+        } else if let Some(value) = line.strip_prefix("#EXT-X-MAP:") {
+            current_init_map = Some(parse_init_map(value)?);
         } else if !line.starts_with('#') {
             let sequence = media_sequence + segment_index;
             let byte_range = current_byte_range.take().map(|range| {
@@ -1109,6 +1229,7 @@ fn parse_media_playlist(body: &str) -> Result<MediaPlaylist, String> {
                 uri: line.to_string(),
                 duration_ms: next_duration.take().unwrap_or(0),
                 byte_range,
+                init_map: current_init_map.clone(),
                 key: current_key.clone(),
             });
             segment_index += 1;
@@ -1180,6 +1301,21 @@ fn parse_key(value: &str) -> Result<Option<HlsKey>, String> {
     }))
 }
 
+fn parse_init_map(value: &str) -> Result<HlsInitMap, String> {
+    let attrs = parse_attributes(value);
+    let uri = attrs.get("URI").cloned().ok_or_else(|| {
+        hls_error(
+            "hls_invalid_playlist",
+            "HLS EXT-X-MAP is missing a URI.",
+            false,
+        )
+    })?;
+    Ok(HlsInitMap {
+        uri,
+        byte_range: attrs.get("BYTERANGE").and_then(|value| parse_byte_range(value)),
+    })
+}
+
 fn parse_attributes(value: &str) -> HashMap<String, String> {
     let mut attrs = HashMap::new();
     let mut key = String::new();
@@ -1226,6 +1362,16 @@ fn parse_byte_range(value: &str) -> Option<ByteRange> {
             .and_then(|value| value.parse::<i64>().ok())
             .map(|value| value.max(0)),
     })
+}
+
+fn init_map_local_name(uri: &str, byte_range: Option<&ByteRange>) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    uri.hash(&mut hasher);
+    if let Some(range) = byte_range {
+        range.start.hash(&mut hasher);
+        range.length.hash(&mut hasher);
+    }
+    format!("init-{:016x}.mp4", hasher.finish())
 }
 
 fn resolve_url(base: &str, value: &str) -> Result<String, String> {

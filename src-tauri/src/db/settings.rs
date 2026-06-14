@@ -1,6 +1,7 @@
+use chrono::Timelike;
 use sqlx::{Row, SqlitePool};
 
-use crate::models::{AppAccentColor, AppFontFamily, AppSettings};
+use crate::models::{AppAccentColor, AppFontFamily, AppSettings, CompletionAction};
 use crate::proxy::{self, AppProxyMode};
 
 use super::{
@@ -30,6 +31,15 @@ const SETTING_PROXY_URL: &str = "proxy_url";
 const SETTING_PROXY_NO_PROXY: &str = "proxy_no_proxy";
 const SETTING_PROXY_USERNAME: &str = "proxy_username";
 const SETTING_PROXY_PASSWORD_SAVED: &str = "proxy_password_saved";
+const SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED: &str = "schedule_download_window_enabled";
+const SETTING_SCHEDULE_DOWNLOAD_WINDOW_START: &str = "schedule_download_window_start";
+const SETTING_SCHEDULE_DOWNLOAD_WINDOW_END: &str = "schedule_download_window_end";
+const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED: &str = "schedule_speed_limit_window_enabled";
+const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START: &str = "schedule_speed_limit_window_start";
+const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END: &str = "schedule_speed_limit_window_end";
+const SETTING_SCHEDULE_SPEED_LIMIT_BPS: &str = "schedule_speed_limit_bps";
+const SETTING_COMPLETION_ACTION: &str = "completion_action";
+const SETTING_COMPLETION_COUNTDOWN_SECONDS: &str = "completion_countdown_seconds";
 
 pub async fn get_settings(
     pool: &SqlitePool,
@@ -96,6 +106,40 @@ pub async fn get_settings(
         .and_then(|value| normalize_proxy_optional(&value))
         .unwrap_or_default();
     let proxy_password_saved = get_bool_setting(pool, SETTING_PROXY_PASSWORD_SAVED, false).await?;
+    let schedule_download_window_enabled =
+        get_bool_setting(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED, false).await?;
+    let schedule_download_window_start = get_setting_value(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_START)
+        .await?
+        .and_then(|value| normalize_local_time(&value))
+        .unwrap_or_else(|| "00:00".to_string());
+    let schedule_download_window_end = get_setting_value(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_END)
+        .await?
+        .and_then(|value| normalize_local_time(&value))
+        .unwrap_or_else(|| "06:00".to_string());
+    let schedule_speed_limit_window_enabled =
+        get_bool_setting(pool, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED, false).await?;
+    let schedule_speed_limit_window_start =
+        get_setting_value(pool, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START)
+            .await?
+            .and_then(|value| normalize_local_time(&value))
+            .unwrap_or_else(|| "18:00".to_string());
+    let schedule_speed_limit_window_end =
+        get_setting_value(pool, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END)
+            .await?
+            .and_then(|value| normalize_local_time(&value))
+            .unwrap_or_else(|| "23:00".to_string());
+    let schedule_speed_limit_bps = get_setting_value(pool, SETTING_SCHEDULE_SPEED_LIMIT_BPS)
+        .await?
+        .and_then(|value| normalize_speed_limit_bps(&value));
+    let completion_action = get_setting_value(pool, SETTING_COMPLETION_ACTION)
+        .await?
+        .map(|value| CompletionAction::from_db_str(&value))
+        .unwrap_or(CompletionAction::None);
+    let completion_countdown_seconds = get_setting_value(pool, SETTING_COMPLETION_COUNTDOWN_SECONDS)
+        .await?
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(30)
+        .clamp(5, 300);
 
     Ok(AppSettings {
         max_active_tasks,
@@ -117,6 +161,15 @@ pub async fn get_settings(
         proxy_no_proxy,
         proxy_username,
         proxy_password_saved,
+        schedule_download_window_enabled,
+        schedule_download_window_start,
+        schedule_download_window_end,
+        schedule_speed_limit_window_enabled,
+        schedule_speed_limit_window_start,
+        schedule_speed_limit_window_end,
+        schedule_speed_limit_bps,
+        completion_action,
+        completion_countdown_seconds,
     })
 }
 
@@ -199,6 +252,60 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         SETTING_PROXY_PASSWORD_SAVED,
         bool_setting_value(settings.proxy_password_saved),
     )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED,
+        bool_setting_value(settings.schedule_download_window_enabled),
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_SCHEDULE_DOWNLOAD_WINDOW_START,
+        &settings.schedule_download_window_start,
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_SCHEDULE_DOWNLOAD_WINDOW_END,
+        &settings.schedule_download_window_end,
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED,
+        bool_setting_value(settings.schedule_speed_limit_window_enabled),
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START,
+        &settings.schedule_speed_limit_window_start,
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END,
+        &settings.schedule_speed_limit_window_end,
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_SCHEDULE_SPEED_LIMIT_BPS,
+        settings.schedule_speed_limit_bps.as_deref().unwrap_or(""),
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_COMPLETION_ACTION,
+        settings.completion_action.as_str(),
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_COMPLETION_COUNTDOWN_SECONDS,
+        &settings.completion_countdown_seconds.to_string(),
+    )
     .await
 }
 
@@ -257,6 +364,42 @@ pub fn parse_speed_limit_bps(value: Option<&str>) -> Option<i64> {
     value
         .and_then(normalize_speed_limit_bps)
         .and_then(|value| value.parse::<i64>().ok())
+}
+
+pub fn normalize_local_time(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let (hour, minute) = trimmed.split_once(':')?;
+    let hour = hour.parse::<u32>().ok()?;
+    let minute = minute.parse::<u32>().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(format!("{hour:02}:{minute:02}"))
+}
+
+pub fn local_time_window_active(start: &str, end: &str) -> bool {
+    let Some(start_minutes) = local_minutes(start) else {
+        return false;
+    };
+    let Some(end_minutes) = local_minutes(end) else {
+        return false;
+    };
+    if start_minutes == end_minutes {
+        return true;
+    }
+    let now = chrono::Local::now();
+    let current = now.hour() * 60 + now.minute();
+    if start_minutes < end_minutes {
+        current >= start_minutes && current < end_minutes
+    } else {
+        current >= start_minutes || current < end_minutes
+    }
+}
+
+fn local_minutes(value: &str) -> Option<u32> {
+    let normalized = normalize_local_time(value)?;
+    let (hour, minute) = normalized.split_once(':')?;
+    Some(hour.parse::<u32>().ok()? * 60 + minute.parse::<u32>().ok()?)
 }
 
 pub fn normalize_multi_connection_threshold_bytes(value: &str) -> Option<String> {

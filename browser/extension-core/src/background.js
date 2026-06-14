@@ -9,6 +9,7 @@ const SETTINGS_KEY = "vibeBrowserCaptureSettings";
 const HEADER_CACHE_TTL_MS = 30_000;
 const MAX_HEADER_CACHE = 80;
 const MAX_LIVE_TASK_CACHE = 120;
+const MAX_MEDIA_CANDIDATES = 40;
 const ACTIVE_TASK_STATUSES = new Set([
   "queued",
   "downloading",
@@ -33,6 +34,7 @@ const api = globalThis.browser ?? globalThis.chrome;
 const headerCache = new Map();
 const pendingWs = new Map();
 const liveTasks = new Map();
+const mediaCandidates = new Map();
 
 let ws = null;
 let bridge = null;
@@ -118,6 +120,22 @@ if (EXPERIMENTAL_CAPTURE && api.webRequest?.onBeforeSendHeaders) {
       cacheRequestHeaders,
       { urls: ["http://*/*", "https://*/*"] },
       ["requestHeaders"],
+    );
+  }
+}
+
+if (EXPERIMENTAL_CAPTURE && api.webRequest?.onHeadersReceived) {
+  try {
+    api.webRequest.onHeadersReceived.addListener(
+      recordMediaCandidate,
+      { urls: ["http://*/*", "https://*/*"] },
+      ["responseHeaders", "extraHeaders"],
+    );
+  } catch {
+    api.webRequest.onHeadersReceived.addListener(
+      recordMediaCandidate,
+      { urls: ["http://*/*", "https://*/*"] },
+      ["responseHeaders"],
     );
   }
 }
@@ -447,6 +465,55 @@ function cleanupHeaderCache() {
   }
 }
 
+function recordMediaCandidate(details) {
+  if (!EXPERIMENTAL_CAPTURE || !details?.url || details.method === "OPTIONS") return {};
+  const headers = details.responseHeaders ?? [];
+  const contentType = headerValue(headers, "content-type").toLowerCase();
+  const contentLength = headerValue(headers, "content-length");
+  if (!looksLikeMediaUrl(details.url, contentType)) return {};
+  const candidate = {
+    id: `${details.tabId ?? -1}:${details.requestId}`,
+    url: details.url,
+    tabId: details.tabId ?? null,
+    frameId: details.frameId ?? null,
+    pageUrl: details.initiator ?? details.documentUrl ?? null,
+    contentType: contentType || null,
+    contentLength: contentLength || null,
+    detectedAt: new Date().toISOString(),
+  };
+  mediaCandidates.delete(candidate.url);
+  mediaCandidates.set(candidate.url, candidate);
+  pruneMediaCandidates();
+  return {};
+}
+
+function looksLikeMediaUrl(url, contentType) {
+  if (contentType.startsWith("video/")) return true;
+  if (contentType.includes("mpegurl") || contentType.includes("x-mpegurl")) return true;
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    return /\.(m3u8|mp4|m4v|m4s|mkv|webm|mov)(?:$|\.)/.test(path);
+  } catch {
+    return false;
+  }
+}
+
+function headerValue(headers, name) {
+  const found = headers.find((header) => header.name?.toLowerCase() === name);
+  return found?.value ?? "";
+}
+
+function pruneMediaCandidates() {
+  if (mediaCandidates.size <= MAX_MEDIA_CANDIDATES) return;
+  const entries = Array.from(mediaCandidates.values()).sort((left, right) =>
+    Date.parse(right.detectedAt) - Date.parse(left.detectedAt)
+  );
+  mediaCandidates.clear();
+  for (const candidate of entries.slice(0, MAX_MEDIA_CANDIDATES)) {
+    mediaCandidates.set(candidate.url, candidate);
+  }
+}
+
 async function getCaptureSettings() {
   const stored = await api.storage.local.get(SETTINGS_KEY);
   captureSettingsCache = normalizeCaptureSettings(stored?.[SETTINGS_KEY]);
@@ -569,6 +636,7 @@ async function popupStatus() {
     settings: await getCaptureSettings(),
     recent: Array.isArray(stored?.[RECENT_KEY]) ? stored[RECENT_KEY] : [],
     tasks: Array.from(liveTasks.values()).slice(0, 8),
+    mediaCandidates: Array.from(mediaCandidates.values()).slice(-8).reverse(),
   };
 }
 

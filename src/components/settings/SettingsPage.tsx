@@ -37,6 +37,7 @@ import type {
   BrowserCaptureSettings,
   BrowserExtensionExportResult,
   BrowserIntegrationStatus,
+  CompletionAction,
 } from "@/generated/bindings";
 import { setLocale, type Locale } from "@/i18n";
 import {
@@ -107,6 +108,15 @@ export function SettingsPage() {
   const [proxyPassword, setProxyPassword] = useState("");
   const [proxyPasswordSaved, setProxyPasswordSaved] = useState(false);
   const [clearProxyPassword, setClearProxyPassword] = useState(false);
+  const [scheduleDownloadWindowEnabled, setScheduleDownloadWindowEnabled] = useState(false);
+  const [scheduleDownloadWindowStart, setScheduleDownloadWindowStart] = useState("00:00");
+  const [scheduleDownloadWindowEnd, setScheduleDownloadWindowEnd] = useState("06:00");
+  const [scheduleSpeedLimitWindowEnabled, setScheduleSpeedLimitWindowEnabled] = useState(false);
+  const [scheduleSpeedLimitWindowStart, setScheduleSpeedLimitWindowStart] = useState("18:00");
+  const [scheduleSpeedLimitWindowEnd, setScheduleSpeedLimitWindowEnd] = useState("23:00");
+  const [scheduleSpeedLimitBps, setScheduleSpeedLimitBps] = useState("");
+  const [completionAction, setCompletionAction] = useState<CompletionAction>("none");
+  const [completionCountdownSeconds, setCompletionCountdownSeconds] = useState(30);
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const [browserStatus, setBrowserStatus] = useState<BrowserIntegrationStatus | null>(null);
@@ -149,6 +159,15 @@ export function SettingsPage() {
     setProxyPassword("");
     setProxyPasswordSaved(settings.proxyPasswordSaved);
     setClearProxyPassword(false);
+    setScheduleDownloadWindowEnabled(settings.scheduleDownloadWindowEnabled);
+    setScheduleDownloadWindowStart(settings.scheduleDownloadWindowStart);
+    setScheduleDownloadWindowEnd(settings.scheduleDownloadWindowEnd);
+    setScheduleSpeedLimitWindowEnabled(settings.scheduleSpeedLimitWindowEnabled);
+    setScheduleSpeedLimitWindowStart(settings.scheduleSpeedLimitWindowStart);
+    setScheduleSpeedLimitWindowEnd(settings.scheduleSpeedLimitWindowEnd);
+    setScheduleSpeedLimitBps(settings.scheduleSpeedLimitBps ?? "");
+    setCompletionAction(settings.completionAction);
+    setCompletionCountdownSeconds(settings.completionCountdownSeconds);
     setSaveState("saved");
   }, [settings]);
 
@@ -173,6 +192,15 @@ export function SettingsPage() {
       proxyUrl === settings.proxyUrl &&
       proxyNoProxy === settings.proxyNoProxy &&
       proxyUsername === settings.proxyUsername &&
+      scheduleDownloadWindowEnabled === settings.scheduleDownloadWindowEnabled &&
+      scheduleDownloadWindowStart === settings.scheduleDownloadWindowStart &&
+      scheduleDownloadWindowEnd === settings.scheduleDownloadWindowEnd &&
+      scheduleSpeedLimitWindowEnabled === settings.scheduleSpeedLimitWindowEnabled &&
+      scheduleSpeedLimitWindowStart === settings.scheduleSpeedLimitWindowStart &&
+      scheduleSpeedLimitWindowEnd === settings.scheduleSpeedLimitWindowEnd &&
+      scheduleSpeedLimitBps === (settings.scheduleSpeedLimitBps ?? "") &&
+      completionAction === settings.completionAction &&
+      completionCountdownSeconds === settings.completionCountdownSeconds &&
       proxyPassword.trim() === "" &&
       !clearProxyPassword
     ) {
@@ -202,6 +230,15 @@ export function SettingsPage() {
         proxyNoProxy,
         proxyUsername,
         proxyPasswordSaved,
+        scheduleDownloadWindowEnabled,
+        scheduleDownloadWindowStart,
+        scheduleDownloadWindowEnd,
+        scheduleSpeedLimitWindowEnabled,
+        scheduleSpeedLimitWindowStart,
+        scheduleSpeedLimitWindowEnd,
+        scheduleSpeedLimitBps: scheduleSpeedLimitBps.trim() || null,
+        completionAction,
+        completionCountdownSeconds,
       });
     }, AUTO_SAVE_DELAY_MS);
 
@@ -232,6 +269,15 @@ export function SettingsPage() {
     proxyPassword,
     proxyPasswordSaved,
     clearProxyPassword,
+    scheduleDownloadWindowEnabled,
+    scheduleDownloadWindowStart,
+    scheduleDownloadWindowEnd,
+    scheduleSpeedLimitWindowEnabled,
+    scheduleSpeedLimitWindowStart,
+    scheduleSpeedLimitWindowEnd,
+    scheduleSpeedLimitBps,
+    completionAction,
+    completionCountdownSeconds,
   ]);
 
   useEffect(() => {
@@ -280,6 +326,15 @@ export function SettingsPage() {
         proxyUsername: nextSettings.proxyUsername,
         proxyPassword: proxyPassword.trim() || null,
         clearProxyPassword,
+        scheduleDownloadWindowEnabled: nextSettings.scheduleDownloadWindowEnabled,
+        scheduleDownloadWindowStart: nextSettings.scheduleDownloadWindowStart,
+        scheduleDownloadWindowEnd: nextSettings.scheduleDownloadWindowEnd,
+        scheduleSpeedLimitWindowEnabled: nextSettings.scheduleSpeedLimitWindowEnabled,
+        scheduleSpeedLimitWindowStart: nextSettings.scheduleSpeedLimitWindowStart,
+        scheduleSpeedLimitWindowEnd: nextSettings.scheduleSpeedLimitWindowEnd,
+        scheduleSpeedLimitBps: nextSettings.scheduleSpeedLimitBps,
+        completionAction: nextSettings.completionAction,
+        completionCountdownSeconds: nextSettings.completionCountdownSeconds,
       });
       if (next.startOnBoot !== settings?.startOnBoot) {
         await syncAutostart(next.startOnBoot);
@@ -631,6 +686,115 @@ export function SettingsPage() {
                     }
                   }}
                   disabled={controlsDisabled}
+                  className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
+                />
+              </SettingsRow>
+            </SettingsSection>
+
+            <SettingsSection
+              title={t("settings.scheduledDownloads")}
+              description={t("settings.scheduledDownloadsDescription")}
+            >
+              <SettingsToggle
+                title={t("settings.downloadWindow")}
+                description={t("settings.downloadWindowDescription")}
+                checked={scheduleDownloadWindowEnabled}
+                disabled={controlsDisabled}
+                onChange={setScheduleDownloadWindowEnabled}
+              />
+              <SettingsRow title={t("settings.downloadWindowTime")} controlClassName="max-w-sm">
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="time"
+                    value={scheduleDownloadWindowStart}
+                    onChange={(event) => setScheduleDownloadWindowStart(event.target.value)}
+                    disabled={controlsDisabled || !scheduleDownloadWindowEnabled}
+                    className="h-11 w-32 bg-surface-root font-mono md:h-8"
+                  />
+                  <span className="text-xs text-text-muted">-</span>
+                  <Input
+                    type="time"
+                    value={scheduleDownloadWindowEnd}
+                    onChange={(event) => setScheduleDownloadWindowEnd(event.target.value)}
+                    disabled={controlsDisabled || !scheduleDownloadWindowEnabled}
+                    className="h-11 w-32 bg-surface-root font-mono md:h-8"
+                  />
+                </div>
+              </SettingsRow>
+              <SettingsToggle
+                title={t("settings.speedLimitWindow")}
+                description={t("settings.speedLimitWindowDescription")}
+                checked={scheduleSpeedLimitWindowEnabled}
+                disabled={controlsDisabled}
+                onChange={setScheduleSpeedLimitWindowEnabled}
+              />
+              <SettingsRow title={t("settings.speedLimitWindowTime")} controlClassName="max-w-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    type="time"
+                    value={scheduleSpeedLimitWindowStart}
+                    onChange={(event) => setScheduleSpeedLimitWindowStart(event.target.value)}
+                    disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
+                    className="h-11 w-32 bg-surface-root font-mono md:h-8"
+                  />
+                  <span className="text-xs text-text-muted">-</span>
+                  <Input
+                    type="time"
+                    value={scheduleSpeedLimitWindowEnd}
+                    onChange={(event) => setScheduleSpeedLimitWindowEnd(event.target.value)}
+                    disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
+                    className="h-11 w-32 bg-surface-root font-mono md:h-8"
+                  />
+                </div>
+              </SettingsRow>
+              <SettingsRow title={t("settings.scheduledSpeedLimit")} htmlFor="scheduled-speed-limit">
+                <ByteUnitInput
+                  id="scheduled-speed-limit"
+                  valueBytes={scheduleSpeedLimitBps}
+                  onChange={setScheduleSpeedLimitBps}
+                  placeholder={t("settings.globalSpeedLimitPlaceholder")}
+                  disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
+                  unitAriaLabel={t("settings.speedUnit")}
+                  units={[
+                    ["1", "B/s"],
+                    ["1024", "KB/s"],
+                    ["1048576", "MB/s"],
+                    ["1073741824", "GB/s"],
+                  ]}
+                  allowEmpty
+                />
+              </SettingsRow>
+              <SettingsRow title={t("settings.completionAction")} htmlFor="completion-action">
+                <Select
+                  value={completionAction}
+                  onValueChange={(value) => setCompletionAction(value as CompletionAction)}
+                  disabled={controlsDisabled}
+                >
+                  <SelectTrigger id="completion-action" className="w-full max-w-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">{t("settings.completionNone")}</SelectItem>
+                    <SelectItem value="exit_app">{t("settings.completionExit")}</SelectItem>
+                    <SelectItem value="shutdown">{t("settings.completionShutdown")}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </SettingsRow>
+              <SettingsRow title={t("settings.completionCountdown")} htmlFor="completion-countdown">
+                <Input
+                  id="completion-countdown"
+                  type="number"
+                  min={5}
+                  max={300}
+                  step={5}
+                  value={completionCountdownSeconds}
+                  onChange={(event) => {
+                    const next = event.target.valueAsNumber;
+                    if (Number.isFinite(next)) {
+                      setCompletionCountdownSeconds(Math.min(300, Math.max(5, Math.floor(next))));
+                    }
+                  }}
+                  disabled={controlsDisabled || completionAction === "none"}
                   className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
                 />
               </SettingsRow>

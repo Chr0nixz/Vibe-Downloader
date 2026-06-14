@@ -7,6 +7,7 @@ import type {
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
   ClipboardLinkDetectedPayload,
+  CompletionActionRequestedPayload,
   CreateTaskInput,
   CursorPageInput,
   HashVerificationState,
@@ -16,12 +17,18 @@ import type {
   ListTasksCursorResult,
   ProbeTaskInput,
   ProbeTaskPayload,
+  FtpDirectoryProbe,
   RequestDiagnostic,
   ResolveTaskAttentionInput,
   SegmentSummary,
+  TaskProxySettings,
+  TaskProxySettingsInput,
   TaskEvent,
   TorrentRuntimeSnapshot,
+  UpdateTorrentFileSelectionInput,
+  UpdateTorrentSeedingInput,
   UpdateSettingsInput,
+  UpdateTaskTransferOptionsInput,
 } from "@/generated/bindings";
 import type { Task, TaskStatus } from "@/types/task";
 import { normalizeTask } from "@/types/task";
@@ -65,13 +72,24 @@ let settings: AppSettings = loadStoredSettings() ?? {
   proxyNoProxy: "",
   proxyUsername: "",
   proxyPasswordSaved: false,
+  scheduleDownloadWindowEnabled: false,
+  scheduleDownloadWindowStart: "00:00",
+  scheduleDownloadWindowEnd: "06:00",
+  scheduleSpeedLimitWindowEnabled: false,
+  scheduleSpeedLimitWindowStart: "18:00",
+  scheduleSpeedLimitWindowEnd: "23:00",
+  scheduleSpeedLimitBps: null,
+  completionAction: "none",
+  completionCountdownSeconds: 30,
 };
+const taskProxySettings = new Map<string, TaskProxySettings>();
 let progressTimer: ReturnType<typeof setInterval> | undefined;
 const progressListeners = new Set<BrowserListener>();
 const taskUpdatedListeners = new Set<TaskUpdatedListener>();
 const queueListeners = new Set<() => void>();
 const settingsListeners = new Set<() => void>();
 const browserIntegrationListeners = new Set<() => void>();
+const completionActionListeners = new Set<(payload: CompletionActionRequestedPayload) => void>();
 const browserIntegrationInstalled = new Set(["chrome", "edge"]);
 let browserCaptureSettings: BrowserCaptureSettings =
   loadStoredBrowserCaptureSettings() ?? defaultBrowserCaptureSettings();
@@ -175,6 +193,36 @@ function loadStoredSettings(): AppSettings | null {
         proxyNoProxy: typeof parsed.proxyNoProxy === "string" ? parsed.proxyNoProxy : "",
         proxyUsername: typeof parsed.proxyUsername === "string" ? parsed.proxyUsername : "",
         proxyPasswordSaved: Boolean(parsed.proxyPasswordSaved),
+        scheduleDownloadWindowEnabled: Boolean(parsed.scheduleDownloadWindowEnabled),
+        scheduleDownloadWindowStart:
+          typeof parsed.scheduleDownloadWindowStart === "string"
+            ? parsed.scheduleDownloadWindowStart
+            : "00:00",
+        scheduleDownloadWindowEnd:
+          typeof parsed.scheduleDownloadWindowEnd === "string"
+            ? parsed.scheduleDownloadWindowEnd
+            : "06:00",
+        scheduleSpeedLimitWindowEnabled: Boolean(parsed.scheduleSpeedLimitWindowEnabled),
+        scheduleSpeedLimitWindowStart:
+          typeof parsed.scheduleSpeedLimitWindowStart === "string"
+            ? parsed.scheduleSpeedLimitWindowStart
+            : "18:00",
+        scheduleSpeedLimitWindowEnd:
+          typeof parsed.scheduleSpeedLimitWindowEnd === "string"
+            ? parsed.scheduleSpeedLimitWindowEnd
+            : "23:00",
+        scheduleSpeedLimitBps:
+          typeof parsed.scheduleSpeedLimitBps === "string"
+            ? parsed.scheduleSpeedLimitBps
+            : null,
+        completionAction:
+          parsed.completionAction === "exit_app" || parsed.completionAction === "shutdown"
+            ? parsed.completionAction
+            : "none",
+        completionCountdownSeconds:
+          typeof parsed.completionCountdownSeconds === "number"
+            ? Math.min(300, Math.max(5, parsed.completionCountdownSeconds))
+            : 30,
       };
     }
     return null;
@@ -307,6 +355,11 @@ function browserTask(
     sourceKey: host,
     connectionCount,
     speedBps: String(speedBps),
+    taskSpeedLimitBps: null,
+    priority: "normal",
+    queuePosition: "0",
+    categoryKey: null,
+    obeySchedule: true,
     healthSummary,
     errorMessage: needsError ? healthSummary : null,
     errorCode: null,
@@ -318,6 +371,7 @@ function browserTask(
     hashStatus: "not_requested",
     hashError: null,
     hashVerifiedAt: null,
+    checksums: [],
     files: [
       {
         id: `${id}-file-0`,
@@ -618,12 +672,91 @@ export async function getTorrentRuntimeSnapshot(
     metadataStatus: task.files.length > 0 ? "ready" : "fetching",
     completedPieces: String(Math.floor(task.downloadedBytes / (4 * 1024 * 1024))),
     verifiedPieces: String(Math.floor(task.downloadedBytes / (4 * 1024 * 1024))),
+    pieceCount: String(Math.max(1, Math.ceil(task.totalSize / (4 * 1024 * 1024)))),
+    pieceBitfieldBase64: null,
     peerCount: live ? "12" : "0",
     seedCount: live ? "4" : "0",
+    dhtStatus: JSON.stringify({ routing_table_size: live ? 128 : 0 }),
+    trackers: [{ url: "udp://tracker.example:6969/announce", status: "configured", lastError: null }],
     uploadBytes: String(uploaded),
     uploadSpeedBps: String(uploadSpeedBps),
     ratio: task.downloadedBytes > 0 ? uploaded / task.downloadedBytes : 0,
+    seedingEnabled: false,
+    seedingState: "disabled",
+    lastErrorCode: null,
+    lastErrorMessage: null,
     updatedAt: task.updatedAt,
+  };
+}
+
+export async function getTaskProxySettings(taskId: string): Promise<TaskProxySettings> {
+  return (
+    taskProxySettings.get(taskId) ?? {
+      taskId,
+      mode: "inherit",
+      proxyUrl: "",
+      proxyUsername: "",
+      proxyPasswordSaved: false,
+      noProxy: "",
+    }
+  );
+}
+
+export async function updateTaskProxySettings(
+  input: TaskProxySettingsInput,
+): Promise<TaskProxySettings> {
+  const next: TaskProxySettings = {
+    taskId: input.taskId,
+    mode: input.mode,
+    proxyUrl: input.proxyUrl ?? "",
+    proxyUsername: input.proxyUsername ?? "",
+    proxyPasswordSaved: input.clearProxyPassword ? false : Boolean(input.proxyPassword),
+    noProxy: input.noProxy ?? "",
+  };
+  taskProxySettings.set(input.taskId, next);
+  return next;
+}
+
+export async function updateTorrentFileSelection(
+  input: UpdateTorrentFileSelectionInput,
+): Promise<Task> {
+  const task = tasks.find((entry) => entry.id === input.taskId);
+  if (!task) throw new Error("Task not found.");
+  const selected = new Set(input.selectedFilePaths);
+  task.files = task.files.map((file) => ({
+    ...file,
+    selected: selected.has(file.relativePath),
+  }));
+  task.status = "queued";
+  task.errorMessage = null;
+  task.errorCode = null;
+  task.updatedAt = nowIso();
+  persistTasks();
+  emitTaskUpdated(task);
+  scheduleBrowserQueue();
+  return task;
+}
+
+export async function updateTorrentSeeding(input: UpdateTorrentSeedingInput): Promise<Task> {
+  const task = tasks.find((entry) => entry.id === input.taskId);
+  if (!task) throw new Error("Task not found.");
+  task.updatedAt = nowIso();
+  persistTasks();
+  emitTaskUpdated(task);
+  return task;
+}
+
+export async function probeFtpDirectory(url: string): Promise<FtpDirectoryProbe> {
+  const base = url.replace(/\/?$/, "/");
+  return {
+    inputUrl: url,
+    directoryUrl: base,
+    currentDirectory: "/",
+    entries: [
+      { name: "example.bin", raw: "-rw-r--r-- 1 user group 1024 example.bin", probableFileUrl: `${base}example.bin` },
+      { name: "nested", raw: "drwxr-xr-x 1 user group 0 nested", probableFileUrl: null },
+    ],
+    diagnostics: ["Mock FTP directory probe"],
   };
 }
 
@@ -743,6 +876,27 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
       : input.proxyPassword
         ? true
         : settings.proxyPasswordSaved,
+    scheduleDownloadWindowEnabled:
+      input.scheduleDownloadWindowEnabled ?? settings.scheduleDownloadWindowEnabled,
+    scheduleDownloadWindowStart:
+      input.scheduleDownloadWindowStart ?? settings.scheduleDownloadWindowStart,
+    scheduleDownloadWindowEnd:
+      input.scheduleDownloadWindowEnd ?? settings.scheduleDownloadWindowEnd,
+    scheduleSpeedLimitWindowEnabled:
+      input.scheduleSpeedLimitWindowEnabled ?? settings.scheduleSpeedLimitWindowEnabled,
+    scheduleSpeedLimitWindowStart:
+      input.scheduleSpeedLimitWindowStart ?? settings.scheduleSpeedLimitWindowStart,
+    scheduleSpeedLimitWindowEnd:
+      input.scheduleSpeedLimitWindowEnd ?? settings.scheduleSpeedLimitWindowEnd,
+    scheduleSpeedLimitBps:
+      input.scheduleSpeedLimitBps === null || input.scheduleSpeedLimitBps === undefined
+        ? settings.scheduleSpeedLimitBps
+        : normalizeSpeedLimit(input.scheduleSpeedLimitBps),
+    completionAction: input.completionAction ?? settings.completionAction,
+    completionCountdownSeconds: Math.min(
+      300,
+      Math.max(5, input.completionCountdownSeconds ?? settings.completionCountdownSeconds),
+    ),
   };
   persistSettings();
   emitSettingsChanged();
@@ -969,6 +1123,19 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   return nextTask;
 }
 
+export async function updateTaskTransferOptions(
+  input: UpdateTaskTransferOptionsInput,
+): Promise<Task> {
+  const task = tasks.find((item) => item.id === input.id);
+  if (!task) throw new Error(`Task not found: ${input.id}`);
+  return updateTask(input.id, {
+    taskSpeedLimitBps: input.taskSpeedLimitBps,
+    priority: input.priority ?? task.priority,
+    queuePosition: input.queuePosition ?? task.queuePosition,
+    categoryKey: input.categoryKey,
+  });
+}
+
 export async function importUrls(input: ImportUrlsInput): Promise<BatchImportResult> {
   const urls = input.input
     .split(/\r?\n/)
@@ -1007,6 +1174,9 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
             saveDir: input.saveDir,
             fileName: probe?.fileName ?? null,
             expectedHashSha256: null,
+            taskSpeedLimitBps: null,
+            priority: null,
+            categoryKey: null,
             probeSnapshot: probe,
             selectedFilePaths: null,
             allowDuplicate: false,
@@ -1081,6 +1251,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       contentType: "application/x-magnet",
       etag: null,
       lastModified: null,
+      hlsVariants: [],
       probedAt: nowIso(),
     };
   }
@@ -1115,6 +1286,15 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       contentType: "application/vnd.apple.mpegurl",
       etag: null,
       lastModified: null,
+      hlsVariants: [
+        {
+          uri: input.url,
+          bandwidth: "6000000",
+          resolution: "1920x1080",
+          codecs: "avc1.640028,mp4a.40.2",
+          selected: true,
+        },
+      ],
       probedAt: nowIso(),
     };
   }
@@ -1141,6 +1321,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
     contentType: "application/octet-stream",
     etag: "\"mock-etag\"",
     lastModified: nowIso(),
+    hlsVariants: [],
     probedAt: nowIso(),
   };
 }
@@ -1289,6 +1470,19 @@ export function onBrowserIntegrationChanged(handler: () => void): Promise<() => 
   return Promise.resolve(() => {
     browserIntegrationListeners.delete(handler);
   });
+}
+
+export function onCompletionActionRequested(
+  handler: (payload: CompletionActionRequestedPayload) => void,
+): Promise<() => void> {
+  completionActionListeners.add(handler);
+  return Promise.resolve(() => {
+    completionActionListeners.delete(handler);
+  });
+}
+
+export async function requestSystemShutdown(): Promise<void> {
+  log.info("mock system shutdown requested");
 }
 
 function browserDisplayName(browser: string): string {

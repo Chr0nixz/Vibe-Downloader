@@ -110,3 +110,30 @@ pub fn open_path(path: &std::path::Path) -> Result<(), String> {
         Err("The operating system could not open the requested path.".to_string())
     }
 }
+
+pub fn shutdown_now() -> Result<(), String> {
+    tracing::warn!("system shutdown requested by confirmed completion action");
+
+    let status = if cfg!(target_os = "windows") {
+        Command::new("shutdown")
+            .args(["/s", "/t", "0"])
+            .status()
+            .map_err(|e| format!("Failed to request shutdown: {e}"))?
+    } else if cfg!(target_os = "macos") {
+        Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to shut down"])
+            .status()
+            .map_err(|e| format!("Failed to request shutdown: {e}"))?
+    } else {
+        Command::new("systemctl")
+            .arg("poweroff")
+            .status()
+            .map_err(|e| format!("Failed to request shutdown: {e}"))?
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("The operating system rejected the shutdown request.".to_string())
+    }
+}

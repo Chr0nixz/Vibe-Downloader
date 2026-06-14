@@ -6,8 +6,9 @@ use tauri_app_lib::{
     db,
     download::ProbeResult,
     models::{
-        AppAccentColor, AppFontFamily, AppSettings, BrowserKind, HashVerificationStatus,
-        SegmentStatus, Task, TaskKind, TaskRecord, TaskStatus, TaskUpdatedPayload,
+        AppAccentColor, AppFontFamily, AppSettings, BrowserKind, CompletionAction,
+        HashVerificationStatus,
+        SegmentStatus, Task, TaskKind, TaskPriority, TaskRecord, TaskStatus, TaskUpdatedPayload,
     },
 };
 
@@ -117,6 +118,15 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         proxy_no_proxy: String::new(),
         proxy_username: String::new(),
         proxy_password_saved: false,
+        schedule_download_window_enabled: false,
+        schedule_download_window_start: "00:00".to_string(),
+        schedule_download_window_end: "06:00".to_string(),
+        schedule_speed_limit_window_enabled: false,
+        schedule_speed_limit_window_start: "18:00".to_string(),
+        schedule_speed_limit_window_end: "23:00".to_string(),
+        schedule_speed_limit_bps: None,
+        completion_action: CompletionAction::None,
+        completion_countdown_seconds: 30,
     };
 
     let segments = db::ensure_task_segments_with_settings(&pool, &task, &settings)
@@ -167,6 +177,15 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
         proxy_no_proxy: String::new(),
         proxy_username: String::new(),
         proxy_password_saved: false,
+        schedule_download_window_enabled: false,
+        schedule_download_window_start: "00:00".to_string(),
+        schedule_download_window_end: "06:00".to_string(),
+        schedule_speed_limit_window_enabled: false,
+        schedule_speed_limit_window_start: "18:00".to_string(),
+        schedule_speed_limit_window_end: "23:00".to_string(),
+        schedule_speed_limit_bps: None,
+        completion_action: CompletionAction::None,
+        completion_countdown_seconds: 30,
     };
 
     let planned_slots = db::planned_segment_count_with_plan(
@@ -348,6 +367,15 @@ async fn settings_upsert_and_clamp_active_task_count() {
             proxy_no_proxy: String::new(),
             proxy_username: String::new(),
             proxy_password_saved: false,
+            schedule_download_window_enabled: false,
+            schedule_download_window_start: "00:00".to_string(),
+            schedule_download_window_end: "06:00".to_string(),
+            schedule_speed_limit_window_enabled: false,
+            schedule_speed_limit_window_start: "18:00".to_string(),
+            schedule_speed_limit_window_end: "23:00".to_string(),
+            schedule_speed_limit_bps: None,
+            completion_action: CompletionAction::None,
+            completion_countdown_seconds: 30,
         },
     )
     .await
@@ -386,6 +414,15 @@ async fn settings_upsert_and_clamp_active_task_count() {
             proxy_no_proxy: String::new(),
             proxy_username: String::new(),
             proxy_password_saved: false,
+            schedule_download_window_enabled: true,
+            schedule_download_window_start: "22:00".to_string(),
+            schedule_download_window_end: "06:00".to_string(),
+            schedule_speed_limit_window_enabled: true,
+            schedule_speed_limit_window_start: "18:00".to_string(),
+            schedule_speed_limit_window_end: "23:00".to_string(),
+            schedule_speed_limit_bps: Some("1024".to_string()),
+            completion_action: CompletionAction::ExitApp,
+            completion_countdown_seconds: 45,
         },
     )
     .await
@@ -876,6 +913,11 @@ fn sample_task(id: &str, total_size: i64) -> TaskRecord {
         source_key: "127.0.0.1".to_string(),
         connection_count: 0,
         speed_bps: 0,
+        task_speed_limit_bps: None,
+        priority: TaskPriority::Normal,
+        queue_position: 0,
+        category_key: None,
+        obey_schedule: true,
         health_summary: Some("Queued".to_string()),
         error_message: None,
         error_code: None,

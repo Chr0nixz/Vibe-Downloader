@@ -1,6 +1,6 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
 
-use reqwest::Url;
+use reqwest::{Client, Url};
 use serde::Deserialize;
 use specta::Type;
 use tauri::{AppHandle, State};
@@ -13,7 +13,8 @@ use crate::{
     logging::sanitize_url,
     models::{
         task::now_iso, AppErrorPayload, BatchImportItem, BatchImportResult, BrowserKind,
-        HashVerificationStatus, ProbeTaskPayload, Task, TaskRecord, TaskStatus,
+        ChecksumAlgorithm, HashVerificationStatus, ProbeTaskPayload, Task, TaskChecksumRecord,
+        TaskPriority, TaskRecord, TaskStatus,
     },
     AppState,
 };
@@ -32,6 +33,9 @@ pub struct CreateTaskInput {
     pub save_dir: Option<String>,
     pub file_name: Option<String>,
     pub expected_hash_sha256: Option<String>,
+    pub task_speed_limit_bps: Option<String>,
+    pub priority: Option<TaskPriority>,
+    pub category_key: Option<String>,
     pub probe_snapshot: Option<ProbeTaskPayload>,
     pub selected_file_paths: Option<Vec<String>>,
     pub allow_duplicate: Option<bool>,
@@ -116,6 +120,7 @@ fn probe_payload_from_output(input_url: &str, probe: ProbeOutput) -> ProbeTaskPa
         content_type: probe.content_type,
         etag: probe.etag,
         last_modified: probe.last_modified,
+        hls_variants: probe.hls_variants,
         probed_at: now_iso(),
     }
 }
@@ -145,6 +150,7 @@ fn probe_output_from_snapshot(url: &str, snapshot: &ProbeTaskPayload) -> Option<
         etag: snapshot.etag.clone(),
         last_modified: snapshot.last_modified.clone(),
         content_type: snapshot.content_type.clone(),
+        hls_variants: snapshot.hls_variants.clone(),
     })
 }
 
@@ -420,6 +426,9 @@ pub async fn import_urls(
                     save_dir: input.save_dir.clone(),
                     file_name: item.file_name.clone(),
                     expected_hash_sha256: None,
+                    task_speed_limit_bps: None,
+                    priority: None,
+                    category_key: None,
                     probe_snapshot: None,
                     selected_file_paths: None,
                     allow_duplicate: Some(false),
@@ -539,6 +548,18 @@ pub(crate) async fn create_task_with_state_and_headers(
     } else {
         HashVerificationStatus::NotRequested
     };
+    let task_speed_limit_bps = input
+        .task_speed_limit_bps
+        .as_deref()
+        .and_then(db::normalize_speed_limit_bps);
+    let priority = input.priority.unwrap_or(TaskPriority::Normal);
+    let category_key = input
+        .category_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let queue_position = db::next_queue_position(&state.pool).await?;
 
     let record = TaskRecord {
         id: Uuid::new_v4().to_string(),
@@ -562,6 +583,11 @@ pub(crate) async fn create_task_with_state_and_headers(
         source_key: probe.source_key.clone(),
         connection_count: 0,
         speed_bps: 0,
+        task_speed_limit_bps,
+        priority,
+        queue_position,
+        category_key,
+        obey_schedule: true,
         health_summary: Some("Queued".to_string()),
         error_message: None,
         error_code: None,
@@ -577,6 +603,37 @@ pub(crate) async fn create_task_with_state_and_headers(
     };
 
     db::insert_task_record(&state.pool, &record).await?;
+    if let Some(expected_hash) = record.expected_hash_sha256.clone() {
+        let checksum = TaskChecksumRecord {
+            id: Uuid::new_v4().to_string(),
+            task_id: record.id.clone(),
+            algorithm: ChecksumAlgorithm::Sha256,
+            expected_hash,
+            actual_hash: None,
+            status: HashVerificationStatus::Pending,
+            source_kind: "manual".to_string(),
+            source_url: None,
+            source_label: None,
+            is_primary: true,
+            weak: false,
+            error_message: None,
+            discovered_at: None,
+            verified_at: None,
+            created_at: record.created_at.clone(),
+            updated_at: record.updated_at.clone(),
+        };
+        db::insert_task_checksum_record(&state.pool, &checksum).await?;
+    }
+    for checksum in discover_checksum_sidecars(
+        &record.id,
+        probe.resolved_uri.as_str(),
+        &request_headers,
+        &record.created_at,
+    )
+    .await
+    {
+        db::insert_task_checksum_record(&state.pool, &checksum).await?;
+    }
     if let Some(credentials) = captured_credentials {
         db::upsert_task_credentials(
             &state.pool,
@@ -617,6 +674,9 @@ pub(crate) async fn create_task_with_state_and_headers(
                     piece_count: 0,
                     private: false,
                     trackers_json: None,
+                    seeding_enabled: false,
+                    seed_ratio_limit: None,
+                    seed_time_limit_seconds: None,
                 },
             )
             .await?;
@@ -663,6 +723,80 @@ pub(crate) async fn create_task_with_state_and_headers(
     let task = task_payload(&state.pool, &record.id).await?;
     emit_task_updated(&app, &task);
     Ok(task)
+}
+
+async fn discover_checksum_sidecars(
+    task_id: &str,
+    final_url: &str,
+    request_headers: &[(String, String)],
+    timestamp: &str,
+) -> Vec<TaskChecksumRecord> {
+    let Ok(parsed) = Url::parse(final_url) else {
+        return Vec::new();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Vec::new();
+    }
+
+    let Ok(client) = Client::builder().timeout(Duration::from_secs(3)).build() else {
+        return Vec::new();
+    };
+    let mut checksums = Vec::new();
+    for (algorithm, suffix) in [
+        (ChecksumAlgorithm::Sha256, ".sha256"),
+        (ChecksumAlgorithm::Sha512, ".sha512"),
+        (ChecksumAlgorithm::Sha1, ".sha1"),
+        (ChecksumAlgorithm::Md5, ".md5"),
+    ] {
+        let source_url = format!("{final_url}{suffix}");
+        let mut request = client.get(&source_url);
+        for (name, value) in request_headers {
+            request = request.header(name, value);
+        }
+        let Ok(response) = request.send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(text) = response.text().await else {
+            continue;
+        };
+        let Some(expected_hash) = first_checksum_token(&text, algorithm) else {
+            continue;
+        };
+        checksums.push(TaskChecksumRecord {
+            id: Uuid::new_v4().to_string(),
+            task_id: task_id.to_string(),
+            algorithm,
+            expected_hash,
+            actual_hash: None,
+            status: HashVerificationStatus::Pending,
+            source_kind: "sidecar".to_string(),
+            source_url: Some(source_url),
+            source_label: Some(suffix.trim_start_matches('.').to_string()),
+            is_primary: algorithm == ChecksumAlgorithm::Sha256,
+            weak: algorithm.is_weak(),
+            error_message: None,
+            discovered_at: Some(timestamp.to_string()),
+            verified_at: None,
+            created_at: timestamp.to_string(),
+            updated_at: timestamp.to_string(),
+        });
+    }
+    checksums
+}
+
+fn first_checksum_token(text: &str, algorithm: ChecksumAlgorithm) -> Option<String> {
+    let expected_len = match algorithm {
+        ChecksumAlgorithm::Md5 => 32,
+        ChecksumAlgorithm::Sha1 => 40,
+        ChecksumAlgorithm::Sha256 => 64,
+        ChecksumAlgorithm::Sha512 => 128,
+    };
+    text.split(|ch: char| !ch.is_ascii_hexdigit())
+        .find(|token| token.len() == expected_len)
+        .map(|token| token.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -803,6 +937,7 @@ mod tests {
             content_type: Some("application/octet-stream".to_string()),
             etag: Some("\"strong\"".to_string()),
             last_modified: Some("Tue, 02 Jan 2024 00:00:00 GMT".to_string()),
+            hls_variants: Vec::new(),
             probed_at: probed_at.to_rfc3339(),
         }
     }
@@ -828,6 +963,7 @@ mod tests {
             etag: None,
             last_modified: None,
             content_type: Some("application/octet-stream".to_string()),
+            hls_variants: Vec::new(),
         }
     }
 }

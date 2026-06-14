@@ -152,7 +152,7 @@ impl HttpEngine {
     }
 
     pub async fn download(&self, context: DownloadContext) -> Result<(), String> {
-        let client = self.client().await?;
+        let client = build_client(&context.proxy_config)?;
         run_segmented_download(segmented::SegmentedDownloadContext {
             client: &client,
             app: context.app,
@@ -273,6 +273,7 @@ impl DownloadEngine for HttpEngine {
                 etag: probe.etag,
                 last_modified: probe.last_modified,
                 content_type: probe.content_type,
+                hls_variants: Vec::new(),
             })
         })
     }

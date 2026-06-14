@@ -46,6 +46,65 @@ impl HashVerificationStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPriority {
+    Low,
+    Normal,
+    High,
+}
+
+impl TaskPriority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Self {
+        match value {
+            "low" => Self::Low,
+            "high" => Self::High,
+            _ => Self::Normal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecksumAlgorithm {
+    Sha256,
+    Sha512,
+    Sha1,
+    Md5,
+}
+
+impl ChecksumAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sha256 => "sha256",
+            Self::Sha512 => "sha512",
+            Self::Sha1 => "sha1",
+            Self::Md5 => "md5",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Self {
+        match value {
+            "sha512" => Self::Sha512,
+            "sha1" => Self::Sha1,
+            "md5" => Self::Md5,
+            _ => Self::Sha256,
+        }
+    }
+
+    pub fn is_weak(self) -> bool {
+        matches!(self, Self::Sha1 | Self::Md5)
+    }
+}
+
 impl TaskStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -132,6 +191,11 @@ pub struct Task {
     pub source_key: String,
     pub connection_count: i32,
     pub speed_bps: String,
+    pub task_speed_limit_bps: Option<String>,
+    pub priority: TaskPriority,
+    pub queue_position: String,
+    pub category_key: Option<String>,
+    pub obey_schedule: bool,
     pub health_summary: Option<String>,
     pub error_message: Option<String>,
     pub error_code: Option<String>,
@@ -143,6 +207,7 @@ pub struct Task {
     pub hash_status: HashVerificationStatus,
     pub hash_error: Option<String>,
     pub hash_verified_at: Option<String>,
+    pub checksums: Vec<TaskChecksum>,
     pub files: Vec<TaskFile>,
     pub created_at: String,
     pub updated_at: String,
@@ -171,6 +236,11 @@ pub struct TaskRecord {
     pub source_key: String,
     pub connection_count: i32,
     pub speed_bps: i64,
+    pub task_speed_limit_bps: Option<String>,
+    pub priority: TaskPriority,
+    pub queue_position: i64,
+    pub category_key: Option<String>,
+    pub obey_schedule: bool,
     pub health_summary: Option<String>,
     pub error_message: Option<String>,
     pub error_code: Option<String>,
@@ -181,6 +251,47 @@ pub struct TaskRecord {
     pub hash_status: HashVerificationStatus,
     pub hash_error: Option<String>,
     pub hash_verified_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskChecksum {
+    pub id: String,
+    pub task_id: String,
+    pub algorithm: ChecksumAlgorithm,
+    pub expected_hash: String,
+    pub actual_hash: Option<String>,
+    pub status: HashVerificationStatus,
+    pub source_kind: String,
+    pub source_url: Option<String>,
+    pub source_label: Option<String>,
+    pub is_primary: bool,
+    pub weak: bool,
+    pub error_message: Option<String>,
+    pub discovered_at: Option<String>,
+    pub verified_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskChecksumRecord {
+    pub id: String,
+    pub task_id: String,
+    pub algorithm: ChecksumAlgorithm,
+    pub expected_hash: String,
+    pub actual_hash: Option<String>,
+    pub status: HashVerificationStatus,
+    pub source_kind: String,
+    pub source_url: Option<String>,
+    pub source_label: Option<String>,
+    pub is_primary: bool,
+    pub weak: bool,
+    pub error_message: Option<String>,
+    pub discovered_at: Option<String>,
+    pub verified_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -377,6 +488,29 @@ impl From<TaskFileRecord> for TaskFile {
     }
 }
 
+impl From<TaskChecksumRecord> for TaskChecksum {
+    fn from(record: TaskChecksumRecord) -> Self {
+        Self {
+            id: record.id,
+            task_id: record.task_id,
+            algorithm: record.algorithm,
+            expected_hash: record.expected_hash,
+            actual_hash: record.actual_hash,
+            status: record.status,
+            source_kind: record.source_kind,
+            source_url: record.source_url,
+            source_label: record.source_label,
+            is_primary: record.is_primary,
+            weak: record.weak,
+            error_message: record.error_message,
+            discovered_at: record.discovered_at,
+            verified_at: record.verified_at,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
 impl From<TaskRecord> for Task {
     fn from(record: TaskRecord) -> Self {
         let failure_category = failure_category_for_code(record.error_code.as_deref());
@@ -402,6 +536,11 @@ impl From<TaskRecord> for Task {
             source_key: record.source_key,
             connection_count: record.connection_count,
             speed_bps: record.speed_bps.to_string(),
+            task_speed_limit_bps: record.task_speed_limit_bps,
+            priority: record.priority,
+            queue_position: record.queue_position.to_string(),
+            category_key: record.category_key,
+            obey_schedule: record.obey_schedule,
             health_summary: record.health_summary,
             error_message: record.error_message,
             error_code: record.error_code,
@@ -413,6 +552,7 @@ impl From<TaskRecord> for Task {
             hash_status: record.hash_status,
             hash_error: record.hash_error,
             hash_verified_at: record.hash_verified_at,
+            checksums: Vec::new(),
             files: Vec::new(),
             created_at: record.created_at,
             updated_at: record.updated_at,
@@ -481,7 +621,18 @@ pub struct ProbeTaskPayload {
     pub content_type: Option<String>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
+    pub hls_variants: Vec<HlsVariant>,
     pub probed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HlsVariant {
+    pub uri: String,
+    pub bandwidth: String,
+    pub resolution: Option<String>,
+    pub codecs: Option<String>,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -494,17 +645,51 @@ pub struct ProbedFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct FtpDirectoryEntry {
+    pub name: String,
+    pub raw: String,
+    pub probable_file_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct FtpDirectoryProbe {
+    pub input_url: String,
+    pub directory_url: String,
+    pub current_directory: Option<String>,
+    pub entries: Vec<FtpDirectoryEntry>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct TorrentRuntimeSnapshot {
     pub task_id: String,
     pub metadata_status: String,
     pub completed_pieces: String,
     pub verified_pieces: String,
+    pub piece_count: String,
+    pub piece_bitfield_base64: Option<String>,
     pub peer_count: String,
     pub seed_count: String,
+    pub dht_status: Option<String>,
+    pub trackers: Vec<TorrentTrackerStatus>,
     pub upload_bytes: String,
     pub upload_speed_bps: String,
     pub ratio: f64,
+    pub seeding_enabled: bool,
+    pub seeding_state: String,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentTrackerStatus {
+    pub url: String,
+    pub status: String,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -513,11 +698,19 @@ pub struct TorrentRuntimeSnapshotRecord {
     pub metadata_status: String,
     pub completed_pieces: i64,
     pub verified_pieces: i64,
+    pub piece_count: i64,
+    pub piece_bitfield_base64: Option<String>,
     pub peer_count: i64,
     pub seed_count: i64,
+    pub dht_status: Option<String>,
+    pub trackers_json: Option<String>,
     pub upload_bytes: i64,
     pub upload_speed_bps: i64,
     pub ratio: f64,
+    pub seeding_enabled: bool,
+    pub seeding_state: String,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
     pub updated_at: String,
 }
 
@@ -528,12 +721,117 @@ impl From<TorrentRuntimeSnapshotRecord> for TorrentRuntimeSnapshot {
             metadata_status: record.metadata_status,
             completed_pieces: record.completed_pieces.to_string(),
             verified_pieces: record.verified_pieces.to_string(),
+            piece_count: record.piece_count.to_string(),
+            piece_bitfield_base64: record.piece_bitfield_base64,
             peer_count: record.peer_count.to_string(),
             seed_count: record.seed_count.to_string(),
+            dht_status: record.dht_status,
+            trackers: record
+                .trackers_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str(value).ok())
+                .unwrap_or_default(),
             upload_bytes: record.upload_bytes.to_string(),
             upload_speed_bps: record.upload_speed_bps.to_string(),
             ratio: record.ratio,
+            seeding_enabled: record.seeding_enabled,
+            seeding_state: record.seeding_state,
+            last_error_code: record.last_error_code,
+            last_error_message: record.last_error_message,
             updated_at: record.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskProxyMode {
+    Inherit,
+    Off,
+    Custom,
+}
+
+impl TaskProxyMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Off => "off",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Self {
+        match value {
+            "off" => Self::Off,
+            "custom" => Self::Custom,
+            _ => Self::Inherit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskProxySettings {
+    pub task_id: String,
+    pub mode: TaskProxyMode,
+    pub proxy_url: String,
+    pub proxy_username: String,
+    pub proxy_password_saved: bool,
+    pub no_proxy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskProxySettingsInput {
+    pub task_id: String,
+    pub mode: TaskProxyMode,
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+    pub clear_proxy_password: Option<bool>,
+    pub no_proxy: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskProxySettingsRecord {
+    pub task_id: String,
+    pub mode: TaskProxyMode,
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password_ciphertext: Option<String>,
+    pub nonce: Option<String>,
+    pub no_proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAction {
+    None,
+    ExitApp,
+    Shutdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionActionRequestedPayload {
+    pub action: CompletionAction,
+    pub countdown_seconds: i32,
+}
+
+impl CompletionAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ExitApp => "exit_app",
+            Self::Shutdown => "shutdown",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Self {
+        match value {
+            "exit_app" => Self::ExitApp,
+            "shutdown" => Self::Shutdown,
+            _ => Self::None,
         }
     }
 }
@@ -604,6 +902,15 @@ pub struct AppSettings {
     pub proxy_no_proxy: String,
     pub proxy_username: String,
     pub proxy_password_saved: bool,
+    pub schedule_download_window_enabled: bool,
+    pub schedule_download_window_start: String,
+    pub schedule_download_window_end: String,
+    pub schedule_speed_limit_window_enabled: bool,
+    pub schedule_speed_limit_window_start: String,
+    pub schedule_speed_limit_window_end: String,
+    pub schedule_speed_limit_bps: Option<String>,
+    pub completion_action: CompletionAction,
+    pub completion_countdown_seconds: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -638,6 +945,10 @@ pub enum TaskFailureCategory {
     Http,
     Auth,
     Hls,
+    Bt,
+    Ftp,
+    Proxy,
+    Schedule,
     Other,
 }
 
@@ -651,6 +962,10 @@ pub fn failure_category_for_code(code: Option<&str>) -> Option<TaskFailureCatego
         "disk_write_failed" => Some(TaskFailureCategory::DiskWrite),
         "auth_headers_expired" | "auth_headers_unavailable" => Some(TaskFailureCategory::Auth),
         value if value.starts_with("hls_") => Some(TaskFailureCategory::Hls),
+        value if value.starts_with("bt_") => Some(TaskFailureCategory::Bt),
+        value if value.starts_with("ftp_") => Some(TaskFailureCategory::Ftp),
+        value if value.starts_with("proxy_") => Some(TaskFailureCategory::Proxy),
+        value if value.starts_with("schedule_") => Some(TaskFailureCategory::Schedule),
         value if value.starts_with("http_") || value == "server_rate_limited" => {
             Some(TaskFailureCategory::Http)
         }

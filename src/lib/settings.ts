@@ -26,5 +26,14 @@ export async function applyGlobalSpeedLimit(
     proxyUsername: settings.proxyUsername,
     proxyPassword: null,
     clearProxyPassword: false,
+    scheduleDownloadWindowEnabled: settings.scheduleDownloadWindowEnabled,
+    scheduleDownloadWindowStart: settings.scheduleDownloadWindowStart,
+    scheduleDownloadWindowEnd: settings.scheduleDownloadWindowEnd,
+    scheduleSpeedLimitWindowEnabled: settings.scheduleSpeedLimitWindowEnabled,
+    scheduleSpeedLimitWindowStart: settings.scheduleSpeedLimitWindowStart,
+    scheduleSpeedLimitWindowEnd: settings.scheduleSpeedLimitWindowEnd,
+    scheduleSpeedLimitBps: settings.scheduleSpeedLimitBps,
+    completionAction: settings.completionAction,
+    completionCountdownSeconds: settings.completionCountdownSeconds,
   });
 }

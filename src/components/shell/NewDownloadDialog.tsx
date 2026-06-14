@@ -28,6 +28,7 @@ import {
 import { Input } from "@/components/ui/input";
 import type {
   BatchImportResult,
+  FtpDirectoryProbe,
   ProbeTaskPayload,
   ProbedFile,
 } from "@/generated/bindings";
@@ -38,6 +39,7 @@ import {
   importUrls,
   openDirectoryPicker,
   openFilePicker,
+  probeFtpDirectory,
   probeTask,
 } from "@/lib/tauri";
 
@@ -144,6 +146,8 @@ export function NewDownloadDialog({
   const [batchInput, setBatchInput] = useState("");
   const [batchResult, setBatchResult] = useState<BatchImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [ftpDirectoryProbe, setFtpDirectoryProbe] = useState<FtpDirectoryProbe | null>(null);
+  const [ftpDirectoryLoading, setFtpDirectoryLoading] = useState(false);
   const [duplicateOverrideAvailable, setDuplicateOverrideAvailable] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -165,6 +169,7 @@ export function NewDownloadDialog({
     selectedLocalFile?.kind === "torrent" ||
     /\.torrent(?:[?#].*)?$/i.test(url.trim());
   const torrentSelectionRequired = isTorrentProbe && isMultiFile && selectedFiles.size === 0;
+  const canProbeFtpDirectory = /^(ftp|ftps):\/\//i.test(url.trim()) && url.trim().endsWith("/");
 
   // Initialize selectedFiles when probe changes
   useEffect(() => {
@@ -183,6 +188,7 @@ export function NewDownloadDialog({
     if (!automatic) setError(null);
     setProbe(null);
     setProbeUrl("");
+    setFtpDirectoryProbe(null);
     try {
       const nextProbe = await probeTask({ url: nextUrl });
       if (requestId !== probeRequestId.current) return;
@@ -198,6 +204,18 @@ export function NewDownloadDialog({
       setError(errorMessage(err));
     } finally {
       if (requestId === probeRequestId.current) setProbing(false);
+    }
+  }
+
+  async function runFtpDirectoryProbe() {
+    setFtpDirectoryLoading(true);
+    setError(null);
+    try {
+      setFtpDirectoryProbe(await probeFtpDirectory(url.trim()));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setFtpDirectoryLoading(false);
     }
   }
 
@@ -267,6 +285,9 @@ export function NewDownloadDialog({
         fileName: fileName.trim() || null,
         expectedHashSha256:
           currentIsTorrentProbe || currentIsHlsProbe ? null : expectedHashSha256.trim() || null,
+        taskSpeedLimitBps: null,
+        priority: null,
+        categoryKey: null,
         probeSnapshot: currentProbe,
         selectedFilePaths,
         allowDuplicate,
@@ -472,6 +493,7 @@ export function NewDownloadDialog({
                     setUrl(event.target.value);
                     setProbe(null);
                     setProbeUrl("");
+                    setFtpDirectoryProbe(null);
                     if (selectedLocalFile?.kind === "torrent") {
                       setSelectedLocalFile(null);
                     }
@@ -500,6 +522,55 @@ export function NewDownloadDialog({
               <p className="text-[11px] leading-4 text-text-muted">
                 {t("newDownload.torrentProtocolHint")}
               </p>
+            ) : null}
+
+            {canProbeFtpDirectory ? (
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => void runFtpDirectoryProbe()}
+                  disabled={ftpDirectoryLoading || submitting}
+                >
+                  {ftpDirectoryLoading ? t("newDownload.probing") : t("newDownload.probeDirectory")}
+                </Button>
+                <span className="text-[11px] text-text-muted">{t("newDownload.ftpDirectoryHint")}</span>
+              </div>
+            ) : null}
+
+            {ftpDirectoryProbe ? (
+              <div className="rounded-md border border-border-subtle bg-surface-raised/50 p-3 text-xs">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="font-medium text-text-secondary">{t("newDownload.ftpDirectory")}</span>
+                  <span className="text-text-muted">{ftpDirectoryProbe.entries.length}</span>
+                </div>
+                <div className="max-h-32 space-y-1 overflow-auto pr-1">
+                  {ftpDirectoryProbe.entries.map((entry) => (
+                    <button
+                      type="button"
+                      key={`${entry.name}-${entry.raw}`}
+                      className="flex w-full items-center justify-between gap-3 rounded-sm px-2 py-1 text-left hover:bg-surface-hover disabled:opacity-60"
+                      disabled={!entry.probableFileUrl}
+                      onClick={() => {
+                        if (entry.probableFileUrl) {
+                          setUrl(entry.probableFileUrl);
+                          setFtpDirectoryProbe(null);
+                        }
+                      }}
+                    >
+                      <span className="truncate text-text-secondary">{entry.name}</span>
+                      <span className="shrink-0 text-text-muted">
+                        {entry.probableFileUrl ? t("newDownload.useFileUrl") : t("newDownload.directoryEntry")}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {ftpDirectoryProbe.diagnostics.length > 0 ? (
+                  <p className="mt-2 truncate text-text-muted">{ftpDirectoryProbe.diagnostics[0]}</p>
+                ) : null}
+              </div>
             ) : null}
 
             {/* Selected local file card (from file picker) */}

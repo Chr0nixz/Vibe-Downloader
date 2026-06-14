@@ -4,6 +4,8 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
+use serde::Deserialize;
+use specta::Type;
 use tauri::{AppHandle, State};
 use tokio::io::AsyncReadExt;
 
@@ -12,7 +14,7 @@ use crate::{
     events::{emit_queue_changed, emit_task_updated_record},
     models::{
         task::now_iso, HashVerificationState, HashVerificationStatus, RecoveryAction, Task,
-        TaskStatus,
+        TaskPriority, TaskStatus,
     },
     platform, AppState,
 };
@@ -23,6 +25,61 @@ use super::{
     spawn_schedule_queued_tasks_after, task_error_code, task_from_record_with_files, task_payload,
     update_recovery_target, ResolveTaskAttentionInput,
 };
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTaskTransferOptionsInput {
+    pub id: String,
+    pub task_speed_limit_bps: Option<String>,
+    pub priority: Option<TaskPriority>,
+    pub queue_position: Option<String>,
+    pub category_key: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_task_transfer_options(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: UpdateTaskTransferOptionsInput,
+) -> Result<Task, String> {
+    let current = require_task(&state.pool, &input.id).await?;
+    let task_speed_limit_bps = input
+        .task_speed_limit_bps
+        .as_deref()
+        .and_then(db::normalize_speed_limit_bps);
+    let priority = input.priority.unwrap_or(current.priority);
+    let queue_position = input
+        .queue_position
+        .as_deref()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(current.queue_position);
+    let category_key = input
+        .category_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    db::update_task_transfer_options(
+        &state.pool,
+        &input.id,
+        db::TaskTransferOptionsUpdate {
+            task_speed_limit_bps,
+            priority,
+            queue_position,
+            category_key,
+        },
+    )
+    .await?;
+    let updated = require_task(&state.pool, &input.id).await?;
+    emit_task_updated_record(&app, &state.pool, &updated).await;
+    emit_queue_changed(&app);
+    if matches!(updated.status, TaskStatus::Queued) {
+        schedule_queued_tasks(app.clone(), state.inner()).await;
+    }
+    task_payload(&state.pool, &input.id).await
+}
 
 #[tauri::command]
 #[specta::specta]

@@ -10,9 +10,12 @@ pub use browser::{
 };
 pub use task::{
     AppAccentColor, AppErrorPayload, AppFontFamily, AppSettings, BatchImportItem,
-    BatchImportResult, EngineCapabilities, HashVerificationState, HashVerificationStatus,
-    ProbeTaskPayload, ProbedFile, RecoveryAction, RequestDiagnostic, RequestDiagnosticRecord,
-    SegmentStatus, SegmentSummary, Task, TaskEvent, TaskFailureCategory, TaskFile, TaskFileRecord,
-    TaskKind, TaskProgressPayload, TaskRecord, TaskSegment, TaskSegmentRecord, TaskStatus,
-    TaskUpdatedPayload, TorrentRuntimeSnapshot, TorrentRuntimeSnapshotRecord,
+    BatchImportResult, ChecksumAlgorithm, CompletionAction, CompletionActionRequestedPayload, EngineCapabilities,
+    FtpDirectoryEntry, FtpDirectoryProbe, HashVerificationState, HashVerificationStatus,
+    HlsVariant, ProbeTaskPayload, ProbedFile, RecoveryAction, RequestDiagnostic,
+    RequestDiagnosticRecord, SegmentStatus, SegmentSummary, Task, TaskChecksum, TaskChecksumRecord, TaskEvent, TaskFailureCategory, TaskFile,
+    TaskFileRecord, TaskKind, TaskPriority, TaskProgressPayload, TaskProxyMode,
+    TaskProxySettings, TaskProxySettingsInput, TaskProxySettingsRecord, TaskRecord, TaskSegment,
+    TaskSegmentRecord, TaskStatus, TaskUpdatedPayload, TorrentRuntimeSnapshot,
+    TorrentRuntimeSnapshotRecord, TorrentTrackerStatus,
 };

@@ -62,6 +62,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
         commands::tasks::get_torrent_runtime_snapshot,
+        commands::tasks::get_task_proxy_settings,
         commands::tasks::list_task_events_page,
         commands::tasks::list_task_requests_page,
         commands::settings::get_settings,
@@ -79,9 +80,15 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::floating::focus_main_window_from_floating,
         commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
+        commands::system::request_system_shutdown,
         commands::tasks::probe_task,
+        commands::tasks::probe_ftp_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
+        commands::tasks::update_task_transfer_options,
+        commands::tasks::update_torrent_file_selection,
+        commands::tasks::update_torrent_seeding,
+        commands::tasks::update_task_proxy_settings,
         commands::tasks::verify_task_hash,
         commands::tasks::pause_task,
         commands::tasks::resume_task,
@@ -105,6 +112,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
         commands::tasks::get_torrent_runtime_snapshot,
+        commands::tasks::get_task_proxy_settings,
         commands::tasks::list_task_events_page,
         commands::tasks::list_task_requests_page,
         commands::settings::get_settings,
@@ -122,9 +130,15 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::floating::focus_main_window_from_floating,
         commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
+        commands::system::request_system_shutdown,
         commands::tasks::probe_task,
+        commands::tasks::probe_ftp_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
+        commands::tasks::update_task_transfer_options,
+        commands::tasks::update_torrent_file_selection,
+        commands::tasks::update_torrent_seeding,
+        commands::tasks::update_task_proxy_settings,
         commands::tasks::verify_task_hash,
         commands::tasks::pause_task,
         commands::tasks::resume_task,
@@ -146,6 +160,14 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::TaskProgressPayload>()
         .typ::<models::TaskFailureCategory>()
         .typ::<models::TorrentRuntimeSnapshot>()
+        .typ::<models::TorrentTrackerStatus>()
+        .typ::<models::TaskProxySettings>()
+        .typ::<models::TaskProxySettingsInput>()
+        .typ::<models::TaskProxyMode>()
+        .typ::<models::CompletionAction>()
+        .typ::<models::CompletionActionRequestedPayload>()
+        .typ::<models::FtpDirectoryProbe>()
+        .typ::<models::FtpDirectoryEntry>()
         .typ::<commands::tasks::ListTasksResult>()
         .typ::<commands::tasks::ListTasksCursorResult>()
         .typ::<commands::tasks::TaskFilterOptions>()
@@ -270,6 +292,8 @@ pub fn run() {
         commands::tasks::list_segments,
         commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
+        commands::tasks::get_torrent_runtime_snapshot,
+        commands::tasks::get_task_proxy_settings,
         commands::tasks::list_task_events_page,
         commands::tasks::list_task_requests_page,
         commands::settings::get_settings,
@@ -287,9 +311,15 @@ pub fn run() {
         commands::floating::focus_main_window_from_floating,
         commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
+        commands::system::request_system_shutdown,
         commands::tasks::probe_task,
+        commands::tasks::probe_ftp_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
+        commands::tasks::update_task_transfer_options,
+        commands::tasks::update_torrent_file_selection,
+        commands::tasks::update_torrent_seeding,
+        commands::tasks::update_task_proxy_settings,
         commands::tasks::verify_task_hash,
         commands::tasks::pause_task,
         commands::tasks::resume_task,
@@ -312,6 +342,8 @@ pub fn run() {
         commands::tasks::list_segments,
         commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
+        commands::tasks::get_torrent_runtime_snapshot,
+        commands::tasks::get_task_proxy_settings,
         commands::tasks::list_task_events_page,
         commands::tasks::list_task_requests_page,
         commands::settings::get_settings,
@@ -329,9 +361,15 @@ pub fn run() {
         commands::floating::focus_main_window_from_floating,
         commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
+        commands::system::request_system_shutdown,
         commands::tasks::probe_task,
+        commands::tasks::probe_ftp_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
+        commands::tasks::update_task_transfer_options,
+        commands::tasks::update_torrent_file_selection,
+        commands::tasks::update_torrent_seeding,
+        commands::tasks::update_task_proxy_settings,
         commands::tasks::verify_task_hash,
         commands::tasks::pause_task,
         commands::tasks::resume_task,
