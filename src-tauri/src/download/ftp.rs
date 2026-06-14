@@ -377,7 +377,7 @@ async fn run_ftp_download(
                             segment.status = SegmentStatus::Completed;
                         }
                     }
-                    Err(error) if cancel.load(Ordering::SeqCst) => return Ok(()),
+                    Err(_error) if cancel.load(Ordering::SeqCst) => return Ok(()),
                     Err(error) => {
                         let progress_len = progress.len();
                         let Some(segment) = progress.get_mut(&finished.segment_id) else {

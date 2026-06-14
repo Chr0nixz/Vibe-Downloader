@@ -10,6 +10,9 @@ const en = {
     completed: "Completed",
     failed: "Failed",
     settings: "Settings",
+    filters: "Filters",
+    expandSidebar: "Expand sidebar",
+    collapseSidebar: "Collapse sidebar",
   },
   task: {
     status: {

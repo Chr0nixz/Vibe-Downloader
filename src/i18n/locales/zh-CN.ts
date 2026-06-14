@@ -10,6 +10,9 @@
     completed: "\u5df2\u5b8c\u6210",
     failed: "\u5931\u8d25",
     settings: "\u8bbe\u7f6e",
+    filters: "\u7b5b\u9009",
+    expandSidebar: "\u5c55\u5f00\u4fa7\u8fb9\u680f",
+    collapseSidebar: "\u6536\u8d77\u4fa7\u8fb9\u680f",
   },
   task: {
     status: {

@@ -19,8 +19,8 @@ const log = createLogger("floating-status");
 
 const RING_R = 28;
 const RING_C = 2 * Math.PI * RING_R;
-const BAR_WIDTH = 180;
-const BAR_HEIGHT = 44;
+const BAR_WIDTH = 240;
+const BAR_HEIGHT = 72;
 const EDGE_THRESHOLD = 30;
 const UNDOCK_THRESHOLD = 80;
 
@@ -40,7 +40,7 @@ async function dockToEdge(
   const waLeft = wa.position.x / scale;
   const waRight = (wa.position.x + wa.size.width) / scale;
 
-  const x = edge === "left" ? waLeft - (BAR_WIDTH - 12) : waRight - 12;
+  const x = edge === "left" ? waLeft : waRight - BAR_WIDTH;
   const clampedY = Math.max(
     wa.position.y / scale,
     Math.min(logicalY, (wa.position.y + wa.size.height) / scale - BAR_HEIGHT),
@@ -57,21 +57,29 @@ async function undock(
   monitor: TauriMonitor,
   LogicalSizeCtor: typeof import("@tauri-apps/api/window").LogicalSize,
   LogicalPositionCtor: typeof import("@tauri-apps/api/window").LogicalPosition,
+  prevEdge: "left" | "right" | null,
 ): Promise<void> {
   const scale = monitor.scaleFactor;
   const wa = monitor.workArea;
   const waLeft = wa.position.x / scale;
   const waRight = (wa.position.x + wa.size.width) / scale;
 
-  // Place the ball centered horizontally in the work area, keeping current Y
-  const centerX = waLeft + (waRight - waLeft) / 2 - 42;
+  // Restore ball near the docked edge, beyond UNDOCK_THRESHOLD to avoid re-trigger
+  let restoreX: number;
+  if (prevEdge === "right") {
+    restoreX = waRight - 84 - 100;
+  } else if (prevEdge === "left") {
+    restoreX = waLeft + 100;
+  } else {
+    restoreX = waLeft + (waRight - waLeft) / 2 - 42;
+  }
   const clampedY = Math.max(
     wa.position.y / scale,
     Math.min(logicalY, (wa.position.y + wa.size.height) / scale - 84),
   );
 
   await win.setSize(new LogicalSizeCtor(84, 84));
-  await win.setPosition(new LogicalPositionCtor(centerX, clampedY));
+  await win.setPosition(new LogicalPositionCtor(restoreX, clampedY));
 }
 
 export function FloatingStatusWindow() {
@@ -201,7 +209,7 @@ export function FloatingStatusWindow() {
                 (dockedEdge === "right" && waRight - (logicalX + BAR_WIDTH) > UNDOCK_THRESHOLD)
               ) {
                 setDockedEdge(null);
-                await undock(logicalX, pos.y / scale, win, monitor, LogicalSize, LogicalPosition);
+                await undock(logicalX, pos.y / scale, win, monitor, LogicalSize, LogicalPosition, dockedEdge);
               }
             } catch (err) {
               log.error("edge check failed", err);
@@ -225,15 +233,21 @@ export function FloatingStatusWindow() {
       if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
       if (dockedEdge) {
         try {
-          const { getCurrentWindow, LogicalSize } = await import("@tauri-apps/api/window");
-          const win = getCurrentWindow();
+          const winApi = await import("@tauri-apps/api/window");
+          const { LogicalSize, LogicalPosition } = winApi;
+          const win = winApi.getCurrentWindow();
           const scale = (await win.scaleFactor()) || 1;
           const pos = await win.innerPosition();
+          const monitor = await winApi.currentMonitor();
           await win.setSize(new LogicalSize(84, 84));
-          // Re-center window at roughly current position so it's visible after undock
-          if (dockedEdge === "left") {
-            const { LogicalPosition } = await import("@tauri-apps/api/window");
-            await win.setPosition(new LogicalPosition(pos.x / scale + BAR_WIDTH - 84, pos.y / scale));
+          if (monitor) {
+            const wa = monitor.workArea;
+            const waLeft = wa.position.x / scale;
+            const waRight = (wa.position.x + wa.size.width) / scale;
+            const restoreX = dockedEdge === "right"
+              ? waRight - 84 - 100
+              : waLeft + 100;
+            await win.setPosition(new LogicalPosition(restoreX, pos.y / scale));
           }
         } catch {
           // ignore
@@ -267,32 +281,118 @@ export function FloatingStatusWindow() {
       <main
         className={cn(
           "floating-bar group relative flex h-full w-full select-none items-center overflow-visible",
-          dockedEdge === "left" ? "floating-bar-left justify-end" : "floating-bar-right justify-start",
+          dockedEdge === "left" ? "floating-bar-left" : "floating-bar-right",
         )}
         onMouseDown={handleDrag}
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       >
         {/* Tooltip */}
-        <div className="pointer-events-none absolute -top-8 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-surface-overlay px-2 py-0.5 text-[0.6rem] leading-4 text-text-secondary opacity-0 shadow-lg ring-1 ring-border-container transition-opacity duration-200 group-hover:opacity-100">
+        <div className="pointer-events-none absolute -top-9 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-surface-overlay px-2.5 py-1 text-[0.65rem] leading-4 text-text-secondary opacity-0 shadow-lg ring-1 ring-border-container transition-opacity duration-200 group-hover:opacity-100">
           {idle ? t("floatingStatus.idle") : `${speedText} · ${Math.round(percent)}%`}
         </div>
 
-        {/* Edge indicator line */}
-        <div className="floating-bar-edge" />
-
-        {/* Compressed aurora glow */}
+        {/* Aurora glow behind the bar */}
         {!idle && (
           <div className="floating-aurora absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" />
         )}
 
-        {/* Content */}
-        <div className="relative z-10 flex items-center gap-2 px-4">
-          <span className="font-mono text-[9px] font-bold leading-none text-text-primary">
+        {/* Circular progress ball at the edge side */}
+        <div
+          className={cn(
+            "floating-ball relative z-10 grid h-16 w-16 shrink-0 place-items-center rounded-full",
+            idle
+              ? "bg-surface-overlay shadow-[0_0_8px_oklch(0.12_0.01_255_/_0.15)] ring-1 ring-border-container"
+              : cn(
+                  "bg-surface-overlay ring-1 ring-accent-primary/25 floating-ball-glow",
+                  isPeak && "floating-ball-peak",
+                  completionBurst && "floating-ball-completion",
+                ),
+          )}
+          style={dockedEdge === "left" ? { marginLeft: 4 } : { marginRight: 4, order: 1 }}
+        >
+          {/* Surface tint */}
+          <div className="floating-surface-tint absolute inset-0 rounded-full" />
+
+          {/* SVG progress ring */}
+          <svg
+            viewBox="0 0 64 64"
+            className="floating-ring absolute inset-0 h-full w-full -rotate-90"
+            aria-hidden
+          >
+            <defs>
+              <linearGradient id="bar-aurora-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" style={{ stopColor: "var(--accent-energy)" }} />
+                <stop offset="50%" style={{ stopColor: "var(--accent-primary)" }} />
+                <stop offset="100%" style={{ stopColor: "var(--accent-peak)" }} />
+              </linearGradient>
+              <filter id="bar-glow-dot-filter">
+                <feGaussianBlur stdDeviation="2.5" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+            </defs>
+            <circle
+              cx="32"
+              cy="32"
+              r={RING_R}
+              fill="none"
+              strokeWidth="2.5"
+              className="stroke-border-subtle opacity-25"
+            />
+            {!idle && percent > 0 && (
+              <>
+                <circle
+                  cx="32"
+                  cy="32"
+                  r={RING_R}
+                  fill="none"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeDasharray={RING_C}
+                  strokeDashoffset={dashoffset}
+                  stroke="url(#bar-aurora-grad)"
+                  className="transition-[stroke-dashoffset] duration-500 ease-out"
+                />
+                <circle
+                  cx={32 + RING_R * Math.cos((percent / 100) * Math.PI * 2)}
+                  cy={32 + RING_R * Math.sin((percent / 100) * Math.PI * 2)}
+                  r="2"
+                  fill="var(--accent-energy)"
+                  filter="url(#bar-glow-dot-filter)"
+                />
+              </>
+            )}
+          </svg>
+
+          {/* Ball content */}
+          <div className="relative flex flex-col items-center gap-px">
+            {idle ? (
+              <img
+                src="/logo-48.png"
+                alt=""
+                width={24}
+                height={24}
+                className="select-none opacity-70"
+                draggable={false}
+              />
+            ) : (
+              <span className="font-mono text-[9px] font-bold leading-none text-text-primary">
+                {Math.round(percent)}%
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Info panel */}
+        <div className="relative z-10 flex flex-1 flex-col items-center justify-center px-2">
+          <span className="font-mono text-[11px] font-bold leading-none text-text-primary">
             {speedText || "—"}
           </span>
-          <span className="text-[8px] leading-none text-text-muted">
-            {Math.round(percent)}%
+          <span className="mt-1 text-[8px] leading-none text-text-muted">
+            {idle ? t("floatingStatus.idle") : `${Math.round(percent)}%`}
           </span>
         </div>
       </main>

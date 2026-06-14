@@ -237,6 +237,38 @@
     animation: none !important;
     opacity: 0.4 !important;
   }
+
+  .nav-indicator {
+    animation: none !important;
+  }
+
+  .nav-dot-pulse {
+    animation: none !important;
+  }
+}
+
+/* ── Sidebar navigation ── */
+
+@keyframes nav-indicator-enter {
+  from {
+    transform: scaleY(0);
+    opacity: 0;
+  }
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes nav-dot-pulse {
+  0%, 100% {
+    opacity: 0.5;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 /* ── Titlebar ── */
@@ -487,61 +519,27 @@
 
 .floating-bar:hover {
   box-shadow:
+    inset 0 0 0 1px oklch(0.33 0.012 255 / 0.5),
     0 0 14px oklch(0.72 0.14 235 / 0.2),
     0 0 5px oklch(0.78 0.18 170 / 0.1);
 }
 
-/* Hover-expand: slide out from edge */
-.floating-bar-left {
-  transform: translateX(calc(-100% + 12px));
-}
-
-.floating-bar-left:hover {
-  transform: translateX(0);
-}
-
+/* Hover: subtle scale + glow intensification */
+.floating-bar-left,
 .floating-bar-right {
-  transform: translateX(calc(100% - 12px));
+  transform: none;
 }
 
+.floating-bar-left:hover,
 .floating-bar-right:hover {
-  transform: translateX(0);
-}
-
-/* Edge indicator line */
-.floating-bar-edge {
-  position: absolute;
-  top: 6px;
-  bottom: 6px;
-  width: 2px;
-  border-radius: 1px;
-  background: linear-gradient(
-    to bottom,
-    var(--accent-energy),
-    var(--accent-primary),
-    var(--accent-peak)
-  );
-  opacity: 0.6;
-  transition: opacity 200ms ease-out;
-}
-
-.floating-bar:hover .floating-bar-edge {
-  opacity: 1;
-}
-
-.floating-bar-left .floating-bar-edge {
-  right: 0;
-}
-
-.floating-bar-right .floating-bar-edge {
-  left: 0;
+  transform: scale(1.02);
 }
 
 /* Compressed aurora glow in bar mode */
 .floating-bar .floating-aurora {
-  width: 120px;
-  height: 48px;
-  border-radius: 24px;
+  width: 200px;
+  height: 56px;
+  border-radius: 28px;
 }
 
 @keyframes detail-enter {
