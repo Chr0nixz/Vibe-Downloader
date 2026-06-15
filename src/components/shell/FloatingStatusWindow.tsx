@@ -13,7 +13,6 @@ import { startWindowDrag } from "@/lib/window-controls";
 import { cn, formatSpeed } from "@/lib/utils";
 import { createLogger } from "@/lib/logger";
 import { useTaskStore } from "@/stores/task-store";
-import type { Task } from "@/types/task";
 
 const log = createLogger("floating-status");
 
@@ -84,7 +83,7 @@ async function undock(
 
 export function FloatingStatusWindow() {
   const { t } = useTranslation();
-  const tasks = useTaskStore((s) => s.tasks);
+  const stats = useTaskStore((s) => s.taskStats);
   const setTasks = useTaskStore((s) => s.setTasks);
   const setLoading = useTaskStore((s) => s.setLoading);
 
@@ -135,7 +134,6 @@ export function FloatingStatusWindow() {
     };
   }, [setLoading, setTasks]);
 
-  const stats = useMemo(() => buildFloatingStats(tasks), [tasks]);
   const percent = stats.totalBytes > 0
     ? Math.min(100, (stats.totalDownloaded / stats.totalBytes) * 100)
     : 0;
@@ -294,7 +292,12 @@ export function FloatingStatusWindow() {
 
         {/* Aurora glow behind the bar */}
         {!idle && (
-          <div className="floating-aurora absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" />
+          <div
+            className={cn(
+              "floating-aurora absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2",
+              isPeak ? "opacity-80" : "opacity-50",
+            )}
+          />
         )}
 
         {/* Circular progress ball at the edge side */}
@@ -427,7 +430,12 @@ export function FloatingStatusWindow() {
       >
         {/* Layer 0: Aurora ambient glow */}
         {!idle && (
-          <div className="floating-aurora absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" />
+          <div
+            className={cn(
+              "floating-aurora absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2",
+              isPeak ? "opacity-80" : "opacity-50",
+            )}
+          />
         )}
 
         {/* Layer 2: Surface radial tint for depth */}
@@ -516,42 +524,4 @@ export function FloatingStatusWindow() {
       </div>
     </main>
   );
-}
-
-function buildFloatingStats(tasks: Task[]) {
-  const activeTasks = tasks.filter(
-    (task) => task.status === "downloading" || task.status === "retrying",
-  );
-  const queued = tasks.filter((task) => task.status === "queued").length;
-  const totalSpeed = activeTasks.reduce((sum, task) => sum + task.speedBps, 0);
-  const totalDownloaded = activeTasks.reduce(
-    (sum, task) => sum + task.downloadedBytes,
-    0,
-  );
-  const totalBytes = activeTasks.reduce((sum, task) => sum + task.totalSize, 0);
-  const featuredTask =
-    [...activeTasks].sort((a, b) => b.speedBps - a.speedBps)[0] ??
-    [...tasks]
-      .filter((task) =>
-        [
-          "queued",
-          "paused",
-          "failed",
-          "needs_attention",
-          "waiting_network",
-        ].includes(task.status),
-      )
-      .sort(
-        (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
-      )[0] ??
-    null;
-
-  return {
-    active: activeTasks.length,
-    queued,
-    totalSpeed,
-    totalDownloaded,
-    totalBytes,
-    featuredTask,
-  };
 }

@@ -83,6 +83,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::system::request_system_shutdown,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
+        commands::tasks::probe_sftp_directory,
         commands::tasks::probe_webdav_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
@@ -134,6 +135,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::system::request_system_shutdown,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
+        commands::tasks::probe_sftp_directory,
         commands::tasks::probe_webdav_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
@@ -170,6 +172,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::CompletionActionRequestedPayload>()
         .typ::<models::FtpDirectoryProbe>()
         .typ::<models::FtpDirectoryEntry>()
+        .typ::<models::SftpDirectoryProbe>()
+        .typ::<models::SftpDirectoryEntry>()
         .typ::<models::WebDavDirectoryProbe>()
         .typ::<models::WebDavDirectoryEntry>()
         .typ::<commands::tasks::ListTasksResult>()
@@ -324,6 +328,7 @@ pub fn run() {
         commands::system::request_system_shutdown,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
+        commands::tasks::probe_sftp_directory,
         commands::tasks::probe_webdav_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
@@ -375,6 +380,7 @@ pub fn run() {
         commands::system::request_system_shutdown,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
+        commands::tasks::probe_sftp_directory,
         commands::tasks::probe_webdav_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,

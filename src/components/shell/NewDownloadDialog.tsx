@@ -31,6 +31,7 @@ import type {
   FtpDirectoryProbe,
   ProbeTaskPayload,
   ProbedFile,
+  SftpDirectoryProbe,
   WebDavDirectoryProbe,
 } from "@/generated/bindings";
 import { createLogger } from "@/lib/logger";
@@ -41,6 +42,7 @@ import {
   openDirectoryPicker,
   openFilePicker,
   probeFtpDirectory,
+  probeSftpDirectory,
   probeWebdavDirectory,
   probeTask,
 } from "@/lib/tauri";
@@ -53,6 +55,57 @@ import { normalizeTask } from "@/types/task";
 import type { Task } from "@/types/task";
 
 /* ------------------------------------------------------------------ */
+/*  Probe error classification                                       */
+/* ------------------------------------------------------------------ */
+
+function probeErrorHintKey(message: string): string {
+  const lower = message.toLowerCase();
+  if (
+    lower.includes("dns") ||
+    lower.includes("resolve") ||
+    lower.includes("name or service not known") ||
+    lower.includes("getaddrinfo")
+  ) {
+    return "newDownload.probeErrorDns";
+  }
+  if (
+    /\b403\b/.test(message) ||
+    lower.includes("forbidden") ||
+    lower.includes("denied") ||
+    lower.includes("unauthorized")
+  ) {
+    return "newDownload.probeErrorDenied";
+  }
+  if (/\b404\b/.test(message) || lower.includes("not found")) {
+    return "newDownload.probeErrorNotFound";
+  }
+  if (
+    /\b429\b/.test(message) ||
+    lower.includes("rate") ||
+    lower.includes("too many")
+  ) {
+    return "newDownload.probeErrorRateLimited";
+  }
+  if (
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("deadline")
+  ) {
+    return "newDownload.probeErrorTimeout";
+  }
+  if (
+    lower.includes("connection") ||
+    lower.includes("connect") ||
+    lower.includes("refused") ||
+    lower.includes("network") ||
+    lower.includes("unreachable")
+  ) {
+    return "newDownload.probeErrorConnection";
+  }
+  return "newDownload.probeFailedHint";
+}
+
+/* ------------------------------------------------------------------ */
 /*  Local file picker types                                            */
 /* ------------------------------------------------------------------ */
 
@@ -62,19 +115,20 @@ interface SelectedLocalFile {
   kind: "torrent" | "metalink" | "dash" | "text";
 }
 
-type RemoteDirectoryProbe = FtpDirectoryProbe | WebDavDirectoryProbe;
+type RemoteDirectoryProbe = FtpDirectoryProbe | SftpDirectoryProbe | WebDavDirectoryProbe;
 type RemoteDirectoryEntry = RemoteDirectoryProbe["entries"][number];
-
-function remoteDirectoryEntryKey(entry: RemoteDirectoryEntry): string {
-  return "raw" in entry ? `${entry.name}-${entry.raw}` : `${entry.name}-${entry.href}`;
-}
 
 function remoteDirectoryProtocolLabel(input: string): string {
   const lower = input.trim().toLowerCase();
   if (lower.startsWith("webdavs://")) return "WebDAVS";
   if (lower.startsWith("webdav://")) return "WebDAV";
+  if (lower.startsWith("sftp://")) return "SFTP";
   if (lower.startsWith("ftps://")) return "FTPS";
   return "FTP";
+}
+
+function remoteDirectoryEntryKey(entry: RemoteDirectoryEntry): string {
+  return "raw" in entry ? `${entry.name}-${entry.raw}` : `${entry.name}-${entry.href}`;
 }
 
 function getLocalFileKind(name: string): SelectedLocalFile["kind"] {
@@ -201,7 +255,7 @@ export function NewDownloadDialog({
   const fileSelectionRequired =
     isSelectableMultiFileProbe && isMultiFile && selectedFiles.size === 0;
   const canProbeRemoteDirectory =
-    /^(ftp|ftps|webdav|webdavs):\/\//i.test(url.trim()) && url.trim().endsWith("/");
+    /^(ftp|ftps|sftp|webdav|webdavs):\/\//i.test(url.trim()) && url.trim().endsWith("/");
 
   // Initialize selectedFiles when probe changes
   useEffect(() => {
@@ -247,6 +301,8 @@ export function NewDownloadDialog({
       setRemoteDirectoryProbe(
         /^webdavs?:\/\//i.test(nextUrl)
           ? await probeWebdavDirectory(nextUrl)
+          : /^sftp:\/\//i.test(nextUrl)
+          ? await probeSftpDirectory(nextUrl)
           : await probeFtpDirectory(nextUrl),
       );
     } catch (err) {
@@ -610,7 +666,7 @@ export function NewDownloadDialog({
                     <button
                       type="button"
                       key={remoteDirectoryEntryKey(entry)}
-                      className="flex w-full items-center justify-between gap-3 rounded-sm px-2 py-1 text-left hover:bg-surface-hover disabled:opacity-60"
+                      className="flex w-full items-center justify-between gap-3 rounded-sm px-2 py-1 text-left hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary disabled:opacity-60"
                       disabled={!entry.probableFileUrl}
                       onClick={() => {
                         if (entry.probableFileUrl) {
@@ -653,7 +709,7 @@ export function NewDownloadDialog({
                 <button
                   type="button"
                   onClick={clearSelectedLocalFile}
-                  className="shrink-0 rounded p-1 text-text-muted transition-colors hover:bg-surface-raised hover:text-text-secondary"
+                  className="shrink-0 rounded p-1 text-text-muted transition-colors hover:bg-surface-raised hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                   title={t("newDownload.removeFile")}
                 >
                   <X className="h-4 w-4" />
@@ -699,6 +755,7 @@ export function NewDownloadDialog({
                      probe.protocol === "dash" ? "DASH" :
                      probe.protocol === "ftp" ? "FTP" :
                      probe.protocol === "ftps" ? "FTPS" :
+                     probe.protocol === "sftp" ? "SFTP" :
                      probe.protocol === "webdav" ? "WebDAV" :
                      probe.protocol === "webdavs" ? "WebDAVS" : "HTTP"}
                   </span>
@@ -723,7 +780,7 @@ export function NewDownloadDialog({
                             : t("newDownload.selectAll")
                         }
                         onClick={toggleAllFiles}
-                        className="flex items-center gap-2 text-xs text-text-secondary transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70"
+                        className="flex items-center gap-2 text-xs text-text-secondary transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                       >
                         <span
                           aria-hidden="true"
@@ -795,7 +852,7 @@ export function NewDownloadDialog({
                         <button
                           type="button"
                           onClick={() => setEditingName(true)}
-                          className="group flex w-full items-center gap-1.5 text-left"
+                          className="group flex w-full items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                           title={t("newDownload.editFileName")}
                         >
                           <span className="truncate text-sm text-text-primary">
@@ -829,7 +886,7 @@ export function NewDownloadDialog({
             <button
               type="button"
               onClick={() => setAdvancedOpen((v) => !v)}
-              className="flex items-center gap-1.5 self-start text-xs text-text-secondary transition-colors hover:text-text-primary"
+              className="flex items-center gap-1.5 self-start text-xs text-text-secondary transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
             >
               <ChevronDown
                 className={`h-3.5 w-3.5 transition-transform duration-200 ${advancedOpen ? "" : "-rotate-90"}`}
@@ -932,7 +989,7 @@ export function NewDownloadDialog({
                   </div>
                 ) : (
                   <p className="mt-1 text-text-secondary">
-                    {t("newDownload.probeFailedHint")}
+                    {t(probeErrorHintKey(error))}
                   </p>
                 )}
               </div>
@@ -997,7 +1054,7 @@ function FileRow({
       aria-checked={checked}
       aria-label={displayName}
       onClick={onToggle}
-      className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-raised/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary/70 ${
+      className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-raised/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary ${
         index > 0 ? "border-t border-border-subtle/50" : ""
       }`}
     >

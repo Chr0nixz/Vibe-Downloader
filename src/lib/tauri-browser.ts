@@ -18,6 +18,7 @@ import type {
   ProbeTaskInput,
   ProbeTaskPayload,
   FtpDirectoryProbe,
+  SftpDirectoryProbe,
   WebDavDirectoryProbe,
   RequestDiagnostic,
   ResolveTaskAttentionInput,
@@ -474,10 +475,12 @@ function scheduleBrowserQueue(): void {
       ...task,
       status: "downloading",
       speedBps: task.speedBps > 0 ? task.speedBps : 4_000_000,
-      connectionCount: Math.min(
-        settings.maxConnectionsPerHost,
-        task.connectionCount > 0 ? task.connectionCount : settings.segmentCount,
-      ),
+      connectionCount: task.supportsParallel
+        ? Math.min(
+            settings.maxConnectionsPerHost,
+            task.connectionCount > 0 ? task.connectionCount : settings.segmentCount,
+          )
+        : 1,
       healthSummary: "Downloading",
       updatedAt: nowIso(),
     };
@@ -758,6 +761,20 @@ export async function probeFtpDirectory(url: string): Promise<FtpDirectoryProbe>
       { name: "nested", raw: "drwxr-xr-x 1 user group 0 nested", probableFileUrl: null },
     ],
     diagnostics: ["Mock FTP directory probe"],
+  };
+}
+
+export async function probeSftpDirectory(url: string): Promise<SftpDirectoryProbe> {
+  const base = url.replace(/\/?$/, "/");
+  return {
+    inputUrl: url,
+    directoryUrl: base,
+    currentDirectory: "/",
+    entries: [
+      { name: "backup.tar.zst", raw: "-rw-r--r-- 1 user group 1048576 backup.tar.zst", probableFileUrl: `${base}backup.tar.zst` },
+      { name: "logs", raw: "drwxr-xr-x 1 user group 0 logs", probableFileUrl: null },
+    ],
+    diagnostics: ["Mock SFTP directory probe"],
   };
 }
 
@@ -1395,28 +1412,33 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       probedAt: nowIso(),
     };
   }
+  const isSftp = protocol === "sftp";
+  const fileName = fileNameFromRelativePath(decodeUrlPath(path));
+  const sourceKey = isSftp && parsed
+    ? `sftp://${parsed.hostname}:${parsed.port || "22"}`
+    : `${protocol}://${host}`;
   return {
     inputUrl: input.url,
     finalUrl: input.url,
-    fileName: "download.bin",
+    fileName,
     protocol,
     taskKind: "single_file",
     capabilities: {
       supportsResume: true,
-      supportsParallel: true,
+      supportsParallel: !isSftp,
       supportsMultiFile: false,
     },
     files: [
       {
-        relativePath: "download.bin",
+        relativePath: fileName,
         size: "1048576",
         contentType: "application/octet-stream",
       },
     ],
     totalSize: "1048576",
-    sourceKey: `${protocol}://${host}`,
+    sourceKey,
     contentType: "application/octet-stream",
-    etag: "\"mock-etag\"",
+    etag: isSftp ? null : "\"mock-etag\"",
     lastModified: nowIso(),
     hlsVariants: [],
     probedAt: nowIso(),
@@ -1428,6 +1450,14 @@ function safeUrl(value: string): URL | null {
     return new URL(value);
   } catch {
     return null;
+  }
+}
+
+function decodeUrlPath(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
   }
 }
 

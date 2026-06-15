@@ -695,6 +695,24 @@ pub struct FtpDirectoryProbe {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct SftpDirectoryEntry {
+    pub name: String,
+    pub raw: String,
+    pub probable_file_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpDirectoryProbe {
+    pub input_url: String,
+    pub directory_url: String,
+    pub current_directory: Option<String>,
+    pub entries: Vec<SftpDirectoryEntry>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct WebDavDirectoryEntry {
     pub name: String,
     pub href: String,
@@ -1001,6 +1019,7 @@ pub enum TaskFailureCategory {
     Metalink,
     Bt,
     Ftp,
+    Sftp,
     Webdav,
     Proxy,
     Schedule,
@@ -1021,6 +1040,7 @@ pub fn failure_category_for_code(code: Option<&str>) -> Option<TaskFailureCatego
         value if value.starts_with("metalink_") => Some(TaskFailureCategory::Metalink),
         value if value.starts_with("bt_") => Some(TaskFailureCategory::Bt),
         value if value.starts_with("ftp_") => Some(TaskFailureCategory::Ftp),
+        value if value.starts_with("sftp_") => Some(TaskFailureCategory::Sftp),
         value if value.starts_with("webdav_") => Some(TaskFailureCategory::Webdav),
         value if value.starts_with("proxy_") => Some(TaskFailureCategory::Proxy),
         value if value.starts_with("schedule_") => Some(TaskFailureCategory::Schedule),

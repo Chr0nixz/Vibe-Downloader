@@ -17,6 +17,20 @@ pub(crate) async fn finalize_download_file(
     Ok(final_path)
 }
 
+pub(crate) async fn preallocate_temp_file(file: &fs::File, total_size: i64, task_id: &str) {
+    if total_size <= 0 {
+        return;
+    }
+    if let Err(error) = file.set_len(u64::try_from(total_size).unwrap_or(u64::MAX)).await {
+        tracing::warn!(
+            task_id,
+            total_size,
+            error = %error,
+            "failed to preallocate temporary download file"
+        );
+    }
+}
+
 async fn available_final_path(preferred_final_path: &Path) -> Result<PathBuf, String> {
     if !fs::try_exists(preferred_final_path).await.unwrap_or(false) {
         return Ok(preferred_final_path.to_path_buf());

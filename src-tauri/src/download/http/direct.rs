@@ -8,7 +8,7 @@ use tokio::{fs, io::AsyncWriteExt, sync::mpsc, task::JoinSet};
 
 use super::{
     error::format_http_status,
-    file::finalize_download_file,
+    file::{finalize_download_file, preallocate_temp_file},
     request::send_get_with_retry,
     segmented::diagnostics::{if_range_header_from, parse_content_range},
     segmented::{download_segment_worker, SegmentMessage, SegmentWorkerRequest},
@@ -130,13 +130,15 @@ pub(super) async fn run_direct_segmented_download(
             .await
             .map_err(|e| format!("Could not reset the temporary file: {e}"))?;
     }
-    fs::OpenOptions::new()
+    let temp_file = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&request.temp_path)
         .await
         .map_err(|e| format!("Could not create the temporary file: {e}"))?;
+    preallocate_temp_file(&temp_file, request.total_size, "direct-segmented").await;
+    drop(temp_file);
 
     let (progress_tx, mut progress_rx) = mpsc::channel::<SegmentMessage>(64);
     let mut workers = JoinSet::new();

@@ -44,9 +44,16 @@ export type FileTypeFilter = "all" | "archive" | "image" | "video" | "document" 
 export type ResumeFilter = "all" | "resumable" | "single_connection";
 
 export interface TaskStats {
+  all: number;
   active: number;
   queued: number;
+  paused: number;
+  completed: number;
+  failed: number;
   totalSpeed: number;
+  totalDownloaded: number;
+  totalBytes: number;
+  featuredTaskId: string | null;
 }
 
 export interface TaskFilters {
@@ -58,6 +65,8 @@ export interface TaskFilters {
 
 interface TaskStore {
   tasks: Task[];
+  taskIds: string[];
+  taskById: Record<string, Task>;
   taskIndexById: Record<string, number>;
   taskStats: TaskStats;
   total: number;
@@ -112,22 +121,88 @@ function indexTasks(tasks: Task[]): Record<string, number> {
   return Object.fromEntries(tasks.map((task, index) => [task.id, index]));
 }
 
+function mapTasksById(tasks: Task[]): Record<string, Task> {
+  return Object.fromEntries(tasks.map((task) => [task.id, task]));
+}
+
 function calculateTaskStats(tasks: Task[]): TaskStats {
+  const activeTasks: Task[] = [];
   let active = 0;
   let queued = 0;
+  let paused = 0;
+  let completed = 0;
+  let failed = 0;
   let totalSpeed = 0;
+  let totalDownloaded = 0;
+  let totalBytes = 0;
+  let fallbackTask: Task | null = null;
 
   for (const task of tasks) {
     if (task.status === "downloading" || task.status === "retrying") {
       active += 1;
+      activeTasks.push(task);
       totalSpeed += task.speedBps;
+      totalDownloaded += task.downloadedBytes;
+      totalBytes += task.totalSize;
     }
     if (task.status === "queued") {
       queued += 1;
     }
+    if (
+      task.status === "paused" ||
+      task.status === "queued" ||
+      task.status === "waiting_network"
+    ) {
+      paused += 1;
+    }
+    if (task.status === "completed") {
+      completed += 1;
+    }
+    if (task.status === "failed" || task.status === "needs_attention") {
+      failed += 1;
+    }
+    if (
+      !fallbackTask &&
+      (
+        task.status === "queued" ||
+        task.status === "paused" ||
+        task.status === "failed" ||
+        task.status === "needs_attention" ||
+        task.status === "waiting_network"
+      )
+    ) {
+      fallbackTask = task;
+    }
   }
 
-  return { active, queued, totalSpeed };
+  const featuredTask =
+    activeTasks.reduce<Task | null>(
+      (best, task) => (!best || task.speedBps > best.speedBps ? task : best),
+      null,
+    ) ?? fallbackTask;
+
+  return {
+    all: tasks.length,
+    active,
+    queued,
+    paused,
+    completed,
+    failed,
+    totalSpeed,
+    totalDownloaded,
+    totalBytes,
+    featuredTaskId: featuredTask?.id ?? null,
+  };
+}
+
+function taskCollections(tasks: Task[]) {
+  return {
+    tasks,
+    taskIds: tasks.map((task) => task.id),
+    taskById: mapTasksById(tasks),
+    taskIndexById: indexTasks(tasks),
+    taskStats: calculateTaskStats(tasks),
+  };
 }
 
 function applyProgressToTask(task: Task, payload: TaskProgressPayload): Task {
@@ -157,8 +232,21 @@ function applyProgressToTask(task: Task, payload: TaskProgressPayload): Task {
 
 export const useTaskStore = create<TaskStore>((set, get) => ({
   tasks: [],
+  taskIds: [],
+  taskById: {},
   taskIndexById: {},
-  taskStats: { active: 0, queued: 0, totalSpeed: 0 },
+  taskStats: {
+    all: 0,
+    active: 0,
+    queued: 0,
+    paused: 0,
+    completed: 0,
+    failed: 0,
+    totalSpeed: 0,
+    totalDownloaded: 0,
+    totalBytes: 0,
+    featuredTaskId: null,
+  },
   total: 0,
   page: 0,
   pageSize: 100,
@@ -191,9 +279,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       const ids = new Set(tasks.map((task) => task.id));
       const speedHistoryByTaskId = pruneSpeedHistory(state.speedHistoryByTaskId, ids);
       return {
-        tasks,
-        taskIndexById: indexTasks(tasks),
-        taskStats: calculateTaskStats(tasks),
+        ...taskCollections(tasks),
         total: tasks.length,
         page: 0,
         nextCursor: null,
@@ -210,9 +296,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       const ids = new Set(nextTasks.map((task) => task.id));
       const speedHistoryByTaskId = pruneSpeedHistory(state.speedHistoryByTaskId, ids);
       return {
-        tasks: nextTasks,
-        taskIndexById: indexTasks(nextTasks),
-        taskStats: calculateTaskStats(nextTasks),
+        ...taskCollections(nextTasks),
         total,
         page,
         pageSize,
@@ -234,9 +318,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
         nextTasks.length + (nextCursor ? 1 : 0),
       );
       return {
-        tasks: nextTasks,
-        taskIndexById: indexTasks(nextTasks),
-        taskStats: calculateTaskStats(nextTasks),
+        ...taskCollections(nextTasks),
         total: knownTotal,
         page: append ? state.page + 1 : 0,
         nextCursor,
@@ -259,9 +341,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       if (index < 0) {
         const tasks = [task, ...state.tasks];
         return {
-          tasks,
-          taskIndexById: indexTasks(tasks),
-          taskStats: calculateTaskStats(tasks),
+          ...taskCollections(tasks),
           total: Math.max(state.total, tasks.length),
         };
       }
@@ -272,9 +352,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
         files: (task.files?.length ?? 0) > 0 ? task.files : tasks[index].files,
       };
       return {
-        tasks,
-        taskIndexById: state.taskIndexById,
-        taskStats: calculateTaskStats(tasks),
+        ...taskCollections(tasks),
       };
     }),
   patchTask: (raw) => get().patchTasksBatch([raw]),
@@ -289,6 +367,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     const now = Date.now();
     set((state) => {
       let tasks = state.tasks;
+      let taskById = state.taskById;
       let speedHistoryByTaskId = state.speedHistoryByTaskId;
       let changed = false;
 
@@ -297,9 +376,12 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
         if (index === undefined) continue;
         if (!changed) {
           tasks = [...state.tasks];
+          taskById = { ...state.taskById };
           changed = true;
         }
-        tasks[index] = applyProgressToTask(tasks[index], payload);
+        const nextTask = applyProgressToTask(tasks[index], payload);
+        tasks[index] = nextTask;
+        taskById[payload.taskId] = nextTask;
         speedHistoryByTaskId = appendSpeedSample(
           speedHistoryByTaskId,
           payload.taskId,
@@ -310,6 +392,8 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       if (!changed) return {};
       return {
         tasks,
+        taskById,
+        taskIds: state.taskIds,
         taskIndexById: state.taskIndexById,
         taskStats: calculateTaskStats(tasks),
         speedHistoryByTaskId,

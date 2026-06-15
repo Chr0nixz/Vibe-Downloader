@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
   Check,
@@ -8,7 +8,9 @@ import {
   LoaderCircle,
   Puzzle,
   RotateCcw,
+  Search,
   Trash2,
+  X,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useTranslation } from "react-i18next";
@@ -22,12 +24,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { BrowserCaptureControls } from "@/components/settings/BrowserCaptureControls";
 import type {
   AppAccentColor,
@@ -39,7 +49,7 @@ import type {
   BrowserIntegrationStatus,
   CompletionAction,
 } from "@/generated/bindings";
-import { setLocale, type Locale } from "@/i18n";
+import { setLocale, SUPPORTED_LOCALES, type Locale } from "@/i18n";
 import {
   exportBrowserExtensionPackages,
   getBrowserCaptureSettings,
@@ -65,6 +75,16 @@ const AUTO_SAVE_DELAY_MS = 1000;
 const MAX_SEGMENT_COUNT = 8;
 const MAX_CONNECTIONS_PER_HOST = 16;
 
+const SECTION_IDS = [
+  "downloads",
+  "advanced-downloads",
+  "scheduled-downloads",
+  "network",
+  "interface",
+  "desktop-integration",
+  "browser-integration",
+] as const;
+
 const ACCENT_HUES: Record<AppAccentColor, number> = {
   blue: 235,
   purple: 290,
@@ -75,6 +95,15 @@ const ACCENT_HUES: Record<AppAccentColor, number> = {
   indigo: 265,
   amber: 80,
 };
+
+const SettingsSearchContext = createContext<{
+  query: string;
+  setQuery: (q: string) => void;
+}>({ query: "", setQuery: () => {} });
+
+function useSettingsSearch() {
+  return useContext(SettingsSearchContext);
+}
 
 export function SettingsPage() {
   const { t, i18n } = useTranslation();
@@ -119,6 +148,9 @@ export function SettingsPage() {
   const [completionCountdownSeconds, setCompletionCountdownSeconds] = useState(30);
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  const [showResetDialog, setShowResetDialog] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [settingsSearch, setSettingsSearch] = useState("");
   const [browserStatus, setBrowserStatus] = useState<BrowserIntegrationStatus | null>(null);
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserAction, setBrowserAction] = useState<string | null>(null);
@@ -131,10 +163,67 @@ export function SettingsPage() {
     browserStatus?.experimentalCaptureEnabled ?? false;
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveVersion = useRef(0);
-  const currentLocale = (["zh-CN", "en"].includes(i18n.language)
+  const currentLocale = (SUPPORTED_LOCALES.includes(i18n.language as Locale)
     ? (i18n.language as Locale)
     : "en") as Locale;
   const controlsDisabled = loading;
+
+  /* Section navigation */
+  const [activeSection, setActiveSection] = useState<string>(SECTION_IDS[0]);
+  const sectionNavRef = useRef<HTMLDivElement>(null);
+  const isScrollingRef = useRef(false);
+
+  useEffect(() => {
+    const nav = sectionNavRef.current;
+    if (!nav) return;
+    const root = nav.closest<HTMLElement>("[data-settings-scroll]");
+    if (!root) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (isScrollingRef.current) return;
+        let best: { id: string; ratio: number } | null = null;
+        for (const entry of entries) {
+          if (
+            entry.isIntersecting &&
+            entry.intersectionRatio > (best?.ratio ?? 0)
+          ) {
+            best = { id: entry.target.id, ratio: entry.intersectionRatio };
+          }
+        }
+        if (best) setActiveSection(best.id);
+      },
+      {
+        root,
+        rootMargin: "-56px 0px -60% 0px",
+        threshold: [0, 0.1, 0.25],
+      },
+    );
+
+    for (const id of SECTION_IDS) {
+      const element = document.getElementById(id);
+      if (element) observer.observe(element);
+    }
+
+    return () => observer.disconnect();
+  }, []);
+
+  const scrollToSection = useCallback((id: string) => {
+    setActiveSection(id);
+    const element = document.getElementById(id);
+    if (!element) return;
+    isScrollingRef.current = true;
+    const prefersReducedMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    element.scrollIntoView({
+      behavior: prefersReducedMotion ? "instant" : "smooth",
+      block: "start",
+    });
+    window.setTimeout(() => {
+      isScrollingRef.current = false;
+    }, 800);
+  }, []);
 
   useEffect(() => {
     if (!settings) return;
@@ -381,6 +470,98 @@ export function SettingsPage() {
     if (selected) setDefaultSaveDir(selected);
   }
 
+  async function handleResetDefaults() {
+    setResetting(true);
+    try {
+      const updated = await updateSettings({
+        maxActiveTasks: 2,
+        defaultSaveDir: null,
+        globalSpeedLimitBps: null,
+        multiConnectionThresholdBytes: "1048576",
+        segmentCount: 4,
+        maxConnectionsPerHost: 8,
+        systemNotifications: true,
+        closeToTray: false,
+        startOnBoot: false,
+        autoResumeOnStartup: false,
+        floatingWindowEnabled: false,
+        clipboardMonitorEnabled: true,
+        fontFamily: "source_han_sans_sc",
+        accentColor: "blue",
+        proxyMode: "off",
+        proxyUrl: "",
+        proxyNoProxy: "",
+        proxyUsername: "",
+        proxyPassword: "",
+        clearProxyPassword: true,
+        scheduleDownloadWindowEnabled: false,
+        scheduleDownloadWindowStart: "00:00",
+        scheduleDownloadWindowEnd: "06:00",
+        scheduleSpeedLimitWindowEnabled: false,
+        scheduleSpeedLimitWindowStart: "18:00",
+        scheduleSpeedLimitWindowEnd: "23:00",
+        scheduleSpeedLimitBps: null,
+        completionAction: "none",
+        completionCountdownSeconds: 30,
+      });
+      setSettings(updated);
+      setDefaultSaveDir(updated.defaultSaveDir);
+      setMaxActiveTasks(updated.maxActiveTasks);
+      setGlobalSpeedLimitBps(
+        updated.globalSpeedLimitBps ? String(updated.globalSpeedLimitBps) : "",
+      );
+      setMultiConnectionThresholdBytes(
+        updated.multiConnectionThresholdBytes
+          ? String(updated.multiConnectionThresholdBytes)
+          : "",
+      );
+      setSegmentCount(updated.segmentCount);
+      setMaxConnectionsPerHost(updated.maxConnectionsPerHost);
+      setSystemNotifications(updated.systemNotifications);
+      setCloseToTray(updated.closeToTray);
+      setStartOnBoot(updated.startOnBoot);
+      setAutoResumeOnStartup(updated.autoResumeOnStartup);
+      setFloatingWindowEnabled(updated.floatingWindowEnabled);
+      setClipboardMonitorEnabled(updated.clipboardMonitorEnabled);
+      setFontFamily(updated.fontFamily);
+      setAccentColor(updated.accentColor);
+      setProxyMode(updated.proxyMode);
+      setProxyUrl(updated.proxyUrl);
+      setProxyNoProxy(updated.proxyNoProxy);
+      setProxyUsername(updated.proxyUsername);
+      setProxyPassword("");
+      setProxyPasswordSaved(updated.proxyPasswordSaved);
+      setClearProxyPassword(false);
+      setScheduleDownloadWindowEnabled(updated.scheduleDownloadWindowEnabled);
+      setScheduleDownloadWindowStart(updated.scheduleDownloadWindowStart);
+      setScheduleDownloadWindowEnd(updated.scheduleDownloadWindowEnd);
+      setScheduleSpeedLimitWindowEnabled(updated.scheduleSpeedLimitWindowEnabled);
+      setScheduleSpeedLimitWindowStart(updated.scheduleSpeedLimitWindowStart);
+      setScheduleSpeedLimitWindowEnd(updated.scheduleSpeedLimitWindowEnd);
+      setScheduleSpeedLimitBps(
+        updated.scheduleSpeedLimitBps
+          ? String(updated.scheduleSpeedLimitBps)
+          : "",
+      );
+      setCompletionAction(updated.completionAction);
+      setCompletionCountdownSeconds(updated.completionCountdownSeconds);
+      addToast({
+        title: t("settings.resetDefaults"),
+        tone: "success",
+      });
+      setShowResetDialog(false);
+    } catch (err) {
+      log.error("reset defaults failed", err);
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: errorMessage(err),
+      });
+    } finally {
+      setResetting(false);
+    }
+  }
+
   async function copyBrowserDiagnostics() {
     if (!browserStatus) return;
     const lines = [
@@ -513,14 +694,88 @@ export function SettingsPage() {
               {t("settings.description")}
             </p>
           </div>
-          <SaveStatus
-            state={saveState}
-            saving={saving}
-            className="hidden sm:inline-flex"
-          />
+          <div className="flex shrink-0 items-center gap-3">
+            <SaveStatus
+              state={saveState}
+              saving={saving}
+              className="hidden sm:inline-flex"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowResetDialog(true)}
+              className="gap-1.5"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              {t("settings.resetDefaults")}
+            </Button>
+          </div>
         </div>
 
-        <ScrollArea className="min-h-0 flex-1">
+        <SettingsSearchContext.Provider value={{ query: settingsSearch, setQuery: setSettingsSearch }}>
+        <div
+          ref={sectionNavRef}
+          data-settings-scroll
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        >
+          <nav
+            className="sticky top-0 z-10 border-b border-border-subtle bg-surface-base/85 backdrop-blur-md"
+            role="navigation"
+            aria-label={t("settings.sectionsNav")}
+          >
+            <div className="mx-auto max-w-4xl px-3 pt-2 sm:px-4 md:px-6">
+              <div className="relative flex items-center">
+                <Search className="pointer-events-none absolute left-3 h-4 w-4 text-text-muted" />
+                <Input
+                  value={settingsSearch}
+                  onChange={(e) => setSettingsSearch(e.target.value)}
+                  placeholder={t("settings.searchSettings")}
+                  className="h-9 w-full rounded-md border border-border-subtle bg-surface-root pl-9 pr-8 text-sm text-text-primary placeholder:text-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+                />
+                {settingsSearch ? (
+                  <button
+                    type="button"
+                    onClick={() => setSettingsSearch("")}
+                    className="absolute right-2 rounded p-0.5 text-text-muted hover:text-text-secondary"
+                    aria-label="Clear search"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            <div className="mx-auto flex max-w-4xl gap-1 overflow-x-auto px-3 sm:px-4 md:px-6">
+              {(
+                [
+                  ["downloads", t("settings.downloads")],
+                  ["advanced-downloads", t("settings.advancedDownloads")],
+                  ["scheduled-downloads", t("settings.scheduledDownloads")],
+                  ["network", t("settings.network")],
+                  ["interface", t("settings.interface")],
+                  ["desktop-integration", t("settings.desktopIntegration")],
+                  ["browser-integration", t("settings.browserIntegration")],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => scrollToSection(id)}
+                  className={cn(
+                    "relative shrink-0 px-3 py-2.5 text-[13px] font-medium transition-colors",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary",
+                    activeSection === id
+                      ? "text-accent-primary"
+                      : "text-text-muted hover:text-text-secondary",
+                  )}
+                >
+                  {label}
+                  {activeSection === id ? (
+                    <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-accent-primary" />
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          </nav>
           <div className="mx-auto flex w-full max-w-4xl flex-col px-3 py-4 sm:px-4 md:px-6 md:py-5">
             {error ? (
               <p
@@ -532,6 +787,7 @@ export function SettingsPage() {
             ) : null}
 
             <SettingsSection
+              id="downloads"
               title={t("settings.downloads")}
               description={t("settings.downloadsDescription")}
             >
@@ -639,6 +895,7 @@ export function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection
+              id="advanced-downloads"
               title={t("settings.advancedDownloads")}
               description={t("settings.advancedDownloadsDescription")}
             >
@@ -692,9 +949,11 @@ export function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection
+              id="scheduled-downloads"
               title={t("settings.scheduledDownloads")}
               description={t("settings.scheduledDownloadsDescription")}
             >
+              <SettingsSubHeading title={t("settings.scheduleGroupDownload")} />
               <SettingsToggle
                 title={t("settings.downloadWindow")}
                 description={t("settings.downloadWindowDescription")}
@@ -702,7 +961,7 @@ export function SettingsPage() {
                 disabled={controlsDisabled}
                 onChange={setScheduleDownloadWindowEnabled}
               />
-              <SettingsRow title={t("settings.downloadWindowTime")} controlClassName="max-w-sm">
+              <SettingsRow title={t("settings.downloadWindowTime")} controlClassName="max-w-sm" tip={t("settings.downloadWindowTimeTip")}>
                 <div className="flex items-center gap-2">
                   <Input
                     type="time"
@@ -721,6 +980,7 @@ export function SettingsPage() {
                   />
                 </div>
               </SettingsRow>
+              <SettingsSubHeading title={t("settings.scheduleGroupSpeed")} />
               <SettingsToggle
                 title={t("settings.speedLimitWindow")}
                 description={t("settings.speedLimitWindowDescription")}
@@ -728,7 +988,7 @@ export function SettingsPage() {
                 disabled={controlsDisabled}
                 onChange={setScheduleSpeedLimitWindowEnabled}
               />
-              <SettingsRow title={t("settings.speedLimitWindowTime")} controlClassName="max-w-sm">
+              <SettingsRow title={t("settings.speedLimitWindowTime")} controlClassName="max-w-sm" tip={t("settings.speedLimitWindowTimeTip")}>
                 <div className="flex flex-wrap items-center gap-2">
                   <Input
                     type="time"
@@ -747,7 +1007,7 @@ export function SettingsPage() {
                   />
                 </div>
               </SettingsRow>
-              <SettingsRow title={t("settings.scheduledSpeedLimit")} htmlFor="scheduled-speed-limit">
+              <SettingsRow title={t("settings.scheduledSpeedLimit")} htmlFor="scheduled-speed-limit" tip={t("settings.scheduledSpeedLimitTip")}>
                 <ByteUnitInput
                   id="scheduled-speed-limit"
                   valueBytes={scheduleSpeedLimitBps}
@@ -764,7 +1024,8 @@ export function SettingsPage() {
                   allowEmpty
                 />
               </SettingsRow>
-              <SettingsRow title={t("settings.completionAction")} htmlFor="completion-action">
+              <SettingsSubHeading title={t("settings.scheduleGroupCompletion")} />
+              <SettingsRow title={t("settings.completionAction")} htmlFor="completion-action" tip={t("settings.completionActionTip")}>
                 <Select
                   value={completionAction}
                   onValueChange={(value) => setCompletionAction(value as CompletionAction)}
@@ -780,7 +1041,7 @@ export function SettingsPage() {
                   </SelectContent>
                 </Select>
               </SettingsRow>
-              <SettingsRow title={t("settings.completionCountdown")} htmlFor="completion-countdown">
+              <SettingsRow title={t("settings.completionCountdown")} htmlFor="completion-countdown" tip={t("settings.completionCountdownTip")}>
                 <Input
                   id="completion-countdown"
                   type="number"
@@ -801,10 +1062,11 @@ export function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection
+              id="network"
               title={t("settings.network")}
               description={t("settings.networkDescription")}
             >
-              <SettingsRow title={t("settings.proxyMode")} htmlFor="proxy-mode-select">
+              <SettingsRow title={t("settings.proxyMode")} htmlFor="proxy-mode-select" tip={t("settings.proxyModeTip")}>
                 <Select
                   value={proxyMode}
                   onValueChange={(value) => setProxyMode(value as AppProxyMode)}
@@ -837,7 +1099,7 @@ export function SettingsPage() {
                 </div>
               </SettingsRow>
 
-              <SettingsRow title={t("settings.proxyNoProxy")} htmlFor="proxy-no-proxy">
+              <SettingsRow title={t("settings.proxyNoProxy")} htmlFor="proxy-no-proxy" tip={t("settings.proxyNoProxyTip")}>
                 <Input
                   id="proxy-no-proxy"
                   value={proxyNoProxy}
@@ -848,7 +1110,7 @@ export function SettingsPage() {
                 />
               </SettingsRow>
 
-              <SettingsRow title={t("settings.proxyUsername")} htmlFor="proxy-username">
+              <SettingsRow title={t("settings.proxyUsername")} htmlFor="proxy-username" tip={t("settings.proxyAuthTip")}>
                 <Input
                   id="proxy-username"
                   value={proxyUsername}
@@ -858,7 +1120,7 @@ export function SettingsPage() {
                 />
               </SettingsRow>
 
-              <SettingsRow title={t("settings.proxyPassword")} htmlFor="proxy-password">
+              <SettingsRow title={t("settings.proxyPassword")} htmlFor="proxy-password" tip={t("settings.proxyPasswordTip")}>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                   <Input
                     id="proxy-password"
@@ -894,7 +1156,7 @@ export function SettingsPage() {
               </SettingsRow>
             </SettingsSection>
 
-            <SettingsSection title={t("settings.interface")}>
+            <SettingsSection id="interface" title={t("settings.interface")}>
               <SettingsRow title={t("settings.themeMode")} htmlFor="theme-mode-select">
                 <Select value={theme ?? "system"} onValueChange={(value) => setTheme(value)}>
                   <SelectTrigger id="theme-mode-select" className="w-full max-w-xs">
@@ -919,6 +1181,11 @@ export function SettingsPage() {
                   <SelectContent>
                     <SelectItem value="en">{t("locale.en")}</SelectItem>
                     <SelectItem value="zh-CN">{t("locale.zhCN")}</SelectItem>
+                    <SelectItem value="zh-TW">{t("locale.zhTW")}</SelectItem>
+                    <SelectItem value="ja">{t("locale.ja")}</SelectItem>
+                    <SelectItem value="ko">{t("locale.ko")}</SelectItem>
+                    <SelectItem value="ru">{t("locale.ru")}</SelectItem>
+                    <SelectItem value="es">{t("locale.es")}</SelectItem>
                   </SelectContent>
                 </Select>
               </SettingsRow>
@@ -983,6 +1250,7 @@ export function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection
+              id="desktop-integration"
               title={t("settings.desktopIntegration")}
               description={t("settings.desktopIntegrationDescription")}
             >
@@ -1031,9 +1299,13 @@ export function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection
+              id="browser-integration"
               title={t("settings.browserIntegration")}
               description={t("settings.browserIntegrationDescription")}
             >
+              <p className="border-b border-border-divider px-4 py-3 text-xs leading-5 text-text-muted">
+                {t("settings.browserIntegrationTip")}
+              </p>
               {browserCapture && browserExperimentalCaptureEnabled ? (
                 <BrowserCaptureControls
                   settings={browserCapture}
@@ -1159,11 +1431,45 @@ export function SettingsPage() {
               ) : null}
             </SettingsSection>
           </div>
-        </ScrollArea>
+        </div>
+        </SettingsSearchContext.Provider>
 
         <footer className="flex shrink-0 justify-end border-t border-border-subtle bg-surface-base/60 px-4 py-3 sm:hidden">
           <SaveStatus state={saveState} saving={saving} className="w-full justify-center" />
         </footer>
+
+        <Dialog open={showResetDialog} onOpenChange={setShowResetDialog}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>{t("settings.resetDefaultsTitle")}</DialogTitle>
+              <DialogDescription>
+                {t("settings.resetDefaultsConfirm")}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogBody />
+            <DialogFooter className="gap-2 sm:gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setShowResetDialog(false)}
+                disabled={resetting}
+              >
+                {t("actions.cancel")}
+              </Button>
+              <Button
+                variant="danger"
+                onClick={handleResetDefaults}
+                disabled={resetting}
+              >
+                {resetting ? (
+                  <LoaderCircle className="mr-1.5 h-4 w-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="mr-1.5 h-4 w-4" />
+                )}
+                {t("settings.resetDefaults")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );
@@ -1205,16 +1511,18 @@ function SaveStatus({
 }
 
 function SettingsSection({
+  id,
   title,
   description,
   children,
 }: {
+  id?: string;
   title: string;
   description?: string;
   children: ReactNode;
 }) {
   return (
-    <section className="border-t border-border-subtle py-5 first:border-t-0 first:pt-0">
+    <section id={id} className="scroll-mt-12 border-t border-border-subtle py-5 first:border-t-0 first:pt-0">
       <div className="grid gap-1 pb-3">
         <h3 className="text-sm font-semibold text-text-primary">{title}</h3>
         {description ? (
@@ -1339,6 +1647,11 @@ function SettingsToggle({
   disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
+  const { query } = useSettingsSearch();
+  const matchesSearch = !query ||
+    title.toLowerCase().includes(query.toLowerCase()) ||
+    description.toLowerCase().includes(query.toLowerCase());
+  if (!matchesSearch) return null;
   return (
     <label className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
       <span className="min-w-0">
@@ -1352,7 +1665,7 @@ function SettingsToggle({
         checked={checked}
         disabled={disabled}
         onChange={(event) => onChange(event.target.checked)}
-        className="h-6 w-6 accent-accent-primary md:h-5 md:w-5"
+        className="h-6 w-6 accent-accent-primary"
       />
     </label>
   );
@@ -1371,6 +1684,11 @@ function SettingsRow({
   controlClassName?: string;
   tip?: string;
 }) {
+  const { query } = useSettingsSearch();
+  const matchesSearch = !query ||
+    title.toLowerCase().includes(query.toLowerCase()) ||
+    (tip ?? "").toLowerCase().includes(query.toLowerCase());
+  if (!matchesSearch) return null;
   return (
     <div className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 md:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)] md:items-center">
       <div className="flex items-center gap-1.5">
@@ -1396,6 +1714,16 @@ function SettingsRow({
         ) : null}
       </div>
       <div className={cn("min-w-0", controlClassName)}>{children}</div>
+    </div>
+  );
+}
+
+function SettingsSubHeading({ title }: { title: string }) {
+  return (
+    <div className="border-t border-border-subtle bg-surface-root/40 px-4 py-2">
+      <h4 className="text-xs font-medium uppercase tracking-wide text-text-muted">
+        {title}
+      </h4>
     </div>
   );
 }

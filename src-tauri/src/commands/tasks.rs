@@ -26,8 +26,9 @@ use crate::{
     logging::sanitize_url,
     models::{
         AppErrorPayload, CompletionAction, CompletionActionRequestedPayload, FtpDirectoryProbe,
-        HashVerificationStatus, RecoveryAction, Task, TaskChecksumRecord, TaskFileRecord,
-        TaskProxySettings, TaskProxySettingsInput, TaskRecord, TaskStatus, WebDavDirectoryProbe,
+        HashVerificationStatus, RecoveryAction, SftpDirectoryProbe, Task, TaskChecksumRecord,
+        TaskFileRecord, TaskProxySettings, TaskProxySettingsInput, TaskRecord, TaskStatus,
+        WebDavDirectoryProbe,
     },
     AppState, DownloadControl, TaskRequestHeaders,
 };
@@ -213,6 +214,16 @@ pub async fn probe_ftp_directory(
 ) -> Result<FtpDirectoryProbe, String> {
     let proxy_config = state.engine_registry.proxy_config().await;
     crate::download::ftp::probe_ftp_directory_url(&url, proxy_config).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn probe_sftp_directory(
+    state: tauri::State<'_, AppState>,
+    url: String,
+) -> Result<SftpDirectoryProbe, String> {
+    let proxy_config = state.engine_registry.proxy_config().await;
+    crate::download::sftp::probe_sftp_directory_url(&state.pool, &url, proxy_config).await
 }
 
 #[tauri::command]
@@ -897,6 +908,7 @@ async fn prepare_task_for_download(
         || is_hls_protocol(&task.protocol)
         || is_dash_protocol(&task.protocol)
         || is_metalink_protocol(&task.protocol)
+        || is_sftp_protocol(&task.protocol)
     {
         db::ensure_task_segments(pool, &task).await?;
         return require_task(pool, &task.id).await;
@@ -993,6 +1005,10 @@ fn is_dash_protocol(protocol: &str) -> bool {
 
 fn is_metalink_protocol(protocol: &str) -> bool {
     protocol == "metalink"
+}
+
+fn is_sftp_protocol(protocol: &str) -> bool {
+    protocol == "sftp"
 }
 
 fn is_torrent_url(url: &Url) -> bool {

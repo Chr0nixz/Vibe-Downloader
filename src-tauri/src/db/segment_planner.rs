@@ -19,8 +19,9 @@ pub fn planned_segment_count_with_plan(
     segment_count: i32,
 ) -> usize {
     if is_bt_protocol(&task.protocol)
-        || is_dash_protocol(&task.protocol)
         || is_metalink_protocol(&task.protocol)
+        || is_sftp_protocol(&task.protocol)
+        || is_dash_protocol(&task.protocol)
     {
         return 1;
     }
@@ -65,12 +66,16 @@ pub fn planned_segments_for_task_with_plan(
         return vec![single_segment_for_task(task, "hls_segment")];
     }
 
+    if is_metalink_protocol(&task.protocol) {
+        return vec![single_segment_for_task(task, "metalink_file")];
+    }
+
     if is_dash_protocol(&task.protocol) {
         return vec![single_segment_for_task(task, "dash_media")];
     }
 
-    if is_metalink_protocol(&task.protocol) {
-        return vec![single_segment_for_task(task, "metalink_file")];
+    if is_sftp_protocol(&task.protocol) {
+        return vec![single_segment_for_task(task, "sftp_file")];
     }
 
     if is_ftp_protocol(&task.protocol) {
@@ -136,12 +141,16 @@ fn is_hls_protocol(protocol: &str) -> bool {
     protocol == "hls"
 }
 
+fn is_metalink_protocol(protocol: &str) -> bool {
+    protocol == "metalink"
+}
+
 fn is_dash_protocol(protocol: &str) -> bool {
     protocol == "dash"
 }
 
-fn is_metalink_protocol(protocol: &str) -> bool {
-    protocol == "metalink"
+fn is_sftp_protocol(protocol: &str) -> bool {
+    protocol == "sftp"
 }
 
 fn single_segment_for_task(task: &TaskRecord, unit_kind: &str) -> TaskSegmentRecord {

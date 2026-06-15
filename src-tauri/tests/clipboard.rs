@@ -24,7 +24,7 @@ fn extracts_multiple_urls_and_deduplicates_normalized_values() {
 #[test]
 fn accepts_supported_download_protocols() {
     let urls = extract_download_urls(
-        "https://example.com/a.torrent ftps://files.example.com/b.bin magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10 file:///C:/Downloads/sample.torrent file:///C:/Downloads/list.meta4",
+        "https://example.com/a.torrent ftps://files.example.com/b.bin sftp://files.example.com/c.bin magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10 file:///C:/Downloads/sample.torrent file:///C:/Downloads/list.meta4",
     );
 
     assert_eq!(
@@ -32,6 +32,7 @@ fn accepts_supported_download_protocols() {
         vec![
             "https://example.com/a.torrent".to_string(),
             "ftps://files.example.com/b.bin".to_string(),
+            "sftp://files.example.com/c.bin".to_string(),
             "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string(),
             "file:///C:/Downloads/sample.torrent".to_string(),
             "file:///C:/Downloads/list.meta4".to_string(),
@@ -42,7 +43,7 @@ fn accepts_supported_download_protocols() {
 #[test]
 fn rejects_unsupported_or_sensitive_urls() {
     let urls = extract_download_urls(
-        "ssh://example.com/file https://user:pass@example.com/secret.zip file:///C:/Downloads/readme.txt",
+        "ssh://example.com/file https://user:pass@example.com/secret.zip sftp://user:pass@example.com/secret.bin file:///C:/Downloads/readme.txt",
     );
 
     assert!(urls.is_empty());

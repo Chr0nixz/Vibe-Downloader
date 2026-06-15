@@ -10,11 +10,12 @@ use crate::{db, events::emit_clipboard_link_detected, models::task::now_iso, App
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const MAX_CLIPBOARD_TEXT_LEN: usize = 64 * 1024;
-const URL_PREFIXES: [&str; 8] = [
+const URL_PREFIXES: [&str; 9] = [
     "http://",
     "https://",
     "ftp://",
     "ftps://",
+    "sftp://",
     "webdav://",
     "webdavs://",
     "magnet:",
@@ -107,7 +108,9 @@ pub fn extract_download_urls(text: &str) -> Vec<String> {
         let mut offset = 0;
         while let Some(index) = lower[offset..].find(prefix) {
             let start = offset + index;
-            starts.push(start);
+            if start == 0 || !lower.as_bytes()[start - 1].is_ascii_alphanumeric() {
+                starts.push(start);
+            }
             offset = start + prefix.len();
         }
     }
@@ -154,7 +157,7 @@ fn normalize_download_url(raw: &str) -> Option<String> {
     }
 
     match parsed.scheme() {
-        "http" | "https" | "ftp" | "ftps" | "webdav" | "webdavs" | "magnet" => {
+        "http" | "https" | "ftp" | "ftps" | "sftp" | "webdav" | "webdavs" | "magnet" => {
             Some(parsed.to_string())
         }
         "file" if is_local_manifest_path(parsed.path()) => Some(parsed.to_string()),

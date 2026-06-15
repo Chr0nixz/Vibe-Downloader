@@ -9,6 +9,7 @@ mod request_headers;
 mod segment_planner;
 mod segments;
 mod settings;
+mod sftp;
 mod task_checksums;
 mod task_credentials;
 mod task_files;
@@ -60,6 +61,7 @@ pub use self::settings::{
     normalize_speed_limit_bps, parse_multi_connection_threshold_bytes, parse_speed_limit_bps,
     upsert_settings,
 };
+pub use self::sftp::verify_or_record_sftp_host_key;
 pub use self::task_checksums::{
     insert_task_checksum_record, list_task_checksum_records, list_task_checksum_records_for_file,
     list_task_checksum_records_for_tasks, update_task_checksum_record,

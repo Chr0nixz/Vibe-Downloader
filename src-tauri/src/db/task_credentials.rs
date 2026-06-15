@@ -95,7 +95,7 @@ pub async fn migrate_legacy_ftp_credentials(pool: &SqlitePool) -> Result<(), Str
         r#"
         SELECT id, url, final_url, protocol
         FROM tasks
-        WHERE protocol IN ('ftp', 'ftps', 'webdav', 'webdavs')
+        WHERE protocol IN ('ftp', 'ftps', 'sftp', 'webdav', 'webdavs')
         "#,
     )
     .fetch_all(pool)
@@ -134,7 +134,7 @@ pub async fn migrate_legacy_ftp_credentials(pool: &SqlitePool) -> Result<(), Str
             crate::db::insert_task_event(
                 pool,
                 &task_id,
-                "ftp_credentials_unavailable",
+                "task_credentials_unavailable",
                 Some(&error),
             )
             .await?;
@@ -167,10 +167,14 @@ pub struct LegacyCredentials {
 
 pub fn legacy_credentials_from_url(input: &str) -> Option<LegacyCredentials> {
     let mut url = reqwest::Url::parse(input.trim()).ok()?;
-    if !matches!(url.scheme(), "ftp" | "ftps" | "webdav" | "webdavs") {
+    let scheme = url.scheme().to_string();
+    if !matches!(scheme.as_str(), "ftp" | "ftps" | "sftp" | "webdav" | "webdavs") {
         return None;
     }
     if url.username().is_empty() && url.password().is_none() {
+        return None;
+    }
+    if scheme == "sftp" && url.username().is_empty() {
         return None;
     }
     let username = if url.username().is_empty() {
@@ -220,8 +224,8 @@ async fn mark_credentials_required(
     final_url: Option<&str>,
 ) -> Result<(), String> {
     let payload = AppErrorPayload::new(
-        "ftp_credentials_unavailable",
-        "FTP credentials could not be moved into encrypted storage. Recreate this task or send the URL again.",
+        "task_credentials_unavailable",
+        "Task credentials could not be moved into encrypted storage. Recreate this task or send the URL again.",
         true,
         vec!["check_url", "restart"],
     );
@@ -288,6 +292,26 @@ mod tests {
     }
 
     #[test]
+    fn ignores_anonymous_ftp_urls() {
+        assert!(legacy_credentials_from_url("ftp://example.com/file.bin").is_none());
+    }
+
+    #[test]
+    fn extracts_and_strips_sftp_credentials_without_anonymous_default() {
+        let legacy =
+            legacy_credentials_from_url("sftp://alice:s3cret@example.com:2222/private/file.bin")
+                .expect("credentials");
+
+        assert_eq!(legacy.username, "alice");
+        assert_eq!(legacy.password, "s3cret");
+        assert_eq!(
+            legacy.sanitized_url,
+            "sftp://example.com:2222/private/file.bin"
+        );
+        assert!(legacy_credentials_from_url("sftp://:pass@example.com/file.bin").is_none());
+    }
+
+    #[test]
     fn extracts_and_strips_webdav_credentials() {
         let legacy =
             legacy_credentials_from_url("webdavs://alice:s3cret@example.com/private/file.bin")
@@ -299,11 +323,6 @@ mod tests {
             legacy.sanitized_url,
             "webdavs://example.com/private/file.bin"
         );
-    }
-
-    #[test]
-    fn ignores_anonymous_ftp_urls() {
-        assert!(legacy_credentials_from_url("ftp://example.com/file.bin").is_none());
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ use tauri::AppHandle;
 
 use super::{
     BtEngine, DashEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine, MetalinkEngine,
-    WebDavEngine,
+    SftpEngine, WebDavEngine,
 };
 use crate::models::{
     EngineCapabilities, HlsVariant, MetalinkProbeData, ProbedFile, TaskKind, TaskRecord,
@@ -90,6 +90,7 @@ impl EngineRegistry {
                 Arc::new(WebDavEngine::new(proxy_config.clone())),
                 Arc::new(HttpEngine::with_proxy_config(proxy_config.clone())?),
                 Arc::new(FtpEngine::new(proxy_config.clone())),
+                Arc::new(SftpEngine::new(proxy_config.clone())),
             ],
             bt_engine,
             proxy_config,

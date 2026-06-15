@@ -5,6 +5,7 @@ pub(crate) mod ftp;
 mod hls;
 mod http;
 mod metalink;
+pub(crate) mod sftp;
 mod speed;
 pub(crate) mod webdav;
 
@@ -18,5 +19,6 @@ pub use ftp::FtpEngine;
 pub use hls::HlsEngine;
 pub use http::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine, ProbeResult};
 pub use metalink::MetalinkEngine;
+pub use sftp::SftpEngine;
 pub use speed::GlobalSpeedLimiter;
 pub use webdav::WebDavEngine;

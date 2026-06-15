@@ -94,6 +94,7 @@ export const commands = {
 	requestSystemShutdown: () => typedError<null, string>(__TAURI_INVOKE("request_system_shutdown")),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
 	probeFtpDirectory: (url: string) => typedError<FtpDirectoryProbe, string>(__TAURI_INVOKE("probe_ftp_directory", { url })),
+	probeSftpDirectory: (url: string) => typedError<SftpDirectoryProbe, string>(__TAURI_INVOKE("probe_sftp_directory", { url })),
 	probeWebdavDirectory: (url: string) => typedError<WebDavDirectoryProbe, string>(__TAURI_INVOKE("probe_webdav_directory", { url })),
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
 	importUrls: (input: ImportUrlsInput) => typedError<BatchImportResult, string>(__TAURI_INVOKE("import_urls", { input })),
@@ -480,6 +481,20 @@ export type SegmentSummary = {
 	speedBps: string,
 };
 
+export type SftpDirectoryEntry = {
+	name: string,
+	raw: string,
+	probableFileUrl: string | null,
+};
+
+export type SftpDirectoryProbe = {
+	inputUrl: string,
+	directoryUrl: string,
+	currentDirectory: string | null,
+	entries: SftpDirectoryEntry[],
+	diagnostics: string[],
+};
+
 export type Task = {
 	id: string,
 	url: string,
@@ -557,7 +572,7 @@ export type TaskEventsPageResult = {
 	nextCursor: string | null,
 };
 
-export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "hls" | "dash" | "metalink" | "bt" | "ftp" | "webdav" | "proxy" | "schedule" | "other";
+export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "hls" | "dash" | "metalink" | "bt" | "ftp" | "sftp" | "webdav" | "proxy" | "schedule" | "other";
 
 export type TaskFile = {
 	id: string,

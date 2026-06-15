@@ -1,5 +1,6 @@
-use tauri_app_lib::proxy::{
-    normalize_proxy_url, socks5_connect, AppProxyMode, ResolvedProxyConfig,
+use tauri_app_lib::{
+    db,
+    proxy::{normalize_proxy_url, socks5_connect, AppProxyMode, ResolvedProxyConfig},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -36,6 +37,15 @@ fn custom_socks5_proxy_gets_auth_url_and_fingerprint_without_password() {
         Some("socks5://user:secret@127.0.0.1:1080/")
     );
     assert!(!config.fingerprint().contains("secret"));
+}
+
+#[test]
+fn sftp_task_proxy_overrides_require_socks5() {
+    assert!(db::validate_task_proxy_protocol("sftp", "socks5://127.0.0.1:1080").is_ok());
+    let error = db::validate_task_proxy_protocol("sftp", "http://proxy.local:8080")
+        .expect_err("http proxy should be rejected for sftp");
+    assert!(error.contains("proxy_scheme_unsupported_for_task"));
+    assert!(error.contains("SFTP tasks only support SOCKS5"));
 }
 
 #[tokio::test]

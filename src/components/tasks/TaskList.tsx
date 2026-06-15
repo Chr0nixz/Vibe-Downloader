@@ -64,7 +64,7 @@ export function TaskList({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const loadingPageRef = useRef(false);
   const initialLoadDoneRef = useRef(false);
-  const tasks = useTaskStore((s) => s.tasks);
+  const taskIds = useTaskStore((s) => s.taskIds);
   const total = useTaskStore((s) => s.total);
   const nextCursor = useTaskStore((s) => s.nextCursor);
   const hasMore = useTaskStore((s) => s.hasMore);
@@ -97,30 +97,34 @@ export function TaskList({
     return n;
   }, [filters]);
 
-  const filtered = tasks;
+  const filtered = taskIds;
   const filteredRef = useRef(filtered);
   filteredRef.current = filtered;
 
   // Announce task status changes for screen readers
   useEffect(() => {
-    const prev = prevTaskStatusesRef.current;
-    for (const task of tasks) {
-      if (prev[task.id] && prev[task.id] !== task.status) {
-        setStatusAnnouncement(
-          t("taskList.statusChanged", {
-            name: task.fileName,
-            status: t(`task.status.${task.status}`),
-          }),
-        );
-        break;
+    return useTaskStore.subscribe((state) => {
+      const prev = prevTaskStatusesRef.current;
+      for (const taskId of state.taskIds) {
+        const task = state.taskById[taskId];
+        if (task && prev[task.id] && prev[task.id] !== task.status) {
+          setStatusAnnouncement(
+            t("taskList.statusChanged", {
+              name: task.fileName,
+              status: t(`task.status.${task.status}`),
+            }),
+          );
+          break;
+        }
       }
-    }
-    const next: Record<string, string> = {};
-    for (const task of tasks) {
-      next[task.id] = task.status;
-    }
-    prevTaskStatusesRef.current = next;
-  }, [tasks, t]);
+      const next: Record<string, string> = {};
+      for (const taskId of state.taskIds) {
+        const task = state.taskById[taskId];
+        if (task) next[task.id] = task.status;
+      }
+      prevTaskStatusesRef.current = next;
+    });
+  }, [t]);
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
   const loadPage = useCallback(async (cursor: string | null, append = false) => {
@@ -176,7 +180,7 @@ export function TaskList({
     getScrollElement: () => scrollContainerRef.current,
     estimateSize: () => 142, // ~132px row + 10px gap
     overscan: 6,
-    getItemKey: (index) => filtered[index]?.id ?? index,
+    getItemKey: (index) => filtered[index] ?? index,
     onChange: (instance) => {
       const items = instance.getVirtualItems();
       if (items.length === 0) return;
@@ -200,12 +204,14 @@ export function TaskList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters, nav, search, sortDirection, sortKey]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const selectedTasks = useMemo(
-    () => tasks.filter((task) => selectedIdSet.has(task.id)),
-    [selectedIdSet, tasks],
-  );
+  const selectedTasks = useCallback(() => {
+    const { taskById } = useTaskStore.getState();
+    return selectedIds
+      .map((id) => taskById[id])
+      .filter((task): task is Task => Boolean(task));
+  }, [selectedIds]);
   const visibleSelectedCount = useMemo(
-    () => filtered.filter((task) => selectedIdSet.has(task.id)).length,
+    () => filtered.filter((taskId) => selectedIdSet.has(taskId)).length,
     [filtered, selectedIdSet],
   );
   const allVisibleSelected =
@@ -217,12 +223,14 @@ export function TaskList({
         ? filterOptions.failureCategories
         : Array.from(
             new Set(
-              tasks
+              taskIds
+                .map((taskId) => useTaskStore.getState().taskById[taskId])
+                .filter((task): task is Task => Boolean(task))
                 .map(failureKind)
                 .filter((kind) => kind !== "none"),
             ),
           ).sort(),
-    [filterOptions.failureCategories, tasks],
+    [filterOptions.failureCategories, taskIds],
   );
 
   const selectAndFocus = useCallback(
@@ -230,7 +238,7 @@ export function TaskList({
       selectTask(taskId);
       setDetailOpen(true);
       const list = filteredRef.current;
-      const index = list.findIndex((task) => task.id === taskId);
+      const index = list.findIndex((id) => id === taskId);
       if (index >= 0) {
         virtualizer.scrollToIndex(index, { align: "center" });
       }
@@ -246,7 +254,7 @@ export function TaskList({
   // Ensure the selected row is scrolled into view (e.g. after initial load).
   useEffect(() => {
     if (!selectedId || filtered.length === 0) return;
-    const index = filtered.findIndex((task) => task.id === selectedId);
+    const index = filtered.findIndex((taskId) => taskId === selectedId);
     if (index >= 0) {
       virtualizer.scrollToIndex(index, { align: "center" });
     }
@@ -257,14 +265,14 @@ export function TaskList({
       const list = filteredRef.current;
       if (list.length === 0) return;
       const currentId = selectedIdRef.current;
-      const currentIndex = list.findIndex((task) => task.id === currentId);
+      const currentIndex = list.findIndex((taskId) => taskId === currentId);
       const startIndex = currentIndex >= 0 ? currentIndex : 0;
       const nextIndex =
         direction === "next"
           ? Math.min(list.length - 1, startIndex + 1)
           : Math.max(0, startIndex - 1);
       const nextTask = list[nextIndex];
-      if (nextTask) selectAndFocus(nextTask.id);
+      if (nextTask) selectAndFocus(nextTask);
     },
     [selectAndFocus],
   );
@@ -277,13 +285,13 @@ export function TaskList({
       if (event.key === "Home") {
         event.preventDefault();
         virtualizer.scrollToIndex(0, { align: "start" });
-        selectAndFocus(list[0].id);
+        selectAndFocus(list[0]);
         return;
       }
       if (event.key === "End") {
         event.preventDefault();
         virtualizer.scrollToIndex(list.length - 1, { align: "end" });
-        selectAndFocus(list[list.length - 1].id);
+        selectAndFocus(list[list.length - 1]);
       }
     },
     [selectAndFocus, virtualizer],
@@ -329,7 +337,7 @@ export function TaskList({
             variant="ghost"
             size="sm"
             className="h-7 text-xs"
-            onClick={() => setSelectedIds(filtered.map((task) => task.id))}
+            onClick={() => setSelectedIds(filtered)}
             disabled={allVisibleSelected}
           >
             {t("taskList.selectVisible", { count: filtered.length })}
@@ -350,7 +358,7 @@ export function TaskList({
             variant="ghost"
             size="sm"
             className="h-7"
-            onClick={() => onBulkPause(selectedTasks)}
+            onClick={() => onBulkPause(selectedTasks())}
           >
             {t("taskList.bulkPause")}
           </Button>
@@ -359,7 +367,7 @@ export function TaskList({
             variant="ghost"
             size="sm"
             className="h-7"
-            onClick={() => onBulkResume(selectedTasks)}
+            onClick={() => onBulkResume(selectedTasks())}
           >
             {t("taskList.bulkResume")}
           </Button>
@@ -368,7 +376,7 @@ export function TaskList({
             variant="ghost"
             size="sm"
             className="h-7"
-            onClick={() => onBulkRetry(selectedTasks)}
+            onClick={() => onBulkRetry(selectedTasks())}
           >
             {t("taskList.bulkRetry")}
           </Button>
@@ -377,7 +385,7 @@ export function TaskList({
             variant="ghost"
             size="sm"
             className="h-7"
-            onClick={() => onBulkOpenFolder(selectedTasks)}
+            onClick={() => onBulkOpenFolder(selectedTasks())}
           >
             {t("taskList.bulkOpenFolder")}
           </Button>
@@ -386,9 +394,9 @@ export function TaskList({
             variant="danger"
             size="sm"
             className="h-7"
-            onClick={() => onBulkDelete(selectedTasks)}
+            onClick={() => onBulkDelete(selectedTasks())}
           >
-            {t("taskList.bulkDelete", { count: selectedTasks.length })}
+            {t("taskList.bulkDelete", { count: selectedIds.length })}
           </Button>
         </div>
       ) : null}
@@ -554,7 +562,7 @@ export function TaskList({
               style={{ height: `calc(${virtualizer.getTotalSize()}px + var(--lp, 16px) * 2)` }}
             >
               {virtualizer.getVirtualItems().map((virtualRow) => {
-                const task = filtered[virtualRow.index];
+                const taskId = filtered[virtualRow.index];
                 return (
                   <div
                     key={virtualRow.key}
@@ -568,9 +576,9 @@ export function TaskList({
                     }}
                   >
                     <TaskRow
-                      task={task}
-                      selected={task.id === selectedId}
-                      multiSelected={selectedIdSet.has(task.id)}
+                      taskId={taskId}
+                      selected={taskId === selectedId}
+                      multiSelected={selectedIdSet.has(taskId)}
                       isFirstFocusable={!selectedId && virtualRow.index === 0}
                       reduceMotion={reduceMotion}
                       position={virtualRow.index + 1}
@@ -698,7 +706,7 @@ function FilterChip({
       {value}
       <button
         type="button"
-        className="ml-0.5 -mr-0.5 inline-flex min-h-6 min-w-6 items-center justify-center rounded-full text-text-muted transition-colors hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:outline-none"
+        className="ml-0.5 -mr-0.5 inline-flex min-h-8 min-w-8 items-center justify-center rounded-full text-text-muted transition-colors hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:outline-none"
         aria-label={`${label}: ${value}`}
         onClick={(event) => {
           event.stopPropagation();

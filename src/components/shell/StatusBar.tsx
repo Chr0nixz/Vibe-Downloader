@@ -1,12 +1,27 @@
+import { Keyboard } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useAppUpdater } from "@/hooks/use-app-updater";
-import { cn, formatSpeed } from "@/lib/utils";
+import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
+import type { Platform } from "@/lib/platform";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useTaskStore } from "@/stores/task-store";
 
-export function StatusBar({ className }: { className?: string }) {
+export function StatusBar({
+  className,
+  platform = "unknown",
+  onOpenShortcuts,
+}: {
+  className?: string;
+  platform?: Platform;
+  onOpenShortcuts?: () => void;
+}) {
   const { t } = useTranslation();
   const stats = useTaskStore((s) => s.taskStats);
   const settings = useSettingsStore((s) => s.settings);
@@ -77,6 +92,28 @@ export function StatusBar({ className }: { className?: string }) {
               : t("statusBar.noGlobalSpeedLimit")}
           </span>
         )}
+        {onOpenShortcuts ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 shrink-0 text-text-muted hover:text-text-primary"
+                aria-label={t("statusBar.shortcuts")}
+                onClick={onOpenShortcuts}
+              >
+                <Keyboard className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {t("statusBar.shortcuts")}&ensp;
+              <kbd className="rounded border border-border-subtle bg-surface-root px-1 py-0.5 font-mono text-[10px]">
+                {formatShortcut("mod+/", platform)}
+              </kbd>
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
       </span>
     </footer>
   );

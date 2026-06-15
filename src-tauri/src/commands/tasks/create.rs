@@ -308,7 +308,7 @@ pub async fn import_urls(
             Ok(url)
                 if matches!(
                     url.scheme(),
-                    "http" | "https" | "ftp" | "ftps" | "webdav" | "webdavs" | "magnet"
+                    "http" | "https" | "ftp" | "ftps" | "sftp" | "webdav" | "webdavs" | "magnet"
                 )
                     || is_torrent_url(&url)
                     || is_metalink_url(&url)
@@ -328,7 +328,7 @@ pub async fn import_urls(
                     content_type: None,
                     supports_resume: false,
                     error_message: Some(
-                        "Only HTTP, HTTPS, FTP, FTPS, WebDAV, magnet links, .torrent URLs, Metalink manifests, and MPEG-DASH MPDs are supported."
+                        "Only HTTP, HTTPS, FTP, FTPS, SFTP, WebDAV, magnet links, .torrent URLs, Metalink manifests, and MPEG-DASH MPDs are supported."
                             .to_string(),
                     ),
                     task: None,

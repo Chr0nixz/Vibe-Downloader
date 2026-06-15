@@ -2,15 +2,29 @@ import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 
 import en from "./locales/en";
+import es from "./locales/es";
+import ja from "./locales/ja";
+import ko from "./locales/ko";
+import ru from "./locales/ru";
 import zhCN from "./locales/zh-CN";
+import zhTW from "./locales/zh-TW";
 
 export const LOCALE_STORAGE_KEY = "vibe-locale";
 
-export const SUPPORTED_LOCALES = ["en", "zh-CN"] as const;
+export const SUPPORTED_LOCALES = [
+  "en",
+  "zh-CN",
+  "zh-TW",
+  "ja",
+  "ko",
+  "ru",
+  "es",
+] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
 
 function normalizeLocale(value: string | null | undefined): Locale {
   if (!value) return "en";
+  if (value === "zh-TW" || value === "zh-HK" || value === "zh-MO") return "zh-TW";
   if (value === "zh" || value.startsWith("zh-")) return "zh-CN";
   if (SUPPORTED_LOCALES.includes(value as Locale)) return value as Locale;
   return "en";
@@ -53,6 +67,11 @@ void i18n.use(initReactI18next).init({
   resources: {
     en: { translation: en },
     "zh-CN": { translation: zhCN },
+    "zh-TW": { translation: zhTW },
+    ja: { translation: ja },
+    ko: { translation: ko },
+    ru: { translation: ru },
+    es: { translation: es },
   },
   lng: detectInitialLocale(),
   fallbackLng: "en",

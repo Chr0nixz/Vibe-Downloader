@@ -158,7 +158,7 @@ pub fn validate_task_proxy_protocol(protocol: &str, proxy_url: &str) -> Result<(
         .to_string();
     match protocol {
         "http" | "https" | "hls" | "dash" | "webdav" | "webdavs" => Ok(()),
-        "bt" | "magnet" | "ftp" | "ftps" if scheme == "socks5" => Ok(()),
+        "bt" | "magnet" | "ftp" | "ftps" | "sftp" if scheme == "socks5" => Ok(()),
         "bt" | "magnet" => Err(proxy_protocol_error(
             protocol,
             "BitTorrent tasks only support SOCKS5 task proxy overrides.",
@@ -166,6 +166,10 @@ pub fn validate_task_proxy_protocol(protocol: &str, proxy_url: &str) -> Result<(
         "ftp" | "ftps" => Err(proxy_protocol_error(
             protocol,
             "FTP and FTPS tasks only support SOCKS5 task proxy overrides.",
+        )),
+        "sftp" => Err(proxy_protocol_error(
+            protocol,
+            "SFTP tasks only support SOCKS5 task proxy overrides.",
         )),
         _ => Ok(()),
     }
