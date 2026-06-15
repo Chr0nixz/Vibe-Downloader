@@ -18,7 +18,10 @@ pub fn planned_segment_count_with_plan(
     multi_connection_threshold_bytes: i64,
     segment_count: i32,
 ) -> usize {
-    if is_bt_protocol(&task.protocol) || is_metalink_protocol(&task.protocol) {
+    if is_bt_protocol(&task.protocol)
+        || is_dash_protocol(&task.protocol)
+        || is_metalink_protocol(&task.protocol)
+    {
         return 1;
     }
     if is_hls_protocol(&task.protocol) {
@@ -60,6 +63,10 @@ pub fn planned_segments_for_task_with_plan(
 
     if is_hls_protocol(&task.protocol) {
         return vec![single_segment_for_task(task, "hls_segment")];
+    }
+
+    if is_dash_protocol(&task.protocol) {
+        return vec![single_segment_for_task(task, "dash_media")];
     }
 
     if is_metalink_protocol(&task.protocol) {
@@ -127,6 +134,10 @@ fn is_bt_protocol(protocol: &str) -> bool {
 
 fn is_hls_protocol(protocol: &str) -> bool {
     protocol == "hls"
+}
+
+fn is_dash_protocol(protocol: &str) -> bool {
+    protocol == "dash"
 }
 
 fn is_metalink_protocol(protocol: &str) -> bool {

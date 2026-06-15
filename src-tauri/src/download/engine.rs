@@ -7,7 +7,10 @@ use std::{
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 
-use super::{BtEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine, MetalinkEngine};
+use super::{
+    BtEngine, DashEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine, MetalinkEngine,
+    WebDavEngine,
+};
 use crate::models::{
     EngineCapabilities, HlsVariant, MetalinkProbeData, ProbedFile, TaskKind, TaskRecord,
 };
@@ -20,6 +23,8 @@ pub struct ProbeRequest {
     pub uri: String,
     pub source: Option<String>,
     pub request_headers: Vec<(String, String)>,
+    pub pool: Option<SqlitePool>,
+    pub task_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +86,8 @@ impl EngineRegistry {
                 bt_engine.clone(),
                 Arc::new(MetalinkEngine::new(proxy_config.clone())),
                 Arc::new(HlsEngine::new(proxy_config.clone())),
+                Arc::new(DashEngine::new(proxy_config.clone())),
+                Arc::new(WebDavEngine::new(proxy_config.clone())),
                 Arc::new(HttpEngine::with_proxy_config(proxy_config.clone())?),
                 Arc::new(FtpEngine::new(proxy_config.clone())),
             ],
@@ -122,6 +129,14 @@ impl EngineRegistry {
                 .find(|engine| engine.id() == "hls")
                 .cloned()
                 .ok_or_else(|| "HLS engine is not available.".to_string());
+        }
+        if is_dash_url(&parsed) {
+            return self
+                .engines
+                .iter()
+                .find(|engine| engine.id() == "dash")
+                .cloned()
+                .ok_or_else(|| "MPEG-DASH engine is not available.".to_string());
         }
         self.engines
             .iter()
@@ -167,4 +182,12 @@ fn is_hls_url(url: &reqwest::Url) -> bool {
             .path_segments()
             .and_then(|mut segments| segments.next_back())
             .is_some_and(|name| name.to_ascii_lowercase().ends_with(".m3u8"))
+}
+
+fn is_dash_url(url: &reqwest::Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "file")
+        && url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".mpd"))
 }

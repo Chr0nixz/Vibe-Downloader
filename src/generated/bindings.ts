@@ -94,6 +94,7 @@ export const commands = {
 	requestSystemShutdown: () => typedError<null, string>(__TAURI_INVOKE("request_system_shutdown")),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
 	probeFtpDirectory: (url: string) => typedError<FtpDirectoryProbe, string>(__TAURI_INVOKE("probe_ftp_directory", { url })),
+	probeWebdavDirectory: (url: string) => typedError<WebDavDirectoryProbe, string>(__TAURI_INVOKE("probe_webdav_directory", { url })),
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
 	importUrls: (input: ImportUrlsInput) => typedError<BatchImportResult, string>(__TAURI_INVOKE("import_urls", { input })),
 	updateTaskTransferOptions: (input: UpdateTaskTransferOptionsInput) => typedError<Task, string>(__TAURI_INVOKE("update_task_transfer_options", { input })),
@@ -556,7 +557,7 @@ export type TaskEventsPageResult = {
 	nextCursor: string | null,
 };
 
-export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "hls" | "metalink" | "bt" | "ftp" | "proxy" | "schedule" | "other";
+export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "hls" | "dash" | "metalink" | "bt" | "ftp" | "webdav" | "proxy" | "schedule" | "other";
 
 export type TaskFile = {
 	id: string,
@@ -721,6 +722,22 @@ export type UpdateTorrentSeedingInput = {
 	enabled: boolean,
 	ratioLimit: number | null,
 	timeLimitSeconds: string | null,
+};
+
+export type WebDavDirectoryEntry = {
+	name: string,
+	href: string,
+	isCollection: boolean,
+	size: string | null,
+	contentType: string | null,
+	probableFileUrl: string | null,
+};
+
+export type WebDavDirectoryProbe = {
+	inputUrl: string,
+	directoryUrl: string,
+	entries: WebDavDirectoryEntry[],
+	diagnostics: string[],
 };
 
 /* Tauri Specta runtime */

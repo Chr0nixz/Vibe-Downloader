@@ -10,8 +10,15 @@ use crate::{db, events::emit_clipboard_link_detected, models::task::now_iso, App
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const MAX_CLIPBOARD_TEXT_LEN: usize = 64 * 1024;
-const URL_PREFIXES: [&str; 6] = [
-    "http://", "https://", "ftp://", "ftps://", "magnet:", "file://",
+const URL_PREFIXES: [&str; 8] = [
+    "http://",
+    "https://",
+    "ftp://",
+    "ftps://",
+    "webdav://",
+    "webdavs://",
+    "magnet:",
+    "file://",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -147,7 +154,9 @@ fn normalize_download_url(raw: &str) -> Option<String> {
     }
 
     match parsed.scheme() {
-        "http" | "https" | "ftp" | "ftps" | "magnet" => Some(parsed.to_string()),
+        "http" | "https" | "ftp" | "ftps" | "webdav" | "webdavs" | "magnet" => {
+            Some(parsed.to_string())
+        }
         "file" if is_local_manifest_path(parsed.path()) => Some(parsed.to_string()),
         _ => None,
     }
@@ -155,5 +164,8 @@ fn normalize_download_url(raw: &str) -> Option<String> {
 
 fn is_local_manifest_path(path: &str) -> bool {
     let path = path.to_ascii_lowercase();
-    path.ends_with(".torrent") || path.ends_with(".meta4") || path.ends_with(".metalink")
+    path.ends_with(".torrent")
+        || path.ends_with(".meta4")
+        || path.ends_with(".metalink")
+        || path.ends_with(".mpd")
 }

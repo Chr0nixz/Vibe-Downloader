@@ -95,7 +95,7 @@ pub async fn migrate_legacy_ftp_credentials(pool: &SqlitePool) -> Result<(), Str
         r#"
         SELECT id, url, final_url, protocol
         FROM tasks
-        WHERE protocol IN ('ftp', 'ftps')
+        WHERE protocol IN ('ftp', 'ftps', 'webdav', 'webdavs')
         "#,
     )
     .fetch_all(pool)
@@ -167,7 +167,7 @@ pub struct LegacyCredentials {
 
 pub fn legacy_credentials_from_url(input: &str) -> Option<LegacyCredentials> {
     let mut url = reqwest::Url::parse(input.trim()).ok()?;
-    if !matches!(url.scheme(), "ftp" | "ftps") {
+    if !matches!(url.scheme(), "ftp" | "ftps" | "webdav" | "webdavs") {
         return None;
     }
     if url.username().is_empty() && url.password().is_none() {
@@ -284,6 +284,20 @@ mod tests {
         assert_eq!(
             legacy.sanitized_url,
             "ftp://example.com:2121/private/file.bin"
+        );
+    }
+
+    #[test]
+    fn extracts_and_strips_webdav_credentials() {
+        let legacy =
+            legacy_credentials_from_url("webdavs://alice:s3cret@example.com/private/file.bin")
+                .expect("credentials");
+
+        assert_eq!(legacy.username, "alice");
+        assert_eq!(legacy.password, "s3cret");
+        assert_eq!(
+            legacy.sanitized_url,
+            "webdavs://example.com/private/file.bin"
         );
     }
 

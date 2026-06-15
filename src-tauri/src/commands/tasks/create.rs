@@ -24,7 +24,10 @@ use crate::commands::task_file_planning::{
     task_file_records_from_probe, unique_final_path,
 };
 
-use super::{is_bt_protocol, is_metalink_url, is_torrent_url, schedule_queued_tasks, task_payload};
+use super::{
+    is_bt_protocol, is_dash_url, is_metalink_url, is_torrent_url, schedule_queued_tasks,
+    task_payload,
+};
 
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +77,8 @@ pub async fn probe_task(
             uri: url.to_string(),
             source: None,
             request_headers: Vec::new(),
+            pool: Some(state.pool.clone()),
+            task_id: None,
         })
         .await?;
     tracing::debug!(
@@ -102,6 +107,8 @@ async fn resolve_create_probe(
             uri: url.to_string(),
             source: None,
             request_headers: request_headers.to_vec(),
+            pool: Some(state.pool.clone()),
+            task_id: None,
         })
         .await
 }
@@ -299,9 +306,13 @@ pub async fn import_urls(
     {
         let parsed = match Url::parse(raw_url) {
             Ok(url)
-                if matches!(url.scheme(), "http" | "https" | "ftp" | "ftps" | "magnet")
+                if matches!(
+                    url.scheme(),
+                    "http" | "https" | "ftp" | "ftps" | "webdav" | "webdavs" | "magnet"
+                )
                     || is_torrent_url(&url)
-                    || is_metalink_url(&url) =>
+                    || is_metalink_url(&url)
+                    || is_dash_url(&url) =>
             {
                 url
             }
@@ -317,7 +328,7 @@ pub async fn import_urls(
                     content_type: None,
                     supports_resume: false,
                     error_message: Some(
-                        "Only HTTP, HTTPS, FTP, FTPS, magnet links, .torrent URLs, and Metalink manifests are supported."
+                        "Only HTTP, HTTPS, FTP, FTPS, WebDAV, magnet links, .torrent URLs, Metalink manifests, and MPEG-DASH MPDs are supported."
                             .to_string(),
                     ),
                     task: None,
@@ -381,6 +392,8 @@ pub async fn import_urls(
                             uri: normalized_url.clone(),
                             source: None,
                             request_headers: Vec::new(),
+                            pool: Some(state.pool.clone()),
+                            task_id: None,
                         })
                         .await
                 }
@@ -545,6 +558,7 @@ pub(crate) async fn create_task_with_state_and_headers(
     let now = now_iso();
     let expected_hash_sha256 = if is_bt_protocol(&probe.protocol)
         || probe.protocol == "hls"
+        || probe.protocol == "dash"
         || is_metalink_protocol(&probe.protocol)
     {
         None

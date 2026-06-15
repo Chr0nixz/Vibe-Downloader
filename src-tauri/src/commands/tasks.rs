@@ -27,7 +27,7 @@ use crate::{
     models::{
         AppErrorPayload, CompletionAction, CompletionActionRequestedPayload, FtpDirectoryProbe,
         HashVerificationStatus, RecoveryAction, Task, TaskChecksumRecord, TaskFileRecord,
-        TaskProxySettings, TaskProxySettingsInput, TaskRecord, TaskStatus,
+        TaskProxySettings, TaskProxySettingsInput, TaskRecord, TaskStatus, WebDavDirectoryProbe,
     },
     AppState, DownloadControl, TaskRequestHeaders,
 };
@@ -213,6 +213,16 @@ pub async fn probe_ftp_directory(
 ) -> Result<FtpDirectoryProbe, String> {
     let proxy_config = state.engine_registry.proxy_config().await;
     crate::download::ftp::probe_ftp_directory_url(&url, proxy_config).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn probe_webdav_directory(
+    state: tauri::State<'_, AppState>,
+    url: String,
+) -> Result<WebDavDirectoryProbe, String> {
+    let proxy_config = state.engine_registry.proxy_config().await;
+    crate::download::webdav::probe_webdav_directory_url(&url, proxy_config).await
 }
 
 pub(crate) async fn schedule_queued_tasks(app: AppHandle, state: &AppState) {
@@ -801,6 +811,8 @@ async fn restart_task_from_beginning(
             uri: task.url.clone(),
             source: None,
             request_headers,
+            pool: Some(state.pool.clone()),
+            task_id: Some(task.id.clone()),
         })
         .await?;
     db::update_task_remote_metadata(
@@ -883,6 +895,7 @@ async fn prepare_task_for_download(
 
     if is_bt_protocol(&task.protocol)
         || is_hls_protocol(&task.protocol)
+        || is_dash_protocol(&task.protocol)
         || is_metalink_protocol(&task.protocol)
     {
         db::ensure_task_segments(pool, &task).await?;
@@ -920,6 +933,8 @@ async fn prepare_task_for_download(
                 uri,
                 source: None,
                 request_headers: request_headers.to_vec(),
+                pool: Some(pool.clone()),
+                task_id: Some(task.id.clone()),
             })
             .await?;
         if let Some(message) = resume_mismatch_message(&task, &probe) {
@@ -972,6 +987,10 @@ fn is_hls_protocol(protocol: &str) -> bool {
     protocol == "hls"
 }
 
+fn is_dash_protocol(protocol: &str) -> bool {
+    protocol == "dash"
+}
+
 fn is_metalink_protocol(protocol: &str) -> bool {
     protocol == "metalink"
 }
@@ -993,6 +1012,14 @@ pub(crate) fn is_metalink_url(url: &Url) -> bool {
                 let name = name.to_ascii_lowercase();
                 name.ends_with(".meta4") || name.ends_with(".metalink")
             })
+}
+
+pub(crate) fn is_dash_url(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "file")
+        && url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".mpd"))
 }
 
 async fn fail_task_and_segments(

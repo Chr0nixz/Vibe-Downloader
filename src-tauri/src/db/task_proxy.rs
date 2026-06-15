@@ -157,7 +157,7 @@ pub fn validate_task_proxy_protocol(protocol: &str, proxy_url: &str) -> Result<(
         .scheme()
         .to_string();
     match protocol {
-        "http" | "https" | "hls" => Ok(()),
+        "http" | "https" | "hls" | "dash" | "webdav" | "webdavs" => Ok(()),
         "bt" | "magnet" | "ftp" | "ftps" if scheme == "socks5" => Ok(()),
         "bt" | "magnet" => Err(proxy_protocol_error(
             protocol,

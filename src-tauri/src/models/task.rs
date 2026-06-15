@@ -695,6 +695,26 @@ pub struct FtpDirectoryProbe {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct WebDavDirectoryEntry {
+    pub name: String,
+    pub href: String,
+    pub is_collection: bool,
+    pub size: Option<String>,
+    pub content_type: Option<String>,
+    pub probable_file_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavDirectoryProbe {
+    pub input_url: String,
+    pub directory_url: String,
+    pub entries: Vec<WebDavDirectoryEntry>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct TorrentRuntimeSnapshot {
     pub task_id: String,
     pub metadata_status: String,
@@ -977,9 +997,11 @@ pub enum TaskFailureCategory {
     Http,
     Auth,
     Hls,
+    Dash,
     Metalink,
     Bt,
     Ftp,
+    Webdav,
     Proxy,
     Schedule,
     Other,
@@ -995,9 +1017,11 @@ pub fn failure_category_for_code(code: Option<&str>) -> Option<TaskFailureCatego
         "disk_write_failed" => Some(TaskFailureCategory::DiskWrite),
         "auth_headers_expired" | "auth_headers_unavailable" => Some(TaskFailureCategory::Auth),
         value if value.starts_with("hls_") => Some(TaskFailureCategory::Hls),
+        value if value.starts_with("dash_") => Some(TaskFailureCategory::Dash),
         value if value.starts_with("metalink_") => Some(TaskFailureCategory::Metalink),
         value if value.starts_with("bt_") => Some(TaskFailureCategory::Bt),
         value if value.starts_with("ftp_") => Some(TaskFailureCategory::Ftp),
+        value if value.starts_with("webdav_") => Some(TaskFailureCategory::Webdav),
         value if value.starts_with("proxy_") => Some(TaskFailureCategory::Proxy),
         value if value.starts_with("schedule_") => Some(TaskFailureCategory::Schedule),
         value if value.starts_with("http_") || value == "server_rate_limited" => {

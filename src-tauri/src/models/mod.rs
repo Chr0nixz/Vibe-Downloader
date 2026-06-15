@@ -19,4 +19,5 @@ pub use task::{
     TaskProgressPayload, TaskProxyMode, TaskProxySettings, TaskProxySettingsInput,
     TaskProxySettingsRecord, TaskRecord, TaskSegment, TaskSegmentRecord, TaskStatus,
     TaskUpdatedPayload, TorrentRuntimeSnapshot, TorrentRuntimeSnapshotRecord, TorrentTrackerStatus,
+    WebDavDirectoryEntry, WebDavDirectoryProbe,
 };

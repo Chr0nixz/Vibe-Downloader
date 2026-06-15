@@ -31,6 +31,7 @@ import type {
   FtpDirectoryProbe,
   ProbeTaskPayload,
   ProbedFile,
+  WebDavDirectoryProbe,
 } from "@/generated/bindings";
 import { createLogger } from "@/lib/logger";
 import { errorMessage, parseAppError } from "@/lib/errors";
@@ -40,6 +41,7 @@ import {
   openDirectoryPicker,
   openFilePicker,
   probeFtpDirectory,
+  probeWebdavDirectory,
   probeTask,
 } from "@/lib/tauri";
 
@@ -57,13 +59,29 @@ import type { Task } from "@/types/task";
 interface SelectedLocalFile {
   path: string;
   name: string;
-  kind: "torrent" | "metalink" | "text";
+  kind: "torrent" | "metalink" | "dash" | "text";
+}
+
+type RemoteDirectoryProbe = FtpDirectoryProbe | WebDavDirectoryProbe;
+type RemoteDirectoryEntry = RemoteDirectoryProbe["entries"][number];
+
+function remoteDirectoryEntryKey(entry: RemoteDirectoryEntry): string {
+  return "raw" in entry ? `${entry.name}-${entry.raw}` : `${entry.name}-${entry.href}`;
+}
+
+function remoteDirectoryProtocolLabel(input: string): string {
+  const lower = input.trim().toLowerCase();
+  if (lower.startsWith("webdavs://")) return "WebDAVS";
+  if (lower.startsWith("webdav://")) return "WebDAV";
+  if (lower.startsWith("ftps://")) return "FTPS";
+  return "FTP";
 }
 
 function getLocalFileKind(name: string): SelectedLocalFile["kind"] {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "torrent") return "torrent";
   if (ext === "meta4" || ext === "metalink") return "metalink";
+  if (ext === "mpd") return "dash";
   return "text";
 }
 
@@ -93,6 +111,7 @@ function pathToFileUrl(filePath: string): string {
 function localFileKindLabel(kind: SelectedLocalFile["kind"], t: (key: string) => string): string {
   if (kind === "torrent") return t("newDownload.fileKindTorrent");
   if (kind === "metalink") return t("newDownload.fileKindMetalink");
+  if (kind === "dash") return t("newDownload.fileKindDash");
   return t("newDownload.fileKindText");
 }
 
@@ -149,8 +168,8 @@ export function NewDownloadDialog({
   const [batchInput, setBatchInput] = useState("");
   const [batchResult, setBatchResult] = useState<BatchImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [ftpDirectoryProbe, setFtpDirectoryProbe] = useState<FtpDirectoryProbe | null>(null);
-  const [ftpDirectoryLoading, setFtpDirectoryLoading] = useState(false);
+  const [remoteDirectoryProbe, setRemoteDirectoryProbe] = useState<RemoteDirectoryProbe | null>(null);
+  const [remoteDirectoryLoading, setRemoteDirectoryLoading] = useState(false);
   const [duplicateOverrideAvailable, setDuplicateOverrideAvailable] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -167,17 +186,22 @@ export function NewDownloadDialog({
   const isTorrentProbe = probe?.protocol === "bt" || probe?.protocol === "magnet";
   const isMetalinkProbe = probe?.protocol === "metalink";
   const isHlsProbe = probe?.protocol === "hls";
+  const isDashProbe = probe?.protocol === "dash";
   const isSelectableMultiFileProbe = isTorrentProbe || isMetalinkProbe;
   const isMultiFile = probe != null && probe.files.length > 1;
   const shouldShowManifestProtocolHint =
     isTorrentProbe ||
     isMetalinkProbe ||
+    isHlsProbe ||
+    isDashProbe ||
     selectedLocalFile?.kind === "torrent" ||
     selectedLocalFile?.kind === "metalink" ||
-    /\.(torrent|meta4|metalink)(?:[?#].*)?$/i.test(url.trim());
+    selectedLocalFile?.kind === "dash" ||
+    /\.(torrent|meta4|metalink|m3u8|mpd)(?:[?#].*)?$/i.test(url.trim());
   const fileSelectionRequired =
     isSelectableMultiFileProbe && isMultiFile && selectedFiles.size === 0;
-  const canProbeFtpDirectory = /^(ftp|ftps):\/\//i.test(url.trim()) && url.trim().endsWith("/");
+  const canProbeRemoteDirectory =
+    /^(ftp|ftps|webdav|webdavs):\/\//i.test(url.trim()) && url.trim().endsWith("/");
 
   // Initialize selectedFiles when probe changes
   useEffect(() => {
@@ -196,7 +220,7 @@ export function NewDownloadDialog({
     if (!automatic) setError(null);
     setProbe(null);
     setProbeUrl("");
-    setFtpDirectoryProbe(null);
+    setRemoteDirectoryProbe(null);
     try {
       const nextProbe = await probeTask({ url: nextUrl });
       if (requestId !== probeRequestId.current) return;
@@ -215,15 +239,20 @@ export function NewDownloadDialog({
     }
   }
 
-  async function runFtpDirectoryProbe() {
-    setFtpDirectoryLoading(true);
+  async function runRemoteDirectoryProbe() {
+    const nextUrl = url.trim();
+    setRemoteDirectoryLoading(true);
     setError(null);
     try {
-      setFtpDirectoryProbe(await probeFtpDirectory(url.trim()));
+      setRemoteDirectoryProbe(
+        /^webdavs?:\/\//i.test(nextUrl)
+          ? await probeWebdavDirectory(nextUrl)
+          : await probeFtpDirectory(nextUrl),
+      );
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      setFtpDirectoryLoading(false);
+      setRemoteDirectoryLoading(false);
     }
   }
 
@@ -234,6 +263,7 @@ export function NewDownloadDialog({
     if (!nextUrl) {
       setProbe(null);
       setProbeUrl("");
+      setRemoteDirectoryProbe(null);
       setError(null);
       return;
     }
@@ -261,6 +291,7 @@ export function NewDownloadDialog({
       currentProbe?.protocol === "bt" || currentProbe?.protocol === "magnet";
     const currentIsMetalinkProbe = currentProbe?.protocol === "metalink";
     const currentIsHlsProbe = currentProbe?.protocol === "hls";
+    const currentIsDashProbe = currentProbe?.protocol === "dash";
     const currentIsSelectableMultiFileProbe = currentIsTorrentProbe || currentIsMetalinkProbe;
     const selectedFilePaths =
       currentProbe && currentIsSelectableMultiFileProbe && currentProbe.files.length > 1
@@ -294,7 +325,7 @@ export function NewDownloadDialog({
         saveDir: saveDir.trim() || null,
         fileName: fileName.trim() || null,
         expectedHashSha256:
-          currentIsTorrentProbe || currentIsMetalinkProbe || currentIsHlsProbe
+          currentIsTorrentProbe || currentIsMetalinkProbe || currentIsHlsProbe || currentIsDashProbe
             ? null
             : expectedHashSha256.trim() || null,
         taskSpeedLimitBps: null,
@@ -326,6 +357,7 @@ export function NewDownloadDialog({
     setProbe(null);
     setProbeUrl("");
     setBatchResult(null);
+    setRemoteDirectoryProbe(null);
     setDuplicateOverrideAvailable(false);
     setSubmitStatus(null);
     setAdvancedOpen(false);
@@ -343,7 +375,7 @@ export function NewDownloadDialog({
     setFileLoading(true);
     try {
       const picked = await openFilePicker([
-        { name: "Manifest / Text", extensions: ["torrent", "meta4", "metalink", "txt"] },
+        { name: "Manifest / Text", extensions: ["torrent", "meta4", "metalink", "mpd", "txt"] },
       ]);
       if (!picked) return;
 
@@ -351,11 +383,12 @@ export function NewDownloadDialog({
       const file: SelectedLocalFile = { path: picked.path, name: picked.name, kind };
       setSelectedLocalFile(file);
 
-      if (kind === "torrent" || kind === "metalink") {
+      if (kind === "torrent" || kind === "metalink" || kind === "dash") {
         const fileUrl = pathToFileUrl(picked.path);
         setUrl(fileUrl);
         setProbe(null);
         setProbeUrl("");
+        setRemoteDirectoryProbe(null);
       } else {
         try {
           const text = await readFileAsText(picked.path);
@@ -376,7 +409,11 @@ export function NewDownloadDialog({
 
   function clearSelectedLocalFile() {
     setSelectedLocalFile(null);
-    if (selectedLocalFile?.kind === "torrent" || selectedLocalFile?.kind === "metalink") {
+    if (
+      selectedLocalFile?.kind === "torrent" ||
+      selectedLocalFile?.kind === "metalink" ||
+      selectedLocalFile?.kind === "dash"
+    ) {
       setUrl("");
       setProbe(null);
       setProbeUrl("");
@@ -505,8 +542,12 @@ export function NewDownloadDialog({
                     setUrl(event.target.value);
                     setProbe(null);
                     setProbeUrl("");
-                    setFtpDirectoryProbe(null);
-                    if (selectedLocalFile?.kind === "torrent" || selectedLocalFile?.kind === "metalink") {
+                    setRemoteDirectoryProbe(null);
+                    if (
+                      selectedLocalFile?.kind === "torrent" ||
+                      selectedLocalFile?.kind === "metalink" ||
+                      selectedLocalFile?.kind === "dash"
+                    ) {
                       setSelectedLocalFile(null);
                     }
                   }}
@@ -536,39 +577,45 @@ export function NewDownloadDialog({
               </p>
             ) : null}
 
-            {canProbeFtpDirectory ? (
+            {canProbeRemoteDirectory ? (
               <div className="flex items-center gap-2">
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   className="h-8"
-                  onClick={() => void runFtpDirectoryProbe()}
-                  disabled={ftpDirectoryLoading || submitting}
+                  onClick={() => void runRemoteDirectoryProbe()}
+                  disabled={remoteDirectoryLoading || submitting}
                 >
-                  {ftpDirectoryLoading ? t("newDownload.probing") : t("newDownload.probeDirectory")}
+                  {remoteDirectoryLoading ? t("newDownload.probing") : t("newDownload.probeDirectory")}
                 </Button>
-                <span className="text-[11px] text-text-muted">{t("newDownload.ftpDirectoryHint")}</span>
+                <span className="text-[11px] text-text-muted">{t("newDownload.remoteDirectoryHint")}</span>
               </div>
             ) : null}
 
-            {ftpDirectoryProbe ? (
+            {remoteDirectoryProbe ? (
               <div className="rounded-md border border-border-subtle bg-surface-raised/50 p-3 text-xs">
                 <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="font-medium text-text-secondary">{t("newDownload.ftpDirectory")}</span>
-                  <span className="text-text-muted">{ftpDirectoryProbe.entries.length}</span>
+                  <span className="font-medium text-text-secondary">
+                    {t("newDownload.remoteDirectory", {
+                      protocol: remoteDirectoryProtocolLabel(
+                        remoteDirectoryProbe.directoryUrl || remoteDirectoryProbe.inputUrl,
+                      ),
+                    })}
+                  </span>
+                  <span className="text-text-muted">{remoteDirectoryProbe.entries.length}</span>
                 </div>
                 <div className="max-h-32 space-y-1 overflow-auto pr-1">
-                  {ftpDirectoryProbe.entries.map((entry) => (
+                  {remoteDirectoryProbe.entries.map((entry) => (
                     <button
                       type="button"
-                      key={`${entry.name}-${entry.raw}`}
+                      key={remoteDirectoryEntryKey(entry)}
                       className="flex w-full items-center justify-between gap-3 rounded-sm px-2 py-1 text-left hover:bg-surface-hover disabled:opacity-60"
                       disabled={!entry.probableFileUrl}
                       onClick={() => {
                         if (entry.probableFileUrl) {
                           setUrl(entry.probableFileUrl);
-                          setFtpDirectoryProbe(null);
+                          setRemoteDirectoryProbe(null);
                         }
                       }}
                     >
@@ -579,8 +626,8 @@ export function NewDownloadDialog({
                     </button>
                   ))}
                 </div>
-                {ftpDirectoryProbe.diagnostics.length > 0 ? (
-                  <p className="mt-2 truncate text-text-muted">{ftpDirectoryProbe.diagnostics[0]}</p>
+                {remoteDirectoryProbe.diagnostics.length > 0 ? (
+                  <p className="mt-2 truncate text-text-muted">{remoteDirectoryProbe.diagnostics[0]}</p>
                 ) : null}
               </div>
             ) : null}
@@ -591,6 +638,8 @@ export function NewDownloadDialog({
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent-primary/10 text-accent-primary">
                   {selectedLocalFile.kind === "torrent" || selectedLocalFile.kind === "metalink" ? (
                     <File className="h-5 w-5" />
+                  ) : selectedLocalFile.kind === "dash" ? (
+                    <FileVideo className="h-5 w-5" />
                   ) : (
                     <FileText className="h-5 w-5" />
                   )}
@@ -647,7 +696,11 @@ export function NewDownloadDialog({
                      probe.protocol === "magnet" ? "Magnet" :
                      probe.protocol === "metalink" ? "Metalink" :
                      probe.protocol === "hls" ? "HLS" :
-                     probe.protocol === "ftp" ? "FTP" : "HTTP"}
+                     probe.protocol === "dash" ? "DASH" :
+                     probe.protocol === "ftp" ? "FTP" :
+                     probe.protocol === "ftps" ? "FTPS" :
+                     probe.protocol === "webdav" ? "WebDAV" :
+                     probe.protocol === "webdavs" ? "WebDAVS" : "HTTP"}
                   </span>
                   {probe.capabilities.supportsResume ? (
                     <span>{t("newDownload.probeResumable")}</span>
@@ -797,7 +850,7 @@ export function NewDownloadDialog({
             {/* Advanced section */}
             {advancedOpen ? (
               <div className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3">
-                {!isTorrentProbe && !isMetalinkProbe && !isHlsProbe ? (
+                {!isTorrentProbe && !isMetalinkProbe && !isHlsProbe && !isDashProbe ? (
                   <label className="flex flex-col gap-1 text-xs text-text-muted">
                     {t("newDownload.sha256")}
                     <Input
