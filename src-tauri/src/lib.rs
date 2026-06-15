@@ -215,20 +215,26 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets({
-                    let mut targets = vec![
-                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                    let mut targets = vec![tauri_plugin_log::Target::new(
+                        tauri_plugin_log::TargetKind::LogDir {
                             file_name: Some("vibe".to_string()),
-                        }),
-                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
-                    ];
+                        },
+                    )];
                     if cfg!(debug_assertions) {
+                        targets.push(tauri_plugin_log::Target::new(
+                            tauri_plugin_log::TargetKind::Webview,
+                        ));
                         targets.push(tauri_plugin_log::Target::new(
                             tauri_plugin_log::TargetKind::Stdout,
                         ));
                     }
                     targets
                 })
-                .level(log::LevelFilter::Trace)
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Trace
+                } else {
+                    log::LevelFilter::Info
+                })
                 .build(),
         )
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {

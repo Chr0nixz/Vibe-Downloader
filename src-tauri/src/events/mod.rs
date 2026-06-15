@@ -5,7 +5,9 @@ use crate::{
     browser_realtime::BrowserRealtimeEvent,
     clipboard::ClipboardLinkDetectedPayload,
     db,
-    models::{CompletionActionRequestedPayload, Task, TaskProgressPayload, TaskRecord, TaskUpdatedPayload},
+    models::{
+        CompletionActionRequestedPayload, Task, TaskProgressPayload, TaskRecord, TaskUpdatedPayload,
+    },
 };
 
 pub const EVENT_TASK_PROGRESS: &str = "task-progress";

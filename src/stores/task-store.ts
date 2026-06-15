@@ -21,7 +21,6 @@ import {
   appendSpeedSample,
   pruneSpeedHistory,
   type SpeedHistoryByTaskId,
-  type SpeedSample,
 } from "./task-live-progress";
 
 export type NavFilter =
@@ -44,6 +43,12 @@ export type TaskSortDirection = "asc" | "desc";
 export type FileTypeFilter = "all" | "archive" | "image" | "video" | "document" | "app" | "other";
 export type ResumeFilter = "all" | "resumable" | "single_connection";
 
+export interface TaskStats {
+  active: number;
+  queued: number;
+  totalSpeed: number;
+}
+
 export interface TaskFilters {
   fileType: FileTypeFilter;
   source: string;
@@ -53,6 +58,8 @@ export interface TaskFilters {
 
 interface TaskStore {
   tasks: Task[];
+  taskIndexById: Record<string, number>;
+  taskStats: TaskStats;
   total: number;
   page: number;
   pageSize: number;
@@ -83,6 +90,7 @@ interface TaskStore {
   ) => void;
   upsertTask: (task: Task) => void;
   patchTask: (payload: TaskProgressPayload | unknown) => void;
+  patchTasksBatch: (payloads: Array<TaskProgressPayload | unknown>) => void;
   selectTask: (id: string | null) => void;
   toggleTaskSelected: (id: string) => void;
   setTaskSelected: (id: string, selected: boolean) => void;
@@ -100,8 +108,57 @@ interface TaskStore {
   setError: (error: string | null) => void;
 }
 
-export const useTaskStore = create<TaskStore>((set) => ({
+function indexTasks(tasks: Task[]): Record<string, number> {
+  return Object.fromEntries(tasks.map((task, index) => [task.id, index]));
+}
+
+function calculateTaskStats(tasks: Task[]): TaskStats {
+  let active = 0;
+  let queued = 0;
+  let totalSpeed = 0;
+
+  for (const task of tasks) {
+    if (task.status === "downloading" || task.status === "retrying") {
+      active += 1;
+      totalSpeed += task.speedBps;
+    }
+    if (task.status === "queued") {
+      queued += 1;
+    }
+  }
+
+  return { active, queued, totalSpeed };
+}
+
+function applyProgressToTask(task: Task, payload: TaskProgressPayload): Task {
+  const downloadedBytes = parseByteCount(payload.downloadedBytes);
+  const totalSize = parseByteCount(payload.totalSize);
+  const speedBps = parseByteCount(payload.speedBps);
+
+  return {
+    ...task,
+    downloadedBytes,
+    totalSize,
+    speedBps,
+    connectionCount: payload.connectionCount,
+    status: payload.status,
+    files: (task.files ?? []).map((file) =>
+      file.selected
+        ? {
+            ...file,
+            downloadedBytes,
+            totalSize,
+            status: payload.status,
+          }
+        : file,
+    ),
+  };
+}
+
+export const useTaskStore = create<TaskStore>((set, get) => ({
   tasks: [],
+  taskIndexById: {},
+  taskStats: { active: 0, queued: 0, totalSpeed: 0 },
   total: 0,
   page: 0,
   pageSize: 100,
@@ -135,6 +192,8 @@ export const useTaskStore = create<TaskStore>((set) => ({
       const speedHistoryByTaskId = pruneSpeedHistory(state.speedHistoryByTaskId, ids);
       return {
         tasks,
+        taskIndexById: indexTasks(tasks),
+        taskStats: calculateTaskStats(tasks),
         total: tasks.length,
         page: 0,
         nextCursor: null,
@@ -152,6 +211,8 @@ export const useTaskStore = create<TaskStore>((set) => ({
       const speedHistoryByTaskId = pruneSpeedHistory(state.speedHistoryByTaskId, ids);
       return {
         tasks: nextTasks,
+        taskIndexById: indexTasks(nextTasks),
+        taskStats: calculateTaskStats(nextTasks),
         total,
         page,
         pageSize,
@@ -174,6 +235,8 @@ export const useTaskStore = create<TaskStore>((set) => ({
       );
       return {
         tasks: nextTasks,
+        taskIndexById: indexTasks(nextTasks),
+        taskStats: calculateTaskStats(nextTasks),
         total: knownTotal,
         page: append ? state.page + 1 : 0,
         nextCursor,
@@ -192,51 +255,66 @@ export const useTaskStore = create<TaskStore>((set) => ({
     }),
   upsertTask: (task) =>
     set((state) => {
-      const index = state.tasks.findIndex((entry) => entry.id === task.id);
-      if (index < 0) return { tasks: [task, ...state.tasks] };
+      const index = state.taskIndexById[task.id] ?? -1;
+      if (index < 0) {
+        const tasks = [task, ...state.tasks];
+        return {
+          tasks,
+          taskIndexById: indexTasks(tasks),
+          taskStats: calculateTaskStats(tasks),
+          total: Math.max(state.total, tasks.length),
+        };
+      }
       const tasks = [...state.tasks];
       tasks[index] = {
         ...tasks[index],
         ...task,
         files: (task.files?.length ?? 0) > 0 ? task.files : tasks[index].files,
       };
-      return { tasks };
+      return {
+        tasks,
+        taskIndexById: state.taskIndexById,
+        taskStats: calculateTaskStats(tasks),
+      };
     }),
-  patchTask: (raw) => {
-    const payload = normalizeTaskProgressPayload(raw);
-    if (!payload) return;
-    const speedBps = parseByteCount(payload.speedBps);
-    const sample: SpeedSample = { at: Date.now(), speedBps };
+  patchTask: (raw) => get().patchTasksBatch([raw]),
+  patchTasksBatch: (rawPayloads) => {
+    const latestByTaskId = new Map<string, TaskProgressPayload>();
+    for (const raw of rawPayloads) {
+      const payload = normalizeTaskProgressPayload(raw);
+      if (payload) latestByTaskId.set(payload.taskId, payload);
+    }
+    if (latestByTaskId.size === 0) return;
 
-    set((state) => ({
-      tasks: state.tasks.map((task) =>
-        task.id === payload.taskId
-          ? {
-              ...task,
-              downloadedBytes: parseByteCount(payload.downloadedBytes),
-              totalSize: parseByteCount(payload.totalSize),
-              speedBps,
-              connectionCount: payload.connectionCount,
-              status: payload.status,
-              files: (task.files ?? []).map((file) =>
-                file.selected
-                  ? {
-                      ...file,
-                      downloadedBytes: parseByteCount(payload.downloadedBytes),
-                      totalSize: parseByteCount(payload.totalSize),
-                      status: payload.status,
-                    }
-                  : file,
-              ),
-            }
-          : task,
-      ),
-      speedHistoryByTaskId: appendSpeedSample(
-        state.speedHistoryByTaskId,
-        payload.taskId,
-        sample,
-      ),
-    }));
+    const now = Date.now();
+    set((state) => {
+      let tasks = state.tasks;
+      let speedHistoryByTaskId = state.speedHistoryByTaskId;
+      let changed = false;
+
+      for (const payload of latestByTaskId.values()) {
+        const index = state.taskIndexById[payload.taskId];
+        if (index === undefined) continue;
+        if (!changed) {
+          tasks = [...state.tasks];
+          changed = true;
+        }
+        tasks[index] = applyProgressToTask(tasks[index], payload);
+        speedHistoryByTaskId = appendSpeedSample(
+          speedHistoryByTaskId,
+          payload.taskId,
+          { at: now, speedBps: parseByteCount(payload.speedBps) },
+        );
+      }
+
+      if (!changed) return {};
+      return {
+        tasks,
+        taskIndexById: state.taskIndexById,
+        taskStats: calculateTaskStats(tasks),
+        speedHistoryByTaskId,
+      };
+    });
   },
   selectTask: (id) => set({ selectedId: id }),
   toggleTaskSelected: (id) =>

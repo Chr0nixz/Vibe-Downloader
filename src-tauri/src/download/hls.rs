@@ -22,9 +22,8 @@ use tokio::{fs, io::AsyncWriteExt, process::Command, task::JoinSet};
 use uuid::Uuid;
 
 use super::{
-    engine::EngineFuture,
-    http::build_client,
-    DownloadContext, DownloadEngine, ProbeOutput, ProbeRequest,
+    engine::EngineFuture, http::build_client, DownloadContext, DownloadEngine, ProbeOutput,
+    ProbeRequest,
 };
 use crate::{
     db,
@@ -246,6 +245,7 @@ impl DownloadEngine for HlsEngine {
                 last_modified: None,
                 content_type: Some(HLS_CONTENT_TYPE.to_string()),
                 hls_variants: plan.variants.clone(),
+                metalink: None,
             })
         })
     }
@@ -274,9 +274,10 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         .as_deref()
         .map(PathBuf::from)
         .ok_or_else(|| "HLS task is missing a staging path.".to_string())?;
-    fs::create_dir_all(&staging_dir)
-        .await
-        .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not create HLS staging folder: {e}")).command_error())?;
+    fs::create_dir_all(&staging_dir).await.map_err(|e| {
+        AppErrorPayload::disk_write_failed(format!("Could not create HLS staging folder: {e}"))
+            .command_error()
+    })?;
 
     let plan = engine.probe_hls(&task.url, &request_headers).await?;
     db::upsert_hls_task(
@@ -295,7 +296,13 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         },
     )
     .await?;
-    db::insert_task_event(&pool, &task.id, "hls_playlist_resolved", Some(&plan.media_url)).await?;
+    db::insert_task_event(
+        &pool,
+        &task.id,
+        "hls_playlist_resolved",
+        Some(&plan.media_url),
+    )
+    .await?;
 
     let mut downloaded_total = existing_hls_downloaded_bytes(&pool, &task.id).await?;
     let mut seen = existing_hls_sequences(&pool, &task.id).await?;
@@ -390,7 +397,8 @@ async fn persist_hls_segment_plans(
             .map(|map| {
                 let uri = resolve_url(media_url, &map.uri)?;
                 Ok::<_, String>(ResolvedHlsInitMap {
-                    local_path: staging_dir.join(init_map_local_name(&uri, map.byte_range.as_ref())),
+                    local_path: staging_dir
+                        .join(init_map_local_name(&uri, map.byte_range.as_ref())),
                     uri,
                     byte_range: map.byte_range.clone(),
                 })
@@ -482,15 +490,8 @@ async fn download_hls_segments(
             let speed_limiter = speed_limiter.clone();
             let cancel = cancel.clone();
             workers.spawn(async move {
-                download_hls_segment(
-                    &pool,
-                    &client,
-                    request_headers,
-                    speed_limiter,
-                    cancel,
-                    plan,
-                )
-                .await
+                download_hls_segment(&pool, &client, request_headers, speed_limiter, cancel, plan)
+                    .await
             });
         }
 
@@ -594,7 +595,10 @@ async fn download_hls_segment(
                     Some(&error),
                 )
                 .await;
-                tokio::time::sleep(Duration::from_millis(200 * u64::try_from(retry_count).unwrap_or(1))).await;
+                tokio::time::sleep(Duration::from_millis(
+                    200 * u64::try_from(retry_count).unwrap_or(1),
+                ))
+                .await;
             }
             Err(error) => {
                 let message = last_error.unwrap_or(error);
@@ -625,19 +629,12 @@ async fn download_hls_segment_once(
     cancel: &Arc<AtomicBool>,
     plan: &SegmentDownloadPlan,
 ) -> Result<i64, String> {
-    db::update_hls_segment_status(
-        pool,
-        &plan.id,
-        0,
-        SegmentStatus::Downloading,
-        0,
-        None,
-    )
-    .await?;
+    db::update_hls_segment_status(pool, &plan.id, 0, SegmentStatus::Downloading, 0, None).await?;
     if let Some(parent) = plan.local_path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not create HLS segment folder: {e}")).command_error())?;
+        fs::create_dir_all(parent).await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not create HLS segment folder: {e}"))
+                .command_error()
+        })?;
     }
     if let Some(init_map) = &plan.init_map {
         ensure_hls_init_map(client, request_headers, speed_limiter, cancel, init_map).await?;
@@ -677,15 +674,18 @@ async fn download_hls_segment_once(
         data
     };
     let bytes = i64::try_from(data.len()).unwrap_or(i64::MAX);
-    let mut file = fs::File::create(&plan.local_path)
-        .await
-        .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not create HLS segment file: {e}")).command_error())?;
-    file.write_all(&data)
-        .await
-        .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not write HLS segment: {e}")).command_error())?;
-    file.flush()
-        .await
-        .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not flush HLS segment: {e}")).command_error())?;
+    let mut file = fs::File::create(&plan.local_path).await.map_err(|e| {
+        AppErrorPayload::disk_write_failed(format!("Could not create HLS segment file: {e}"))
+            .command_error()
+    })?;
+    file.write_all(&data).await.map_err(|e| {
+        AppErrorPayload::disk_write_failed(format!("Could not write HLS segment: {e}"))
+            .command_error()
+    })?;
+    file.flush().await.map_err(|e| {
+        AppErrorPayload::disk_write_failed(format!("Could not flush HLS segment: {e}"))
+            .command_error()
+    })?;
     Ok(bytes)
 }
 
@@ -711,19 +711,23 @@ async fn ensure_hls_init_map(
     }
     speed_limiter.throttle(data.len()).await;
     if let Some(parent) = init_map.local_path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not create HLS init map folder: {e}")).command_error())?;
+        fs::create_dir_all(parent).await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not create HLS init map folder: {e}"))
+                .command_error()
+        })?;
     }
-    let mut file = fs::File::create(&init_map.local_path)
-        .await
-        .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not create HLS init map: {e}")).command_error())?;
-    file.write_all(&data)
-        .await
-        .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not write HLS init map: {e}")).command_error())?;
-    file.flush()
-        .await
-        .map_err(|e| AppErrorPayload::disk_write_failed(format!("Could not flush HLS init map: {e}")).command_error())
+    let mut file = fs::File::create(&init_map.local_path).await.map_err(|e| {
+        AppErrorPayload::disk_write_failed(format!("Could not create HLS init map: {e}"))
+            .command_error()
+    })?;
+    file.write_all(&data).await.map_err(|e| {
+        AppErrorPayload::disk_write_failed(format!("Could not write HLS init map: {e}"))
+            .command_error()
+    })?;
+    file.flush().await.map_err(|e| {
+        AppErrorPayload::disk_write_failed(format!("Could not flush HLS init map: {e}"))
+            .command_error()
+    })
 }
 
 async fn decrypt_hls_segment(
@@ -827,7 +831,9 @@ async fn write_local_hls_playlist(
         .max()
         .unwrap_or(1)
         .max(1);
-    text.push_str(&format!("#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n"));
+    text.push_str(&format!(
+        "#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n"
+    ));
     if let Some(first) = completed.first() {
         if first.discontinuity_sequence > 0 {
             text.push_str(&format!(
@@ -1192,7 +1198,11 @@ fn parse_media_playlist(body: &str) -> Result<MediaPlaylist, String> {
             continue;
         }
         if let Some(value) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
-            target_duration = value.trim().parse::<i64>().unwrap_or(target_duration).max(1);
+            target_duration = value
+                .trim()
+                .parse::<i64>()
+                .unwrap_or(target_duration)
+                .max(1);
         } else if let Some(value) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
             media_sequence = value.trim().parse::<i64>().unwrap_or(0).max(0);
         } else if let Some(value) = line.strip_prefix("#EXT-X-PLAYLIST-TYPE:") {
@@ -1312,7 +1322,9 @@ fn parse_init_map(value: &str) -> Result<HlsInitMap, String> {
     })?;
     Ok(HlsInitMap {
         uri,
-        byte_range: attrs.get("BYTERANGE").and_then(|value| parse_byte_range(value)),
+        byte_range: attrs
+            .get("BYTERANGE")
+            .and_then(|value| parse_byte_range(value)),
     })
 }
 
@@ -1353,9 +1365,10 @@ fn parse_extinf_duration(value: &str) -> Option<i64> {
 }
 
 fn parse_byte_range(value: &str) -> Option<ByteRange> {
-    let (length, start) = value.trim().split_once('@').map_or((value.trim(), None), |(l, s)| {
-        (l.trim(), Some(s.trim()))
-    });
+    let (length, start) = value
+        .trim()
+        .split_once('@')
+        .map_or((value.trim(), None), |(l, s)| (l.trim(), Some(s.trim())));
     Some(ByteRange {
         length: length.parse::<i64>().ok()?.max(0),
         start: start
@@ -1391,18 +1404,27 @@ fn hls_output_name(url: &str) -> String {
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| format!("hls-{}", chrono::Utc::now().timestamp()));
     let path = Path::new(&name);
-    let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or(&name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&name);
     format!("{stem}.mp4")
 }
 
 fn byte_range_header(range: &ByteRange) -> String {
     let start = range.start.unwrap_or(0);
-    let end = start.saturating_add(range.length).saturating_sub(1).max(start);
+    let end = start
+        .saturating_add(range.length)
+        .saturating_sub(1)
+        .max(start);
     format!("bytes={start}-{end}")
 }
 
 fn parse_hls_iv(value: &str) -> Result<[u8; 16], String> {
-    let value = value.trim().trim_start_matches("0x").trim_start_matches("0X");
+    let value = value
+        .trim()
+        .trim_start_matches("0x")
+        .trim_start_matches("0X");
     if value.len() > 32 || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return Err("HLS AES-128 IV is invalid.".to_string());
     }
@@ -1504,10 +1526,34 @@ mod tests {
             "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-BYTERANGE:100@50\n#EXTINF:5,\nfile.ts\n#EXT-X-BYTERANGE:75\n#EXTINF:5,\nfile.ts\n",
         )
         .expect("media");
-        assert_eq!(media.segments[0].byte_range.as_ref().map(|range| range.start), Some(Some(50)));
-        assert_eq!(media.segments[0].byte_range.as_ref().map(|range| range.length), Some(100));
-        assert_eq!(media.segments[1].byte_range.as_ref().map(|range| range.start), Some(Some(150)));
-        assert_eq!(media.segments[1].byte_range.as_ref().map(|range| range.length), Some(75));
+        assert_eq!(
+            media.segments[0]
+                .byte_range
+                .as_ref()
+                .map(|range| range.start),
+            Some(Some(50))
+        );
+        assert_eq!(
+            media.segments[0]
+                .byte_range
+                .as_ref()
+                .map(|range| range.length),
+            Some(100)
+        );
+        assert_eq!(
+            media.segments[1]
+                .byte_range
+                .as_ref()
+                .map(|range| range.start),
+            Some(Some(150))
+        );
+        assert_eq!(
+            media.segments[1]
+                .byte_range
+                .as_ref()
+                .map(|range| range.length),
+            Some(75)
+        );
     }
 
     #[test]

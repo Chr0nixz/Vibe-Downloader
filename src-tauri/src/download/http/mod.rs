@@ -274,6 +274,7 @@ impl DownloadEngine for HttpEngine {
                 last_modified: probe.last_modified,
                 content_type: probe.content_type,
                 hls_variants: Vec::new(),
+                metalink: None,
             })
         })
     }

@@ -51,6 +51,8 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2.3.3"
 tauri-plugin-autostart = "2.5.1"
 sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
 zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 axum = { version = "0.8.7", features = ["ws"] }
 futures-util = "0.3"
@@ -59,5 +61,6 @@ chacha20poly1305 = { version = "0.10", features = ["std"] }
 keyring = "3"
 librqbit = { version = "9.0.0-rc.0", default-features = false, features = ["rust-tls"] }
 magnet-url = "3.0.0"
+quick-xml = "0.39"
 
 [dev-dependencies]

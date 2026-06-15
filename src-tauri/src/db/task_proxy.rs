@@ -22,14 +22,16 @@ pub async fn get_task_proxy_settings(
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(row.map(row_to_task_proxy_settings).unwrap_or_else(|| TaskProxySettings {
-        task_id: task_id.to_string(),
-        mode: TaskProxyMode::Inherit,
-        proxy_url: String::new(),
-        proxy_username: String::new(),
-        proxy_password_saved: false,
-        no_proxy: String::new(),
-    }))
+    Ok(row
+        .map(row_to_task_proxy_settings)
+        .unwrap_or_else(|| TaskProxySettings {
+            task_id: task_id.to_string(),
+            mode: TaskProxyMode::Inherit,
+            proxy_url: String::new(),
+            proxy_username: String::new(),
+            proxy_password_saved: false,
+            no_proxy: String::new(),
+        }))
 }
 
 pub async fn upsert_task_proxy_settings(
@@ -219,7 +221,9 @@ fn row_to_task_proxy_settings(row: sqlx::sqlite::SqliteRow) -> TaskProxySettings
     TaskProxySettings {
         task_id: row.get("task_id"),
         mode: TaskProxyMode::from_db_str(row.get::<String, _>("mode").as_str()),
-        proxy_url: row.get::<Option<String>, _>("proxy_url").unwrap_or_default(),
+        proxy_url: row
+            .get::<Option<String>, _>("proxy_url")
+            .unwrap_or_default(),
         proxy_username: row
             .get::<Option<String>, _>("proxy_username")
             .unwrap_or_default(),

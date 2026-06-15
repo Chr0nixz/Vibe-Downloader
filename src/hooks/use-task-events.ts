@@ -54,6 +54,9 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
     let unlistenTaskUpdated: (() => void) | undefined;
     let unlistenQueue: (() => void) | undefined;
     let queueRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let progressFrame: number | undefined;
+    let progressFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+    let pendingProgressPayloads: unknown[] = [];
 
     function notifyTaskStatusChanges(previous: Task[], next: Task[]) {
       if (!notify) return;
@@ -93,12 +96,57 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
       }
     }
 
+    function flushProgressBatch() {
+      if (progressFrame !== undefined) {
+        cancelAnimationFrame(progressFrame);
+        progressFrame = undefined;
+      }
+      if (progressFallbackTimer) {
+        clearTimeout(progressFallbackTimer);
+        progressFallbackTimer = undefined;
+      }
+      if (pendingProgressPayloads.length === 0) return;
+
+      const payloads = pendingProgressPayloads;
+      pendingProgressPayloads = [];
+      const previous = useTaskStore.getState().tasks;
+      useTaskStore.getState().patchTasksBatch(payloads);
+      notifyTaskStatusChanges(previous, useTaskStore.getState().tasks);
+    }
+
+    function scheduleProgressFlush() {
+      if (progressFrame !== undefined || progressFallbackTimer) return;
+
+      if (typeof requestAnimationFrame === "function") {
+        progressFrame = requestAnimationFrame(() => {
+          progressFrame = undefined;
+          if (progressFallbackTimer) {
+            clearTimeout(progressFallbackTimer);
+            progressFallbackTimer = undefined;
+          }
+          flushProgressBatch();
+        });
+        progressFallbackTimer = setTimeout(() => {
+          if (progressFrame !== undefined) {
+            cancelAnimationFrame(progressFrame);
+            progressFrame = undefined;
+          }
+          flushProgressBatch();
+        }, 80);
+        return;
+      }
+
+      progressFallbackTimer = setTimeout(() => {
+        progressFallbackTimer = undefined;
+        flushProgressBatch();
+      }, 16);
+    }
+
     void (async () => {
       unlistenProgress = await onTaskProgress((payload) => {
         if (!cancelled) {
-          const previous = useTaskStore.getState().tasks;
-          useTaskStore.getState().patchTask(payload);
-          notifyTaskStatusChanges(previous, useTaskStore.getState().tasks);
+          pendingProgressPayloads.push(payload);
+          scheduleProgressFlush();
         }
       });
       if (cancelled) {
@@ -108,6 +156,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
 
       unlistenTaskUpdated = await onTaskUpdated((task) => {
         if (cancelled) return;
+        flushProgressBatch();
         const previous = useTaskStore.getState().tasks;
         useTaskStore.getState().upsertTask(task);
         notifyTaskStatusChanges(previous, useTaskStore.getState().tasks);
@@ -119,6 +168,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
 
       unlistenQueue = await onQueueChanged(async () => {
         if (cancelled) return;
+        flushProgressBatch();
         if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
         queueRefreshTimer = setTimeout(() => {
           void (async () => {
@@ -149,6 +199,8 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
     return () => {
       cancelled = true;
       if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
+      if (progressFrame !== undefined) cancelAnimationFrame(progressFrame);
+      if (progressFallbackTimer) clearTimeout(progressFallbackTimer);
       unlistenProgress?.();
       unlistenTaskUpdated?.();
       unlistenQueue?.();

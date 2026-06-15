@@ -131,8 +131,12 @@ export function AppShell() {
   const [completionActionRequest, setCompletionActionRequest] =
     useState<CompletionActionRequestedPayload | null>(null);
 
-  const tasks = useTaskStore((s) => s.tasks);
   const selectedId = useTaskStore((s) => s.selectedId);
+  const selected = useTaskStore((s) => {
+    if (!s.selectedId) return null;
+    const index = s.taskIndexById[s.selectedId];
+    return index === undefined ? null : (s.tasks[index] ?? null);
+  });
   const nav = useTaskStore((s) => s.nav);
   const detailOpen = useTaskStore((s) => s.detailOpen);
   const setTaskCursorPage = useTaskStore((s) => s.setTaskCursorPage);
@@ -181,7 +185,6 @@ export function AppShell() {
     return () => clearTimeout(timer);
   }, [dismissSplash]);
 
-  const selected = tasks.find((t) => t.id === selectedId) ?? null;
   const taskSurfaceActive = nav !== "settings";
 
   const refreshTasks = useCallback(async (selectId?: string) => {

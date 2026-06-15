@@ -117,6 +117,28 @@ pub async fn update_task_file_selection(
     Ok(())
 }
 
+pub async fn update_task_file_progress(
+    pool: &SqlitePool,
+    file_id: &str,
+    downloaded_bytes: i64,
+    status: crate::models::TaskStatus,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE task_files
+        SET downloaded_bytes = ?, status = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(downloaded_bytes.max(0))
+    .bind(status.as_str())
+    .bind(file_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn row_to_task_file(row: &sqlx::sqlite::SqliteRow) -> Result<TaskFileRecord, String> {
     Ok(TaskFileRecord {
         id: row.get("id"),

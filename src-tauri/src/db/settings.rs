@@ -108,14 +108,16 @@ pub async fn get_settings(
     let proxy_password_saved = get_bool_setting(pool, SETTING_PROXY_PASSWORD_SAVED, false).await?;
     let schedule_download_window_enabled =
         get_bool_setting(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED, false).await?;
-    let schedule_download_window_start = get_setting_value(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_START)
-        .await?
-        .and_then(|value| normalize_local_time(&value))
-        .unwrap_or_else(|| "00:00".to_string());
-    let schedule_download_window_end = get_setting_value(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_END)
-        .await?
-        .and_then(|value| normalize_local_time(&value))
-        .unwrap_or_else(|| "06:00".to_string());
+    let schedule_download_window_start =
+        get_setting_value(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_START)
+            .await?
+            .and_then(|value| normalize_local_time(&value))
+            .unwrap_or_else(|| "00:00".to_string());
+    let schedule_download_window_end =
+        get_setting_value(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_END)
+            .await?
+            .and_then(|value| normalize_local_time(&value))
+            .unwrap_or_else(|| "06:00".to_string());
     let schedule_speed_limit_window_enabled =
         get_bool_setting(pool, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED, false).await?;
     let schedule_speed_limit_window_start =
@@ -135,11 +137,12 @@ pub async fn get_settings(
         .await?
         .map(|value| CompletionAction::from_db_str(&value))
         .unwrap_or(CompletionAction::None);
-    let completion_countdown_seconds = get_setting_value(pool, SETTING_COMPLETION_COUNTDOWN_SECONDS)
-        .await?
-        .and_then(|value| value.parse::<i32>().ok())
-        .unwrap_or(30)
-        .clamp(5, 300);
+    let completion_countdown_seconds =
+        get_setting_value(pool, SETTING_COMPLETION_COUNTDOWN_SECONDS)
+            .await?
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(30)
+            .clamp(5, 300);
 
     Ok(AppSettings {
         max_active_tasks,

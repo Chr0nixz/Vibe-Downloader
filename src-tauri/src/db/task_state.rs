@@ -6,6 +6,14 @@ use super::task_records::{error_state_from_message, recovery_actions_json};
 use super::{delete_task_request_headers, insert_task_event};
 
 pub async fn clear_tasks(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query("DELETE FROM metalink_resources")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM metalink_tasks")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM hls_segments")
         .execute(pool)
         .await
@@ -123,6 +131,37 @@ pub async fn update_task_health_summary(
     .await
     .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+pub async fn update_task_runtime_progress(
+    pool: &SqlitePool,
+    task_id: &str,
+    downloaded_bytes: i64,
+    speed_bps: i64,
+    connection_count: i32,
+    status: TaskStatus,
+    health_summary: Option<&str>,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET downloaded_bytes = ?, speed_bps = ?, connection_count = ?,
+            status = ?, health_summary = COALESCE(?, health_summary), updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(downloaded_bytes.max(0))
+    .bind(speed_bps.max(0))
+    .bind(connection_count.max(0))
+    .bind(status.as_str())
+    .bind(health_summary)
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

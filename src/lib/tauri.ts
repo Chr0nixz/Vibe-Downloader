@@ -322,7 +322,7 @@ export async function openFilePicker(
     directory: false,
     multiple: false,
     filters: filters ?? [
-      { name: "Download files", extensions: ["torrent", "txt"] },
+      { name: "Download files", extensions: ["torrent", "meta4", "metalink", "txt"] },
     ],
   });
   if (typeof selected !== "string") {

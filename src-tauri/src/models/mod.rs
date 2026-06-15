@@ -10,12 +10,13 @@ pub use browser::{
 };
 pub use task::{
     AppAccentColor, AppErrorPayload, AppFontFamily, AppSettings, BatchImportItem,
-    BatchImportResult, ChecksumAlgorithm, CompletionAction, CompletionActionRequestedPayload, EngineCapabilities,
-    FtpDirectoryEntry, FtpDirectoryProbe, HashVerificationState, HashVerificationStatus,
-    HlsVariant, ProbeTaskPayload, ProbedFile, RecoveryAction, RequestDiagnostic,
-    RequestDiagnosticRecord, SegmentStatus, SegmentSummary, Task, TaskChecksum, TaskChecksumRecord, TaskEvent, TaskFailureCategory, TaskFile,
-    TaskFileRecord, TaskKind, TaskPriority, TaskProgressPayload, TaskProxyMode,
-    TaskProxySettings, TaskProxySettingsInput, TaskProxySettingsRecord, TaskRecord, TaskSegment,
-    TaskSegmentRecord, TaskStatus, TaskUpdatedPayload, TorrentRuntimeSnapshot,
-    TorrentRuntimeSnapshotRecord, TorrentTrackerStatus,
+    BatchImportResult, ChecksumAlgorithm, CompletionAction, CompletionActionRequestedPayload,
+    EngineCapabilities, FtpDirectoryEntry, FtpDirectoryProbe, HashVerificationState,
+    HashVerificationStatus, HlsVariant, MetalinkChecksum, MetalinkFile, MetalinkProbeData,
+    MetalinkResource, ProbeTaskPayload, ProbedFile, RecoveryAction, RequestDiagnostic,
+    RequestDiagnosticRecord, SegmentStatus, SegmentSummary, Task, TaskChecksum, TaskChecksumRecord,
+    TaskEvent, TaskFailureCategory, TaskFile, TaskFileRecord, TaskKind, TaskPriority,
+    TaskProgressPayload, TaskProxyMode, TaskProxySettings, TaskProxySettingsInput,
+    TaskProxySettingsRecord, TaskRecord, TaskSegment, TaskSegmentRecord, TaskStatus,
+    TaskUpdatedPayload, TorrentRuntimeSnapshot, TorrentRuntimeSnapshotRecord, TorrentTrackerStatus,
 };

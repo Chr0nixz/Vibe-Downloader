@@ -7,8 +7,8 @@ use tauri_app_lib::{
     download::ProbeResult,
     models::{
         AppAccentColor, AppFontFamily, AppSettings, BrowserKind, CompletionAction,
-        HashVerificationStatus,
-        SegmentStatus, Task, TaskKind, TaskPriority, TaskRecord, TaskStatus, TaskUpdatedPayload,
+        HashVerificationStatus, SegmentStatus, Task, TaskKind, TaskPriority, TaskRecord,
+        TaskStatus, TaskUpdatedPayload,
     },
 };
 

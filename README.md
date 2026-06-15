@@ -9,6 +9,9 @@ Protocol hardening note: FTP/FTPS credential-bearing URLs are sanitized into
 task records and encrypted task credentials; BitTorrent selected-file tasks
 apply file selection before starting the runtime torrent; HTTP request
 diagnostics include Range and If-Range data for resume troubleshooting.
+Metalink `.meta4`/`.metalink` manifests are parsed into manifest tasks with
+multi-file selection, HTTP/HTTPS mirror fallback, per-file progress, and
+manifest-provided MD5/SHA-1/SHA-256/SHA-512 verification.
 
 Scheduling/proxy note: queued tasks can opt into a global download window,
 timed global throttling can apply a stricter limit, and completion actions

@@ -148,11 +148,12 @@ fn normalize_download_url(raw: &str) -> Option<String> {
 
     match parsed.scheme() {
         "http" | "https" | "ftp" | "ftps" | "magnet" => Some(parsed.to_string()),
-        "file" if is_torrent_path(parsed.path()) => Some(parsed.to_string()),
+        "file" if is_local_manifest_path(parsed.path()) => Some(parsed.to_string()),
         _ => None,
     }
 }
 
-fn is_torrent_path(path: &str) -> bool {
-    path.to_ascii_lowercase().ends_with(".torrent")
+fn is_local_manifest_path(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    path.ends_with(".torrent") || path.ends_with(".meta4") || path.ends_with(".metalink")
 }

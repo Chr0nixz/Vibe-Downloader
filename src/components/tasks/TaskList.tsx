@@ -199,13 +199,14 @@ export function TaskList({
     virtualizer.scrollToOffset(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters, nav, search, sortDirection, sortKey]);
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedTasks = useMemo(
-    () => tasks.filter((task) => selectedIds.includes(task.id)),
-    [selectedIds, tasks],
+    () => tasks.filter((task) => selectedIdSet.has(task.id)),
+    [selectedIdSet, tasks],
   );
   const visibleSelectedCount = useMemo(
-    () => filtered.filter((task) => selectedIds.includes(task.id)).length,
-    [filtered, selectedIds],
+    () => filtered.filter((task) => selectedIdSet.has(task.id)).length,
+    [filtered, selectedIdSet],
   );
   const allVisibleSelected =
     filtered.length > 0 && visibleSelectedCount === filtered.length;
@@ -569,7 +570,7 @@ export function TaskList({
                     <TaskRow
                       task={task}
                       selected={task.id === selectedId}
-                      multiSelected={selectedIds.includes(task.id)}
+                      multiSelected={selectedIdSet.has(task.id)}
                       isFirstFocusable={!selectedId && virtualRow.index === 0}
                       reduceMotion={reduceMotion}
                       position={virtualRow.index + 1}

@@ -13,8 +13,8 @@ use crate::{
     logging::sanitize_url,
     models::{
         task::now_iso, AppErrorPayload, BatchImportItem, BatchImportResult, BrowserKind,
-        ChecksumAlgorithm, HashVerificationStatus, ProbeTaskPayload, Task, TaskChecksumRecord,
-        TaskPriority, TaskRecord, TaskStatus,
+        ChecksumAlgorithm, HashVerificationStatus, MetalinkProbeData, ProbeTaskPayload, Task,
+        TaskChecksumRecord, TaskFileRecord, TaskPriority, TaskRecord, TaskStatus,
     },
     AppState,
 };
@@ -24,7 +24,7 @@ use crate::commands::task_file_planning::{
     task_file_records_from_probe, unique_final_path,
 };
 
-use super::{is_bt_protocol, is_torrent_url, schedule_queued_tasks, task_payload};
+use super::{is_bt_protocol, is_metalink_url, is_torrent_url, schedule_queued_tasks, task_payload};
 
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -137,6 +137,9 @@ fn probe_output_from_snapshot(url: &str, snapshot: &ProbeTaskPayload) -> Option<
     if chrono::Utc::now().signed_duration_since(probed_at) > chrono::Duration::minutes(5) {
         return None;
     }
+    if snapshot.protocol == "metalink" {
+        return None;
+    }
 
     Some(ProbeOutput {
         protocol: snapshot.protocol.clone(),
@@ -151,6 +154,7 @@ fn probe_output_from_snapshot(url: &str, snapshot: &ProbeTaskPayload) -> Option<
         last_modified: snapshot.last_modified.clone(),
         content_type: snapshot.content_type.clone(),
         hls_variants: snapshot.hls_variants.clone(),
+        metalink: None,
     })
 }
 
@@ -159,7 +163,7 @@ fn selected_relative_paths_for_probe(
     protocol: &str,
     files: &[crate::models::ProbedFile],
 ) -> Result<Option<HashSet<String>>, String> {
-    if !is_bt_protocol(protocol) || files.len() <= 1 {
+    if !(is_bt_protocol(protocol) || is_metalink_protocol(protocol)) || files.len() <= 1 {
         return Ok(None);
     }
 
@@ -167,7 +171,7 @@ fn selected_relative_paths_for_probe(
         return Ok(None);
     };
     if input.is_empty() {
-        return Err("Select at least one torrent file to download.".to_string());
+        return Err("Select at least one file to download.".to_string());
     }
 
     let available = files
@@ -180,12 +184,12 @@ fn selected_relative_paths_for_probe(
         .collect::<HashSet<_>>();
 
     if selected.is_empty() {
-        return Err("Select at least one torrent file to download.".to_string());
+        return Err("Select at least one file to download.".to_string());
     }
 
     if let Some(unknown) = selected.iter().find(|path| !available.contains(*path)) {
         return Err(format!(
-            "Selected torrent file is not in the probe result: {unknown}"
+            "Selected file is not in the probe result: {unknown}"
         ));
     }
 
@@ -296,7 +300,8 @@ pub async fn import_urls(
         let parsed = match Url::parse(raw_url) {
             Ok(url)
                 if matches!(url.scheme(), "http" | "https" | "ftp" | "ftps" | "magnet")
-                    || is_torrent_url(&url) =>
+                    || is_torrent_url(&url)
+                    || is_metalink_url(&url) =>
             {
                 url
             }
@@ -312,7 +317,7 @@ pub async fn import_urls(
                     content_type: None,
                     supports_resume: false,
                     error_message: Some(
-                        "Only HTTP, HTTPS, FTP, FTPS, magnet links, and .torrent URLs are supported."
+                        "Only HTTP, HTTPS, FTP, FTPS, magnet links, .torrent URLs, and Metalink manifests are supported."
                             .to_string(),
                     ),
                     task: None,
@@ -538,7 +543,10 @@ pub(crate) async fn create_task_with_state_and_headers(
         .to_string();
     let temp_path = PathBuf::from(format!("{}.vibe-downloading", final_path.display()));
     let now = now_iso();
-    let expected_hash_sha256 = if is_bt_protocol(&probe.protocol) || probe.protocol == "hls" {
+    let expected_hash_sha256 = if is_bt_protocol(&probe.protocol)
+        || probe.protocol == "hls"
+        || is_metalink_protocol(&probe.protocol)
+    {
         None
     } else {
         normalize_sha256(input.expected_hash_sha256.as_deref())?
@@ -607,6 +615,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         let checksum = TaskChecksumRecord {
             id: Uuid::new_v4().to_string(),
             task_id: record.id.clone(),
+            file_id: None,
             algorithm: ChecksumAlgorithm::Sha256,
             expected_hash,
             actual_hash: None,
@@ -645,7 +654,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         .await?;
     }
     db::insert_task_event(&state.pool, &record.id, "created", None).await?;
-    for file_record in task_file_records_from_probe(
+    let file_records = task_file_records_from_probe(
         &record,
         &probe_files,
         &save_dir,
@@ -653,8 +662,12 @@ pub(crate) async fn create_task_with_state_and_headers(
         &temp_path,
         &file_name,
         selected_relative_paths.as_ref(),
-    )? {
+    )?;
+    for file_record in &file_records {
         db::insert_task_file_record(&state.pool, &file_record).await?;
+    }
+    if let Some(metalink) = probe.metalink.as_ref() {
+        persist_metalink_probe(&state.pool, &record, &file_records, metalink).await?;
     }
     db::ensure_task_segments_with_settings(&state.pool, &record, &settings).await?;
     if is_bt_protocol(&record.protocol) {
@@ -725,6 +738,80 @@ pub(crate) async fn create_task_with_state_and_headers(
     Ok(task)
 }
 
+async fn persist_metalink_probe(
+    pool: &sqlx::SqlitePool,
+    task: &TaskRecord,
+    file_records: &[TaskFileRecord],
+    metalink: &MetalinkProbeData,
+) -> Result<(), String> {
+    db::upsert_metalink_task(
+        pool,
+        db::MetalinkTaskUpsert {
+            task_id: &task.id,
+            manifest_url: &metalink.manifest_url,
+            manifest_format: &metalink.manifest_format,
+            file_count: i64::try_from(metalink.files.len()).unwrap_or(i64::MAX),
+        },
+    )
+    .await?;
+    let now = now_iso();
+    for file in &metalink.files {
+        let Some(record) = file_records.iter().find(|record| {
+            sanitize_probe_relative_path(&record.relative_path) == file.relative_path
+        }) else {
+            continue;
+        };
+        for resource in &file.resources {
+            let resource_id = Uuid::new_v4().to_string();
+            db::insert_metalink_resource(
+                pool,
+                db::MetalinkResourceInsert {
+                    id: &resource_id,
+                    task_id: &task.id,
+                    file_id: &record.id,
+                    url: &resource.url,
+                    priority: resource.priority,
+                    location: resource.location.as_deref(),
+                },
+            )
+            .await?;
+        }
+        let mut checksums = file.checksums.clone();
+        checksums.sort_by_key(|checksum| match checksum.algorithm {
+            ChecksumAlgorithm::Sha256 => 0,
+            ChecksumAlgorithm::Sha512 => 1,
+            ChecksumAlgorithm::Sha1 => 2,
+            ChecksumAlgorithm::Md5 => 3,
+        });
+        for (index, checksum) in checksums.iter().enumerate() {
+            db::insert_task_checksum_record(
+                pool,
+                &TaskChecksumRecord {
+                    id: Uuid::new_v4().to_string(),
+                    task_id: task.id.clone(),
+                    file_id: Some(record.id.clone()),
+                    algorithm: checksum.algorithm,
+                    expected_hash: checksum.value.clone(),
+                    actual_hash: None,
+                    status: HashVerificationStatus::Pending,
+                    source_kind: "metalink".to_string(),
+                    source_url: Some(metalink.manifest_url.clone()),
+                    source_label: Some(record.relative_path.clone()),
+                    is_primary: index == 0,
+                    weak: checksum.weak,
+                    error_message: None,
+                    discovered_at: Some(now.clone()),
+                    verified_at: None,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn discover_checksum_sidecars(
     task_id: &str,
     final_url: &str,
@@ -768,6 +855,7 @@ async fn discover_checksum_sidecars(
         checksums.push(TaskChecksumRecord {
             id: Uuid::new_v4().to_string(),
             task_id: task_id.to_string(),
+            file_id: None,
             algorithm,
             expected_hash,
             actual_hash: None,
@@ -797,6 +885,10 @@ fn first_checksum_token(text: &str, algorithm: ChecksumAlgorithm) -> Option<Stri
     text.split(|ch: char| !ch.is_ascii_hexdigit())
         .find(|token| token.len() == expected_len)
         .map(|token| token.to_ascii_lowercase())
+}
+
+fn is_metalink_protocol(protocol: &str) -> bool {
+    protocol == "metalink"
 }
 
 #[cfg(test)]
@@ -875,14 +967,14 @@ mod tests {
         let empty: Vec<String> = Vec::new();
         assert_eq!(
             selected_relative_paths_for_probe(Some(&empty), "bt", &files).unwrap_err(),
-            "Select at least one torrent file to download."
+            "Select at least one file to download."
         );
 
         let unknown = vec!["missing.bin".to_string()];
         assert!(
             selected_relative_paths_for_probe(Some(&unknown), "bt", &files)
                 .unwrap_err()
-                .contains("Selected torrent file is not in the probe result")
+                .contains("Selected file is not in the probe result")
         );
     }
 
@@ -964,6 +1056,7 @@ mod tests {
             last_modified: None,
             content_type: Some("application/octet-stream".to_string()),
             hls_variants: Vec::new(),
+            metalink: None,
         }
     }
 }

@@ -96,15 +96,13 @@ pub async fn update_torrent_file_selection(
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
     if selected.is_empty() {
-        return Err(
-            crate::models::AppErrorPayload {
-                code: "bt_file_selection_required".to_string(),
-                message: "Choose at least one torrent file before downloading.".to_string(),
-                recoverable: true,
-                actions: vec!["check_url".to_string()],
-            }
-            .command_error(),
-        );
+        return Err(crate::models::AppErrorPayload {
+            code: "bt_file_selection_required".to_string(),
+            message: "Choose at least one torrent file before downloading.".to_string(),
+            recoverable: true,
+            actions: vec!["check_url".to_string()],
+        }
+        .command_error());
     }
     db::update_task_file_selection(&state.pool, &task.id, &selected).await?;
     db::update_task_status(
@@ -159,7 +157,10 @@ pub async fn update_torrent_seeding(
     )
     .await?;
     if !input.enabled {
-        state.engine_registry.delete_runtime_task(&task, false).await;
+        state
+            .engine_registry
+            .delete_runtime_task(&task, false)
+            .await;
     }
     if let Some(updated) = db::get_task_record(&state.pool, &task.id).await? {
         emit_task_updated_record(&app, &state.pool, &updated).await;
@@ -414,7 +415,8 @@ async fn start_task_download(
         resolve_task_request_headers(&pool, request_headers.clone(), &task.id).await?;
     let global_proxy_config = engine_registry.proxy_config().await;
     let task_proxy_config =
-        db::resolve_task_proxy_config(&pool, &task.id, &task.protocol, &global_proxy_config).await?;
+        db::resolve_task_proxy_config(&pool, &task.id, &task.protocol, &global_proxy_config)
+            .await?;
     let task =
         prepare_task_for_download(&pool, &engine_registry, task, &task_request_headers).await?;
     if downloads.lock().await.contains_key(&task.id) {
@@ -545,12 +547,7 @@ async fn start_task_download(
                     );
                 }
             }
-            maybe_emit_completion_action(
-                &task_app,
-                &task_pool,
-                downloads_map.clone(),
-            )
-            .await;
+            maybe_emit_completion_action(&task_app, &task_pool, downloads_map.clone()).await;
         }
 
         spawn_schedule_queued_tasks(
@@ -884,7 +881,10 @@ async fn prepare_task_for_download(
         return Err("Remote file changed. Restart download to avoid corruption.".to_string());
     }
 
-    if is_bt_protocol(&task.protocol) || is_hls_protocol(&task.protocol) {
+    if is_bt_protocol(&task.protocol)
+        || is_hls_protocol(&task.protocol)
+        || is_metalink_protocol(&task.protocol)
+    {
         db::ensure_task_segments(pool, &task).await?;
         return require_task(pool, &task.id).await;
     }
@@ -972,12 +972,27 @@ fn is_hls_protocol(protocol: &str) -> bool {
     protocol == "hls"
 }
 
+fn is_metalink_protocol(protocol: &str) -> bool {
+    protocol == "metalink"
+}
+
 fn is_torrent_url(url: &Url) -> bool {
     matches!(url.scheme(), "http" | "https" | "file")
         && url
             .path_segments()
             .and_then(|mut segments| segments.next_back())
             .is_some_and(|name| name.to_ascii_lowercase().ends_with(".torrent"))
+}
+
+pub(crate) fn is_metalink_url(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "file")
+        && url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .is_some_and(|name| {
+                let name = name.to_ascii_lowercase();
+                name.ends_with(".meta4") || name.ends_with(".metalink")
+            })
 }
 
 async fn fail_task_and_segments(
@@ -1075,7 +1090,8 @@ async fn tasks_from_records_with_files(
         .map(|record| record.id.clone())
         .collect::<Vec<_>>();
     let mut files_by_task_id = db::list_task_file_records_for_tasks(pool, &task_ids).await?;
-    let mut checksums_by_task_id = db::list_task_checksum_records_for_tasks(pool, &task_ids).await?;
+    let mut checksums_by_task_id =
+        db::list_task_checksum_records_for_tasks(pool, &task_ids).await?;
     Ok(records
         .into_iter()
         .map(|record| {

@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -11,12 +11,7 @@ use std::{
 use reqwest::Client;
 use sqlx::SqlitePool;
 use tauri::AppHandle;
-use tokio::{
-    fs,
-    io::AsyncWriteExt,
-    sync::{mpsc, RwLock},
-    task::JoinSet,
-};
+use tokio::{fs, io::AsyncWriteExt, sync::mpsc, task::JoinSet};
 
 pub(super) mod diagnostics;
 mod worker;
@@ -152,6 +147,7 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
         .map_err(|e| format!("Could not create the temporary file: {e}"))?;
     let mut downloaded = 0_i64;
     let mut last_emit = Instant::now();
+    let mut last_checkpoint = Instant::now();
     let mut last_tick = Instant::now();
     let mut last_bytes = 0_i64;
 
@@ -164,8 +160,16 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
             file.flush()
                 .await
                 .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
-            db::update_segment_progress(&pool, &segment.id, downloaded, SegmentStatus::Downloading)
-                .await?;
+            db::update_task_and_segment_progress(
+                &pool,
+                &task.id,
+                &segment.id,
+                downloaded,
+                0,
+                1,
+                TaskStatus::Downloading,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -179,16 +183,19 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
         if last_emit.elapsed() >= Duration::from_millis(300) {
             let elapsed = last_tick.elapsed().as_secs_f64().max(0.001);
             let speed_bps = ((downloaded - last_bytes) as f64 / elapsed) as i64;
-            db::update_task_and_segment_progress(
-                &pool,
-                &task.id,
-                &segment.id,
-                downloaded,
-                speed_bps,
-                1,
-                TaskStatus::Downloading,
-            )
-            .await?;
+            if last_checkpoint.elapsed() >= RUNTIME_PROGRESS_CHECKPOINT_INTERVAL {
+                db::update_task_and_segment_progress(
+                    &pool,
+                    &task.id,
+                    &segment.id,
+                    downloaded,
+                    speed_bps,
+                    1,
+                    TaskStatus::Downloading,
+                )
+                .await?;
+                last_checkpoint = Instant::now();
+            }
             emit_progress(
                 &app,
                 &task.id,
@@ -243,6 +250,7 @@ const AUTO_ACCELERATION_MIN_REMAINING_BYTES: i64 = 8 * 1024 * 1024;
 const AUTO_ACCELERATION_WARMUP: Duration = Duration::from_secs(10);
 const AUTO_ACCELERATION_EVALUATION: Duration = Duration::from_secs(5);
 const AUTO_ACCELERATION_STABILITY_WINDOW: usize = 5;
+const RUNTIME_PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub(super) enum SegmentMessage {
@@ -267,6 +275,128 @@ pub(super) struct SegmentFailure {
     pub(super) segment_id: String,
     pub(super) downloaded_until: i64,
     pub(super) error: String,
+}
+
+struct RuntimeSegmentProgress {
+    range_start: i64,
+    range_end: i64,
+    downloaded_until: i64,
+    speed_bps: i64,
+    status: SegmentStatus,
+    dirty: bool,
+}
+
+struct RuntimeProgress {
+    segments: HashMap<String, RuntimeSegmentProgress>,
+    last_checkpoint: Instant,
+}
+
+impl RuntimeProgress {
+    fn from_segments(segments: &[TaskSegmentRecord]) -> Self {
+        Self {
+            segments: segments
+                .iter()
+                .map(|segment| {
+                    (
+                        segment.id.clone(),
+                        RuntimeSegmentProgress {
+                            range_start: segment.range_start,
+                            range_end: segment.range_end,
+                            downloaded_until: segment.downloaded_until,
+                            speed_bps: segment.speed_bps,
+                            status: segment.status,
+                            dirty: false,
+                        },
+                    )
+                })
+                .collect(),
+            last_checkpoint: Instant::now(),
+        }
+    }
+
+    fn mark_downloading(&mut self, segment_id: &str, downloaded_until: i64) {
+        if let Some(segment) = self.segments.get_mut(segment_id) {
+            segment.downloaded_until = downloaded_until;
+            segment.status = SegmentStatus::Downloading;
+            segment.dirty = true;
+        }
+    }
+
+    fn update_progress(&mut self, segment_id: String, downloaded_until: i64, speed_bps: i64) {
+        if let Some(segment) = self.segments.get_mut(&segment_id) {
+            segment.downloaded_until = downloaded_until;
+            segment.speed_bps = speed_bps.max(0);
+            segment.status = SegmentStatus::Downloading;
+            segment.dirty = true;
+        }
+    }
+
+    fn mark_retrying(&mut self, segment_id: &str, downloaded_until: i64) {
+        if let Some(segment) = self.segments.get_mut(segment_id) {
+            segment.downloaded_until = downloaded_until;
+            segment.speed_bps = 0;
+            segment.status = SegmentStatus::Pending;
+            segment.dirty = false;
+        }
+    }
+
+    fn mark_completed(&mut self, segment_id: &str, downloaded_until: i64) {
+        if let Some(segment) = self.segments.get_mut(segment_id) {
+            segment.downloaded_until = downloaded_until;
+            segment.speed_bps = 0;
+            segment.status = SegmentStatus::Completed;
+            segment.dirty = false;
+        }
+    }
+
+    fn mark_failed(&mut self, segment_id: &str, downloaded_until: i64) {
+        if let Some(segment) = self.segments.get_mut(segment_id) {
+            segment.downloaded_until = downloaded_until;
+            segment.speed_bps = 0;
+            segment.status = SegmentStatus::Failed;
+            segment.dirty = false;
+        }
+    }
+
+    fn update_range_end(&mut self, segment_id: &str, range_end: i64) {
+        if let Some(segment) = self.segments.get_mut(segment_id) {
+            segment.range_end = range_end;
+            segment.dirty = true;
+        }
+    }
+
+    fn insert_segment(&mut self, segment: &TaskSegmentRecord) {
+        self.segments.insert(
+            segment.id.clone(),
+            RuntimeSegmentProgress {
+                range_start: segment.range_start,
+                range_end: segment.range_end,
+                downloaded_until: segment.downloaded_until,
+                speed_bps: segment.speed_bps,
+                status: segment.status,
+                dirty: true,
+            },
+        );
+    }
+
+    fn total_downloaded(&self) -> i64 {
+        self.segments
+            .values()
+            .map(|segment| {
+                let next_byte = segment
+                    .downloaded_until
+                    .clamp(segment.range_start, segment.range_end.saturating_add(1));
+                next_byte.saturating_sub(segment.range_start)
+            })
+            .sum()
+    }
+
+    fn total_speed(&self) -> i64 {
+        self.segments
+            .values()
+            .map(|segment| segment.speed_bps.max(0))
+            .sum()
+    }
 }
 
 pub(super) struct SegmentedDownloadContext<'a> {
@@ -393,12 +523,16 @@ pub(super) async fn run_segmented_download(
         1,
         AUTO_ACCELERATION_MAX_SEGMENTS.min(db::MAX_AUTO_SEGMENT_COUNT),
     );
-    let live_ends = Arc::new(RwLock::new(
-        segments
-            .iter()
-            .map(|segment| (segment.id.clone(), segment.range_end))
-            .collect::<HashMap<_, _>>(),
-    ));
+    let mut runtime_progress = RuntimeProgress::from_segments(&segments);
+    let mut range_ends = segments
+        .iter()
+        .map(|segment| {
+            (
+                segment.id.clone(),
+                Arc::new(AtomicI64::new(segment.range_end)),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let mut pending_segments = VecDeque::new();
     let if_range = if_range_header_value(&task);
 
@@ -408,6 +542,7 @@ pub(super) async fn run_segmented_download(
             .clamp(segment.range_start, segment.range_end.saturating_add(1));
         if offset > segment.range_end {
             db::complete_segment(&pool, &segment.id).await?;
+            runtime_progress.mark_completed(&segment.id, offset);
             continue;
         }
         pending_segments.push_back(segment);
@@ -425,7 +560,8 @@ pub(super) async fn run_segmented_download(
         &mut pending_segments,
         segment_count,
         max_worker_count,
-        &live_ends,
+        &mut range_ends,
+        &mut runtime_progress,
         speed_limiter.clone(),
         &request_headers,
         task.total_size,
@@ -433,7 +569,6 @@ pub(super) async fn run_segmented_download(
     )
     .await?;
 
-    let mut last_speeds: HashMap<String, i64> = HashMap::new();
     let mut last_emit = Instant::now();
     let mut active_connection_count = i32::try_from(active_workers.max(1)).unwrap_or(1);
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -454,12 +589,12 @@ pub(super) async fn run_segmented_download(
                         connection_count: active_connection_count,
                         update_task: !cancel.load(Ordering::SeqCst),
                     },
-                    &mut last_speeds,
+                    &mut runtime_progress,
                     message,
                 )
                 .await?;
                 if !cancel.load(Ordering::SeqCst) && last_emit.elapsed() >= Duration::from_millis(300) {
-                    emit_aggregate_progress(&app, &pool, &task.id, task.total_size, active_connection_count, &last_speeds).await?;
+                    emit_aggregate_progress(&app, &pool, &task.id, task.total_size, active_connection_count, &mut runtime_progress, false).await?;
                     last_emit = Instant::now();
                 }
             }
@@ -476,6 +611,16 @@ pub(super) async fn run_segmented_download(
                         );
                         cancel.store(true, Ordering::SeqCst);
                         workers.abort_all();
+                        runtime_progress.mark_failed(&failure.segment_id, failure.downloaded_until);
+                        checkpoint_runtime_progress(
+                            &pool,
+                            &task.id,
+                            active_connection_count,
+                            TaskStatus::Downloading,
+                            &mut runtime_progress,
+                            true,
+                        )
+                        .await?;
                         db::update_segment_status(
                             &pool,
                             &failure.segment_id,
@@ -505,6 +650,15 @@ pub(super) async fn run_segmented_download(
                         );
                         cancel.store(true, Ordering::SeqCst);
                         workers.abort_all();
+                        checkpoint_runtime_progress(
+                            &pool,
+                            &task.id,
+                            active_connection_count,
+                            TaskStatus::Downloading,
+                            &mut runtime_progress,
+                            true,
+                        )
+                        .await?;
                         let message = format!("A download worker stopped unexpectedly: {error}");
                         db::update_task_status(
                             &pool,
@@ -533,7 +687,8 @@ pub(super) async fn run_segmented_download(
                     &mut pending_segments,
                     segment_count,
                     max_worker_count,
-                    &live_ends,
+                    &mut range_ends,
+                    &mut runtime_progress,
                     speed_limiter.clone(),
                     &request_headers,
                     task.total_size,
@@ -546,8 +701,8 @@ pub(super) async fn run_segmented_download(
                 if cancel.load(Ordering::SeqCst) {
                     continue;
                 }
-                emit_aggregate_progress(&app, &pool, &task.id, task.total_size, active_connection_count, &last_speeds).await?;
-                let current_speed = last_speeds.values().copied().sum::<i64>().max(0);
+                emit_aggregate_progress(&app, &pool, &task.id, task.total_size, active_connection_count, &mut runtime_progress, true).await?;
+                let current_speed = runtime_progress.total_speed().max(0);
                 speed_history.push_back((Instant::now(), current_speed));
                 while speed_history.len() > AUTO_ACCELERATION_STABILITY_WINDOW {
                     speed_history.pop_front();
@@ -567,8 +722,8 @@ pub(super) async fn run_segmented_download(
                     &mut acceleration_disabled,
                     &mut pending_acceleration,
                     &speed_history,
-                    &last_speeds,
-                    &live_ends,
+                    &mut runtime_progress,
+                    &mut range_ends,
                     speed_limiter.clone(),
                     started_at,
                     max_worker_count,
@@ -582,6 +737,15 @@ pub(super) async fn run_segmented_download(
     }
 
     if cancel.load(Ordering::SeqCst) {
+        checkpoint_runtime_progress(
+            &pool,
+            &task.id,
+            active_connection_count,
+            TaskStatus::Downloading,
+            &mut runtime_progress,
+            true,
+        )
+        .await?;
         tracing::info!(task_id = %task.id, "segmented download canceled");
         return Ok(());
     }
@@ -596,11 +760,20 @@ pub(super) async fn run_segmented_download(
                 connection_count: active_connection_count,
                 update_task: false,
             },
-            &mut last_speeds,
+            &mut runtime_progress,
             message,
         )
         .await?;
     }
+    checkpoint_runtime_progress(
+        &pool,
+        &task.id,
+        active_connection_count,
+        TaskStatus::Downloading,
+        &mut runtime_progress,
+        true,
+    )
+    .await?;
 
     let final_segments = db::list_segment_records(&pool, &task.id).await?;
     for segment in &final_segments {
@@ -660,7 +833,8 @@ async fn spawn_segment_workers(
     pending_segments: &mut VecDeque<TaskSegmentRecord>,
     segment_count: usize,
     max_worker_count: usize,
-    live_ends: &Arc<RwLock<HashMap<String, i64>>>,
+    range_ends: &mut HashMap<String, Arc<AtomicI64>>,
+    runtime_progress: &mut RuntimeProgress,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     request_headers: &[(String, String)],
     total_size: i64,
@@ -681,6 +855,12 @@ async fn spawn_segment_workers(
             None,
         )
         .await?;
+        runtime_progress.mark_downloading(&segment.id, offset);
+        let range_end = range_ends
+            .entry(segment.id.clone())
+            .or_insert_with(|| Arc::new(AtomicI64::new(segment.range_end)))
+            .clone();
+        range_end.store(segment.range_end, Ordering::SeqCst);
         *active_workers += 1;
         workers.spawn(download_segment_worker(SegmentWorkerRequest {
             client: client.clone(),
@@ -693,7 +873,7 @@ async fn spawn_segment_workers(
             supports_parallel,
             cancel: cancel.clone(),
             progress_tx: progress_tx.clone(),
-            live_ends: live_ends.clone(),
+            range_end,
             speed_limiter: speed_limiter.clone(),
             request_headers: request_headers.to_vec(),
             if_range: if_range.map(str::to_string),
@@ -727,8 +907,8 @@ async fn maybe_accelerate_segments(
     acceleration_disabled: &mut bool,
     pending_acceleration: &mut Option<AccelerationCheck>,
     speed_history: &VecDeque<(Instant, i64)>,
-    last_speeds: &HashMap<String, i64>,
-    live_ends: &Arc<RwLock<HashMap<String, i64>>>,
+    runtime_progress: &mut RuntimeProgress,
+    range_ends: &mut HashMap<String, Arc<AtomicI64>>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     started_at: Instant,
     max_worker_count: usize,
@@ -739,7 +919,7 @@ async fn maybe_accelerate_segments(
         return Ok(());
     }
 
-    let current_speed = last_speeds.values().copied().sum::<i64>().max(0);
+    let current_speed = runtime_progress.total_speed().max(0);
     if let Some(check) = pending_acceleration.take() {
         if check.started_at.elapsed() >= AUTO_ACCELERATION_EVALUATION {
             let connection_growth =
@@ -781,11 +961,13 @@ async fn maybe_accelerate_segments(
         return Ok(());
     };
 
-    {
-        let mut ends = live_ends.write().await;
-        ends.insert(split.original_segment_id.clone(), split.original_range_end);
-        ends.insert(split.tail_segment.id.clone(), split.tail_segment.range_end);
+    runtime_progress.update_range_end(&split.original_segment_id, split.original_range_end);
+    if let Some(range_end) = range_ends.get(&split.original_segment_id) {
+        range_end.store(split.original_range_end, Ordering::SeqCst);
     }
+    let tail_range_end = Arc::new(AtomicI64::new(split.tail_segment.range_end));
+    range_ends.insert(split.tail_segment.id.clone(), tail_range_end.clone());
+    runtime_progress.insert_segment(&split.tail_segment);
 
     db::update_segment_status(
         pool,
@@ -814,7 +996,7 @@ async fn maybe_accelerate_segments(
         supports_parallel: task.supports_parallel,
         cancel: cancel.clone(),
         progress_tx: progress_tx.clone(),
-        live_ends: live_ends.clone(),
+        range_end: tail_range_end,
         speed_limiter,
         request_headers: request_headers.to_vec(),
         if_range: if_range.map(str::to_string),
@@ -831,7 +1013,8 @@ async fn maybe_accelerate_segments(
         &task.id,
         task.total_size,
         *active_connection_count,
-        last_speeds,
+        runtime_progress,
+        true,
     )
     .await?;
     Ok(())
@@ -867,7 +1050,7 @@ struct SegmentMessageContext<'a> {
 
 async fn handle_segment_message(
     context: SegmentMessageContext<'_>,
-    last_speeds: &mut HashMap<String, i64>,
+    runtime_progress: &mut RuntimeProgress,
     message: SegmentMessage,
 ) -> Result<(), String> {
     let SegmentMessageContext {
@@ -885,19 +1068,8 @@ async fn handle_segment_message(
             downloaded_until,
             speed_bps,
         } => {
-            if update_task {
-                db::update_segment_runtime_progress(
-                    pool,
-                    &segment_id,
-                    downloaded_until,
-                    speed_bps,
-                    SegmentStatus::Downloading,
-                )
-                .await?;
-            } else {
-                db::update_segment_downloaded_until(pool, &segment_id, downloaded_until).await?;
-            }
-            last_speeds.insert(segment_id, speed_bps.max(0));
+            let _ = update_task;
+            runtime_progress.update_progress(segment_id, downloaded_until, speed_bps);
         }
         SegmentMessage::Retry {
             segment_id,
@@ -909,10 +1081,9 @@ async fn handle_segment_message(
                 .await?;
             let payload = format!("{segment_id}: {error}");
             db::insert_task_event(pool, task_id, "retrying", Some(&payload)).await?;
-            last_speeds.insert(segment_id, 0);
+            runtime_progress.mark_retrying(&segment_id, downloaded_until);
             if update_task {
-                let segments = db::list_segment_records(pool, task_id).await?;
-                let downloaded = db::total_segment_downloaded_bytes(&segments);
+                let downloaded = runtime_progress.total_downloaded();
                 db::update_task_status(
                     pool,
                     task_id,
@@ -947,18 +1118,18 @@ async fn emit_aggregate_progress(
     task_id: &str,
     total_size: i64,
     connection_count: i32,
-    last_speeds: &HashMap<String, i64>,
+    runtime_progress: &mut RuntimeProgress,
+    force_checkpoint: bool,
 ) -> Result<(), String> {
-    let segments = db::list_segment_records(pool, task_id).await?;
-    let downloaded = db::total_segment_downloaded_bytes(&segments);
-    let speed_bps = last_speeds.values().copied().sum::<i64>();
-    db::update_task_progress(
+    let downloaded = runtime_progress.total_downloaded();
+    let speed_bps = runtime_progress.total_speed();
+    checkpoint_runtime_progress(
         pool,
         task_id,
-        downloaded,
-        speed_bps,
         connection_count,
         TaskStatus::Downloading,
+        runtime_progress,
+        force_checkpoint,
     )
     .await?;
     emit_progress(
@@ -970,6 +1141,89 @@ async fn emit_aggregate_progress(
         connection_count,
         TaskStatus::Downloading,
     );
+    Ok(())
+}
+
+async fn checkpoint_runtime_progress(
+    pool: &SqlitePool,
+    task_id: &str,
+    connection_count: i32,
+    status: TaskStatus,
+    runtime_progress: &mut RuntimeProgress,
+    force: bool,
+) -> Result<(), String> {
+    if !force && runtime_progress.last_checkpoint.elapsed() < RUNTIME_PROGRESS_CHECKPOINT_INTERVAL {
+        return Ok(());
+    }
+    if !force
+        && !runtime_progress
+            .segments
+            .values()
+            .any(|segment| segment.dirty)
+    {
+        return Ok(());
+    }
+
+    let downloaded = runtime_progress.total_downloaded();
+    let speed_bps = runtime_progress.total_speed();
+    let updated_at = crate::models::task::now_iso();
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET downloaded_bytes = ?, speed_bps = ?, connection_count = ?, status = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(downloaded)
+    .bind(speed_bps)
+    .bind(connection_count)
+    .bind(status.as_str())
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        r#"
+        UPDATE task_files
+        SET downloaded_bytes = ?, status = ?
+        WHERE task_id = ? AND selected = 1
+        "#,
+    )
+    .bind(downloaded)
+    .bind(status.as_str())
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    for (segment_id, segment) in runtime_progress
+        .segments
+        .iter_mut()
+        .filter(|(_, segment)| force || segment.dirty)
+    {
+        sqlx::query(
+            r#"
+            UPDATE task_work_units
+            SET downloaded_until = ?, speed_bps = ?, status = ?, last_error = NULL
+            WHERE id = ?
+            "#,
+        )
+        .bind(segment.downloaded_until)
+        .bind(segment.speed_bps.max(0))
+        .bind(segment.status.as_str())
+        .bind(segment_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        segment.dirty = false;
+    }
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    runtime_progress.last_checkpoint = Instant::now();
     Ok(())
 }
 

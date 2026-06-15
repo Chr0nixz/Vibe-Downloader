@@ -42,7 +42,7 @@ const SETTING_BROWSER_CAPTURE: &str = "browser_capture_settings";
 const DEFAULT_BROWSER_MIN_SIZE_BYTES: &str = "0";
 const DEFAULT_BROWSER_EXTENSIONS: &[&str] = &[
     "zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "bz2", "xz", "pdf", "mp4",
-    "mkv", "mp3", "flac", "m3u8",
+    "mkv", "mp3", "flac", "m3u8", "meta4", "metalink",
 ];
 const FORWARDED_HEADER_ALLOWLIST: &[&str] = &[
     "cookie",

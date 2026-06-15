@@ -1,18 +1,10 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicBool, AtomicI64, Ordering},
+    Arc,
 };
 
 use reqwest::{Client, StatusCode};
-use tokio::{
-    fs,
-    io::AsyncWriteExt,
-    sync::{mpsc, RwLock},
-    task::JoinSet,
-};
+use tokio::{fs, io::AsyncWriteExt, sync::mpsc, task::JoinSet};
 
 use super::{
     error::format_http_status,
@@ -149,13 +141,6 @@ pub(super) async fn run_direct_segmented_download(
     let (progress_tx, mut progress_rx) = mpsc::channel::<SegmentMessage>(64);
     let mut workers = JoinSet::new();
     let segment_count = request.segments.len();
-    let live_ends = Arc::new(RwLock::new(
-        request
-            .segments
-            .iter()
-            .map(|segment| (segment.id.clone(), segment.range_end))
-            .collect::<HashMap<_, _>>(),
-    ));
     let mut active_workers = 0_usize;
     let if_range = if_range_header_from(request.etag.as_deref(), request.last_modified.as_deref());
 
@@ -166,6 +151,7 @@ pub(super) async fn run_direct_segmented_download(
         if offset > segment.range_end {
             continue;
         }
+        let range_end = segment.range_end;
         active_workers += 1;
         workers.spawn(download_segment_worker(SegmentWorkerRequest {
             client: client.clone(),
@@ -178,7 +164,7 @@ pub(super) async fn run_direct_segmented_download(
             supports_parallel: request.supports_parallel,
             cancel: cancel.clone(),
             progress_tx: progress_tx.clone(),
-            live_ends: live_ends.clone(),
+            range_end: Arc::new(AtomicI64::new(range_end)),
             speed_limiter: speed_limiter.clone(),
             request_headers: Vec::new(),
             if_range: if_range.clone(),

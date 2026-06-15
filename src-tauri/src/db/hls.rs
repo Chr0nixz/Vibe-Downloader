@@ -114,7 +114,10 @@ pub async fn upsert_hls_task(pool: &SqlitePool, task: HlsTaskUpsert<'_>) -> Resu
     Ok(())
 }
 
-pub async fn get_hls_task(pool: &SqlitePool, task_id: &str) -> Result<Option<HlsTaskRecord>, String> {
+pub async fn get_hls_task(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Option<HlsTaskRecord>, String> {
     let row = sqlx::query(
         r#"
         SELECT task_id, input_url, media_url, playlist_kind, selected_bandwidth,

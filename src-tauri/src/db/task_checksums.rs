@@ -1,8 +1,6 @@
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
-use crate::models::{
-    ChecksumAlgorithm, HashVerificationStatus, TaskChecksumRecord,
-};
+use crate::models::{ChecksumAlgorithm, HashVerificationStatus, TaskChecksumRecord};
 
 pub async fn list_task_checksum_records(
     pool: &SqlitePool,
@@ -10,12 +8,12 @@ pub async fn list_task_checksum_records(
 ) -> Result<Vec<TaskChecksumRecord>, String> {
     let rows = sqlx::query(
         r#"
-        SELECT id, task_id, algorithm, expected_hash, actual_hash, status,
+        SELECT id, task_id, file_id, algorithm, expected_hash, actual_hash, status,
                source_kind, source_url, source_label, is_primary, weak,
                error_message, discovered_at, verified_at, created_at, updated_at
         FROM task_checksums
         WHERE task_id = ?
-        ORDER BY is_primary DESC, algorithm ASC, created_at ASC
+        ORDER BY is_primary DESC, file_id ASC, algorithm ASC, created_at ASC
         "#,
     )
     .bind(task_id)
@@ -36,7 +34,7 @@ pub async fn list_task_checksum_records_for_tasks(
 
     let mut query = QueryBuilder::<Sqlite>::new(
         r#"
-        SELECT id, task_id, algorithm, expected_hash, actual_hash, status,
+        SELECT id, task_id, file_id, algorithm, expected_hash, actual_hash, status,
                source_kind, source_url, source_label, is_primary, weak,
                error_message, discovered_at, verified_at, created_at, updated_at
         FROM task_checksums
@@ -49,7 +47,7 @@ pub async fn list_task_checksum_records_for_tasks(
     }
     separated.push_unseparated(
         r#")
-        ORDER BY task_id ASC, is_primary DESC, algorithm ASC, created_at ASC
+        ORDER BY task_id ASC, is_primary DESC, file_id ASC, algorithm ASC, created_at ASC
         "#,
     );
 
@@ -78,14 +76,15 @@ pub async fn insert_task_checksum_record(
     sqlx::query(
         r#"
         INSERT OR IGNORE INTO task_checksums (
-            id, task_id, algorithm, expected_hash, actual_hash, status,
+            id, task_id, file_id, algorithm, expected_hash, actual_hash, status,
             source_kind, source_url, source_label, is_primary, weak,
             error_message, discovered_at, verified_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&checksum.id)
     .bind(&checksum.task_id)
+    .bind(&checksum.file_id)
     .bind(checksum.algorithm.as_str())
     .bind(&checksum.expected_hash)
     .bind(&checksum.actual_hash)
@@ -107,10 +106,65 @@ pub async fn insert_task_checksum_record(
     Ok(())
 }
 
+pub async fn list_task_checksum_records_for_file(
+    pool: &SqlitePool,
+    file_id: &str,
+) -> Result<Vec<TaskChecksumRecord>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, task_id, file_id, algorithm, expected_hash, actual_hash, status,
+               source_kind, source_url, source_label, is_primary, weak,
+               error_message, discovered_at, verified_at, created_at, updated_at
+        FROM task_checksums
+        WHERE file_id = ?
+        ORDER BY is_primary DESC, algorithm ASC, created_at ASC
+        "#,
+    )
+    .bind(file_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    rows.iter().map(row_to_checksum).collect()
+}
+
+pub async fn update_task_checksum_record(
+    pool: &SqlitePool,
+    id: &str,
+    actual_hash: Option<&str>,
+    status: HashVerificationStatus,
+    error_message: Option<&str>,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+    let verified_at = matches!(
+        status,
+        HashVerificationStatus::Verified | HashVerificationStatus::Failed
+    )
+    .then_some(updated_at.as_str());
+    sqlx::query(
+        r#"
+        UPDATE task_checksums
+        SET actual_hash = ?, status = ?, error_message = ?,
+            verified_at = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(actual_hash)
+    .bind(status.as_str())
+    .bind(error_message)
+    .bind(verified_at)
+    .bind(&updated_at)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn row_to_checksum(row: &sqlx::sqlite::SqliteRow) -> Result<TaskChecksumRecord, String> {
     Ok(TaskChecksumRecord {
         id: row.get("id"),
         task_id: row.get("task_id"),
+        file_id: row.get("file_id"),
         algorithm: ChecksumAlgorithm::from_db_str(row.get::<String, _>("algorithm").as_str()),
         expected_hash: row.get("expected_hash"),
         actual_hash: row.get("actual_hash"),

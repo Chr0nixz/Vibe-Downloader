@@ -178,6 +178,7 @@ impl FtpEngine {
             last_modified,
             content_type: None,
             hls_variants: Vec::new(),
+            metalink: None,
         })
     }
 

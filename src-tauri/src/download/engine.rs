@@ -7,8 +7,10 @@ use std::{
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 
-use super::{BtEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine};
-use crate::models::{EngineCapabilities, HlsVariant, ProbedFile, TaskKind, TaskRecord};
+use super::{BtEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine, MetalinkEngine};
+use crate::models::{
+    EngineCapabilities, HlsVariant, MetalinkProbeData, ProbedFile, TaskKind, TaskRecord,
+};
 use crate::proxy::{ResolvedProxyConfig, SharedProxyConfig};
 
 pub(crate) type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -34,6 +36,7 @@ pub struct ProbeOutput {
     pub last_modified: Option<String>,
     pub content_type: Option<String>,
     pub hls_variants: Vec<HlsVariant>,
+    pub metalink: Option<MetalinkProbeData>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +79,7 @@ impl EngineRegistry {
         Ok(Self {
             engines: vec![
                 bt_engine.clone(),
+                Arc::new(MetalinkEngine::new(proxy_config.clone())),
                 Arc::new(HlsEngine::new(proxy_config.clone())),
                 Arc::new(HttpEngine::with_proxy_config(proxy_config.clone())?),
                 Arc::new(FtpEngine::new(proxy_config.clone())),
@@ -97,8 +101,19 @@ impl EngineRegistry {
         let parsed =
             reqwest::Url::parse(uri.trim()).map_err(|_| "Download URL is invalid.".to_string())?;
         let scheme = parsed.scheme();
-        if scheme == "magnet" || scheme == "file" || is_torrent_url(&parsed) {
+        if scheme == "magnet"
+            || (scheme == "file" && is_torrent_url(&parsed))
+            || is_torrent_url(&parsed)
+        {
             return Ok(self.bt_engine.clone());
+        }
+        if is_metalink_url(&parsed) {
+            return self
+                .engines
+                .iter()
+                .find(|engine| engine.id() == "metalink")
+                .cloned()
+                .ok_or_else(|| "Metalink engine is not available.".to_string());
         }
         if is_hls_url(&parsed) {
             return self
@@ -128,11 +143,22 @@ impl EngineRegistry {
 pub struct ExternalEngineAdapter;
 
 fn is_torrent_url(url: &reqwest::Url) -> bool {
-    matches!(url.scheme(), "http" | "https")
+    matches!(url.scheme(), "http" | "https" | "file")
         && url
             .path_segments()
             .and_then(|mut segments| segments.next_back())
             .is_some_and(|name| name.to_ascii_lowercase().ends_with(".torrent"))
+}
+
+fn is_metalink_url(url: &reqwest::Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "file")
+        && url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .is_some_and(|name| {
+                let name = name.to_ascii_lowercase();
+                name.ends_with(".meta4") || name.ends_with(".metalink")
+            })
 }
 
 fn is_hls_url(url: &reqwest::Url) -> bool {

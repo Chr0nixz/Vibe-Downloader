@@ -3,8 +3,8 @@ use std::{
     sync::atomic::Ordering,
 };
 
-use sha2::{Digest, Sha256};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use specta::Type;
 use tauri::{AppHandle, State};
 use tokio::io::AsyncReadExt;

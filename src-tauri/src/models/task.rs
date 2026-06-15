@@ -260,6 +260,7 @@ pub struct TaskRecord {
 pub struct TaskChecksum {
     pub id: String,
     pub task_id: String,
+    pub file_id: Option<String>,
     pub algorithm: ChecksumAlgorithm,
     pub expected_hash: String,
     pub actual_hash: Option<String>,
@@ -280,6 +281,7 @@ pub struct TaskChecksum {
 pub struct TaskChecksumRecord {
     pub id: String,
     pub task_id: String,
+    pub file_id: Option<String>,
     pub algorithm: ChecksumAlgorithm,
     pub expected_hash: String,
     pub actual_hash: Option<String>,
@@ -493,6 +495,7 @@ impl From<TaskChecksumRecord> for TaskChecksum {
         Self {
             id: record.id,
             task_id: record.task_id,
+            file_id: record.file_id,
             algorithm: record.algorithm,
             expected_hash: record.expected_hash,
             actual_hash: record.actual_hash,
@@ -641,6 +644,35 @@ pub struct ProbedFile {
     pub relative_path: String,
     pub size: String,
     pub content_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetalinkProbeData {
+    pub manifest_url: String,
+    pub manifest_format: String,
+    pub files: Vec<MetalinkFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetalinkFile {
+    pub relative_path: String,
+    pub size: i64,
+    pub checksums: Vec<MetalinkChecksum>,
+    pub resources: Vec<MetalinkResource>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetalinkChecksum {
+    pub algorithm: ChecksumAlgorithm,
+    pub value: String,
+    pub weak: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetalinkResource {
+    pub url: String,
+    pub priority: i64,
+    pub location: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -945,6 +977,7 @@ pub enum TaskFailureCategory {
     Http,
     Auth,
     Hls,
+    Metalink,
     Bt,
     Ftp,
     Proxy,
@@ -962,6 +995,7 @@ pub fn failure_category_for_code(code: Option<&str>) -> Option<TaskFailureCatego
         "disk_write_failed" => Some(TaskFailureCategory::DiskWrite),
         "auth_headers_expired" | "auth_headers_unavailable" => Some(TaskFailureCategory::Auth),
         value if value.starts_with("hls_") => Some(TaskFailureCategory::Hls),
+        value if value.starts_with("metalink_") => Some(TaskFailureCategory::Metalink),
         value if value.starts_with("bt_") => Some(TaskFailureCategory::Bt),
         value if value.starts_with("ftp_") => Some(TaskFailureCategory::Ftp),
         value if value.starts_with("proxy_") => Some(TaskFailureCategory::Proxy),

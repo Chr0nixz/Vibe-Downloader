@@ -550,7 +550,7 @@ function normalizeCaptureSettings(value) {
       minSizeBytes: String(Number(value?.minSizeBytes ?? 0) || 0),
       fileExtensions: Array.isArray(value?.fileExtensions)
         ? value.fileExtensions
-        : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv", "m3u8"],
+        : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv", "m3u8", "meta4", "metalink"],
       siteRules: Array.isArray(value?.siteRules) ? value.siteRules : [],
     };
   }
@@ -565,7 +565,7 @@ function normalizeCaptureSettings(value) {
     minSizeBytes: String(Number(value?.minSizeBytes ?? 0) || 0),
     fileExtensions: Array.isArray(value?.fileExtensions)
       ? value.fileExtensions
-      : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv", "m3u8"],
+      : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv", "m3u8", "meta4", "metalink"],
     siteRules: Array.isArray(value?.siteRules) ? value.siteRules : [],
   };
 }

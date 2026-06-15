@@ -237,7 +237,7 @@ function defaultBrowserCaptureSettings(): BrowserCaptureSettings {
     forwardHeaders: false,
     forwardHeadersMode: browserExperimentalCaptureEnabled ? "ask" : "disabled",
     minSizeBytes: "0",
-    fileExtensions: ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "m3u8"],
+    fileExtensions: ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "m3u8", "meta4", "metalink"],
     siteRules: [],
   };
 }
@@ -1051,19 +1051,20 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
     });
   }
   const fileName = input.fileName?.trim() || probe.fileName || "download.bin";
-  const isTorrentMultiFile =
-    (probe.protocol === "bt" || probe.protocol === "magnet") && probe.files.length > 1;
-  if (isTorrentMultiFile && input.selectedFilePaths && input.selectedFilePaths.length === 0) {
-    throw new Error("Select at least one torrent file to download.");
+  const isSelectableMultiFile =
+    (probe.protocol === "bt" || probe.protocol === "magnet" || probe.protocol === "metalink") &&
+    probe.files.length > 1;
+  if (isSelectableMultiFile && input.selectedFilePaths && input.selectedFilePaths.length === 0) {
+    throw new Error("Select at least one file to download.");
   }
   const selectedFilePaths = new Set(
-    isTorrentMultiFile ? (input.selectedFilePaths ?? []).filter(Boolean) : [],
+    isSelectableMultiFile ? (input.selectedFilePaths ?? []).filter(Boolean) : [],
   );
   if (selectedFilePaths.size > 0) {
     const availablePaths = new Set(probe.files.map((file) => file.relativePath));
     const unknown = Array.from(selectedFilePaths).filter((path) => !availablePaths.has(path));
     if (unknown.length > 0) {
-      throw new Error(`Unknown torrent file selection: ${unknown[0]}`);
+      throw new Error(`Unknown file selection: ${unknown[0]}`);
     }
   }
   const probeFiles =
@@ -1260,6 +1261,40 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
   const protocol = parsed?.protocol.replace(":", "") || "http";
   const host = parsed?.host ?? "example.com";
   const path = parsed?.pathname ?? "";
+  if (/\.meta4$|\.metalink$/i.test(path)) {
+    const sourceName = fileNameFromRelativePath(path) || "download.meta4";
+    return {
+      inputUrl: input.url,
+      finalUrl: input.url,
+      fileName: sourceName.replace(/\.(meta4|metalink)$/i, ""),
+      protocol: "metalink",
+      taskKind: "manifest",
+      capabilities: {
+        supportsResume: true,
+        supportsParallel: true,
+        supportsMultiFile: true,
+      },
+      files: [
+        {
+          relativePath: "package/app-installer.exe",
+          size: "73400320",
+          contentType: "application/octet-stream",
+        },
+        {
+          relativePath: "package/checksums.txt",
+          size: "4096",
+          contentType: "text/plain",
+        },
+      ],
+      totalSize: "73404416",
+      sourceKey: `${protocol}://${host}`,
+      contentType: "application/metalink4+xml",
+      etag: null,
+      lastModified: null,
+      hlsVariants: [],
+      probedAt: nowIso(),
+    };
+  }
   if ((protocol === "http" || protocol === "https") && /\.m3u8$/i.test(path)) {
     const sourceName = fileNameFromRelativePath(path) || "playlist.m3u8";
     const fileName = sourceName.replace(/\.m3u8$/i, ".mp4");

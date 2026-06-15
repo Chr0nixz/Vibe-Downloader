@@ -1,8 +1,7 @@
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -15,7 +14,7 @@ use reqwest::{
 use tokio::{
     fs,
     io::{AsyncSeekExt, AsyncWriteExt},
-    sync::{mpsc, RwLock},
+    sync::mpsc,
 };
 
 use super::super::{
@@ -42,7 +41,7 @@ pub(in crate::download::http) struct SegmentWorkerRequest {
     pub(in crate::download::http) supports_parallel: bool,
     pub(in crate::download::http) cancel: Arc<AtomicBool>,
     pub(in crate::download::http) progress_tx: mpsc::Sender<SegmentMessage>,
-    pub(in crate::download::http) live_ends: Arc<RwLock<HashMap<String, i64>>>,
+    pub(in crate::download::http) range_end: Arc<AtomicI64>,
     pub(in crate::download::http) speed_limiter: Arc<GlobalSpeedLimiter>,
     pub(in crate::download::http) request_headers: Vec<(String, String)>,
     pub(in crate::download::http) if_range: Option<String>,
@@ -62,7 +61,7 @@ pub(in crate::download::http) async fn download_segment_worker(
         supports_parallel,
         cancel,
         progress_tx,
-        live_ends,
+        range_end,
         speed_limiter,
         request_headers,
         if_range,
@@ -90,7 +89,7 @@ pub(in crate::download::http) async fn download_segment_worker(
             supports_parallel,
             cancel: &cancel,
             progress_tx: &progress_tx,
-            live_ends: &live_ends,
+            range_end: &range_end,
             speed_limiter: &speed_limiter,
             request_headers: &request_headers,
             if_range: if_range.as_deref(),
@@ -133,7 +132,7 @@ struct SegmentAttemptRequest<'a> {
     supports_parallel: bool,
     cancel: &'a Arc<AtomicBool>,
     progress_tx: &'a mpsc::Sender<SegmentMessage>,
-    live_ends: &'a Arc<RwLock<HashMap<String, i64>>>,
+    range_end: &'a Arc<AtomicI64>,
     speed_limiter: &'a Arc<GlobalSpeedLimiter>,
     request_headers: &'a [(String, String)],
     if_range: Option<&'a str>,
@@ -160,15 +159,15 @@ async fn download_segment_once(
         supports_parallel,
         cancel,
         progress_tx,
-        live_ends,
+        range_end,
         speed_limiter,
         request_headers,
         if_range,
         mut offset,
     } = request;
 
-    let range_end = live_segment_end(live_ends, segment).await;
-    if offset > range_end {
+    let initial_range_end = range_end.load(Ordering::SeqCst);
+    if offset > initial_range_end {
         send_segment_progress(progress_tx, &segment.id, offset, 0)
             .await
             .map_err(non_retryable_attempt)?;
@@ -187,7 +186,7 @@ async fn download_segment_once(
     let mut http_request = apply_forwarded_headers(client.get(url), request_headers)
         .header(ACCEPT_ENCODING, "identity");
     let range_header = if use_range {
-        Some(format!("bytes={offset}-{range_end}"))
+        Some(format!("bytes={offset}-{initial_range_end}"))
     } else {
         None
     };
@@ -260,7 +259,7 @@ async fn download_segment_once(
             .get(CONTENT_RANGE)
             .and_then(|value| value.to_str().ok())
             .and_then(parse_content_range)
-            .filter(|range| range.start == offset && range.end == range_end)
+            .filter(|range| range.start == offset && range.end == initial_range_end)
             .filter(|range| range.total == total_size);
         if expected_total.is_none() {
             return Err(non_retryable(segment_failure(
@@ -320,7 +319,7 @@ async fn download_segment_once(
             return Ok(offset);
         }
 
-        let current_end = live_segment_end(live_ends, segment).await;
+        let current_end = range_end.load(Ordering::SeqCst);
         if offset > current_end {
             send_segment_progress(progress_tx, &segment.id, offset, 0)
                 .await
@@ -333,7 +332,7 @@ async fn download_segment_once(
         if write_len <= 0 {
             return Ok(offset);
         }
-        if i64::try_from(chunk.len()).unwrap_or(0) > allowed && current_end == range_end {
+        if i64::try_from(chunk.len()).unwrap_or(0) > allowed && current_end == initial_range_end {
             return Err(non_retryable(segment_failure(
                 segment,
                 offset,
@@ -382,7 +381,7 @@ async fn download_segment_once(
         ))
     })?;
 
-    let final_end = live_segment_end(live_ends, segment).await;
+    let final_end = range_end.load(Ordering::SeqCst);
     if offset <= final_end {
         return Err(retryable(segment_failure(
             segment,
@@ -395,18 +394,6 @@ async fn download_segment_once(
         .await
         .map_err(non_retryable_attempt)?;
     Ok(offset)
-}
-
-async fn live_segment_end(
-    live_ends: &Arc<RwLock<HashMap<String, i64>>>,
-    segment: &TaskSegmentRecord,
-) -> i64 {
-    live_ends
-        .read()
-        .await
-        .get(&segment.id)
-        .copied()
-        .unwrap_or(segment.range_end)
 }
 
 fn retryable(failure: SegmentFailure) -> SegmentAttemptError {

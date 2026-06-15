@@ -24,7 +24,7 @@ fn extracts_multiple_urls_and_deduplicates_normalized_values() {
 #[test]
 fn accepts_supported_download_protocols() {
     let urls = extract_download_urls(
-        "https://example.com/a.torrent ftps://files.example.com/b.bin magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10 file:///C:/Downloads/sample.torrent",
+        "https://example.com/a.torrent ftps://files.example.com/b.bin magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10 file:///C:/Downloads/sample.torrent file:///C:/Downloads/list.meta4",
     );
 
     assert_eq!(
@@ -34,6 +34,7 @@ fn accepts_supported_download_protocols() {
             "ftps://files.example.com/b.bin".to_string(),
             "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string(),
             "file:///C:/Downloads/sample.torrent".to_string(),
+            "file:///C:/Downloads/list.meta4".to_string(),
         ]
     );
 }

@@ -57,12 +57,13 @@ import type { Task } from "@/types/task";
 interface SelectedLocalFile {
   path: string;
   name: string;
-  kind: "torrent" | "text";
+  kind: "torrent" | "metalink" | "text";
 }
 
 function getLocalFileKind(name: string): SelectedLocalFile["kind"] {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "torrent") return "torrent";
+  if (ext === "meta4" || ext === "metalink") return "metalink";
   return "text";
 }
 
@@ -90,7 +91,9 @@ function pathToFileUrl(filePath: string): string {
 }
 
 function localFileKindLabel(kind: SelectedLocalFile["kind"], t: (key: string) => string): string {
-  return kind === "torrent" ? t("newDownload.fileKindTorrent") : t("newDownload.fileKindText");
+  if (kind === "torrent") return t("newDownload.fileKindTorrent");
+  if (kind === "metalink") return t("newDownload.fileKindMetalink");
+  return t("newDownload.fileKindText");
 }
 
 /* ------------------------------------------------------------------ */
@@ -162,13 +165,18 @@ export function NewDownloadDialog({
   const batchInputRef = useRef<HTMLTextAreaElement | null>(null);
   const appliedInitialSourceId = useRef<string | undefined>(undefined);
   const isTorrentProbe = probe?.protocol === "bt" || probe?.protocol === "magnet";
+  const isMetalinkProbe = probe?.protocol === "metalink";
   const isHlsProbe = probe?.protocol === "hls";
+  const isSelectableMultiFileProbe = isTorrentProbe || isMetalinkProbe;
   const isMultiFile = probe != null && probe.files.length > 1;
-  const shouldShowTorrentProtocolHint =
+  const shouldShowManifestProtocolHint =
     isTorrentProbe ||
+    isMetalinkProbe ||
     selectedLocalFile?.kind === "torrent" ||
-    /\.torrent(?:[?#].*)?$/i.test(url.trim());
-  const torrentSelectionRequired = isTorrentProbe && isMultiFile && selectedFiles.size === 0;
+    selectedLocalFile?.kind === "metalink" ||
+    /\.(torrent|meta4|metalink)(?:[?#].*)?$/i.test(url.trim());
+  const fileSelectionRequired =
+    isSelectableMultiFileProbe && isMultiFile && selectedFiles.size === 0;
   const canProbeFtpDirectory = /^(ftp|ftps):\/\//i.test(url.trim()) && url.trim().endsWith("/");
 
   // Initialize selectedFiles when probe changes
@@ -251,9 +259,11 @@ export function NewDownloadDialog({
     const currentProbe = probe && probeUrl === currentUrl ? probe : null;
     const currentIsTorrentProbe =
       currentProbe?.protocol === "bt" || currentProbe?.protocol === "magnet";
+    const currentIsMetalinkProbe = currentProbe?.protocol === "metalink";
     const currentIsHlsProbe = currentProbe?.protocol === "hls";
+    const currentIsSelectableMultiFileProbe = currentIsTorrentProbe || currentIsMetalinkProbe;
     const selectedFilePaths =
-      currentProbe && currentIsTorrentProbe && currentProbe.files.length > 1
+      currentProbe && currentIsSelectableMultiFileProbe && currentProbe.files.length > 1
         ? Array.from(selectedFiles)
             .sort((left, right) => left - right)
             .map((index) => currentProbe.files[index]?.relativePath)
@@ -261,11 +271,11 @@ export function NewDownloadDialog({
         : null;
     if (
       currentProbe &&
-      currentIsTorrentProbe &&
+      currentIsSelectableMultiFileProbe &&
       currentProbe.files.length > 1 &&
       selectedFilePaths?.length === 0
     ) {
-      setError(t("newDownload.torrentSelectionRequired"));
+      setError(t("newDownload.fileSelectionRequired"));
       setSubmitStatus(null);
       return;
     }
@@ -284,7 +294,9 @@ export function NewDownloadDialog({
         saveDir: saveDir.trim() || null,
         fileName: fileName.trim() || null,
         expectedHashSha256:
-          currentIsTorrentProbe || currentIsHlsProbe ? null : expectedHashSha256.trim() || null,
+          currentIsTorrentProbe || currentIsMetalinkProbe || currentIsHlsProbe
+            ? null
+            : expectedHashSha256.trim() || null,
         taskSpeedLimitBps: null,
         priority: null,
         categoryKey: null,
@@ -331,7 +343,7 @@ export function NewDownloadDialog({
     setFileLoading(true);
     try {
       const picked = await openFilePicker([
-        { name: "Torrent / Text", extensions: ["torrent", "txt"] },
+        { name: "Manifest / Text", extensions: ["torrent", "meta4", "metalink", "txt"] },
       ]);
       if (!picked) return;
 
@@ -339,7 +351,7 @@ export function NewDownloadDialog({
       const file: SelectedLocalFile = { path: picked.path, name: picked.name, kind };
       setSelectedLocalFile(file);
 
-      if (kind === "torrent") {
+      if (kind === "torrent" || kind === "metalink") {
         const fileUrl = pathToFileUrl(picked.path);
         setUrl(fileUrl);
         setProbe(null);
@@ -364,7 +376,7 @@ export function NewDownloadDialog({
 
   function clearSelectedLocalFile() {
     setSelectedLocalFile(null);
-    if (selectedLocalFile?.kind === "torrent") {
+    if (selectedLocalFile?.kind === "torrent" || selectedLocalFile?.kind === "metalink") {
       setUrl("");
       setProbe(null);
       setProbeUrl("");
@@ -494,7 +506,7 @@ export function NewDownloadDialog({
                     setProbe(null);
                     setProbeUrl("");
                     setFtpDirectoryProbe(null);
-                    if (selectedLocalFile?.kind === "torrent") {
+                    if (selectedLocalFile?.kind === "torrent" || selectedLocalFile?.kind === "metalink") {
                       setSelectedLocalFile(null);
                     }
                   }}
@@ -518,9 +530,9 @@ export function NewDownloadDialog({
               </div>
             </label>
 
-            {shouldShowTorrentProtocolHint ? (
+            {shouldShowManifestProtocolHint ? (
               <p className="text-[11px] leading-4 text-text-muted">
-                {t("newDownload.torrentProtocolHint")}
+                {t("newDownload.manifestProtocolHint")}
               </p>
             ) : null}
 
@@ -577,7 +589,7 @@ export function NewDownloadDialog({
             {selectedLocalFile ? (
               <div className="flex items-center gap-3 rounded-md border border-border-subtle bg-surface-raised/60 px-3 py-2.5">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent-primary/10 text-accent-primary">
-                  {selectedLocalFile.kind === "torrent" ? (
+                  {selectedLocalFile.kind === "torrent" || selectedLocalFile.kind === "metalink" ? (
                     <File className="h-5 w-5" />
                   ) : (
                     <FileText className="h-5 w-5" />
@@ -633,6 +645,7 @@ export function NewDownloadDialog({
                   <span className="rounded bg-surface-raised px-1.5 py-0.5 font-medium text-text-secondary">
                     {probe.protocol === "bt" ? "BT" :
                      probe.protocol === "magnet" ? "Magnet" :
+                     probe.protocol === "metalink" ? "Metalink" :
                      probe.protocol === "hls" ? "HLS" :
                      probe.protocol === "ftp" ? "FTP" : "HTTP"}
                   </span>
@@ -784,7 +797,7 @@ export function NewDownloadDialog({
             {/* Advanced section */}
             {advancedOpen ? (
               <div className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3">
-                {!isTorrentProbe && !isHlsProbe ? (
+                {!isTorrentProbe && !isMetalinkProbe && !isHlsProbe ? (
                   <label className="flex flex-col gap-1 text-xs text-text-muted">
                     {t("newDownload.sha256")}
                     <Input
@@ -885,7 +898,7 @@ export function NewDownloadDialog({
             <Button
               type="submit"
               className="w-full sm:w-auto"
-              disabled={submitting || torrentSelectionRequired || !url.trim()}
+              disabled={submitting || fileSelectionRequired || !url.trim()}
             >
               {submitting ? (
                 <>

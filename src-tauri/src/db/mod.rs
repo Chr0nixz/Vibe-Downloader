@@ -3,13 +3,14 @@ mod connection;
 mod events;
 mod hash;
 mod hls;
+mod metalink;
 mod request_diagnostics;
 mod request_headers;
 mod segment_planner;
 mod segments;
 mod settings;
-mod task_credentials;
 mod task_checksums;
+mod task_credentials;
 mod task_files;
 mod task_proxy;
 mod task_records;
@@ -27,6 +28,11 @@ pub use self::hls::{
     reset_hls_segments_for_task, update_hls_last_media_sequence, update_hls_segment_status,
     upsert_hls_segment, upsert_hls_task, HlsSegmentRecord, HlsSegmentUpsert, HlsTaskRecord,
     HlsTaskUpsert,
+};
+pub use self::metalink::{
+    insert_metalink_resource, list_metalink_resources_for_file, mark_metalink_resource_completed,
+    mark_metalink_resource_failed, upsert_metalink_task, MetalinkResourceInsert,
+    MetalinkResourceRecord, MetalinkTaskUpsert,
 };
 pub use self::request_diagnostics::{insert_request_diagnostic, list_request_diagnostics_page};
 pub use self::request_headers::{
@@ -48,22 +54,23 @@ pub use self::segments::{
     update_segments_status_for_task, SegmentSplit,
 };
 pub use self::settings::{
-    clipboard_monitor_enabled, get_settings, normalize_accent_color, normalize_font_family,
-    local_time_window_active, normalize_local_time, normalize_multi_connection_threshold_bytes,
+    clipboard_monitor_enabled, get_settings, local_time_window_active, normalize_accent_color,
+    normalize_font_family, normalize_local_time, normalize_multi_connection_threshold_bytes,
     normalize_proxy_mode, normalize_proxy_no_proxy, normalize_proxy_optional, normalize_proxy_url,
     normalize_speed_limit_bps, parse_multi_connection_threshold_bytes, parse_speed_limit_bps,
     upsert_settings,
+};
+pub use self::task_checksums::{
+    insert_task_checksum_record, list_task_checksum_records, list_task_checksum_records_for_file,
+    list_task_checksum_records_for_tasks, update_task_checksum_record,
 };
 pub use self::task_credentials::{
     legacy_credentials_from_url, migrate_legacy_ftp_credentials, resolve_task_credentials,
     upsert_task_credentials, TaskCredentials,
 };
-pub use self::task_checksums::{
-    insert_task_checksum_record, list_task_checksum_records, list_task_checksum_records_for_tasks,
-};
 pub use self::task_files::{
     insert_task_file_record, list_task_file_records, list_task_file_records_for_tasks,
-    update_task_file_selection,
+    update_task_file_progress, update_task_file_selection,
 };
 pub use self::task_proxy::{
     get_task_proxy_settings, resolve_task_proxy_config, upsert_task_proxy_settings,
@@ -71,8 +78,8 @@ pub use self::task_proxy::{
 };
 pub use self::task_records::{
     find_duplicate_task_record, get_task_record, insert_task_record, list_queued_task_records,
-    list_task_records, list_task_records_cursor, list_task_records_page, next_retry_after_at,
-    next_queue_position, task_filter_options, update_task_transfer_options, TaskFilterOptions,
+    list_task_records, list_task_records_cursor, list_task_records_page, next_queue_position,
+    next_retry_after_at, task_filter_options, update_task_transfer_options, TaskFilterOptions,
     TaskListPage, TaskListQuery, TaskTransferOptionsUpdate,
 };
 pub use self::task_state::{
@@ -80,7 +87,8 @@ pub use self::task_state::{
     complete_unknown_size_task, delete_segments_for_task, delete_task_files_for_task,
     delete_task_record, reset_interrupted_tasks, reset_task_download_state,
     update_task_and_segment_progress, update_task_final_path, update_task_health_summary,
-    update_task_progress, update_task_retry_after, update_task_save_target, update_task_status,
+    update_task_progress, update_task_retry_after, update_task_runtime_progress,
+    update_task_save_target, update_task_status,
 };
 pub use self::torrent::{
     get_torrent_runtime_snapshot, torrent_seeding_enabled, update_task_remote_metadata,

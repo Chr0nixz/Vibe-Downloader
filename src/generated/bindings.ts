@@ -526,6 +526,7 @@ export type Task = {
 export type TaskChecksum = {
 	id: string,
 	taskId: string,
+	fileId: string | null,
 	algorithm: ChecksumAlgorithm,
 	expectedHash: string,
 	actualHash: string | null,
@@ -555,7 +556,7 @@ export type TaskEventsPageResult = {
 	nextCursor: string | null,
 };
 
-export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "hls" | "bt" | "ftp" | "proxy" | "schedule" | "other";
+export type TaskFailureCategory = "remote_changed" | "resume_unavailable" | "temp_file" | "disk_write" | "http" | "auth" | "hls" | "metalink" | "bt" | "ftp" | "proxy" | "schedule" | "other";
 
 export type TaskFile = {
 	id: string,

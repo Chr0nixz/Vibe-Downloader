@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -9,19 +8,10 @@ import { useTaskStore } from "@/stores/task-store";
 
 export function StatusBar({ className }: { className?: string }) {
   const { t } = useTranslation();
-  const tasks = useTaskStore((s) => s.tasks);
+  const stats = useTaskStore((s) => s.taskStats);
   const settings = useSettingsStore((s) => s.settings);
   const { updateVersion, installing, error, installUpdate } = useAppUpdater();
   const speedLimit = Number(settings?.globalSpeedLimitBps ?? 0);
-
-  const stats = useMemo(() => {
-    const active = tasks.filter(
-      (t) => t.status === "downloading" || t.status === "retrying",
-    );
-    const queued = tasks.filter((t) => t.status === "queued");
-    const totalSpeed = active.reduce((sum, t) => sum + t.speedBps, 0);
-    return { active: active.length, queued: queued.length, totalSpeed };
-  }, [tasks]);
 
   return (
     <footer
