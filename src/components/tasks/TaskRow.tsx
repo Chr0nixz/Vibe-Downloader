@@ -39,7 +39,7 @@ import type { RecoveryAction } from "@/generated/bindings";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 
 interface TaskRowProps {
-  task: Task;
+  taskId: string;
   selected: boolean;
   multiSelected: boolean;
   isFirstFocusable: boolean;
@@ -80,7 +80,7 @@ function statusBadge(status: Task["status"]): string {
 }
 
 export const TaskRow = memo(function TaskRow({
-  task,
+  taskId,
   selected,
   multiSelected,
   isFirstFocusable,
@@ -98,18 +98,20 @@ export const TaskRow = memo(function TaskRow({
   onResolveAttention,
 }: TaskRowProps) {
   const { t } = useTranslation();
-  const expanded = useTaskStore((s) => s.expandedTaskIds.includes(task.id));
-  const completionFlash = useTaskStore((s) => s.completionFlashIds.includes(task.id));
+  const task = useTaskStore((s) => s.taskById[taskId]);
+  const expanded = useTaskStore((s) => s.expandedTaskIds.includes(taskId));
+  const completionFlash = useTaskStore((s) => s.completionFlashIds.includes(taskId));
   const speedHistory = useTaskStore(
-    (s) => s.speedHistoryByTaskId[task.id] ?? EMPTY_SPEED_HISTORY,
+    (s) => s.speedHistoryByTaskId[taskId] ?? EMPTY_SPEED_HISTORY,
   );
   const toggleTaskExpanded = useTaskStore((s) => s.toggleTaskExpanded);
   const onSelect = useCallback(() => {
-    onSelectTask(task.id);
-  }, [onSelectTask, task.id]);
+    onSelectTask(taskId);
+  }, [onSelectTask, taskId]);
   const onToggleExpanded = useCallback(() => {
-    toggleTaskExpanded(task.id);
-  }, [toggleTaskExpanded, task.id]);
+    toggleTaskExpanded(taskId);
+  }, [toggleTaskExpanded, taskId]);
+  if (!task) return null;
   const progress =
     task.totalSize > 0 ? task.downloadedBytes / task.totalSize : 0;
   const isActive =
@@ -166,7 +168,7 @@ export const TaskRow = memo(function TaskRow({
         }
       }}
       className={cn(
-        "group relative overflow-hidden rounded-lg border border-transparent bg-surface-base/60 px-3 py-3.5 transition-[background-color,border-color,box-shadow,transform] duration-ui ease-out hover:-translate-y-px hover:bg-surface-raised/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70 sm:px-3.5 md:px-4",
+        "group relative overflow-hidden rounded-lg border border-transparent bg-surface-base/60 px-3 py-3.5 transition-[background-color,border-color,box-shadow,transform] duration-ui ease-out hover:-translate-y-px hover:bg-surface-raised/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary sm:px-3.5 md:px-4",
         "grid gap-x-4 gap-y-3 md:grid-cols-[minmax(0,1fr)_auto] md:gap-y-2",
         completionFlash && "completion-flash",
         selected &&

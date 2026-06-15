@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -46,7 +46,7 @@ export function Sidebar() {
   const { t } = useTranslation();
   const nav = useTaskStore((s) => s.nav);
   const setNav = useTaskStore((s) => s.setNav);
-  const tasks = useTaskStore((s) => s.tasks);
+  const taskStats = useTaskStore((s) => s.taskStats);
 
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -66,15 +66,13 @@ export function Sidebar() {
     }
   };
 
-  const counts = useMemo(() => {
-    const c: Record<string, number> = { all: tasks.length };
-    for (const task of tasks) {
-      c[task.status] = (c[task.status] ?? 0) + 1;
-    }
-    c.paused = (c.paused ?? 0) + (c.queued ?? 0) + (c.waiting_network ?? 0);
-    c.failed = (c.failed ?? 0) + (c.needs_attention ?? 0);
-    return c;
-  }, [tasks]);
+  const counts: Record<string, number> = {
+    all: taskStats.all,
+    downloading: taskStats.active,
+    paused: taskStats.paused,
+    completed: taskStats.completed,
+    failed: taskStats.failed,
+  };
 
   return (
     <nav
@@ -136,23 +134,43 @@ export function Sidebar() {
         />
 
         {/* Collapse / expand toggle */}
+        <div className="hidden md:mx-1.5 md:mt-0.5 md:block lg:mx-2.5">
+          <div className="h-px bg-border-subtle/40" />
+        </div>
         <Button
           type="button"
           variant="ghost"
           onClick={toggleCollapse}
           aria-label={collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
           className={cn(
-            "h-9 w-9 flex-none justify-center p-0 text-text-muted",
-            "hover:bg-surface-raised hover:text-text-secondary",
-            "md:mt-1 md:w-full",
-            "transition-colors duration-[var(--motion-ui)]",
+            "group h-9 w-9 flex-none justify-center p-0",
+            "text-text-muted",
+            "hover:bg-accent-primary/10 hover:text-accent-primary",
+            "md:mt-1 md:h-10 md:w-full md:flex-row md:gap-2",
+            "transition-all duration-[var(--motion-ui)]",
           )}
         >
-          {collapsed ? (
-            <ChevronRight className="h-4 w-4" aria-hidden />
-          ) : (
-            <ChevronLeft className="h-4 w-4" aria-hidden />
-          )}
+          <span
+            className={cn(
+              "flex h-5 w-5 items-center justify-center rounded-full",
+              "bg-surface-raised/80 group-hover:bg-accent-primary/15",
+              "transition-colors duration-[var(--motion-ui)]",
+            )}
+          >
+            {collapsed ? (
+              <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+            ) : (
+              <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+            )}
+          </span>
+          <span
+            className={cn(
+              "hidden text-xs font-medium md:inline lg:hidden",
+              collapsed && "lg:hidden",
+            )}
+          >
+            {collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
+          </span>
         </Button>
       </div>
     </nav>

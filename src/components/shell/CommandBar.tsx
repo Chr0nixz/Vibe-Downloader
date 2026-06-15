@@ -10,11 +10,16 @@ import {
   Search,
   Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -66,12 +71,10 @@ export function CommandBar({
   const sortKey = useTaskStore((s) => s.sortKey);
   const sortDirection = useTaskStore((s) => s.sortDirection);
   const setSort = useTaskStore((s) => s.setSort);
-  const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
+  const [speedPopoverOpen, setSpeedPopoverOpen] = useState(false);
   const [customLimit, setCustomLimit] = useState("");
   const [savingSpeed, setSavingSpeed] = useState(false);
-  const speedMenuRef = useRef<HTMLDivElement>(null);
   const speedTriggerRef = useRef<HTMLButtonElement>(null);
-  const speedListRef = useRef<HTMLDivElement>(null);
   const canStart =
     !!selectedTask &&
     (selectedTask.status === "paused" ||
@@ -85,79 +88,16 @@ export function CommandBar({
   const canDelete = !!selectedTask;
   const currentLimit = Number(settings?.globalSpeedLimitBps ?? 0);
 
+  // First-run tooltip: auto-shows once per session to help new users discover the button
+  const [firstRunTip, setFirstRunTip] = useState(true);
   useEffect(() => {
-    if (!speedMenuOpen) return;
-
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (
-        target instanceof Node &&
-        speedMenuRef.current &&
-        !speedMenuRef.current.contains(target)
-      ) {
-        setSpeedMenuOpen(false);
-      }
-    };
-
-    window.addEventListener("pointerdown", onPointerDown);
-    return () => window.removeEventListener("pointerdown", onPointerDown);
-  }, [speedMenuOpen]);
-
-  // Auto-focus the first menu item when the speed menu opens
-  useEffect(() => {
-    if (speedMenuOpen && speedListRef.current) {
-      const firstItem = speedListRef.current.querySelector<HTMLElement>(
-        '[role="menuitemradio"]',
-      );
-      firstItem?.focus();
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setFirstRunTip(false);
+      return;
     }
-  }, [speedMenuOpen]);
-
-  const handleSpeedMenuKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      const menu = speedListRef.current;
-      if (!menu) return;
-
-      const items = Array.from(
-        menu.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
-      );
-      if (items.length === 0) return;
-
-      const currentIndex = items.indexOf(document.activeElement as HTMLElement);
-
-      switch (event.key) {
-        case "ArrowDown": {
-          event.preventDefault();
-          const next = currentIndex < items.length - 1 ? currentIndex + 1 : 0;
-          items[next]?.focus();
-          break;
-        }
-        case "ArrowUp": {
-          event.preventDefault();
-          const prev = currentIndex > 0 ? currentIndex - 1 : items.length - 1;
-          items[prev]?.focus();
-          break;
-        }
-        case "Home": {
-          event.preventDefault();
-          items[0]?.focus();
-          break;
-        }
-        case "End": {
-          event.preventDefault();
-          items[items.length - 1]?.focus();
-          break;
-        }
-        case "Escape": {
-          event.preventDefault();
-          setSpeedMenuOpen(false);
-          speedTriggerRef.current?.focus();
-          break;
-        }
-      }
-    },
-    [],
-  );
+    const timer = window.setTimeout(() => setFirstRunTip(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   async function setSpeedLimit(limit: number | null) {
     try {
@@ -165,7 +105,7 @@ export function CommandBar({
       if (!settings) return;
       const nextSettings = await applyGlobalSpeedLimit(settings, limit);
       setSettings(nextSettings);
-      setSpeedMenuOpen(false);
+      setSpeedPopoverOpen(false);
     } catch (error) {
       addToast({
         tone: "error",
@@ -188,7 +128,7 @@ export function CommandBar({
       className="flex min-w-0 items-center gap-1.5 border-b border-border-subtle bg-surface-base px-2 py-1.5 md:gap-2.5 md:px-3 md:py-2"
       aria-label={t("commandBar.toolbarAria")}
     >
-      <Tooltip>
+      <Tooltip open={firstRunTip || undefined}>
         <TooltipTrigger asChild>
           <Button
             variant="default"
@@ -200,7 +140,11 @@ export function CommandBar({
             <span className="hidden md:inline">{t("commandBar.newDownload")}</span>
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{t("commandBar.newDownload")}</TooltipContent>
+        <TooltipContent className={firstRunTip ? "max-w-56 text-balance" : undefined}>
+          {firstRunTip
+            ? t("commandBar.newDownloadFirstRunTip")
+            : t("commandBar.newDownload")}
+        </TooltipContent>
       </Tooltip>
 
       <div className="hidden shrink-0 items-center gap-1 md:flex md:gap-2">
@@ -222,73 +166,69 @@ export function CommandBar({
           onClick={onDelete}
           disabled={!canDelete}
         />
-        <div className="relative" ref={speedMenuRef}>
-          <ActionIcon
-            label={
-              currentLimit > 0
-                ? t("commandBar.speedLimitActive", {
-                    speed: formatSpeed(currentLimit),
-                  })
-                : t("commandBar.speedLimit")
-            }
-            icon={savingSpeed ? LoaderCircle : Gauge}
-            className={cn("hidden md:inline-flex", savingSpeed && "animate-spin")}
-            onClick={() => setSpeedMenuOpen((open) => !open)}
-            disabled={!settings || savingSpeed}
-            buttonRef={speedTriggerRef}
-            ariaHasPopup="menu"
-            ariaExpanded={speedMenuOpen}
-          />
-          {speedMenuOpen ? (
-            <div
-              ref={speedListRef}
-              className="absolute left-0 top-10 z-30 w-64 rounded-md border border-border-subtle bg-surface-overlay p-1.5 shadow-xl"
-              role="menu"
-              aria-label={t("commandBar.speedLimit")}
-              onKeyDown={handleSpeedMenuKeyDown}
-            >
-              <SpeedPreset
+        <Popover open={speedPopoverOpen} onOpenChange={setSpeedPopoverOpen}>
+          <PopoverTrigger asChild>
+            <ActionIcon
+              label={
+                currentLimit > 0
+                  ? t("commandBar.speedLimitActive", {
+                      speed: formatSpeed(currentLimit),
+                    })
+                  : t("commandBar.speedLimit")
+              }
+              icon={savingSpeed ? LoaderCircle : Gauge}
+              className={cn(
+                "hidden md:inline-flex",
+                savingSpeed && "animate-spin",
+              )}
+              disabled={!settings || savingSpeed}
+              buttonRef={speedTriggerRef}
+            />
+          </PopoverTrigger>
+          <PopoverContent className="w-64" align="start">
+            <div className="space-y-0.5">
+              <SpeedOption
                 label={t("speedLimit.unlimited")}
                 active={currentLimit <= 0}
                 onClick={() => void setSpeedLimit(null)}
               />
               {SPEED_LIMIT_PRESETS.map((preset) => (
-                <SpeedPreset
+                <SpeedOption
                   key={preset.value}
                   label={preset.label}
                   active={currentLimit === preset.value}
                   onClick={() => void setSpeedLimit(preset.value)}
                 />
               ))}
-              <div className="mt-1 border-t border-border-subtle pt-1">
-                <label className="block px-2 py-1 text-[11px] font-medium text-text-muted">
-                  {t("speedLimit.customBytes")}
-                </label>
-                <div className="flex gap-1 px-1">
-                  <Input
-                    value={customLimit}
-                    onChange={(event) => setCustomLimit(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") applyCustomSpeed();
-                    }}
-                    inputMode="numeric"
-                    placeholder="1048576"
-                    className="h-8"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={applyCustomSpeed}
-                    disabled={savingSpeed || !customLimit.trim()}
-                  >
-                    {t("speedLimit.apply")}
-                  </Button>
-                </div>
+            </div>
+            <div className="mt-1.5 border-t border-border-subtle pt-1.5">
+              <label className="block px-2 py-1 text-[11px] font-medium text-text-muted">
+                {t("speedLimit.customBytes")}
+              </label>
+              <div className="flex gap-1 px-1">
+                <Input
+                  value={customLimit}
+                  onChange={(event) => setCustomLimit(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") applyCustomSpeed();
+                  }}
+                  inputMode="numeric"
+                  placeholder="1048576"
+                  className="h-8"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={applyCustomSpeed}
+                  disabled={savingSpeed || !customLimit.trim()}
+                >
+                  {t("speedLimit.apply")}
+                </Button>
               </div>
             </div>
-          ) : null}
-        </div>
+          </PopoverContent>
+        </Popover>
       </div>
 
       <div className="hidden shrink-0 items-center md:flex">
@@ -366,7 +306,7 @@ const SPEED_LIMIT_PRESETS = [
   { label: "10 MB/s", value: 10 * 1024 * 1024 },
 ];
 
-function SpeedPreset({
+function SpeedOption({
   label,
   active,
   onClick,
@@ -378,17 +318,19 @@ function SpeedPreset({
   return (
     <button
       type="button"
-      role="menuitemradio"
-      aria-checked={active}
-      tabIndex={-1}
       className={cn(
-        "flex h-8 w-full items-center justify-between rounded px-2 text-left text-sm text-text-secondary hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
+        "flex h-8 w-full items-center justify-between rounded-md px-2 text-left text-sm text-text-secondary",
+        "transition-[background-color,color] duration-[var(--motion-ui)] ease-out",
+        "hover:bg-surface-raised hover:text-text-primary",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
         active && "bg-surface-raised text-text-primary",
       )}
       onClick={onClick}
     >
       <span>{label}</span>
-      {active ? <Check className="h-4 w-4 text-accent-primary" /> : null}
+      {active ? (
+        <Check className="h-4 w-4 text-accent-primary" />
+      ) : null}
     </button>
   );
 }
@@ -400,8 +342,6 @@ function ActionIcon({
   disabled,
   className,
   buttonRef,
-  ariaHasPopup,
-  ariaExpanded,
 }: {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
@@ -409,8 +349,6 @@ function ActionIcon({
   disabled?: boolean;
   className?: string;
   buttonRef?: React.Ref<HTMLButtonElement>;
-  ariaHasPopup?: React.AriaAttributes["aria-haspopup"];
-  ariaExpanded?: boolean;
 }) {
   return (
     <Tooltip>
@@ -420,8 +358,6 @@ function ActionIcon({
           variant="ghost"
           size="icon"
           aria-label={label}
-          aria-haspopup={ariaHasPopup}
-          aria-expanded={ariaExpanded}
           onClick={onClick}
           disabled={disabled}
           className={className}

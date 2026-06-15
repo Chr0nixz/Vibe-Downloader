@@ -5,19 +5,22 @@ plain-text clipboard content for supported download links and open the New
 download flow for confirmation. Clipboard monitoring is enabled by default and
 can be disabled in Settings > Desktop integration.
 
-Protocol hardening note: FTP/FTPS credential-bearing URLs are sanitized into
-task records and encrypted task credentials; BitTorrent selected-file tasks
-apply file selection before starting the runtime torrent; HTTP request
+Protocol hardening note: FTP/FTPS/SFTP credential-bearing URLs are sanitized
+into task records and encrypted task credentials; BitTorrent selected-file
+tasks apply file selection before starting the runtime torrent; HTTP request
 diagnostics include Range and If-Range data for resume troubleshooting.
 Metalink `.meta4`/`.metalink` manifests are parsed into manifest tasks with
 multi-file selection, HTTP/HTTPS mirror fallback, per-file progress, and
 manifest-provided MD5/SHA-1/SHA-256/SHA-512 verification.
+SFTP is implemented as a first-pass single-file engine with password
+credentials, pause/resume from the local temp file, one-level directory probing,
+SOCKS5-only proxy support, and TOFU host-key fingerprint checks.
 
 Scheduling/proxy note: queued tasks can opt into a global download window,
 timed global throttling can apply a stricter limit, and completion actions
 support cancellable app exit plus explicitly confirmed shutdown. Per-task proxy
 overrides are available for supported protocol/proxy combinations: HTTP(S) can
-use HTTP(S)/SOCKS5, while BT and FTP/explicit FTPS are limited to SOCKS5.
+use HTTP(S)/SOCKS5, while BT, FTP/explicit FTPS, and SFTP are limited to SOCKS5.
 
 Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下载、断点续传、任务队列和浏览器交接变得更清楚、更可靠，也比传统下载工具更符合现在的桌面审美。
 
@@ -57,7 +60,7 @@ Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下�
 
 这些功能还在后续计划中，不要把当前版本当成完整下载器使用：
 
-- HLS/m3u8 流媒体解析、SFTP、网盘解析或视频嗅探；`.m3u8` 当前按普通 HTTP 文件处理。
+- HLS/m3u8 流媒体解析、网盘解析或视频嗅探；`.m3u8` 当前按普通 HTTP 文件处理。
 - 任务优先级、单任务限速。
 - 完整站点规则管理 UI。
 - 商店版浏览器扩展、Safari wrapper 和正式扩展签名。

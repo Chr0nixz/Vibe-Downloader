@@ -205,6 +205,36 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
 }
 
 #[tokio::test]
+async fn sftp_task_creates_single_file_work_unit() {
+    let pool = test_pool("sftp-planning").await;
+    let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES * 4;
+    let mut task = sample_task("task-sftp", total_size);
+    task.url = "sftp://example.com/remote/file.bin".to_string();
+    task.final_url = Some(task.url.clone());
+    task.protocol = "sftp".to_string();
+    task.source_key = "sftp://example.com:22".to_string();
+    task.supports_parallel = false;
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert sftp task");
+
+    let planned_slots = db::planned_segment_count_with_plan(
+        &task,
+        db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
+        db::MAX_SEGMENT_COUNT,
+    );
+    let segments = db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("sftp segments");
+
+    assert_eq!(planned_slots, 1);
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].unit_kind, "sftp_file");
+    assert_eq!(segments[0].range_start, 0);
+    assert_eq!(segments[0].range_end, total_size - 1);
+}
+
+#[tokio::test]
 async fn bt_task_creates_single_piece_work_unit() {
     let pool = test_pool("bt-planning").await;
     let mut task = sample_task("task-bt", 0);
@@ -654,7 +684,7 @@ async fn cursor_task_query_pages_and_maps_failure_categories() {
             page_size: 10,
             cursor_value: None,
             cursor_id: None,
-            ..first_query
+            ..first_query.clone()
         },
     )
     .await
@@ -664,6 +694,64 @@ async fn cursor_task_query_pages_and_maps_failure_categories() {
         .items
         .iter()
         .all(|task| task.error_code.as_deref() == Some("auth_headers_expired")));
+
+    let mut sftp_task = sample_task("task-sftp-failure", 100);
+    sftp_task.updated_at = "2024-01-01T00:20:00Z".to_string();
+    sftp_task.created_at = sftp_task.updated_at.clone();
+    sftp_task.status = TaskStatus::Failed;
+    sftp_task.error_code = Some("sftp_host_key_changed".to_string());
+    db::insert_task_record(&pool, &sftp_task)
+        .await
+        .expect("insert sftp failure task");
+    let sftp = db::list_task_records_cursor(
+        &pool,
+        &db::TaskListQuery {
+            failure: "sftp".to_string(),
+            page_size: 10,
+            cursor_value: None,
+            cursor_id: None,
+            ..first_query
+        },
+    )
+    .await
+    .expect("sftp category page");
+    assert_eq!(sftp.items.len(), 1);
+    assert_eq!(
+        sftp.items[0].error_code.as_deref(),
+        Some("sftp_host_key_changed")
+    );
+}
+
+#[tokio::test]
+async fn task_query_indexes_are_created() {
+    let pool = test_pool("task-query-indexes").await;
+    let indexes: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index'
+          AND name IN (
+              'idx_tasks_updated_at_id',
+              'idx_tasks_created_at_id',
+              'idx_tasks_status_updated_at_id',
+              'idx_tasks_source_key_updated_at_id',
+              'idx_tasks_error_code_updated_at_id'
+          )
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("query indexes");
+
+    for expected in [
+        "idx_tasks_updated_at_id",
+        "idx_tasks_created_at_id",
+        "idx_tasks_status_updated_at_id",
+        "idx_tasks_source_key_updated_at_id",
+        "idx_tasks_error_code_updated_at_id",
+    ] {
+        assert!(indexes.iter().any(|index| index == expected), "{expected}");
+    }
 }
 
 #[tokio::test]

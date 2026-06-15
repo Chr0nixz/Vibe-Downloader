@@ -83,6 +83,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::system::request_system_shutdown,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
+        commands::tasks::probe_sftp_directory,
+        commands::tasks::probe_webdav_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
         commands::tasks::update_task_transfer_options,
@@ -133,6 +135,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::system::request_system_shutdown,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
+        commands::tasks::probe_sftp_directory,
+        commands::tasks::probe_webdav_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
         commands::tasks::update_task_transfer_options,
@@ -168,6 +172,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::CompletionActionRequestedPayload>()
         .typ::<models::FtpDirectoryProbe>()
         .typ::<models::FtpDirectoryEntry>()
+        .typ::<models::SftpDirectoryProbe>()
+        .typ::<models::SftpDirectoryEntry>()
+        .typ::<models::WebDavDirectoryProbe>()
+        .typ::<models::WebDavDirectoryEntry>()
         .typ::<commands::tasks::ListTasksResult>()
         .typ::<commands::tasks::ListTasksCursorResult>()
         .typ::<commands::tasks::TaskFilterOptions>()
@@ -320,6 +328,8 @@ pub fn run() {
         commands::system::request_system_shutdown,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
+        commands::tasks::probe_sftp_directory,
+        commands::tasks::probe_webdav_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
         commands::tasks::update_task_transfer_options,
@@ -370,6 +380,8 @@ pub fn run() {
         commands::system::request_system_shutdown,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
+        commands::tasks::probe_sftp_directory,
+        commands::tasks::probe_webdav_directory,
         commands::tasks::create_task,
         commands::tasks::import_urls,
         commands::tasks::update_task_transfer_options,

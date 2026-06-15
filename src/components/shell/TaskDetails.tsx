@@ -436,7 +436,7 @@ function TaskDetailsPanel({
           <button
             type="button"
             onClick={() => setDiagnosticsOpen((v) => !v)}
-            className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-raised/40 hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary/70"
+            className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-raised/40 hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary"
             aria-expanded={diagnosticsOpen}
           >
             <ChevronDown
@@ -473,7 +473,7 @@ function TaskDetailsPanel({
                     }}
                     className={cn(
                       "rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/70",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
                       activeTab === key
                         ? "bg-accent-primary/12 text-accent-primary"
                         : "text-text-muted hover:bg-surface-raised/60 hover:text-text-secondary",

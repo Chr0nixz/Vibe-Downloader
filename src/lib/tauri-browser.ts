@@ -18,6 +18,8 @@ import type {
   ProbeTaskInput,
   ProbeTaskPayload,
   FtpDirectoryProbe,
+  SftpDirectoryProbe,
+  WebDavDirectoryProbe,
   RequestDiagnostic,
   ResolveTaskAttentionInput,
   SegmentSummary,
@@ -237,7 +239,7 @@ function defaultBrowserCaptureSettings(): BrowserCaptureSettings {
     forwardHeaders: false,
     forwardHeadersMode: browserExperimentalCaptureEnabled ? "ask" : "disabled",
     minSizeBytes: "0",
-    fileExtensions: ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "m3u8", "meta4", "metalink"],
+    fileExtensions: ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "m3u8", "mpd", "meta4", "metalink"],
     siteRules: [],
   };
 }
@@ -473,10 +475,12 @@ function scheduleBrowserQueue(): void {
       ...task,
       status: "downloading",
       speedBps: task.speedBps > 0 ? task.speedBps : 4_000_000,
-      connectionCount: Math.min(
-        settings.maxConnectionsPerHost,
-        task.connectionCount > 0 ? task.connectionCount : settings.segmentCount,
-      ),
+      connectionCount: task.supportsParallel
+        ? Math.min(
+            settings.maxConnectionsPerHost,
+            task.connectionCount > 0 ? task.connectionCount : settings.segmentCount,
+          )
+        : 1,
       healthSummary: "Downloading",
       updatedAt: nowIso(),
     };
@@ -760,6 +764,47 @@ export async function probeFtpDirectory(url: string): Promise<FtpDirectoryProbe>
   };
 }
 
+export async function probeSftpDirectory(url: string): Promise<SftpDirectoryProbe> {
+  const base = url.replace(/\/?$/, "/");
+  return {
+    inputUrl: url,
+    directoryUrl: base,
+    currentDirectory: "/",
+    entries: [
+      { name: "backup.tar.zst", raw: "-rw-r--r-- 1 user group 1048576 backup.tar.zst", probableFileUrl: `${base}backup.tar.zst` },
+      { name: "logs", raw: "drwxr-xr-x 1 user group 0 logs", probableFileUrl: null },
+    ],
+    diagnostics: ["Mock SFTP directory probe"],
+  };
+}
+
+export async function probeWebdavDirectory(url: string): Promise<WebDavDirectoryProbe> {
+  const base = url.replace(/\/?$/, "/");
+  return {
+    inputUrl: url,
+    directoryUrl: base,
+    entries: [
+      {
+        name: "release-video.mp4",
+        href: `${base}release-video.mp4`,
+        isCollection: false,
+        size: "73400320",
+        contentType: "video/mp4",
+        probableFileUrl: `${base}release-video.mp4`,
+      },
+      {
+        name: "archive",
+        href: `${base}archive/`,
+        isCollection: true,
+        size: null,
+        contentType: null,
+        probableFileUrl: null,
+      },
+    ],
+    diagnostics: ["Mock WebDAV PROPFIND returned 207 Multi-Status"],
+  };
+}
+
 async function mockTaskEventsForTask(taskId: string): Promise<TaskEvent[]> {
   return taskEvents.filter((event) => event.taskId === taskId).slice(0, 100);
 }
@@ -812,6 +857,8 @@ export async function listTaskRequestsPage(input: CursorPageInput) {
 function mockFailureCategory(task: Task): string | null {
   if (!task.errorCode && !task.errorMessage) return null;
   if (task.errorCode?.startsWith("http_")) return "http";
+  if (task.errorCode?.startsWith("dash_")) return "dash";
+  if (task.errorCode?.startsWith("webdav_")) return "webdav";
   if (task.errorCode?.includes("disk")) return "disk_write";
   if (task.errorCode?.includes("temp_file")) return "temp_file";
   if (task.errorCode?.includes("resume")) return "resume_unavailable";
@@ -1097,6 +1144,8 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
     totalSize: taskTotalSize,
     protocol: probe.protocol,
     taskKind: probe.taskKind,
+    supportsResume: probe.capabilities.supportsResume,
+    supportsParallel: probe.capabilities.supportsParallel,
     supportsMultiFile: probe.capabilities.supportsMultiFile,
     sourceKey: probe.sourceKey,
     saveDir: input.saveDir?.trim() || settings.defaultSaveDir,
@@ -1333,28 +1382,63 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       probedAt: nowIso(),
     };
   }
+  if ((protocol === "http" || protocol === "https" || protocol === "file") && /\.mpd$/i.test(path)) {
+    const sourceName = fileNameFromRelativePath(path) || "manifest.mpd";
+    const fileName = sourceName.replace(/\.mpd$/i, ".mp4");
+    return {
+      inputUrl: input.url,
+      finalUrl: input.url,
+      fileName,
+      protocol: "dash",
+      taskKind: "manifest",
+      capabilities: {
+        supportsResume: false,
+        supportsParallel: true,
+        supportsMultiFile: false,
+      },
+      files: [
+        {
+          relativePath: fileName,
+          size: "0",
+          contentType: "video/mp4",
+        },
+      ],
+      totalSize: "0",
+      sourceKey: `${protocol}://${host}`,
+      contentType: "application/dash+xml",
+      etag: null,
+      lastModified: null,
+      hlsVariants: [],
+      probedAt: nowIso(),
+    };
+  }
+  const isSftp = protocol === "sftp";
+  const fileName = fileNameFromRelativePath(decodeUrlPath(path));
+  const sourceKey = isSftp && parsed
+    ? `sftp://${parsed.hostname}:${parsed.port || "22"}`
+    : `${protocol}://${host}`;
   return {
     inputUrl: input.url,
     finalUrl: input.url,
-    fileName: "download.bin",
+    fileName,
     protocol,
     taskKind: "single_file",
     capabilities: {
       supportsResume: true,
-      supportsParallel: true,
+      supportsParallel: !isSftp,
       supportsMultiFile: false,
     },
     files: [
       {
-        relativePath: "download.bin",
+        relativePath: fileName,
         size: "1048576",
         contentType: "application/octet-stream",
       },
     ],
     totalSize: "1048576",
-    sourceKey: `${protocol}://${host}`,
+    sourceKey,
     contentType: "application/octet-stream",
-    etag: "\"mock-etag\"",
+    etag: isSftp ? null : "\"mock-etag\"",
     lastModified: nowIso(),
     hlsVariants: [],
     probedAt: nowIso(),
@@ -1366,6 +1450,14 @@ function safeUrl(value: string): URL | null {
     return new URL(value);
   } catch {
     return null;
+  }
+}
+
+function decodeUrlPath(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
   }
 }
 

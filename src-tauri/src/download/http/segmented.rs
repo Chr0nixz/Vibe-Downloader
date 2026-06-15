@@ -24,13 +24,13 @@ pub(super) use self::worker::{download_segment_worker, SegmentWorkerRequest};
 
 use super::{
     error::format_http_status,
-    file::{finalize_download_file, persist_completed_path},
+    file::{finalize_download_file, persist_completed_path, preallocate_temp_file},
     request::send_get_with_retry,
 };
 use crate::{
     db,
     download::GlobalSpeedLimiter,
-    events::{emit_queue_changed, emit_task_progress, emit_task_updated_record},
+    events::{emit_queue_changed, emit_task_updated_record, TaskProgressEmitGate},
     logging::sanitize_url,
     models::{
         AppErrorPayload, RequestDiagnosticRecord, SegmentStatus, TaskProgressPayload, TaskRecord,
@@ -146,6 +146,7 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
         .await
         .map_err(|e| format!("Could not create the temporary file: {e}"))?;
     let mut downloaded = 0_i64;
+    let mut progress_gate = TaskProgressEmitGate::default();
     let mut last_emit = Instant::now();
     let mut last_checkpoint = Instant::now();
     let mut last_tick = Instant::now();
@@ -170,6 +171,7 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
                 TaskStatus::Downloading,
             )
             .await?;
+            progress_gate.flush(&app);
             return Ok(());
         }
 
@@ -198,12 +200,14 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
             }
             emit_progress(
                 &app,
+                &mut progress_gate,
                 &task.id,
                 downloaded,
                 0,
                 speed_bps,
                 1,
                 TaskStatus::Downloading,
+                false,
             );
             last_emit = Instant::now();
             last_tick = Instant::now();
@@ -233,12 +237,14 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
     }
     emit_progress(
         &app,
+        &mut progress_gate,
         &task.id,
         downloaded,
         downloaded,
         0,
         0,
         TaskStatus::Completed,
+        true,
     );
     emit_queue_changed(&app);
     Ok(())
@@ -485,14 +491,17 @@ pub(super) async fn run_segmented_download(
         None,
     )
     .await?;
+    let mut progress_gate = TaskProgressEmitGate::default();
     emit_progress(
         &app,
+        &mut progress_gate,
         &task.id,
         initial_downloaded,
         task.total_size,
         0,
         active_connection_count,
         TaskStatus::Downloading,
+        true,
     );
 
     if let Some(parent) = temp_path_buf.parent() {
@@ -507,13 +516,15 @@ pub(super) async fn run_segmented_download(
             .map_err(|e| format!("Could not reset the temporary file: {e}"))?;
     }
 
-    fs::OpenOptions::new()
+    let temp_file = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&temp_path_buf)
         .await
         .map_err(|e| format!("Could not create the temporary file: {e}"))?;
+    preallocate_temp_file(&temp_file, task.total_size, &task.id).await;
+    drop(temp_file);
 
     let (progress_tx, mut progress_rx) = mpsc::channel::<SegmentMessage>(64);
     let mut workers = JoinSet::new();
@@ -574,8 +585,7 @@ pub(super) async fn run_segmented_download(
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let started_at = Instant::now();
     let mut speed_history: VecDeque<(Instant, i64)> = VecDeque::new();
-    let mut acceleration_disabled = false;
-    let mut pending_acceleration: Option<AccelerationCheck> = None;
+    let mut acceleration = AccelerationRuntime::default();
 
     while active_workers > 0 {
         tokio::select! {
@@ -590,11 +600,12 @@ pub(super) async fn run_segmented_download(
                         update_task: !cancel.load(Ordering::SeqCst),
                     },
                     &mut runtime_progress,
+                    &mut progress_gate,
                     message,
                 )
                 .await?;
                 if !cancel.load(Ordering::SeqCst) && last_emit.elapsed() >= Duration::from_millis(300) {
-                    emit_aggregate_progress(&app, &pool, &task.id, task.total_size, active_connection_count, &mut runtime_progress, false).await?;
+                    emit_aggregate_progress(&app, &pool, &task.id, task.total_size, active_connection_count, &mut runtime_progress, &mut progress_gate, false, false).await?;
                     last_emit = Instant::now();
                 }
             }
@@ -611,6 +622,7 @@ pub(super) async fn run_segmented_download(
                         );
                         cancel.store(true, Ordering::SeqCst);
                         workers.abort_all();
+                        acceleration.record_failure();
                         runtime_progress.mark_failed(&failure.segment_id, failure.downloaded_until);
                         checkpoint_runtime_progress(
                             &pool,
@@ -701,7 +713,7 @@ pub(super) async fn run_segmented_download(
                 if cancel.load(Ordering::SeqCst) {
                     continue;
                 }
-                emit_aggregate_progress(&app, &pool, &task.id, task.total_size, active_connection_count, &mut runtime_progress, true).await?;
+                emit_aggregate_progress(&app, &pool, &task.id, task.total_size, active_connection_count, &mut runtime_progress, &mut progress_gate, true, false).await?;
                 let current_speed = runtime_progress.total_speed().max(0);
                 speed_history.push_back((Instant::now(), current_speed));
                 while speed_history.len() > AUTO_ACCELERATION_STABILITY_WINDOW {
@@ -719,10 +731,10 @@ pub(super) async fn run_segmented_download(
                     &mut workers,
                     &mut active_workers,
                     &mut active_connection_count,
-                    &mut acceleration_disabled,
-                    &mut pending_acceleration,
+                    &mut acceleration,
                     &speed_history,
                     &mut runtime_progress,
+                    &mut progress_gate,
                     &mut range_ends,
                     speed_limiter.clone(),
                     started_at,
@@ -746,6 +758,7 @@ pub(super) async fn run_segmented_download(
             true,
         )
         .await?;
+        progress_gate.flush(&app);
         tracing::info!(task_id = %task.id, "segmented download canceled");
         return Ok(());
     }
@@ -761,6 +774,7 @@ pub(super) async fn run_segmented_download(
                 update_task: false,
             },
             &mut runtime_progress,
+            &mut progress_gate,
             message,
         )
         .await?;
@@ -805,12 +819,14 @@ pub(super) async fn run_segmented_download(
     );
     emit_progress(
         &app,
+        &mut progress_gate,
         &task.id,
         task.total_size,
         task.total_size,
         0,
         0,
         TaskStatus::Completed,
+        true,
     );
     emit_queue_changed(&app);
 
@@ -889,6 +905,25 @@ struct AccelerationCheck {
     started_at: Instant,
 }
 
+#[derive(Default)]
+struct AccelerationRuntime {
+    disabled: bool,
+    split_count: usize,
+    failure_count: usize,
+    last_failure_at: Option<Instant>,
+    pending: Option<AccelerationCheck>,
+}
+
+impl AccelerationRuntime {
+    fn record_failure(&mut self) {
+        self.failure_count += 1;
+        self.last_failure_at = Some(Instant::now());
+        if self.failure_count >= 2 {
+            self.disabled = true;
+        }
+    }
+}
+
 // Auto-acceleration coordinates worker state, speed history, and live ranges;
 // keep this exception until acceleration gets a dedicated coordinator object.
 #[allow(clippy::too_many_arguments)]
@@ -904,10 +939,10 @@ async fn maybe_accelerate_segments(
     workers: &mut JoinSet<Result<(), SegmentFailure>>,
     active_workers: &mut usize,
     active_connection_count: &mut i32,
-    acceleration_disabled: &mut bool,
-    pending_acceleration: &mut Option<AccelerationCheck>,
+    acceleration: &mut AccelerationRuntime,
     speed_history: &VecDeque<(Instant, i64)>,
     runtime_progress: &mut RuntimeProgress,
+    progress_gate: &mut TaskProgressEmitGate,
     range_ends: &mut HashMap<String, Arc<AtomicI64>>,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     started_at: Instant,
@@ -915,19 +950,32 @@ async fn maybe_accelerate_segments(
     request_headers: &[(String, String)],
     if_range: Option<&str>,
 ) -> Result<(), String> {
-    if *acceleration_disabled || cancel.load(Ordering::SeqCst) || !task.supports_parallel {
+    if acceleration.disabled || cancel.load(Ordering::SeqCst) || !task.supports_parallel {
+        return Ok(());
+    }
+    if acceleration
+        .last_failure_at
+        .is_some_and(|failed_at| failed_at.elapsed() < AUTO_ACCELERATION_EVALUATION)
+    {
         return Ok(());
     }
 
     let current_speed = runtime_progress.total_speed().max(0);
-    if let Some(check) = pending_acceleration.take() {
+    if let Some(check) = acceleration.pending.take() {
         if check.started_at.elapsed() >= AUTO_ACCELERATION_EVALUATION {
             let connection_growth =
                 (*active_connection_count as f64 / check.before_connections.max(1) as f64) - 1.0;
             let required_speed =
                 check.before_speed_bps as f64 * (1.0 + (connection_growth.max(0.0) * 0.8));
             if check.before_speed_bps > 0 && (current_speed as f64) < required_speed {
-                *acceleration_disabled = true;
+                acceleration.disabled = true;
+                db::insert_task_event(
+                    pool,
+                    &task.id,
+                    "http_acceleration_disabled",
+                    Some("Acceleration did not improve throughput enough."),
+                )
+                .await?;
                 tracing::debug!(
                     task_id = %task.id,
                     current_speed,
@@ -936,7 +984,7 @@ async fn maybe_accelerate_segments(
                 );
             }
         } else {
-            *pending_acceleration = Some(check);
+            acceleration.pending = Some(check);
         }
         return Ok(());
     }
@@ -946,6 +994,7 @@ async fn maybe_accelerate_segments(
         || !speed_is_stable(speed_history)
         || *active_connection_count as usize >= AUTO_ACCELERATION_MAX_SEGMENTS
         || *active_connection_count as usize >= max_worker_count
+        || acceleration.split_count >= AUTO_ACCELERATION_MAX_SEGMENTS.saturating_sub(1)
     {
         return Ok(());
     }
@@ -985,6 +1034,7 @@ async fn maybe_accelerate_segments(
             .min(max_worker_count),
     )
     .unwrap_or(*active_connection_count);
+    let tail_segment_id = split.tail_segment.id.clone();
     workers.spawn(download_segment_worker(SegmentWorkerRequest {
         client: client.clone(),
         task_id: split.tail_segment.task_id.clone(),
@@ -1002,7 +1052,19 @@ async fn maybe_accelerate_segments(
         if_range: if_range.map(str::to_string),
     }));
 
-    *pending_acceleration = Some(AccelerationCheck {
+    acceleration.split_count += 1;
+    let event_payload = format!(
+        "split={}; connections={}",
+        tail_segment_id, *active_connection_count
+    );
+    db::insert_task_event(
+        pool,
+        &task.id,
+        "http_acceleration_split",
+        Some(&event_payload),
+    )
+    .await?;
+    acceleration.pending = Some(AccelerationCheck {
         before_connections: (*active_connection_count - 1).max(1),
         before_speed_bps: current_speed,
         started_at: Instant::now(),
@@ -1014,7 +1076,9 @@ async fn maybe_accelerate_segments(
         task.total_size,
         *active_connection_count,
         runtime_progress,
+        progress_gate,
         true,
+        false,
     )
     .await?;
     Ok(())
@@ -1051,6 +1115,7 @@ struct SegmentMessageContext<'a> {
 async fn handle_segment_message(
     context: SegmentMessageContext<'_>,
     runtime_progress: &mut RuntimeProgress,
+    progress_gate: &mut TaskProgressEmitGate,
     message: SegmentMessage,
 ) -> Result<(), String> {
     let SegmentMessageContext {
@@ -1096,12 +1161,14 @@ async fn handle_segment_message(
                 .await?;
                 emit_progress(
                     app,
+                    progress_gate,
                     task_id,
                     downloaded,
                     total_size,
                     0,
                     connection_count,
                     TaskStatus::Retrying,
+                    true,
                 );
             }
         }
@@ -1119,7 +1186,9 @@ async fn emit_aggregate_progress(
     total_size: i64,
     connection_count: i32,
     runtime_progress: &mut RuntimeProgress,
+    progress_gate: &mut TaskProgressEmitGate,
     force_checkpoint: bool,
+    force_emit: bool,
 ) -> Result<(), String> {
     let downloaded = runtime_progress.total_downloaded();
     let speed_bps = runtime_progress.total_speed();
@@ -1134,12 +1203,14 @@ async fn emit_aggregate_progress(
     .await?;
     emit_progress(
         app,
+        progress_gate,
         task_id,
         downloaded,
         total_size,
         speed_bps,
         connection_count,
         TaskStatus::Downloading,
+        force_emit,
     );
     Ok(())
 }
@@ -1229,12 +1300,14 @@ async fn checkpoint_runtime_progress(
 
 fn emit_progress(
     app: &AppHandle,
+    progress_gate: &mut TaskProgressEmitGate,
     task_id: &str,
     downloaded_bytes: i64,
     total_size: i64,
     speed_bps: i64,
     connection_count: i32,
     status: TaskStatus,
+    force: bool,
 ) {
     let payload = TaskProgressPayload {
         task_id: task_id.to_string(),
@@ -1244,5 +1317,5 @@ fn emit_progress(
         connection_count,
         status,
     };
-    emit_task_progress(app, &payload);
+    progress_gate.emit_or_store(app, payload, force);
 }

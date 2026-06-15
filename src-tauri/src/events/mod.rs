@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -21,6 +23,51 @@ pub const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED: &str = "tray-new-download-requested
 pub const EVENT_TRAY_SETTINGS_REQUESTED: &str = "tray-settings-requested";
 pub const EVENT_CLIPBOARD_LINK_DETECTED: &str = "clipboard-link-detected";
 pub const EVENT_COMPLETION_ACTION_REQUESTED: &str = "completion-action-requested";
+
+const DEFAULT_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
+
+pub struct TaskProgressEmitGate {
+    min_interval: Duration,
+    last_emit: Option<Instant>,
+    pending: Option<TaskProgressPayload>,
+}
+
+impl Default for TaskProgressEmitGate {
+    fn default() -> Self {
+        Self::new(DEFAULT_PROGRESS_EMIT_INTERVAL)
+    }
+}
+
+impl TaskProgressEmitGate {
+    pub fn new(min_interval: Duration) -> Self {
+        Self {
+            min_interval,
+            last_emit: None,
+            pending: None,
+        }
+    }
+
+    pub fn emit_or_store(&mut self, app: &AppHandle, payload: TaskProgressPayload, force: bool) {
+        let due = self
+            .last_emit
+            .is_none_or(|last_emit| last_emit.elapsed() >= self.min_interval);
+        if force || due {
+            emit_task_progress(app, &payload);
+            self.last_emit = Some(Instant::now());
+            self.pending = None;
+        } else {
+            self.pending = Some(payload);
+        }
+    }
+
+    pub fn flush(&mut self, app: &AppHandle) {
+        let Some(payload) = self.pending.take() else {
+            return;
+        };
+        emit_task_progress(app, &payload);
+        self.last_emit = Some(Instant::now());
+    }
+}
 
 pub fn emit_task_progress(app: &AppHandle, payload: &TaskProgressPayload) {
     emit_payload(app, EVENT_TASK_PROGRESS, payload);

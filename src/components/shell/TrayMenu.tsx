@@ -103,7 +103,7 @@ export function TrayMenu() {
           </div>
           <button
             type="button"
-            className="grid h-7 w-7 place-items-center rounded-md text-text-muted outline-none transition hover:bg-surface-raised hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent-primary/70"
+            className="grid h-7 w-7 place-items-center rounded-md text-text-muted outline-none transition hover:bg-surface-raised hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent-primary"
             aria-label={t("trayMenu.close")}
             onClick={() => void hideWindow()}
           >
@@ -145,7 +145,7 @@ function TrayMenuButton({
     <button
       type="button"
       className={cn(
-        "group flex h-9 w-full items-center gap-2.5 rounded-md px-2 text-left outline-none transition duration-ui ease-out hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-accent-primary/70",
+        "group flex h-9 w-full items-center gap-2.5 rounded-md px-2 text-left outline-none transition duration-ui ease-out hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-accent-primary",
         separated && "mt-1 border-t border-border-separator pt-1.5",
         item.tone === "danger" && "hover:bg-status-danger/10",
       )}

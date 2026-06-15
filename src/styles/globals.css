@@ -331,38 +331,22 @@
   filter: brightness(1.35) saturate(1.2);
 }
 
-/* Layer 0: Aurora ambient glow behind the ball */
+/* Layer 0: Soft ambient halo behind the ball (static, opacity controlled by state) */
 .floating-aurora {
   width: 88px;
   height: 88px;
   border-radius: 50%;
   background: radial-gradient(
     circle,
-    oklch(0.72 0.14 235 / 0.22) 0%,
-    oklch(0.78 0.18 170 / 0.12) 35%,
-    oklch(0.74 0.18 305 / 0.08) 55%,
+    oklch(0.72 0.14 235 / 0.18) 0%,
+    oklch(0.78 0.18 170 / 0.08) 45%,
     transparent 70%
   );
   filter: blur(8px);
   pointer-events: none;
-  animation: aurora-breathe 6s ease-in-out infinite;
+  transform: translate(-50%, -50%);
+  transition: opacity 320ms ease-out;
   z-index: -1;
-}
-
-@keyframes aurora-breathe {
-  0%,
-  100% {
-    transform: translate(-50%, -50%) scale(1);
-    opacity: 0.6;
-  }
-  33% {
-    transform: translate(-50%, -50%) scale(1.15) rotate(20deg);
-    opacity: 0.85;
-  }
-  66% {
-    transform: translate(-50%, -50%) scale(0.95) rotate(-15deg);
-    opacity: 0.5;
-  }
 }
 
 /* Layer 2: Subtle surface tint for depth */
@@ -377,116 +361,43 @@
   z-index: 0;
 }
 
-/* Aurora glow animation on the ball (box-shadow based) */
+/* Active state — steady accent glow (no animation, single-layer) */
 .floating-ball-glow {
-  animation: floating-aurora-glow 4s ease-in-out infinite;
-}
-
-@keyframes floating-aurora-glow {
-  0%,
-  100% {
-    box-shadow:
-      0 0 12px oklch(0.72 0.14 235 / 0.12),
-      0 0 4px oklch(0.78 0.18 170 / 0.06);
-  }
-  33% {
-    box-shadow:
-      0 0 18px oklch(0.78 0.18 170 / 0.3),
-      0 0 6px oklch(0.74 0.18 305 / 0.12);
-  }
-  66% {
-    box-shadow:
-      0 0 16px oklch(0.74 0.18 305 / 0.25),
-      0 0 5px oklch(0.72 0.14 235 / 0.1);
-  }
+  box-shadow: 0 0 14px oklch(0.72 0.14 235 / 0.22);
 }
 
 .dark .floating-ball-glow {
-  animation-name: floating-aurora-glow-dark;
+  box-shadow: 0 0 16px oklch(0.72 0.14 235 / 0.28);
 }
 
-@keyframes floating-aurora-glow-dark {
-  0%,
-  100% {
-    box-shadow:
-      0 0 14px oklch(0.72 0.14 235 / 0.18),
-      0 0 5px oklch(0.78 0.18 170 / 0.08);
-  }
-  33% {
-    box-shadow:
-      0 0 22px oklch(0.78 0.18 170 / 0.4),
-      0 0 8px oklch(0.74 0.18 305 / 0.15);
-  }
-  66% {
-    box-shadow:
-      0 0 20px oklch(0.74 0.18 305 / 0.35),
-      0 0 6px oklch(0.72 0.14 235 / 0.12);
-  }
-}
-
-/* Peak speed state — intensified glow */
+/* Peak speed state — brighter steady accent glow */
 .floating-ball-peak {
-  animation: floating-peak-glow 2s ease-in-out infinite !important;
+  box-shadow:
+    0 0 24px oklch(0.78 0.18 170 / 0.45),
+    0 0 8px oklch(0.72 0.14 235 / 0.2) !important;
 }
 
-@keyframes floating-peak-glow {
-  0%,
-  100% {
-    box-shadow:
-      0 0 20px oklch(0.78 0.18 170 / 0.35),
-      0 0 8px oklch(0.72 0.14 235 / 0.15);
-  }
-  50% {
-    box-shadow:
-      0 0 28px oklch(0.78 0.18 170 / 0.55),
-      0 0 12px oklch(0.74 0.18 305 / 0.25),
-      0 0 0 3px oklch(0.72 0.14 235 / 0.1);
-  }
-}
-
-/* Completion burst — one-shot celebration */
+/* Completion burst — one-shot single-layer expansion and fade */
 .floating-ball-completion {
   animation: floating-completion 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
 }
 
 @keyframes floating-completion {
   0% {
-    box-shadow:
-      0 0 12px oklch(0.72 0.14 235 / 0.12),
-      0 0 4px oklch(0.78 0.18 170 / 0.06);
+    box-shadow: 0 0 14px oklch(0.72 0.14 235 / 0.22);
   }
   35% {
-    box-shadow:
-      0 0 36px oklch(0.78 0.18 170 / 0.6),
-      0 0 16px oklch(0.72 0.14 235 / 0.4),
-      0 0 0 6px oklch(0.74 0.18 305 / 0.2);
+    box-shadow: 0 0 36px oklch(0.78 0.18 170 / 0.55);
   }
   100% {
-    box-shadow:
-      0 0 8px oklch(0.12 0.01 255 / 0.15),
-      0 0 0 0 transparent;
+    box-shadow: 0 0 0 0 transparent;
   }
 }
 
-/* Reduced motion overrides for aurora effects */
+/* Reduced motion overrides for floating ball effects */
 @media (prefers-reduced-motion: reduce) {
   .floating-aurora {
-    animation: none !important;
-    opacity: 0.5 !important;
-  }
-
-  .floating-ball-glow {
-    animation: none !important;
-    box-shadow:
-      0 0 14px oklch(0.72 0.14 235 / 0.2),
-      0 0 5px oklch(0.78 0.18 170 / 0.08) !important;
-  }
-
-  .floating-ball-peak {
-    animation: none !important;
-    box-shadow:
-      0 0 22px oklch(0.78 0.18 170 / 0.45),
-      0 0 8px oklch(0.72 0.14 235 / 0.2) !important;
+    opacity: 0.4 !important;
   }
 
   .floating-ball-completion {

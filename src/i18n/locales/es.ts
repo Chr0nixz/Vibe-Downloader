@@ -186,6 +186,9 @@ const es = {
     maxConnectionsPerHostTip: "M\u00e1ximo de conexiones paralelas a un mismo servidor. M\u00e1s alto es m\u00e1s r\u00e1pido, pero algunos servidores limitan. Recomendado: 8\u201316",
     speedUnit: "Unidad de velocidad",
     sizeUnit: "Unidad de tama\u00f1o",
+    scheduleGroupDownload: "Horario de descarga",
+    scheduleGroupSpeed: "Horario de limitaci\u00f3n de velocidad",
+    scheduleGroupCompletion: "Al finalizar",
     interface: "Interfaz",
     themeMode: "Apariencia",
     themeSystem: "Seguir al sistema",
@@ -251,6 +254,12 @@ const es = {
     saved: "Guardado",
     save: "Guardar ajustes",
     saving: "Guardando...",
+    resetDefaults: "Restablecer valores",
+    resetDefaultsTitle: "Restablecer valores",
+    resetDefaultsConfirm:
+      "Esto restablecer\u00e1 todos los ajustes a sus valores predeterminados. Esta acci\u00f3n no se puede deshacer.",
+    searchSettings: "Buscar ajustes...",
+    searchNoResults: "No se encontraron ajustes coincidentes.",
   },
   deleteDialog: {
     title: "Eliminar tarea",

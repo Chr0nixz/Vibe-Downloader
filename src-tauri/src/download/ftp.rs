@@ -39,7 +39,7 @@ use super::{
 };
 use crate::{
     db,
-    events::{emit_task_progress, emit_task_updated_record},
+    events::{emit_task_updated_record, TaskProgressEmitGate},
     logging::sanitize_url,
     models::{
         EngineCapabilities, FtpDirectoryEntry, FtpDirectoryProbe, ProbedFile,
@@ -56,6 +56,7 @@ const FTP_MIN_SPLIT_REMAINING: i64 = 16 * 1024 * 1024;
 const FTP_WORKER_RETRIES: i32 = 2;
 const FTP_READ_BUFFER_SIZE: usize = 64 * 1024;
 const FTP_PROGRESS_INTERVAL: Duration = Duration::from_millis(300);
+const FTP_PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct FtpEngine {
@@ -101,6 +102,7 @@ struct SegmentProgress {
     speed_bps: i64,
     status: SegmentStatus,
     retry_count: i32,
+    dirty: bool,
 }
 
 #[derive(Debug)]
@@ -335,6 +337,8 @@ async fn run_ftp_download(
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let started_at = Instant::now();
     let mut last_split_at = Instant::now();
+    let mut last_checkpoint = Instant::now();
+    let mut progress_gate = TaskProgressEmitGate::default();
     let mut acceleration_disabled = false;
     let mut dynamic_failures = 0_i32;
 
@@ -351,10 +355,34 @@ async fn run_ftp_download(
         &mut workers,
         &proxy_config,
     );
-    emit_ftp_progress(&app, &pool, &task, &progress, running.len()).await?;
+    emit_ftp_progress(
+        &app,
+        &pool,
+        &task,
+        &mut progress,
+        running.len(),
+        &mut last_checkpoint,
+        &mut progress_gate,
+        true,
+        true,
+    )
+    .await?;
 
     while !pending.is_empty() || !running.is_empty() {
         if cancel.load(Ordering::SeqCst) {
+            emit_ftp_progress(
+                &app,
+                &pool,
+                &task,
+                &mut progress,
+                running.len(),
+                &mut last_checkpoint,
+                &mut progress_gate,
+                true,
+                true,
+            )
+            .await?;
+            progress_gate.flush(&app);
             return Ok(());
         }
 
@@ -364,8 +392,19 @@ async fn run_ftp_download(
                     segment.downloaded_until = message.downloaded_until;
                     segment.speed_bps = message.speed_bps;
                     segment.status = SegmentStatus::Downloading;
+                    segment.dirty = true;
                 }
-                emit_ftp_progress(&app, &pool, &task, &progress, running.len()).await?;
+                emit_ftp_progress(
+                    &app,
+                    &pool,
+                    &task,
+                    &mut progress,
+                    running.len(),
+                    &mut last_checkpoint,
+                    &mut progress_gate,
+                    false,
+                    false,
+                ).await?;
             }
             Some(joined) = workers.join_next(), if !running.is_empty() => {
                 let finished = joined.map_err(|error| format!("A FTP worker stopped unexpectedly: {error}"))?;
@@ -376,6 +415,7 @@ async fn run_ftp_download(
                             segment.downloaded_until = downloaded_until;
                             segment.speed_bps = 0;
                             segment.status = SegmentStatus::Completed;
+                            segment.dirty = true;
                         }
                     }
                     Err(_error) if cancel.load(Ordering::SeqCst) => return Ok(()),
@@ -387,6 +427,7 @@ async fn run_ftp_download(
                         segment.status = SegmentStatus::Pending;
                         segment.retry_count += 1;
                         segment.speed_bps = 0;
+                        segment.dirty = false;
                         db::update_segment_retry(
                             &pool,
                             &finished.segment_id,
@@ -429,7 +470,17 @@ async fn run_ftp_download(
                         });
                     }
                 }
-                emit_ftp_progress(&app, &pool, &task, &progress, running.len()).await?;
+                emit_ftp_progress(
+                    &app,
+                    &pool,
+                    &task,
+                    &mut progress,
+                    running.len(),
+                    &mut last_checkpoint,
+                    &mut progress_gate,
+                    true,
+                    true,
+                ).await?;
             }
             _ = tokio::time::sleep(Duration::from_millis(250)) => {}
         }
@@ -478,6 +529,7 @@ async fn run_ftp_download(
                         speed_bps: 0,
                         status: SegmentStatus::Pending,
                         retry_count: 0,
+                        dirty: true,
                     },
                 );
                 pending.push_back(tail);
@@ -488,8 +540,34 @@ async fn run_ftp_download(
     }
 
     if cancel.load(Ordering::SeqCst) {
+        emit_ftp_progress(
+            &app,
+            &pool,
+            &task,
+            &mut progress,
+            running.len(),
+            &mut last_checkpoint,
+            &mut progress_gate,
+            true,
+            true,
+        )
+        .await?;
+        progress_gate.flush(&app);
         return Ok(());
     }
+
+    emit_ftp_progress(
+        &app,
+        &pool,
+        &task,
+        &mut progress,
+        running.len(),
+        &mut last_checkpoint,
+        &mut progress_gate,
+        true,
+        true,
+    )
+    .await?;
 
     let downloaded = total_downloaded_from_progress(&progress, task.total_size);
     if task.total_size > 0 && downloaded < task.total_size {
@@ -660,14 +738,6 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
                 downloaded_until: offset,
                 speed_bps: speed,
             });
-            db::update_segment_runtime_progress(
-                &request.pool,
-                &request.segment.id,
-                offset,
-                speed,
-                SegmentStatus::Downloading,
-            )
-            .await?;
             last_emit = Instant::now();
             last_emit_bytes = offset;
         }
@@ -702,24 +772,45 @@ async fn emit_ftp_progress(
     app: &AppHandle,
     pool: &SqlitePool,
     task: &TaskRecord,
-    progress: &HashMap<String, SegmentProgress>,
+    progress: &mut HashMap<String, SegmentProgress>,
     active_connections: usize,
+    last_checkpoint: &mut Instant,
+    progress_gate: &mut TaskProgressEmitGate,
+    force_checkpoint: bool,
+    force_emit: bool,
 ) -> Result<(), String> {
     let downloaded = total_downloaded_from_progress(progress, task.total_size);
     let speed = progress.values().map(|segment| segment.speed_bps).sum();
     let connection_count = i32::try_from(active_connections).unwrap_or(i32::MAX);
-    db::update_task_progress(
-        pool,
-        &task.id,
-        downloaded,
-        speed,
-        connection_count,
-        TaskStatus::Downloading,
-    )
-    .await?;
-    emit_task_progress(
+    let dirty_segments = progress.values().any(|segment| segment.dirty);
+    if force_checkpoint
+        || (dirty_segments && last_checkpoint.elapsed() >= FTP_PROGRESS_CHECKPOINT_INTERVAL)
+    {
+        db::update_task_progress(
+            pool,
+            &task.id,
+            downloaded,
+            speed,
+            connection_count,
+            TaskStatus::Downloading,
+        )
+        .await?;
+        for (segment_id, segment) in progress.iter_mut().filter(|(_, segment)| segment.dirty) {
+            db::update_segment_runtime_progress(
+                pool,
+                segment_id,
+                segment.downloaded_until,
+                segment.speed_bps,
+                segment.status,
+            )
+            .await?;
+            segment.dirty = false;
+        }
+        *last_checkpoint = Instant::now();
+    }
+    progress_gate.emit_or_store(
         app,
-        &TaskProgressPayload {
+        TaskProgressPayload {
             task_id: task.id.clone(),
             downloaded_bytes: downloaded.to_string(),
             total_size: task.total_size.to_string(),
@@ -727,6 +818,7 @@ async fn emit_ftp_progress(
             connection_count,
             status: TaskStatus::Downloading,
         },
+        force_emit,
     );
     Ok(())
 }
@@ -771,6 +863,7 @@ fn progress_from_segments(segments: &[TaskSegmentRecord]) -> HashMap<String, Seg
                     speed_bps: segment.speed_bps,
                     status: segment.status,
                     retry_count: segment.retry_count,
+                    dirty: false,
                 },
             )
         })
@@ -815,6 +908,7 @@ mod tests {
                 speed_bps: 0,
                 status: SegmentStatus::Completed,
                 retry_count: 0,
+                dirty: false,
             },
         );
 
@@ -833,6 +927,7 @@ mod tests {
                 speed_bps: 0,
                 status: SegmentStatus::Completed,
                 retry_count: 0,
+                dirty: false,
             },
         );
 

@@ -134,8 +134,7 @@ export function AppShell() {
   const selectedId = useTaskStore((s) => s.selectedId);
   const selected = useTaskStore((s) => {
     if (!s.selectedId) return null;
-    const index = s.taskIndexById[s.selectedId];
-    return index === undefined ? null : (s.tasks[index] ?? null);
+    return s.taskById[s.selectedId] ?? null;
   });
   const nav = useTaskStore((s) => s.nav);
   const detailOpen = useTaskStore((s) => s.detailOpen);
@@ -693,9 +692,9 @@ export function AppShell() {
             />
           </Suspense>
         </main>
-        <StatusBar className="md:hidden" />
+        <StatusBar className="md:hidden" platform={platform} onOpenShortcuts={() => setShortcutPanelOpen(true)} />
       </div>
-      <StatusBar className="hidden md:flex" />
+      <StatusBar className="hidden md:flex" platform={platform} onOpenShortcuts={() => setShortcutPanelOpen(true)} />
       <ToastViewport />
       {paletteOpen ? (
         <Suspense fallback={null}>

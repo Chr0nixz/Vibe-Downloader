@@ -23,6 +23,8 @@ import type {
   ProbeTaskInput,
   ProbeTaskPayload,
   FtpDirectoryProbe,
+  SftpDirectoryProbe,
+  WebDavDirectoryProbe,
   SegmentSummary,
   TaskProxySettings,
   TaskProxySettingsInput,
@@ -291,6 +293,22 @@ export async function probeFtpDirectory(url: string): Promise<FtpDirectoryProbe>
   }
   const commands = await loadNativeCommands();
   return runCommand("probeFtpDirectory", () => commands.probeFtpDirectory(url));
+}
+
+export async function probeSftpDirectory(url: string): Promise<SftpDirectoryProbe> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).probeSftpDirectory(url);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("probeSftpDirectory", () => commands.probeSftpDirectory(url));
+}
+
+export async function probeWebdavDirectory(url: string): Promise<WebDavDirectoryProbe> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).probeWebdavDirectory(url);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("probeWebdavDirectory", () => commands.probeWebdavDirectory(url));
 }
 
 export async function openDirectoryPicker(): Promise<string | null> {
