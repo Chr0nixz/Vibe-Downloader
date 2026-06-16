@@ -1,27 +1,35 @@
 # 项目改进审计
 
-最后更新：2026-06-13
+最后更新：2026-06-17
 
 本审计基于当前仓库代码、配置、测试和文档状态。它不替代 [ROADMAP.md](ROADMAP.md)，而是按风险和用户影响列出仍需处理的问题。
 
 ## 总体结论
 
-Vibe Downloader 已经超过最早 HTTP MVP：HTTP/HTTPS 下载核心、SQLite 持久化、分段续传、队列调度、设置、日志、浏览器 Native Messaging、WebSocket 实时桥、剪贴板监控、批量导入、命令面板和 CI 验证都已经落地。
+Vibe Downloader 已经远超最早 HTTP MVP：HTTP/HTTPS 下载核心（含自动加速分段）、SQLite 持久化（11 个迁移）、FTP/FTPS 动态并行、SFTP (TOFU)、BitTorrent (运行时快照)、HLS (AES-128-CBC)、DASH (ffmpeg)、WebDAV (PROPFIND)、Metalink (镜像故障转移 + 校验和)、加密凭据存储、逐任务代理、定时调度、浮动状态窗口、8 色主题、设置搜索、store 分解、虚拟无限滚动、浏览器 Native Messaging、WebSocket 实时桥、剪贴板监控、批量导入、命令面板和 CI 验证都已经落地。
 
 当前主要风险集中在四类：
 
 1. 发布前信任链路：README、路线图、审计和发布说明必须持续与代码一致。
-2. 非 HTTP 协议成熟度：FTP/FTPS 和 BitTorrent 已可用，但可靠性、诊断和恢复能力仍低于 HTTP/HTTPS。
+2. 非 HTTP 协议成熟度：FTP/FTPS、SFTP、BitTorrent、HLS、DASH、WebDAV 和 Metalink 已可用，但可靠性、诊断和恢复能力仍低于 HTTP/HTTPS。HLS 和 DASH 依赖外部 ffmpeg。
 3. 发布级安全和分发：浏览器商店身份、扩展签名、Safari wrapper、权限文案、OS 代码签名和 updater 端到端演练仍未完成。
-4. 规模化性能：任务列表已分页和虚拟化，详情诊断已降频，但仍需要生产规模数据库和多任务压测。
+4. 规模化性能：任务列表已 store 分解 + 虚拟化 + 游标分页，详情诊断已节流，但仍需要生产规模数据库和多任务压测。
 
 ## 已确认优势
 
 - HTTP probe 支持 HEAD 与 Range GET fallback，并识别文件名、大小、content type、Range 能力和来源 host。
-- 下载引擎支持未知大小单连接、Range 分段、分段 retry、断点续传校验和全局 token bucket 限速。
-- FTP 凭据会从 URL 中剥离并进入加密任务凭据存储；任务记录、诊断和日志只保留脱敏 URL。
-- BitTorrent 任务支持 magnet、HTTP/HTTPS `.torrent` URL 和本地 `file://*.torrent`，并继承全局下载限速。
-- UI 已具备搜索、状态导航、虚拟任务列表、多选批量操作、排序筛选、命令面板、详情抽屉、Chunks/Connections/Requests/Logs、toast、删除确认和基础恢复动作。
+- HTTP 下载引擎支持未知大小单连接、Range 分段、自动加速（动态分裂，最多 8 段）、分段 retry、断点续传校验、checkpoint 进度持久化和全局 token bucket 限速。
+- FTP/FTPS 支持动态并行分段（最多 4 连接）、SOCKS5 代理、加密凭据存储和目录探测。
+- SFTP 支持密码认证、加密凭据、本地临时文件断点续传、目录探测、SOCKS5 代理和 TOFU 主机密钥验证。
+- BitTorrent 支持 magnet、HTTP/HTTPS `.torrent` URL 和本地 `file://*.torrent`，含多文件选择、运行时快照、SOCKS5 代理、可配置做种和全局限速。
+- HLS/m3u8 支持主播放列表变体选择、AES-128-CBC 解密、并发分段、直播轮询和 ffmpeg MP4 封装。
+- DASH/MPD 支持清单解析（拒绝 live）、ffmpeg 下载和 MP4 封装。
+- WebDAV/WebDAVS 支持 Basic Auth、PROPFIND 目录探测和 HTTP 引擎委托。
+- Metalink4 支持多文件选择、HTTP/HTTPS 镜像故障转移和 MD5/SHA-1/SHA-256/SHA-512 校验和验证。
+- 加密凭据存储使用 ChaCha20-Poly1305，覆盖 FTP/FTPS、SFTP 和 WebDAV，启动时自动迁移旧明文。
+- 逐任务代理覆盖（继承/关闭/自定义），按协议验证兼容性。
+- 定时下载窗口、定时限速窗口、完成动作（可取消退出 + 确认关机）。
+- UI 具备 store 分解（data/ui/speed-history）、虚拟无限滚动、游标分页、8 色 OKLCH 主题、浮动状态窗口（球/条形）、可折叠侧边栏（三档响应式）、设置页 7 分区 + 搜索、命令面板、详情面板、Chunks/Connections/Requests/Logs、toast、删除确认和恢复动作。
 - 浏览器集成已具备 Native Messaging、实时桥、manifest 安装诊断、下载接管、显式 Cookie/header 转发和 request id 去重。
 - CI 覆盖前端 typecheck/build、Rust check/clippy/test、Specta 绑定漂移和三平台 Tauri build。
 
@@ -47,11 +55,17 @@ Vibe Downloader 已经超过最早 HTTP MVP：HTTP/HTTPS 下载核心、SQLite �
 
 ### 3. 非 HTTP 协议可靠性
 
-FTP/FTPS 和 BT 已接入，但还不能按 HTTP 路径宣传为成熟。
+FTP/FTPS、SFTP、BitTorrent、HLS、DASH、WebDAV 和 Metalink 已接入，但都不能按 HTTP 路径宣传为成熟。
 
 - 为 FTP/FTPS 增加匿名、带凭据、显式 FTPS、隐式 FTPS、代理失败、断点恢复测试。
+- 为 SFTP 增加密码认证失败、TOFU 主机密钥不匹配、代理连接失败、断点续传测试。
 - 为 BT 增加限速、暂停、恢复、文件选择和元数据超时测试。
-- 统一协议错误分类和恢复动作，减少裸字符串错误。
+- 为 HLS 增加 AES 解密失败、直播轮询超时、ffmpeg 缺失/失败测试。
+- 为 DASH 增加 ffmpeg 缺失、空输出、live 拒绝测试。
+- 为 WebDAV 增加认证失败、PROPFIND 解析、大目录测试。
+- 为 Metalink 增加镜像全部失败、校验和不匹配、路径安全测试。
+- 统一协议错误分类和恢复动作（已有 `TaskFailureCategory` 15 类和 `RecoveryAction` 8 种），继续减少裸字符串错误。
+- 验证 ffmpeg 在不同 OS 上的可用性（PATH 查找 vs `VIBE_FFMPEG_PATH`），确保缺失时给出明确诊断。
 
 ## P1：核心体验完善
 
@@ -65,11 +79,11 @@ FTP/FTPS 和 BT 已接入，但还不能按 HTTP 路径宣传为成熟。
 
 ### 2. 设置和新建任务继续降噪
 
-设置页已经自动保存并支持友好单位；连续调整时成功反馈收敛到页内保存状态，不再产生连续成功 toast。
+设置页已全面重构为 7 个可折叠分区 + 搜索栏 + 自动保存（1000ms 防抖）；连续调整时成功反馈收敛到页内保存状态，不再产生连续成功 toast。
 
 - 保持合并保存节流，避免连续 toast。
 - 新建下载继续强化批量入口和错误文案。
-- 对 FTP 凭据安全存储不可用时提供明确重试或重新创建提示。
+- 加密凭据存储已覆盖 FTP/FTPS、SFTP 和 WebDAV，旧明文会在启动时自动迁移；对迁移失败的任务仍需提供明确重试或重新创建提示。
 
 ### 3. 启动恢复策略
 
@@ -83,7 +97,7 @@ FTP/FTPS 和 BT 已接入，但还不能按 HTTP 路径宣传为成熟。
 
 ### 1. 重试策略集中化
 
-HTTP、FTP、分段 worker 和 BT 当前各有重试/超时策略。
+HTTP（最多 5 段重试）、FTP（最多 2 worker 重试）、SFTP、BT（90s 元数据超时）、HLS（2 段重试 + 指数退避）、DASH、WebDAV 和 Metalink 当前各有重试/超时策略。
 
 - 建立共享 retry policy 和错误分类。
 - 记录 retry-after、退避原因、最终失败阶段。
@@ -91,7 +105,7 @@ HTTP、FTP、分段 worker 和 BT 当前各有重试/超时策略。
 
 ### 2. 数据库迁移规范
 
-项目已从单一初始 schema 进入增量迁移阶段。
+项目已累积到 011 号迁移，包括一个涉及表重建的 `009_metalink.sql`（task_checksums 新增 file_id 列）。
 
 - 后续只新增 additive migration，不重写历史 migration。
 - 复杂迁移必须有旧数据升级测试。
@@ -156,8 +170,6 @@ pnpm build:extensions
 ```bash
 pnpm tauri build --config src-tauri/tauri.ci.conf.json
 ```
-# Protocol hardening update
+# Protocol and engine update
 
-2026-06-13: FTP/FTPS credential-bearing URLs are sanitized into task records and
-encrypted task credentials; BitTorrent selected-file tasks apply file selection
-before start; HTTP request diagnostics now include If-Range for resume analysis.
+2026-06-17: HLS/m3u8 streaming engine (AES-128-CBC, live polling, ffmpeg remux), DASH/MPD engine (ffmpeg), WebDAV/WebDAVS engine (PROPFIND, Basic Auth), Metalink4 engine (mirror failover, checksum verification), SFTP engine (TOFU, SOCKS5), FTP/FTPS dynamic parallel segments, HTTP auto-acceleration, encrypted credential storage (ChaCha20-Poly1305) with legacy migration, per-task proxy overrides, scheduled download windows, floating status window, store decomposition, accent color themes, and settings page overhaul.

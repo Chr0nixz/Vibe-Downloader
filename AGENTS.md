@@ -6,29 +6,36 @@ This file gives coding agents the local project context and working rules for Vi
 
 Vibe Downloader is a desktop download manager built with Tauri 2, React 19, TypeScript, Rust, SQLite, and WebExtension Native Messaging.
 
-The project is currently at `0.1.1`. It is not a finished IDM replacement yet. Treat HTTP/HTTPS as the most mature path, with lower-maturity FTP/FTPS and BitTorrent entry points already present.
+The project is currently at `0.1.1`. It is not a finished IDM replacement yet. Treat HTTP/HTTPS as the most mature path, with FTP/FTPS, SFTP, BitTorrent, HLS, DASH, WebDAV, and Metalink entry points already present at varying maturity levels.
 
 Implemented today:
 
 - HTTP/HTTPS task creation and resource probing through HEAD with Range GET fallback.
-- SQLite persistence for tasks, segments, settings, and browser handoff messages.
-- Single-stream downloads, unknown-size downloads, segmented Range downloads, resume validation, segment retry, and final file auto-renaming.
-- Queue scheduling with max active task count and per-host connection slot limits.
+- SQLite persistence for tasks, segments, settings, browser handoff messages, credentials, proxy settings, checksums, and SFTP known hosts.
+- Single-stream downloads, unknown-size downloads, segmented Range downloads, auto-acceleration (dynamic segment splitting), resume validation, segment retry, checkpoint-based progress persistence, and final file auto-renaming.
+- Queue scheduling with max active task count, per-host connection slot limits, scheduled download windows, timed speed throttling, and completion actions (cancellable app exit, confirmed shutdown).
 - Global speed limiting through a Rust token bucket.
-- React task list, status filters, search, sorting, multi-select, batch actions, command palette, settings page, task details, Chunks/Connections/Requests/Logs views, toast, delete confirmation, recovery actions, and en/zh-CN i18n.
-- Clipboard link monitoring while the desktop app is running.
-- FTP/FTPS task creation and downloads, plus BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files.
+- Per-task proxy overrides (Inherit/Off/Custom) with protocol-aware validation: HTTP(S) allows HTTP/HTTPS/SOCKS5 proxies; BT, FTP/FTPS, and SFTP allow SOCKS5 only.
+- FTP/FTPS task creation and downloads with dynamic parallel segments, SOCKS5 proxy support, encrypted credential storage, and directory probing.
+- SFTP task creation and single-file downloads with password credentials, encrypted credential storage, local-temp pause/resume, directory probing, SOCKS5 proxy support, and TOFU host-key fingerprint verification.
+- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files, with multi-file selection, runtime snapshots (piece map, peers, trackers, DHT, seeding), SOCKS5 proxy support, and configurable seeding.
+- HLS/m3u8 streaming engine with master playlist variant selection, AES-128-CBC decryption, init map (EXT-X-MAP) support, byte range segments, concurrent segment downloads, live polling, and ffmpeg-based MP4 remuxing.
+- DASH (MPEG-DASH / MPD) engine with manifest parsing (rejects dynamic/live), ffmpeg-based download and MP4 remuxing, and progress monitoring.
+- WebDAV/WebDAVS engine mapping to HTTP/HTTPS with Basic Auth credentials, PROPFIND directory probing, and delegation to the HTTP engine.
+- Metalink4 engine with manifest parsing, multi-file selection, HTTP/HTTPS mirror failover by priority, per-file progress, and MD5/SHA-1/SHA-256/SHA-512 checksum verification.
+- Encrypted task credential storage (ChaCha20-Poly1305) for FTP/FTPS, SFTP, and WebDAV, with legacy plaintext migration on startup.
+- React task list with store decomposition (task-data, task-ui, speed-history stores), virtualized infinite scroll, cursor pagination, status filters, search, sorting, multi-select, batch actions, command palette, settings page with 7 collapsible sections and search, task details, Chunks/Connections/Requests/Logs views, toast, delete confirmation, recovery actions, 8 accent color themes, floating status window (ball and bar modes), and en/zh-CN i18n.
+- Clipboard link monitoring for all supported protocols (HTTP/HTTPS, FTP/FTPS, SFTP, WebDAV/WebDAVS, magnet, local manifests) while the desktop app is running.
 - Browser Native Messaging host, local WebSocket bridge, manifest install/uninstall diagnostics, duplicate request handling, Tauri single-instance forwarding, browser download takeover, and optional allowlisted Cookie/header forwarding.
 - CI, Tauri build matrix, Release workflow, Specta bindings, and Tauri updater configuration.
 - Vitest coverage for pure frontend logic plus Rust unit/integration tests.
 
 Not implemented yet:
 
-- HLS/m3u8 parsing, SFTP, cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols.
+- Cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols.
 - Safari wrapper, browser store submission IDs, production extension signing, and final browser permission review copy.
-- FTP credential hardening through encrypted task credentials.
-- BT/FTP reliability and diagnostics parity with the HTTP/HTTPS path.
-- Per-task speed limits, task priorities, and full file classification automation.
+- BT/FTP/SFTP/Metalink/HLS/DASH/WebDAV reliability and diagnostics parity with the HTTP/HTTPS path.
+- Per-task speed limits, task priorities, full site rule management UI, and full file classification automation.
 - OS code-signed production distribution.
 
 ## Key Directories
@@ -72,15 +79,18 @@ Run `pnpm specta` and `pnpm check:bindings` after Rust command or model changes 
 
 ## Architecture Notes
 
-- Frontend state lives in Zustand stores under `src/stores`.
+- Frontend state is decomposed into three Zustand stores under `src/stores`: `task-data-store.ts` (task data, indexes, stats, progress patching), `task-ui-store.ts` (selection, nav, search, sort, filter facets), and `speed-history-store.ts` (per-task speed samples). `task-store.ts` is the facade that re-exports from all three plus `task-query.ts`.
 - Native command wrappers live in `src/lib/tauri.ts`; browser preview mocks live in `src/lib/tauri-browser.ts`.
 - Rust command registration and Specta export live in `src-tauri/src/lib.rs`.
-- Download behavior is organized under `src-tauri/src/download/`; HTTP segmented downloads keep coordinator, worker, and diagnostics helpers separated.
-- SQLite access lives under `src-tauri/src/db/`; `db/mod.rs` is the re-export and shared-constant entry point.
+- Download behavior is organized under `src-tauri/src/download/` with a trait-based `EngineRegistry` that routes URLs to the correct engine. Each protocol has its own module: `http/` (segmented coordinator, worker, direct, file), `ftp.rs`, `sftp.rs`, `bt.rs`, `hls.rs`, `dash.rs`, `webdav.rs`, `metalink.rs`.
+- SQLite access lives under `src-tauri/src/db/`; `db/mod.rs` is the re-export and shared-constant entry point. Protocol-specific DB modules include `db/metalink.rs`, `db/sftp.rs`, `db/task_credentials.rs`, `db/task_proxy.rs`, `db/task_checksums.rs`, `db/task_files.rs`, and `db/task_state.rs`.
 - Task commands are split under `src-tauri/src/commands/tasks/` for create/import, query/detail paging, actions/hash, and debug mock seed helpers.
-- Tauri events are defined in `src-tauri/src/events/mod.rs`.
+- Tauri events are defined in `src-tauri/src/events/mod.rs`; `TaskProgressEmitGate` throttles high-frequency progress updates to 250ms minimum intervals.
 - Browser handoff commands live in `src-tauri/src/commands/browser.rs`.
 - The Native Messaging host binary lives in `src-tauri/src/bin/vibe-native-host.rs`.
+- Credential encryption uses ChaCha20-Poly1305 via `secure_headers` helpers; passwords are stored as ciphertext + nonce in SQLite.
+- The segment planner (`db/segment_planner.rs`) determines segment count and type based on protocol characteristics and user settings.
+- Settings span 29 keys covering downloads, scheduling, proxy, UI (accent colors, fonts, sidebar/titlebar options), and desktop integration.
 
 Important current constants:
 
@@ -88,6 +98,17 @@ Important current constants:
 - Initial segment count defaults to 4 and is clamped to 1-8.
 - Max active tasks defaults to 2 and is clamped to 1-8.
 - Max connections per host defaults to 8 and is clamped to 1-16.
+- HTTP auto-acceleration: max 8 segments, 10s warmup, 5s evaluation, 8 MB minimum remaining.
+- FTP dynamic parallel: max 4 segments, 8s warmup, 5s interval, 16 MB minimum split remaining.
+- HLS segment retries: 2; live max idle polls: 6.
+- BT metadata timeout: 90s; progress interval: 10s.
+- DASH progress interval: 500ms.
+- SFTP read buffer: 64 KB; progress interval: 300ms.
+- Metalink hash buffer: 1 MB.
+- Clipboard max text length: 64 KB; poll interval: 1s.
+- WebSocket bridge port: 48365.
+- Event throttle (`TaskProgressEmitGate`): 250ms minimum interval.
+- Speed history limit: 60 samples per task.
 
 ## Documentation Rules
 
@@ -117,11 +138,13 @@ The UI should stay a dense, calm desktop utility, not a marketing page or card-h
 
 Preserve:
 
-- Left navigation, central task list, optional details panel/drawer, and bottom status bar.
+- Collapsible left navigation (three responsive tiers: mobile bottom bar, tablet compact, desktop expandable), central virtualized task list with infinite scroll, optional right detail panel/drawer, floating status window (ball or bar mode), and bottom status bar.
 - Icon buttons with accessible labels and tooltips.
+- OKLCH-based color system with 8 accent color themes (blue, purple, teal, green, orange, rose, indigo, amber), each with light/dark variants.
 - Clear state colors without turning the app into a noisy neon theme.
 - Advanced engine details inside expanded rows or details tabs.
 - Keyboard access without hiding primary mouse paths.
+- `prefers-reduced-motion` respected across all animations.
 
 ## Release Notes For Agents
 
