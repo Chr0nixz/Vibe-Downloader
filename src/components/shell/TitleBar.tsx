@@ -14,6 +14,7 @@ import {
   startWindowDrag,
   toggleMaximizeWindow,
 } from "@/lib/window-controls";
+import { useSettingsStore } from "@/stores/settings-store";
 import { cn } from "@/lib/utils";
 
 interface TitleBarProps {
@@ -22,6 +23,9 @@ interface TitleBarProps {
 
 export function TitleBar({ platform }: TitleBarProps) {
   const { t } = useTranslation();
+  const titlebarGradient = useSettingsStore(
+    (s) => s.settings?.titlebarGradientEnabled ?? true,
+  );
 
   if (platform === "linux") {
     return null;
@@ -33,6 +37,7 @@ export function TitleBar({ platform }: TitleBarProps) {
     <header
       className={cn(
         "titlebar relative flex h-[var(--titlebar-height)] shrink-0 items-center bg-surface-base/90",
+        titlebarGradient && "titlebar-gradient",
         platform === "macos" && "pl-[var(--traffic-lights-inset)]",
       )}
       data-tauri-drag-region

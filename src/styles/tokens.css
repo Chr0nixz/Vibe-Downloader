@@ -4,10 +4,11 @@
   --surface-raised: oklch(0.99 0.003 255);
   --surface-overlay: oklch(0.99 0.003 255 / 0.92);
   --surface-scrim: oklch(0.975 0.004 255 / 0.72);
+  --surface-hover: oklch(0.92 0.006 255);
   --border-subtle: oklch(0.84 0.01 255);
   --text-primary: oklch(0.22 0.012 255);
   --text-secondary: oklch(0.28 0.015 255);
-  --text-muted: oklch(0.39 0.01 255);
+  --text-muted: oklch(0.30 0.01 255);
   --text-on-accent: oklch(0.98 0.004 255);
   --text-on-danger: oklch(0.98 0.004 255);
   --status-success: oklch(0.27 0.14 150);
@@ -34,8 +35,8 @@
   --border-danger-subtle: oklch(0.45 0.18 25 / 0.25);
   --border-success: oklch(0.27 0.14 150 / 0.25);
   --border-success-strong: oklch(0.27 0.14 150 / 0.35);
-  --border-accent: oklch(0.48 0.18 235 / 0.3);
-  --border-accent-subtle: oklch(0.48 0.18 235 / 0.2);
+  --border-accent: color-mix(in oklch, var(--accent-primary) 30%, transparent);
+  --border-accent-subtle: color-mix(in oklch, var(--accent-primary) 20%, transparent);
   --border-hover: oklch(0.39 0.01 255 / 0.4);
 }
 
@@ -97,15 +98,16 @@
   --surface-raised: oklch(0.235 0.01 255);
   --surface-overlay: oklch(0.245 0.012 255 / 0.78);
   --surface-scrim: oklch(0.145 0.006 255 / 0.72);
+  --surface-hover: oklch(0.28 0.01 255);
   --border-subtle: oklch(0.33 0.012 255);
   --text-primary: oklch(0.93 0.006 255);
   --text-secondary: oklch(0.72 0.008 255);
   --text-muted: oklch(0.78 0.008 255);
   --text-on-accent: oklch(0.18 0.012 255);
   --text-on-danger: oklch(0.975 0.004 255);
-  --status-success: oklch(0.72 0.14 150);
-  --status-warning: oklch(0.78 0.14 75);
-  --status-danger: oklch(0.68 0.18 25);
+  --status-success: oklch(0.80 0.14 150);
+  --status-warning: oklch(0.88 0.12 75);
+  --status-danger: oklch(0.80 0.16 25);
 
   /* Semantic borders — dark mode */
   --border-divider: oklch(0.33 0.012 255 / 0.7);
@@ -117,12 +119,12 @@
   --border-danger-subtle: oklch(0.68 0.18 25 / 0.25);
   --border-success: oklch(0.72 0.14 150 / 0.25);
   --border-success-strong: oklch(0.72 0.14 150 / 0.35);
-  --border-accent: oklch(0.72 0.14 235 / 0.3);
-  --border-accent-subtle: oklch(0.72 0.14 235 / 0.2);
+  --border-accent: color-mix(in oklch, var(--accent-primary) 30%, transparent);
+  --border-accent-subtle: color-mix(in oklch, var(--accent-primary) 20%, transparent);
   --border-hover: oklch(0.78 0.008 255 / 0.4);
 
   /* Accent — blue (default) */
-  --accent-primary: oklch(0.72 0.14 235);
+  --accent-primary: oklch(0.76 0.14 235);
   --accent-energy: oklch(0.78 0.18 170);
   --accent-peak: oklch(0.74 0.18 305);
 }
@@ -130,49 +132,49 @@
 /* ── Dark accent overrides ── */
 
 .dark[data-accent="blue"] {
-  --accent-primary: oklch(0.72 0.14 235);
+  --accent-primary: oklch(0.76 0.14 235);
   --accent-energy: oklch(0.78 0.18 170);
   --accent-peak: oklch(0.74 0.18 305);
 }
 
 .dark[data-accent="purple"] {
-  --accent-primary: oklch(0.72 0.14 290);
+  --accent-primary: oklch(0.76 0.14 290);
   --accent-energy: oklch(0.76 0.16 210);
   --accent-peak: oklch(0.74 0.16 330);
 }
 
 .dark[data-accent="teal"] {
-  --accent-primary: oklch(0.72 0.14 190);
+  --accent-primary: oklch(0.76 0.14 190);
   --accent-energy: oklch(0.78 0.14 165);
   --accent-peak: oklch(0.74 0.14 235);
 }
 
 .dark[data-accent="green"] {
-  --accent-primary: oklch(0.72 0.14 150);
+  --accent-primary: oklch(0.76 0.14 150);
   --accent-energy: oklch(0.76 0.14 130);
   --accent-peak: oklch(0.74 0.14 190);
 }
 
 .dark[data-accent="orange"] {
-  --accent-primary: oklch(0.72 0.14 55);
+  --accent-primary: oklch(0.76 0.14 55);
   --accent-energy: oklch(0.76 0.14 80);
   --accent-peak: oklch(0.74 0.14 350);
 }
 
 .dark[data-accent="rose"] {
-  --accent-primary: oklch(0.72 0.14 350);
+  --accent-primary: oklch(0.76 0.14 350);
   --accent-energy: oklch(0.76 0.16 10);
   --accent-peak: oklch(0.74 0.16 305);
 }
 
 .dark[data-accent="indigo"] {
-  --accent-primary: oklch(0.72 0.14 265);
+  --accent-primary: oklch(0.76 0.14 265);
   --accent-energy: oklch(0.76 0.16 210);
   --accent-peak: oklch(0.74 0.16 310);
 }
 
 .dark[data-accent="amber"] {
-  --accent-primary: oklch(0.72 0.14 80);
+  --accent-primary: oklch(0.76 0.14 80);
   --accent-energy: oklch(0.76 0.14 55);
   --accent-peak: oklch(0.74 0.14 45);
 }

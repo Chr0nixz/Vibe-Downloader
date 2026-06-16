@@ -1,4 +1,5 @@
 import type { RecoveryAction } from "@/generated/bindings";
+import type { TFunction } from "i18next";
 
 export interface AppErrorPayload {
   code: string;
@@ -35,6 +36,21 @@ export function errorMessage(error: unknown): string {
   if (payload) return payload.message;
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+export function localizedMessage(
+  message: string | null | undefined,
+  t: TFunction,
+): string | undefined {
+  if (!message) return undefined;
+  if (message.startsWith("taskDiagnostics.")) {
+    return t(message);
+  }
+  return message;
+}
+
+export function localizedErrorMessage(error: unknown, t: TFunction): string {
+  return localizedMessage(errorMessage(error), t) ?? "";
 }
 
 export function recoveryActionsForError(error: unknown): RecoveryAction[] {

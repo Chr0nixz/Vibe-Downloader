@@ -79,9 +79,10 @@ pub use self::task_proxy::{
     validate_task_proxy_protocol,
 };
 pub use self::task_records::{
-    find_duplicate_task_record, get_task_record, insert_task_record, list_queued_task_records,
-    list_task_records, list_task_records_cursor, list_task_records_page, next_queue_position,
-    next_retry_after_at, task_filter_options, update_task_transfer_options, TaskFilterOptions,
+    find_duplicate_task_record, get_task_record, insert_task_record,
+    list_browser_realtime_task_records, list_queued_task_records, list_task_records,
+    list_task_records_cursor, list_task_records_page, next_queue_position, next_retry_after_at,
+    task_filter_options, task_stats_snapshot, update_task_transfer_options, TaskFilterOptions,
     TaskListPage, TaskListQuery, TaskTransferOptionsUpdate,
 };
 pub use self::task_state::{

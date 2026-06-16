@@ -58,6 +58,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::tasks::list_tasks_page,
         commands::tasks::list_tasks_cursor,
         commands::tasks::get_task,
+        commands::tasks::get_task_stats,
         commands::tasks::list_segments,
         commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
@@ -110,6 +111,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::tasks::list_tasks_page,
         commands::tasks::list_tasks_cursor,
         commands::tasks::get_task,
+        commands::tasks::get_task_stats,
         commands::tasks::list_segments,
         commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
@@ -162,6 +164,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<proxy::AppProxyMode>()
         .typ::<models::TaskUpdatedPayload>()
         .typ::<models::TaskProgressPayload>()
+        .typ::<models::TaskStatsSnapshot>()
         .typ::<models::TaskFailureCategory>()
         .typ::<models::TorrentRuntimeSnapshot>()
         .typ::<models::TorrentTrackerStatus>()
@@ -303,6 +306,7 @@ pub fn run() {
         commands::tasks::list_tasks_page,
         commands::tasks::list_tasks_cursor,
         commands::tasks::get_task,
+        commands::tasks::get_task_stats,
         commands::tasks::list_segments,
         commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,
@@ -355,6 +359,7 @@ pub fn run() {
         commands::tasks::list_tasks_page,
         commands::tasks::list_tasks_cursor,
         commands::tasks::get_task,
+        commands::tasks::get_task_stats,
         commands::tasks::list_segments,
         commands::tasks::list_segments_page,
         commands::tasks::get_segment_summary,

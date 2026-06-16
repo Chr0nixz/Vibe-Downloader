@@ -10,6 +10,7 @@ import {
   taskFileType,
   type TaskQuerySnapshot,
 } from "./task-query";
+import { normalizeTaskStatsSnapshot } from "./task-store";
 
 const baseQuery: TaskQuerySnapshot = {
   nav: "all",
@@ -163,5 +164,30 @@ describe("task query helpers", () => {
         }),
       ),
     ).toBe("disk_write");
+  });
+
+  it("normalizes backend task stats snapshots for global counters", () => {
+    expect(
+      normalizeTaskStatsSnapshot({
+        all: "120",
+        active: "2",
+        queued: "4",
+        paused: "5",
+        completed: "100",
+        failed: "9",
+        totalSpeed: "4096",
+        totalDownloaded: "2048",
+        totalBytes: "8192",
+        featuredTaskId: "task-fast",
+      }),
+    ).toMatchObject({
+      all: 120,
+      active: 2,
+      queued: 4,
+      totalSpeed: 4096,
+      totalDownloaded: 2048,
+      totalBytes: 8192,
+      featuredTaskId: "task-fast",
+    });
   });
 });

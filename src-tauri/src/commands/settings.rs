@@ -42,6 +42,8 @@ pub struct UpdateSettingsInput {
     pub schedule_speed_limit_window_start: Option<String>,
     pub schedule_speed_limit_window_end: Option<String>,
     pub schedule_speed_limit_bps: Option<String>,
+    pub sidebar_stripe_enabled: Option<bool>,
+    pub titlebar_gradient_enabled: Option<bool>,
     pub completion_action: Option<CompletionAction>,
     pub completion_countdown_seconds: Option<i32>,
 }
@@ -181,6 +183,12 @@ pub async fn update_settings(
     let schedule_speed_limit_bps = input
         .schedule_speed_limit_bps
         .and_then(|value| db::normalize_speed_limit_bps(&value));
+    let sidebar_stripe_enabled = input
+        .sidebar_stripe_enabled
+        .unwrap_or(current.sidebar_stripe_enabled);
+    let titlebar_gradient_enabled = input
+        .titlebar_gradient_enabled
+        .unwrap_or(current.titlebar_gradient_enabled);
     let completion_action = input.completion_action.unwrap_or(current.completion_action);
     let completion_countdown_seconds = input
         .completion_countdown_seconds
@@ -213,6 +221,8 @@ pub async fn update_settings(
         schedule_speed_limit_window_start,
         schedule_speed_limit_window_end,
         schedule_speed_limit_bps,
+        sidebar_stripe_enabled,
+        titlebar_gradient_enabled,
         completion_action,
         completion_countdown_seconds,
     };

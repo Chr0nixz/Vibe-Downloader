@@ -18,7 +18,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { type NavFilter, useTaskStore } from "@/stores/task-store";
+import { useSettingsStore } from "@/stores/settings-store";
+import { type NavFilter, useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
 
 const COLLAPSE_KEY = "vibe-sidebar-collapsed";
 
@@ -44,9 +45,9 @@ const settingsItem: NavItemDef = {
 
 export function Sidebar() {
   const { t } = useTranslation();
-  const nav = useTaskStore((s) => s.nav);
-  const setNav = useTaskStore((s) => s.setNav);
-  const taskStats = useTaskStore((s) => s.taskStats);
+  const nav = useTaskUIStore((s) => s.nav);
+  const setNav = useTaskUIStore((s) => s.setNav);
+  const taskStats = useTaskDataStore((s) => s.globalTaskStats ?? s.taskStats);
 
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -78,7 +79,7 @@ export function Sidebar() {
     <nav
       className={cn(
         // ── Mobile: horizontal bottom bar ──
-        "order-3 flex h-14 w-full shrink-0 flex-row items-center gap-1 border-t px-1.5 py-1",
+        "order-3 flex h-12 w-full shrink-0 flex-row items-center gap-1 border-t px-1 py-0.5",
         // ── Mica surface ──
         "bg-surface-base/60",
         "[backdrop-filter:blur(12px)]",
@@ -143,7 +144,7 @@ export function Sidebar() {
           onClick={toggleCollapse}
           aria-label={collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
           className={cn(
-            "group h-9 w-9 flex-none justify-center p-0",
+            "group hidden h-9 w-9 flex-none justify-center p-0 md:flex",
             "text-text-muted",
             "hover:bg-accent-primary/10 hover:text-accent-primary",
             "md:mt-1 md:h-10 md:w-full md:flex-row md:gap-2",
@@ -197,6 +198,9 @@ function NavItem({
   onClick: () => void;
 }) {
   const Icon = item.icon;
+  const showStripe = useSettingsStore(
+    (s) => s.settings?.sidebarStripeEnabled ?? false,
+  );
   const showBadge =
     item.id !== "settings" && item.id !== "all" && count > 0;
   const showActivityDot =
@@ -216,7 +220,7 @@ function NavItem({
           aria-label={showBadge ? `${label} (${count})` : label}
           className={cn(
             // ── Base sizing per breakpoint (left-aligned) ──
-            "relative h-12 min-w-11 flex-1 gap-2.5 px-0 text-sm",
+            "relative h-11 min-w-10 flex-1 gap-1.5 px-1 text-xs",
             "md:h-10 md:w-full md:flex-none md:flex-col md:items-start md:justify-start md:gap-1 md:px-1",
             "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
             // ── Override button transition ──
@@ -225,23 +229,24 @@ function NavItem({
             active && [
               // Layer 1 — accent background fill
               "bg-accent-primary/10",
-              // Layer 2 — left indicator bar (hidden on mobile, visible md+)
-              "md:[--nav-indicator-scale:1]",
-              "md:shadow-[inset_3px_0_0_var(--accent-primary)]",
+              // Layer 2 — left indicator bar (hidden on mobile, visible md+), only when setting enabled
+              showStripe && "md:[--nav-indicator-scale:1]",
+              showStripe && "md:shadow-[inset_3px_0_0_var(--accent-primary)]",
               // Layer 3 — accent text + medium weight
               "font-medium text-accent-primary",
               // Subtle glass overlay on active
-              "dark:bg-white/[0.04]",
+              "dark:bg-surface-raised/6",
             ],
             // ── Inactive ──
             !active && [
               "text-text-secondary",
               "hover:bg-surface-raised hover:text-text-primary",
             ],
+            active && "min-w-20 flex-[1.45] md:min-w-0 md:flex-none",
           )}
         >
-          {/* Left indicator bar with scaleY entrance (md+ only) */}
-          {active && (
+          {/* Left indicator bar with scaleY entrance (md+ only), only when setting enabled */}
+          {active && showStripe && (
             <span
               className="nav-indicator pointer-events-none absolute top-1.5 bottom-1.5 left-0 hidden w-[3px] rounded-r-full bg-accent-primary md:block"
               style={{
@@ -258,7 +263,8 @@ function NavItem({
           {/* Label: hidden on mobile, 10px on compact, normal on wide; hidden when sidebar collapsed */}
           <span
             className={cn(
-              "hidden text-[10px] leading-tight md:inline lg:text-sm lg:leading-normal",
+              "hidden max-w-16 truncate text-[10px] leading-tight md:inline md:max-w-none lg:text-sm lg:leading-normal",
+              active && "inline",
               compact && "lg:hidden",
             )}
           >

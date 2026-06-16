@@ -38,6 +38,8 @@ const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED: &str = "schedule_speed_limit_
 const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START: &str = "schedule_speed_limit_window_start";
 const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END: &str = "schedule_speed_limit_window_end";
 const SETTING_SCHEDULE_SPEED_LIMIT_BPS: &str = "schedule_speed_limit_bps";
+const SETTING_SIDEBAR_STRIPE_ENABLED: &str = "sidebar_stripe_enabled";
+const SETTING_TITLEBAR_GRADIENT_ENABLED: &str = "titlebar_gradient_enabled";
 const SETTING_COMPLETION_ACTION: &str = "completion_action";
 const SETTING_COMPLETION_COUNTDOWN_SECONDS: &str = "completion_countdown_seconds";
 
@@ -133,6 +135,10 @@ pub async fn get_settings(
     let schedule_speed_limit_bps = get_setting_value(pool, SETTING_SCHEDULE_SPEED_LIMIT_BPS)
         .await?
         .and_then(|value| normalize_speed_limit_bps(&value));
+    let sidebar_stripe_enabled =
+        get_bool_setting(pool, SETTING_SIDEBAR_STRIPE_ENABLED, false).await?;
+    let titlebar_gradient_enabled =
+        get_bool_setting(pool, SETTING_TITLEBAR_GRADIENT_ENABLED, true).await?;
     let completion_action = get_setting_value(pool, SETTING_COMPLETION_ACTION)
         .await?
         .map(|value| CompletionAction::from_db_str(&value))
@@ -171,6 +177,8 @@ pub async fn get_settings(
         schedule_speed_limit_window_start,
         schedule_speed_limit_window_end,
         schedule_speed_limit_bps,
+        sidebar_stripe_enabled,
+        titlebar_gradient_enabled,
         completion_action,
         completion_countdown_seconds,
     })
@@ -296,6 +304,18 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         pool,
         SETTING_SCHEDULE_SPEED_LIMIT_BPS,
         settings.schedule_speed_limit_bps.as_deref().unwrap_or(""),
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_SIDEBAR_STRIPE_ENABLED,
+        bool_setting_value(settings.sidebar_stripe_enabled),
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_TITLEBAR_GRADIENT_ENABLED,
+        bool_setting_value(settings.titlebar_gradient_enabled),
     )
     .await?;
     upsert_setting_value(

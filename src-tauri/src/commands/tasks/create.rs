@@ -3,7 +3,7 @@ use std::{collections::HashSet, path::PathBuf, time::Duration};
 use reqwest::{Client, Url};
 use serde::Deserialize;
 use specta::Type;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
@@ -647,16 +647,14 @@ pub(crate) async fn create_task_with_state_and_headers(
         };
         db::insert_task_checksum_record(&state.pool, &checksum).await?;
     }
-    for checksum in discover_checksum_sidecars(
+    spawn_checksum_sidecar_discovery(
+        &app,
+        &state.pool,
         &record.id,
         probe.resolved_uri.as_str(),
         &request_headers,
         &record.created_at,
-    )
-    .await
-    {
-        db::insert_task_checksum_record(&state.pool, &checksum).await?;
-    }
+    );
     if let Some(credentials) = captured_credentials {
         db::upsert_task_credentials(
             &state.pool,
@@ -678,7 +676,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         selected_relative_paths.as_ref(),
     )?;
     for file_record in &file_records {
-        db::insert_task_file_record(&state.pool, &file_record).await?;
+        db::insert_task_file_record(&state.pool, file_record).await?;
     }
     if let Some(metalink) = probe.metalink.as_ref() {
         persist_metalink_probe(&state.pool, &record, &file_records, metalink).await?;
@@ -750,6 +748,66 @@ pub(crate) async fn create_task_with_state_and_headers(
     let task = task_payload(&state.pool, &record.id).await?;
     emit_task_updated(&app, &task);
     Ok(task)
+}
+
+fn spawn_checksum_sidecar_discovery(
+    app: &AppHandle,
+    pool: &sqlx::SqlitePool,
+    task_id: &str,
+    final_url: &str,
+    request_headers: &[(String, String)],
+    timestamp: &str,
+) {
+    let app = app.clone();
+    let pool = pool.clone();
+    let task_id = task_id.to_string();
+    let final_url = final_url.to_string();
+    let request_headers = request_headers.to_vec();
+    let timestamp = timestamp.to_string();
+
+    tauri::async_runtime::spawn(async move {
+        let checksums =
+            discover_checksum_sidecars(&task_id, &final_url, &request_headers, &timestamp).await;
+        if checksums.is_empty() {
+            return;
+        }
+
+        let mut inserted = 0usize;
+        for checksum in checksums {
+            match db::insert_task_checksum_record(&pool, &checksum).await {
+                Ok(()) => inserted += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %error,
+                        "failed to persist discovered checksum sidecar"
+                    );
+                }
+            }
+        }
+
+        if inserted == 0 {
+            return;
+        }
+
+        let _ = db::insert_task_event(
+            &pool,
+            &task_id,
+            "checksums_discovered",
+            Some(&inserted.to_string()),
+        )
+        .await;
+        if let Some(app_state) = app.try_state::<crate::AppState>() {
+            match super::task_payload(&app_state.pool, &task_id).await {
+                Ok(task) => crate::events::emit_task_updated(&app, &task),
+                Err(error) => tracing::warn!(
+                    task_id = %task_id,
+                    error = %error,
+                    "failed to emit checksum sidecar update"
+                ),
+            }
+        }
+    });
 }
 
 async fn persist_metalink_probe(

@@ -32,12 +32,13 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import type { Platform } from "@/lib/platform";
 import { applyGlobalSpeedLimit } from "@/lib/settings";
 import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
 import {
-  useTaskStore,
+  useTaskUIStore,
   type TaskSortKey,
 } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
@@ -63,14 +64,24 @@ export function CommandBar({
   onDelete,
 }: CommandBarProps) {
   const { t } = useTranslation();
-  const search = useTaskStore((s) => s.search);
-  const setSearch = useTaskStore((s) => s.setSearch);
+  const search = useTaskUIStore((s) => s.search);
+  const setSearch = useTaskUIStore((s) => s.setSearch);
+  const [searchInput, setSearchInput] = useState(search);
+  const debouncedSearch = useDebouncedValue(searchInput, 200);
+  useEffect(() => {
+    setSearch(debouncedSearch);
+  }, [debouncedSearch, setSearch]);
+  useEffect(() => {
+    if (search !== debouncedSearch) {
+      setSearchInput(search);
+    }
+  }, [search, debouncedSearch]);
   const settings = useSettingsStore((s) => s.settings);
   const setSettings = useSettingsStore((s) => s.setSettings);
   const addToast = useToastStore((s) => s.addToast);
-  const sortKey = useTaskStore((s) => s.sortKey);
-  const sortDirection = useTaskStore((s) => s.sortDirection);
-  const setSort = useTaskStore((s) => s.setSort);
+  const sortKey = useTaskUIStore((s) => s.sortKey);
+  const sortDirection = useTaskUIStore((s) => s.sortDirection);
+  const setSort = useTaskUIStore((s) => s.setSort);
   const [speedPopoverOpen, setSpeedPopoverOpen] = useState(false);
   const [customLimit, setCustomLimit] = useState("");
   const [savingSpeed, setSavingSpeed] = useState(false);
@@ -186,7 +197,7 @@ export function CommandBar({
             />
           </PopoverTrigger>
           <PopoverContent className="w-64" align="start">
-            <div className="space-y-0.5">
+            <div className="space-y-0.5" role="radiogroup" aria-label={t("speedLimit.customBytes")}>
               <SpeedOption
                 label={t("speedLimit.unlimited")}
                 active={currentLimit <= 0}
@@ -261,8 +272,8 @@ export function CommandBar({
       <div className="relative min-w-0 flex-1">
         <Search className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
         <Input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
           placeholder={t("commandBar.searchPlaceholder")}
           className="h-11 pl-8 md:h-8"
           aria-label={t("commandBar.searchAria")}
@@ -318,6 +329,8 @@ function SpeedOption({
   return (
     <button
       type="button"
+      role="radio"
+      aria-checked={active ? "true" : "false"}
       className={cn(
         "flex h-8 w-full items-center justify-between rounded-md px-2 text-left text-sm text-text-secondary",
         "transition-[background-color,color] duration-[var(--motion-ui)] ease-out",

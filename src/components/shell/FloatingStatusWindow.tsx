@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import {
   focusMainWindowFromFloating,
+  getTaskStats,
   hideFloatingStatusWindow,
   isTauriRuntime,
   listTasksCursor,
@@ -12,7 +13,7 @@ import {
 import { startWindowDrag } from "@/lib/window-controls";
 import { cn, formatSpeed } from "@/lib/utils";
 import { createLogger } from "@/lib/logger";
-import { useTaskStore } from "@/stores/task-store";
+import { useTaskDataStore } from "@/stores/task-store";
 
 const log = createLogger("floating-status");
 
@@ -83,9 +84,10 @@ async function undock(
 
 export function FloatingStatusWindow() {
   const { t } = useTranslation();
-  const stats = useTaskStore((s) => s.taskStats);
-  const setTasks = useTaskStore((s) => s.setTasks);
-  const setLoading = useTaskStore((s) => s.setLoading);
+  const stats = useTaskDataStore((s) => s.globalTaskStats ?? s.taskStats);
+  const setTasks = useTaskDataStore((s) => s.setTasks);
+  const setGlobalTaskStats = useTaskDataStore((s) => s.setGlobalTaskStats);
+  const setLoading = useTaskDataStore((s) => s.setLoading);
 
   useTaskEvents({ notify: false });
 
@@ -121,7 +123,11 @@ export function FloatingStatusWindow() {
           cursor: null,
           pageSize: 50,
         });
-        if (!cancelled) setTasks(data.items);
+        const stats = await getTaskStats();
+        if (!cancelled) {
+          setTasks(data.items);
+          setGlobalTaskStats(stats);
+        }
       } catch (err) {
         if (!cancelled) log.error("initial task load failed", err);
       } finally {
@@ -132,7 +138,7 @@ export function FloatingStatusWindow() {
     return () => {
       cancelled = true;
     };
-  }, [setLoading, setTasks]);
+  }, [setGlobalTaskStats, setLoading, setTasks]);
 
   const percent = stats.totalBytes > 0
     ? Math.min(100, (stats.totalDownloaded / stats.totalBytes) * 100)
@@ -394,7 +400,7 @@ export function FloatingStatusWindow() {
           <span className="font-mono text-[11px] font-bold leading-none text-text-primary">
             {speedText || "—"}
           </span>
-          <span className="mt-1 text-[8px] leading-none text-text-muted">
+          <span className="mt-1 text-[9px] leading-none text-text-muted">
             {idle ? t("floatingStatus.idle") : `${Math.round(percent)}%`}
           </span>
         </div>
@@ -510,12 +516,12 @@ export function FloatingStatusWindow() {
               <span
                 className={cn(
                   "font-mono font-bold leading-none text-text-primary",
-                  compact ? "text-[8px]" : "text-[10px]",
+                  compact ? "text-[9px]" : "text-[10px]",
                 )}
               >
                 {speedText}
               </span>
-              <span className="text-[7.5px] leading-none text-text-muted">
+              <span className="text-[9px] leading-none text-text-muted">
                 {Math.round(percent)}%
               </span>
             </>

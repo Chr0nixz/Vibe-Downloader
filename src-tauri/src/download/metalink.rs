@@ -12,7 +12,10 @@ use reqwest::{header::RANGE, Client, StatusCode};
 use sha2::Digest;
 use sqlx::SqlitePool;
 use tauri::AppHandle;
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 
 use super::{
     engine::EngineFuture,
@@ -33,6 +36,7 @@ use crate::{
 };
 
 const PROTOCOL_METALINK: &str = "metalink";
+const HASH_READ_BUFFER_SIZE: usize = 1024 * 1024;
 const METALINK_CONTENT_TYPE: &str = "application/metalink4+xml";
 const DEFAULT_RESOURCE_PRIORITY: i64 = 999_999;
 
@@ -446,16 +450,68 @@ async fn verify_metalink_file(
 }
 
 async fn hash_file(path: &Path, algorithm: ChecksumAlgorithm) -> Result<String, String> {
-    let bytes = fs::read(path)
+    let mut file = fs::File::open(path)
         .await
         .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
-    let out = match algorithm {
-        ChecksumAlgorithm::Sha256 => hex_lower(sha2::Sha256::digest(&bytes).as_slice()),
-        ChecksumAlgorithm::Sha512 => hex_lower(sha2::Sha512::digest(&bytes).as_slice()),
-        ChecksumAlgorithm::Sha1 => hex_lower(sha1::Sha1::digest(&bytes).as_slice()),
-        ChecksumAlgorithm::Md5 => hex_lower(md5::Md5::digest(&bytes).as_slice()),
-    };
-    Ok(out)
+    let mut buffer = vec![0_u8; HASH_READ_BUFFER_SIZE];
+    match algorithm {
+        ChecksumAlgorithm::Sha256 => {
+            let mut hasher = sha2::Sha256::new();
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(hex_lower(hasher.finalize().as_slice()))
+        }
+        ChecksumAlgorithm::Sha512 => {
+            let mut hasher = sha2::Sha512::new();
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(hex_lower(hasher.finalize().as_slice()))
+        }
+        ChecksumAlgorithm::Sha1 => {
+            let mut hasher = sha1::Sha1::new();
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(hex_lower(hasher.finalize().as_slice()))
+        }
+        ChecksumAlgorithm::Md5 => {
+            let mut hasher = md5::Md5::new();
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(hex_lower(hasher.finalize().as_slice()))
+        }
+    }
 }
 
 async fn emit_metalink_progress(
@@ -952,5 +1008,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("metalink_invalid_manifest"));
+    }
+
+    #[tokio::test]
+    async fn hash_file_streams_supported_algorithms() {
+        let path = std::env::temp_dir().join(format!(
+            "vibe-metalink-hash-{}.bin",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::write(&path, b"abc").await.expect("write test file");
+
+        let sha256 = hash_file(&path, ChecksumAlgorithm::Sha256)
+            .await
+            .expect("sha256");
+        let md5 = hash_file(&path, ChecksumAlgorithm::Md5)
+            .await
+            .expect("md5");
+
+        let _ = fs::remove_file(&path).await;
+        assert_eq!(
+            sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(md5, "900150983cd24fb0d6963f7d28e17f72");
     }
 }

@@ -32,7 +32,7 @@ function parseByteCount(value: string | number | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-export function normalizeTask(task: GeneratedTask): Task {
+export function normalizeTask(task: GeneratedTask | Task): Task {
   return {
     ...task,
     recoveryActions: task.recoveryActions ?? [],

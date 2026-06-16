@@ -32,9 +32,14 @@ import {
   formatSpeed,
 } from "@/lib/utils";
 import { cn } from "@/lib/utils";
-import type { SpeedSample } from "@/stores/task-store";
-import { useTaskStore } from "@/stores/task-store";
-import { errorMessage, recoveryActionsForError } from "@/lib/errors";
+import type { SpeedSample } from "@/stores/speed-history-store";
+import { useSpeedHistoryStore } from "@/stores/speed-history-store";
+import { useTaskDataStore } from "@/stores/task-store";
+import {
+  localizedErrorMessage,
+  localizedMessage,
+  recoveryActionsForError,
+} from "@/lib/errors";
 import type { RecoveryAction } from "@/generated/bindings";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 
@@ -98,13 +103,13 @@ export const TaskRow = memo(function TaskRow({
   onResolveAttention,
 }: TaskRowProps) {
   const { t } = useTranslation();
-  const task = useTaskStore((s) => s.taskById[taskId]);
-  const expanded = useTaskStore((s) => s.expandedTaskIds.includes(taskId));
-  const completionFlash = useTaskStore((s) => s.completionFlashIds.includes(taskId));
-  const speedHistory = useTaskStore(
-    (s) => s.speedHistoryByTaskId[taskId] ?? EMPTY_SPEED_HISTORY,
+  const task = useTaskDataStore((s) => s.taskById[taskId]);
+  const expanded = useTaskDataStore((s) => s.expandedTaskIds.includes(taskId));
+  const completionFlash = useTaskDataStore((s) => s.completionFlashIds.includes(taskId));
+  const speedHistory = useSpeedHistoryStore(
+    (s) => s.history[taskId] ?? EMPTY_SPEED_HISTORY,
   );
-  const toggleTaskExpanded = useTaskStore((s) => s.toggleTaskExpanded);
+  const toggleTaskExpanded = useTaskDataStore((s) => s.toggleTaskExpanded);
   const onSelect = useCallback(() => {
     onSelectTask(taskId);
   }, [onSelectTask, taskId]);
@@ -121,9 +126,10 @@ export const TaskRow = memo(function TaskRow({
     task.retryAfterAt && task.status === "queued"
       ? t("task.retryAfter", { time: formatRetryTime(task.retryAfterAt) })
       : null;
+  const healthSummary = localizedMessage(task.healthSummary, t);
   const diagnosticLabel = task.errorMessage
-    ? errorMessage(task.errorMessage)
-    : retryLaterLabel || task.healthSummary || speedTrend.label;
+    ? localizedErrorMessage(task.errorMessage, t)
+    : retryLaterLabel || healthSummary || speedTrend.label;
   const baseId = `task-${task.id}`;
   const nameId = `${baseId}-name`;
   const statusId = `${baseId}-status`;
@@ -168,8 +174,8 @@ export const TaskRow = memo(function TaskRow({
         }
       }}
       className={cn(
-        "group relative overflow-hidden rounded-lg border border-transparent bg-surface-base/60 px-3 py-3.5 transition-[background-color,border-color,box-shadow,transform] duration-ui ease-out hover:-translate-y-px hover:bg-surface-raised/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary sm:px-3.5 md:px-4",
-        "grid gap-x-4 gap-y-3 md:grid-cols-[minmax(0,1fr)_auto] md:gap-y-2",
+        "group relative overflow-hidden rounded-md border border-transparent bg-surface-base/60 px-2.5 py-2 transition-[background-color,border-color,box-shadow] duration-ui ease-out hover:bg-surface-raised/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary sm:px-3 md:px-3 md:py-1.5",
+        "grid gap-x-3 gap-y-2 md:grid-cols-[minmax(0,1fr)_minmax(12rem,14rem)]",
         completionFlash && "completion-flash",
         selected &&
           "border-border-accent bg-accent-primary/[0.04]",
@@ -180,9 +186,9 @@ export const TaskRow = memo(function TaskRow({
       )}
       transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
     >
-      <div className="flex min-w-0 gap-3">
+      <div className="flex min-w-0 gap-2.5">
         <label
-          className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-surface-raised"
+          className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded hover:bg-surface-raised md:h-7 md:w-7"
           data-row-action
           onClick={(event) => event.stopPropagation()}
         >
@@ -196,16 +202,13 @@ export const TaskRow = memo(function TaskRow({
             className="h-4 w-4 accent-accent-primary"
           />
         </label>
-        <div className="min-w-0 flex-1 space-y-2">
+        <div className="min-w-0 flex-1 space-y-1.5 md:space-y-1">
         <div className="flex min-w-0 items-start justify-between gap-2 md:block">
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <div
                 id={nameId}
-                className={cn(
-                  "truncate text-[0.9rem] font-semibold leading-snug text-text-primary",
-                  isActive && "text-[0.95rem]",
-                )}
+                className="truncate text-sm font-semibold leading-snug text-text-primary"
               >
                 {task.fileName}
               </div>
@@ -248,12 +251,12 @@ export const TaskRow = memo(function TaskRow({
           label={progressLabel}
           active={isActive}
           smooth={!isActive}
-          size={isActive ? "lg" : "default"}
+          size="default"
           className={completionFlash ? "completion-flash-progress" : undefined}
         />
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs text-text-muted md:hidden">
-          <span className={cn("text-text-primary", isActive && "text-sm font-semibold text-accent-primary")}>{formatSpeed(task.speedBps)}</span>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-text-muted md:hidden">
+          <span className={cn("text-text-primary", isActive && "text-xs font-semibold text-accent-primary")}>{formatSpeed(task.speedBps)}</span>
           <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
             {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
           </span>
@@ -270,12 +273,12 @@ export const TaskRow = memo(function TaskRow({
         </div>
       </div>
 
-      <div className="hidden min-w-36 flex-col items-end gap-1 text-right font-mono text-xs md:flex">
+      <div className="hidden min-w-52 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-right font-mono text-xs md:grid md:[&>span:nth-of-type(3)]:col-span-2 md:[&>span:nth-of-type(3)]:min-w-0 md:[&>span:nth-of-type(3)]:truncate md:[&>span:nth-of-type(4)]:hidden">
         <span className={cn(
-          "text-sm text-text-primary",
-          isActive && "text-base font-semibold text-accent-primary",
+          "min-w-0 truncate text-sm text-text-primary",
+          isActive && "font-semibold text-accent-primary",
         )}>{formatSpeed(task.speedBps)}</span>
-        <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
+        <span className="min-w-0 truncate text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
           {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
         </span>
         <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
@@ -297,7 +300,7 @@ export const TaskRow = memo(function TaskRow({
           onFinishLiveRecording={onFinishLiveRecording}
           onOpenFile={onOpenFile}
           onOpenFolder={onOpenFolder}
-          className="mt-1"
+          className="col-span-2 justify-self-end"
         />
       </div>
 
@@ -333,8 +336,8 @@ export const TaskRow = memo(function TaskRow({
             exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -4 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
           >
-            <div className="grid gap-3 border-t border-border-divider pt-3 md:grid-cols-[minmax(0,1fr)_minmax(10rem,15rem)] md:items-center">
-              <div className="min-w-0 space-y-2 text-xs text-text-secondary">
+            <div className="grid gap-2 border-t border-border-divider pt-2 md:grid-cols-[minmax(0,1fr)_minmax(10rem,15rem)] md:items-center">
+              <div className="min-w-0 space-y-1.5 text-xs text-text-secondary">
                 <DetailLine label={t("task.expanded.saveDir")} value={task.saveDir} />
                 <DetailLine
                   label={t("task.expanded.resume")}
@@ -424,8 +427,8 @@ function RowActions({
   return (
     <div
       className={cn(
-        "flex gap-1.5 [&_button]:h-11 [&_button]:w-11 md:[&_button]:h-8 md:[&_button]:w-8",
-        "opacity-60 transition-opacity duration-ui group-hover:opacity-100 group-focus-within:opacity-100",
+        "flex gap-1 [&_[data-row-icon-button]]:h-10 [&_[data-row-icon-button]]:w-10 md:[&_[data-row-icon-button]]:h-8 md:[&_[data-row-icon-button]]:w-8",
+        "opacity-70 transition-opacity duration-ui group-hover:opacity-100 group-focus-within:opacity-100",
         className,
       )}
       data-row-action
@@ -466,6 +469,7 @@ function RowActions({
           <TooltipTrigger asChild>
             <Button
               size="sm"
+              className="h-10 px-2 text-xs md:h-7 md:px-2"
               aria-label={t("actions.retryFor", { name: task.fileName })}
               onClick={(event) => {
                 event.stopPropagation();
@@ -545,6 +549,7 @@ function ActionButton({
           aria-controls={controls}
           disabled={disabled}
           onClick={onClick}
+          data-row-icon-button
         >
           {children}
         </Button>
@@ -581,7 +586,7 @@ function InlineRecovery({
 
   return (
     <div
-      className="col-span-full flex items-center gap-2"
+      className="col-span-full flex flex-wrap items-center gap-2 pt-1"
       data-row-action
       data-no-drag
     >
@@ -591,6 +596,7 @@ function InlineRecovery({
       />
       <Button
         size="sm"
+        className="h-8 px-2 text-xs"
         onClick={(event) => {
           event.stopPropagation();
           onResolve(task, primaryAction);
@@ -602,6 +608,7 @@ function InlineRecovery({
         <Button
           variant="ghost"
           size="sm"
+          className="h-8 px-2 text-xs"
           onClick={(event) => {
             event.stopPropagation();
             if (!expanded) onToggleExpanded();

@@ -45,6 +45,7 @@
   --color-surface-raised: var(--surface-raised);
   --color-surface-overlay: var(--surface-overlay);
   --color-surface-scrim: var(--surface-scrim);
+  --color-surface-hover: var(--surface-hover);
   --color-border-subtle: var(--border-subtle);
   --color-border-divider: var(--border-divider);
   --color-border-panel: var(--border-panel);
@@ -109,6 +110,16 @@
   [role="button"]:not(:disabled) {
     cursor: pointer;
   }
+
+  .dark [data-radix-popper-content-wrapper] > *,
+  .dark [data-radix-dialog-content],
+  .dark [data-radix-select-content],
+  .dark [data-radix-popover-content] {
+    box-shadow:
+      0 10px 15px -3px oklch(0 0 0 / 0.35),
+      0 4px 6px -4px oklch(0 0 0 / 0.3),
+      0 0 0 1px oklch(0.33 0.012 255 / 0.5);
+  }
 }
 
 @keyframes fade-in {
@@ -144,15 +155,15 @@
 
 @keyframes completion-glow {
   0% {
-    box-shadow: 0 0 0 0 oklch(0.72 0.14 150 / 0);
+    box-shadow: 0 0 0 0 transparent;
     border-color: var(--border-subtle);
   }
   20% {
-    box-shadow: 0 0 0 3px oklch(0.72 0.14 150 / 0.3), 0 0 16px oklch(0.72 0.14 150 / 0.2);
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--status-success) 30%, transparent), 0 0 16px color-mix(in oklch, var(--status-success) 20%, transparent);
     border-color: var(--status-success);
   }
   100% {
-    box-shadow: 0 0 0 0 oklch(0.72 0.14 150 / 0);
+    box-shadow: 0 0 0 0 transparent;
     border-color: var(--status-success);
   }
 }
@@ -182,14 +193,6 @@
   .completion-flash-progress {
     animation: none !important;
     transition: none !important;
-  }
-
-  .titlebar-logo {
-    transition: none !important;
-  }
-
-  .titlebar:hover .titlebar-logo {
-    transform: none;
   }
 
   .floating-ball-glow {
@@ -277,7 +280,7 @@
   box-shadow: 0 1px 0 0 var(--border-subtle);
 }
 
-.titlebar::after {
+.titlebar-gradient::after {
   content: "";
   position: absolute;
   bottom: 0;
@@ -297,10 +300,6 @@
 
 .titlebar-logo {
   transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.titlebar:hover .titlebar-logo {
-  transform: rotate(15deg) scale(1.08);
 }
 
 /* ── Floating ball ── */
@@ -338,8 +337,8 @@
   border-radius: 50%;
   background: radial-gradient(
     circle,
-    oklch(0.72 0.14 235 / 0.18) 0%,
-    oklch(0.78 0.18 170 / 0.08) 45%,
+    color-mix(in oklch, var(--accent-primary) 18%, transparent) 0%,
+    color-mix(in oklch, var(--accent-energy) 8%, transparent) 45%,
     transparent 70%
   );
   filter: blur(8px);
@@ -353,8 +352,8 @@
 .floating-surface-tint {
   background: radial-gradient(
     circle at 35% 35%,
-    oklch(0.78 0.18 170 / 0.08) 0%,
-    oklch(0.72 0.14 235 / 0.04) 50%,
+    color-mix(in oklch, var(--accent-energy) 8%, transparent) 0%,
+    color-mix(in oklch, var(--accent-primary) 4%, transparent) 50%,
     transparent 70%
   );
   pointer-events: none;
@@ -363,18 +362,18 @@
 
 /* Active state — steady accent glow (no animation, single-layer) */
 .floating-ball-glow {
-  box-shadow: 0 0 14px oklch(0.72 0.14 235 / 0.22);
+  box-shadow: 0 0 14px color-mix(in oklch, var(--accent-primary) 22%, transparent);
 }
 
 .dark .floating-ball-glow {
-  box-shadow: 0 0 16px oklch(0.72 0.14 235 / 0.28);
+  box-shadow: 0 0 16px color-mix(in oklch, var(--accent-primary) 28%, transparent);
 }
 
 /* Peak speed state — brighter steady accent glow */
 .floating-ball-peak {
   box-shadow:
-    0 0 24px oklch(0.78 0.18 170 / 0.45),
-    0 0 8px oklch(0.72 0.14 235 / 0.2) !important;
+    0 0 24px color-mix(in oklch, var(--accent-energy) 45%, transparent),
+    0 0 8px color-mix(in oklch, var(--accent-primary) 20%, transparent) !important;
 }
 
 /* Completion burst — one-shot single-layer expansion and fade */
@@ -384,10 +383,10 @@
 
 @keyframes floating-completion {
   0% {
-    box-shadow: 0 0 14px oklch(0.72 0.14 235 / 0.22);
+    box-shadow: 0 0 14px color-mix(in oklch, var(--accent-primary) 22%, transparent);
   }
   35% {
-    box-shadow: 0 0 36px oklch(0.78 0.18 170 / 0.55);
+    box-shadow: 0 0 36px color-mix(in oklch, var(--accent-energy) 55%, transparent);
   }
   100% {
     box-shadow: 0 0 0 0 transparent;
@@ -414,25 +413,25 @@
 /* ── Floating bar (edge-docked mode) ── */
 
 .floating-bar {
-  background: oklch(0.22 0.012 255 / 0.82);
+  background: color-mix(in oklch, var(--surface-base) 82%, transparent);
   backdrop-filter: blur(12px);
   border-radius: 9999px;
   box-shadow:
-    inset 0 0 0 1px oklch(0.33 0.012 255 / 0.5),
-    0 0 10px oklch(0.72 0.14 235 / 0.1),
-    0 0 3px oklch(0.78 0.18 170 / 0.05);
+    inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 50%, transparent),
+    0 0 10px color-mix(in oklch, var(--accent-primary) 10%, transparent),
+    0 0 3px color-mix(in oklch, var(--accent-energy) 5%, transparent);
   transition: transform 250ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .dark .floating-bar {
-  background: oklch(0.18 0.008 255 / 0.82);
+  background: color-mix(in oklch, var(--surface-base) 82%, transparent);
 }
 
 .floating-bar:hover {
   box-shadow:
-    inset 0 0 0 1px oklch(0.33 0.012 255 / 0.5),
-    0 0 14px oklch(0.72 0.14 235 / 0.2),
-    0 0 5px oklch(0.78 0.18 170 / 0.1);
+    inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 50%, transparent),
+    0 0 14px color-mix(in oklch, var(--accent-primary) 20%, transparent),
+    0 0 5px color-mix(in oklch, var(--accent-energy) 10%, transparent);
 }
 
 /* Hover: subtle scale + glow intensification */

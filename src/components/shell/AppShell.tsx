@@ -55,7 +55,7 @@ import {
   runTrayMenuAction,
 } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settings-store";
-import { taskCursorInput, useTaskStore } from "@/stores/task-store";
+import { taskCursorInput, useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 
@@ -131,19 +131,18 @@ export function AppShell() {
   const [completionActionRequest, setCompletionActionRequest] =
     useState<CompletionActionRequestedPayload | null>(null);
 
-  const selectedId = useTaskStore((s) => s.selectedId);
-  const selected = useTaskStore((s) => {
-    if (!s.selectedId) return null;
-    return s.taskById[s.selectedId] ?? null;
-  });
-  const nav = useTaskStore((s) => s.nav);
-  const detailOpen = useTaskStore((s) => s.detailOpen);
-  const setTaskCursorPage = useTaskStore((s) => s.setTaskCursorPage);
-  const upsertTask = useTaskStore((s) => s.upsertTask);
-  const setError = useTaskStore((s) => s.setError);
-  const selectTask = useTaskStore((s) => s.selectTask);
-  const clearSelectedIds = useTaskStore((s) => s.clearSelectedIds);
-  const setDetailOpen = useTaskStore((s) => s.setDetailOpen);
+  const selectedId = useTaskUIStore((s) => s.selectedId);
+  const selected = useTaskDataStore((s) =>
+    selectedId ? s.taskById[selectedId] ?? null : null,
+  );
+  const nav = useTaskUIStore((s) => s.nav);
+  const detailOpen = useTaskUIStore((s) => s.detailOpen);
+  const setTaskCursorPage = useTaskDataStore((s) => s.setTaskCursorPage);
+  const upsertTask = useTaskDataStore((s) => s.upsertTask);
+  const setError = useTaskDataStore((s) => s.setError);
+  const selectTask = useTaskUIStore((s) => s.selectTask);
+  const clearSelectedIds = useTaskUIStore((s) => s.clearSelectedIds);
+  const setDetailOpen = useTaskUIStore((s) => s.setDetailOpen);
   const settings = useSettingsStore((s) => s.settings);
   const setSettings = useSettingsStore((s) => s.setSettings);
   const setSettingsLoading = useSettingsStore((s) => s.setLoading);
@@ -151,7 +150,7 @@ export function AppShell() {
   const addToast = useToastStore((s) => s.addToast);
   const updateToast = useToastStore((s) => s.updateToast);
   const dismissToast = useToastStore((s) => s.dismissToast);
-  const taskLoading = useTaskStore((s) => s.loading);
+  const taskLoading = useTaskDataStore((s) => s.loading);
 
   /* ── Splash overlay ── */
   const initialLoadDoneRef = useRef(false);
@@ -178,7 +177,7 @@ export function AppShell() {
     const timer = setTimeout(() => {
       if (!initialLoadDoneRef.current) {
         dismissSplash();
-        useTaskStore.getState().setLoading(false);
+        useTaskDataStore.getState().setLoading(false);
       }
     }, 3000);
     return () => clearTimeout(timer);
@@ -193,7 +192,7 @@ export function AppShell() {
     if (selectId) {
       selectTask(selectId);
     } else {
-      const currentSelectedId = useTaskStore.getState().selectedId;
+      const currentSelectedId = useTaskUIStore.getState().selectedId;
       if (
         data.length > 0 &&
         (!currentSelectedId || !data.some((task) => task.id === currentSelectedId))
@@ -506,7 +505,7 @@ export function AppShell() {
         openNewDownload();
       });
       unlistenSettings = await onTraySettingsRequested(() => {
-        useTaskStore.getState().setNav("settings");
+        useTaskUIStore.getState().setNav("settings");
         setDetailOpen(false);
       });
 
@@ -631,7 +630,7 @@ export function AppShell() {
 
       if (matchesShortcut(event, "mod+,", platform)) {
         event.preventDefault();
-        useTaskStore.getState().setNav("settings");
+        useTaskUIStore.getState().setNav("settings");
         setDetailOpen(false);
         return;
       }
@@ -728,7 +727,7 @@ export function AppShell() {
             onBulkDelete={bulkDelete}
             onBulkOpenFolder={bulkOpenFolder}
             onSetNav={(nextNav) => {
-              useTaskStore.getState().setNav(nextNav);
+              useTaskUIStore.getState().setNav(nextNav);
               if (nextNav === "settings") {
                 setDetailOpen(false);
               }
@@ -749,7 +748,7 @@ export function AppShell() {
             initialBatchInput={newDownloadInitialState?.batchInput}
             onDraftStateChange={setNewDownloadDraftDirty}
             onCreated={(task) => {
-              useTaskStore.getState().upsertTask(task);
+              useTaskDataStore.getState().upsertTask(task);
               selectTask(task.id);
             }}
           />

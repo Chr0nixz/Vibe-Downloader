@@ -6,7 +6,7 @@ This file gives coding agents the local project context and working rules for Vi
 
 Vibe Downloader is a desktop download manager built with Tauri 2, React 19, TypeScript, Rust, SQLite, and WebExtension Native Messaging.
 
-The project is currently at `0.1.0`. It is not a finished IDM replacement yet. Treat HTTP/HTTPS as the most mature path, with lower-maturity FTP/FTPS and BitTorrent entry points already present.
+The project is currently at `0.1.1`. It is not a finished IDM replacement yet. Treat HTTP/HTTPS as the most mature path, with lower-maturity FTP/FTPS and BitTorrent entry points already present.
 
 Implemented today:
 

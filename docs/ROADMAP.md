@@ -6,7 +6,7 @@ This roadmap reflects the current repository state. Product and design constrain
 
 ## Current Baseline
 
-Version: `0.1.0`.
+Version: `0.1.1`.
 
 The app now includes a working HTTP/HTTPS desktop download manager, plus lower-maturity FTP/FTPS, SFTP, and BitTorrent entry points, with:
 
