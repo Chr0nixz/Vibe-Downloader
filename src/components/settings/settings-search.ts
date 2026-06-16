@@ -1,0 +1,34 @@
+export type SettingsSearchSection<Id extends string = string> = {
+  id: Id;
+  title: string;
+  description?: string;
+  summary?: string;
+  terms?: readonly string[];
+};
+
+function normalizeSettingsQuery(query: string): string {
+  return query.trim().toLocaleLowerCase();
+}
+
+export function settingsSectionMatchesQuery<Id extends string>(
+  section: SettingsSearchSection<Id>,
+  query: string,
+): boolean {
+  const normalizedQuery = normalizeSettingsQuery(query);
+  if (!normalizedQuery) return true;
+  return [
+    section.id,
+    section.title,
+    section.description,
+    section.summary,
+    ...(section.terms ?? []),
+  ].some((value) => value?.toLocaleLowerCase().includes(normalizedQuery));
+}
+
+export function settingsSearchHasResults<Id extends string>(
+  sections: readonly SettingsSearchSection<Id>[],
+  query: string,
+): boolean {
+  const normalizedQuery = normalizeSettingsQuery(query);
+  return !normalizedQuery || sections.some((section) => settingsSectionMatchesQuery(section, normalizedQuery));
+}

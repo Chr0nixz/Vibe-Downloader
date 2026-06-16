@@ -208,14 +208,15 @@ fn webdav_request_headers(
     credentials: Option<&WebDavCredentials>,
 ) -> Vec<(String, String)> {
     let mut headers = base_headers.to_vec();
-    if credentials.is_some()
-        && !headers
+    if let Some(credentials) = credentials {
+        let has_authorization = headers
             .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case(AUTHORIZATION.as_str()))
-    {
-        let credentials = credentials.expect("checked above");
-        let token = STANDARD.encode(format!("{}:{}", credentials.username, credentials.password));
-        headers.push(("Authorization".to_string(), format!("Basic {token}")));
+            .any(|(name, _)| name.eq_ignore_ascii_case(AUTHORIZATION.as_str()));
+        if !has_authorization {
+            let token =
+                STANDARD.encode(format!("{}:{}", credentials.username, credentials.password));
+            headers.push(("Authorization".to_string(), format!("Basic {token}")));
+        }
     }
     headers
 }

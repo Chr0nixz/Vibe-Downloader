@@ -356,30 +356,34 @@ async fn run_ftp_download(
         &proxy_config,
     );
     emit_ftp_progress(
-        &app,
-        &pool,
-        &task,
         &mut progress,
-        running.len(),
         &mut last_checkpoint,
         &mut progress_gate,
-        true,
-        true,
+        FtpProgressInput {
+            app: &app,
+            pool: &pool,
+            task: &task,
+            active_connections: running.len(),
+            force_checkpoint: true,
+            force_emit: true,
+        },
     )
     .await?;
 
     while !pending.is_empty() || !running.is_empty() {
         if cancel.load(Ordering::SeqCst) {
             emit_ftp_progress(
-                &app,
-                &pool,
-                &task,
                 &mut progress,
-                running.len(),
                 &mut last_checkpoint,
                 &mut progress_gate,
-                true,
-                true,
+                FtpProgressInput {
+                    app: &app,
+                    pool: &pool,
+                    task: &task,
+                    active_connections: running.len(),
+                    force_checkpoint: true,
+                    force_emit: true,
+                },
             )
             .await?;
             progress_gate.flush(&app);
@@ -395,15 +399,17 @@ async fn run_ftp_download(
                     segment.dirty = true;
                 }
                 emit_ftp_progress(
-                    &app,
-                    &pool,
-                    &task,
                     &mut progress,
-                    running.len(),
                     &mut last_checkpoint,
                     &mut progress_gate,
-                    false,
-                    false,
+                    FtpProgressInput {
+                        app: &app,
+                        pool: &pool,
+                        task: &task,
+                        active_connections: running.len(),
+                        force_checkpoint: false,
+                        force_emit: false,
+                    },
                 ).await?;
             }
             Some(joined) = workers.join_next(), if !running.is_empty() => {
@@ -471,15 +477,17 @@ async fn run_ftp_download(
                     }
                 }
                 emit_ftp_progress(
-                    &app,
-                    &pool,
-                    &task,
                     &mut progress,
-                    running.len(),
                     &mut last_checkpoint,
                     &mut progress_gate,
-                    true,
-                    true,
+                    FtpProgressInput {
+                        app: &app,
+                        pool: &pool,
+                        task: &task,
+                        active_connections: running.len(),
+                        force_checkpoint: true,
+                        force_emit: true,
+                    },
                 ).await?;
             }
             _ = tokio::time::sleep(Duration::from_millis(250)) => {}
@@ -541,15 +549,17 @@ async fn run_ftp_download(
 
     if cancel.load(Ordering::SeqCst) {
         emit_ftp_progress(
-            &app,
-            &pool,
-            &task,
             &mut progress,
-            running.len(),
             &mut last_checkpoint,
             &mut progress_gate,
-            true,
-            true,
+            FtpProgressInput {
+                app: &app,
+                pool: &pool,
+                task: &task,
+                active_connections: running.len(),
+                force_checkpoint: true,
+                force_emit: true,
+            },
         )
         .await?;
         progress_gate.flush(&app);
@@ -557,15 +567,17 @@ async fn run_ftp_download(
     }
 
     emit_ftp_progress(
-        &app,
-        &pool,
-        &task,
         &mut progress,
-        running.len(),
         &mut last_checkpoint,
         &mut progress_gate,
-        true,
-        true,
+        FtpProgressInput {
+            app: &app,
+            pool: &pool,
+            task: &task,
+            active_connections: running.len(),
+            force_checkpoint: true,
+            force_emit: true,
+        },
     )
     .await?;
 
@@ -768,17 +780,29 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
     Ok(offset)
 }
 
-async fn emit_ftp_progress(
-    app: &AppHandle,
-    pool: &SqlitePool,
-    task: &TaskRecord,
-    progress: &mut HashMap<String, SegmentProgress>,
+struct FtpProgressInput<'a> {
+    app: &'a AppHandle,
+    pool: &'a SqlitePool,
+    task: &'a TaskRecord,
     active_connections: usize,
-    last_checkpoint: &mut Instant,
-    progress_gate: &mut TaskProgressEmitGate,
     force_checkpoint: bool,
     force_emit: bool,
+}
+
+async fn emit_ftp_progress(
+    progress: &mut HashMap<String, SegmentProgress>,
+    last_checkpoint: &mut Instant,
+    progress_gate: &mut TaskProgressEmitGate,
+    input: FtpProgressInput<'_>,
 ) -> Result<(), String> {
+    let FtpProgressInput {
+        app,
+        pool,
+        task,
+        active_connections,
+        force_checkpoint,
+        force_emit,
+    } = input;
     let downloaded = total_downloaded_from_progress(progress, task.total_size);
     let speed = progress.values().map(|segment| segment.speed_bps).sum();
     let connection_count = i32::try_from(active_connections).unwrap_or(i32::MAX);

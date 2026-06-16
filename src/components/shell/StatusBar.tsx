@@ -11,7 +11,7 @@ import { useAppUpdater } from "@/hooks/use-app-updater";
 import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
 import type { Platform } from "@/lib/platform";
 import { useSettingsStore } from "@/stores/settings-store";
-import { useTaskStore } from "@/stores/task-store";
+import { useTaskDataStore } from "@/stores/task-store";
 
 export function StatusBar({
   className,
@@ -23,7 +23,7 @@ export function StatusBar({
   onOpenShortcuts?: () => void;
 }) {
   const { t } = useTranslation();
-  const stats = useTaskStore((s) => s.taskStats);
+  const stats = useTaskDataStore((s) => s.globalTaskStats ?? s.taskStats);
   const settings = useSettingsStore((s) => s.settings);
   const { updateVersion, installing, error, installUpdate } = useAppUpdater();
   const speedLimit = Number(settings?.globalSpeedLimitBps ?? 0);
@@ -31,18 +31,18 @@ export function StatusBar({
   return (
     <footer
       className={cn(
-        "order-2 flex h-9 shrink-0 items-center justify-between gap-3 border-t border-border-subtle bg-surface-base px-3 text-xs md:order-none md:h-8 md:px-4",
+        "order-2 flex h-7 shrink-0 items-center justify-between gap-2 border-t border-border-subtle bg-surface-base px-2 text-[11px] sm:h-8 sm:px-3 md:order-none md:px-4 md:text-xs",
         className,
       )}
       role="contentinfo"
       aria-live="polite"
       aria-atomic="false"
     >
-      <span className="flex min-w-0 items-center gap-2">
+      <span className="flex min-w-0 items-center gap-1.5">
         <span className="text-text-muted">{t("statusBar.total")}</span>
         <span className={cn(
           "font-mono font-semibold tabular-nums",
-          stats.totalSpeed > 0 ? "text-accent-primary text-sm" : "text-text-secondary",
+          stats.totalSpeed > 0 ? "text-xs text-accent-primary md:text-sm" : "text-text-secondary",
         )}>
           {formatSpeed(stats.totalSpeed)}
         </span>
@@ -64,7 +64,7 @@ export function StatusBar({
       </span>
       <span className="flex min-w-0 items-center justify-end gap-2">
         {updateVersion ? (
-          <span className="flex items-center gap-2">
+          <span className="hidden items-center gap-2 sm:flex">
             <span className="truncate text-accent-primary">
               {t("statusBar.updateAvailable", { version: updateVersion })}
             </span>
@@ -72,7 +72,7 @@ export function StatusBar({
               type="button"
               variant="outline"
               size="sm"
-              className="h-8 shrink-0 px-2 text-xs"
+              className="h-7 shrink-0 px-2 text-xs md:h-8"
               disabled={installing}
               onClick={() => void installUpdate()}
             >
@@ -99,7 +99,7 @@ export function StatusBar({
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="h-6 w-6 shrink-0 text-text-muted hover:text-text-primary"
+                className="h-8 w-8 shrink-0 text-text-muted hover:text-text-primary"
                 aria-label={t("statusBar.shortcuts")}
                 onClick={onOpenShortcuts}
               >

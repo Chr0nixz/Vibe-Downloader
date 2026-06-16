@@ -27,9 +27,12 @@ const toneFill: Record<NonNullable<ProgressBarProps["tone"]>, string> = {
 };
 
 const toneGlow: Record<NonNullable<ProgressBarProps["tone"]>, string> = {
-  primary: "shadow-[0_0_8px_oklch(0.72_0.14_235_/_0.35)]",
-  success: "shadow-[0_0_6px_oklch(0.72_0.14_150_/_0.3)]",
-  danger: "shadow-[0_0_6px_oklch(0.68_0.18_25_/_0.3)]",
+  primary:
+    "shadow-[0_0_8px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
+  success:
+    "shadow-[0_0_6px_color-mix(in_oklch,var(--status-success)_30%,transparent)]",
+  danger:
+    "shadow-[0_0_6px_color-mix(in_oklch,var(--status-danger)_30%,transparent)]",
   neutral: "",
 };
 

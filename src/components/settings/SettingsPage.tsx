@@ -1,7 +1,8 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
   Check,
+  ChevronDown,
   Clipboard,
   FolderOpen,
   Info,
@@ -39,6 +40,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { BrowserCaptureControls } from "@/components/settings/BrowserCaptureControls";
+import {
+  settingsSearchHasResults,
+  settingsSectionMatchesQuery,
+  type SettingsSearchSection,
+} from "@/components/settings/settings-search";
 import type {
   AppAccentColor,
   AppFontFamily,
@@ -65,7 +71,7 @@ import {
 } from "@/lib/tauri";
 import { errorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
-import { cn } from "@/lib/utils";
+import { cn, formatSpeed } from "@/lib/utils";
 
 const log = createLogger("settings");
 import { useSettingsStore } from "@/stores/settings-store";
@@ -85,21 +91,30 @@ const SECTION_IDS = [
   "browser-integration",
 ] as const;
 
-const ACCENT_HUES: Record<AppAccentColor, number> = {
-  blue: 235,
-  purple: 290,
-  teal: 190,
-  green: 150,
-  orange: 55,
-  rose: 350,
-  indigo: 265,
-  amber: 80,
+type SettingsSectionId = typeof SECTION_IDS[number];
+
+const DEFAULT_EXPANDED_SETTINGS_SECTIONS = new Set<SettingsSectionId>([
+  "downloads",
+  "interface",
+  "desktop-integration",
+]);
+
+const ACCENT_SWATCHES: Record<string, { light: string; dark: string }> = {
+  blue:   { light: "oklch(0.48 0.18 235)", dark: "oklch(0.76 0.14 235)" },
+  purple: { light: "oklch(0.48 0.18 290)", dark: "oklch(0.76 0.14 290)" },
+  teal:   { light: "oklch(0.48 0.15 190)", dark: "oklch(0.76 0.14 190)" },
+  green:  { light: "oklch(0.48 0.16 150)", dark: "oklch(0.76 0.14 150)" },
+  orange: { light: "oklch(0.48 0.16 55)",  dark: "oklch(0.76 0.14 55)" },
+  rose:   { light: "oklch(0.48 0.18 350)", dark: "oklch(0.76 0.14 350)" },
+  indigo: { light: "oklch(0.48 0.18 265)", dark: "oklch(0.76 0.14 265)" },
+  amber:  { light: "oklch(0.48 0.16 80)",  dark: "oklch(0.76 0.14 80)" },
 };
 
 const SettingsSearchContext = createContext<{
   query: string;
   setQuery: (q: string) => void;
-}>({ query: "", setQuery: () => {} });
+  forceVisible?: boolean;
+}>({ query: "", setQuery: () => {}, forceVisible: false });
 
 function useSettingsSearch() {
   return useContext(SettingsSearchContext);
@@ -130,6 +145,8 @@ export function SettingsPage() {
   const [clipboardMonitorEnabled, setClipboardMonitorEnabled] = useState(true);
   const [fontFamily, setFontFamily] = useState<AppFontFamily>("source_han_sans_sc");
   const [accentColor, setAccentColor] = useState<AppAccentColor>("blue");
+  const [sidebarStripeEnabled, setSidebarStripeEnabled] = useState(true);
+  const [titlebarGradientEnabled, setTitlebarGradientEnabled] = useState(true);
   const [proxyMode, setProxyMode] = useState<AppProxyMode>("off");
   const [proxyUrl, setProxyUrl] = useState("");
   const [proxyNoProxy, setProxyNoProxy] = useState("");
@@ -167,6 +184,225 @@ export function SettingsPage() {
     ? (i18n.language as Locale)
     : "en") as Locale;
   const controlsDisabled = loading;
+  const parsedGlobalSpeedLimit = Number(globalSpeedLimitBps);
+  const speedLimitSummary = globalSpeedLimitBps.trim() && Number.isFinite(parsedGlobalSpeedLimit)
+    ? formatSpeed(parsedGlobalSpeedLimit)
+    : t("settings.speedUnlimited");
+  const proxyModeLabel =
+    proxyMode === "system"
+      ? t("settings.proxySystem")
+      : proxyMode === "custom"
+        ? t("settings.proxyCustom")
+        : t("settings.proxyOff");
+  const themeLabel =
+    theme === "light"
+      ? t("settings.themeLight")
+      : theme === "dark"
+        ? t("settings.themeDark")
+        : t("settings.themeSystem");
+  const currentLocaleKey =
+    currentLocale === "zh-CN"
+      ? "zhCN"
+      : currentLocale === "zh-TW"
+        ? "zhTW"
+        : currentLocale;
+  const localeLabel = t(`locale.${currentLocaleKey}`);
+  const enabledDesktopIntegrations = [
+    systemNotifications,
+    closeToTray,
+    startOnBoot,
+    autoResumeOnStartup,
+    floatingWindowEnabled,
+    clipboardMonitorEnabled,
+  ].filter(Boolean).length;
+  const enabledSchedules = [
+    scheduleDownloadWindowEnabled,
+    scheduleSpeedLimitWindowEnabled,
+    completionAction !== "none",
+  ].filter(Boolean).length;
+  const installedBrowserCount =
+    browserStatus?.browsers.filter((browser) => browser.manifestInstalled).length ?? 0;
+  const settingsSections = useMemo<SettingsSearchSection[]>(
+    () => [
+      {
+        id: "downloads",
+        title: t("settings.downloads"),
+        description: t("settings.downloadsDescription"),
+        summary: t("settings.downloadsSummary", {
+          count: maxActiveTasks,
+          speed: speedLimitSummary,
+        }),
+        terms: [
+          t("settings.defaultSaveDir"),
+          t("settings.maxActiveTasks"),
+          t("settings.maxActiveTasksTip"),
+          t("settings.globalSpeedLimit"),
+          t("settings.globalSpeedLimitTip"),
+          t("settings.multiConnectionThreshold"),
+          t("settings.multiConnectionThresholdTip"),
+        ],
+      },
+      {
+        id: "advanced-downloads",
+        title: t("settings.advancedDownloads"),
+        description: t("settings.advancedDownloadsDescription"),
+        summary: t("settings.advancedDownloadsSummary", {
+          segments: segmentCount,
+          connections: maxConnectionsPerHost,
+        }),
+        terms: [
+          t("settings.segmentCount"),
+          t("settings.segmentCountTip"),
+          t("settings.maxConnectionsPerHost"),
+          t("settings.maxConnectionsPerHostTip"),
+        ],
+      },
+      {
+        id: "scheduled-downloads",
+        title: t("settings.scheduledDownloads"),
+        description: t("settings.scheduledDownloadsDescription"),
+        summary:
+          enabledSchedules > 0
+            ? t("settings.scheduledDownloadsSummary", { count: enabledSchedules })
+            : t("settings.scheduledDownloadsOff"),
+        terms: [
+          t("settings.scheduleGroupDownload"),
+          t("settings.downloadWindow"),
+          t("settings.downloadWindowDescription"),
+          t("settings.downloadWindowTime"),
+          t("settings.scheduleGroupSpeed"),
+          t("settings.speedLimitWindow"),
+          t("settings.speedLimitWindowDescription"),
+          t("settings.speedLimitWindowTime"),
+          t("settings.scheduledSpeedLimit"),
+          t("settings.scheduleGroupCompletion"),
+          t("settings.completionAction"),
+          t("settings.completionNone"),
+          t("settings.completionExit"),
+          t("settings.completionShutdown"),
+          t("settings.completionCountdown"),
+        ],
+      },
+      {
+        id: "network",
+        title: t("settings.network"),
+        description: t("settings.networkDescription"),
+        summary: proxyModeLabel,
+        terms: [
+          t("settings.proxyMode"),
+          t("settings.proxyModeTip"),
+          t("settings.proxyOff"),
+          t("settings.proxySystem"),
+          t("settings.proxyCustom"),
+          t("settings.proxyUrl"),
+          t("settings.proxyUrlDescription"),
+          t("settings.proxyNoProxy"),
+          t("settings.proxyUsername"),
+          t("settings.proxyPassword"),
+        ],
+      },
+      {
+        id: "interface",
+        title: t("settings.interface"),
+        summary: t("settings.interfaceSummary", {
+          theme: themeLabel,
+          locale: localeLabel,
+        }),
+        terms: [
+          t("settings.themeMode"),
+          t("settings.themeSystem"),
+          t("settings.themeLight"),
+          t("settings.themeDark"),
+          t("locale.label"),
+          t("locale.en"),
+          t("locale.zhCN"),
+          t("settings.fontFamily"),
+          t("settings.fontFamilySourceHanSans"),
+          t("settings.fontFamilySystem"),
+          t("settings.accentColor"),
+        ],
+      },
+      {
+        id: "desktop-integration",
+        title: t("settings.desktopIntegration"),
+        description: t("settings.desktopIntegrationDescription"),
+        summary: t("settings.desktopIntegrationSummary", {
+          count: enabledDesktopIntegrations,
+        }),
+        terms: [
+          t("settings.systemNotifications"),
+          t("settings.systemNotificationsDescription"),
+          t("settings.closeToTray"),
+          t("settings.closeToTrayDescription"),
+          t("settings.startOnBoot"),
+          t("settings.startOnBootDescription"),
+          t("settings.autoResumeOnStartup"),
+          t("settings.autoResumeOnStartupDescription"),
+          t("settings.floatingWindow"),
+          t("settings.floatingWindowDescription"),
+          t("settings.clipboardMonitor"),
+          t("settings.clipboardMonitorDescription"),
+        ],
+      },
+      {
+        id: "browser-integration",
+        title: t("settings.browserIntegration"),
+        description: t("settings.browserIntegrationDescription"),
+        summary: browserStatus
+          ? installedBrowserCount > 0
+            ? t("settings.browserIntegrationSummary", { count: installedBrowserCount })
+            : t("settings.browserIntegrationSummaryNone")
+          : t("settings.browserIntegrationSummaryLoading"),
+        terms: [
+          t("settings.browserIntegrationTip"),
+          t("settings.browserAutoIntercept"),
+          t("settings.browserForwardHeaders"),
+          t("settings.browserInstalled"),
+          t("settings.browserDetected"),
+          t("settings.browserNotDetected"),
+          t("settings.browserInstall"),
+          t("settings.browserUninstall"),
+          t("settings.browserHostName"),
+          t("settings.browserNativeHostPath"),
+          t("settings.browserExtensionPath"),
+          t("settings.browserExportPackages"),
+          ...(browserStatus?.browsers.map((browser) => browser.displayName) ?? []),
+        ],
+      },
+    ],
+    [
+      browserStatus,
+      enabledDesktopIntegrations,
+      enabledSchedules,
+      installedBrowserCount,
+      localeLabel,
+      maxActiveTasks,
+      maxConnectionsPerHost,
+      proxyModeLabel,
+      segmentCount,
+      speedLimitSummary,
+      t,
+      themeLabel,
+    ],
+  );
+  const settingsSectionById = useMemo(
+    () => new Map(settingsSections.map((section) => [section.id, section])),
+    [settingsSections],
+  );
+  const settingsSearchHasMatch = settingsSearchHasResults(settingsSections, settingsSearch);
+  const settingsSearchActive = settingsSearch.trim().length > 0;
+  const getSectionProps = (id: SettingsSectionId) => {
+    const section = settingsSectionById.get(id);
+    if (!section) throw new Error(`Missing settings section: ${id}`);
+    return {
+      id,
+      title: section.title,
+      description: section.description,
+      summary: section.summary,
+      defaultOpen: DEFAULT_EXPANDED_SETTINGS_SECTIONS.has(id),
+      matchesSearch: settingsSectionMatchesQuery(section, settingsSearch),
+    };
+  };
 
   /* Section navigation */
   const [activeSection, setActiveSection] = useState<string>(SECTION_IDS[0]);
@@ -241,6 +477,8 @@ export function SettingsPage() {
     setClipboardMonitorEnabled(settings.clipboardMonitorEnabled);
     setFontFamily(settings.fontFamily);
     setAccentColor(settings.accentColor);
+    setSidebarStripeEnabled(settings.sidebarStripeEnabled);
+    setTitlebarGradientEnabled(settings.titlebarGradientEnabled);
     setProxyMode(settings.proxyMode);
     setProxyUrl(settings.proxyUrl);
     setProxyNoProxy(settings.proxyNoProxy);
@@ -277,6 +515,8 @@ export function SettingsPage() {
       clipboardMonitorEnabled === settings.clipboardMonitorEnabled &&
       fontFamily === settings.fontFamily &&
       accentColor === settings.accentColor &&
+      sidebarStripeEnabled === settings.sidebarStripeEnabled &&
+      titlebarGradientEnabled === settings.titlebarGradientEnabled &&
       proxyMode === settings.proxyMode &&
       proxyUrl === settings.proxyUrl &&
       proxyNoProxy === settings.proxyNoProxy &&
@@ -314,6 +554,8 @@ export function SettingsPage() {
         clipboardMonitorEnabled,
         fontFamily,
         accentColor,
+        sidebarStripeEnabled,
+        titlebarGradientEnabled,
         proxyMode,
         proxyUrl,
         proxyNoProxy,
@@ -351,6 +593,8 @@ export function SettingsPage() {
     clipboardMonitorEnabled,
     fontFamily,
     accentColor,
+    sidebarStripeEnabled,
+    titlebarGradientEnabled,
     proxyMode,
     proxyUrl,
     proxyNoProxy,
@@ -409,6 +653,8 @@ export function SettingsPage() {
         clipboardMonitorEnabled: nextSettings.clipboardMonitorEnabled,
         fontFamily: nextSettings.fontFamily,
         accentColor: nextSettings.accentColor,
+        sidebarStripeEnabled: nextSettings.sidebarStripeEnabled,
+        titlebarGradientEnabled: nextSettings.titlebarGradientEnabled,
         proxyMode: nextSettings.proxyMode,
         proxyUrl: nextSettings.proxyUrl,
         proxyNoProxy: nextSettings.proxyNoProxy,
@@ -488,6 +734,8 @@ export function SettingsPage() {
         clipboardMonitorEnabled: true,
         fontFamily: "source_han_sans_sc",
         accentColor: "blue",
+        sidebarStripeEnabled: false,
+        titlebarGradientEnabled: true,
         proxyMode: "off",
         proxyUrl: "",
         proxyNoProxy: "",
@@ -525,6 +773,8 @@ export function SettingsPage() {
       setClipboardMonitorEnabled(updated.clipboardMonitorEnabled);
       setFontFamily(updated.fontFamily);
       setAccentColor(updated.accentColor);
+      setSidebarStripeEnabled(updated.sidebarStripeEnabled);
+      setTitlebarGradientEnabled(updated.titlebarGradientEnabled);
       setProxyMode(updated.proxyMode);
       setProxyUrl(updated.proxyUrl);
       setProxyNoProxy(updated.proxyNoProxy);
@@ -719,7 +969,7 @@ export function SettingsPage() {
           className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
         >
           <nav
-            className="sticky top-0 z-10 border-b border-border-subtle bg-surface-base/85 backdrop-blur-md"
+            className="sticky top-0 z-10 border-b border-border-subtle bg-surface-base"
             role="navigation"
             aria-label={t("settings.sectionsNav")}
           >
@@ -736,7 +986,7 @@ export function SettingsPage() {
                   <button
                     type="button"
                     onClick={() => setSettingsSearch("")}
-                    className="absolute right-2 rounded p-0.5 text-text-muted hover:text-text-secondary"
+                    className="absolute right-2 rounded p-1.5 min-h-8 min-w-8 text-text-muted hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                     aria-label="Clear search"
                   >
                     <X className="h-4 w-4" />
@@ -745,17 +995,7 @@ export function SettingsPage() {
               </div>
             </div>
             <div className="mx-auto flex max-w-4xl gap-1 overflow-x-auto px-3 sm:px-4 md:px-6">
-              {(
-                [
-                  ["downloads", t("settings.downloads")],
-                  ["advanced-downloads", t("settings.advancedDownloads")],
-                  ["scheduled-downloads", t("settings.scheduledDownloads")],
-                  ["network", t("settings.network")],
-                  ["interface", t("settings.interface")],
-                  ["desktop-integration", t("settings.desktopIntegration")],
-                  ["browser-integration", t("settings.browserIntegration")],
-                ] as const
-              ).map(([id, label]) => (
+              {settingsSections.map(({ id, title }) => (
                 <button
                   key={id}
                   type="button"
@@ -768,7 +1008,7 @@ export function SettingsPage() {
                       : "text-text-muted hover:text-text-secondary",
                   )}
                 >
-                  {label}
+                  {title}
                   {activeSection === id ? (
                     <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-accent-primary" />
                   ) : null}
@@ -786,10 +1026,17 @@ export function SettingsPage() {
               </p>
             ) : null}
 
+            {settingsSearchActive && !settingsSearchHasMatch ? (
+              <div
+                className="mb-4 rounded-md border border-border-subtle bg-surface-base px-3 py-2 text-sm text-text-secondary"
+                role="status"
+              >
+                {t("settings.searchNoResults")}
+              </div>
+            ) : null}
+
             <SettingsSection
-              id="downloads"
-              title={t("settings.downloads")}
-              description={t("settings.downloadsDescription")}
+              {...getSectionProps("downloads")}
             >
               <SettingsRow
                 title={t("settings.defaultSaveDir")}
@@ -895,9 +1142,7 @@ export function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection
-              id="advanced-downloads"
-              title={t("settings.advancedDownloads")}
-              description={t("settings.advancedDownloadsDescription")}
+              {...getSectionProps("advanced-downloads")}
             >
               <SettingsRow
                 title={t("settings.segmentCount")}
@@ -949,9 +1194,7 @@ export function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection
-              id="scheduled-downloads"
-              title={t("settings.scheduledDownloads")}
-              description={t("settings.scheduledDownloadsDescription")}
+              {...getSectionProps("scheduled-downloads")}
             >
               <SettingsSubHeading title={t("settings.scheduleGroupDownload")} />
               <SettingsToggle
@@ -968,6 +1211,7 @@ export function SettingsPage() {
                     value={scheduleDownloadWindowStart}
                     onChange={(event) => setScheduleDownloadWindowStart(event.target.value)}
                     disabled={controlsDisabled || !scheduleDownloadWindowEnabled}
+                    aria-label="Start time"
                     className="h-11 w-32 bg-surface-root font-mono md:h-8"
                   />
                   <span className="text-xs text-text-muted">-</span>
@@ -976,6 +1220,7 @@ export function SettingsPage() {
                     value={scheduleDownloadWindowEnd}
                     onChange={(event) => setScheduleDownloadWindowEnd(event.target.value)}
                     disabled={controlsDisabled || !scheduleDownloadWindowEnabled}
+                    aria-label="End time"
                     className="h-11 w-32 bg-surface-root font-mono md:h-8"
                   />
                 </div>
@@ -995,6 +1240,7 @@ export function SettingsPage() {
                     value={scheduleSpeedLimitWindowStart}
                     onChange={(event) => setScheduleSpeedLimitWindowStart(event.target.value)}
                     disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
+                    aria-label="Start time"
                     className="h-11 w-32 bg-surface-root font-mono md:h-8"
                   />
                   <span className="text-xs text-text-muted">-</span>
@@ -1003,6 +1249,7 @@ export function SettingsPage() {
                     value={scheduleSpeedLimitWindowEnd}
                     onChange={(event) => setScheduleSpeedLimitWindowEnd(event.target.value)}
                     disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
+                    aria-label="End time"
                     className="h-11 w-32 bg-surface-root font-mono md:h-8"
                   />
                 </div>
@@ -1062,9 +1309,7 @@ export function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection
-              id="network"
-              title={t("settings.network")}
-              description={t("settings.networkDescription")}
+              {...getSectionProps("network")}
             >
               <SettingsRow title={t("settings.proxyMode")} htmlFor="proxy-mode-select" tip={t("settings.proxyModeTip")}>
                 <Select
@@ -1156,7 +1401,7 @@ export function SettingsPage() {
               </SettingsRow>
             </SettingsSection>
 
-            <SettingsSection id="interface" title={t("settings.interface")}>
+            <SettingsSection {...getSectionProps("interface")}>
               <SettingsRow title={t("settings.themeMode")} htmlFor="theme-mode-select">
                 <Select value={theme ?? "system"} onValueChange={(value) => setTheme(value)}>
                   <SelectTrigger id="theme-mode-select" className="w-full max-w-xs">
@@ -1207,7 +1452,7 @@ export function SettingsPage() {
                 </Select>
               </SettingsRow>
               <SettingsRow title={t("settings.accentColor")} htmlFor="accent-color-picker">
-                <div id="accent-color-picker" className="flex flex-wrap items-center gap-2.5">
+                <div id="accent-color-picker" role="radiogroup" aria-label={t("settings.accentColor")} className="flex flex-wrap items-center gap-2.5">
                   {(
                     [
                       ["blue", t("settings.accentBlue")],
@@ -1220,15 +1465,16 @@ export function SettingsPage() {
                       ["amber", t("settings.accentAmber")],
                     ] as const
                   ).map(([color, label]) => {
-                    const hue = ACCENT_HUES[color as AppAccentColor];
                     const isSelected = accentColor === color;
                     const swatchBg = isSelected
                       ? "var(--accent-primary)"
-                      : `oklch(${isDark ? "0.72 0.14" : "0.48 0.18"} ${hue})`;
+                      : ACCENT_SWATCHES[color]?.[isDark ? "dark" : "light"] ?? "var(--accent-primary)";
                     return (
                       <button
                         key={color}
                         type="button"
+                        role="radio"
+                        aria-checked={isSelected ? "true" : "false"}
                         aria-label={label}
                         title={label}
                         disabled={controlsDisabled}
@@ -1247,12 +1493,24 @@ export function SettingsPage() {
                   })}
                 </div>
               </SettingsRow>
+              <SettingsToggle
+                title={t("settings.sidebarStripe")}
+                description={t("settings.sidebarStripeDescription")}
+                checked={sidebarStripeEnabled}
+                disabled={controlsDisabled}
+                onChange={setSidebarStripeEnabled}
+              />
+              <SettingsToggle
+                title={t("settings.titlebarGradient")}
+                description={t("settings.titlebarGradientDescription")}
+                checked={titlebarGradientEnabled}
+                disabled={controlsDisabled}
+                onChange={setTitlebarGradientEnabled}
+              />
             </SettingsSection>
 
             <SettingsSection
-              id="desktop-integration"
-              title={t("settings.desktopIntegration")}
-              description={t("settings.desktopIntegrationDescription")}
+              {...getSectionProps("desktop-integration")}
             >
               <SettingsToggle
                 title={t("settings.systemNotifications")}
@@ -1299,9 +1557,7 @@ export function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection
-              id="browser-integration"
-              title={t("settings.browserIntegration")}
-              description={t("settings.browserIntegrationDescription")}
+              {...getSectionProps("browser-integration")}
             >
               <p className="border-b border-border-divider px-4 py-3 text-xs leading-5 text-text-muted">
                 {t("settings.browserIntegrationTip")}
@@ -1514,26 +1770,79 @@ function SettingsSection({
   id,
   title,
   description,
+  summary,
+  defaultOpen = false,
+  matchesSearch = true,
   children,
 }: {
   id?: string;
   title: string;
   description?: string;
+  summary?: string;
+  defaultOpen?: boolean;
+  matchesSearch?: boolean;
   children: ReactNode;
 }) {
+  const { query, setQuery } = useSettingsSearch();
+  const searchActive = query.trim().length > 0;
+  const [open, setOpen] = useState(defaultOpen);
+  const contentVisible = searchActive ? matchesSearch : open;
+  const panelId = id ? `${id}-settings-section-panel` : undefined;
+
   return (
-    <section id={id} className="scroll-mt-12 border-t border-border-subtle py-5 first:border-t-0 first:pt-0">
-      <div className="grid gap-1 pb-3">
-        <h3 className="text-sm font-semibold text-text-primary">{title}</h3>
-        {description ? (
-          <p className="max-w-2xl text-sm leading-5 text-text-muted">
-            {description}
-          </p>
-        ) : null}
-      </div>
-      <div className="overflow-hidden rounded-lg border border-border-panel bg-surface-base/70">
-        {children}
-      </div>
+    <section id={id} className="scroll-mt-12 border-t border-border-subtle py-4 first:border-t-0 first:pt-0">
+      <button
+        type="button"
+        className={cn(
+          "flex w-full items-start justify-between gap-3 rounded-md px-1 py-2 text-left transition-colors",
+          "hover:bg-surface-base/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
+        )}
+        aria-expanded={contentVisible}
+        aria-controls={panelId}
+        onClick={() => {
+          if (searchActive) return;
+          setOpen((current) => !current);
+        }}
+      >
+        <span className="grid min-w-0 gap-1">
+          <span className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-text-primary">{title}</span>
+            {summary ? (
+              <span className="min-w-0 truncate rounded-full bg-surface-raised px-2 py-0.5 text-[11px] font-medium text-text-muted">
+                {summary}
+              </span>
+            ) : null}
+          </span>
+          {description ? (
+            <span className="max-w-2xl text-sm leading-5 text-text-muted">
+              {description}
+            </span>
+          ) : null}
+        </span>
+        <ChevronDown
+          className={cn(
+            "mt-0.5 h-4 w-4 shrink-0 text-text-muted transition-transform duration-ui",
+            contentVisible && "rotate-180",
+          )}
+          aria-hidden
+        />
+      </button>
+      {contentVisible ? (
+        <SettingsSearchContext.Provider
+          value={{
+            query,
+            setQuery,
+            forceVisible: searchActive && matchesSearch,
+          }}
+        >
+          <div
+            id={panelId}
+            className="mt-2 overflow-hidden rounded-lg border border-border-panel bg-surface-base/70"
+          >
+            {children}
+          </div>
+        </SettingsSearchContext.Provider>
+      ) : null}
     </section>
   );
 }
@@ -1647,8 +1956,8 @@ function SettingsToggle({
   disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
-  const { query } = useSettingsSearch();
-  const matchesSearch = !query ||
+  const { query, forceVisible } = useSettingsSearch();
+  const matchesSearch = forceVisible || !query ||
     title.toLowerCase().includes(query.toLowerCase()) ||
     description.toLowerCase().includes(query.toLowerCase());
   if (!matchesSearch) return null;
@@ -1684,8 +1993,8 @@ function SettingsRow({
   controlClassName?: string;
   tip?: string;
 }) {
-  const { query } = useSettingsSearch();
-  const matchesSearch = !query ||
+  const { query, forceVisible } = useSettingsSearch();
+  const matchesSearch = forceVisible || !query ||
     title.toLowerCase().includes(query.toLowerCase()) ||
     (tip ?? "").toLowerCase().includes(query.toLowerCase());
   if (!matchesSearch) return null;
@@ -1700,7 +2009,7 @@ function SettingsRow({
             <TooltipTrigger asChild>
               <button
                 type="button"
-                className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-text-muted transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/50"
+                className="inline-flex min-h-8 min-w-8 shrink-0 items-center justify-center rounded-full text-text-muted transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary/50"
                 tabIndex={0}
                 aria-label={tip}
               >
@@ -1721,9 +2030,9 @@ function SettingsRow({
 function SettingsSubHeading({ title }: { title: string }) {
   return (
     <div className="border-t border-border-subtle bg-surface-root/40 px-4 py-2">
-      <h4 className="text-xs font-medium uppercase tracking-wide text-text-muted">
+      <h3 className="text-xs font-medium uppercase tracking-wide text-text-muted">
         {title}
-      </h4>
+      </h3>
     </div>
   );
 }

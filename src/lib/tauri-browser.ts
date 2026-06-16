@@ -21,10 +21,12 @@ import type {
   SftpDirectoryProbe,
   WebDavDirectoryProbe,
   RequestDiagnostic,
+  RecoveryAction,
   ResolveTaskAttentionInput,
   SegmentSummary,
   TaskProxySettings,
   TaskProxySettingsInput,
+  TaskStatsSnapshot,
   TaskEvent,
   TorrentRuntimeSnapshot,
   UpdateTorrentFileSelectionInput,
@@ -48,6 +50,21 @@ const browserExperimentalCaptureEnabled = ["1", "true", "yes", "on"].includes(
   String(import.meta.env.VITE_BROWSER_EXPERIMENTAL_CAPTURE ?? "").toLowerCase(),
 );
 
+const LEGACY_HEALTH_SUMMARY_KEYS: Record<string, string> = {
+  "Downloading": "taskDiagnostics.downloading",
+  "Downloading steadily": "taskDiagnostics.downloadingSteadily",
+  "Server limit detected": "taskDiagnostics.serverLimitDetected",
+  "Network fluctuation, retrying": "taskDiagnostics.networkRetrying",
+  "Resume unavailable": "taskDiagnostics.resumeUnavailable",
+  "Remote file changed. Restart download to avoid corruption.":
+    "taskDiagnostics.remoteChanged",
+  "Completed": "taskDiagnostics.completed",
+  "Waiting for network": "taskDiagnostics.waitingNetwork",
+  "Disk write slower than network": "taskDiagnostics.diskWriteSlow",
+  "Queued": "taskDiagnostics.queued",
+  "Finishing HLS recording": "taskDiagnostics.finishingHls",
+};
+
 type BrowserListener = (payload: TaskProgressPayload) => void;
 type TaskUpdatedListener = (task: Task) => void;
 
@@ -69,6 +86,8 @@ let settings: AppSettings = loadStoredSettings() ?? {
   clipboardMonitorEnabled: true,
   fontFamily: "source_han_sans_sc",
   accentColor: "blue",
+  sidebarStripeEnabled: false,
+  titlebarGradientEnabled: true,
   proxyMode: "off",
   proxyUrl: "",
   proxyNoProxy: "",
@@ -100,6 +119,83 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function mockErrorForHealthSummary(healthSummary: string | null): {
+  errorMessage: string | null;
+  recoveryActions: RecoveryAction[];
+} {
+  if (healthSummary === "taskDiagnostics.resumeUnavailable") {
+    return {
+      errorMessage: JSON.stringify({
+        code: "resume_unavailable",
+        message: healthSummary,
+        recoverable: true,
+        actions: ["restart", "open_folder"],
+      }),
+      recoveryActions: ["restart", "open_folder"],
+    };
+  }
+  if (healthSummary === "taskDiagnostics.remoteChanged") {
+    return {
+      errorMessage: JSON.stringify({
+        code: "remote_changed",
+        message: healthSummary,
+        recoverable: true,
+        actions: ["restart", "open_folder"],
+      }),
+      recoveryActions: ["restart", "open_folder"],
+    };
+  }
+
+  return {
+    errorMessage: healthSummary,
+    recoveryActions: [],
+  };
+}
+
+function normalizeMockHealthSummary(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  return LEGACY_HEALTH_SUMMARY_KEYS[trimmed] ?? trimmed;
+}
+
+function normalizeMockErrorMessage(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as { message?: unknown };
+    if (typeof parsed.message === "string") {
+      return JSON.stringify({
+        ...parsed,
+        message: normalizeMockHealthSummary(parsed.message) ?? parsed.message,
+      });
+    }
+  } catch {
+    /* legacy plain string */
+  }
+  return LEGACY_HEALTH_SUMMARY_KEYS[trimmed] ?? trimmed;
+}
+
+function normalizeStoredMockTask(rawTask: Task): Task {
+  const task = normalizeTask(rawTask);
+  const healthSummary = normalizeMockHealthSummary(task.healthSummary);
+  const derivedError = mockErrorForHealthSummary(healthSummary);
+  const isAttentionState =
+    task.status === "failed" || task.status === "needs_attention";
+
+  return {
+    ...task,
+    healthSummary,
+    errorMessage:
+      isAttentionState && derivedError.errorMessage
+        ? derivedError.errorMessage
+        : normalizeMockErrorMessage(task.errorMessage),
+    recoveryActions:
+      isAttentionState && task.recoveryActions.length === 0
+        ? derivedError.recoveryActions
+        : task.recoveryActions,
+  };
+}
+
 function persistTasks(): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
@@ -120,8 +216,10 @@ function loadStoredTasks(): Task[] | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Task[];
-    return Array.isArray(parsed) ? parsed : null;
+    const parsed = JSON.parse(raw) as unknown[];
+    return Array.isArray(parsed)
+      ? parsed.map((task) => normalizeStoredMockTask(task as Task))
+      : null;
   } catch {
     return null;
   }
@@ -189,6 +287,8 @@ function loadStoredSettings(): AppSettings | null {
           parsed.accentColor === "amber"
             ? parsed.accentColor
             : "blue",
+        sidebarStripeEnabled: Boolean(parsed.sidebarStripeEnabled ?? false),
+        titlebarGradientEnabled: Boolean(parsed.titlebarGradientEnabled ?? true),
         proxyMode:
           parsed.proxyMode === "system" || parsed.proxyMode === "custom" ? parsed.proxyMode : "off",
         proxyUrl: typeof parsed.proxyUrl === "string" ? parsed.proxyUrl : "",
@@ -333,6 +433,9 @@ function browserTask(
   timestamp: string,
 ): Task {
   const needsError = status === "failed" || status === "needs_attention";
+  const mockError = needsError
+    ? mockErrorForHealthSummary(healthSummary)
+    : { errorMessage: null, recoveryActions: [] };
   const parsed = safeUrl(url);
   const protocol = parsed?.protocol.replace(":", "") || "https";
   return normalizeTask({
@@ -363,9 +466,9 @@ function browserTask(
     categoryKey: null,
     obeySchedule: true,
     healthSummary,
-    errorMessage: needsError ? healthSummary : null,
+    errorMessage: mockError.errorMessage,
     errorCode: null,
-    recoveryActions: [],
+    recoveryActions: mockError.recoveryActions,
     retryAfterAt: null,
     failureCategory: needsError ? "other" : null,
     expectedHashSha256: null,
@@ -398,16 +501,16 @@ function browserTask(
 export function buildBrowserMockTasks(): Task[] {
   const now = nowIso();
   return [
-    browserTask("mock-ubuntu", "ubuntu-24.04.iso", "https://releases.ubuntu.com/noble/ubuntu-24.04-desktop-amd64.iso", "releases.ubuntu.com", "downloading", 4_200_000_000, 1_680_000_000, 8, 48_500_000, "Downloading steadily", now),
-    browserTask("mock-node", "node-v22.pkg", "https://nodejs.org/dist/v22.0.0/node-v22.0.0.pkg", "nodejs.org", "downloading", 80_000_000, 52_000_000, 4, 12_400_000, "Server limit detected", now),
+    browserTask("mock-ubuntu", "ubuntu-24.04.iso", "https://releases.ubuntu.com/noble/ubuntu-24.04-desktop-amd64.iso", "releases.ubuntu.com", "downloading", 4_200_000_000, 1_680_000_000, 8, 48_500_000, "taskDiagnostics.downloadingSteadily", now),
+    browserTask("mock-node", "node-v22.pkg", "https://nodejs.org/dist/v22.0.0/node-v22.0.0.pkg", "nodejs.org", "downloading", 80_000_000, 52_000_000, 4, 12_400_000, "taskDiagnostics.serverLimitDetected", now),
     browserTask("mock-rust", "rust-docs.pdf", "https://doc.rust-lang.org/book.pdf", "doc.rust-lang.org", "paused", 12_000_000, 4_800_000, 0, 0, null, now),
     browserTask("mock-game", "game-patch.zip", "https://cdn.example.com/patches/season-12.zip", "cdn.example.com", "queued", 2_400_000_000, 0, 0, 0, null, now),
-    browserTask("mock-dataset", "dataset.tar.gz", "https://data.example.org/ml/dataset.tar.gz", "data.example.org", "retrying", 900_000_000, 120_000_000, 2, 3_200_000, "Network fluctuation, retrying", now),
-    browserTask("mock-driver", "driver-setup.exe", "https://vendor.example.net/drivers/setup.exe", "vendor.example.net", "failed", 350_000_000, 89_000_000, 0, 0, "Resume unavailable", now),
-    browserTask("mock-llm", "llm-weights.safetensors", "https://models.example.ai/weights/v3.safetensors", "models.example.ai", "needs_attention", 8_000_000_000, 2_100_000_000, 0, 0, "Remote file changed. Restart download to avoid corruption.", now),
-    browserTask("mock-arch", "archlinux.iso", "https://mirror.archlinux.org/iso/latest/archlinux-x86_64.iso", "mirror.archlinux.org", "completed", 1_300_000_000, 1_300_000_000, 0, 0, "Completed", now),
-    browserTask("mock-fonts", "fonts-bundle.zip", "https://github.com/google/fonts/archive/refs/heads/main.zip", "github.com", "waiting_network", 220_000_000, 45_000_000, 0, 0, "Waiting for network", now),
-    browserTask("mock-vscode", "vscode.deb", "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64", "code.visualstudio.com", "downloading", 95_000_000, 71_000_000, 2, 8_900_000, "Disk write slower than network", now),
+    browserTask("mock-dataset", "dataset.tar.gz", "https://data.example.org/ml/dataset.tar.gz", "data.example.org", "retrying", 900_000_000, 120_000_000, 2, 3_200_000, "taskDiagnostics.networkRetrying", now),
+    browserTask("mock-driver", "driver-setup.exe", "https://vendor.example.net/drivers/setup.exe", "vendor.example.net", "failed", 350_000_000, 89_000_000, 0, 0, "taskDiagnostics.resumeUnavailable", now),
+    browserTask("mock-llm", "llm-weights.safetensors", "https://models.example.ai/weights/v3.safetensors", "models.example.ai", "needs_attention", 8_000_000_000, 2_100_000_000, 0, 0, "taskDiagnostics.remoteChanged", now),
+    browserTask("mock-arch", "archlinux.iso", "https://mirror.archlinux.org/iso/latest/archlinux-x86_64.iso", "mirror.archlinux.org", "completed", 1_300_000_000, 1_300_000_000, 0, 0, "taskDiagnostics.completed", now),
+    browserTask("mock-fonts", "fonts-bundle.zip", "https://github.com/google/fonts/archive/refs/heads/main.zip", "github.com", "waiting_network", 220_000_000, 45_000_000, 0, 0, "taskDiagnostics.waitingNetwork", now),
+    browserTask("mock-vscode", "vscode.deb", "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64", "code.visualstudio.com", "downloading", 95_000_000, 71_000_000, 2, 8_900_000, "taskDiagnostics.diskWriteSlow", now),
   ];
 }
 
@@ -481,7 +584,7 @@ function scheduleBrowserQueue(): void {
             task.connectionCount > 0 ? task.connectionCount : settings.segmentCount,
           )
         : 1,
-      healthSummary: "Downloading",
+      healthSummary: "taskDiagnostics.downloading",
       updatedAt: nowIso(),
     };
     logTaskEvent(task.id, "started");
@@ -511,7 +614,7 @@ function tickActiveDownloads(): void {
       status: completed ? ("completed" as const) : task.status,
       speedBps: completed ? 0 : task.speedBps,
       connectionCount: completed ? 0 : task.connectionCount,
-      healthSummary: completed ? "Completed" : task.healthSummary,
+      healthSummary: completed ? "taskDiagnostics.completed" : task.healthSummary,
       updatedAt: nowIso(),
     };
     if (completed) {
@@ -563,6 +666,37 @@ export async function listTasks(): Promise<Task[]> {
 
 export async function getTask(id: string): Promise<Task | null> {
   return tasks.find((task) => task.id === id) ?? null;
+}
+
+export async function getTaskStats(): Promise<TaskStatsSnapshot> {
+  const activeTasks = tasks.filter(
+    (task) => task.status === "downloading" || task.status === "retrying",
+  );
+  const fallback = tasks.find((task) =>
+    ["queued", "paused", "failed", "needs_attention", "waiting_network"].includes(task.status),
+  );
+  const featuredTask =
+    activeTasks.reduce<Task | null>(
+      (best, task) => (!best || task.speedBps > best.speedBps ? task : best),
+      null,
+    ) ?? fallback ?? null;
+
+  return {
+    all: String(tasks.length),
+    active: String(activeTasks.length),
+    queued: String(tasks.filter((task) => task.status === "queued").length),
+    paused: String(tasks.filter((task) =>
+      task.status === "paused" ||
+      task.status === "queued" ||
+      task.status === "waiting_network",
+    ).length),
+    completed: String(tasks.filter((task) => task.status === "completed").length),
+    failed: String(tasks.filter((task) => task.status === "failed" || task.status === "needs_attention").length),
+    totalSpeed: String(activeTasks.reduce((sum, task) => sum + task.speedBps, 0)),
+    totalDownloaded: String(activeTasks.reduce((sum, task) => sum + task.downloadedBytes, 0)),
+    totalBytes: String(activeTasks.reduce((sum, task) => sum + task.totalSize, 0)),
+    featuredTaskId: featuredTask?.id ?? null,
+  };
 }
 
 async function mockTaskSegmentsForTask(taskId: string): Promise<TaskSegment[]> {
@@ -914,6 +1048,10 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
       input.clipboardMonitorEnabled ?? settings.clipboardMonitorEnabled,
     fontFamily: input.fontFamily ?? settings.fontFamily,
     accentColor: input.accentColor ?? settings.accentColor,
+    sidebarStripeEnabled:
+      input.sidebarStripeEnabled ?? settings.sidebarStripeEnabled,
+    titlebarGradientEnabled:
+      input.titlebarGradientEnabled ?? settings.titlebarGradientEnabled,
     proxyMode: input.proxyMode ?? settings.proxyMode,
     proxyUrl: input.proxyUrl ?? settings.proxyUrl,
     proxyNoProxy: input.proxyNoProxy ?? settings.proxyNoProxy,
@@ -1486,7 +1624,7 @@ export async function resumeTask(id: string): Promise<Task> {
     status: "queued",
     speedBps: 0,
     connectionCount: 0,
-    healthSummary: "Queued",
+    healthSummary: "taskDiagnostics.queued",
   });
   logTaskEvent(id, "resumed");
   scheduleBrowserQueue();
@@ -1503,7 +1641,7 @@ export async function finishLiveRecording(id: string): Promise<Task> {
   if (!task) throw new Error(`Task not found: ${id}`);
   if (task.protocol !== "hls") throw new Error("Only HLS live recordings can be finished.");
   const next = updateTask(id, {
-    healthSummary: "Finishing HLS recording",
+    healthSummary: "taskDiagnostics.finishingHls",
   });
   logTaskEvent(id, "hls_finish_requested");
   return next;
@@ -1529,7 +1667,7 @@ export async function resolveTaskAttention(input: ResolveTaskAttentionInput): Pr
       downloadedBytes: 0,
       speedBps: 0,
       connectionCount: 0,
-      healthSummary: "Queued",
+      healthSummary: "taskDiagnostics.queued",
       errorMessage: null,
     });
   }

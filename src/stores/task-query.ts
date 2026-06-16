@@ -8,7 +8,7 @@ import type {
   TaskFilters,
   TaskSortDirection,
   TaskSortKey,
-} from "./task-store";
+} from "./task-data-store";
 
 export interface TaskQuerySnapshot {
   nav: NavFilter;

@@ -18,7 +18,7 @@ pub use task::{
     SftpDirectoryProbe, Task, TaskChecksum, TaskChecksumRecord, TaskEvent, TaskFailureCategory,
     TaskFile, TaskFileRecord, TaskKind, TaskPriority, TaskProgressPayload, TaskProxyMode,
     TaskProxySettings, TaskProxySettingsInput, TaskProxySettingsRecord, TaskRecord, TaskSegment,
-    TaskSegmentRecord, TaskStatus, TaskUpdatedPayload, TorrentRuntimeSnapshot,
+    TaskSegmentRecord, TaskStatsSnapshot, TaskStatus, TaskUpdatedPayload, TorrentRuntimeSnapshot,
     TorrentRuntimeSnapshotRecord, TorrentTrackerStatus, WebDavDirectoryEntry,
     WebDavDirectoryProbe,
 };

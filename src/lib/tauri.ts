@@ -28,6 +28,7 @@ import type {
   SegmentSummary,
   TaskProxySettings,
   TaskProxySettingsInput,
+  TaskStatsSnapshot,
   TaskEvent,
   TorrentRuntimeSnapshot,
   TrayMenuAction,
@@ -103,6 +104,14 @@ export async function getTask(id: string): Promise<Task | null> {
   const commands = await loadNativeCommands();
   const task = await runCommand("getTask", () => commands.getTask(id));
   return task ? normalizeTask(task) : null;
+}
+
+export async function getTaskStats(): Promise<TaskStatsSnapshot> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getTaskStats();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("getTaskStats", () => commands.getTaskStats());
 }
 
 export interface TaskPage {

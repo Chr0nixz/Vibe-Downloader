@@ -5,8 +5,8 @@ use tauri::State;
 use crate::{
     db,
     models::{
-        RequestDiagnostic, SegmentSummary, Task, TaskEvent, TaskRecord, TaskSegment, TaskStatus,
-        TorrentRuntimeSnapshot,
+        RequestDiagnostic, SegmentSummary, Task, TaskEvent, TaskRecord, TaskSegment,
+        TaskStatsSnapshot, TaskStatus, TorrentRuntimeSnapshot,
     },
     AppState,
 };
@@ -260,6 +260,12 @@ pub async fn get_task(state: State<'_, AppState>, id: String) -> Result<Option<T
     Ok(Some(
         task_from_record_with_files(&state.pool, record).await?,
     ))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_task_stats(state: State<'_, AppState>) -> Result<TaskStatsSnapshot, String> {
+    db::task_stats_snapshot(&state.pool).await
 }
 
 #[tauri::command]

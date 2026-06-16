@@ -1,0 +1,1 @@
+export const TASK_ROW_ESTIMATED_SIZE = 96;

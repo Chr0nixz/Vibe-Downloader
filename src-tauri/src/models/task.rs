@@ -213,6 +213,21 @@ pub struct Task {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStatsSnapshot {
+    pub all: String,
+    pub active: String,
+    pub queued: String,
+    pub paused: String,
+    pub completed: String,
+    pub failed: String,
+    pub total_speed: String,
+    pub total_downloaded: String,
+    pub total_bytes: String,
+    pub featured_task_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskRecord {
     pub id: String,
@@ -979,6 +994,8 @@ pub struct AppSettings {
     pub schedule_speed_limit_window_start: String,
     pub schedule_speed_limit_window_end: String,
     pub schedule_speed_limit_bps: Option<String>,
+    pub sidebar_stripe_enabled: bool,
+    pub titlebar_gradient_enabled: bool,
     pub completion_action: CompletionAction,
     pub completion_countdown_seconds: i32,
 }

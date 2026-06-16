@@ -10,7 +10,7 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import type { RecoveryAction } from "@/generated/bindings";
-import { errorMessage, recoveryActionsForError } from "@/lib/errors";
+import { localizedErrorMessage, recoveryActionsForError } from "@/lib/errors";
 import type { Task } from "@/types/task";
 
 export function TaskRecoveryActions({
@@ -37,7 +37,7 @@ export function TaskRecoveryActions({
       aria-label={t("recovery.groupLabel")}
     >
       <p className="text-xs leading-5 text-status-danger">
-        {errorMessage(task.errorMessage)}
+        {localizedErrorMessage(task.errorMessage, t)}
       </p>
       <div className="mt-2 flex flex-wrap gap-2">
         {actions.map((action) => (

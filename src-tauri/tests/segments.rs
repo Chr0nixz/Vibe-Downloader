@@ -125,6 +125,8 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         schedule_speed_limit_window_start: "18:00".to_string(),
         schedule_speed_limit_window_end: "23:00".to_string(),
         schedule_speed_limit_bps: None,
+        sidebar_stripe_enabled: true,
+        titlebar_gradient_enabled: true,
         completion_action: CompletionAction::None,
         completion_countdown_seconds: 30,
     };
@@ -184,6 +186,8 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
         schedule_speed_limit_window_start: "18:00".to_string(),
         schedule_speed_limit_window_end: "23:00".to_string(),
         schedule_speed_limit_bps: None,
+        sidebar_stripe_enabled: true,
+        titlebar_gradient_enabled: true,
         completion_action: CompletionAction::None,
         completion_countdown_seconds: 30,
     };
@@ -404,6 +408,8 @@ async fn settings_upsert_and_clamp_active_task_count() {
             schedule_speed_limit_window_start: "18:00".to_string(),
             schedule_speed_limit_window_end: "23:00".to_string(),
             schedule_speed_limit_bps: None,
+            sidebar_stripe_enabled: true,
+            titlebar_gradient_enabled: true,
             completion_action: CompletionAction::None,
             completion_countdown_seconds: 30,
         },
@@ -451,6 +457,8 @@ async fn settings_upsert_and_clamp_active_task_count() {
             schedule_speed_limit_window_start: "18:00".to_string(),
             schedule_speed_limit_window_end: "23:00".to_string(),
             schedule_speed_limit_bps: Some("1024".to_string()),
+            sidebar_stripe_enabled: false,
+            titlebar_gradient_enabled: false,
             completion_action: CompletionAction::ExitApp,
             completion_countdown_seconds: 45,
         },
@@ -753,6 +761,93 @@ async fn task_query_indexes_are_created() {
         assert!(indexes.iter().any(|index| index == expected), "{expected}");
     }
 }
+
+#[tokio::test]
+async fn task_stats_snapshot_uses_full_database_counts() {
+    let pool = test_pool("task-stats").await;
+    let mut downloading = sample_task("stats-downloading", 1_000);
+    downloading.status = TaskStatus::Downloading;
+    downloading.downloaded_bytes = 250;
+    downloading.speed_bps = 40;
+    db::insert_task_record(&pool, &downloading)
+        .await
+        .expect("insert downloading");
+
+    let mut retrying = sample_task("stats-retrying", 2_000);
+    retrying.status = TaskStatus::Retrying;
+    retrying.downloaded_bytes = 500;
+    retrying.speed_bps = 60;
+    db::insert_task_record(&pool, &retrying)
+        .await
+        .expect("insert retrying");
+
+    for (id, status) in [
+        ("stats-queued", TaskStatus::Queued),
+        ("stats-paused", TaskStatus::Paused),
+        ("stats-completed", TaskStatus::Completed),
+        ("stats-failed", TaskStatus::Failed),
+        ("stats-attention", TaskStatus::NeedsAttention),
+    ] {
+        let mut task = sample_task(id, 100);
+        task.status = status;
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert stats task");
+    }
+
+    let stats = db::task_stats_snapshot(&pool).await.expect("stats");
+    assert_eq!(stats.all, "7");
+    assert_eq!(stats.active, "2");
+    assert_eq!(stats.queued, "1");
+    assert_eq!(stats.paused, "2");
+    assert_eq!(stats.completed, "1");
+    assert_eq!(stats.failed, "2");
+    assert_eq!(stats.total_speed, "100");
+    assert_eq!(stats.total_downloaded, "750");
+    assert_eq!(stats.total_bytes, "3000");
+    assert_eq!(stats.featured_task_id.as_deref(), Some("stats-retrying"));
+}
+
+#[tokio::test]
+async fn browser_realtime_task_query_returns_active_plus_recent() {
+    let pool = test_pool("browser-realtime-query").await;
+    for index in 0..60 {
+        let mut task = sample_task(&format!("browser-recent-{index:02}"), 100);
+        task.status = TaskStatus::Completed;
+        task.updated_at = format!("2024-01-01T00:{index:02}:00Z");
+        task.created_at = task.updated_at.clone();
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert recent");
+    }
+
+    for (id, status) in [
+        ("browser-active-downloading", TaskStatus::Downloading),
+        ("browser-active-attention", TaskStatus::NeedsAttention),
+    ] {
+        let mut task = sample_task(id, 100);
+        task.status = status;
+        task.updated_at = "2024-01-02T00:00:00Z".to_string();
+        task.created_at = task.updated_at.clone();
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert active");
+    }
+
+    let records = db::list_browser_realtime_task_records(&pool)
+        .await
+        .expect("browser realtime records");
+    assert_eq!(records.len(), 52);
+    assert!(records
+        .iter()
+        .any(|task| task.id == "browser-active-downloading"));
+    assert!(records
+        .iter()
+        .any(|task| task.id == "browser-active-attention"));
+    assert!(records.iter().any(|task| task.id == "browser-recent-59"));
+    assert!(!records.iter().any(|task| task.id == "browser-recent-00"));
+}
+
 
 #[tokio::test]
 async fn reset_interrupted_tasks_pauses_active_records() {

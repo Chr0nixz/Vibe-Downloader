@@ -2,7 +2,7 @@ use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::models::{
     AppErrorPayload, HashVerificationStatus, RecoveryAction, TaskKind, TaskPriority, TaskRecord,
-    TaskStatus,
+    TaskStatsSnapshot, TaskStatus,
 };
 
 use super::MAX_TASK_PAGE_SIZE;
@@ -76,6 +76,125 @@ pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, Str
     .map_err(|e| e.to_string())?;
 
     rows.iter().map(row_to_task).collect()
+}
+
+pub async fn task_stats_snapshot(pool: &SqlitePool) -> Result<TaskStatsSnapshot, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*) AS all_count,
+            COALESCE(SUM(CASE WHEN status IN ('downloading', 'retrying') THEN 1 ELSE 0 END), 0) AS active_count,
+            COALESCE(SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END), 0) AS queued_count,
+            COALESCE(SUM(CASE WHEN status IN ('paused', 'queued', 'waiting_network') THEN 1 ELSE 0 END), 0) AS paused_count,
+            COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
+            COALESCE(SUM(CASE WHEN status IN ('failed', 'needs_attention') THEN 1 ELSE 0 END), 0) AS failed_count,
+            COALESCE(SUM(CASE WHEN status IN ('downloading', 'retrying') THEN speed_bps ELSE 0 END), 0) AS total_speed,
+            COALESCE(SUM(CASE WHEN status IN ('downloading', 'retrying') THEN downloaded_bytes ELSE 0 END), 0) AS total_downloaded,
+            COALESCE(SUM(CASE WHEN status IN ('downloading', 'retrying') THEN total_size ELSE 0 END), 0) AS total_bytes
+        FROM tasks
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut featured_task_id: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM tasks
+        WHERE status IN ('downloading', 'retrying')
+        ORDER BY speed_bps DESC, updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if featured_task_id.is_none() {
+        featured_task_id = sqlx::query_scalar(
+            r#"
+            SELECT id
+            FROM tasks
+            WHERE status IN ('queued', 'paused', 'failed', 'needs_attention', 'waiting_network')
+            ORDER BY updated_at DESC
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(TaskStatsSnapshot {
+        all: row.get::<i64, _>("all_count").to_string(),
+        active: row.get::<i64, _>("active_count").to_string(),
+        queued: row.get::<i64, _>("queued_count").to_string(),
+        paused: row.get::<i64, _>("paused_count").to_string(),
+        completed: row.get::<i64, _>("completed_count").to_string(),
+        failed: row.get::<i64, _>("failed_count").to_string(),
+        total_speed: row.get::<i64, _>("total_speed").to_string(),
+        total_downloaded: row.get::<i64, _>("total_downloaded").to_string(),
+        total_bytes: row.get::<i64, _>("total_bytes").to_string(),
+        featured_task_id,
+    })
+}
+
+pub async fn list_browser_realtime_task_records(
+    pool: &SqlitePool,
+) -> Result<Vec<TaskRecord>, String> {
+    let active_rows = sqlx::query(
+        r#"
+        SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
+               total_size, downloaded_bytes, status, etag, last_modified, content_type,
+               supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
+               health_summary, error_message, error_code, recovery_actions, retry_after_at,
+               expected_hash_sha256, actual_hash_sha256,
+               hash_status, hash_error, hash_verified_at, created_at, updated_at
+        FROM tasks
+        WHERE status IN ('downloading', 'retrying', 'queued', 'paused', 'waiting_network', 'needs_attention')
+        ORDER BY
+            CASE status
+                WHEN 'downloading' THEN 0
+                WHEN 'retrying' THEN 1
+                WHEN 'queued' THEN 2
+                WHEN 'paused' THEN 3
+                WHEN 'waiting_network' THEN 4
+                WHEN 'needs_attention' THEN 5
+                ELSE 6
+            END,
+            updated_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let recent_rows = sqlx::query(
+        r#"
+        SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
+               total_size, downloaded_bytes, status, etag, last_modified, content_type,
+               supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
+               health_summary, error_message, error_code, recovery_actions, retry_after_at,
+               expected_hash_sha256, actual_hash_sha256,
+               hash_status, hash_error, hash_verified_at, created_at, updated_at
+        FROM tasks
+        WHERE status NOT IN ('downloading', 'retrying', 'queued', 'paused', 'waiting_network', 'needs_attention')
+        ORDER BY updated_at DESC
+        LIMIT 50
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    active_rows
+        .iter()
+        .chain(recent_rows.iter())
+        .map(row_to_task)
+        .collect()
 }
 
 pub async fn list_task_records_page(

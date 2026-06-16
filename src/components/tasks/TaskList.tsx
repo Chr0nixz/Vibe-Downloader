@@ -18,10 +18,12 @@ import {
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { TaskRow } from "@/components/tasks/TaskRow";
+import { TASK_ROW_ESTIMATED_SIZE } from "@/components/tasks/task-layout";
 import {
   failureKind,
   taskCursorInput,
-  useTaskStore,
+  useTaskDataStore,
+  useTaskUIStore,
   type FileTypeFilter,
   type ResumeFilter,
 } from "@/stores/task-store";
@@ -64,29 +66,29 @@ export function TaskList({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const loadingPageRef = useRef(false);
   const initialLoadDoneRef = useRef(false);
-  const taskIds = useTaskStore((s) => s.taskIds);
-  const total = useTaskStore((s) => s.total);
-  const nextCursor = useTaskStore((s) => s.nextCursor);
-  const hasMore = useTaskStore((s) => s.hasMore);
-  const filterOptions = useTaskStore((s) => s.filterOptions);
-  const nav = useTaskStore((s) => s.nav);
-  const search = useTaskStore((s) => s.search);
-  const selectedId = useTaskStore((s) => s.selectedId);
-  const selectedIds = useTaskStore((s) => s.selectedIds);
-  const sortKey = useTaskStore((s) => s.sortKey);
-  const sortDirection = useTaskStore((s) => s.sortDirection);
-  const filters = useTaskStore((s) => s.filters);
-  const selectTask = useTaskStore((s) => s.selectTask);
-  const setSelectedIds = useTaskStore((s) => s.setSelectedIds);
-  const setTaskSelected = useTaskStore((s) => s.setTaskSelected);
-  const clearSelectedIds = useTaskStore((s) => s.clearSelectedIds);
-  const setFilters = useTaskStore((s) => s.setFilters);
-  const setDetailOpen = useTaskStore((s) => s.setDetailOpen);
-  const setTaskCursorPage = useTaskStore((s) => s.setTaskCursorPage);
-  const loading = useTaskStore((s) => s.loading);
-  const setLoading = useTaskStore((s) => s.setLoading);
-  const error = useTaskStore((s) => s.error);
-  const setError = useTaskStore((s) => s.setError);
+  const taskIds = useTaskDataStore((s) => s.taskIds);
+  const total = useTaskDataStore((s) => s.total);
+  const nextCursor = useTaskDataStore((s) => s.nextCursor);
+  const hasMore = useTaskDataStore((s) => s.hasMore);
+  const filterOptions = useTaskDataStore((s) => s.filterOptions);
+  const nav = useTaskUIStore((s) => s.nav);
+  const search = useTaskUIStore((s) => s.search);
+  const selectedId = useTaskUIStore((s) => s.selectedId);
+  const selectedIds = useTaskUIStore((s) => s.selectedIds);
+  const sortKey = useTaskUIStore((s) => s.sortKey);
+  const sortDirection = useTaskUIStore((s) => s.sortDirection);
+  const filters = useTaskUIStore((s) => s.filters);
+  const selectTask = useTaskUIStore((s) => s.selectTask);
+  const setSelectedIds = useTaskUIStore((s) => s.setSelectedIds);
+  const setTaskSelected = useTaskUIStore((s) => s.setTaskSelected);
+  const clearSelectedIds = useTaskUIStore((s) => s.clearSelectedIds);
+  const setFilters = useTaskUIStore((s) => s.setFilters);
+  const setDetailOpen = useTaskUIStore((s) => s.setDetailOpen);
+  const setTaskCursorPage = useTaskDataStore((s) => s.setTaskCursorPage);
+  const loading = useTaskDataStore((s) => s.loading);
+  const setLoading = useTaskDataStore((s) => s.setLoading);
+  const error = useTaskDataStore((s) => s.error);
+  const setError = useTaskDataStore((s) => s.setError);
 
   const activeFilterCount = useMemo(() => {
     let n = 0;
@@ -103,7 +105,7 @@ export function TaskList({
 
   // Announce task status changes for screen readers
   useEffect(() => {
-    return useTaskStore.subscribe((state) => {
+    return useTaskDataStore.subscribe((state) => {
       const prev = prevTaskStatusesRef.current;
       for (const taskId of state.taskIds) {
         const task = state.taskById[taskId];
@@ -141,7 +143,7 @@ export function TaskList({
         append,
       );
       if (!append) {
-        const currentSelectedId = useTaskStore.getState().selectedId;
+        const currentSelectedId = useTaskUIStore.getState().selectedId;
         if (
           result.items.length > 0 &&
           (!currentSelectedId || !result.items.some((task) => task.id === currentSelectedId))
@@ -178,7 +180,7 @@ export function TaskList({
   const virtualizer = useVirtualizer({
     count: filtered.length,
     getScrollElement: () => scrollContainerRef.current,
-    estimateSize: () => 142, // ~132px row + 10px gap
+    estimateSize: () => TASK_ROW_ESTIMATED_SIZE, // compact row + 8px gap; failed/expanded rows are measured.
     overscan: 6,
     getItemKey: (index) => filtered[index] ?? index,
     onChange: (instance) => {
@@ -205,7 +207,7 @@ export function TaskList({
   }, [filters, nav, search, sortDirection, sortKey]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedTasks = useCallback(() => {
-    const { taskById } = useTaskStore.getState();
+    const { taskById } = useTaskDataStore.getState();
     return selectedIds
       .map((id) => taskById[id])
       .filter((task): task is Task => Boolean(task));
@@ -224,7 +226,7 @@ export function TaskList({
         : Array.from(
             new Set(
               taskIds
-                .map((taskId) => useTaskStore.getState().taskById[taskId])
+                .map((taskId) => useTaskDataStore.getState().taskById[taskId])
                 .filter((task): task is Task => Boolean(task))
                 .map(failureKind)
                 .filter((kind) => kind !== "none"),
@@ -564,7 +566,7 @@ export function TaskList({
               {virtualizer.getVirtualItems().map((virtualRow) => {
                 const taskId = filtered[virtualRow.index];
                 return (
-                  <div
+              <div
                     key={virtualRow.key}
                     data-index={virtualRow.index}
                     ref={virtualizer.measureElement}
@@ -572,7 +574,7 @@ export function TaskList({
                     style={{
                       top: 0,
                       transform: `translateY(calc(${virtualRow.start}px + var(--lp, 16px)))`,
-                      paddingBottom: virtualRow.index < filtered.length - 1 ? 10 : 0,
+                      paddingBottom: virtualRow.index < filtered.length - 1 ? 8 : 0,
                     }}
                   >
                     <TaskRow

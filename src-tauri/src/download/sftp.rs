@@ -515,8 +515,10 @@ async fn connect_sftp(
         port: target.port,
         failure: failure.clone(),
     };
-    let mut config = Config::default();
-    config.nodelay = true;
+    let config = Config {
+        nodelay: true,
+        ..Default::default()
+    };
     let config = Arc::new(config);
     let handle_result = if proxy_config.is_custom_socks5() {
         let proxy_url = proxy_config

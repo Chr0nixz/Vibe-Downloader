@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   errorMessage,
   isRecoveryAction,
+  localizedErrorMessage,
+  localizedMessage,
   parseAppError,
   recoveryActionsForError,
 } from "./errors";
@@ -53,5 +55,23 @@ describe("app error helpers", () => {
   it("recognizes the supported recovery action surface", () => {
     expect(isRecoveryAction("restart")).toBe(true);
     expect(isRecoveryAction("delete_everything")).toBe(false);
+  });
+
+  it("localizes task diagnostic message keys without changing plain errors", () => {
+    const t = ((key: string) => `localized:${key}`) as never;
+    const encoded = JSON.stringify({
+      code: "resume_unavailable",
+      message: "taskDiagnostics.resumeUnavailable",
+      recoverable: true,
+      actions: ["restart"],
+    });
+
+    expect(localizedMessage("taskDiagnostics.completed", t)).toBe(
+      "localized:taskDiagnostics.completed",
+    );
+    expect(localizedMessage("HTTP 404", t)).toBe("HTTP 404");
+    expect(localizedErrorMessage(encoded, t)).toBe(
+      "localized:taskDiagnostics.resumeUnavailable",
+    );
   });
 });

@@ -4,15 +4,21 @@ import i18n from "@/i18n";
 import { createLogger } from "@/lib/logger";
 import {
   isTauriRuntime,
+  getTaskStats,
   listTasksCursor,
   onQueueChanged,
   onTaskProgress,
   onTaskUpdated,
 } from "@/lib/tauri";
-import { mergeTasksFromServer, taskCursorInput, useTaskStore } from "@/stores/task-store";
+import {
+  mergeTasksFromServer,
+  normalizeTaskStatsSnapshot,
+  taskCursorInput,
+  useTaskDataStore,
+} from "@/stores/task-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
-import { errorMessage } from "@/lib/errors";
+import { localizedErrorMessage, localizedMessage } from "@/lib/errors";
 import type { Task } from "@/types/task";
 
 const log = createLogger("task-events");
@@ -54,6 +60,9 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
     let unlistenTaskUpdated: (() => void) | undefined;
     let unlistenQueue: (() => void) | undefined;
     let queueRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let statsRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let statsRefreshInFlight = false;
+    let recalculateStatsTimer: ReturnType<typeof setTimeout> | undefined;
     let progressFrame: number | undefined;
     let progressFallbackTimer: ReturnType<typeof setTimeout> | undefined;
     let pendingProgressPayloads: unknown[] = [];
@@ -78,7 +87,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
         if (!rememberStatusNotification(notifiedStatuses.current, notificationKey)) continue;
 
         if (task.status === "completed") {
-          useTaskStore.getState().markCompletionFlash(task.id);
+          useTaskDataStore.getState().markCompletionFlash(task.id);
           addToast({
             tone: "success",
             title: i18n.t("toast.taskCompleted", { name: task.fileName }),
@@ -90,10 +99,46 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
           addToast({
             tone: "error",
             title: i18n.t("toast.taskFailed", { name: task.fileName }),
-            description: task.errorMessage ? errorMessage(task.errorMessage) : task.healthSummary || undefined,
+            description: task.errorMessage
+              ? localizedErrorMessage(task.errorMessage, i18n.t)
+              : localizedMessage(task.healthSummary, i18n.t),
           });
         }
       }
+    }
+
+    function scheduleStatsRefresh(delay = 250) {
+      if (statsRefreshTimer) clearTimeout(statsRefreshTimer);
+      statsRefreshTimer = setTimeout(() => {
+        statsRefreshTimer = undefined;
+        if (statsRefreshInFlight) {
+          scheduleStatsRefresh(250);
+          return;
+        }
+        statsRefreshInFlight = true;
+        void getTaskStats()
+          .then((stats) => {
+            if (!cancelled) {
+              useTaskDataStore
+                .getState()
+                .setGlobalTaskStats(normalizeTaskStatsSnapshot(stats));
+            }
+          })
+          .catch((error) => {
+            log.warn("task stats refresh failed", error);
+          })
+          .finally(() => {
+            statsRefreshInFlight = false;
+          });
+      }, delay);
+    }
+
+    function scheduleRecalculateStats(delay: number) {
+      if (recalculateStatsTimer) clearTimeout(recalculateStatsTimer);
+      recalculateStatsTimer = setTimeout(() => {
+        recalculateStatsTimer = undefined;
+        useTaskDataStore.getState().recalculateTaskStats();
+      }, delay);
     }
 
     function flushProgressBatch() {
@@ -109,9 +154,11 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
 
       const payloads = pendingProgressPayloads;
       pendingProgressPayloads = [];
-      const previous = useTaskStore.getState().tasks;
-      useTaskStore.getState().patchTasksBatch(payloads);
-      notifyTaskStatusChanges(previous, useTaskStore.getState().tasks);
+      const previous = useTaskDataStore.getState().tasks;
+      useTaskDataStore.getState().patchTasksBatch(payloads);
+      notifyTaskStatusChanges(previous, useTaskDataStore.getState().tasks);
+      scheduleRecalculateStats(250);
+      scheduleStatsRefresh(1_000);
     }
 
     function scheduleProgressFlush() {
@@ -157,9 +204,11 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
       unlistenTaskUpdated = await onTaskUpdated((task) => {
         if (cancelled) return;
         flushProgressBatch();
-        const previous = useTaskStore.getState().tasks;
-        useTaskStore.getState().upsertTask(task);
-        notifyTaskStatusChanges(previous, useTaskStore.getState().tasks);
+        const previous = useTaskDataStore.getState().tasks;
+        useTaskDataStore.getState().upsertTask(task);
+        notifyTaskStatusChanges(previous, useTaskDataStore.getState().tasks);
+        scheduleRecalculateStats(150);
+        scheduleStatsRefresh(150);
       });
       if (cancelled) {
         unlistenTaskUpdated();
@@ -173,18 +222,20 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
         queueRefreshTimer = setTimeout(() => {
           void (async () => {
             try {
-              const previous = useTaskStore.getState().tasks;
+              const previous = useTaskDataStore.getState().tasks;
               const page = await listTasksCursor(taskCursorInput(null));
               const fresh = page.items;
               if (cancelled) return;
               const merged = mergeTasksFromServer(previous, fresh);
-              useTaskStore.getState().setTaskCursorPage(
+              useTaskDataStore.getState().setTaskCursorPage(
                 merged,
                 page.totalEstimate,
                 page.nextCursor,
                 page.filterOptions,
               );
               notifyTaskStatusChanges(previous, merged);
+              scheduleRecalculateStats(150);
+              scheduleStatsRefresh(150);
             } catch (error) {
               log.warn("queue refresh failed", error);
             }
@@ -196,9 +247,13 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
       }
     })();
 
+    scheduleStatsRefresh(0);
+
     return () => {
       cancelled = true;
       if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
+      if (statsRefreshTimer) clearTimeout(statsRefreshTimer);
+      if (recalculateStatsTimer) clearTimeout(recalculateStatsTimer);
       if (progressFrame !== undefined) cancelAnimationFrame(progressFrame);
       if (progressFallbackTimer) clearTimeout(progressFallbackTimer);
       unlistenProgress?.();

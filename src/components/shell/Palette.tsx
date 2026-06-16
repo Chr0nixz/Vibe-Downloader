@@ -22,6 +22,7 @@ import type { TFunction } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { useTheme } from "next-themes";
 import { useTranslation } from "react-i18next";
+import { useShallow } from "zustand/react/shallow";
 
 import type { AppSettings } from "@/generated/bindings";
 import type { Platform } from "@/lib/platform";
@@ -45,7 +46,8 @@ import { useSettingsStore } from "@/stores/settings-store";
 import {
   failureKind,
   filterTasks,
-  useTaskStore,
+  useTaskDataStore,
+  useTaskUIStore,
   type FileTypeFilter,
   type NavFilter,
   type ResumeFilter,
@@ -152,21 +154,21 @@ export function Palette({
   const [activeIndex, setActiveIndex] = useState(0);
   const [runningId, setRunningId] = useState<string | null>(null);
 
-  const tasks = useTaskStore((s) => s.tasks);
-  const selectedIds = useTaskStore((s) => s.selectedIds);
-  const nav = useTaskStore((s) => s.nav);
-  const taskSearch = useTaskStore((s) => s.search);
-  const sortKey = useTaskStore((s) => s.sortKey);
-  const sortDirection = useTaskStore((s) => s.sortDirection);
-  const filters = useTaskStore((s) => s.filters);
-  const detailOpen = useTaskStore((s) => s.detailOpen);
-  const setTasks = useTaskStore((s) => s.setTasks);
-  const setError = useTaskStore((s) => s.setError);
-  const setSelectedIds = useTaskStore((s) => s.setSelectedIds);
-  const clearSelectedIds = useTaskStore((s) => s.clearSelectedIds);
-  const setSort = useTaskStore((s) => s.setSort);
-  const setFilters = useTaskStore((s) => s.setFilters);
-  const setDetailOpen = useTaskStore((s) => s.setDetailOpen);
+  const tasks = useTaskDataStore(useShallow((s) => s.tasks));
+  const selectedIds = useTaskUIStore((s) => s.selectedIds);
+  const nav = useTaskUIStore((s) => s.nav);
+  const taskSearch = useTaskUIStore((s) => s.search);
+  const sortKey = useTaskUIStore((s) => s.sortKey);
+  const sortDirection = useTaskUIStore((s) => s.sortDirection);
+  const filters = useTaskUIStore((s) => s.filters);
+  const detailOpen = useTaskUIStore((s) => s.detailOpen);
+  const setTasks = useTaskDataStore((s) => s.setTasks);
+  const setError = useTaskDataStore((s) => s.setError);
+  const setSelectedIds = useTaskUIStore((s) => s.setSelectedIds);
+  const clearSelectedIds = useTaskUIStore((s) => s.clearSelectedIds);
+  const setSort = useTaskUIStore((s) => s.setSort);
+  const setFilters = useTaskUIStore((s) => s.setFilters);
+  const setDetailOpen = useTaskUIStore((s) => s.setDetailOpen);
 
   const settings = useSettingsStore((s) => s.settings);
   const setSettings = useSettingsStore((s) => s.setSettings);

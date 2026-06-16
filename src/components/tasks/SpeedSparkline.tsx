@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import type { TFunction } from "i18next";
 
 import { cn, formatSpeed } from "@/lib/utils";
-import type { SpeedSample } from "@/stores/task-store";
+import type { SpeedSample } from "@/stores/speed-history-store";
 
 interface SpeedTrend {
   label: string;

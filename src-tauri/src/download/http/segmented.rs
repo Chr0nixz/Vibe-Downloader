@@ -201,12 +201,7 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
             emit_progress(
                 &app,
                 &mut progress_gate,
-                &task.id,
-                downloaded,
-                0,
-                speed_bps,
-                1,
-                TaskStatus::Downloading,
+                progress_payload(&task.id, downloaded, 0, speed_bps, 1, TaskStatus::Downloading),
                 false,
             );
             last_emit = Instant::now();
@@ -238,12 +233,7 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
     emit_progress(
         &app,
         &mut progress_gate,
-        &task.id,
-        downloaded,
-        downloaded,
-        0,
-        0,
-        TaskStatus::Completed,
+        progress_payload(&task.id, downloaded, downloaded, 0, 0, TaskStatus::Completed),
         true,
     );
     emit_queue_changed(&app);
@@ -495,12 +485,14 @@ pub(super) async fn run_segmented_download(
     emit_progress(
         &app,
         &mut progress_gate,
-        &task.id,
-        initial_downloaded,
-        task.total_size,
-        0,
-        active_connection_count,
-        TaskStatus::Downloading,
+        progress_payload(
+            &task.id,
+            initial_downloaded,
+            task.total_size,
+            0,
+            active_connection_count,
+            TaskStatus::Downloading,
+        ),
         true,
     );
 
@@ -605,7 +597,20 @@ pub(super) async fn run_segmented_download(
                 )
                 .await?;
                 if !cancel.load(Ordering::SeqCst) && last_emit.elapsed() >= Duration::from_millis(300) {
-                    emit_aggregate_progress(&app, &pool, &task.id, task.total_size, active_connection_count, &mut runtime_progress, &mut progress_gate, false, false).await?;
+                    emit_aggregate_progress(
+                        &app,
+                        &pool,
+                        &mut runtime_progress,
+                        &mut progress_gate,
+                        AggregateProgressInput {
+                            task_id: &task.id,
+                            total_size: task.total_size,
+                            connection_count: active_connection_count,
+                            force_checkpoint: false,
+                            force_emit: false,
+                        },
+                    )
+                    .await?;
                     last_emit = Instant::now();
                 }
             }
@@ -713,7 +718,20 @@ pub(super) async fn run_segmented_download(
                 if cancel.load(Ordering::SeqCst) {
                     continue;
                 }
-                emit_aggregate_progress(&app, &pool, &task.id, task.total_size, active_connection_count, &mut runtime_progress, &mut progress_gate, true, false).await?;
+                emit_aggregate_progress(
+                    &app,
+                    &pool,
+                    &mut runtime_progress,
+                    &mut progress_gate,
+                    AggregateProgressInput {
+                        task_id: &task.id,
+                        total_size: task.total_size,
+                        connection_count: active_connection_count,
+                        force_checkpoint: true,
+                        force_emit: false,
+                    },
+                )
+                .await?;
                 let current_speed = runtime_progress.total_speed().max(0);
                 speed_history.push_back((Instant::now(), current_speed));
                 while speed_history.len() > AUTO_ACCELERATION_STABILITY_WINDOW {
@@ -820,12 +838,14 @@ pub(super) async fn run_segmented_download(
     emit_progress(
         &app,
         &mut progress_gate,
-        &task.id,
-        task.total_size,
-        task.total_size,
-        0,
-        0,
-        TaskStatus::Completed,
+        progress_payload(
+            &task.id,
+            task.total_size,
+            task.total_size,
+            0,
+            0,
+            TaskStatus::Completed,
+        ),
         true,
     );
     emit_queue_changed(&app);
@@ -1072,13 +1092,15 @@ async fn maybe_accelerate_segments(
     emit_aggregate_progress(
         app,
         pool,
-        &task.id,
-        task.total_size,
-        *active_connection_count,
         runtime_progress,
         progress_gate,
-        true,
-        false,
+        AggregateProgressInput {
+            task_id: &task.id,
+            total_size: task.total_size,
+            connection_count: *active_connection_count,
+            force_checkpoint: true,
+            force_emit: false,
+        },
     )
     .await?;
     Ok(())
@@ -1162,12 +1184,14 @@ async fn handle_segment_message(
                 emit_progress(
                     app,
                     progress_gate,
-                    task_id,
-                    downloaded,
-                    total_size,
-                    0,
-                    connection_count,
-                    TaskStatus::Retrying,
+                    progress_payload(
+                        task_id,
+                        downloaded,
+                        total_size,
+                        0,
+                        connection_count,
+                        TaskStatus::Retrying,
+                    ),
                     true,
                 );
             }
@@ -1179,38 +1203,44 @@ async fn handle_segment_message(
     Ok(())
 }
 
+struct AggregateProgressInput<'a> {
+    task_id: &'a str,
+    total_size: i64,
+    connection_count: i32,
+    force_checkpoint: bool,
+    force_emit: bool,
+}
+
 async fn emit_aggregate_progress(
     app: &AppHandle,
     pool: &SqlitePool,
-    task_id: &str,
-    total_size: i64,
-    connection_count: i32,
     runtime_progress: &mut RuntimeProgress,
     progress_gate: &mut TaskProgressEmitGate,
-    force_checkpoint: bool,
-    force_emit: bool,
+    input: AggregateProgressInput<'_>,
 ) -> Result<(), String> {
     let downloaded = runtime_progress.total_downloaded();
     let speed_bps = runtime_progress.total_speed();
     checkpoint_runtime_progress(
         pool,
-        task_id,
-        connection_count,
+        input.task_id,
+        input.connection_count,
         TaskStatus::Downloading,
         runtime_progress,
-        force_checkpoint,
+        input.force_checkpoint,
     )
     .await?;
     emit_progress(
         app,
         progress_gate,
-        task_id,
-        downloaded,
-        total_size,
-        speed_bps,
-        connection_count,
-        TaskStatus::Downloading,
-        force_emit,
+        progress_payload(
+            input.task_id,
+            downloaded,
+            input.total_size,
+            speed_bps,
+            input.connection_count,
+            TaskStatus::Downloading,
+        ),
+        input.force_emit,
     );
     Ok(())
 }
@@ -1298,24 +1328,29 @@ async fn checkpoint_runtime_progress(
     Ok(())
 }
 
-fn emit_progress(
-    app: &AppHandle,
-    progress_gate: &mut TaskProgressEmitGate,
+fn progress_payload(
     task_id: &str,
     downloaded_bytes: i64,
     total_size: i64,
     speed_bps: i64,
     connection_count: i32,
     status: TaskStatus,
-    force: bool,
-) {
-    let payload = TaskProgressPayload {
+) -> TaskProgressPayload {
+    TaskProgressPayload {
         task_id: task_id.to_string(),
         downloaded_bytes: downloaded_bytes.to_string(),
         total_size: total_size.to_string(),
         speed_bps: speed_bps.to_string(),
         connection_count,
         status,
-    };
+    }
+}
+
+fn emit_progress(
+    app: &AppHandle,
+    progress_gate: &mut TaskProgressEmitGate,
+    payload: TaskProgressPayload,
+    force: bool,
+) {
     progress_gate.emit_or_store(app, payload, force);
 }

@@ -50,6 +50,7 @@ export const commands = {
 	createdAt: string,
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_task", { id })),
+	getTaskStats: () => typedError<TaskStatsSnapshot, string>(__TAURI_INVOKE("get_task_stats")),
 	listSegments: (input: ListSegmentsInput) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_segments", { input })),
 	listSegmentsPage: (input: CursorPageInput) => typedError<TaskSegmentsPageResult, string>(__TAURI_INVOKE("list_segments_page", { input })),
 	getSegmentSummary: (taskId: string) => typedError<SegmentSummary, string>(__TAURI_INVOKE("get_segment_summary", { taskId })),
@@ -156,6 +157,8 @@ export type AppSettings = {
 	scheduleSpeedLimitWindowStart: string,
 	scheduleSpeedLimitWindowEnd: string,
 	scheduleSpeedLimitBps: string | null,
+	sidebarStripeEnabled: boolean,
+	titlebarGradientEnabled: boolean,
 	completionAction: CompletionAction,
 	completionCountdownSeconds: number,
 };
@@ -652,6 +655,19 @@ export type TaskSegmentsPageResult = {
 	nextCursor: string | null,
 };
 
+export type TaskStatsSnapshot = {
+	all: string,
+	active: string,
+	queued: string,
+	paused: string,
+	completed: string,
+	failed: string,
+	totalSpeed: string,
+	totalDownloaded: string,
+	totalBytes: string,
+	featuredTaskId: string | null,
+};
+
 export type TaskStatus = "queued" | "downloading" | "paused" | "completed" | "failed" | "retrying" | "waiting_network" | "needs_attention";
 
 export type TaskUpdatedPayload = {
@@ -715,6 +731,8 @@ export type UpdateSettingsInput = {
 	scheduleSpeedLimitWindowStart: string | null,
 	scheduleSpeedLimitWindowEnd: string | null,
 	scheduleSpeedLimitBps: string | null,
+	sidebarStripeEnabled: boolean | null,
+	titlebarGradientEnabled: boolean | null,
 	completionAction: CompletionAction | null,
 	completionCountdownSeconds: number | null,
 };

@@ -709,7 +709,7 @@ export function NewDownloadDialog({
                 <button
                   type="button"
                   onClick={clearSelectedLocalFile}
-                  className="shrink-0 rounded p-1 text-text-muted transition-colors hover:bg-surface-raised hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+                  className="shrink-0 rounded p-1.5 min-h-8 min-w-8 text-text-muted transition-colors hover:bg-surface-raised hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                   title={t("newDownload.removeFile")}
                 >
                   <X className="h-4 w-4" />
@@ -845,6 +845,7 @@ export function NewDownloadDialog({
                               setEditingName(false);
                             }
                           }}
+                          aria-label={t("newDownload.fileName")}
                           className="h-7 text-sm"
                           autoFocus
                         />
@@ -921,10 +922,11 @@ export function NewDownloadDialog({
 
                 {/* Batch import */}
                 <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
-                  <span className="text-xs text-text-muted">
+                  <label htmlFor="batch-urls-input" className="text-xs text-text-muted">
                     {t("newDownload.batchUrls")}
-                  </span>
+                  </label>
                   <textarea
+                    id="batch-urls-input"
                     ref={batchInputRef}
                     value={batchInput}
                     onChange={(event) => setBatchInput(event.target.value)}

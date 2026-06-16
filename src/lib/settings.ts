@@ -20,6 +20,8 @@ export async function applyGlobalSpeedLimit(
     clipboardMonitorEnabled: settings.clipboardMonitorEnabled,
     fontFamily: settings.fontFamily,
     accentColor: settings.accentColor,
+    sidebarStripeEnabled: settings.sidebarStripeEnabled,
+    titlebarGradientEnabled: settings.titlebarGradientEnabled,
     proxyMode: settings.proxyMode,
     proxyUrl: settings.proxyUrl,
     proxyNoProxy: settings.proxyNoProxy,
