@@ -329,6 +329,25 @@ async fn send_json(
 fn write_bootstrap_file(bootstrap: &BrowserBridgeBootstrap) -> Result<(), String> {
     let path = bootstrap_file_path();
     let raw = serde_json::to_string(bootstrap).map_err(|e| e.to_string())?;
+    // Remove any stale bootstrap file from a previous run.
+    // On Windows the file may be marked read-only, which blocks both
+    // overwrite and deletion — clear the flag before removing.
+    if path.exists() {
+        #[cfg(windows)]
+        {
+            if let Ok(metadata) = std::fs::metadata(&path) {
+                if metadata.permissions().readonly() {
+                    let mut perms = metadata.permissions();
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    {
+                        perms.set_readonly(false);
+                    }
+                    let _ = std::fs::set_permissions(&path, perms);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
     std::fs::write(&path, raw).map_err(|e| {
         format!(
             "Could not write browser bridge bootstrap file at {}: {e}",
