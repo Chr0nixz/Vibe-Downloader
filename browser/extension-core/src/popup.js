@@ -91,9 +91,7 @@ function renderRecent(recent) {
 function renderLive(tasks) {
   if (!liveTasks) return;
   liveTasks.replaceChildren(
-    ...(tasks.length > 0
-      ? tasks.map((task) => liveItem(task))
-      : [emptyItem(i18n("noLiveTasks"))],
+    ...(tasks.length > 0 ? tasks.map((task) => liveItem(task)) : [emptyItem(i18n("noLiveTasks"))]),
   );
 }
 
@@ -115,7 +113,9 @@ function liveItem(task) {
   if (totalBytes > 0 && downloadedBytes > 0) {
     percentText = `${Math.min(100, Math.round((downloadedBytes / totalBytes) * 100))}%`;
   }
-  statusText.textContent = [task.status ?? "sent", percentText, speedBps > 0 ? formatSpeed(speedBps) : ""].filter(Boolean).join(" · ");
+  statusText.textContent = [task.status ?? "sent", percentText, speedBps > 0 ? formatSpeed(speedBps) : ""]
+    .filter(Boolean)
+    .join(" · ");
   if (task.status === "failed") statusText.className = "recent-failed";
   const time = document.createElement("time");
   time.dateTime = task.updatedAt ?? task.createdAt;

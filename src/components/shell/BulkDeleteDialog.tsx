@@ -50,7 +50,7 @@ export function BulkDeleteDialog({
           </DialogDescription>
 
           {tasks.length > 0 ? (
-            <ul role="list" className="max-h-36 space-y-0.5 overflow-y-auto overscroll-contain rounded-md border border-border-subtle bg-surface-root px-3 py-2">
+            <ul className="max-h-36 space-y-0.5 overflow-y-auto overscroll-contain rounded-md border border-border-subtle bg-surface-root px-3 py-2">
               {visibleNames.map((task) => (
                 <li key={task.id} className="flex items-center gap-2 py-0.5 text-sm">
                   <span className="truncate text-text-primary">{task.fileName}</span>

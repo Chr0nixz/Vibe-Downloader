@@ -1,6 +1,6 @@
-import type { Task } from "@/types/task";
-import { isTauriRuntime } from "@/lib/runtime";
 import { createLogger } from "@/lib/logger";
+import { isTauriRuntime } from "@/lib/runtime";
+import type { Task } from "@/types/task";
 
 const log = createLogger("export");
 
@@ -80,9 +80,7 @@ export async function exportTasks(tasks: Task[], format: ExportFormat): Promise<
     const { save } = await import("@tauri-apps/plugin-dialog");
     const path = await save({
       defaultPath: `vibe-tasks.${extension}`,
-      filters: [
-        { name: format === "json" ? "JSON" : "CSV", extensions: [extension] },
-      ],
+      filters: [{ name: format === "json" ? "JSON" : "CSV", extensions: [extension] }],
     });
     if (!path) return false;
 

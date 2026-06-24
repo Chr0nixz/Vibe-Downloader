@@ -1,3 +1,4 @@
+// biome-ignore lint/correctness/noUnusedVariables: loaded via importScripts/<script> into global scope
 function createLogger(namespace) {
   const prefix = `[vibe-ext:${namespace}]`;
   return {

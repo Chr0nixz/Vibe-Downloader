@@ -513,10 +513,7 @@ export async function verifyTaskHash(id: string): Promise<HashVerificationState>
   return runCommand("verifyTaskHash", () => commands.verifyTaskHash(id));
 }
 
-export async function computeFileHash(
-  id: string,
-  algorithm: ChecksumAlgorithm,
-): Promise<string> {
+export async function computeFileHash(id: string, algorithm: ChecksumAlgorithm): Promise<string> {
   if (!isTauriRuntime()) {
     return "mock-hash-value";
   }
@@ -569,9 +566,7 @@ export async function retryTaskWithMirror(id: string, mirrorUrl: string): Promis
     return (await loadBrowserAdapter()).retryTask(id);
   }
   const commands = await loadNativeCommands();
-  return normalizeTask(
-    await runCommand("retryTaskWithMirror", () => commands.retryTaskWithMirror(id, mirrorUrl)),
-  );
+  return normalizeTask(await runCommand("retryTaskWithMirror", () => commands.retryTaskWithMirror(id, mirrorUrl)));
 }
 
 export async function finishLiveRecording(id: string): Promise<Task> {

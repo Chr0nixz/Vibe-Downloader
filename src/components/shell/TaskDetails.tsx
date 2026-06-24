@@ -321,7 +321,12 @@ function TaskDetailsPanel({
             setSegments((prev) => {
               if (
                 prev.length === result.items.length &&
-                prev.every((s, i) => s.id === result.items[i].id && s.status === result.items[i].status && s.downloadedUntil === result.items[i].downloadedUntil)
+                prev.every(
+                  (s, i) =>
+                    s.id === result.items[i].id &&
+                    s.status === result.items[i].status &&
+                    s.downloadedUntil === result.items[i].downloadedUntil,
+                )
               ) {
                 return prev;
               }
@@ -774,11 +779,16 @@ function Row({ label, value, mono = true }: { label: string; value: string; mono
 
 function formatAlgorithm(algo: string): string {
   switch (algo) {
-    case "sha256": return "SHA-256";
-    case "sha512": return "SHA-512";
-    case "sha1": return "SHA-1";
-    case "md5": return "MD5";
-    default: return algo.toUpperCase();
+    case "sha256":
+      return "SHA-256";
+    case "sha512":
+      return "SHA-512";
+    case "sha1":
+      return "SHA-1";
+    case "md5":
+      return "MD5";
+    default:
+      return algo.toUpperCase();
   }
 }
 
@@ -797,13 +807,14 @@ function ChecksumRow({
 }) {
   const { t } = useTranslation();
   const actual = result?.actual ?? checksum.actualHash;
-  const match = result !== undefined
-    ? result.match
-    : checksum.status === "verified"
-      ? true
-      : checksum.status === "failed"
-        ? false
-        : null;
+  const match =
+    result !== undefined
+      ? result.match
+      : checksum.status === "verified"
+        ? true
+        : checksum.status === "failed"
+          ? false
+          : null;
 
   return (
     <div className="rounded border border-border-subtle bg-surface-raised/20 p-2">
@@ -840,12 +851,17 @@ function ChecksumRow({
         ) : null}
       </div>
       {match !== null ? (
-        <p role="status" className={cn("mt-1 text-[11px] font-medium", match ? "text-status-success" : "text-status-danger")}>
+        <p
+          role="status"
+          className={cn("mt-1 text-[11px] font-medium", match ? "text-status-success" : "text-status-danger")}
+        >
           {match ? t("taskDetails.checksumMatch") : t("taskDetails.checksumMismatch")}
         </p>
       ) : null}
       {checksum.errorMessage ? (
-        <p role="alert" className="mt-1 text-[11px] text-status-danger">{checksum.errorMessage}</p>
+        <p role="alert" className="mt-1 text-[11px] text-status-danger">
+          {checksum.errorMessage}
+        </p>
       ) : null}
     </div>
   );
@@ -879,9 +895,7 @@ function HashPanel({
     return (
       <div className="rounded-md border border-border-subtle bg-surface-raised/40 p-3 text-xs">
         <div className="flex items-center justify-between gap-3">
-          <span className="text-text-muted">
-            {t("taskDetails.checksumsHeader", { count: checksums.length })}
-          </span>
+          <span className="text-text-muted">{t("taskDetails.checksumsHeader", { count: checksums.length })}</span>
           <Button
             type="button"
             size="sm"
@@ -946,16 +960,23 @@ function HashPanel({
           </span>
         ) : null}
       </div>
-      {error ? <p role="alert" className="mt-2 text-status-danger">{error}</p> : null}
+      {error ? (
+        <p role="alert" className="mt-2 text-status-danger">
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }
 
 function mirrorTone(status: string): string {
   switch (status) {
-    case "completed": return "text-status-success";
-    case "failed": return "text-status-danger";
-    default: return "text-text-secondary";
+    case "completed":
+      return "text-status-success";
+    case "failed":
+      return "text-status-danger";
+    default:
+      return "text-text-secondary";
   }
 }
 
@@ -976,9 +997,7 @@ function MetalinkMirrorPanel({
 
   return (
     <div className="rounded-md border border-border-subtle bg-surface-raised/40 p-3 text-xs">
-      <div className="text-text-muted">
-        {t("taskDetails.mirrorsHeader", { count: mirrors.length })}
-      </div>
+      <div className="text-text-muted">{t("taskDetails.mirrorsHeader", { count: mirrors.length })}</div>
       <div className="mt-2 grid gap-2">
         {mirrors.map((mirror) => (
           <div
@@ -987,9 +1006,7 @@ function MetalinkMirrorPanel({
           >
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
-                <span className={cn("text-[11px] font-medium", mirrorTone(mirror.status))}>
-                  {mirror.status}
-                </span>
+                <span className={cn("text-[11px] font-medium", mirrorTone(mirror.status))}>{mirror.status}</span>
                 {mirror.location ? (
                   <span className="text-[10px] text-text-muted">
                     {t("taskDetails.mirrorLocation")}: {mirror.location}
@@ -1004,9 +1021,7 @@ function MetalinkMirrorPanel({
               <div className="mt-0.5 truncate font-mono text-[11px] text-text-secondary" title={mirror.url}>
                 {mirror.url}
               </div>
-              {mirror.lastError ? (
-                <p className="mt-0.5 text-[10px] text-status-danger">{mirror.lastError}</p>
-              ) : null}
+              {mirror.lastError ? <p className="mt-0.5 text-[10px] text-status-danger">{mirror.lastError}</p> : null}
             </div>
             {canRetry ? (
               <Button
@@ -1080,7 +1095,10 @@ function TorrentRuntimePanel({
 
   if (error) {
     return (
-      <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+      <p
+        role="alert"
+        className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+      >
         {error}
       </p>
     );
@@ -1148,7 +1166,10 @@ function TorrentRuntimePanel({
           </div>
         ) : null}
         {snapshot.lastErrorMessage ? (
-          <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+          <p
+            role="alert"
+            className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+          >
             {snapshot.lastErrorMessage}
           </p>
         ) : null}
@@ -1354,7 +1375,11 @@ function TaskTransferPanel({ task }: { task: Task }) {
         </span>
         <span>{t("taskDetails.queuePosition", { position: task.queuePosition })}</span>
       </div>
-      {error ? <p role="alert" className="text-xs text-status-danger">{error}</p> : null}
+      {error ? (
+        <p role="alert" className="text-xs text-status-danger">
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -1475,7 +1500,11 @@ function TaskProxyPanel({ task }: { task: Task }) {
           />
         </div>
       ) : null}
-      {error ? <p role="alert" className="text-xs text-status-danger">{error}</p> : null}
+      {error ? (
+        <p role="alert" className="text-xs text-status-danger">
+          {error}
+        </p>
+      ) : null}
       <div className="flex items-center justify-between gap-2">
         <p className="text-[11px] text-text-muted">{t("taskDetails.taskProxyHint")}</p>
         <Button
@@ -1517,7 +1546,10 @@ function ChunkList({
 
   if (error) {
     return (
-      <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+      <p
+        role="alert"
+        className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+      >
         {error}
       </p>
     );
@@ -1584,7 +1616,11 @@ function ChunkList({
                 {retryLabel} {segment.retryCount}
               </span>
             </div>
-            {segment.lastError ? <p role="alert" className="mt-2 text-status-danger">{segment.lastError}</p> : null}
+            {segment.lastError ? (
+              <p role="alert" className="mt-2 text-status-danger">
+                {segment.lastError}
+              </p>
+            ) : null}
           </div>
         );
       })}
@@ -1622,7 +1658,10 @@ function ConnectionList({
 
   if (error) {
     return (
-      <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+      <p
+        role="alert"
+        className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+      >
         {error}
       </p>
     );
@@ -1676,7 +1715,11 @@ function ConnectionList({
               <span>{speedLabel}</span>
               <span className="text-right font-mono text-text-secondary">{formatSpeed(speed)}</span>
             </div>
-            {segment.lastError ? <p role="alert" className="mt-2 text-status-danger">{errorMessage(segment.lastError)}</p> : null}
+            {segment.lastError ? (
+              <p role="alert" className="mt-2 text-status-danger">
+                {errorMessage(segment.lastError)}
+              </p>
+            ) : null}
           </div>
         );
       })}
@@ -1704,7 +1747,10 @@ function EventList({
 
   if (error) {
     return (
-      <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+      <p
+        role="alert"
+        className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+      >
         {error}
       </p>
     );
@@ -1755,7 +1801,10 @@ function RequestList({
 
   if (error) {
     return (
-      <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+      <p
+        role="alert"
+        className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+      >
         {error}
       </p>
     );
@@ -1796,7 +1845,11 @@ function RequestList({
             {request.etag ? (
               <p className="mt-2 break-all font-mono text-[11px] text-text-muted">ETag {request.etag}</p>
             ) : null}
-            {request.errorMessage ? <p role="alert" className="mt-2 text-status-danger">{request.errorMessage}</p> : null}
+            {request.errorMessage ? (
+              <p role="alert" className="mt-2 text-status-danger">
+                {request.errorMessage}
+              </p>
+            ) : null}
           </li>
         ))}
       </ol>

@@ -290,9 +290,7 @@ export function AppShell() {
   const bulkPause = useCallback(
     (selectedTasks: Task[]) => {
       const ids = selectedTasks
-        .filter(
-          (task) => task.status === "downloading" || task.status === "retrying" || task.status === "queued",
-        )
+        .filter((task) => task.status === "downloading" || task.status === "retrying" || task.status === "queued")
         .map((task) => task.id);
       void runBulkTransferAction(ids, "pause", t("taskList.bulkPause"));
     },
@@ -302,9 +300,7 @@ export function AppShell() {
   const bulkResume = useCallback(
     (selectedTasks: Task[]) => {
       const ids = selectedTasks
-        .filter(
-          (task) => task.status === "paused" || task.status === "failed" || task.status === "waiting_network",
-        )
+        .filter((task) => task.status === "paused" || task.status === "failed" || task.status === "waiting_network")
         .map((task) => task.id);
       void runBulkTransferAction(ids, "resume", t("taskList.bulkResume"));
     },

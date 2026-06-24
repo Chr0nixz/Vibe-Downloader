@@ -565,7 +565,7 @@ async fn start_task_download(
                     payload
                         .downcast_ref::<String>()
                         .map(|s| s.as_str())
-                        .or_else(|| payload.downcast_ref::<&str>().map(|s| *s))
+                        .or_else(|| payload.downcast_ref::<&str>().copied())
                         .unwrap_or("unknown panic")
                         .to_string()
                 } else {

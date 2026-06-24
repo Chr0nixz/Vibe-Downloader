@@ -381,11 +381,11 @@ fn parse_webdav_multistatus(
                     _ => {}
                 }
             }
-            Ok(Event::Empty(event)) => {
-                if local_name(event.name().as_ref()) == "collection" {
-                    if let Some(current) = current.as_mut() {
-                        current.is_collection = true;
-                    }
+            Ok(Event::Empty(event))
+                if local_name(event.name().as_ref()) == "collection" =>
+            {
+                if let Some(current) = current.as_mut() {
+                    current.is_collection = true;
                 }
             }
             Ok(Event::Text(event)) => {

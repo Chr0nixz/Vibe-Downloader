@@ -104,20 +104,19 @@ impl GlobalSpeedLimiter {
             // Refill: only one thread succeeds the CAS and performs the refill.
             let now = now_millis();
             let last = self.last_refill_millis.load(Ordering::Relaxed);
-            if now > last {
-                if self
+            if now > last
+                && self
                     .last_refill_millis
                     .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
-                {
-                    let elapsed_millis = (now - last) as i64;
-                    // Refill in milli-bytes: limit (bytes/sec) × elapsed_ms = milli-bytes
-                    let refill_milli = elapsed_millis.saturating_mul(limit);
-                    let current = self.tokens_milli.load(Ordering::Relaxed);
-                    let max_milli = limit * 1000;
-                    let new_tokens = (current + refill_milli).min(max_milli);
-                    self.tokens_milli.store(new_tokens, Ordering::Relaxed);
-                }
+            {
+                let elapsed_millis = (now - last) as i64;
+                // Refill in milli-bytes: limit (bytes/sec) × elapsed_ms = milli-bytes
+                let refill_milli = elapsed_millis.saturating_mul(limit);
+                let current = self.tokens_milli.load(Ordering::Relaxed);
+                let max_milli = limit * 1000;
+                let new_tokens = (current + refill_milli).min(max_milli);
+                self.tokens_milli.store(new_tokens, Ordering::Relaxed);
             }
 
             // Consume: try to take tokens via CAS.
@@ -145,9 +144,7 @@ impl GlobalSpeedLimiter {
                 // Not enough tokens — sleep until we have enough.
                 let deficit_milli = request_milli - current;
                 // wait_ms = deficit_milli / limit (milli-bytes / bytes-per-sec = ms)
-                let wait_ms = (((deficit_milli as f64) / (limit as f64)) as u64)
-                    .max(1)
-                    .min(250);
+                let wait_ms = (((deficit_milli as f64) / (limit as f64)) as u64).clamp(1, 250);
                 tokio::time::sleep(Duration::from_millis(wait_ms)).await;
                 spin_count = 0;
                 continue;

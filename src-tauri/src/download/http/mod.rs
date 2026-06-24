@@ -269,7 +269,7 @@ impl reqwest::dns::Resolve for HickoryResolver {
                 .lookup_ip(name.as_str())
                 .await
                 .map_err(|e| {
-                    Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                    Box::new(std::io::Error::other(e.to_string()))
                         as Box<dyn std::error::Error + Send + Sync>
                 })?;
             let addrs: Vec<SocketAddr> = lookup.iter().map(|ip| SocketAddr::new(ip, 0)).collect();

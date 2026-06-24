@@ -280,8 +280,7 @@ function loadStoredSettings(): AppSettings | null {
           typeof parsed.completionCountdownSeconds === "number"
             ? Math.min(300, Math.max(5, parsed.completionCountdownSeconds))
             : 30,
-        completionRunCommand:
-          typeof parsed.completionRunCommand === "string" ? parsed.completionRunCommand : "",
+        completionRunCommand: typeof parsed.completionRunCommand === "string" ? parsed.completionRunCommand : "",
         deleteToTrash: typeof parsed.deleteToTrash === "boolean" ? parsed.deleteToTrash : true,
       };
     }
@@ -1267,7 +1266,15 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   const now = nowIso();
   const normalizedUrl = input.url.trim();
   const probe =
-    input.probeSnapshot?.inputUrl.trim() === normalizedUrl ? input.probeSnapshot : await probeTask({ url: input.url, username: null, password: null, privateKeyData: null, privateKeyPassphrase: null });
+    input.probeSnapshot?.inputUrl.trim() === normalizedUrl
+      ? input.probeSnapshot
+      : await probeTask({
+          url: input.url,
+          username: null,
+          password: null,
+          privateKeyData: null,
+          privateKeyPassphrase: null,
+        });
   const duplicate = duplicateTaskForProbe(normalizedUrl, probe);
   if (duplicate && !input.allowDuplicate) {
     throw JSON.stringify({
@@ -1386,7 +1393,15 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
     }
     const duplicate = seen.has(normalized);
     seen.add(normalized);
-    const probe = duplicate ? null : await probeTask({ url: normalized, username: null, password: null, privateKeyData: null, privateKeyPassphrase: null });
+    const probe = duplicate
+      ? null
+      : await probeTask({
+          url: normalized,
+          username: null,
+          password: null,
+          privateKeyData: null,
+          privateKeyPassphrase: null,
+        });
     const existingTask = !duplicate && probe ? duplicateTaskForProbe(normalized, probe) : null;
     const isDuplicate = duplicate || Boolean(existingTask);
     const task =

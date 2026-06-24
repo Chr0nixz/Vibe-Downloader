@@ -133,7 +133,7 @@ export function TrayMenu() {
           </button>
         </div>
 
-        <nav ref={navRef} className="p-1" role="menu" aria-label={t("trayMenu.title")} onKeyDown={handleNavKeyDown}>
+        <nav ref={navRef} className="p-1" aria-label={t("trayMenu.title")} onKeyDown={handleNavKeyDown}>
           {items.map((item, index) => (
             <TrayMenuButton
               key={item.action}

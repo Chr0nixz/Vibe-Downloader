@@ -43,7 +43,7 @@ import type {
   BrowserIntegrationStatus,
   CompletionAction,
 } from "@/generated/bindings";
-import { type Locale, LOCALE_LABEL_KEYS, STABLE_LOCALES, SUPPORTED_LOCALES, setLocale } from "@/i18n";
+import { LOCALE_LABEL_KEYS, type Locale, STABLE_LOCALES, SUPPORTED_LOCALES, setLocale } from "@/i18n";
 import { localizedErrorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import {

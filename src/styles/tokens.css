@@ -103,7 +103,7 @@
   --border-subtle: oklch(0.33 0.012 255);
   --text-primary: oklch(0.93 0.006 255);
   --text-secondary: oklch(0.84 0.008 255);
-  --text-muted: oklch(0.70 0.008 255);
+  --text-muted: oklch(0.7 0.008 255);
   --text-on-accent: oklch(0.18 0.012 255);
   --text-on-danger: oklch(0.975 0.004 255);
   --status-success: oklch(0.8 0.14 150);

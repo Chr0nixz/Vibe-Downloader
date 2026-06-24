@@ -258,8 +258,7 @@ export function TaskList({
       const anchorIdx = list.indexOf(anchorId);
       const currentIdx = list.indexOf(currentId);
       if (anchorIdx === -1 || currentIdx === -1) return;
-      const [start, end] =
-        anchorIdx < currentIdx ? [anchorIdx, currentIdx] : [currentIdx, anchorIdx];
+      const [start, end] = anchorIdx < currentIdx ? [anchorIdx, currentIdx] : [currentIdx, anchorIdx];
       setSelectedIds(list.slice(start, end + 1));
     },
     [setSelectedIds],

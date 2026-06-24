@@ -417,8 +417,7 @@ export function NewDownloadDialog({
         password: password || null,
         privateKeyData: privateKeyData || null,
         privateKeyPassphrase: privateKeyPassphrase || null,
-        selectedHlsVariantUri:
-          currentIsHlsProbe && selectedHlsVariantUri ? selectedHlsVariantUri : null,
+        selectedHlsVariantUri: currentIsHlsProbe && selectedHlsVariantUri ? selectedHlsVariantUri : null,
       });
       onCreated(task);
       resetForm();
@@ -930,10 +929,7 @@ export function NewDownloadDialog({
             {isHlsProbe && probe && probe.hlsVariants.length > 1 ? (
               <label className="flex flex-col gap-1 text-xs text-text-muted">
                 {t("newDownload.hlsQuality")}
-                <Select
-                  value={selectedHlsVariantUri ?? ""}
-                  onValueChange={(value) => setSelectedHlsVariantUri(value)}
-                >
+                <Select value={selectedHlsVariantUri ?? ""} onValueChange={(value) => setSelectedHlsVariantUri(value)}>
                   <SelectTrigger className="h-8 w-full text-xs">
                     <SelectValue />
                   </SelectTrigger>
@@ -991,9 +987,7 @@ export function NewDownloadDialog({
                 {/* Authentication */}
                 {!isTorrentProbe && !isMetalinkProbe && !isHlsProbe && !isDashProbe ? (
                   <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
-                    <span className="text-xs font-medium text-text-secondary">
-                      {t("newDownload.authentication")}
-                    </span>
+                    <span className="text-xs font-medium text-text-secondary">{t("newDownload.authentication")}</span>
                     <div className="grid grid-cols-2 gap-2">
                       <label className="flex flex-col gap-1 text-xs text-text-muted">
                         {t("newDownload.authUsername")}
@@ -1019,9 +1013,7 @@ export function NewDownloadDialog({
                     </div>
                     {isSftpUrl ? (
                       <div className="flex flex-col gap-2">
-                        <span className="text-xs font-medium text-text-secondary">
-                          {t("newDownload.sshKeyAuth")}
-                        </span>
+                        <span className="text-xs font-medium text-text-secondary">{t("newDownload.sshKeyAuth")}</span>
                         <div className="flex items-center gap-2">
                           <Button
                             type="button"

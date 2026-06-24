@@ -40,17 +40,12 @@ export function settingsSearchHasResults<Id extends string>(
   return !normalizedQuery || sections.some((section) => settingsSectionMatchesQuery(section, normalizedQuery));
 }
 
-export function findFieldMatches(
-  fieldKeys: readonly SettingsFieldKey[],
-  query: string,
-): SettingsFieldMatch[] {
+export function findFieldMatches(fieldKeys: readonly SettingsFieldKey[], query: string): SettingsFieldMatch[] {
   const normalizedQuery = normalizeSettingsQuery(query);
   if (!normalizedQuery) return [];
   return fieldKeys
     .filter((field) =>
-      [field.fieldKey, ...(field.terms ?? [])].some((value) =>
-        value?.toLocaleLowerCase().includes(normalizedQuery),
-      ),
+      [field.fieldKey, ...(field.terms ?? [])].some((value) => value?.toLocaleLowerCase().includes(normalizedQuery)),
     )
     .map((field) => ({ sectionId: field.sectionId, fieldKey: field.fieldKey }));
 }

@@ -86,9 +86,7 @@ function render(status) {
 
       info.appendChild(document.createTextNode(` — mode: ${rule.mode ?? "default"}`));
       if (rule.forwardHeaders != null) {
-        info.appendChild(
-          document.createTextNode(`, headers: ${rule.forwardHeaders ? "on" : "off"}`),
-        );
+        info.appendChild(document.createTextNode(`, headers: ${rule.forwardHeaders ? "on" : "off"}`));
       }
 
       const actions = document.createElement("div");
@@ -147,7 +145,7 @@ saveRuleButton.addEventListener("click", () => {
     .filter(Boolean);
   const minSizeRaw = ruleMinSizeEl.value;
   const rule = {
-    id: editingRuleIndex >= 0 ? currentRules[editingRuleIndex]?.id ?? crypto.randomUUID() : crypto.randomUUID(),
+    id: editingRuleIndex >= 0 ? (currentRules[editingRuleIndex]?.id ?? crypto.randomUUID()) : crypto.randomUUID(),
     hostPattern,
     includeSubdomains: ruleSubdomainsEl.checked,
     mode: ruleModeEl.value,
@@ -249,11 +247,5 @@ saveButton.addEventListener("click", () => {
       saveButton.textContent = `Error: ${String(error?.message ?? error)}`;
     });
 });
-
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
-}
 
 refresh();
