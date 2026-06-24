@@ -831,7 +831,7 @@ pub(crate) async fn check_schedule_preemption(
 /// Spawns a background task that checks the schedule window every 60 seconds
 /// and preempts running tasks or resumes paused tasks as needed.
 pub(crate) fn spawn_schedule_window_monitor(app: AppHandle, _state: &AppState) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         // First tick fires immediately; skip it.
         interval.tick().await;
