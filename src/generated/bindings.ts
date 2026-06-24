@@ -118,6 +118,12 @@ export const commands = {
 	cancelTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("cancel_task", { id })),
 	deleteTask: (id: string, deleteFile: boolean) => typedError<null, string>(__TAURI_INVOKE("delete_task", { id, deleteFile })),
 	bulkDeleteTasks: (ids: string[], deleteFile: boolean) => typedError<number, string>(__TAURI_INVOKE("bulk_delete_tasks", { ids, deleteFile })),
+	/**
+	 *  Bulk apply a transfer action (pause/resume/retry) to multiple tasks in a
+	 *  single IPC call. Returns the number of tasks successfully processed.
+	 *  Individual task failures are logged and skipped; the call only fails if a
+	 *  fatal error occurs before the loop.
+	 */
 	bulkTaskAction: (ids: string[], action: string) => typedError<number, string>(__TAURI_INVOKE("bulk_task_action", { ids, action })),
 	openTaskFile: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_file", { id })),
 	openTaskFolder: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_folder", { id })),
