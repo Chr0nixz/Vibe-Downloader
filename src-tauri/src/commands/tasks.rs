@@ -536,13 +536,18 @@ async fn start_task_download(
         // Spawn the download as a nested task so that a panic inside the engine
         // is caught by tokio's JoinHandle (returns Err(JoinError) with is_panic())
         // instead of aborting the entire process. Requires panic = "unwind".
+        // Clone the shared handles that are still needed after the nested spawn
+        // so the outer task retains access once `async move` captures them.
+        let inner_app = task_app.clone();
+        let inner_pool = task_pool.clone();
+        let inner_cancel = task_cancel.clone();
         let download_handle = tokio::spawn(async move {
             engine
                 .download(DownloadContext {
-                    app: task_app.clone(),
-                    pool: task_pool.clone(),
+                    app: inner_app,
+                    pool: inner_pool,
                     task,
-                    cancel: task_cancel.clone(),
+                    cancel: inner_cancel,
                     cancel_token: task_cancel_token.clone(),
                     finish: task_finish.clone(),
                     speed_limiter: task_speed_limiter,

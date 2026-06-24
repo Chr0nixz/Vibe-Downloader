@@ -309,7 +309,7 @@ pub async fn list_task_records_cursor(
     })
 }
 
-fn append_task_filters(query: &mut QueryBuilder<'_, Sqlite>, input: &TaskListQuery) -> bool {
+fn append_task_filters(query: &mut QueryBuilder<Sqlite>, input: &TaskListQuery) -> bool {
     let mut has_where = false;
 
     match input.nav.as_str() {
@@ -367,7 +367,7 @@ fn append_task_filters(query: &mut QueryBuilder<'_, Sqlite>, input: &TaskListQue
 }
 
 fn append_cursor_filter(
-    query: &mut QueryBuilder<'_, Sqlite>,
+    query: &mut QueryBuilder<Sqlite>,
     has_where: &mut bool,
     input: &TaskListQuery,
 ) {
@@ -396,7 +396,7 @@ fn append_cursor_filter(
     query.push(" AND id > ").push_bind(id.clone()).push("))");
 }
 
-fn push_filter_prefix(query: &mut QueryBuilder<'_, Sqlite>, has_where: &mut bool) {
+fn push_filter_prefix(query: &mut QueryBuilder<Sqlite>, has_where: &mut bool) {
     if *has_where {
         query.push(" AND ");
     } else {
@@ -405,7 +405,7 @@ fn push_filter_prefix(query: &mut QueryBuilder<'_, Sqlite>, has_where: &mut bool
     }
 }
 
-fn push_static_filter(query: &mut QueryBuilder<'_, Sqlite>, has_where: &mut bool, filter: &str) {
+fn push_static_filter(query: &mut QueryBuilder<Sqlite>, has_where: &mut bool, filter: &str) {
     push_filter_prefix(query, has_where);
     query.push(filter);
 }

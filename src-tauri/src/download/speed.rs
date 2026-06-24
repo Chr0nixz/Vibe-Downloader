@@ -145,7 +145,7 @@ impl GlobalSpeedLimiter {
                 // Not enough tokens — sleep until we have enough.
                 let deficit_milli = request_milli - current;
                 // wait_ms = deficit_milli / limit (milli-bytes / bytes-per-sec = ms)
-                let wait_ms = ((deficit_milli as f64) / (limit as f64) as u64)
+                let wait_ms = (((deficit_milli as f64) / (limit as f64)) as u64)
                     .max(1)
                     .min(250);
                 tokio::time::sleep(Duration::from_millis(wait_ms)).await;
