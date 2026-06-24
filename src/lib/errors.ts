@@ -67,6 +67,9 @@ export function localizedMessage(message: string | null | undefined, t: TFunctio
 export function localizedErrorMessage(error: unknown, t: TFunction): string {
   const payload = parseAppError(error);
   if (payload) {
+    if (payload.message.startsWith("taskDiagnostics.")) {
+      return localizedMessage(payload.message, t) ?? "";
+    }
     const i18nKey = errorCodeToI18nKey(payload.code);
     if (i18nKey) return t(i18nKey);
   }

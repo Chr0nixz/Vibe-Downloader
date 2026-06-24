@@ -22,6 +22,7 @@ pub(crate) async fn hash_file(
 
     macro_rules! compute_hash {
         ($hasher:expr) => {{
+            let mut hasher = $hasher;
             loop {
                 let read = file
                     .read(&mut buffer)
@@ -30,9 +31,9 @@ pub(crate) async fn hash_file(
                 if read == 0 {
                     break;
                 }
-                Digest::update(&mut $hasher, &buffer[..read]);
+                Digest::update(&mut hasher, &buffer[..read]);
             }
-            format!("{:x}", $hasher.finalize())
+            format!("{:x}", hasher.finalize())
         }};
     }
 
