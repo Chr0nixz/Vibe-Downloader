@@ -2,9 +2,7 @@ import type { TaskProgressPayload, TaskStatus } from "@/generated/bindings";
 
 export type { TaskProgressPayload };
 
-export function normalizeTaskProgressPayload(
-  raw: unknown,
-): TaskProgressPayload | null {
+export function normalizeTaskProgressPayload(raw: unknown): TaskProgressPayload | null {
   if (!raw || typeof raw !== "object") return null;
 
   const record = raw as Record<string, unknown>;

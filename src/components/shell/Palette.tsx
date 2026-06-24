@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import {
   Check,
   Eye,
@@ -18,15 +19,10 @@ import {
   Sun,
   Trash2,
 } from "lucide-react";
-import type { TFunction } from "i18next";
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { useTheme } from "next-themes";
+import { type ComponentType, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
-
-import type { AppSettings } from "@/generated/bindings";
-import type { Platform } from "@/lib/platform";
-import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogBody,
@@ -35,38 +31,34 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import type { AppSettings } from "@/generated/bindings";
 import { errorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
+import type { Platform } from "@/lib/platform";
 import { applyGlobalSpeedLimit } from "@/lib/settings";
 
 const log = createLogger("palette");
+
 import { canSeedMockTasks, seedMockTasks } from "@/lib/tauri";
 import { cn, formatSpeed } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
 import {
+  type FileTypeFilter,
   failureKind,
   filterTasks,
-  useTaskDataStore,
-  useTaskUIStore,
-  type FileTypeFilter,
   type NavFilter,
   type ResumeFilter,
   type TaskFilters,
   type TaskSortDirection,
   type TaskSortKey,
+  useTaskDataStore,
+  useTaskUIStore,
 } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 
-type PaletteGroup =
-  | "app"
-  | "task"
-  | "bulk"
-  | "views"
-  | "sort"
-  | "filters"
-  | "speed"
-  | "development";
+type PaletteGroup = "app" | "task" | "bulk" | "views" | "sort" | "filters" | "speed" | "development";
 
 interface PaletteCommand {
   id: string;
@@ -84,16 +76,7 @@ interface PaletteCommand {
   run: () => void | Promise<void>;
 }
 
-const GROUP_ORDER: PaletteGroup[] = [
-  "app",
-  "task",
-  "bulk",
-  "views",
-  "sort",
-  "filters",
-  "speed",
-  "development",
-];
+const GROUP_ORDER: PaletteGroup[] = ["app", "task", "bulk", "views", "sort", "filters", "speed", "development"];
 
 const SPEED_LIMIT_PRESETS = [
   { id: "unlimited", label: "Unlimited", value: null },
@@ -179,19 +162,10 @@ export function Palette({
     () => filterTasks(tasks, nav, taskSearch, sortKey, sortDirection, filters),
     [filters, nav, sortDirection, sortKey, taskSearch, tasks],
   );
-  const selectedTasks = useMemo(
-    () => tasks.filter((task) => selectedIds.includes(task.id)),
-    [selectedIds, tasks],
-  );
-  const sourceOptions = useMemo(
-    () => Array.from(new Set(tasks.map((task) => task.sourceKey))).sort(),
-    [tasks],
-  );
+  const selectedTasks = useMemo(() => tasks.filter((task) => selectedIds.includes(task.id)), [selectedIds, tasks]);
+  const sourceOptions = useMemo(() => Array.from(new Set(tasks.map((task) => task.sourceKey))).sort(), [tasks]);
   const failureOptions = useMemo(
-    () =>
-      Array.from(
-        new Set(tasks.map(failureKind).filter((kind) => kind !== "none")),
-      ).sort(),
+    () => Array.from(new Set(tasks.map(failureKind).filter((kind) => kind !== "none"))).sort(),
     [tasks],
   );
 
@@ -281,9 +255,7 @@ export function Palette({
       ? commands.filter((command) => commandMatches(command, normalized))
       : commands.filter((command) => command.featured !== false);
 
-    return base.sort(
-      (a, b) => GROUP_ORDER.indexOf(a.group) - GROUP_ORDER.indexOf(b.group),
-    );
+    return base.sort((a, b) => GROUP_ORDER.indexOf(a.group) - GROUP_ORDER.indexOf(b.group));
   }, [commands, query]);
 
   const groupedCommands = useMemo(
@@ -398,9 +370,7 @@ export function Palette({
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("palette.title")}</DialogTitle>
-          <DialogDescription className="sr-only">
-            {t("palette.description")}
-          </DialogDescription>
+          <DialogDescription className="sr-only">{t("palette.description")}</DialogDescription>
         </DialogHeader>
         <DialogBody className="flex flex-col overflow-hidden p-0" onKeyDown={onKeyDown}>
           <div className="shrink-0 border-b border-border-subtle p-3">
@@ -416,9 +386,7 @@ export function Palette({
                 aria-expanded={open}
                 aria-controls="command-palette-results"
                 aria-activedescendant={
-                  visibleCommands[activeIndex]
-                    ? commandDomId(visibleCommands[activeIndex].id)
-                    : undefined
+                  visibleCommands[activeIndex] ? commandDomId(visibleCommands[activeIndex].id) : undefined
                 }
               />
             </div>
@@ -432,9 +400,7 @@ export function Palette({
             className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2"
           >
             {groupedCommands.length === 0 ? (
-              <p className="px-3 py-8 text-center text-sm text-text-muted">
-                {t("palette.noResults")}
-              </p>
+              <p className="px-3 py-8 text-center text-sm text-text-muted">{t("palette.noResults")}</p>
             ) : (
               groupedCommands.map((entry) => (
                 <div key={entry.group} className="py-1">
@@ -443,9 +409,7 @@ export function Palette({
                   </p>
                   <div className="space-y-1">
                     {entry.commands.map((command) => {
-                      const commandIndex = visibleCommands.findIndex(
-                        (entryCommand) => entryCommand.id === command.id,
-                      );
+                      const commandIndex = visibleCommands.findIndex((entryCommand) => entryCommand.id === command.id);
                       return (
                         <CommandRow
                           key={command.id}
@@ -494,9 +458,7 @@ function CommandRow({
       className={cn(
         "flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
         active && "bg-surface-raised",
-        command.enabled
-          ? "text-text-primary hover:bg-surface-raised"
-          : "cursor-not-allowed text-text-muted",
+        command.enabled ? "text-text-primary hover:bg-surface-raised" : "cursor-not-allowed text-text-muted",
         command.danger && command.enabled && "text-status-danger",
       )}
     >
@@ -512,9 +474,7 @@ function CommandRow({
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-2">
           <span className="truncate text-sm font-medium">{command.label}</span>
-          {command.active ? (
-            <Check className="h-3.5 w-3.5 shrink-0 text-accent-primary" />
-          ) : null}
+          {command.active ? <Check className="h-3.5 w-3.5 shrink-0 text-accent-primary" /> : null}
         </span>
         <span className="block truncate text-xs text-text-muted">
           {command.enabled ? command.description : command.disabledReason}
@@ -614,31 +574,18 @@ function buildCommands({
 
   const canStart =
     !!selectedTask &&
-    (selectedTask.status === "paused" ||
-      selectedTask.status === "failed" ||
-      selectedTask.status === "waiting_network");
+    (selectedTask.status === "paused" || selectedTask.status === "failed" || selectedTask.status === "waiting_network");
   const canPause =
     !!selectedTask &&
-    (selectedTask.status === "downloading" ||
-      selectedTask.status === "retrying" ||
-      selectedTask.status === "queued");
-  const canRetry =
-    !!selectedTask &&
-    selectedTask.status !== "completed" &&
-    selectedTask.status !== "needs_attention";
+    (selectedTask.status === "downloading" || selectedTask.status === "retrying" || selectedTask.status === "queued");
+  const canRetry = !!selectedTask && selectedTask.status !== "completed" && selectedTask.status !== "needs_attention";
   const canOpenFile = selectedTask?.status === "completed";
   const hasSelectedTasks = selectedTasks.length > 0;
   const canBulkPause = selectedTasks.some(
-    (task) =>
-      task.status === "downloading" ||
-      task.status === "retrying" ||
-      task.status === "queued",
+    (task) => task.status === "downloading" || task.status === "retrying" || task.status === "queued",
   );
   const canBulkResume = selectedTasks.some(
-    (task) =>
-      task.status === "paused" ||
-      task.status === "failed" ||
-      task.status === "waiting_network",
+    (task) => task.status === "paused" || task.status === "failed" || task.status === "waiting_network",
   );
   const canBulkRetry = selectedTasks.some((task) => task.status !== "completed");
   const filtersActive =
@@ -775,9 +722,7 @@ function buildCommands({
   });
   push({
     id: "task.toggle-details",
-    label: detailOpen
-      ? t("palette.commands.hideDetails")
-      : t("palette.commands.showDetails"),
+    label: detailOpen ? t("palette.commands.hideDetails") : t("palette.commands.showDetails"),
     description: t("palette.descriptions.task", { name: selectedName }),
     group: "task",
     icon: detailOpen ? EyeOff : Eye,
@@ -891,22 +836,20 @@ function buildCommands({
     run: () => onBulkDelete(selectedTasks),
   });
 
-  (["all", "downloading", "paused", "completed", "failed", "settings"] as const).forEach(
-    (nextNav) => {
-      push({
-        id: `view.${nextNav}`,
-        label: t(`nav.${nextNav}`),
-        description: t("palette.descriptions.view"),
-        group: "views",
-        icon: nextNav === "settings" ? Settings : ListChecks,
-        keywords: keyword("view", "filter", nextNav, "视图", "导航"),
-        enabled: true,
-        active: nav === nextNav,
-        featured: nextNav !== "settings",
-        run: () => onSetNav(nextNav),
-      });
-    },
-  );
+  (["all", "downloading", "paused", "completed", "failed", "settings"] as const).forEach((nextNav) => {
+    push({
+      id: `view.${nextNav}`,
+      label: t(`nav.${nextNav}`),
+      description: t("palette.descriptions.view"),
+      group: "views",
+      icon: nextNav === "settings" ? Settings : ListChecks,
+      keywords: keyword("view", "filter", nextNav, "视图", "导航"),
+      enabled: true,
+      active: nav === nextNav,
+      featured: nextNav !== "settings",
+      run: () => onSetNav(nextNav),
+    });
+  });
 
   const sortCommands: Array<{
     id: string;
@@ -1030,10 +973,12 @@ function buildCommands({
     });
   });
 
-  [["all", t("taskList.allFailures")], ...failureOptions.map((failure) => [
-    failure,
-    t(`taskList.failure_${failure}`, { defaultValue: failure }),
-  ] as [string, string])].forEach(([value, label]) => {
+  [
+    ["all", t("taskList.allFailures")],
+    ...failureOptions.map(
+      (failure) => [failure, t(`taskList.failure_${failure}`, { defaultValue: failure })] as [string, string],
+    ),
+  ].forEach(([value, label]) => {
     push({
       id: `filter.failure.${value}`,
       label: t("palette.commands.filterBy", { label }),
@@ -1048,23 +993,22 @@ function buildCommands({
     });
   });
 
-  [["all", t("taskList.allSources")], ...sourceOptions.map((source) => [
-    source,
-    source,
-  ] as [string, string])].forEach(([value, label]) => {
-    push({
-      id: `filter.source.${value}`,
-      label: t("palette.commands.filterBy", { label }),
-      description: t("taskList.source"),
-      group: "filters",
-      icon: Filter,
-      keywords: keyword("filter", "source", "host", value, label, "筛选", "来源"),
-      enabled: true,
-      active: filters.source === value,
-      featured: false,
-      run: () => setFilters({ source: value }),
-    });
-  });
+  [["all", t("taskList.allSources")], ...sourceOptions.map((source) => [source, source] as [string, string])].forEach(
+    ([value, label]) => {
+      push({
+        id: `filter.source.${value}`,
+        label: t("palette.commands.filterBy", { label }),
+        description: t("taskList.source"),
+        group: "filters",
+        icon: Filter,
+        keywords: keyword("filter", "source", "host", value, label, "筛选", "来源"),
+        enabled: true,
+        active: filters.source === value,
+        featured: false,
+        run: () => setFilters({ source: value }),
+      });
+    },
+  );
 
   SPEED_LIMIT_PRESETS.forEach((preset) => {
     const active = preset.value === null ? currentLimit <= 0 : currentLimit === preset.value;
@@ -1117,12 +1061,7 @@ function normalizeSearch(value: string): string {
 }
 
 function commandMatches(command: PaletteCommand, query: string): boolean {
-  return [
-    command.label,
-    command.description,
-    command.group,
-    ...command.keywords,
-  ]
+  return [command.label, command.description, command.group, ...command.keywords]
     .join(" ")
     .toLowerCase()
     .includes(query);

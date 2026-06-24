@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use reqwest::{Client, StatusCode};
-use tokio::{fs, io::AsyncWriteExt, sync::mpsc, task::JoinSet};
+use tokio::{fs, io::{AsyncWriteExt, BufWriter}, sync::mpsc, task::JoinSet};
 
 use super::{
     error::format_http_status,
@@ -61,7 +61,7 @@ pub(super) async fn run_direct_download(
             .map_err(|e| format!("Could not create the download directory: {e}"))?;
     }
 
-    let mut file = if resume_from > 0 {
+    let raw_file = if resume_from > 0 {
         fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -73,6 +73,7 @@ pub(super) async fn run_direct_download(
             .await
             .map_err(|e| format!("Could not create the temporary file: {e}"))?
     };
+    let mut file = BufWriter::with_capacity(256 * 1024, raw_file);
 
     let mut downloaded = resume_from;
     while let Some(chunk) = response
@@ -145,6 +146,7 @@ pub(super) async fn run_direct_segmented_download(
     let segment_count = request.segments.len();
     let mut active_workers = 0_usize;
     let if_range = if_range_header_from(request.etag.as_deref(), request.last_modified.as_deref());
+    let cancel_token = tokio_util::sync::CancellationToken::new();
 
     for segment in request.segments {
         let offset = segment
@@ -165,6 +167,7 @@ pub(super) async fn run_direct_segmented_download(
             segment_count,
             supports_parallel: request.supports_parallel,
             cancel: cancel.clone(),
+            cancel_token: cancel_token.clone(),
             progress_tx: progress_tx.clone(),
             range_end: Arc::new(AtomicI64::new(range_end)),
             speed_limiter: speed_limiter.clone(),

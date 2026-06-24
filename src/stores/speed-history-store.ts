@@ -24,10 +24,7 @@ export const useSpeedHistoryStore = create<SpeedHistoryState>((set, get) => ({
   appendSample: (taskId, sample) => {
     const current = get().history;
     const existing = current[taskId] ?? [];
-    const updated =
-      existing.length >= SPEED_HISTORY_LIMIT
-        ? [...existing.slice(1), sample]
-        : [...existing, sample];
+    const updated = existing.length >= SPEED_HISTORY_LIMIT ? [...existing.slice(1), sample] : [...existing, sample];
     // Only update the specific task's array, not the entire map
     set({ history: { ...current, [taskId]: updated } });
   },
@@ -35,13 +32,13 @@ export const useSpeedHistoryStore = create<SpeedHistoryState>((set, get) => ({
   appendBatch: (entries) => {
     if (entries.length === 0) return;
     const current = get().history;
+    // Shallow-copy the map (Zustand requires a new reference to trigger updates),
+    // but only create new arrays for tasks that actually have new samples.
+    // Tasks without samples keep their original array reference (structural sharing).
     const next = { ...current };
     for (const { taskId, sample } of entries) {
       const existing = next[taskId] ?? [];
-      next[taskId] =
-        existing.length >= SPEED_HISTORY_LIMIT
-          ? [...existing.slice(1), sample]
-          : [...existing, sample];
+      next[taskId] = existing.length >= SPEED_HISTORY_LIMIT ? [...existing.slice(1), sample] : [...existing, sample];
     }
     set({ history: next });
   },

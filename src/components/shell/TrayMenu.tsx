@@ -1,19 +1,11 @@
-import {
-  AppWindow,
-  FolderOpen,
-  Plus,
-  Power,
-  Settings,
-  X,
-  type LucideIcon,
-} from "lucide-react";
-import { useEffect, useState } from "react";
+import { AppWindow, FolderOpen, type LucideIcon, Plus, Power, Settings, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { TrayMenuAction } from "@/generated/bindings";
-import { cn } from "@/lib/utils";
 import { createLogger } from "@/lib/logger";
 import { runTrayMenuAction } from "@/lib/tauri";
+import { cn } from "@/lib/utils";
 
 const log = createLogger("tray-menu");
 
@@ -57,6 +49,7 @@ const items: TrayMenuItem[] = [
 export function TrayMenu() {
   const { t } = useTranslation();
   const [pendingAction, setPendingAction] = useState<TrayMenuAction | null>(null);
+  const navRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -68,6 +61,37 @@ export function TrayMenu() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const handleNavKeyDown = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
+    const nav = navRef.current;
+    if (!nav) return;
+    const buttons = Array.from(nav.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not(:disabled)'));
+    if (buttons.length === 0) return;
+    const currentIndex = buttons.indexOf(document.activeElement as HTMLButtonElement);
+
+    let nextIndex = -1;
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        nextIndex = currentIndex < buttons.length - 1 ? currentIndex + 1 : 0;
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        nextIndex = currentIndex > 0 ? currentIndex - 1 : buttons.length - 1;
+        break;
+      case "Home":
+        event.preventDefault();
+        nextIndex = 0;
+        break;
+      case "End":
+        event.preventDefault();
+        nextIndex = buttons.length - 1;
+        break;
+      default:
+        return;
+    }
+    buttons[nextIndex]?.focus();
   }, []);
 
   async function runAction(action: TrayMenuAction) {
@@ -97,9 +121,7 @@ export function TrayMenu() {
             <span className="h-2 w-2 rounded-full bg-accent-energy" />
           </div>
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-[0.82rem] font-semibold leading-5 text-text-primary">
-              {t("trayMenu.title")}
-            </h1>
+            <h1 className="truncate text-[0.82rem] font-semibold leading-5 text-text-primary">{t("trayMenu.title")}</h1>
           </div>
           <button
             type="button"
@@ -111,7 +133,7 @@ export function TrayMenu() {
           </button>
         </div>
 
-        <nav className="p-1" role="group" aria-label={t("trayMenu.title")}>
+        <nav ref={navRef} className="p-1" role="menu" aria-label={t("trayMenu.title")} onKeyDown={handleNavKeyDown}>
           {items.map((item, index) => (
             <TrayMenuButton
               key={item.action}
@@ -144,6 +166,7 @@ function TrayMenuButton({
   return (
     <button
       type="button"
+      role="menuitem"
       className={cn(
         "group flex h-9 w-full items-center gap-2.5 rounded-md px-2 text-left outline-none transition duration-ui ease-out hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-accent-primary",
         separated && "mt-1 border-t border-border-separator pt-1.5",
@@ -155,8 +178,7 @@ function TrayMenuButton({
       <span
         className={cn(
           "grid h-7 w-7 shrink-0 place-items-center rounded-md bg-surface-raised text-text-secondary ring-1 ring-border-divider transition",
-          item.tone === "primary" &&
-            "bg-accent-primary text-text-on-accent ring-accent-primary",
+          item.tone === "primary" && "bg-accent-primary text-text-on-accent ring-accent-primary",
           item.tone === "danger" &&
             "text-status-danger group-hover:bg-status-danger/14 group-hover:ring-status-danger/30",
         )}

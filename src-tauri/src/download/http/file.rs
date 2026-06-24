@@ -10,10 +10,53 @@ pub(crate) async fn finalize_download_file(
     preferred_final_path: &Path,
 ) -> Result<PathBuf, String> {
     let final_path = available_final_path(preferred_final_path).await?;
-    fs::rename(temp_path, &final_path).await.map_err(|e| {
-        AppErrorPayload::disk_write_failed(format!("Could not finalize the downloaded file: {e}"))
+    if fs::rename(temp_path, &final_path).await.is_ok() {
+        return Ok(final_path);
+    }
+    // Cross-drive fallback: rename fails with EXDEV when source and dest are
+    // on different volumes (e.g. C: → D: on Windows). Copy, fsync, then delete.
+    fs::copy(temp_path, &final_path)
+        .await
+        .map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!(
+                "Could not copy downloaded file to {dest}: {e}",
+                dest = final_path.display()
+            ))
             .command_error()
-    })?;
+        })?;
+    // fsync the destination to ensure data is on disk before removing the source.
+    // If sync fails, keep the temp file as a safety net — deleting the source
+    // without confirmed persistence risks data loss on network/unreliable drives.
+    let synced = match fs::File::open(&final_path).await {
+        Ok(file) => match file.sync_all().await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    path = %final_path.display(),
+                    error = %error,
+                    "sync_all failed after cross-drive copy; keeping temp file as safety net"
+                );
+                false
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                path = %final_path.display(),
+                error = %error,
+                "could not open copied file for sync_all"
+            );
+            false
+        }
+    };
+    if synced {
+        if let Err(error) = fs::remove_file(temp_path).await {
+            tracing::warn!(
+                path = %temp_path.display(),
+                error = %error,
+                "could not remove temp file after cross-drive copy"
+            );
+        }
+    }
     Ok(final_path)
 }
 
@@ -21,7 +64,10 @@ pub(crate) async fn preallocate_temp_file(file: &fs::File, total_size: i64, task
     if total_size <= 0 {
         return;
     }
-    if let Err(error) = file.set_len(u64::try_from(total_size).unwrap_or(u64::MAX)).await {
+    if let Err(error) = file
+        .set_len(u64::try_from(total_size).unwrap_or(u64::MAX))
+        .await
+    {
         tracing::warn!(
             task_id,
             total_size,

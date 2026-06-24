@@ -93,6 +93,9 @@ export const commands = {
 	showTrayMenuAt: (logicalX: number | null, logicalY: number | null) => typedError<null, string>(__TAURI_INVOKE("show_tray_menu_at", { logicalX, logicalY })),
 	runTrayMenuAction: (action: TrayMenuAction) => typedError<null, string>(__TAURI_INVOKE("run_tray_menu_action", { action })),
 	requestSystemShutdown: () => typedError<null, string>(__TAURI_INVOKE("request_system_shutdown")),
+	requestSystemSleep: () => typedError<null, string>(__TAURI_INVOKE("request_system_sleep")),
+	requestSystemHibernate: () => typedError<null, string>(__TAURI_INVOKE("request_system_hibernate")),
+	requestLockScreen: () => typedError<null, string>(__TAURI_INVOKE("request_lock_screen")),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
 	probeFtpDirectory: (url: string) => typedError<FtpDirectoryProbe, string>(__TAURI_INVOKE("probe_ftp_directory", { url })),
 	probeSftpDirectory: (url: string) => typedError<SftpDirectoryProbe, string>(__TAURI_INVOKE("probe_sftp_directory", { url })),
@@ -104,13 +107,18 @@ export const commands = {
 	updateTorrentSeeding: (input: UpdateTorrentSeedingInput) => typedError<Task, string>(__TAURI_INVOKE("update_torrent_seeding", { input })),
 	updateTaskProxySettings: (input: TaskProxySettingsInput) => typedError<TaskProxySettings, string>(__TAURI_INVOKE("update_task_proxy_settings", { input })),
 	verifyTaskHash: (id: string) => typedError<HashVerificationState, string>(__TAURI_INVOKE("verify_task_hash", { id })),
+	computeFileHash: (id: string, algorithm: ChecksumAlgorithm) => typedError<string, string>(__TAURI_INVOKE("compute_file_hash", { id, algorithm })),
 	pauseTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("pause_task", { id })),
 	resumeTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("resume_task", { id })),
 	retryTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("retry_task", { id })),
+	listMetalinkMirrors: (id: string) => typedError<MetalinkMirrorView[], string>(__TAURI_INVOKE("list_metalink_mirrors", { id })),
+	retryTaskWithMirror: (id: string, mirrorUrl: string) => typedError<Task, string>(__TAURI_INVOKE("retry_task_with_mirror", { id, mirrorUrl })),
 	finishLiveRecording: (id: string) => typedError<Task, string>(__TAURI_INVOKE("finish_live_recording", { id })),
 	resolveTaskAttention: (input: ResolveTaskAttentionInput) => typedError<Task, string>(__TAURI_INVOKE("resolve_task_attention", { input })),
 	cancelTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("cancel_task", { id })),
 	deleteTask: (id: string, deleteFile: boolean) => typedError<null, string>(__TAURI_INVOKE("delete_task", { id, deleteFile })),
+	bulkDeleteTasks: (ids: string[], deleteFile: boolean) => typedError<number, string>(__TAURI_INVOKE("bulk_delete_tasks", { ids, deleteFile })),
+	bulkTaskAction: (ids: string[], action: string) => typedError<number, string>(__TAURI_INVOKE("bulk_task_action", { ids, action })),
 	openTaskFile: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_file", { id })),
 	openTaskFolder: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_folder", { id })),
 	seedMockTasks: () => typedError<Task[], string>(__TAURI_INVOKE("seed_mock_tasks")),
@@ -125,8 +133,6 @@ export type AppErrorPayload = {
 	recoverable: boolean,
 	actions: string[],
 };
-
-export type AppFontFamily = "system" | "source_han_sans_sc";
 
 export type AppProxyMode = "off" | "system" | "custom";
 
@@ -143,7 +149,6 @@ export type AppSettings = {
 	autoResumeOnStartup: boolean,
 	floatingWindowEnabled: boolean,
 	clipboardMonitorEnabled: boolean,
-	fontFamily: AppFontFamily,
 	accentColor: AppAccentColor,
 	proxyMode: AppProxyMode,
 	proxyUrl: string,
@@ -157,10 +162,11 @@ export type AppSettings = {
 	scheduleSpeedLimitWindowStart: string,
 	scheduleSpeedLimitWindowEnd: string,
 	scheduleSpeedLimitBps: string | null,
-	sidebarStripeEnabled: boolean,
 	titlebarGradientEnabled: boolean,
 	completionAction: CompletionAction,
 	completionCountdownSeconds: number,
+	completionRunCommand: string,
+	deleteToTrash: boolean,
 };
 
 export type BatchImportItem = {
@@ -302,7 +308,7 @@ export type ClipboardLinkDetectedPayload = {
 	detectedAt: string,
 };
 
-export type CompletionAction = "none" | "exit_app" | "shutdown";
+export type CompletionAction = "none" | "exit_app" | "shutdown" | "sleep" | "hibernate" | "lock_screen" | "run_command";
 
 export type CompletionActionRequestedPayload = {
 	action: CompletionAction,
@@ -320,6 +326,11 @@ export type CreateTaskInput = {
 	probeSnapshot: ProbeTaskPayload | null,
 	selectedFilePaths: string[] | null,
 	allowDuplicate: boolean | null,
+	username: string | null,
+	password: string | null,
+	privateKeyData: string | null,
+	privateKeyPassphrase: string | null,
+	selectedHlsVariantUri: string | null,
 };
 
 export type CursorPageInput = {
@@ -420,8 +431,22 @@ export type ListTasksResult = {
 	pageSize: number,
 };
 
+export type MetalinkMirrorView = {
+	id: string,
+	url: string,
+	priority: number,
+	location: string | null,
+	status: string,
+	failureCount: number,
+	lastError: string | null,
+};
+
 export type ProbeTaskInput = {
 	url: string,
+	username: string | null,
+	password: string | null,
+	privateKeyData: string | null,
+	privateKeyPassphrase: string | null,
 };
 
 export type ProbeTaskPayload = {
@@ -716,7 +741,6 @@ export type UpdateSettingsInput = {
 	autoResumeOnStartup: boolean | null,
 	floatingWindowEnabled: boolean | null,
 	clipboardMonitorEnabled: boolean | null,
-	fontFamily: AppFontFamily | null,
 	accentColor: AppAccentColor | null,
 	proxyMode: AppProxyMode | null,
 	proxyUrl: string | null,
@@ -731,10 +755,11 @@ export type UpdateSettingsInput = {
 	scheduleSpeedLimitWindowStart: string | null,
 	scheduleSpeedLimitWindowEnd: string | null,
 	scheduleSpeedLimitBps: string | null,
-	sidebarStripeEnabled: boolean | null,
 	titlebarGradientEnabled: boolean | null,
 	completionAction: CompletionAction | null,
 	completionCountdownSeconds: number | null,
+	completionRunCommand: string | null,
+	deleteToTrash: boolean | null,
 };
 
 export type UpdateTaskTransferOptionsInput = {

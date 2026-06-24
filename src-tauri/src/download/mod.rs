@@ -1,10 +1,14 @@
 mod bt;
+pub(crate) mod checksum;
 mod dash;
 mod engine;
 pub(crate) mod ftp;
 mod hls;
 mod http;
 mod metalink;
+pub(crate) mod probe_error;
+pub(crate) mod retry;
+pub(crate) mod sanitize;
 pub(crate) mod sftp;
 mod speed;
 pub(crate) mod webdav;
@@ -12,7 +16,7 @@ pub(crate) mod webdav;
 pub use bt::BtEngine;
 pub use dash::DashEngine;
 pub use engine::{
-    DownloadContext, DownloadEngine, EngineRegistry, ExternalEngineAdapter, ProbeOutput,
+    DownloadContext, DownloadEngine, EngineRegistry, ProbeOutput,
     ProbeRequest,
 };
 pub use ftp::FtpEngine;

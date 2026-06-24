@@ -1,7 +1,8 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { CommandBar } from "@/components/shell/CommandBar";
+import type { AttentionDialogRequest } from "@/components/shell/ResolveAttentionDialog";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { StatusBar } from "@/components/shell/StatusBar";
 import { TitleBar } from "@/components/shell/TitleBar";
@@ -17,41 +18,41 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ToastViewport } from "@/components/ui/toast";
-import type { AttentionDialogRequest } from "@/components/shell/ResolveAttentionDialog";
+import type { CompletionActionRequestedPayload, RecoveryAction, ResolveTaskAttentionInput } from "@/generated/bindings";
 import { useTaskEvents } from "@/hooks/use-task-events";
+import { localizedErrorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
-import { errorMessage } from "@/lib/errors";
-import type {
-  CompletionActionRequestedPayload,
-  RecoveryAction,
-  ResolveTaskAttentionInput,
-} from "@/generated/bindings";
-import {
-  getPlatform,
-  trafficLightsInsetPx,
-  type Platform,
-} from "@/lib/platform";
-import { cn, sanitizeUrlForDisplay } from "@/lib/utils";
+import { getPlatform, type Platform, trafficLightsInsetPx } from "@/lib/platform";
+import { sanitizeUrlForDisplay } from "@/lib/utils";
 
 const log = createLogger("app-shell");
+
+import { isSupportedLocalFile, resolveLocalFile } from "@/lib/local-file";
 import {
+  bulkDeleteTasks,
+  bulkTaskAction,
   deleteTask,
+  type FileDropDragState,
+  finishLiveRecording,
   getSettings,
   listTasksCursor,
-  onCompletionActionRequested,
   onClipboardLinkDetected,
+  onCompletionActionRequested,
+  onFileDrop,
   onSettingsChanged,
   onTrayNewDownloadRequested,
   onTraySettingsRequested,
+  openDirectoryPicker,
   openTaskFile,
   openTaskFolder,
-  openDirectoryPicker,
-  requestSystemShutdown,
-  finishLiveRecording,
   pauseTask,
+  requestLockScreen,
+  requestSystemHibernate,
+  requestSystemShutdown,
+  requestSystemSleep,
   resolveTaskAttention,
-  retryTask,
   resumeTask,
+  retryTask,
   runTrayMenuAction,
 } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -100,18 +101,21 @@ const ShortcutPanel = lazy(() =>
     default: module.ShortcutPanel,
   })),
 );
+const OnboardingDialog = lazy(() =>
+  import("@/components/shell/OnboardingDialog").then((module) => ({
+    default: module.OnboardingDialog,
+  })),
+);
 
-function matchesShortcut(
-  event: KeyboardEvent,
-  shortcut: string,
-  platform: Platform,
-): boolean {
+function matchesShortcut(event: KeyboardEvent, shortcut: string, platform: Platform): boolean {
   const parts = shortcut.toLowerCase().split("+");
   const key = parts[parts.length - 1];
   if (parts.includes("mod")) {
     const modOk = platform === "macos" ? event.metaKey : event.ctrlKey;
     if (!modOk) return false;
   }
+  if (parts.includes("shift") && !event.shiftKey) return false;
+  if (!parts.includes("shift") && event.shiftKey) return false;
   return event.key.toLowerCase() === key;
 }
 
@@ -121,20 +125,17 @@ export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
-  const [newDownloadInitialState, setNewDownloadInitialState] =
-    useState<NewDownloadInitialState | null>(null);
+  const [newDownloadInitialState, setNewDownloadInitialState] = useState<NewDownloadInitialState | null>(null);
   const [newDownloadDraftDirty, setNewDownloadDraftDirty] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
   const [bulkDeleteTargets, setBulkDeleteTargets] = useState<Task[]>([]);
-  const [attentionRequest, setAttentionRequest] =
-    useState<AttentionDialogRequest | null>(null);
-  const [completionActionRequest, setCompletionActionRequest] =
-    useState<CompletionActionRequestedPayload | null>(null);
+  const [attentionRequest, setAttentionRequest] = useState<AttentionDialogRequest | null>(null);
+  const [completionActionRequest, setCompletionActionRequest] = useState<CompletionActionRequestedPayload | null>(null);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
 
   const selectedId = useTaskUIStore((s) => s.selectedId);
-  const selected = useTaskDataStore((s) =>
-    selectedId ? s.taskById[selectedId] ?? null : null,
-  );
+  const taskIds = useTaskDataStore((s) => s.taskIds);
+  const selected = useTaskDataStore((s) => (selectedId ? (s.taskById[selectedId] ?? null) : null));
   const nav = useTaskUIStore((s) => s.nav);
   const detailOpen = useTaskUIStore((s) => s.detailOpen);
   const setTaskCursorPage = useTaskDataStore((s) => s.setTaskCursorPage);
@@ -142,209 +143,234 @@ export function AppShell() {
   const setError = useTaskDataStore((s) => s.setError);
   const selectTask = useTaskUIStore((s) => s.selectTask);
   const clearSelectedIds = useTaskUIStore((s) => s.clearSelectedIds);
+  const setSelectedIds = useTaskUIStore((s) => s.setSelectedIds);
+  const setNav = useTaskUIStore((s) => s.setNav);
   const setDetailOpen = useTaskUIStore((s) => s.setDetailOpen);
   const settings = useSettingsStore((s) => s.settings);
   const setSettings = useSettingsStore((s) => s.setSettings);
   const setSettingsLoading = useSettingsStore((s) => s.setLoading);
   const setSettingsError = useSettingsStore((s) => s.setError);
   const addToast = useToastStore((s) => s.addToast);
-  const updateToast = useToastStore((s) => s.updateToast);
   const dismissToast = useToastStore((s) => s.dismissToast);
-  const taskLoading = useTaskDataStore((s) => s.loading);
-
-  /* ── Splash overlay ── */
-  const initialLoadDoneRef = useRef(false);
-  const [splashVisible, setSplashVisible] = useState(true);
-  const [splashDismissing, setSplashDismissing] = useState(false);
-
-  const dismissSplash = useCallback(() => {
-    if (initialLoadDoneRef.current) return;
-    initialLoadDoneRef.current = true;
-    const fadeTimer = setTimeout(() => setSplashDismissing(true), 200);
-    const removeTimer = setTimeout(() => setSplashVisible(false), 420);
-    return () => {
-      clearTimeout(fadeTimer);
-      clearTimeout(removeTimer);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!taskLoading) dismissSplash();
-  }, [taskLoading, dismissSplash]);
-
-  // Safety timeout: force-dismiss splash after 3 seconds regardless of loading state
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (!initialLoadDoneRef.current) {
-        dismissSplash();
-        useTaskDataStore.getState().setLoading(false);
-      }
-    }, 3000);
-    return () => clearTimeout(timer);
-  }, [dismissSplash]);
 
   const taskSurfaceActive = nav !== "settings";
 
-  const refreshTasks = useCallback(async (selectId?: string) => {
-    const page = await listTasksCursor(taskCursorInput(null));
-    const data = page.items;
-    setTaskCursorPage(data, page.totalEstimate, page.nextCursor, page.filterOptions);
-    if (selectId) {
-      selectTask(selectId);
-    } else {
-      const currentSelectedId = useTaskUIStore.getState().selectedId;
-      if (
-        data.length > 0 &&
-        (!currentSelectedId || !data.some((task) => task.id === currentSelectedId))
-      ) {
-        selectTask(data[0].id);
-      } else if (data.length === 0) {
-        selectTask(null);
-      }
-    }
-  }, [selectTask, setTaskCursorPage]);
-
-  const runTaskAction = useCallback(async (action: () => Promise<Task | void>, selectId?: string) => {
-    try {
-      const result = await action();
-      setError(null);
-      if (result) {
-        upsertTask(result);
-        if (selectId) selectTask(selectId);
+  const refreshTasks = useCallback(
+    async (selectId?: string) => {
+      const page = await listTasksCursor(taskCursorInput(null));
+      const data = page.items;
+      setTaskCursorPage(data, page.totalEstimate, page.nextCursor, page.filterOptions);
+      if (selectId) {
+        selectTask(selectId);
       } else {
-        await refreshTasks(selectId);
+        const currentSelectedId = useTaskUIStore.getState().selectedId;
+        if (data.length > 0 && (!currentSelectedId || !data.some((task) => task.id === currentSelectedId))) {
+          selectTask(data[0].id);
+        } else if (data.length === 0) {
+          selectTask(null);
+        }
       }
-    } catch (err) {
-      const message = errorMessage(err);
-      log.error("task action failed", err);
-      setError(message);
-      addToast({
-        tone: "error",
-        title: t("toast.actionFailed"),
-        description: message,
+    },
+    [selectTask, setTaskCursorPage],
+  );
+
+  const runTaskAction = useCallback(
+    async (
+      action: () => Promise<Task | void>,
+      selectId?: string,
+      options?: { suppressErrorToast?: boolean },
+    ): Promise<boolean> => {
+      try {
+        const result = await action();
+        setError(null);
+        if (result) {
+          upsertTask(result);
+          if (selectId) selectTask(selectId);
+        } else {
+          await refreshTasks(selectId);
+        }
+        return true;
+      } catch (err) {
+        const message = localizedErrorMessage(err, t);
+        log.error("task action failed", err);
+        setError(message);
+        if (!options?.suppressErrorToast) {
+          addToast({
+            tone: "error",
+            title: t("toast.actionFailed"),
+            description: message,
+          });
+        }
+        return false;
+      }
+    },
+    [addToast, refreshTasks, selectTask, setError, t, upsertTask],
+  );
+
+  const toggleTransfer = useCallback(
+    (task: Task) => {
+      if (task.status === "downloading" || task.status === "retrying" || task.status === "queued") {
+        void runTaskAction(() => pauseTask(task.id), task.id);
+      } else if (task.status !== "completed" && task.status !== "needs_attention") {
+        void runTaskAction(() => resumeTask(task.id), task.id);
+      }
+    },
+    [runTaskAction],
+  );
+
+  const retry = useCallback(
+    (task: Task) => {
+      void runTaskAction(() => retryTask(task.id), task.id);
+    },
+    [runTaskAction],
+  );
+
+  const finishRecording = useCallback(
+    (task: Task) => {
+      void runTaskAction(() => finishLiveRecording(task.id), task.id);
+    },
+    [runTaskAction],
+  );
+
+  const openFile = useCallback(
+    (task: Task) => {
+      void runTaskAction(() => openTaskFile(task.id), task.id);
+    },
+    [runTaskAction],
+  );
+
+  const openFolder = useCallback(
+    (task: Task) => {
+      void runTaskAction(() => openTaskFolder(task.id), task.id);
+    },
+    [runTaskAction],
+  );
+
+  // Single-IPC bulk transfer action (pause/resume/retry) via bulk_task_action.
+  // Replaces N serial IPC calls with one aggregated call + one refresh.
+  const runBulkTransferAction = useCallback(
+    async (ids: string[], action: "pause" | "resume" | "retry", label: string) => {
+      if (ids.length === 0) return;
+      const total = ids.length;
+      const toastId = addToast({
+        tone: "info",
+        title: t("toast.bulkProgress", { action: label, done: 0, total }),
       });
-    }
-  }, [addToast, refreshTasks, selectTask, setError, t, upsertTask]);
+      try {
+        const succeeded = await bulkTaskAction(ids, action);
+        dismissToast(toastId);
+        const failed = total - succeeded;
+        await refreshTasks();
+        if (failed === 0) {
+          addToast({
+            tone: "success",
+            title: t("toast.bulkComplete", { action: label, done: succeeded, total }),
+          });
+        } else if (failed === total) {
+          addToast({
+            tone: "error",
+            title: t("toast.bulkFailed", { action: label }),
+            description: t("toast.bulkFailureDetail", { failed, total }),
+          });
+        } else {
+          addToast({
+            tone: "error",
+            title: t("toast.bulkPartialFailure", { action: label, failed, total }),
+          });
+        }
+      } catch (err) {
+        dismissToast(toastId);
+        const message = localizedErrorMessage(err, t);
+        addToast({ tone: "error", title: t("toast.bulkFailed", { action: label }), description: message });
+      }
+    },
+    [addToast, dismissToast, refreshTasks, t],
+  );
 
-  const toggleTransfer = useCallback((task: Task) => {
-    if (task.status === "downloading" || task.status === "retrying" || task.status === "queued") {
-      void runTaskAction(() => pauseTask(task.id), task.id);
-    } else if (task.status !== "completed" && task.status !== "needs_attention") {
-      void runTaskAction(() => resumeTask(task.id), task.id);
-    }
-  }, [runTaskAction]);
+  const bulkPause = useCallback(
+    (selectedTasks: Task[]) => {
+      const ids = selectedTasks
+        .filter(
+          (task) => task.status === "downloading" || task.status === "retrying" || task.status === "queued",
+        )
+        .map((task) => task.id);
+      void runBulkTransferAction(ids, "pause", t("taskList.bulkPause"));
+    },
+    [runBulkTransferAction, t],
+  );
 
-  const retry = useCallback((task: Task) => {
-    void runTaskAction(() => retryTask(task.id), task.id);
-  }, [runTaskAction]);
+  const bulkResume = useCallback(
+    (selectedTasks: Task[]) => {
+      const ids = selectedTasks
+        .filter(
+          (task) => task.status === "paused" || task.status === "failed" || task.status === "waiting_network",
+        )
+        .map((task) => task.id);
+      void runBulkTransferAction(ids, "resume", t("taskList.bulkResume"));
+    },
+    [runBulkTransferAction, t],
+  );
 
-  const finishRecording = useCallback((task: Task) => {
-    void runTaskAction(() => finishLiveRecording(task.id), task.id);
-  }, [runTaskAction]);
+  const bulkRetry = useCallback(
+    (selectedTasks: Task[]) => {
+      const ids = selectedTasks.filter((task) => task.status !== "completed").map((task) => task.id);
+      void runBulkTransferAction(ids, "retry", t("taskList.bulkRetry"));
+    },
+    [runBulkTransferAction, t],
+  );
 
-  const openFile = useCallback((task: Task) => {
-    void runTaskAction(() => openTaskFile(task.id), task.id);
-  }, [runTaskAction]);
+  const bulkOpenFolder = useCallback(
+    (selectedTasks: Task[]) => {
+      const first = selectedTasks[0];
+      if (first) openFolder(first);
+    },
+    [openFolder],
+  );
 
-  const openFolder = useCallback((task: Task) => {
-    void runTaskAction(() => openTaskFolder(task.id), task.id);
-  }, [runTaskAction]);
-
-  const runBulkTaskAction = useCallback(async (
-    selectedTasks: Task[],
-    action: (task: Task) => Promise<Task | void>,
-    label: string,
-  ) => {
-    if (selectedTasks.length === 0) return;
-    const total = selectedTasks.length;
-    const toastId = addToast({
-      tone: "info",
-      title: t("toast.bulkProgress", { action: label, done: 0, total }),
-    });
-    let done = 0;
-    for (const task of selectedTasks) {
-      await runTaskAction(() => action(task), task.id);
-      done++;
-      updateToast(toastId, {
-        description: t("toast.bulkProgress", { action: label, done, total }),
-      });
-    }
-    dismissToast(toastId);
-    addToast({
-      tone: "success",
-      title: t("toast.bulkComplete", { action: label, done, total }),
-    });
-  }, [addToast, dismissToast, runTaskAction, t, updateToast]);
-
-  const bulkPause = useCallback((selectedTasks: Task[]) => {
-    void runBulkTaskAction(
-      selectedTasks.filter((task) =>
-        task.status === "downloading" ||
-        task.status === "retrying" ||
-        task.status === "queued",
-      ),
-      (task) => pauseTask(task.id),
-      t("taskList.bulkPause"),
-    );
-  }, [runBulkTaskAction, t]);
-
-  const bulkResume = useCallback((selectedTasks: Task[]) => {
-    void runBulkTaskAction(
-      selectedTasks.filter((task) =>
-        task.status === "paused" ||
-        task.status === "failed" ||
-        task.status === "waiting_network",
-      ),
-      (task) => resumeTask(task.id),
-      t("taskList.bulkResume"),
-    );
-  }, [runBulkTaskAction, t]);
-
-  const bulkRetry = useCallback((selectedTasks: Task[]) => {
-    void runBulkTaskAction(
-      selectedTasks.filter((task) => task.status !== "completed"),
-      (task) => retryTask(task.id),
-      t("taskList.bulkRetry"),
-    );
-  }, [runBulkTaskAction, t]);
-
-  const bulkOpenFolder = useCallback((selectedTasks: Task[]) => {
-    const first = selectedTasks[0];
-    if (first) openFolder(first);
-  }, [openFolder]);
+  const bulkExport = useCallback(
+    async (selectedTasks: Task[], format: "json" | "csv") => {
+      if (selectedTasks.length === 0) return;
+      const { exportTasks } = await import("@/lib/export");
+      const success = await exportTasks(selectedTasks, format);
+      if (success) {
+        addToast({ tone: "success", title: t("taskList.exportSuccess", { count: selectedTasks.length }) });
+      }
+    },
+    [addToast, t],
+  );
 
   const bulkDelete = useCallback((selectedTasks: Task[]) => {
     if (selectedTasks.length === 0) return;
     setBulkDeleteTargets(selectedTasks);
   }, []);
 
-  const confirmBulkDelete = useCallback((deleteFile: boolean) => {
-    const targets = bulkDeleteTargets;
-    setBulkDeleteTargets([]);
-    if (targets.length === 0) return;
-    void (async () => {
-      const total = targets.length;
-      const label = t("taskList.bulkDelete", { count: total });
-      const toastId = addToast({
-        tone: "info",
-        title: t("toast.bulkProgress", { action: label, done: 0, total }),
-      });
-      let done = 0;
-      for (const task of targets) {
-        await runTaskAction(() => deleteTask(task.id, deleteFile));
-        done++;
-        updateToast(toastId, {
-          description: t("toast.bulkProgress", { action: label, done, total }),
-        });
-      }
-      dismissToast(toastId);
-      addToast({
-        tone: "success",
-        title: t("toast.bulkComplete", { action: label, done, total }),
-      });
-      clearSelectedIds();
-    })();
-  }, [addToast, bulkDeleteTargets, clearSelectedIds, dismissToast, runTaskAction, t, updateToast]);
+  const confirmBulkDelete = useCallback(
+    (deleteFile: boolean) => {
+      const targets = bulkDeleteTargets;
+      setBulkDeleteTargets([]);
+      if (targets.length === 0) return;
+      void (async () => {
+        const total = targets.length;
+        const label = t("taskList.bulkDelete", { count: total });
+        const ids = targets.map((task) => task.id);
+        try {
+          const done = await bulkDeleteTasks(ids, deleteFile);
+          addToast({
+            tone: "success",
+            title: t("toast.bulkComplete", { action: label, done, total }),
+          });
+        } catch (error) {
+          addToast({
+            tone: "error",
+            title: t("toast.bulkFailed", { action: label }),
+            description: error instanceof Error ? error.message : String(error),
+          });
+        }
+        clearSelectedIds();
+      })();
+    },
+    [addToast, bulkDeleteTargets, clearSelectedIds, t],
+  );
 
   const openNewDownload = useCallback((initialState?: NewDownloadInitialState) => {
     if (initialState) {
@@ -355,33 +381,33 @@ export function AppShell() {
     setNewDownloadOpen(true);
   }, []);
 
-  const applyClipboardDownload = useCallback(
-    (sourceId: string, urls: string[]) => {
-      if (urls.length === 0) return;
-      setNewDownloadInitialState({
-        sourceId,
-        url: urls.length === 1 ? urls[0] : undefined,
-        batchInput: urls.length > 1 ? urls.join("\n") : undefined,
-      });
-      setNewDownloadOpen(true);
+  const applyClipboardDownload = useCallback((sourceId: string, urls: string[]) => {
+    if (urls.length === 0) return;
+    setNewDownloadInitialState({
+      sourceId,
+      url: urls.length === 1 ? urls[0] : undefined,
+      batchInput: urls.length > 1 ? urls.join("\n") : undefined,
+    });
+    setNewDownloadOpen(true);
+  }, []);
+
+  const submitAttentionResolution = useCallback(
+    (
+      task: Task,
+      action: RecoveryAction,
+      overrides?: Partial<Pick<ResolveTaskAttentionInput, "fileName" | "saveDir">>,
+    ) => {
+      const input: ResolveTaskAttentionInput = {
+        id: task.id,
+        action,
+        fileName: overrides?.fileName ?? null,
+        saveDir: overrides?.saveDir ?? null,
+      };
+
+      void runTaskAction(() => resolveTaskAttention(input), task.id);
     },
-    [],
+    [runTaskAction],
   );
-
-  const submitAttentionResolution = useCallback((
-    task: Task,
-    action: RecoveryAction,
-    overrides?: Partial<Pick<ResolveTaskAttentionInput, "fileName" | "saveDir">>,
-  ) => {
-    const input: ResolveTaskAttentionInput = {
-      id: task.id,
-      action,
-      fileName: overrides?.fileName ?? null,
-      saveDir: overrides?.saveDir ?? null,
-    };
-
-    void runTaskAction(() => resolveTaskAttention(input), task.id);
-  }, [runTaskAction]);
 
   const runCompletionAction = useCallback(
     async (request: CompletionActionRequestedPayload) => {
@@ -391,9 +417,15 @@ export function AppShell() {
           await runTrayMenuAction("quit");
         } else if (request.action === "shutdown") {
           await requestSystemShutdown();
+        } else if (request.action === "sleep") {
+          await requestSystemSleep();
+        } else if (request.action === "hibernate") {
+          await requestSystemHibernate();
+        } else if (request.action === "lock_screen") {
+          await requestLockScreen();
         }
       } catch (err) {
-        const message = errorMessage(err);
+        const message = localizedErrorMessage(err, t);
         log.error("completion action failed", err);
         addToast({
           tone: "error",
@@ -405,59 +437,69 @@ export function AppShell() {
     [addToast, t],
   );
 
-  const resolveAttention = useCallback(async (task: Task, action: RecoveryAction) => {
-    if (action === "open_folder" || action === "free_disk_space") {
-      openFolder(task);
-      if (action === "free_disk_space") {
+  const resolveAttention = useCallback(
+    async (task: Task, action: RecoveryAction) => {
+      if (action === "open_folder" || action === "free_disk_space") {
+        openFolder(task);
+        if (action === "free_disk_space") {
+          addToast({
+            tone: "info",
+            title: t("recovery.freeDiskSpaceToast"),
+            description: task.saveDir,
+          });
+        }
+        return;
+      }
+      if (action === "check_url") {
+        selectTask(task.id);
+        setDetailOpen(true);
         addToast({
           tone: "info",
-          title: t("recovery.freeDiskSpaceToast"),
-          description: task.saveDir,
+          title: t("recovery.checkUrlToast"),
+          description: sanitizeUrlForDisplay(task.url),
         });
+        return;
       }
-      return;
-    }
-    if (action === "check_url") {
-      selectTask(task.id);
-      setDetailOpen(true);
-      addToast({
-        tone: "info",
-        title: t("recovery.checkUrlToast"),
-        description: sanitizeUrlForDisplay(task.url),
-      });
-      return;
-    }
 
-    if (action === "choose_another_name") {
-      setAttentionRequest({ task, action });
-      return;
-    }
+      if (action === "choose_another_name") {
+        setAttentionRequest({ task, action });
+        return;
+      }
 
-    if (action === "choose_another_folder") {
-      const saveDir = await openDirectoryPicker();
-      if (!saveDir) return;
-      submitAttentionResolution(task, action, { saveDir });
-      return;
-    }
+      if (action === "choose_another_folder") {
+        const saveDir = await openDirectoryPicker();
+        if (!saveDir) return;
+        submitAttentionResolution(task, action, { saveDir });
+        return;
+      }
 
-    if (action === "restart") {
-      setAttentionRequest({ task, action });
-      return;
-    }
+      if (action === "restart") {
+        setAttentionRequest({ task, action });
+        return;
+      }
 
-    submitAttentionResolution(task, action);
-  }, [addToast, openFolder, selectTask, setDetailOpen, submitAttentionResolution, t]);
+      submitAttentionResolution(task, action);
+    },
+    [addToast, openFolder, selectTask, setDetailOpen, submitAttentionResolution, t],
+  );
 
   useEffect(() => {
     void getPlatform().then(setPlatform);
   }, []);
 
   useEffect(() => {
+    try {
+      if (localStorage.getItem("vibe-onboarding-completed") !== "1") {
+        setOnboardingOpen(true);
+      }
+    } catch {
+      // localStorage unavailable; skip onboarding
+    }
+  }, []);
+
+  useEffect(() => {
     document.documentElement.setAttribute("data-platform", platform);
-    document.documentElement.style.setProperty(
-      "--traffic-lights-inset",
-      `${trafficLightsInsetPx(platform)}px`,
-    );
+    document.documentElement.style.setProperty("--traffic-lights-inset", `${trafficLightsInsetPx(platform)}px`);
   }, [platform]);
 
   useTaskEvents();
@@ -476,7 +518,7 @@ export function AppShell() {
       } catch (err) {
         if (!cancelled) {
           log.warn("settings load failed", err);
-          setSettingsError(errorMessage(err));
+          setSettingsError(localizedErrorMessage(err, t));
         }
       } finally {
         if (!cancelled) setSettingsLoading(false);
@@ -558,13 +600,7 @@ export function AppShell() {
       cancelled = true;
       unlistenClipboard?.();
     };
-  }, [
-    addToast,
-    applyClipboardDownload,
-    newDownloadDraftDirty,
-    newDownloadOpen,
-    t,
-  ]);
+  }, [addToast, applyClipboardDownload, newDownloadDraftDirty, newDownloadOpen, t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -585,22 +621,95 @@ export function AppShell() {
   }, []);
 
   useEffect(() => {
-    document.documentElement.dataset.fontFamily =
-      settings?.fontFamily ?? "source_han_sans_sc";
-  }, [settings?.fontFamily]);
-
-  useEffect(() => {
-    document.documentElement.dataset.accent =
-      settings?.accentColor ?? "blue";
+    document.documentElement.dataset.accent = settings?.accentColor ?? "blue";
   }, [settings?.accentColor]);
 
+  const [dropActive, setDropActive] = useState(false);
+
+  const applyDroppedFile = useCallback((initialState: NewDownloadInitialState) => {
+    setNewDownloadInitialState(initialState);
+    setNewDownloadOpen(true);
+  }, []);
+
   useEffect(() => {
+    let cancelled = false;
+    let unlistenFileDrop: (() => void) | undefined;
+
+    void (async () => {
+      unlistenFileDrop = await onFileDrop(
+        async (paths) => {
+          const supported = paths.filter((path) => isSupportedLocalFile(path.split(/[/\\]/).pop() ?? path));
+          if (supported.length === 0) {
+            addToast({
+              tone: "error",
+              title: t("toast.unsupportedDroppedFiles"),
+              description: t("toast.unsupportedDroppedFilesDescription"),
+            });
+            return;
+          }
+          const firstPath = supported[0];
+          const name = firstPath.split(/[/\\]/).pop() ?? firstPath;
+          try {
+            const resolved = await resolveLocalFile(firstPath, name);
+            if (newDownloadOpen && newDownloadDraftDirty) {
+              addToast({
+                tone: "info",
+                title: t("toast.droppedFileReady"),
+                description: name,
+                action: {
+                  label: t("toast.useDroppedFile"),
+                  onClick: () =>
+                    applyDroppedFile({
+                      sourceId: `drop-${Date.now()}`,
+                      url: resolved.url,
+                      batchInput: resolved.batchInput,
+                    }),
+                },
+              });
+              return;
+            }
+            applyDroppedFile({
+              sourceId: `drop-${Date.now()}`,
+              url: resolved.url,
+              batchInput: resolved.batchInput,
+            });
+          } catch (err) {
+            log.error("dropped file resolve failed", err);
+            addToast({
+              tone: "error",
+              title: t("toast.actionFailed"),
+              description: localizedErrorMessage(err, t),
+            });
+          }
+        },
+        (state: FileDropDragState) => setDropActive(state.active),
+      );
+      if (cancelled) unlistenFileDrop?.();
+    })();
+
+    return () => {
+      cancelled = true;
+      unlistenFileDrop?.();
+    };
+  }, [addToast, applyDroppedFile, newDownloadDraftDirty, newDownloadOpen, t]);
+
+  useEffect(() => {
+    const NAV_KEYS: Record<string, "all" | "downloading" | "paused" | "completed" | "failed"> = {
+      "1": "all",
+      "2": "downloading",
+      "3": "paused",
+      "4": "completed",
+      "5": "failed",
+    };
+
     const onKeyDown = (event: KeyboardEvent) => {
+      // IME composition guard: when a CJK input method is composing (e.g. typing
+      // pinyin), keystrokes should go to the IME, not trigger app shortcuts.
+      if (event.isComposing) return;
       const target = event.target as HTMLElement;
-      const isInput =
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.isContentEditable;
+      const isInput = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+
+      // ── Always-active shortcuts ──
 
       if (matchesShortcut(event, "mod+k", platform)) {
         event.preventDefault();
@@ -614,14 +723,6 @@ export function AppShell() {
         return;
       }
 
-      if (!isInput) {
-        if (event.key === "?") {
-          event.preventDefault();
-          setShortcutPanelOpen((prev) => !prev);
-          return;
-        }
-      }
-
       if (matchesShortcut(event, "mod+n", platform)) {
         event.preventDefault();
         openNewDownload();
@@ -630,14 +731,105 @@ export function AppShell() {
 
       if (matchesShortcut(event, "mod+,", platform)) {
         event.preventDefault();
-        useTaskUIStore.getState().setNav("settings");
+        setNav("settings");
         setDetailOpen(false);
         return;
+      }
+
+      // ── Non-input shortcuts ──
+
+      if (!isInput) {
+        if (event.key === "?") {
+          event.preventDefault();
+          setShortcutPanelOpen((prev) => !prev);
+          return;
+        }
+
+        // Navigation: Mod+1~5
+        const navTarget = NAV_KEYS[event.key];
+        if (navTarget && matchesShortcut(event, `mod+${event.key}`, platform)) {
+          event.preventDefault();
+          setNav(navTarget);
+          return;
+        }
+
+        // Task selection: Mod+Up / Mod+Down
+        if (matchesShortcut(event, "mod+arrowup", platform)) {
+          event.preventDefault();
+          const idx = selectedId ? taskIds.indexOf(selectedId) : -1;
+          if (idx > 0) selectTask(taskIds[idx - 1]!);
+          else if (taskIds.length > 0 && idx === -1) selectTask(taskIds[0]!);
+          return;
+        }
+
+        if (matchesShortcut(event, "mod+arrowdown", platform)) {
+          event.preventDefault();
+          const idx = selectedId ? taskIds.indexOf(selectedId) : -1;
+          if (idx >= 0 && idx < taskIds.length - 1) selectTask(taskIds[idx + 1]!);
+          else if (taskIds.length > 0 && idx === -1) selectTask(taskIds[0]!);
+          return;
+        }
+
+        // Toggle detail: Mod+D
+        if (matchesShortcut(event, "mod+d", platform)) {
+          event.preventDefault();
+          setDetailOpen(!detailOpen);
+          return;
+        }
+
+        // Open folder: Mod+O
+        if (matchesShortcut(event, "mod+o", platform) && selected) {
+          event.preventDefault();
+          openFolder(selected);
+          return;
+        }
+
+        // Open file: Mod+Enter
+        if (matchesShortcut(event, "mod+enter", platform) && selected) {
+          event.preventDefault();
+          openFile(selected);
+          return;
+        }
+
+        // Delete: Del
+        if (event.key === "Delete" && selected) {
+          event.preventDefault();
+          setDeleteTarget(selected);
+          return;
+        }
+
+        // Select all: Mod+A
+        if (matchesShortcut(event, "mod+a", platform)) {
+          event.preventDefault();
+          setSelectedIds(taskIds);
+          return;
+        }
+
+        // Clear selection: Mod+Shift+A
+        if (matchesShortcut(event, "mod+shift+a", platform)) {
+          event.preventDefault();
+          clearSelectedIds();
+          return;
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openNewDownload, platform, setDetailOpen]);
+  }, [
+    clearSelectedIds,
+    detailOpen,
+    openFile,
+    openFolder,
+    openNewDownload,
+    platform,
+    selectTask,
+    selected,
+    selectedId,
+    setSelectedIds,
+    setDetailOpen,
+    setNav,
+    taskIds,
+  ]);
 
   return (
     <div className="flex h-full flex-col">
@@ -658,7 +850,7 @@ export function AppShell() {
         }}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
-        <Sidebar />
+        <Sidebar onOpenOnboarding={() => setOnboardingOpen(true)} />
         <main className="order-1 flex min-h-0 min-w-0 flex-1 md:order-none">
           <h1 className="sr-only">{t("app.name")}</h1>
           <TaskList
@@ -668,11 +860,14 @@ export function AppShell() {
             onOpenFile={openFile}
             onOpenFolder={openFolder}
             onResolveAttention={resolveAttention}
+            onDelete={(task) => setDeleteTarget(task)}
+            onNewDownload={() => openNewDownload()}
             onBulkPause={bulkPause}
             onBulkResume={bulkResume}
             onBulkRetry={bulkRetry}
             onBulkDelete={bulkDelete}
             onBulkOpenFolder={bulkOpenFolder}
+            onBulkExport={bulkExport}
           />
           <Suspense fallback={null}>
             <TaskDetails
@@ -814,43 +1009,24 @@ export function AppShell() {
       ) : null}
       {shortcutPanelOpen ? (
         <Suspense fallback={null}>
-          <ShortcutPanel
-            open={shortcutPanelOpen}
-            onOpenChange={setShortcutPanelOpen}
-            platform={platform}
-          />
+          <ShortcutPanel open={shortcutPanelOpen} onOpenChange={setShortcutPanelOpen} platform={platform} />
         </Suspense>
       ) : null}
-      {splashVisible ? (
+      {onboardingOpen ? (
+        <Suspense fallback={null}>
+          <OnboardingDialog open={onboardingOpen} onOpenChange={setOnboardingOpen} />
+        </Suspense>
+      ) : null}
+      {dropActive ? (
         <div
-          className={cn(
-            "splash-overlay fixed inset-0 z-50 flex items-center justify-center bg-surface-root",
-            splashDismissing && "pointer-events-none",
-          )}
-          style={
-            splashDismissing
-              ? { animation: "splash-fade-out 220ms ease-out forwards" }
-              : undefined
-          }
+          className="drop-overlay pointer-events-none fixed inset-0 z-[60] flex items-center justify-center bg-surface-scrim motion-safe:animate-[fade-in_140ms_ease-out]"
           role="status"
-          aria-label={t("app.name")}
+          aria-label={t("toast.dropHere")}
         >
-          <div className="flex flex-col items-center gap-4">
-            <img
-              src="/logo-64.png"
-              alt=""
-              width={72}
-              height={72}
-              className="select-none"
-              draggable={false}
-            />
-            <span className="text-lg font-semibold tracking-wide text-text-primary">
-              {t("app.name")}
-            </span>
-            <div
-              className="splash-indicator mt-1 h-2 w-2 rounded-full bg-accent-primary"
-              style={{ animation: "splash-breathe 1.5s ease-in-out infinite" }}
-            />
+          <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-accent-primary bg-surface-base/80 px-10 py-8 text-center backdrop-blur-sm">
+            <img src="/logo-64.png" alt="" width={40} height={40} className="select-none" draggable={false} />
+            <span className="text-sm font-semibold text-text-primary">{t("toast.dropToStart")}</span>
+            <span className="text-xs text-text-muted">{t("toast.dropHere")}</span>
           </div>
         </div>
       ) : null}
@@ -871,15 +1047,15 @@ function CompletionActionDialog({
 }) {
   const { t } = useTranslation();
   const [remaining, setRemaining] = useState(request.countdownSeconds);
-  const isExit = request.action === "exit_app";
-  const isShutdown = request.action === "shutdown";
+  const needsConfirm = request.action === "shutdown" || request.action === "sleep" || request.action === "hibernate";
+  const hasCountdown = !needsConfirm;
 
   useEffect(() => {
     setRemaining(request.countdownSeconds);
   }, [request]);
 
   useEffect(() => {
-    if (!open || !isExit) return;
+    if (!open || !hasCountdown) return;
     if (remaining <= 0) {
       void onRun(request);
       return;
@@ -888,35 +1064,34 @@ function CompletionActionDialog({
       setRemaining((value) => Math.max(0, value - 1));
     }, 1000);
     return () => window.clearTimeout(timer);
-  }, [isExit, onRun, open, remaining, request]);
+  }, [hasCountdown, onRun, open, remaining, request]);
+
+  const titleKey = `completionDialog.${request.action}Title` as const;
+  const descriptionKey = `completionDialog.${request.action}Description` as const;
+  const confirmKey =
+    `completionDialog.confirm${request.action === "exit_app" ? "Exit" : request.action === "shutdown" ? "Shutdown" : request.action === "sleep" ? "Sleep" : request.action === "hibernate" ? "Hibernate" : request.action === "lock_screen" ? "Lock" : "Run"}` as const;
 
   return (
-    <Dialog open={open} onOpenChange={(nextOpen) => {
-      if (!nextOpen) onCancel();
-    }}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onCancel();
+      }}
+    >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>
-            {isShutdown
-              ? t("completionDialog.shutdownTitle")
-              : t("completionDialog.exitTitle")}
-          </DialogTitle>
+          <DialogTitle>{t(titleKey)}</DialogTitle>
         </DialogHeader>
         <DialogBody className="space-y-3 py-4">
           <DialogDescription>
-            {isShutdown
-              ? t("completionDialog.shutdownDescription")
-              : t("completionDialog.exitDescription", { seconds: remaining })}
+            {hasCountdown ? t(descriptionKey, { seconds: remaining }) : t(descriptionKey)}
           </DialogDescription>
-          {isExit ? (
+          {hasCountdown ? (
             <div className="h-1.5 overflow-hidden rounded-full bg-surface-raised">
               <div
                 className="h-full rounded-full bg-accent-primary transition-[width] duration-300"
                 style={{
-                  width: `${Math.max(
-                    0,
-                    Math.min(100, (remaining / Math.max(1, request.countdownSeconds)) * 100),
-                  )}%`,
+                  width: `${Math.max(0, Math.min(100, (remaining / Math.max(1, request.countdownSeconds)) * 100))}%`,
                 }}
               />
             </div>
@@ -926,13 +1101,8 @@ function CompletionActionDialog({
           <Button variant="outline" onClick={onCancel}>
             {t("completionDialog.cancel")}
           </Button>
-          <Button
-            variant={isShutdown ? "danger" : "default"}
-            onClick={() => void onRun(request)}
-          >
-            {isShutdown
-              ? t("completionDialog.confirmShutdown")
-              : t("completionDialog.exitNow")}
+          <Button variant={needsConfirm ? "danger" : "default"} onClick={() => void onRun(request)}>
+            {t(confirmKey)}
           </Button>
         </DialogFooter>
       </DialogContent>

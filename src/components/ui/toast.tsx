@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useRef } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { useCallback, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { useToastStore, type AppToast } from "@/stores/toast-store";
+import { type AppToast, useToastStore } from "@/stores/toast-store";
 
 const TOAST_TIMEOUT_MS = 4800;
 
@@ -79,12 +79,7 @@ function ToastItem({
     return () => clearTimeout(timerRef.current);
   }, [startTimer]);
 
-  const Icon =
-    toast.tone === "success"
-      ? CheckCircle2
-      : toast.tone === "error"
-        ? AlertTriangle
-        : Info;
+  const Icon = toast.tone === "success" ? CheckCircle2 : toast.tone === "error" ? AlertTriangle : Info;
 
   return (
     <motion.div
@@ -94,7 +89,7 @@ function ToastItem({
       exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.98 }}
       transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
       className={cn(
-        "pointer-events-auto grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3 rounded-lg border bg-surface-overlay px-3 py-3 shadow-lg backdrop-blur-sm",
+        "pointer-events-auto grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3 rounded-lg border bg-surface-overlay px-3 py-3 shadow-md backdrop-blur-sm",
         toast.tone === "success" && "border-border-success-strong",
         toast.tone === "error" && "border-border-danger-strong",
         toast.tone === "info" && "border-border-subtle",
@@ -115,13 +110,9 @@ function ToastItem({
         aria-hidden
       />
       <div className="min-w-0">
-        <p className="truncate text-sm font-medium text-text-primary">
-          {toast.title}
-        </p>
+        <p className="truncate text-sm font-medium text-text-primary">{toast.title}</p>
         {toast.description ? (
-          <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-text-secondary">
-            {toast.description}
-          </p>
+          <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-text-secondary">{toast.description}</p>
         ) : null}
         {toast.action ? (
           <Button

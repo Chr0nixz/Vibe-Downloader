@@ -187,6 +187,20 @@ fn is_weak_etag(value: &str) -> bool {
     value.trim_start().starts_with("W/") || value.trim_start().starts_with("w/")
 }
 
+trait EmptyFallback {
+    fn if_empty<F: FnOnce() -> String>(self, fallback: F) -> String;
+}
+
+impl EmptyFallback for String {
+    fn if_empty<F: FnOnce() -> String>(self, fallback: F) -> String {
+        if self.trim().is_empty() {
+            fallback()
+        } else {
+            self
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,20 +312,6 @@ mod tests {
             hash_verified_at: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
-        }
-    }
-}
-
-trait EmptyFallback {
-    fn if_empty<F: FnOnce() -> String>(self, fallback: F) -> String;
-}
-
-impl EmptyFallback for String {
-    fn if_empty<F: FnOnce() -> String>(self, fallback: F) -> String {
-        if self.trim().is_empty() {
-            fallback()
-        } else {
-            self
         }
     }
 }

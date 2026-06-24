@@ -1,17 +1,13 @@
 import { create } from "zustand";
 
-import type {
-  NavFilter,
-  TaskFilters,
-  TaskSortDirection,
-  TaskSortKey,
-} from "./task-data-store";
+import type { NavFilter, TaskFilters, TaskSortDirection, TaskSortKey } from "./task-data-store";
 
 /* ── Store interface ── */
 
 interface TaskUIStore {
   selectedId: string | null;
   selectedIds: string[];
+  selectionAnchorId: string | null;
   nav: NavFilter;
   search: string;
   sortKey: TaskSortKey;
@@ -23,6 +19,7 @@ interface TaskUIStore {
   setTaskSelected: (id: string, selected: boolean) => void;
   setSelectedIds: (ids: string[]) => void;
   clearSelectedIds: () => void;
+  setSelectionAnchor: (id: string | null) => void;
   setNav: (nav: NavFilter) => void;
   setSearch: (search: string) => void;
   setSort: (key: TaskSortKey, direction?: TaskSortDirection) => void;
@@ -35,6 +32,7 @@ interface TaskUIStore {
 export const useTaskUIStore = create<TaskUIStore>((set) => ({
   selectedId: null,
   selectedIds: [],
+  selectionAnchorId: null,
   nav: "all",
   search: "",
   sortKey: "updated_at",
@@ -47,7 +45,7 @@ export const useTaskUIStore = create<TaskUIStore>((set) => ({
   },
   detailOpen: false,
 
-  selectTask: (id) => set({ selectedId: id }),
+  selectTask: (id) => set({ selectedId: id, selectionAnchorId: id }),
 
   toggleTaskSelected: (id) =>
     set((state) => ({
@@ -65,7 +63,9 @@ export const useTaskUIStore = create<TaskUIStore>((set) => ({
 
   setSelectedIds: (ids) => set({ selectedIds: Array.from(new Set(ids)) }),
 
-  clearSelectedIds: () => set({ selectedIds: [] }),
+  clearSelectedIds: () => set({ selectedIds: [], selectionAnchorId: null }),
+
+  setSelectionAnchor: (id) => set({ selectionAnchorId: id }),
 
   setNav: (nav) => set({ nav }),
 
@@ -74,13 +74,10 @@ export const useTaskUIStore = create<TaskUIStore>((set) => ({
   setSort: (key, direction) =>
     set((state) => ({
       sortKey: key,
-      sortDirection:
-        direction ??
-        (state.sortKey === key && state.sortDirection === "desc" ? "asc" : "desc"),
+      sortDirection: direction ?? (state.sortKey === key && state.sortDirection === "desc" ? "asc" : "desc"),
     })),
 
-  setFilters: (filters) =>
-    set((state) => ({ filters: { ...state.filters, ...filters } })),
+  setFilters: (filters) => set((state) => ({ filters: { ...state.filters, ...filters } })),
 
   setDetailOpen: (open) => set({ detailOpen: open }),
 }));

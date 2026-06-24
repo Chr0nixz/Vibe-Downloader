@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  settingsSearchHasResults,
-  settingsSectionMatchesQuery,
-  type SettingsSearchSection,
-} from "./settings-search";
+import { type SettingsSearchSection, settingsSearchHasResults, settingsSectionMatchesQuery } from "./settings-search";
 
 const sections: SettingsSearchSection[] = [
   {

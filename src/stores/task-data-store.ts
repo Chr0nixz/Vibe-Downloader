@@ -1,43 +1,18 @@
 import { create } from "zustand";
 
-import type {
-  ListTasksCursorInput,
-  ListTasksInput,
-  TaskFilterOptions,
-  TaskStatsSnapshot,
-} from "@/generated/bindings";
+import type { ListTasksCursorInput, ListTasksInput, TaskFilterOptions, TaskStatsSnapshot } from "@/generated/bindings";
 import type { Task } from "@/types/task";
 import { parseByteCount } from "@/types/task";
-import {
-  normalizeTaskProgressPayload,
-  type TaskProgressPayload,
-} from "@/types/task-progress";
-
-import {
-  buildTaskCursorInput,
-  buildTaskPageInput,
-  mergePagedTasks,
-} from "./task-query";
+import { normalizeTaskProgressPayload, type TaskProgressPayload } from "@/types/task-progress";
 import { useSpeedHistoryStore } from "./speed-history-store";
+import { buildTaskCursorInput, buildTaskPageInput, mergePagedTasks } from "./task-query";
 import { useTaskUIStore } from "./task-ui-store";
 
 /* ── Types ── */
 
-export type NavFilter =
-  | "all"
-  | "downloading"
-  | "paused"
-  | "completed"
-  | "failed"
-  | "settings";
+export type NavFilter = "all" | "downloading" | "paused" | "completed" | "failed" | "settings";
 
-export type TaskSortKey =
-  | "updated_at"
-  | "created_at"
-  | "file_size"
-  | "progress"
-  | "speed"
-  | "status";
+export type TaskSortKey = "updated_at" | "created_at" | "file_size" | "progress" | "speed" | "status";
 
 export type TaskSortDirection = "asc" | "desc";
 export type FileTypeFilter = "all" | "archive" | "image" | "video" | "document" | "app" | "other";
@@ -109,11 +84,7 @@ export function calculateTaskStats(tasks: Task[]): TaskStats {
     if (task.status === "queued") {
       queued += 1;
     }
-    if (
-      task.status === "paused" ||
-      task.status === "queued" ||
-      task.status === "waiting_network"
-    ) {
+    if (task.status === "paused" || task.status === "queued" || task.status === "waiting_network") {
       paused += 1;
     }
     if (task.status === "completed") {
@@ -124,23 +95,19 @@ export function calculateTaskStats(tasks: Task[]): TaskStats {
     }
     if (
       !fallbackTask &&
-      (
-        task.status === "queued" ||
+      (task.status === "queued" ||
         task.status === "paused" ||
         task.status === "failed" ||
         task.status === "needs_attention" ||
-        task.status === "waiting_network"
-      )
+        task.status === "waiting_network")
     ) {
       fallbackTask = task;
     }
   }
 
   const featuredTask =
-    activeTasks.reduce<Task | null>(
-      (best, task) => (!best || task.speedBps > best.speedBps ? task : best),
-      null,
-    ) ?? fallbackTask;
+    activeTasks.reduce<Task | null>((best, task) => (!best || task.speedBps > best.speedBps ? task : best), null) ??
+    fallbackTask;
 
   return {
     all: tasks.length,
@@ -156,9 +123,7 @@ export function calculateTaskStats(tasks: Task[]): TaskStats {
   };
 }
 
-export function normalizeTaskStatsSnapshot(
-  stats: TaskStats | TaskStatsSnapshot,
-): TaskStats {
+export function normalizeTaskStatsSnapshot(stats: TaskStats | TaskStatsSnapshot): TaskStats {
   return {
     all: Number(stats.all) || 0,
     active: Number(stats.active) || 0,
@@ -206,6 +171,17 @@ function applyProgressToTask(task: Task, payload: TaskProgressPayload): Task {
         : file,
     ),
   };
+}
+
+/** Map a task status to the stat counter fields it contributes to. */
+function statusCounterKeys(status: Task["status"]): Array<"active" | "queued" | "paused" | "completed" | "failed"> {
+  const keys: Array<"active" | "queued" | "paused" | "completed" | "failed"> = [];
+  if (status === "downloading" || status === "retrying") keys.push("active");
+  if (status === "queued") keys.push("queued", "paused");
+  if (status === "paused" || status === "waiting_network") keys.push("paused");
+  if (status === "completed") keys.push("completed");
+  if (status === "failed" || status === "needs_attention") keys.push("failed");
+  return keys;
 }
 
 /* ── Store interface ── */
@@ -323,10 +299,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       // Delegate speed history pruning to dedicated store
       useSpeedHistoryStore.getState().pruneToIds(ids);
 
-      const knownTotal = Math.max(
-        totalEstimate,
-        nextTasks.length + (nextCursor ? 1 : 0),
-      );
+      const knownTotal = Math.max(totalEstimate, nextTasks.length + (nextCursor ? 1 : 0));
 
       // Cross-store: prune selectedIds in UI store
       pruneUISelectedIds(ids);
@@ -338,9 +311,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
         nextCursor,
         hasMore: Boolean(nextCursor),
         filterOptions:
-          append &&
-          filterOptions.sources.length === 0 &&
-          filterOptions.failureCategories.length === 0
+          append && filterOptions.sources.length === 0 && filterOptions.failureCategories.length === 0
             ? state.filterOptions
             : filterOptions,
         expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
@@ -412,6 +383,16 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       let taskById = state.taskById;
       let changed = false;
 
+      // Incremental stats deltas
+      let dActive = 0;
+      let dQueued = 0;
+      let dPaused = 0;
+      let dCompleted = 0;
+      let dFailed = 0;
+      let dTotalSpeed = 0;
+      let dTotalDownloaded = 0;
+      let dTotalBytes = 0;
+
       for (const payload of latestByTaskId.values()) {
         const index = state.taskIndexById[payload.taskId];
         if (index === undefined) continue;
@@ -420,20 +401,57 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
           taskById = { ...state.taskById };
           changed = true;
         }
-        const nextTask = applyProgressToTask(tasks[index], payload);
+        const old = tasks[index];
+        const nextTask = applyProgressToTask(old, payload);
         tasks[index] = nextTask;
         taskById[payload.taskId] = nextTask;
         speedSamples.push({
           taskId: payload.taskId,
           sample: { at: now, speedBps: parseByteCount(payload.speedBps) },
         });
+
+        // Accumulate stats delta
+        if (old.status !== nextTask.status) {
+          for (const key of statusCounterKeys(old.status)) {
+            if (key === "active") dActive -= 1;
+            else if (key === "queued") dQueued -= 1;
+            else if (key === "paused") dPaused -= 1;
+            else if (key === "completed") dCompleted -= 1;
+            else if (key === "failed") dFailed -= 1;
+          }
+          for (const key of statusCounterKeys(nextTask.status)) {
+            if (key === "active") dActive += 1;
+            else if (key === "queued") dQueued += 1;
+            else if (key === "paused") dPaused += 1;
+            else if (key === "completed") dCompleted += 1;
+            else if (key === "failed") dFailed += 1;
+          }
+        }
+        dTotalSpeed += nextTask.speedBps - old.speedBps;
+        dTotalDownloaded += nextTask.downloadedBytes - old.downloadedBytes;
+        dTotalBytes += nextTask.totalSize - old.totalSize;
       }
 
       if (!changed) return {};
-      // NOTE: taskStats is NOT computed here. Call recalculateTaskStats() separately.
+
+      const prevStats = state.taskStats;
+      const nextStats: TaskStats = {
+        all: prevStats.all,
+        active: prevStats.active + dActive,
+        queued: prevStats.queued + dQueued,
+        paused: prevStats.paused + dPaused,
+        completed: prevStats.completed + dCompleted,
+        failed: prevStats.failed + dFailed,
+        totalSpeed: Math.max(0, prevStats.totalSpeed + dTotalSpeed),
+        totalDownloaded: Math.max(0, prevStats.totalDownloaded + dTotalDownloaded),
+        totalBytes: Math.max(0, prevStats.totalBytes + dTotalBytes),
+        featuredTaskId: prevStats.featuredTaskId,
+      };
+
       return {
         tasks,
         taskById,
+        taskStats: nextStats,
         taskIds: state.taskIds,
         taskIndexById: state.taskIndexById,
       };

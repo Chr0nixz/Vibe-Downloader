@@ -15,6 +15,8 @@ Implemented today:
 - Single-stream downloads, unknown-size downloads, segmented Range downloads, auto-acceleration (dynamic segment splitting), resume validation, segment retry, checkpoint-based progress persistence, and final file auto-renaming.
 - Queue scheduling with max active task count, per-host connection slot limits, scheduled download windows, timed speed throttling, and completion actions (cancellable app exit, confirmed shutdown).
 - Global speed limiting through a Rust token bucket.
+- Per-task speed limits enforced across HTTP/FTP/SFTP/BT, combined with global limit (minimum wins).
+- Task priorities (high/normal/low) used by the queue scheduler to dispatch tasks in priority order.
 - Per-task proxy overrides (Inherit/Off/Custom) with protocol-aware validation: HTTP(S) allows HTTP/HTTPS/SOCKS5 proxies; BT, FTP/FTPS, and SFTP allow SOCKS5 only.
 - FTP/FTPS task creation and downloads with dynamic parallel segments, SOCKS5 proxy support, encrypted credential storage, and directory probing.
 - SFTP task creation and single-file downloads with password credentials, encrypted credential storage, local-temp pause/resume, directory probing, SOCKS5 proxy support, and TOFU host-key fingerprint verification.
@@ -22,7 +24,7 @@ Implemented today:
 - HLS/m3u8 streaming engine with master playlist variant selection, AES-128-CBC decryption, init map (EXT-X-MAP) support, byte range segments, concurrent segment downloads, live polling, and ffmpeg-based MP4 remuxing.
 - DASH (MPEG-DASH / MPD) engine with manifest parsing (rejects dynamic/live), ffmpeg-based download and MP4 remuxing, and progress monitoring.
 - WebDAV/WebDAVS engine mapping to HTTP/HTTPS with Basic Auth credentials, PROPFIND directory probing, and delegation to the HTTP engine.
-- Metalink4 engine with manifest parsing, multi-file selection, HTTP/HTTPS mirror failover by priority, per-file progress, and MD5/SHA-1/SHA-256/SHA-512 checksum verification.
+- Metalink4 engine with manifest parsing, multi-file selection, HTTP/HTTPS mirror failover by priority, per-file progress, and checksum verification (strongest available algorithm per file).
 - Encrypted task credential storage (ChaCha20-Poly1305) for FTP/FTPS, SFTP, and WebDAV, with legacy plaintext migration on startup.
 - React task list with store decomposition (task-data, task-ui, speed-history stores), virtualized infinite scroll, cursor pagination, status filters, search, sorting, multi-select, batch actions, command palette, settings page with 7 collapsible sections and search, task details, Chunks/Connections/Requests/Logs views, toast, delete confirmation, recovery actions, 8 accent color themes, floating status window (ball and bar modes), and en/zh-CN i18n.
 - Clipboard link monitoring for all supported protocols (HTTP/HTTPS, FTP/FTPS, SFTP, WebDAV/WebDAVS, magnet, local manifests) while the desktop app is running.
@@ -35,7 +37,7 @@ Not implemented yet:
 - Cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols.
 - Safari wrapper, browser store submission IDs, production extension signing, and final browser permission review copy.
 - BT/FTP/SFTP/Metalink/HLS/DASH/WebDAV reliability and diagnostics parity with the HTTP/HTTPS path.
-- Per-task speed limits, task priorities, full site rule management UI, and full file classification automation.
+- Full site rule management UI, and full file classification automation.
 - OS code-signed production distribution.
 
 ## Key Directories
@@ -63,7 +65,9 @@ pnpm tauri dev
 Useful checks:
 
 ```bash
-pnpm typecheck
+pnpm typecheck      # TypeScript type checking (tsc --noEmit)
+pnpm lint           # Biome static analysis (NOT type checking)
+pnpm check          # typecheck + lint combined
 pnpm test:frontend
 pnpm build
 pnpm check:bindings
@@ -72,6 +76,8 @@ cargo check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 pnpm build:extensions
 ```
+
+Note: `pnpm lint` runs Biome (linting/formatting), not TypeScript type checking. Use `pnpm typecheck` or `pnpm check` for type errors.
 
 Run `pnpm build:extensions` when touching `browser/extension-core`, Native Messaging behavior, or related documentation.
 
@@ -90,7 +96,7 @@ Run `pnpm specta` and `pnpm check:bindings` after Rust command or model changes 
 - The Native Messaging host binary lives in `src-tauri/src/bin/vibe-native-host.rs`.
 - Credential encryption uses ChaCha20-Poly1305 via `secure_headers` helpers; passwords are stored as ciphertext + nonce in SQLite.
 - The segment planner (`db/segment_planner.rs`) determines segment count and type based on protocol characteristics and user settings.
-- Settings span 29 keys covering downloads, scheduling, proxy, UI (accent colors, fonts, sidebar/titlebar options), and desktop integration.
+- Settings span 29 keys covering downloads, scheduling, proxy, UI (accent colors, sidebar/titlebar options), and desktop integration.
 
 Important current constants:
 
@@ -127,7 +133,7 @@ Important current constants:
 - Prefer existing patterns over new abstractions.
 - Use generated Specta bindings rather than hand-writing IPC types when Rust models or commands change.
 - Treat English and Simplified Chinese (`en`/`zh-CN`) as the only actively supported locales for now. Add other locale translations later when explicitly prioritized.
-- Preserve the current browser handoff security boundary: browser handoff is HTTP/HTTPS only, URLs may not contain embedded credentials, browsers do not control local save paths, and Cookie/header forwarding must stay explicit, allowlisted, and encrypted when persisted.
+- Preserve the current browser handoff security boundary: browser handoff is HTTP/HTTPS only, browser handoff URLs must not contain embedded credentials (rejected at the handoff boundary), browsers do not control local save paths, and Cookie/header forwarding must stay explicit, allowlisted, and encrypted when persisted. Note: direct task creation (UI and clipboard) does extract embedded credentials from HTTP/HTTPS URLs via `legacy_credentials_from_url`, encrypts them, and sanitizes the task URL — this is by design, not a security gap.
 - Keep debug-only mock behavior out of production builds. `seed_mock_tasks` is intentionally debug-only.
 - When changing download or resume logic, add or update Rust tests under `src-tauri/tests`.
 - When changing frontend behavior, run at least `pnpm typecheck` and `pnpm test:frontend`; run `pnpm build` for UI or bundling changes.

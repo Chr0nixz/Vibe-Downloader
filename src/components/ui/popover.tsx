@@ -1,6 +1,6 @@
-import * as React from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "motion/react";
+import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -16,29 +16,15 @@ const PopoverContent = React.forwardRef<
 
   return (
     <PopoverPrimitive.Portal>
-      <PopoverPrimitive.Content
-        ref={ref}
-        align={align}
-        sideOffset={sideOffset}
-        asChild
-        {...props}
-      >
+      <PopoverPrimitive.Content ref={ref} align={align} sideOffset={sideOffset} asChild {...props}>
         <motion.div
           className={cn(
-            "z-50 min-w-[8rem] rounded-lg border border-border-subtle bg-surface-overlay p-1.5 shadow-lg",
+            "z-50 min-w-[8rem] rounded-lg bg-surface-overlay p-1.5 shadow-md ring-1 ring-border-subtle",
             className,
           )}
-          initial={
-            reduceMotion
-              ? false
-              : { opacity: 0, y: -4, scale: 0.97 }
-          }
+          initial={reduceMotion ? false : { opacity: 0, y: -4, scale: 0.97 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={
-            reduceMotion
-              ? { opacity: 0 }
-              : { opacity: 0, y: -2, scale: 0.97 }
-          }
+          exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -2, scale: 0.97 }}
           transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
         >
           {props.children}
@@ -49,4 +35,4 @@ const PopoverContent = React.forwardRef<
 });
 PopoverContent.displayName = PopoverPrimitive.Content.displayName;
 
-export { Popover, PopoverTrigger, PopoverContent, PopoverClose };
+export { Popover, PopoverClose, PopoverContent, PopoverTrigger };

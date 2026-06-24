@@ -1,24 +1,20 @@
-import { useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Download,
+  HelpCircle,
   LayoutGrid,
   PauseCircle,
   Settings,
 } from "lucide-react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { useSettingsStore } from "@/stores/settings-store";
 import { type NavFilter, useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
 
 const COLLAPSE_KEY = "vibe-sidebar-collapsed";
@@ -43,7 +39,7 @@ const settingsItem: NavItemDef = {
   icon: Settings,
 };
 
-export function Sidebar() {
+export function Sidebar({ onOpenOnboarding }: { onOpenOnboarding?: () => void }) {
   const { t } = useTranslation();
   const nav = useTaskUIStore((s) => s.nav);
   const setNav = useTaskUIStore((s) => s.setNav);
@@ -134,6 +130,35 @@ export function Sidebar() {
           onClick={() => setNav("settings")}
         />
 
+        {/* Help / onboarding button */}
+        {onOpenOnboarding ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={onOpenOnboarding}
+                aria-label={t("onboarding.help")}
+                className={cn(
+                  "group hidden h-9 w-9 flex-none justify-center p-0 md:flex",
+                  "text-text-muted",
+                  "hover:bg-accent-primary/10 hover:text-accent-primary",
+                  "md:mt-0.5 md:h-10 md:w-full md:flex-row md:gap-2",
+                  "transition-all duration-[var(--motion-ui)]",
+                )}
+              >
+                <HelpCircle className="h-[18px] w-[18px] shrink-0" aria-hidden />
+                <span className={cn("hidden text-xs font-medium md:inline lg:hidden", collapsed && "lg:hidden")}>
+                  {t("onboarding.help")}
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side={collapsed ? "right" : "top"} className={cn("lg:hidden", collapsed && "lg:block")}>
+              {t("onboarding.help")}
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
+
         {/* Collapse / expand toggle */}
         <div className="hidden md:mx-1.5 md:mt-0.5 md:block lg:mx-2.5">
           <div className="h-px bg-border-subtle/40" />
@@ -164,12 +189,7 @@ export function Sidebar() {
               <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
             )}
           </span>
-          <span
-            className={cn(
-              "hidden text-xs font-medium md:inline lg:hidden",
-              collapsed && "lg:hidden",
-            )}
-          >
+          <span className={cn("hidden text-xs font-medium md:inline lg:hidden", collapsed && "lg:hidden")}>
             {collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
           </span>
         </Button>
@@ -198,16 +218,9 @@ function NavItem({
   onClick: () => void;
 }) {
   const Icon = item.icon;
-  const showStripe = useSettingsStore(
-    (s) => s.settings?.sidebarStripeEnabled ?? false,
-  );
-  const showBadge =
-    item.id !== "settings" && item.id !== "all" && count > 0;
+  const showBadge = item.id !== "settings" && item.id !== "all" && count > 0;
   const showActivityDot =
-    item.id !== "settings" &&
-    item.id !== "all" &&
-    count > 0 &&
-    (item.id === "downloading" || item.id === "failed");
+    item.id !== "settings" && item.id !== "all" && count > 0 && (item.id === "downloading" || item.id === "failed");
 
   return (
     <Tooltip>
@@ -225,38 +238,20 @@ function NavItem({
             "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
             // ── Override button transition ──
             "transition-all duration-[var(--motion-ui)] ease-out",
-            // ── Active: three-layer indicator ──
+            // ── Active: two-layer indicator ──
             active && [
               // Layer 1 — accent background fill
               "bg-accent-primary/10",
-              // Layer 2 — left indicator bar (hidden on mobile, visible md+), only when setting enabled
-              showStripe && "md:[--nav-indicator-scale:1]",
-              showStripe && "md:shadow-[inset_3px_0_0_var(--accent-primary)]",
-              // Layer 3 — accent text + medium weight
+              // Layer 2 — accent text + medium weight
               "font-medium text-accent-primary",
               // Subtle glass overlay on active
               "dark:bg-surface-raised/6",
             ],
             // ── Inactive ──
-            !active && [
-              "text-text-secondary",
-              "hover:bg-surface-raised hover:text-text-primary",
-            ],
+            !active && ["text-text-secondary", "hover:bg-surface-raised hover:text-text-primary"],
             active && "min-w-20 flex-[1.45] md:min-w-0 md:flex-none",
           )}
         >
-          {/* Left indicator bar with scaleY entrance (md+ only), only when setting enabled */}
-          {active && showStripe && (
-            <span
-              className="nav-indicator pointer-events-none absolute top-1.5 bottom-1.5 left-0 hidden w-[3px] rounded-r-full bg-accent-primary md:block"
-              style={{
-                animation:
-                  "nav-indicator-enter 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards",
-              }}
-              aria-hidden
-            />
-          )}
-
           {/* Icon — left-aligned (no mx-auto) */}
           <Icon className="h-[18px] w-[18px] shrink-0" aria-hidden />
 
@@ -294,9 +289,7 @@ function NavItem({
               className={cn(
                 "absolute right-1.5 top-1 h-2 w-2 rounded-full md:block lg:hidden",
                 compact && "lg:block",
-                item.id === "downloading"
-                  ? "bg-accent-primary"
-                  : "bg-status-danger",
+                item.id === "downloading" ? "bg-accent-primary" : "bg-status-danger",
               )}
               aria-hidden
             >

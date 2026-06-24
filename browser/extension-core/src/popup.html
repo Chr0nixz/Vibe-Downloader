@@ -10,31 +10,34 @@
     <main>
       <header>
         <strong>Vibe Downloader</strong>
-        <span id="status">Ready</span>
+        <span id="status">__MSG_statusReady__</span>
       </header>
       <section id="capture-controls" aria-label="Capture settings" class="controls" hidden>
         <label>
           <input id="auto-intercept" type="checkbox" />
-          <span>Auto capture</span>
+          <span>__MSG_autoCapture__</span>
         </label>
         <label>
-          <span>Cookies & headers</span>
+          <span>__MSG_cookiesHeaders__</span>
           <select id="forward-headers-mode">
-            <option value="ask">Ask first</option>
-            <option value="enabled">Forward</option>
-            <option value="disabled">Do not forward</option>
+            <option value="ask">__MSG_forwardAsk__</option>
+            <option value="enabled">__MSG_forwardEnabled__</option>
+            <option value="disabled">__MSG_forwardDisabled__</option>
           </select>
         </label>
       </section>
-      <button id="send-current" type="button">Send current page</button>
+      <button id="send-current" type="button">__MSG_sendCurrentPage__</button>
       <section aria-label="Live tasks">
-        <div class="section-title">Live</div>
+        <div class="section-title">__MSG_liveSection__</div>
         <ol id="live-tasks"></ol>
       </section>
       <section aria-label="Recent handoffs">
-        <div class="section-title">Recent</div>
+        <div class="section-title">__MSG_recentSection__</div>
         <ol id="recent-tasks"></ol>
       </section>
+      <footer>
+        <button id="open-options" type="button">__MSG_optionsButton__</button>
+      </footer>
     </main>
     <script src="logger.js"></script>
     <script src="popup.js"></script>

@@ -42,9 +42,7 @@ export function BulkDeleteDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>
-            {t("deleteDialog.bulkTitle", { count: tasks.length })}
-          </DialogTitle>
+          <DialogTitle>{t("deleteDialog.bulkTitle", { count: tasks.length })}</DialogTitle>
         </DialogHeader>
         <DialogBody className="space-y-3 py-4">
           <DialogDescription className="text-sm text-text-secondary">
@@ -52,18 +50,10 @@ export function BulkDeleteDialog({
           </DialogDescription>
 
           {tasks.length > 0 ? (
-            <ul
-              className="max-h-36 space-y-0.5 overflow-y-auto overscroll-contain rounded-md border border-border-subtle bg-surface-root px-3 py-2"
-              role="list"
-            >
+            <ul role="list" className="max-h-36 space-y-0.5 overflow-y-auto overscroll-contain rounded-md border border-border-subtle bg-surface-root px-3 py-2">
               {visibleNames.map((task) => (
-                <li
-                  key={task.id}
-                  className="flex items-center gap-2 py-0.5 text-sm"
-                >
-                  <span className="truncate text-text-primary">
-                    {task.fileName}
-                  </span>
+                <li key={task.id} className="flex items-center gap-2 py-0.5 text-sm">
+                  <span className="truncate text-text-primary">{task.fileName}</span>
                 </li>
               ))}
               {remainingCount > 0 ? (
@@ -85,20 +75,10 @@ export function BulkDeleteDialog({
           </label>
         </DialogBody>
         <DialogFooter>
-          <Button
-            type="button"
-            variant="ghost"
-            className="w-full sm:w-auto"
-            onClick={() => onOpenChange(false)}
-          >
+          <Button type="button" variant="ghost" className="w-full sm:w-auto" onClick={() => onOpenChange(false)}>
             {t("deleteDialog.cancel")}
           </Button>
-          <Button
-            type="button"
-            variant="danger"
-            className="w-full sm:w-auto"
-            onClick={() => onDelete(deleteFiles)}
-          >
+          <Button type="button" variant="danger" className="w-full sm:w-auto" onClick={() => onDelete(deleteFiles)}>
             {t("deleteDialog.bulkConfirm", { count: tasks.length })}
           </Button>
         </DialogFooter>

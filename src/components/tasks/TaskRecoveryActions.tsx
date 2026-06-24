@@ -1,11 +1,4 @@
-import {
-  Clock,
-  FilePenLine,
-  FolderOpen,
-  HardDrive,
-  Link,
-  RotateCcw,
-} from "lucide-react";
+import { Clock, FilePenLine, FolderOpen, HardDrive, Link, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -24,10 +17,7 @@ export function TaskRecoveryActions({
 }) {
   const { t } = useTranslation();
   const recoveryActions = task.recoveryActions ?? [];
-  const actions =
-    recoveryActions.length > 0
-      ? recoveryActions
-      : recoveryActionsForError(task.errorMessage);
+  const actions = recoveryActions.length > 0 ? recoveryActions : recoveryActionsForError(task.errorMessage);
   if (!task.errorMessage || actions.length === 0) return null;
 
   return (
@@ -36,9 +26,7 @@ export function TaskRecoveryActions({
       role="group"
       aria-label={t("recovery.groupLabel")}
     >
-      <p className="text-xs leading-5 text-status-danger">
-        {localizedErrorMessage(task.errorMessage, t)}
-      </p>
+      <p role="alert" className="text-xs leading-5 text-status-danger">{localizedErrorMessage(task.errorMessage, t)}</p>
       <div className="mt-2 flex flex-wrap gap-2">
         {actions.map((action) => (
           <Button
@@ -73,8 +61,6 @@ function RecoveryIcon({ action }: { action: RecoveryAction }) {
       return <Link className="h-4 w-4" aria-hidden />;
     case "retry_later":
       return <Clock className="h-4 w-4" aria-hidden />;
-    case "restart":
-    case "retry":
     default:
       return <RotateCcw className="h-4 w-4" aria-hidden />;
   }

@@ -4,7 +4,7 @@
  * src-tauri/tauri.conf.json, and src-tauri/Cargo.toml.
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -38,10 +38,7 @@ writeFileSync(tauriConfPath, `${JSON.stringify(tauriConf, null, 2)}\n`);
 
 const cargoTomlPath = resolve(root, "src-tauri/Cargo.toml");
 let cargoToml = readFileSync(cargoTomlPath, "utf8");
-cargoToml = cargoToml.replace(
-  /^version = ".*"$/m,
-  `version = "${version}"`,
-);
+cargoToml = cargoToml.replace(/^version = ".*"$/m, `version = "${version}"`);
 writeFileSync(cargoTomlPath, cargoToml);
 
 console.log(`Synced version ${version} from tag ${tag}`);

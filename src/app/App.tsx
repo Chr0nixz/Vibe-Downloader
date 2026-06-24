@@ -5,10 +5,7 @@ import { FloatingStatusWindow } from "@/components/shell/FloatingStatusWindow";
 import { TrayMenu } from "@/components/shell/TrayMenu";
 
 export default function App() {
-  const surface =
-    typeof window === "undefined"
-      ? null
-      : new URLSearchParams(window.location.search).get("surface");
+  const surface = typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("surface");
 
   useEffect(() => {
     if (surface) {

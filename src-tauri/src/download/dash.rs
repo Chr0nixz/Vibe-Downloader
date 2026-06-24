@@ -29,8 +29,8 @@ use crate::{
     events::{emit_task_progress, emit_task_updated_record},
     logging::sanitize_url,
     models::{
-        AppErrorPayload, EngineCapabilities, ProbedFile, SegmentStatus, TaskKind, TaskProgressPayload,
-        TaskRecord, TaskStatus,
+        AppErrorPayload, EngineCapabilities, ProbedFile, SegmentStatus, TaskKind,
+        TaskProgressPayload, TaskRecord, TaskStatus,
     },
     proxy::SharedProxyConfig,
 };
@@ -140,7 +140,16 @@ async fn run_dash_download(context: DownloadContext) -> Result<(), String> {
         ..
     } = context;
 
-    ensure_ffmpeg_available()?;
+    // Capture ffmpeg path once before any awaits to avoid TOCTOU:
+    // if ffmpeg were removed between ensure_ffmpeg_available() and Command::new(),
+    // the second call would return None and panic under panic=abort.
+    let ffmpeg = ffmpeg_path().ok_or_else(|| {
+        dash_error(
+            "dash_ffmpeg_missing",
+            "ffmpeg was not found. Install ffmpeg or set VIBE_FFMPEG_PATH before creating MPEG-DASH tasks.",
+            true,
+        )
+    })?;
     let input_url = task.final_url.clone().unwrap_or_else(|| task.url.clone());
     let temp_path = task
         .temp_path
@@ -154,22 +163,18 @@ async fn run_dash_download(context: DownloadContext) -> Result<(), String> {
         .ok_or_else(|| "DASH task is missing a final path.".to_string())?;
     if let Some(parent) = temp_path.parent() {
         fs::create_dir_all(parent).await.map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!(
-                "Could not create DASH output folder: {e}"
-            ))
-            .command_error()
+            AppErrorPayload::disk_write_failed(format!("Could not create DASH output folder: {e}"))
+                .command_error()
         })?;
     }
     if fs::try_exists(&temp_path).await.unwrap_or(false) {
         fs::remove_file(&temp_path).await.map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!(
-                "Could not reset DASH temporary file: {e}"
-            ))
-            .command_error()
+            AppErrorPayload::disk_write_failed(format!("Could not reset DASH temporary file: {e}"))
+                .command_error()
         })?;
     }
 
-    let mut command = Command::new(ffmpeg_path().expect("checked above"));
+    let mut command = Command::new(&ffmpeg);
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -194,11 +199,20 @@ async fn run_dash_download(context: DownloadContext) -> Result<(), String> {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    db::insert_task_event(&pool, &task.id, "dash_ffmpeg_started", Some(&sanitize_url(&input_url)))
-        .await?;
-    let mut child = command
-        .spawn()
-        .map_err(|e| dash_error("dash_ffmpeg_failed", format!("Could not start ffmpeg: {e}"), true))?;
+    db::insert_task_event(
+        &pool,
+        &task.id,
+        "dash_ffmpeg_started",
+        Some(&sanitize_url(&input_url)),
+    )
+    .await?;
+    let mut child = command.spawn().map_err(|e| {
+        dash_error(
+            "dash_ffmpeg_failed",
+            format!("Could not start ffmpeg: {e}"),
+            true,
+        )
+    })?;
     drain_child_output(child.stdout.take(), child.stderr.take());
 
     let mut last_size = 0_i64;
@@ -472,7 +486,15 @@ fn dash_output_name(url: &str) -> String {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or(&name);
-    format!("{stem}.mp4")
+    // Sanitize the stem (URL path segments may carry reserved chars or `..`),
+    // then re-extract the final path component so any residual `/` or `\`
+    // left after replacement cannot escape the save directory.
+    let sanitized = crate::download::sanitize::sanitize_single_file_name(stem);
+    let final_stem = Path::new(&sanitized)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&sanitized);
+    format!("{final_stem}.mp4")
 }
 
 fn ensure_ffmpeg_available() -> Result<(), String> {

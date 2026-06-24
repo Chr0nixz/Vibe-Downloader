@@ -1,0 +1,84 @@
+{
+  "extName": { "message": "Vibe Downloader" },
+  "extDescription": { "message": "Send and manage browser downloads with Vibe Downloader." },
+
+  "statusReady": { "message": "Ready" },
+  "statusSending": { "message": "Sending..." },
+  "statusSent": { "message": "Sent" },
+  "statusDisconnected": { "message": "Disconnected" },
+  "statusUnknown": { "message": "unknown" },
+
+  "autoCapture": { "message": "Auto capture" },
+  "cookiesHeaders": { "message": "Cookies & headers" },
+  "forwardAsk": { "message": "Ask first" },
+  "forwardEnabled": { "message": "Forward" },
+  "forwardDisabled": { "message": "Do not forward" },
+
+  "sendCurrentPage": { "message": "Send current page" },
+  "liveSection": { "message": "Live" },
+  "recentSection": { "message": "Recent" },
+  "noRecentTasks": { "message": "No recent tasks" },
+  "noLiveTasks": { "message": "No live tasks" },
+  "optionsButton": { "message": "Options" },
+
+  "optionsTitle": { "message": "Vibe Downloader — Options" },
+  "connectionSection": { "message": "Connection" },
+  "connectionChecking": { "message": "Checking connection status…" },
+  "connectionConnected": { "message": "Connected to Vibe Downloader via realtime bridge." },
+  "connectionError": { "message": "Bridge connection encountered an error. Retrying…" },
+  "connectionNotConnected": { "message": "Not connected. Make sure Vibe Downloader is running." },
+
+  "captureSection": { "message": "Browser Capture Settings" },
+  "captureDisabled": {
+    "message": "Browser capture is disabled in this build. Enable with the experimental capture flag to access these settings."
+  },
+  "autoIntercept": { "message": "Auto-intercept browser downloads" },
+  "autoInterceptHint": { "message": "Automatically hand off matching downloads to Vibe Downloader." },
+  "headersModeLabel": { "message": "Cookie & header forwarding" },
+  "headersModeDisabled": { "message": "Disabled" },
+  "headersModeAsk": { "message": "Ask per download" },
+  "headersModeEnabled": { "message": "Always forward" },
+  "headersModeHint": { "message": "Forward browser cookies and headers to the download engine." },
+  "fileExtensionsLabel": { "message": "Monitored file extensions" },
+  "fileExtensionsHint": {
+    "message": "Comma-separated list. Only downloads matching these extensions will be intercepted."
+  },
+  "minSizeLabel": { "message": "Minimum file size (bytes)" },
+  "minSizeHint": { "message": "Downloads smaller than this will be handled by the browser directly." },
+  "saveSettings": { "message": "Save Settings" },
+  "savedButton": { "message": "Saved!" },
+
+  "rulesSection": { "message": "Site Rules" },
+  "rulesEmpty": { "message": "No site-specific rules configured." },
+  "addRule": { "message": "+ Add Rule" },
+  "newRule": { "message": "New Rule" },
+  "editRule": { "message": "Edit Rule" },
+  "ruleHost": { "message": "Host pattern" },
+  "ruleHostHint": { "message": "Use *.domain to match all subdomains." },
+  "ruleSubdomains": { "message": "Include subdomains" },
+  "ruleMode": { "message": "Mode" },
+  "ruleModeAuto": { "message": "Auto — intercept matching downloads" },
+  "ruleModeAsk": { "message": "Ask — prompt before intercepting" },
+  "ruleModeNever": { "message": "Never — skip this site" },
+  "ruleExtensions": { "message": "File extensions (override)" },
+  "ruleExtensionsHint": { "message": "Leave empty to use global extensions list." },
+  "ruleMinSize": { "message": "Minimum size in bytes (override)" },
+  "ruleHeaders": { "message": "Header forwarding" },
+  "ruleHeadersDefault": { "message": "Use global setting" },
+  "ruleHeadersTrue": { "message": "Always forward" },
+  "ruleHeadersFalse": { "message": "Never forward" },
+  "saveRule": { "message": "Save Rule" },
+  "cancelRule": { "message": "Cancel" },
+  "editButton": { "message": "Edit" },
+  "deleteButton": { "message": "Delete" },
+  "deleteRuleConfirm": {
+    "message": "Delete rule for \"$host$\"?",
+    "placeholders": {
+      "host": { "content": "$1", "example": "example.com" }
+    }
+  },
+  "unknownHost": { "message": "unknown" },
+
+  "ctxDownloadLink": { "message": "Download with Vibe Downloader" },
+  "ctxDownloadSelection": { "message": "Download selected URL with Vibe Downloader" }
+}

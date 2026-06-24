@@ -1,0 +1,82 @@
+{
+  "extName": { "message": "Vibe Downloader" },
+  "extDescription": { "message": "使用 Vibe Downloader 发送和管理浏览器下载。" },
+
+  "statusReady": { "message": "就绪" },
+  "statusSending": { "message": "发送中…" },
+  "statusSent": { "message": "已发送" },
+  "statusDisconnected": { "message": "未连接" },
+  "statusUnknown": { "message": "未知" },
+
+  "autoCapture": { "message": "自动捕获" },
+  "cookiesHeaders": { "message": "Cookie 和标头" },
+  "forwardAsk": { "message": "每次询问" },
+  "forwardEnabled": { "message": "转发" },
+  "forwardDisabled": { "message": "不转发" },
+
+  "sendCurrentPage": { "message": "发送当前页面" },
+  "liveSection": { "message": "实时" },
+  "recentSection": { "message": "最近" },
+  "noRecentTasks": { "message": "无最近任务" },
+  "noLiveTasks": { "message": "无实时任务" },
+  "optionsButton": { "message": "选项" },
+
+  "optionsTitle": { "message": "Vibe Downloader — 选项" },
+  "connectionSection": { "message": "连接" },
+  "connectionChecking": { "message": "正在检查连接状态…" },
+  "connectionConnected": { "message": "已通过实时桥接连接到 Vibe Downloader。" },
+  "connectionError": { "message": "桥接连接遇到错误，正在重试…" },
+  "connectionNotConnected": { "message": "未连接。请确保 Vibe Downloader 正在运行。" },
+
+  "captureSection": { "message": "浏览器捕获设置" },
+  "captureDisabled": {
+    "message": "此构建版本中浏览器捕获已禁用。使用实验性捕获标志启用后可访问这些设置。"
+  },
+  "autoIntercept": { "message": "自动拦截浏览器下载" },
+  "autoInterceptHint": { "message": "自动将匹配的下载移交给 Vibe Downloader。" },
+  "headersModeLabel": { "message": "Cookie 和标头转发" },
+  "headersModeDisabled": { "message": "禁用" },
+  "headersModeAsk": { "message": "每次下载询问" },
+  "headersModeEnabled": { "message": "始终转发" },
+  "headersModeHint": { "message": "将浏览器 Cookie 和标头转发到下载引擎。" },
+  "fileExtensionsLabel": { "message": "监控的文件扩展名" },
+  "fileExtensionsHint": { "message": "逗号分隔列表。仅拦截匹配这些扩展名的下载。" },
+  "minSizeLabel": { "message": "最小文件大小（字节）" },
+  "minSizeHint": { "message": "小于此大小的下载将由浏览器直接处理。" },
+  "saveSettings": { "message": "保存设置" },
+  "savedButton": { "message": "已保存！" },
+
+  "rulesSection": { "message": "站点规则" },
+  "rulesEmpty": { "message": "未配置站点特定规则。" },
+  "addRule": { "message": "+ 添加规则" },
+  "newRule": { "message": "新建规则" },
+  "editRule": { "message": "编辑规则" },
+  "ruleHost": { "message": "主机模式" },
+  "ruleHostHint": { "message": "使用 *.domain 匹配所有子域。" },
+  "ruleSubdomains": { "message": "包含子域" },
+  "ruleMode": { "message": "模式" },
+  "ruleModeAuto": { "message": "自动 — 拦截匹配的下载" },
+  "ruleModeAsk": { "message": "询问 — 拦截前提示" },
+  "ruleModeNever": { "message": "从不 — 跳过此站点" },
+  "ruleExtensions": { "message": "文件扩展名（覆盖）" },
+  "ruleExtensionsHint": { "message": "留空则使用全局扩展名列表。" },
+  "ruleMinSize": { "message": "最小字节数（覆盖）" },
+  "ruleHeaders": { "message": "标头转发" },
+  "ruleHeadersDefault": { "message": "使用全局设置" },
+  "ruleHeadersTrue": { "message": "始终转发" },
+  "ruleHeadersFalse": { "message": "从不转发" },
+  "saveRule": { "message": "保存规则" },
+  "cancelRule": { "message": "取消" },
+  "editButton": { "message": "编辑" },
+  "deleteButton": { "message": "删除" },
+  "deleteRuleConfirm": {
+    "message": "删除\"$host$\"的规则？",
+    "placeholders": {
+      "host": { "content": "$1", "example": "example.com" }
+    }
+  },
+  "unknownHost": { "message": "未知" },
+
+  "ctxDownloadLink": { "message": "使用 Vibe Downloader 下载" },
+  "ctxDownloadSelection": { "message": "使用 Vibe Downloader 下载选中的 URL" }
+}

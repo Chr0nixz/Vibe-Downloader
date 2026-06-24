@@ -1,5 +1,6 @@
 use std::{collections::HashSet, path::PathBuf, time::Duration};
 
+use base64::Engine as _;
 use reqwest::{Client, Url};
 use serde::Deserialize;
 use specta::Type;
@@ -8,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     db,
-    download::{ProbeOutput, ProbeRequest},
+    download::{probe_error::ensure_structured_error, ProbeOutput, ProbeRequest},
     events::{emit_queue_changed, emit_task_updated},
     logging::sanitize_url,
     models::{
@@ -42,12 +43,21 @@ pub struct CreateTaskInput {
     pub probe_snapshot: Option<ProbeTaskPayload>,
     pub selected_file_paths: Option<Vec<String>>,
     pub allow_duplicate: Option<bool>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub private_key_data: Option<String>,
+    pub private_key_passphrase: Option<String>,
+    pub selected_hls_variant_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeTaskInput {
     pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub private_key_data: Option<String>,
+    pub private_key_passphrase: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -70,17 +80,24 @@ pub async fn probe_task(
         return Err("Enter a download URL.".to_string());
     }
 
+    let request_headers = basic_auth_headers(input.username.as_deref(), input.password.as_deref());
+
     tracing::debug!(url = %sanitize_url(url), "probing download url");
     let engine = state.engine_registry.engine_for_uri(url)?;
     let probe = engine
         .probe(ProbeRequest {
             uri: url.to_string(),
             source: None,
-            request_headers: Vec::new(),
+            request_headers,
             pool: Some(state.pool.clone()),
             task_id: None,
+            username: input.username.clone(),
+            password: input.password.clone(),
+            private_key_data: input.private_key_data.clone(),
+            private_key_passphrase: input.private_key_passphrase.clone(),
         })
-        .await?;
+        .await
+        .map_err(ensure_structured_error)?;
     tracing::debug!(
         url = %sanitize_url(url),
         total_size = probe.total_size,
@@ -109,8 +126,13 @@ async fn resolve_create_probe(
             request_headers: request_headers.to_vec(),
             pool: Some(state.pool.clone()),
             task_id: None,
+            username: None,
+            password: None,
+            private_key_data: None,
+            private_key_passphrase: None,
         })
         .await
+        .map_err(ensure_structured_error)
 }
 
 fn probe_payload_from_output(input_url: &str, probe: ProbeOutput) -> ProbeTaskPayload {
@@ -309,8 +331,7 @@ pub async fn import_urls(
                 if matches!(
                     url.scheme(),
                     "http" | "https" | "ftp" | "ftps" | "sftp" | "webdav" | "webdavs" | "magnet"
-                )
-                    || is_torrent_url(&url)
+                ) || is_torrent_url(&url)
                     || is_metalink_url(&url)
                     || is_dash_url(&url) =>
             {
@@ -394,10 +415,15 @@ pub async fn import_urls(
                             request_headers: Vec::new(),
                             pool: Some(state.pool.clone()),
                             task_id: None,
+                            username: None,
+                            password: None,
+                            private_key_data: None,
+                            private_key_passphrase: None,
                         })
                         .await
+                        .map_err(ensure_structured_error)
                 }
-                Err(error) => Err(error),
+                Err(error) => Err(ensure_structured_error(error)),
             };
             match probe_result {
                 Ok(probe) => {
@@ -450,6 +476,11 @@ pub async fn import_urls(
                     probe_snapshot: None,
                     selected_file_paths: None,
                     allow_duplicate: Some(false),
+                    username: None,
+                    password: None,
+                    private_key_data: None,
+                    private_key_passphrase: None,
+                    selected_hls_variant_uri: None,
                 },
             )
             .await
@@ -497,12 +528,30 @@ pub(crate) async fn create_task_with_state_and_headers(
         return Err("Enter a download URL.".to_string());
     }
     let captured_credentials = db::legacy_credentials_from_url(url);
-    if captured_credentials.is_some() {
+    let has_credentials = captured_credentials.is_some()
+        || input.username.as_deref().is_some_and(|u| !u.is_empty());
+    if has_credentials {
         crate::secure_headers::ensure_secret_encryption_available()?;
     }
 
+    // Build auth headers from explicit credentials or URL-embedded credentials
+    let auth_headers = {
+        let mut headers = request_headers.clone();
+        if let (Some(user), Some(pass)) = (input.username.as_deref(), input.password.as_deref()) {
+            if !user.is_empty() {
+                headers.extend(basic_auth_headers(Some(user), Some(pass)));
+            }
+        } else if let Some(ref creds) = captured_credentials {
+            headers.extend(basic_auth_headers(
+                Some(creds.username.as_str()),
+                Some(creds.password.as_str()),
+            ));
+        }
+        headers
+    };
+
     let probe =
-        resolve_create_probe(state, url, input.probe_snapshot.as_ref(), &request_headers).await?;
+        resolve_create_probe(state, url, input.probe_snapshot.as_ref(), &auth_headers).await?;
     let storage_url = captured_credentials
         .as_ref()
         .map(|credentials| credentials.sanitized_url.clone())
@@ -552,8 +601,14 @@ pub(crate) async fn create_task_with_state_and_headers(
     let file_name = final_path
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or(requested_file_name)
-        .to_string();
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            // Defensive fallback: unique_final_path already sanitizes via
+            // sanitize_file_name, so Path::file_name() should only return
+            // None for degenerate inputs (e.g. trailing `..`). Re-sanitize
+            // through the shared helper rather than echoing the raw request.
+            crate::download::sanitize::sanitize_single_file_name(requested_file_name)
+        });
     let temp_path = PathBuf::from(format!("{}.vibe-downloading", final_path.display()));
     let now = now_iso();
     let expected_hash_sha256 = if is_bt_protocol(&probe.protocol)
@@ -583,9 +638,18 @@ pub(crate) async fn create_task_with_state_and_headers(
         .map(str::to_string);
     let queue_position = db::next_queue_position(&state.pool).await?;
 
+    let task_url = match input.selected_hls_variant_uri.as_deref() {
+        Some(variant_uri) if probe.protocol == "hls" => reqwest::Url::parse(&storage_url)
+            .ok()
+            .and_then(|base| base.join(variant_uri).ok())
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| storage_url.clone()),
+        _ => storage_url.clone(),
+    };
+
     let record = TaskRecord {
         id: Uuid::new_v4().to_string(),
-        url: storage_url,
+        url: task_url,
         final_url: Some(storage_final_url),
         protocol: probe.protocol.clone(),
         task_kind: probe.task_kind,
@@ -624,7 +688,55 @@ pub(crate) async fn create_task_with_state_and_headers(
         updated_at: now,
     };
 
-    db::insert_task_record(&state.pool, &record).await?;
+    // Close the TOCTOU race: BEGIN IMMEDIATE acquires a RESERVED lock before any
+    // SELECT runs, so a concurrent creator blocks until this transaction commits —
+    // its dup-check SELECT will then see our INSERT. (sqlx's `begin()` uses DEFERRED,
+    // which reads a WAL snapshot and would let both creators pass the dup-check.)
+    {
+        let mut conn = state.pool.acquire().await.map_err(|e| e.to_string())?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let outcome: Result<(), String> = async {
+            if !input.allow_duplicate.unwrap_or(false) {
+                let bt_source_key = if record.source_key.starts_with("bt:") {
+                    Some(record.source_key.as_str())
+                } else {
+                    None
+                };
+                if let Some(duplicate) = db::find_duplicate_task_record(
+                    &mut *conn,
+                    &record.url,
+                    record.final_url.as_deref(),
+                    bt_source_key,
+                )
+                .await?
+                {
+                    return Err(
+                        AppErrorPayload::duplicate_task(&duplicate.file_name).command_error(),
+                    );
+                }
+            }
+            db::insert_task_record(&mut *conn, &record).await?;
+            Ok(())
+        }
+        .await;
+
+        match outcome {
+            Ok(()) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            Err(err) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                return Err(err);
+            }
+        }
+    }
     if let Some(expected_hash) = record.expected_hash_sha256.clone() {
         let checksum = TaskChecksumRecord {
             id: Uuid::new_v4().to_string(),
@@ -655,13 +767,28 @@ pub(crate) async fn create_task_with_state_and_headers(
         &request_headers,
         &record.created_at,
     );
-    if let Some(credentials) = captured_credentials {
+    if let (Some(user), Some(pass)) = (input.username.as_deref(), input.password.as_deref()) {
+        if !user.is_empty() {
+            db::upsert_task_credentials(
+                &state.pool,
+                &record.id,
+                &record.protocol,
+                user,
+                pass,
+                input.private_key_data.as_deref(),
+                input.private_key_passphrase.as_deref(),
+            )
+            .await?;
+        }
+    } else if let Some(credentials) = captured_credentials {
         db::upsert_task_credentials(
             &state.pool,
             &record.id,
             &record.protocol,
             &credentials.username,
             &credentials.password,
+            None,
+            None,
         )
         .await?;
     }
@@ -961,6 +1088,22 @@ fn first_checksum_token(text: &str, algorithm: ChecksumAlgorithm) -> Option<Stri
 
 fn is_metalink_protocol(protocol: &str) -> bool {
     protocol == "metalink"
+}
+
+/// Build an `Authorization: Basic` header from optional username and password.
+/// Returns an empty vec if username is None or empty.
+fn basic_auth_headers(
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Vec<(String, String)> {
+    let user = username.unwrap_or("").trim();
+    if user.is_empty() {
+        return Vec::new();
+    }
+    let pass = password.unwrap_or("");
+    let encoded =
+        base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+    vec![("Authorization".to_string(), format!("Basic {encoded}"))]
 }
 
 #[cfg(test)]

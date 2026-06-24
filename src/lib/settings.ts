@@ -1,10 +1,7 @@
 import type { AppSettings } from "@/generated/bindings";
 import { updateSettings } from "@/lib/tauri";
 
-export async function applyGlobalSpeedLimit(
-  settings: AppSettings,
-  limit: number | null,
-): Promise<AppSettings> {
+export async function applyGlobalSpeedLimit(settings: AppSettings, limit: number | null): Promise<AppSettings> {
   return updateSettings({
     maxActiveTasks: settings.maxActiveTasks,
     defaultSaveDir: settings.defaultSaveDir,
@@ -18,9 +15,7 @@ export async function applyGlobalSpeedLimit(
     autoResumeOnStartup: settings.autoResumeOnStartup,
     floatingWindowEnabled: settings.floatingWindowEnabled,
     clipboardMonitorEnabled: settings.clipboardMonitorEnabled,
-    fontFamily: settings.fontFamily,
     accentColor: settings.accentColor,
-    sidebarStripeEnabled: settings.sidebarStripeEnabled,
     titlebarGradientEnabled: settings.titlebarGradientEnabled,
     proxyMode: settings.proxyMode,
     proxyUrl: settings.proxyUrl,
@@ -37,5 +32,7 @@ export async function applyGlobalSpeedLimit(
     scheduleSpeedLimitBps: settings.scheduleSpeedLimitBps,
     completionAction: settings.completionAction,
     completionCountdownSeconds: settings.completionCountdownSeconds,
+    completionRunCommand: settings.completionRunCommand,
+    deleteToTrash: settings.deleteToTrash,
   });
 }

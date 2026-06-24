@@ -25,6 +25,10 @@ pub struct ProbeRequest {
     pub request_headers: Vec<(String, String)>,
     pub pool: Option<SqlitePool>,
     pub task_id: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub private_key_data: Option<String>,
+    pub private_key_passphrase: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +54,7 @@ pub struct DownloadContext {
     pub pool: SqlitePool,
     pub task: TaskRecord,
     pub cancel: Arc<AtomicBool>,
+    pub cancel_token: tokio_util::sync::CancellationToken,
     pub finish: Arc<AtomicBool>,
     pub speed_limiter: Arc<GlobalSpeedLimiter>,
     pub connection_limit: usize,
@@ -68,6 +73,7 @@ pub trait DownloadEngine: Send + Sync {
 pub struct EngineRegistry {
     engines: Vec<Arc<dyn DownloadEngine>>,
     bt_engine: Arc<BtEngine>,
+    http_engine: Arc<HttpEngine>,
     proxy_config: SharedProxyConfig,
 }
 
@@ -81,6 +87,7 @@ impl EngineRegistry {
     pub fn new() -> Result<Self, String> {
         let proxy_config = ResolvedProxyConfig::shared_default();
         let bt_engine = Arc::new(BtEngine::new(proxy_config.clone()));
+        let http_engine = Arc::new(HttpEngine::with_proxy_config(proxy_config.clone())?);
         Ok(Self {
             engines: vec![
                 bt_engine.clone(),
@@ -88,17 +95,19 @@ impl EngineRegistry {
                 Arc::new(HlsEngine::new(proxy_config.clone())),
                 Arc::new(DashEngine::new(proxy_config.clone())),
                 Arc::new(WebDavEngine::new(proxy_config.clone())),
-                Arc::new(HttpEngine::with_proxy_config(proxy_config.clone())?),
+                http_engine.clone(),
                 Arc::new(FtpEngine::new(proxy_config.clone())),
                 Arc::new(SftpEngine::new(proxy_config.clone())),
             ],
             bt_engine,
+            http_engine,
             proxy_config,
         })
     }
 
     pub async fn set_proxy_config(&self, config: ResolvedProxyConfig) {
         *self.proxy_config.write().await = config;
+        self.http_engine.invalidate_clients().await;
     }
 
     pub async fn proxy_config(&self) -> ResolvedProxyConfig {
@@ -154,9 +163,6 @@ impl EngineRegistry {
         }
     }
 }
-
-#[derive(Debug, Clone)]
-pub struct ExternalEngineAdapter;
 
 fn is_torrent_url(url: &reqwest::Url) -> bool {
     matches!(url.scheme(), "http" | "https" | "file")

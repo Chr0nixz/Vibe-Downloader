@@ -9,12 +9,11 @@ use std::{
 
 use quick_xml::{events::Event, Reader};
 use reqwest::{header::RANGE, Client, StatusCode};
-use sha2::Digest;
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
 };
 
 use super::{
@@ -24,6 +23,7 @@ use super::{
 };
 use crate::{
     db,
+    download::checksum::hash_file,
     events::{emit_task_progress, emit_task_updated_record},
     logging::sanitize_url,
     models::{
@@ -36,7 +36,6 @@ use crate::{
 };
 
 const PROTOCOL_METALINK: &str = "metalink";
-const HASH_READ_BUFFER_SIZE: usize = 1024 * 1024;
 const METALINK_CONTENT_TYPE: &str = "application/metalink4+xml";
 const DEFAULT_RESOURCE_PRIORITY: i64 = 999_999;
 
@@ -447,71 +446,6 @@ async fn verify_metalink_file(
         return Err(error);
     }
     Ok(())
-}
-
-async fn hash_file(path: &Path, algorithm: ChecksumAlgorithm) -> Result<String, String> {
-    let mut file = fs::File::open(path)
-        .await
-        .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
-    let mut buffer = vec![0_u8; HASH_READ_BUFFER_SIZE];
-    match algorithm {
-        ChecksumAlgorithm::Sha256 => {
-            let mut hasher = sha2::Sha256::new();
-            loop {
-                let read = file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..read]);
-            }
-            Ok(hex_lower(hasher.finalize().as_slice()))
-        }
-        ChecksumAlgorithm::Sha512 => {
-            let mut hasher = sha2::Sha512::new();
-            loop {
-                let read = file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..read]);
-            }
-            Ok(hex_lower(hasher.finalize().as_slice()))
-        }
-        ChecksumAlgorithm::Sha1 => {
-            let mut hasher = sha1::Sha1::new();
-            loop {
-                let read = file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..read]);
-            }
-            Ok(hex_lower(hasher.finalize().as_slice()))
-        }
-        ChecksumAlgorithm::Md5 => {
-            let mut hasher = md5::Md5::new();
-            loop {
-                let read = file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..read]);
-            }
-            Ok(hex_lower(hasher.finalize().as_slice()))
-        }
-    }
 }
 
 async fn emit_metalink_progress(
@@ -945,14 +879,6 @@ fn content_type_for_path(path: &str) -> Option<String> {
     .map(str::to_string)
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
-
 fn metalink_error(code: &str, message: impl Into<String>, recoverable: bool) -> String {
     AppErrorPayload::new(
         code,
@@ -1021,9 +947,7 @@ mod tests {
         let sha256 = hash_file(&path, ChecksumAlgorithm::Sha256)
             .await
             .expect("sha256");
-        let md5 = hash_file(&path, ChecksumAlgorithm::Md5)
-            .await
-            .expect("md5");
+        let md5 = hash_file(&path, ChecksumAlgorithm::Md5).await.expect("md5");
 
         let _ = fs::remove_file(&path).await;
         assert_eq!(

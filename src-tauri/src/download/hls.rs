@@ -261,6 +261,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         pool,
         task,
         cancel,
+        cancel_token: _,
         finish,
         speed_limiter,
         connection_limit,
@@ -268,6 +269,16 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         proxy_config,
     } = context;
     ensure_ffmpeg_available()?;
+    // Capture ffmpeg path once before any awaits to avoid TOCTOU:
+    // if ffmpeg were removed between ensure_ffmpeg_available() and run_ffmpeg(),
+    // the second call would return None and fail after a long download.
+    let ffmpeg = ffmpeg_path().ok_or_else(|| {
+        hls_error(
+            "hls_ffmpeg_missing",
+            "ffmpeg was not found. Install ffmpeg or set VIBE_FFMPEG_PATH before creating HLS tasks.",
+            true,
+        )
+    })?;
     let client = build_client(&proxy_config)?;
     let staging_dir = task
         .temp_path
@@ -372,7 +383,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         return Ok(());
     }
 
-    finalize_hls_task(&app, &pool, &task, &staging_dir, downloaded_total).await
+    finalize_hls_task(&app, &pool, &task, &staging_dir, downloaded_total, &ffmpeg).await
 }
 
 async fn persist_hls_segment_plans(
@@ -783,11 +794,12 @@ async fn finalize_hls_task(
     task: &TaskRecord,
     staging_dir: &Path,
     downloaded_total: i64,
+    ffmpeg: &Path,
 ) -> Result<(), String> {
     db::update_task_health_summary(pool, &task.id, Some("Converting HLS stream to MP4")).await?;
     let local_playlist = write_local_hls_playlist(pool, &task.id, staging_dir).await?;
     let mp4_temp = staging_dir.join("output.mp4");
-    run_ffmpeg(&local_playlist, &mp4_temp).await?;
+    run_ffmpeg(&local_playlist, &mp4_temp, ffmpeg).await?;
     let final_path = task
         .final_path
         .as_deref()
@@ -879,14 +891,7 @@ async fn write_local_hls_playlist(
     Ok(path)
 }
 
-async fn run_ffmpeg(input: &Path, output: &Path) -> Result<(), String> {
-    let ffmpeg = ffmpeg_path().ok_or_else(|| {
-        hls_error(
-            "hls_ffmpeg_missing",
-            "ffmpeg was not found. Install ffmpeg or set VIBE_FFMPEG_PATH before creating HLS tasks.",
-            true,
-        )
-    })?;
+async fn run_ffmpeg(input: &Path, output: &Path, ffmpeg: &Path) -> Result<(), String> {
     if fs::try_exists(output).await.unwrap_or(false) {
         fs::remove_file(output)
             .await
@@ -1408,7 +1413,15 @@ fn hls_output_name(url: &str) -> String {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or(&name);
-    format!("{stem}.mp4")
+    // Sanitize the stem (URL path segments may carry reserved chars or `..`),
+    // then re-extract the final path component so any residual `/` or `\`
+    // left after replacement cannot escape the save directory.
+    let sanitized = crate::download::sanitize::sanitize_single_file_name(stem);
+    let final_stem = Path::new(&sanitized)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&sanitized);
+    format!("{final_stem}.mp4")
 }
 
 fn byte_range_header(range: &ByteRange) -> String {

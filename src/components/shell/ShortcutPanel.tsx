@@ -1,7 +1,5 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-
-import type { Platform } from "@/lib/platform";
 import {
   Dialog,
   DialogBody,
@@ -10,6 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import type { Platform } from "@/lib/platform";
 
 interface ShortcutEntry {
   keys: string;
@@ -92,25 +91,19 @@ export function ShortcutPanel({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>{t("shortcuts.title")}</DialogTitle>
-          <DialogDescription className="sr-only">
-            {t("shortcuts.description")}
-          </DialogDescription>
+          <DialogDescription className="sr-only">{t("shortcuts.description")}</DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-5">
           {groups.map((group) => (
             <section key={group.id}>
-              <h3 className="mb-2 text-[11px] font-semibold text-text-muted">
-                {group.label}
-              </h3>
+              <h3 className="mb-2 text-[11px] font-semibold text-text-muted">{group.label}</h3>
               <div className="space-y-1">
                 {group.shortcuts.map((shortcut) => (
                   <div
                     key={`${shortcut.keys}-${shortcut.label}`}
                     className="flex items-center justify-between rounded-md px-2 py-1.5 transition-colors hover:bg-surface-base"
                   >
-                    <span className="text-sm text-text-secondary">
-                      {shortcut.label}
-                    </span>
+                    <span className="text-sm text-text-secondary">{shortcut.label}</span>
                     <ShortcutKeys keys={shortcut.keys} />
                   </div>
                 ))}
@@ -130,9 +123,7 @@ function ShortcutKeys({ keys }: { keys: string }) {
     <span className="flex shrink-0 items-center gap-1">
       {parts.map((part, index) => (
         <span key={index} className="flex items-center gap-1">
-          {index > 0 ? (
-            <span className="text-[10px] text-text-muted">+</span>
-          ) : null}
+          {index > 0 ? <span className="text-[10px] text-text-muted">+</span> : null}
           <kbd className="inline-flex min-w-[1.5rem] items-center justify-center rounded border border-border-subtle bg-surface-root px-1.5 py-0.5 font-mono text-[11px] text-text-muted shadow-[0_1px_0_oklch(0_0_0/0.08)]">
             {part}
           </kbd>

@@ -42,16 +42,78 @@ let reconnectTimer = null;
 let lastStatus = "disconnected";
 let captureSettingsCache = normalizeCaptureSettings(null);
 
+/* ── Session state persistence (survives SW termination) ── */
+
+const SESSION_TASKS_KEY = "vibeSessionTasks";
+const SESSION_BRIDGE_KEY = "vibeSessionBridge";
+const SESSION_STATUS_KEY = "vibeSessionStatus";
+const BADGE_COLORS = { connected: "#22c55e", disconnected: "#6b7280", error: "#ef4444" };
+let sessionSaveTimer = null;
+
+function hasSessionStorage() {
+  return typeof api?.storage?.session?.get === "function";
+}
+
+async function restoreSessionState() {
+  if (!hasSessionStorage()) return;
+  try {
+    const data = await api.storage.session.get([SESSION_TASKS_KEY, SESSION_BRIDGE_KEY, SESSION_STATUS_KEY]);
+    if (data[SESSION_STATUS_KEY]) lastStatus = data[SESSION_STATUS_KEY];
+    if (data[SESSION_BRIDGE_KEY]?.wsUrl && data[SESSION_BRIDGE_KEY]?.token) {
+      bridge = data[SESSION_BRIDGE_KEY];
+    }
+    const tasks = data[SESSION_TASKS_KEY];
+    if (Array.isArray(tasks)) {
+      for (const task of tasks) upsertLiveTask(task);
+    }
+  } catch (error) {
+    log.debug("session restore failed (normal on first run)", error);
+  }
+}
+
+function scheduleSessionSave() {
+  if (!hasSessionStorage()) return;
+  if (sessionSaveTimer) return;
+  sessionSaveTimer = setTimeout(() => {
+    sessionSaveTimer = null;
+    api.storage.session
+      .set({
+        [SESSION_TASKS_KEY]: Array.from(liveTasks.values()),
+        [SESSION_STATUS_KEY]: lastStatus,
+        ...(bridge ? { [SESSION_BRIDGE_KEY]: bridge } : {}),
+      })
+      .catch((error) => log.debug("session save failed", error));
+  }, 500);
+}
+
+/* ── Badge updates ── */
+
+function updateBadge() {
+  if (!api?.action) return;
+  const activeCount = Array.from(liveTasks.values()).filter((task) => ACTIVE_TASK_STATUSES.has(task.status)).length;
+  const text = activeCount > 0 ? String(activeCount) : "";
+  api.action.setBadgeText({ text }).catch(() => {});
+  const color = BADGE_COLORS[lastStatus] ?? BADGE_COLORS.disconnected;
+  api.action.setBadgeBackgroundColor({ color }).catch(() => {});
+}
+
+/* ── Restore session state on SW start, then bootstrap bridge ── */
+
+void (async () => {
+  await restoreSessionState();
+  await ensureBridge();
+})();
+
 api.runtime.onInstalled.addListener(() => {
   log.info("extension installed, registering context menus");
   api.contextMenus.create({
     id: "vibe-download-link",
-    title: "Download with Vibe Downloader",
+    title: api.i18n.getMessage("ctxDownloadLink") || "Download with Vibe Downloader",
     contexts: ["link"],
   });
   api.contextMenus.create({
     id: "vibe-download-selection",
-    title: "Download selected URL with Vibe Downloader",
+    title: api.i18n.getMessage("ctxDownloadSelection") || "Download selected URL with Vibe Downloader",
     contexts: ["selection"],
   });
 });
@@ -110,37 +172,29 @@ if (EXPERIMENTAL_CAPTURE && api.downloads?.onCreated) {
 
 if (EXPERIMENTAL_CAPTURE && api.webRequest?.onBeforeSendHeaders) {
   try {
-    api.webRequest.onBeforeSendHeaders.addListener(
-      cacheRequestHeaders,
-      { urls: ["http://*/*", "https://*/*"] },
-      ["requestHeaders", "extraHeaders"],
-    );
+    api.webRequest.onBeforeSendHeaders.addListener(cacheRequestHeaders, { urls: ["http://*/*", "https://*/*"] }, [
+      "requestHeaders",
+      "extraHeaders",
+    ]);
   } catch {
-    api.webRequest.onBeforeSendHeaders.addListener(
-      cacheRequestHeaders,
-      { urls: ["http://*/*", "https://*/*"] },
-      ["requestHeaders"],
-    );
+    api.webRequest.onBeforeSendHeaders.addListener(cacheRequestHeaders, { urls: ["http://*/*", "https://*/*"] }, [
+      "requestHeaders",
+    ]);
   }
 }
 
 if (EXPERIMENTAL_CAPTURE && api.webRequest?.onHeadersReceived) {
   try {
-    api.webRequest.onHeadersReceived.addListener(
-      recordMediaCandidate,
-      { urls: ["http://*/*", "https://*/*"] },
-      ["responseHeaders", "extraHeaders"],
-    );
+    api.webRequest.onHeadersReceived.addListener(recordMediaCandidate, { urls: ["http://*/*", "https://*/*"] }, [
+      "responseHeaders",
+      "extraHeaders",
+    ]);
   } catch {
-    api.webRequest.onHeadersReceived.addListener(
-      recordMediaCandidate,
-      { urls: ["http://*/*", "https://*/*"] },
-      ["responseHeaders"],
-    );
+    api.webRequest.onHeadersReceived.addListener(recordMediaCandidate, { urls: ["http://*/*", "https://*/*"] }, [
+      "responseHeaders",
+    ]);
   }
 }
-
-void ensureBridge();
 
 async function handleBrowserDownload(download) {
   if (!EXPERIMENTAL_CAPTURE) return;
@@ -168,9 +222,7 @@ async function handleBrowserDownload(download) {
       suggestedFileName: fileNameFromPath(download.filename) ?? suggestedFileNameFromUrl(download.url),
       source: "browser_auto",
       browserDownloadId: String(download.id),
-      totalBytes: Number.isFinite(download.totalBytes) && download.totalBytes > 0
-        ? String(download.totalBytes)
-        : null,
+      totalBytes: Number.isFinite(download.totalBytes) && download.totalBytes > 0 ? String(download.totalBytes) : null,
       mime: download.mime ?? null,
       forwardedHeaders: headers,
       headersAvailable: headerConsent.available || headers.length > 0,
@@ -249,6 +301,7 @@ async function ensureBridge() {
       throw new Error(response?.errorMessage ?? "Vibe realtime bridge is unavailable.");
     }
     bridge = { wsUrl: response.wsUrl, token: response.token };
+    scheduleSessionSave();
   }
   await connectWs();
 }
@@ -263,6 +316,8 @@ function connectWs() {
     ws = socket;
     socket.addEventListener("open", () => {
       lastStatus = "connected";
+      scheduleSessionSave();
+      updateBadge();
       resolve();
       void sendWsRequest("getSettings", null)
         .then((settings) => saveLocalCaptureSettings(settings))
@@ -272,11 +327,20 @@ function connectWs() {
     socket.addEventListener("close", () => {
       lastStatus = "disconnected";
       ws = null;
+      // Reset bridge so ensureBridge re-bootstraps a fresh token on the next
+      // attempt. Without this, a stale token (e.g. after desktop app restart)
+      // would cause an infinite reconnect loop.
+      bridge = null;
+      scheduleSessionSave();
+      updateBadge();
       rejectPendingWsRequests("Realtime bridge disconnected.");
       scheduleReconnect();
     });
     socket.addEventListener("error", () => {
       lastStatus = "error";
+      bridge = null;
+      scheduleSessionSave();
+      updateBadge();
       reject(new Error("Vibe realtime bridge connection failed."));
     });
   });
@@ -310,11 +374,15 @@ function handleWsMessage(raw) {
   if (message.type === "tasksSnapshot") {
     liveTasks.clear();
     for (const task of message.payload?.tasks ?? []) upsertLiveTask(task);
+    scheduleSessionSave();
+    updateBadge();
     return;
   }
   if (message.type === "taskUpdated") {
     const task = message.payload;
     if (task?.id) upsertLiveTask(task);
+    scheduleSessionSave();
+    updateBadge();
     return;
   }
   if (message.type === "taskProgress") {
@@ -327,6 +395,8 @@ function handleWsMessage(raw) {
         id: payload.taskId,
         updatedAt: new Date().toISOString(),
       });
+      scheduleSessionSave();
+      updateBadge();
     }
   }
 }
@@ -440,9 +510,7 @@ function cacheRequestHeaders(details) {
 async function forwardedHeaders(url) {
   if (!EXPERIMENTAL_CAPTURE) return [];
   const cached = headerCache.get(url);
-  const headers = cached && Date.now() - cached.createdAt < HEADER_CACHE_TTL_MS
-    ? [...cached.headers]
-    : [];
+  const headers = cached && Date.now() - cached.createdAt < HEADER_CACHE_TTL_MS ? [...cached.headers] : [];
   const hasCookie = headers.some((header) => header.name.toLowerCase() === "cookie");
   if (!hasCookie && api.cookies?.getAll) {
     try {
@@ -505,8 +573,8 @@ function headerValue(headers, name) {
 
 function pruneMediaCandidates() {
   if (mediaCandidates.size <= MAX_MEDIA_CANDIDATES) return;
-  const entries = Array.from(mediaCandidates.values()).sort((left, right) =>
-    Date.parse(right.detectedAt) - Date.parse(left.detectedAt)
+  const entries = Array.from(mediaCandidates.values()).sort(
+    (left, right) => Date.parse(right.detectedAt) - Date.parse(left.detectedAt),
   );
   mediaCandidates.clear();
   for (const candidate of entries.slice(0, MAX_MEDIA_CANDIDATES)) {
@@ -550,27 +618,60 @@ function normalizeCaptureSettings(value) {
       minSizeBytes: String(Number(value?.minSizeBytes ?? 0) || 0),
       fileExtensions: Array.isArray(value?.fileExtensions)
         ? value.fileExtensions
-        : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv", "m3u8", "meta4", "metalink"],
+        : [
+            "zip",
+            "7z",
+            "rar",
+            "exe",
+            "msi",
+            "dmg",
+            "pkg",
+            "iso",
+            "tar",
+            "gz",
+            "pdf",
+            "mp4",
+            "mkv",
+            "m3u8",
+            "meta4",
+            "metalink",
+          ],
       siteRules: Array.isArray(value?.siteRules) ? value.siteRules : [],
     };
   }
   return {
     autoIntercept: value?.autoIntercept !== false,
-    forwardHeadersMode: value?.forwardHeadersMode ??
-      (typeof value?.forwardHeaders === "boolean"
-        ? value.forwardHeaders ? "enabled" : "disabled"
-        : "ask"),
-    forwardHeaders: value?.forwardHeadersMode === "enabled" ||
-      (value?.forwardHeadersMode == null && value?.forwardHeaders === true),
+    forwardHeadersMode:
+      value?.forwardHeadersMode ??
+      (typeof value?.forwardHeaders === "boolean" ? (value.forwardHeaders ? "enabled" : "disabled") : "ask"),
+    forwardHeaders:
+      value?.forwardHeadersMode === "enabled" || (value?.forwardHeadersMode == null && value?.forwardHeaders === true),
     minSizeBytes: String(Number(value?.minSizeBytes ?? 0) || 0),
     fileExtensions: Array.isArray(value?.fileExtensions)
       ? value.fileExtensions
-      : ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "mp4", "mkv", "m3u8", "meta4", "metalink"],
+      : [
+          "zip",
+          "7z",
+          "rar",
+          "exe",
+          "msi",
+          "dmg",
+          "pkg",
+          "iso",
+          "tar",
+          "gz",
+          "pdf",
+          "mp4",
+          "mkv",
+          "m3u8",
+          "meta4",
+          "metalink",
+        ],
     siteRules: Array.isArray(value?.siteRules) ? value.siteRules : [],
   };
 }
 
-function shouldForwardHeaders(url, settings) {
+function _shouldForwardHeaders(url, settings) {
   return headerForwardingDecision(url, settings).forward;
 }
 
@@ -622,9 +723,7 @@ function matchingRule(hostname, rules) {
       const root = pattern.slice(2);
       return host === root || host.endsWith(`.${root}`);
     }
-    return rule.includeSubdomains
-      ? host === pattern || host.endsWith(`.${pattern}`)
-      : host === pattern;
+    return rule.includeSubdomains ? host === pattern || host.endsWith(`.${pattern}`) : host === pattern;
   });
 }
 
@@ -690,7 +789,10 @@ function suggestedFileNameFromUrl(value) {
 }
 
 function fileNameFromPath(value) {
-  const name = String(value ?? "").split(/[\\/]/).filter(Boolean).at(-1);
+  const name = String(value ?? "")
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .at(-1);
   return name || null;
 }
 

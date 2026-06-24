@@ -119,7 +119,8 @@ const es = {
     loadingMore: "Cargando m\u00e1s, quedan {{count}}",
     empty: "No hay tareas en esta vista.",
     emptySearch: "No hay tareas que coincidan con la b\u00fasqueda.",
-    emptyHint: "Haz clic en el bot\u00f3n + o presiona Ctrl+K para a\u00f1adir una URL de descarga. Las extensiones del navegador tambi\u00e9n pueden enviar descargas autom\u00e1ticamente.",
+    emptyHint:
+      "Haz clic en el bot\u00f3n + o presiona Ctrl+N para a\u00f1adir una descarga. Las extensiones del navegador tambi\u00e9n pueden enviar descargas autom\u00e1ticamente. Presiona Ctrl+K para la paleta de comandos.",
     aria: "Lista de tareas de descarga",
     selectTask: "Seleccionar {{name}}",
     toolPanel: "Filtros y acciones en lote",
@@ -166,7 +167,8 @@ const es = {
     title: "Ajustes",
     description: "Controla d\u00f3nde se guardan las descargas y cu\u00e1ntas tareas se ejecutan a la vez.",
     downloads: "Descargas",
-    downloadsDescription: "Estos valores se aplican a las tareas nuevas. Las tareas existentes conservan su ruta guardada.",
+    downloadsDescription:
+      "Estos valores se aplican a las tareas nuevas. Las tareas existentes conservan su ruta guardada.",
     advancedDownloads: "Descargas avanzadas",
     advancedDownloadsDescription: "Ajusta la planificaci\u00f3n de conexiones para servidores y archivos grandes.",
     defaultSaveDir: "Carpeta de guardado por defecto",
@@ -179,11 +181,16 @@ const es = {
     multiConnectionThreshold: "Umbral multiconexi\u00f3n",
     segmentCount: "Segmentos iniciales",
     maxConnectionsPerHost: "M\u00e1x. conexiones por host",
-    maxActiveTasksTip: "N\u00famero de descargas simult\u00e1neas. M\u00e1s tareas comparten ancho de banda y conexiones. Recomendado: 3\u20135",
-    globalSpeedLimitTip: "Limita la velocidad total de todas las descargas. D\u00e9jalo vac\u00edo para ilimitado. \u00datil cuando necesitas reservar ancho de banda para otras aplicaciones",
-    multiConnectionThresholdTip: "Los archivos mayores que este tama\u00f1o usan m\u00faltiples conexiones para descargar m\u00e1s r\u00e1pido. Para archivos peque\u00f1os es m\u00e1s eficiente una sola conexi\u00f3n",
-    segmentCountTip: "En cu\u00e1ntas partes se divide cada descarga. M\u00e1s segmentos acelera archivos grandes pero puede sobrecargar el servidor. Recomendado: 4\u20138",
-    maxConnectionsPerHostTip: "M\u00e1ximo de conexiones paralelas a un mismo servidor. M\u00e1s alto es m\u00e1s r\u00e1pido, pero algunos servidores limitan. Recomendado: 8\u201316",
+    maxActiveTasksTip:
+      "N\u00famero de descargas simult\u00e1neas. M\u00e1s tareas comparten ancho de banda y conexiones. Recomendado: 3\u20135",
+    globalSpeedLimitTip:
+      "Limita la velocidad total de todas las descargas. D\u00e9jalo vac\u00edo para ilimitado. \u00datil cuando necesitas reservar ancho de banda para otras aplicaciones",
+    multiConnectionThresholdTip:
+      "Los archivos mayores que este tama\u00f1o usan m\u00faltiples conexiones para descargar m\u00e1s r\u00e1pido. Para archivos peque\u00f1os es m\u00e1s eficiente una sola conexi\u00f3n",
+    segmentCountTip:
+      "En cu\u00e1ntas partes se divide cada descarga. M\u00e1s segmentos acelera archivos grandes pero puede sobrecargar el servidor. Recomendado: 4\u20138",
+    maxConnectionsPerHostTip:
+      "M\u00e1ximo de conexiones paralelas a un mismo servidor. M\u00e1s alto es m\u00e1s r\u00e1pido, pero algunos servidores limitan. Recomendado: 8\u201316",
     speedUnit: "Unidad de velocidad",
     sizeUnit: "Unidad de tama\u00f1o",
     scheduleGroupDownload: "Horario de descarga",
@@ -194,9 +201,6 @@ const es = {
     themeSystem: "Seguir al sistema",
     themeLight: "Claro",
     themeDark: "Oscuro",
-    fontFamily: "Fuente",
-    fontFamilySourceHanSans: "Source Han Sans",
-    fontFamilySystem: "Predeterminada del sistema",
     accentColor: "Color de acento",
     accentBlue: "Azul",
     accentPurple: "Morado",
@@ -211,7 +215,8 @@ const es = {
     systemNotifications: "Notificaciones del sistema al finalizar",
     systemNotificationsDescription: "Muestra una notificaci\u00f3n del sistema cuando se completa una tarea.",
     closeToTray: "Cerrar a la bandeja",
-    closeToTrayDescription: "Mant\u00e9n Vibe ejecut\u00e1ndose en la bandeja del sistema al cerrar la ventana principal.",
+    closeToTrayDescription:
+      "Mant\u00e9n Vibe ejecut\u00e1ndose en la bandeja del sistema al cerrar la ventana principal.",
     startOnBoot: "Iniciar al arrancar",
     startOnBootDescription: "Inicia Vibe Downloader al iniciar sesi\u00f3n.",
     floatingWindow: "Ventana flotante de estado",
@@ -260,6 +265,9 @@ const es = {
       "Esto restablecer\u00e1 todos los ajustes a sus valores predeterminados. Esta acci\u00f3n no se puede deshacer.",
     searchSettings: "Buscar ajustes...",
     searchNoResults: "No se encontraron ajustes coincidentes.",
+    clearSearch: "Clear search",
+    startTime: "Start time",
+    endTime: "End time",
   },
   deleteDialog: {
     title: "Eliminar tarea",
@@ -279,9 +287,11 @@ const es = {
     detecting: "Detectando\u2026",
     detectHint: "Validar la URL ahora",
     autoDetecting: "Comprobando URL...",
-    usingProbe: "Usando la \u00faltima comprobaci\u00f3n. El servidor se verificar\u00e1 de nuevo antes de iniciar la tarea.",
+    usingProbe:
+      "Usando la \u00faltima comprobaci\u00f3n. El servidor se verificar\u00e1 de nuevo antes de iniciar la tarea.",
     revalidating: "Verificando el servidor antes de iniciar la tarea.",
-    probeFailedHint: "Puedes editar la URL, detectar de nuevo o iniciar igualmente y dejar que el gestor de descargas lo intente.",
+    probeFailedHint:
+      "Puedes editar la URL, detectar de nuevo o iniciar igualmente y dejar que el gestor de descargas lo intente.",
     saveDir: "Carpeta de guardado",
     saveDirPlaceholder: "Carpeta de Descargas por defecto",
     chooseDirectory: "Elegir carpeta",
@@ -430,9 +440,7 @@ const es = {
     connectionsSummary: "De {{total}} conexiones, {{active}} activas, velocidad total {{speed}}.",
     chunkTooltip: "Rango {{range}}, completado {{percent}}, {{retries}} reintentos",
     connectionTooltip: "Conexi\u00f3n {{index}}, rango {{range}}, {{percent}}, {{speed}}",
-    chunksPlaceholder: "Marcador de mapa de calor de fragmentos para HTTP MVP.",
     loadMore: "Cargar m\u00e1s",
-    connectionsPlaceholder: "Marcador de la pesta\u00f1a Conexiones.",
     close: "Cerrar detalles",
     closeBackdrop: "Cerrar detalles",
     drawerAria: "Detalles de la tarea",
@@ -512,6 +520,17 @@ const es = {
     ko: "Coreano",
     ru: "Ruso",
     es: "Espa\u00f1ol",
+  },
+  format: {
+    byteUnit: { b: "B", kb: "KB", mb: "MB", gb: "GB", tb: "TB" },
+    speed: "{{value}} {{unit}}/s",
+    eta: {
+      seconds: "{{n}}s",
+      minutes: "{{n}}min",
+      hours: "{{h}}h {{m}}min",
+      days: "{{d}}d {{h}}h",
+    },
+    percent: "{{value}}%",
   },
 } as const;
 

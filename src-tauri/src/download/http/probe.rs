@@ -64,7 +64,7 @@ fn file_name_from_response(response: &Response) -> String {
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
 
-    let name = response
+    let raw_name = response
         .headers()
         .get(CONTENT_DISPOSITION)
         .and_then(|value| value.to_str().ok())
@@ -92,6 +92,13 @@ fn file_name_from_response(response: &Response) -> String {
         })
         .unwrap_or_else(|| format!("download-{}", chrono::Utc::now().timestamp()));
 
+    // Defense in depth: sanitize before ensure_extension_from_content_type so
+    // that malicious Content-Disposition / URL values (path traversal,
+    // reserved characters) cannot leak into display_name, logs, or the
+    // filesystem. The task-creation layer runs its own sanitize via
+    // unique_final_path, but catching it here keeps every downstream consumer
+    // consistent.
+    let name = crate::download::sanitize::sanitize_single_file_name(&raw_name);
     ensure_extension_from_content_type(name, content_type)
 }
 

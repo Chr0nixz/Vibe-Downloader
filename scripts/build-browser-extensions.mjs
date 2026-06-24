@@ -1,15 +1,10 @@
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sourceDir = path.join(root, "browser", "extension-core", "src");
-const manifestTemplatePath = path.join(
-  root,
-  "browser",
-  "extension-core",
-  "manifest.template.json",
-);
+const manifestTemplatePath = path.join(root, "browser", "extension-core", "manifest.template.json");
 const distDir = path.join(root, "browser", "dist");
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const profile = process.env.VIBE_BROWSER_PROFILE === "release" ? "release" : "dev";
@@ -23,7 +18,7 @@ const variants = [
     browserKind: "chrome",
     extensionId:
       profile === "release"
-        ? "replace-with-chrome-web-store-id"
+        ? (process.env.VIBE_CHROME_EXTENSION_ID ?? "replace-with-chrome-web-store-id")
         : "abcdefghijklmnopabcdefghijklmnop",
   },
   {
@@ -31,7 +26,7 @@ const variants = [
     browserKind: "edge",
     extensionId:
       profile === "release"
-        ? "replace-with-edge-addons-id"
+        ? (process.env.VIBE_EDGE_EXTENSION_ID ?? "replace-with-edge-addons-id")
         : "abcdefghijklmnopabcdefghijklmnop",
   },
   {
@@ -39,7 +34,7 @@ const variants = [
     browserKind: "firefox",
     firefoxId:
       profile === "release"
-        ? "vibe-downloader@example.invalid"
+        ? (process.env.VIBE_FIREFOX_EXTENSION_ID ?? "vibe-downloader@example.invalid")
         : "vibe-downloader@local",
   },
   {
@@ -47,7 +42,7 @@ const variants = [
     browserKind: "opera",
     extensionId:
       profile === "release"
-        ? "replace-with-opera-addons-id"
+        ? (process.env.VIBE_CHROME_EXTENSION_ID ?? "replace-with-opera-addons-id")
         : "abcdefghijklmnopabcdefghijklmnop",
   },
 ];
@@ -70,9 +65,7 @@ function withCapturePermissions(manifest) {
   }
   return {
     ...manifest,
-    permissions: Array.from(
-      new Set([...(manifest.permissions ?? []), "downloads", "cookies", "webRequest"]),
-    ),
+    permissions: Array.from(new Set([...(manifest.permissions ?? []), "downloads", "cookies", "webRequest"])),
     host_permissions: ["http://*/*", "https://*/*"],
   };
 }
@@ -105,9 +98,18 @@ for (const variant of variants) {
       .replaceAll("__VIBE_BROWSER_KIND__", variant.browserKind)
       .replaceAll("__VIBE_EXPERIMENTAL_CAPTURE__", experimentalCapture ? "true" : "false"),
   );
-  for (const file of ["logger.js", "popup.html", "popup.js", "popup.css"]) {
+  for (const file of [
+    "logger.js",
+    "popup.html",
+    "popup.js",
+    "popup.css",
+    "options.html",
+    "options.js",
+    "options.css",
+  ]) {
     await copyFile(path.join(sourceDir, file), path.join(target, file));
   }
+  await cp(path.join(sourceDir, "_locales"), path.join(target, "_locales"), { recursive: true });
 }
 
 console.log(`Built browser extensions in ${path.relative(root, distDir)}`);

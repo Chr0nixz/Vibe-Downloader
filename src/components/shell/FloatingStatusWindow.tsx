@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useTaskEvents } from "@/hooks/use-task-events";
+import { createLogger } from "@/lib/logger";
 import {
   focusMainWindowFromFloating,
   getTaskStats,
@@ -10,9 +11,8 @@ import {
   listTasksCursor,
   showTrayMenuAt,
 } from "@/lib/tauri";
-import { startWindowDrag } from "@/lib/window-controls";
 import { cn, formatSpeed } from "@/lib/utils";
-import { createLogger } from "@/lib/logger";
+import { startWindowDrag } from "@/lib/window-controls";
 import { useTaskDataStore } from "@/stores/task-store";
 
 const log = createLogger("floating-status");
@@ -73,10 +73,7 @@ async function undock(
   } else {
     restoreX = waLeft + (waRight - waLeft) / 2 - 42;
   }
-  const clampedY = Math.max(
-    wa.position.y / scale,
-    Math.min(logicalY, (wa.position.y + wa.size.height) / scale - 84),
-  );
+  const clampedY = Math.max(wa.position.y / scale, Math.min(logicalY, (wa.position.y + wa.size.height) / scale - 84));
 
   await win.setSize(new LogicalSizeCtor(84, 84));
   await win.setPosition(new LogicalPositionCtor(restoreX, clampedY));
@@ -140,9 +137,7 @@ export function FloatingStatusWindow() {
     };
   }, [setGlobalTaskStats, setLoading, setTasks]);
 
-  const percent = stats.totalBytes > 0
-    ? Math.min(100, (stats.totalDownloaded / stats.totalBytes) * 100)
-    : 0;
+  const percent = stats.totalBytes > 0 ? Math.min(100, (stats.totalDownloaded / stats.totalBytes) * 100) : 0;
   const idle = stats.active === 0;
   const dashoffset = RING_C * (1 - percent / 100);
 
@@ -186,8 +181,9 @@ export function FloatingStatusWindow() {
 
     void (async () => {
       try {
-        const { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition } =
-          await import("@tauri-apps/api/window");
+        const { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition } = await import(
+          "@tauri-apps/api/window"
+        );
         const win = getCurrentWindow();
 
         unlisten = await win.onMoved(async ({ payload: pos }) => {
@@ -248,9 +244,7 @@ export function FloatingStatusWindow() {
             const wa = monitor.workArea;
             const waLeft = wa.position.x / scale;
             const waRight = (wa.position.x + wa.size.width) / scale;
-            const restoreX = dockedEdge === "right"
-              ? waRight - 84 - 100
-              : waLeft + 100;
+            const restoreX = dockedEdge === "right" ? waRight - 84 - 100 : waLeft + 100;
             await win.setPosition(new LogicalPosition(restoreX, pos.y / scale));
           }
         } catch {
@@ -268,17 +262,14 @@ export function FloatingStatusWindow() {
     void focusMainWindowFromFloating();
   }, []);
 
-  const handleContextMenu = useCallback(
-    async (event: React.MouseEvent) => {
-      event.preventDefault();
-      try {
-        await showTrayMenuAt(event.screenX, event.screenY);
-      } catch (err) {
-        log.error("show tray menu failed", err);
-      }
-    },
-    [],
-  );
+  const handleContextMenu = useCallback(async (event: React.MouseEvent) => {
+    event.preventDefault();
+    try {
+      await showTrayMenuAt(event.screenX, event.screenY);
+    } catch (err) {
+      log.error("show tray menu failed", err);
+    }
+  }, []);
 
   if (dockedEdge) {
     return (
@@ -296,22 +287,12 @@ export function FloatingStatusWindow() {
           {idle ? t("floatingStatus.idle") : `${speedText} · ${Math.round(percent)}%`}
         </div>
 
-        {/* Aurora glow behind the bar */}
-        {!idle && (
-          <div
-            className={cn(
-              "floating-aurora absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2",
-              isPeak ? "opacity-80" : "opacity-50",
-            )}
-          />
-        )}
-
         {/* Circular progress ball at the edge side */}
         <div
           className={cn(
             "floating-ball relative z-10 grid h-16 w-16 shrink-0 place-items-center rounded-full",
             idle
-              ? "bg-surface-overlay shadow-[0_0_8px_oklch(0.12_0.01_255_/_0.15)] ring-1 ring-border-container"
+              ? "bg-surface-overlay shadow-[var(--shadow-idle-ball)] ring-1 ring-border-container"
               : cn(
                   "bg-surface-overlay ring-1 ring-accent-primary/25 floating-ball-glow",
                   isPeak && "floating-ball-peak",
@@ -320,21 +301,9 @@ export function FloatingStatusWindow() {
           )}
           style={dockedEdge === "left" ? { marginLeft: 4 } : { marginRight: 4, order: 1 }}
         >
-          {/* Surface tint */}
-          <div className="floating-surface-tint absolute inset-0 rounded-full" />
-
           {/* SVG progress ring */}
-          <svg
-            viewBox="0 0 64 64"
-            className="floating-ring absolute inset-0 h-full w-full -rotate-90"
-            aria-hidden
-          >
+          <svg viewBox="0 0 64 64" className="floating-ring absolute inset-0 h-full w-full -rotate-90" aria-hidden>
             <defs>
-              <linearGradient id="bar-aurora-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" style={{ stopColor: "var(--accent-energy)" }} />
-                <stop offset="50%" style={{ stopColor: "var(--accent-primary)" }} />
-                <stop offset="100%" style={{ stopColor: "var(--accent-peak)" }} />
-              </linearGradient>
               <filter id="bar-glow-dot-filter">
                 <feGaussianBlur stdDeviation="2.5" result="blur" />
                 <feMerge>
@@ -362,7 +331,7 @@ export function FloatingStatusWindow() {
                   strokeLinecap="round"
                   strokeDasharray={RING_C}
                   strokeDashoffset={dashoffset}
-                  stroke="url(#bar-aurora-grad)"
+                  stroke="var(--accent-primary)"
                   className="transition-[stroke-dashoffset] duration-500 ease-out"
                 />
                 <circle
@@ -397,9 +366,7 @@ export function FloatingStatusWindow() {
 
         {/* Info panel */}
         <div className="relative z-10 flex flex-1 flex-col items-center justify-center px-2">
-          <span className="font-mono text-[11px] font-bold leading-none text-text-primary">
-            {speedText || "—"}
-          </span>
+          <span className="font-mono text-[11px] font-bold leading-none text-text-primary">{speedText || "—"}</span>
           <span className="mt-1 text-[9px] leading-none text-text-muted">
             {idle ? t("floatingStatus.idle") : `${Math.round(percent)}%`}
           </span>
@@ -425,7 +392,7 @@ export function FloatingStatusWindow() {
         className={cn(
           "floating-ball relative grid h-16 w-16 place-items-center rounded-full",
           idle
-            ? "bg-surface-overlay shadow-[0_0_8px_oklch(0.12_0.01_255_/_0.15)] ring-1 ring-border-container"
+            ? "bg-surface-overlay shadow-[var(--shadow-idle-ball)] ring-1 ring-border-container"
             : cn(
                 "bg-surface-overlay ring-1 ring-accent-primary/25 floating-ball-glow",
                 isPeak && "floating-ball-peak",
@@ -434,31 +401,9 @@ export function FloatingStatusWindow() {
         )}
         aria-label={t("floatingStatus.title")}
       >
-        {/* Layer 0: Aurora ambient glow */}
-        {!idle && (
-          <div
-            className={cn(
-              "floating-aurora absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2",
-              isPeak ? "opacity-80" : "opacity-50",
-            )}
-          />
-        )}
-
-        {/* Layer 2: Surface radial tint for depth */}
-        <div className="floating-surface-tint absolute inset-0 rounded-full" />
-
-        {/* SVG progress ring with aurora gradient */}
-        <svg
-          viewBox="0 0 64 64"
-          className="floating-ring absolute inset-0 h-full w-full -rotate-90"
-          aria-hidden
-        >
+        {/* SVG progress ring */}
+        <svg viewBox="0 0 64 64" className="floating-ring absolute inset-0 h-full w-full -rotate-90" aria-hidden>
           <defs>
-            <linearGradient id="aurora-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" style={{ stopColor: "var(--accent-energy)" }} />
-              <stop offset="50%" style={{ stopColor: "var(--accent-primary)" }} />
-              <stop offset="100%" style={{ stopColor: "var(--accent-peak)" }} />
-            </linearGradient>
             <filter id="glow-dot-filter">
               <feGaussianBlur stdDeviation="2.5" result="blur" />
               <feMerge>
@@ -486,7 +431,7 @@ export function FloatingStatusWindow() {
                 strokeLinecap="round"
                 strokeDasharray={RING_C}
                 strokeDashoffset={dashoffset}
-                stroke="url(#aurora-grad)"
+                stroke="var(--accent-primary)"
                 className="transition-[stroke-dashoffset] duration-500 ease-out"
               />
               <circle
@@ -521,9 +466,7 @@ export function FloatingStatusWindow() {
               >
                 {speedText}
               </span>
-              <span className="text-[9px] leading-none text-text-muted">
-                {Math.round(percent)}%
-              </span>
+              <span className="text-[9px] leading-none text-text-muted">{Math.round(percent)}%</span>
             </>
           )}
         </div>

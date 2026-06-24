@@ -35,11 +35,7 @@ describe("app error helpers", () => {
       actions: [],
     });
 
-    expect(recoveryActionsForError(encoded)).toEqual([
-      "free_disk_space",
-      "choose_another_folder",
-      "retry",
-    ]);
+    expect(recoveryActionsForError(encoded)).toEqual(["free_disk_space", "choose_another_folder", "retry"]);
   });
 
   it("maps legacy string errors into the structured recovery model", () => {
@@ -66,12 +62,8 @@ describe("app error helpers", () => {
       actions: ["restart"],
     });
 
-    expect(localizedMessage("taskDiagnostics.completed", t)).toBe(
-      "localized:taskDiagnostics.completed",
-    );
+    expect(localizedMessage("taskDiagnostics.completed", t)).toBe("localized:taskDiagnostics.completed");
     expect(localizedMessage("HTTP 404", t)).toBe("HTTP 404");
-    expect(localizedErrorMessage(encoded, t)).toBe(
-      "localized:taskDiagnostics.resumeUnavailable",
-    );
+    expect(localizedErrorMessage(encoded, t)).toBe("localized:taskDiagnostics.resumeUnavailable");
   });
 });

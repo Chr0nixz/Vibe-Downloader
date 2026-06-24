@@ -41,9 +41,7 @@ export function DeleteTaskDialog({
         </DialogHeader>
         <DialogBody className="space-y-3 py-4">
           <DialogDescription className="text-sm text-text-secondary">
-            {task
-              ? t("deleteDialog.messageWithName", { name: task.fileName })
-              : t("deleteDialog.messageGeneric")}
+            {task ? t("deleteDialog.messageWithName", { name: task.fileName }) : t("deleteDialog.messageGeneric")}
           </DialogDescription>
 
           <label className="flex cursor-pointer items-center gap-2.5 rounded-md px-1 py-1 text-sm text-text-secondary transition-colors hover:text-text-primary">
@@ -57,20 +55,10 @@ export function DeleteTaskDialog({
           </label>
         </DialogBody>
         <DialogFooter>
-          <Button
-            type="button"
-            variant="ghost"
-            className="w-full sm:w-auto"
-            onClick={() => onOpenChange(false)}
-          >
+          <Button type="button" variant="ghost" className="w-full sm:w-auto" onClick={() => onOpenChange(false)}>
             {t("deleteDialog.cancel")}
           </Button>
-          <Button
-            type="button"
-            variant="danger"
-            className="w-full sm:w-auto"
-            onClick={() => onDelete(deleteFiles)}
-          >
+          <Button type="button" variant="danger" className="w-full sm:w-auto" onClick={() => onDelete(deleteFiles)}>
             {t("deleteDialog.confirm")}
           </Button>
         </DialogFooter>

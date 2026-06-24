@@ -1,49 +1,51 @@
-import { isTauriRuntime } from "@/lib/runtime";
-import { createLogger } from "@/lib/logger";
-import { parseAppError } from "@/lib/errors";
 import type {
   AppSettings,
+  BatchImportResult,
   BrowserCaptureSettings,
   BrowserCaptureSettingsInput,
   BrowserExtensionExportResult,
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
-  BatchImportResult,
+  ChecksumAlgorithm,
   ClipboardLinkDetectedPayload,
   CompletionActionRequestedPayload,
   CreateTaskInput,
+  CursorPageInput,
+  FtpDirectoryProbe,
   HashVerificationState,
   ImportUrlsInput,
-  CursorPageInput,
   ListTasksCursorInput,
   ListTasksCursorResult,
   ListTasksInput,
   ListTasksResult,
-  RequestDiagnostic,
+  MetalinkMirrorView,
   ProbeTaskInput,
   ProbeTaskPayload,
-  FtpDirectoryProbe,
-  SftpDirectoryProbe,
-  WebDavDirectoryProbe,
+  RequestDiagnostic,
+  ResolveTaskAttentionInput,
   SegmentSummary,
+  SftpDirectoryProbe,
+  TaskEvent,
   TaskProxySettings,
   TaskProxySettingsInput,
   TaskStatsSnapshot,
-  TaskEvent,
+  TaskUpdatedPayload,
   TorrentRuntimeSnapshot,
   TrayMenuAction,
-  ResolveTaskAttentionInput,
-  TaskUpdatedPayload,
   UpdateSettingsInput,
   UpdateTaskTransferOptionsInput,
   UpdateTorrentFileSelectionInput,
   UpdateTorrentSeedingInput,
+  WebDavDirectoryProbe,
 } from "@/generated/bindings";
+import { parseAppError } from "@/lib/errors";
+import { createLogger } from "@/lib/logger";
+import { isTauriRuntime } from "@/lib/runtime";
 import type { Task } from "@/types/task";
 import { normalizeTask } from "@/types/task";
+import type { TaskProgressPayload } from "@/types/task-progress";
 import type { TaskSegment } from "@/types/task-segment";
 import { normalizeTaskSegment } from "@/types/task-segment";
-import type { TaskProgressPayload } from "@/types/task-progress";
 
 export const EVENT_TASK_PROGRESS = "task-progress";
 export const EVENT_TASK_UPDATED = "task-updated";
@@ -58,9 +60,7 @@ export const canSeedMockTasks = !isTauriRuntime() || import.meta.env.DEV;
 
 const log = createLogger("tauri");
 
-type CommandResult<T, E> =
-  | { status: "ok"; data: T }
-  | { status: "error"; error: E };
+type CommandResult<T, E> = { status: "ok"; data: T } | { status: "error"; error: E };
 
 function unwrapCommand<T, E>(result: CommandResult<T, E>): T {
   if (result.status === "ok") return result.data;
@@ -138,9 +138,7 @@ export async function listTasksCursor(input: ListTasksCursorInput): Promise<Task
     return (await loadBrowserAdapter()).listTasksCursor(input);
   }
   const commands = await loadNativeCommands();
-  const result: ListTasksCursorResult = await runCommand("listTasksCursor", () =>
-    commands.listTasksCursor(input),
-  );
+  const result: ListTasksCursorResult = await runCommand("listTasksCursor", () => commands.listTasksCursor(input));
   return {
     items: result.items.map(normalizeTask),
     nextCursor: result.nextCursor,
@@ -154,9 +152,7 @@ export async function listTasksPage(input: ListTasksInput): Promise<TaskPage> {
     return (await loadBrowserAdapter()).listTasksPage(input);
   }
   const commands = await loadNativeCommands();
-  const result: ListTasksResult = await runCommand("listTasksPage", () =>
-    commands.listTasksPage(input),
-  );
+  const result: ListTasksResult = await runCommand("listTasksPage", () => commands.listTasksPage(input));
   return {
     items: result.items.map(normalizeTask),
     total: Number(result.total) || 0,
@@ -170,9 +166,7 @@ export async function listSegments(taskId: string, page = 0, pageSize = 100): Pr
     return (await loadBrowserAdapter()).listSegments(taskId, page, pageSize);
   }
   const commands = await loadNativeCommands();
-  const segments = await runCommand("listSegments", () =>
-    commands.listSegments({ taskId, page, pageSize }),
-  );
+  const segments = await runCommand("listSegments", () => commands.listSegments({ taskId, page, pageSize }));
   return segments.map(normalizeTaskSegment);
 }
 
@@ -196,16 +190,12 @@ export async function getSegmentSummary(taskId: string): Promise<SegmentSummary>
   return runCommand("getSegmentSummary", () => commands.getSegmentSummary(taskId));
 }
 
-export async function getTorrentRuntimeSnapshot(
-  taskId: string,
-): Promise<TorrentRuntimeSnapshot | null> {
+export async function getTorrentRuntimeSnapshot(taskId: string): Promise<TorrentRuntimeSnapshot | null> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).getTorrentRuntimeSnapshot(taskId);
   }
   const commands = await loadNativeCommands();
-  return runCommand("getTorrentRuntimeSnapshot", () =>
-    commands.getTorrentRuntimeSnapshot(taskId),
-  );
+  return runCommand("getTorrentRuntimeSnapshot", () => commands.getTorrentRuntimeSnapshot(taskId));
 }
 
 export async function getTaskProxySettings(taskId: string): Promise<TaskProxySettings> {
@@ -216,9 +206,7 @@ export async function getTaskProxySettings(taskId: string): Promise<TaskProxySet
   return runCommand("getTaskProxySettings", () => commands.getTaskProxySettings(taskId));
 }
 
-export async function updateTaskProxySettings(
-  input: TaskProxySettingsInput,
-): Promise<TaskProxySettings> {
+export async function updateTaskProxySettings(input: TaskProxySettingsInput): Promise<TaskProxySettings> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).updateTaskProxySettings(input);
   }
@@ -226,17 +214,13 @@ export async function updateTaskProxySettings(
   return runCommand("updateTaskProxySettings", () => commands.updateTaskProxySettings(input));
 }
 
-export async function updateTorrentFileSelection(
-  input: UpdateTorrentFileSelectionInput,
-): Promise<Task> {
+export async function updateTorrentFileSelection(input: UpdateTorrentFileSelectionInput): Promise<Task> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).updateTorrentFileSelection(input);
   }
   const commands = await loadNativeCommands();
   return normalizeTask(
-    await runCommand("updateTorrentFileSelection", () =>
-      commands.updateTorrentFileSelection(input),
-    ),
+    await runCommand("updateTorrentFileSelection", () => commands.updateTorrentFileSelection(input)),
   );
 }
 
@@ -245,9 +229,7 @@ export async function updateTorrentSeeding(input: UpdateTorrentSeedingInput): Pr
     return (await loadBrowserAdapter()).updateTorrentSeeding(input);
   }
   const commands = await loadNativeCommands();
-  return normalizeTask(
-    await runCommand("updateTorrentSeeding", () => commands.updateTorrentSeeding(input)),
-  );
+  return normalizeTask(await runCommand("updateTorrentSeeding", () => commands.updateTorrentSeeding(input)));
 }
 
 export async function listTaskEventsPage(input: CursorPageInput): Promise<CursorPage<TaskEvent>> {
@@ -258,9 +240,7 @@ export async function listTaskEventsPage(input: CursorPageInput): Promise<Cursor
   return runCommand("listTaskEventsPage", () => commands.listTaskEventsPage(input));
 }
 
-export async function listTaskRequestsPage(
-  input: CursorPageInput,
-): Promise<CursorPage<RequestDiagnostic>> {
+export async function listTaskRequestsPage(input: CursorPageInput): Promise<CursorPage<RequestDiagnostic>> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).listTaskRequestsPage(input);
   }
@@ -337,9 +317,7 @@ export interface PickedFile {
   name: string;
 }
 
-export async function openFilePicker(
-  filters?: { name: string; extensions: string[] }[],
-): Promise<PickedFile | null> {
+export async function openFilePicker(filters?: { name: string; extensions: string[] }[]): Promise<PickedFile | null> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).openFilePicker(filters);
   }
@@ -348,9 +326,7 @@ export async function openFilePicker(
   const selected = await open({
     directory: false,
     multiple: false,
-    filters: filters ?? [
-      { name: "Download files", extensions: ["torrent", "meta4", "metalink", "txt"] },
-    ],
+    filters: filters ?? [{ name: "Download files", extensions: ["torrent", "meta4", "metalink", "txt"] }],
   });
   if (typeof selected !== "string") {
     log.debug("✓ openFilePicker (canceled)");
@@ -394,9 +370,7 @@ export async function exportBrowserExtensionPackages(): Promise<BrowserExtension
     return (await loadBrowserAdapter()).exportBrowserExtensionPackages();
   }
   const commands = await loadNativeCommands();
-  return runCommand("exportBrowserExtensionPackages", () =>
-    commands.exportBrowserExtensionPackages(),
-  );
+  return runCommand("exportBrowserExtensionPackages", () => commands.exportBrowserExtensionPackages());
 }
 
 export async function runTrayMenuAction(action: TrayMenuAction): Promise<void> {
@@ -415,6 +389,33 @@ export async function requestSystemShutdown(): Promise<void> {
   }
   const commands = await loadNativeCommands();
   await runCommand("requestSystemShutdown", () => commands.requestSystemShutdown());
+}
+
+export async function requestSystemSleep(): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock request system sleep");
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("requestSystemSleep", () => commands.requestSystemSleep());
+}
+
+export async function requestSystemHibernate(): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock request system hibernate");
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("requestSystemHibernate", () => commands.requestSystemHibernate());
+}
+
+export async function requestLockScreen(): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock request lock screen");
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("requestLockScreen", () => commands.requestLockScreen());
 }
 
 export async function showFloatingStatusWindow(): Promise<void> {
@@ -450,23 +451,16 @@ export async function focusMainWindowFromFloating(): Promise<void> {
     return;
   }
   const commands = await loadNativeCommands();
-  await runCommand("focusMainWindowFromFloating", () =>
-    commands.focusMainWindowFromFloating(),
-  );
+  await runCommand("focusMainWindowFromFloating", () => commands.focusMainWindowFromFloating());
 }
 
-export async function showTrayMenuAt(
-  logicalX: number,
-  logicalY: number,
-): Promise<void> {
+export async function showTrayMenuAt(logicalX: number, logicalY: number): Promise<void> {
   if (!isTauriRuntime()) {
     log.debug("mock show tray menu at", logicalX, logicalY);
     return;
   }
   const commands = await loadNativeCommands();
-  await runCommand("showTrayMenuAt", () =>
-    commands.showTrayMenuAt(logicalX, logicalY),
-  );
+  await runCommand("showTrayMenuAt", () => commands.showTrayMenuAt(logicalX, logicalY));
 }
 
 export async function getBrowserCaptureSettings(): Promise<BrowserCaptureSettings> {
@@ -484,9 +478,7 @@ export async function updateBrowserCaptureSettings(
     return (await loadBrowserAdapter()).updateBrowserCaptureSettings(input);
   }
   const commands = await loadNativeCommands();
-  return runCommand("updateBrowserCaptureSettings", () =>
-    commands.updateBrowserCaptureSettings(input),
-  );
+  return runCommand("updateBrowserCaptureSettings", () => commands.updateBrowserCaptureSettings(input));
 }
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {
@@ -497,18 +489,12 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   return normalizeTask(await runCommand("createTask", () => commands.createTask(input)));
 }
 
-export async function updateTaskTransferOptions(
-  input: UpdateTaskTransferOptionsInput,
-): Promise<Task> {
+export async function updateTaskTransferOptions(input: UpdateTaskTransferOptionsInput): Promise<Task> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).updateTaskTransferOptions(input);
   }
   const commands = await loadNativeCommands();
-  return normalizeTask(
-    await runCommand("updateTaskTransferOptions", () =>
-      commands.updateTaskTransferOptions(input),
-    ),
-  );
+  return normalizeTask(await runCommand("updateTaskTransferOptions", () => commands.updateTaskTransferOptions(input)));
 }
 
 export async function importUrls(input: ImportUrlsInput): Promise<BatchImportResult> {
@@ -525,6 +511,17 @@ export async function verifyTaskHash(id: string): Promise<HashVerificationState>
   }
   const commands = await loadNativeCommands();
   return runCommand("verifyTaskHash", () => commands.verifyTaskHash(id));
+}
+
+export async function computeFileHash(
+  id: string,
+  algorithm: ChecksumAlgorithm,
+): Promise<string> {
+  if (!isTauriRuntime()) {
+    return "mock-hash-value";
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("computeFileHash", () => commands.computeFileHash(id, algorithm));
 }
 
 export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload> {
@@ -559,14 +556,30 @@ export async function retryTask(id: string): Promise<Task> {
   return normalizeTask(await runCommand("retryTask", () => commands.retryTask(id)));
 }
 
+export async function listMetalinkMirrors(id: string): Promise<MetalinkMirrorView[]> {
+  if (!isTauriRuntime()) {
+    return [];
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("listMetalinkMirrors", () => commands.listMetalinkMirrors(id));
+}
+
+export async function retryTaskWithMirror(id: string, mirrorUrl: string): Promise<Task> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).retryTask(id);
+  }
+  const commands = await loadNativeCommands();
+  return normalizeTask(
+    await runCommand("retryTaskWithMirror", () => commands.retryTaskWithMirror(id, mirrorUrl)),
+  );
+}
+
 export async function finishLiveRecording(id: string): Promise<Task> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).finishLiveRecording(id);
   }
   const commands = await loadNativeCommands();
-  return normalizeTask(
-    await runCommand("finishLiveRecording", () => commands.finishLiveRecording(id)),
-  );
+  return normalizeTask(await runCommand("finishLiveRecording", () => commands.finishLiveRecording(id)));
 }
 
 export async function resolveTaskAttention(input: ResolveTaskAttentionInput): Promise<Task> {
@@ -574,9 +587,7 @@ export async function resolveTaskAttention(input: ResolveTaskAttentionInput): Pr
     return (await loadBrowserAdapter()).resolveTaskAttention(input);
   }
   const commands = await loadNativeCommands();
-  return normalizeTask(
-    await runCommand("resolveTaskAttention", () => commands.resolveTaskAttention(input)),
-  );
+  return normalizeTask(await runCommand("resolveTaskAttention", () => commands.resolveTaskAttention(input)));
 }
 
 export async function cancelTask(id: string): Promise<Task> {
@@ -594,6 +605,36 @@ export async function deleteTask(id: string, deleteFile = false): Promise<void> 
   }
   const commands = await loadNativeCommands();
   await runCommand("deleteTask", () => commands.deleteTask(id, deleteFile));
+}
+
+export async function bulkDeleteTasks(ids: string[], deleteFile = false): Promise<number> {
+  if (!isTauriRuntime()) {
+    const adapter = await loadBrowserAdapter();
+    for (const id of ids) await adapter.deleteTask(id, deleteFile);
+    return ids.length;
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("bulkDeleteTasks", () => commands.bulkDeleteTasks(ids, deleteFile));
+}
+
+export async function bulkTaskAction(ids: string[], action: "pause" | "resume" | "retry"): Promise<number> {
+  if (!isTauriRuntime()) {
+    const adapter = await loadBrowserAdapter();
+    let succeeded = 0;
+    for (const id of ids) {
+      try {
+        if (action === "pause") await adapter.pauseTask(id);
+        else if (action === "resume") await adapter.resumeTask(id);
+        else if (action === "retry") await adapter.retryTask(id);
+        succeeded += 1;
+      } catch {
+        // skip individual failures
+      }
+    }
+    return succeeded;
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("bulkTaskAction", () => commands.bulkTaskAction(ids, action));
 }
 
 export async function openTaskFile(id: string): Promise<void> {
@@ -614,9 +655,7 @@ export async function openTaskFolder(id: string): Promise<void> {
   await runCommand("openTaskFolder", () => commands.openTaskFolder(id));
 }
 
-export function onTaskProgress(
-  handler: (payload: TaskProgressPayload) => void,
-): Promise<() => void> {
+export function onTaskProgress(handler: (payload: TaskProgressPayload) => void): Promise<() => void> {
   if (!isTauriRuntime()) {
     return import("@/lib/tauri-browser").then((adapter) => adapter.onTaskProgress(handler));
   }
@@ -682,13 +721,9 @@ export function onTraySettingsRequested(handler: () => void): Promise<() => void
   );
 }
 
-export function onClipboardLinkDetected(
-  handler: (payload: ClipboardLinkDetectedPayload) => void,
-): Promise<() => void> {
+export function onClipboardLinkDetected(handler: (payload: ClipboardLinkDetectedPayload) => void): Promise<() => void> {
   if (!isTauriRuntime()) {
-    return import("@/lib/tauri-browser").then((adapter) =>
-      adapter.onClipboardLinkDetected(handler),
-    );
+    return import("@/lib/tauri-browser").then((adapter) => adapter.onClipboardLinkDetected(handler));
   }
   return import("@tauri-apps/api/event").then(({ listen }) =>
     listen<ClipboardLinkDetectedPayload>(EVENT_CLIPBOARD_LINK_DETECTED, (event) => {
@@ -699,9 +734,7 @@ export function onClipboardLinkDetected(
 
 export function onBrowserIntegrationChanged(handler: () => void): Promise<() => void> {
   if (!isTauriRuntime()) {
-    return import("@/lib/tauri-browser").then((adapter) =>
-      adapter.onBrowserIntegrationChanged(handler),
-    );
+    return import("@/lib/tauri-browser").then((adapter) => adapter.onBrowserIntegrationChanged(handler));
   }
   return import("@tauri-apps/api/event").then(({ listen }) =>
     listen(EVENT_BROWSER_INTEGRATION_CHANGED, () => {
@@ -714,14 +747,52 @@ export function onCompletionActionRequested(
   handler: (payload: CompletionActionRequestedPayload) => void,
 ): Promise<() => void> {
   if (!isTauriRuntime()) {
-    return import("@/lib/tauri-browser").then((adapter) =>
-      adapter.onCompletionActionRequested(handler),
-    );
+    return import("@/lib/tauri-browser").then((adapter) => adapter.onCompletionActionRequested(handler));
   }
   return import("@tauri-apps/api/event").then(({ listen }) =>
     listen<CompletionActionRequestedPayload>(EVENT_COMPLETION_ACTION_REQUESTED, (event) => {
       handler(event.payload);
     }).then((unlisten) => unlisten),
+  );
+}
+
+/**
+ * Drag-and-drop file events from the native window. Tauri intercepts native
+ * file drops (dragDropEnabled defaults to true), so HTML5 drop events do not
+ * fire — we subscribe via the webview API instead.
+ *
+ * - `onDrop` receives the absolute file paths of dropped files.
+ * - `onDragStateChange` tracks the drag-enter/leave overlay state. `paths`
+ *   is only provided on enter so callers can pre-filter by extension.
+ */
+export type FileDropDragState = { active: boolean; paths?: string[] };
+
+export function onFileDrop(
+  onDrop: (paths: string[]) => void,
+  onDragStateChange?: (state: FileDropDragState) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return import("@/lib/tauri-browser").then((adapter) => adapter.onFileDrop(onDrop, onDragStateChange));
+  }
+  return import("@tauri-apps/api/webview").then(({ getCurrentWebview }) =>
+    getCurrentWebview().onDragDropEvent((event) => {
+      const payload = event.payload as {
+        type: "enter" | "over" | "drop" | "leave";
+        paths: string[];
+      };
+      if (payload.type === "drop") {
+        onDrop(payload.paths ?? []);
+        onDragStateChange?.({ active: false });
+        return;
+      }
+      if (payload.type === "enter") {
+        onDragStateChange?.({ active: true, paths: payload.paths });
+        return;
+      }
+      if (payload.type === "leave") {
+        onDragStateChange?.({ active: false });
+      }
+    }),
   );
 }
 

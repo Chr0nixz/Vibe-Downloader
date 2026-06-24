@@ -11,7 +11,7 @@ use std::{
 use reqwest::Client;
 use sqlx::SqlitePool;
 use tauri::AppHandle;
-use tokio::{fs, io::AsyncWriteExt, sync::mpsc, task::JoinSet};
+use tokio::{fs, io::{AsyncWriteExt, BufWriter}, sync::mpsc, task::JoinSet};
 
 pub(super) mod diagnostics;
 mod worker;
@@ -47,6 +47,7 @@ struct UnknownSizeDownloadContext<'a> {
     final_path_buf: PathBuf,
     segments: Vec<TaskSegmentRecord>,
     cancel: Arc<AtomicBool>,
+    cancel_token: tokio_util::sync::CancellationToken,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     request_headers: Vec<(String, String)>,
 }
@@ -61,6 +62,7 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
         final_path_buf,
         segments,
         cancel,
+        cancel_token,
         speed_limiter,
         request_headers,
     } = context;
@@ -142,9 +144,10 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
         return Err(format_http_status(response.status()));
     }
 
-    let mut file = fs::File::create(&temp_path_buf)
+    let raw_file = fs::File::create(&temp_path_buf)
         .await
         .map_err(|e| format!("Could not create the temporary file: {e}"))?;
+    let mut file = BufWriter::with_capacity(256 * 1024, raw_file);
     let mut downloaded = 0_i64;
     let mut progress_gate = TaskProgressEmitGate::default();
     let mut last_emit = Instant::now();
@@ -152,11 +155,31 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
     let mut last_tick = Instant::now();
     let mut last_bytes = 0_i64;
 
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("The connection failed while downloading: {e}"))?
-    {
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                file.flush()
+                    .await
+                    .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
+                db::update_task_and_segment_progress(
+                    &pool,
+                    &task.id,
+                    &segment.id,
+                    downloaded,
+                    0,
+                    1,
+                    TaskStatus::Downloading,
+                )
+                .await?;
+                progress_gate.flush(&app);
+                return Ok(());
+            }
+            chunk = response.chunk() => match chunk {
+                Ok(Some(data)) => data,
+                Ok(None) => break,
+                Err(e) => return Err(format!("The connection failed while downloading: {e}")),
+            }
+        };
         if cancel.load(Ordering::SeqCst) {
             file.flush()
                 .await
@@ -201,7 +224,14 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
             emit_progress(
                 &app,
                 &mut progress_gate,
-                progress_payload(&task.id, downloaded, 0, speed_bps, 1, TaskStatus::Downloading),
+                progress_payload(
+                    &task.id,
+                    downloaded,
+                    0,
+                    speed_bps,
+                    1,
+                    TaskStatus::Downloading,
+                ),
                 false,
             );
             last_emit = Instant::now();
@@ -233,7 +263,14 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
     emit_progress(
         &app,
         &mut progress_gate,
-        progress_payload(&task.id, downloaded, downloaded, 0, 0, TaskStatus::Completed),
+        progress_payload(
+            &task.id,
+            downloaded,
+            downloaded,
+            0,
+            0,
+            TaskStatus::Completed,
+        ),
         true,
     );
     emit_queue_changed(&app);
@@ -285,28 +322,39 @@ struct RuntimeSegmentProgress {
 struct RuntimeProgress {
     segments: HashMap<String, RuntimeSegmentProgress>,
     last_checkpoint: Instant,
+    last_written_downloaded: i64,
+    last_written_speed_bps: i64,
+    files_selection_changed: bool,
 }
 
 impl RuntimeProgress {
     fn from_segments(segments: &[TaskSegmentRecord]) -> Self {
+        let seg_map: HashMap<String, RuntimeSegmentProgress> = segments
+            .iter()
+            .map(|segment| {
+                (
+                    segment.id.clone(),
+                    RuntimeSegmentProgress {
+                        range_start: segment.range_start,
+                        range_end: segment.range_end,
+                        downloaded_until: segment.downloaded_until,
+                        speed_bps: segment.speed_bps,
+                        status: segment.status,
+                        dirty: false,
+                    },
+                )
+            })
+            .collect();
+        let initial_downloaded = seg_map
+            .values()
+            .map(|s| (s.downloaded_until - s.range_start).max(0))
+            .sum();
         Self {
-            segments: segments
-                .iter()
-                .map(|segment| {
-                    (
-                        segment.id.clone(),
-                        RuntimeSegmentProgress {
-                            range_start: segment.range_start,
-                            range_end: segment.range_end,
-                            downloaded_until: segment.downloaded_until,
-                            speed_bps: segment.speed_bps,
-                            status: segment.status,
-                            dirty: false,
-                        },
-                    )
-                })
-                .collect(),
+            segments: seg_map,
             last_checkpoint: Instant::now(),
+            last_written_downloaded: initial_downloaded,
+            last_written_speed_bps: 0,
+            files_selection_changed: false,
         }
     }
 
@@ -401,6 +449,7 @@ pub(super) struct SegmentedDownloadContext<'a> {
     pub(super) pool: SqlitePool,
     pub(super) task: TaskRecord,
     pub(super) cancel: Arc<AtomicBool>,
+    pub(super) cancel_token: tokio_util::sync::CancellationToken,
     pub(super) speed_limiter: Arc<GlobalSpeedLimiter>,
     pub(super) connection_limit: usize,
     pub(super) request_headers: Vec<(String, String)>,
@@ -416,6 +465,7 @@ pub(super) async fn run_segmented_download(
         pool,
         task,
         cancel,
+        cancel_token,
         speed_limiter,
         connection_limit,
         request_headers,
@@ -451,6 +501,7 @@ pub(super) async fn run_segmented_download(
             final_path_buf,
             segments,
             cancel,
+            cancel_token,
             speed_limiter,
             request_headers,
         })
@@ -557,6 +608,7 @@ pub(super) async fn run_segmented_download(
         &temp_path_buf,
         task.supports_parallel,
         &cancel,
+        &cancel_token,
         &progress_tx,
         &mut workers,
         &mut active_workers,
@@ -581,6 +633,9 @@ pub(super) async fn run_segmented_download(
 
     while active_workers > 0 {
         tokio::select! {
+            _ = cancel_token.cancelled() => {
+                break;
+            }
             Some(message) = progress_rx.recv() => {
                 handle_segment_message(
                     SegmentMessageContext {
@@ -698,6 +753,7 @@ pub(super) async fn run_segmented_download(
                     &temp_path_buf,
                     task.supports_parallel,
                     &cancel,
+                    &cancel_token,
                     &progress_tx,
                     &mut workers,
                     &mut active_workers,
@@ -745,6 +801,7 @@ pub(super) async fn run_segmented_download(
                     &url,
                     &temp_path_buf,
                     &cancel,
+                    &cancel_token,
                     &progress_tx,
                     &mut workers,
                     &mut active_workers,
@@ -863,6 +920,7 @@ async fn spawn_segment_workers(
     temp_path: &Path,
     supports_parallel: bool,
     cancel: &Arc<AtomicBool>,
+    cancel_token: &tokio_util::sync::CancellationToken,
     progress_tx: &mpsc::Sender<SegmentMessage>,
     workers: &mut JoinSet<Result<(), SegmentFailure>>,
     active_workers: &mut usize,
@@ -908,6 +966,7 @@ async fn spawn_segment_workers(
             segment_count,
             supports_parallel,
             cancel: cancel.clone(),
+            cancel_token: cancel_token.clone(),
             progress_tx: progress_tx.clone(),
             range_end,
             speed_limiter: speed_limiter.clone(),
@@ -955,6 +1014,7 @@ async fn maybe_accelerate_segments(
     url: &str,
     temp_path: &Path,
     cancel: &Arc<AtomicBool>,
+    cancel_token: &tokio_util::sync::CancellationToken,
     progress_tx: &mpsc::Sender<SegmentMessage>,
     workers: &mut JoinSet<Result<(), SegmentFailure>>,
     active_workers: &mut usize,
@@ -1065,6 +1125,7 @@ async fn maybe_accelerate_segments(
         segment_count: *active_connection_count as usize,
         supports_parallel: task.supports_parallel,
         cancel: cancel.clone(),
+        cancel_token: cancel_token.clone(),
         progress_tx: progress_tx.clone(),
         range_end: tail_range_end,
         speed_limiter,
@@ -1253,58 +1314,79 @@ async fn checkpoint_runtime_progress(
     runtime_progress: &mut RuntimeProgress,
     force: bool,
 ) -> Result<(), String> {
+    let is_terminal = matches!(
+        status,
+        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::NeedsAttention
+    );
     if !force && runtime_progress.last_checkpoint.elapsed() < RUNTIME_PROGRESS_CHECKPOINT_INTERVAL {
         return Ok(());
     }
-    if !force
-        && !runtime_progress
-            .segments
-            .values()
-            .any(|segment| segment.dirty)
-    {
+    let has_dirty_segments = runtime_progress
+        .segments
+        .values()
+        .any(|segment| segment.dirty);
+    if !force && !has_dirty_segments {
         return Ok(());
     }
 
     let downloaded = runtime_progress.total_downloaded();
     let speed_bps = runtime_progress.total_speed();
+    let task_header_changed =
+        downloaded != runtime_progress.last_written_downloaded
+            || speed_bps != runtime_progress.last_written_speed_bps;
+
+    // Fast path: nothing to write at all.
+    if !task_header_changed && !has_dirty_segments {
+        runtime_progress.last_checkpoint = Instant::now();
+        return Ok(());
+    }
+
     let updated_at = crate::models::task::now_iso();
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    sqlx::query(
-        r#"
-        UPDATE tasks
-        SET downloaded_bytes = ?, speed_bps = ?, connection_count = ?, status = ?, updated_at = ?
-        WHERE id = ?
-        "#,
-    )
-    .bind(downloaded)
-    .bind(speed_bps)
-    .bind(connection_count)
-    .bind(status.as_str())
-    .bind(&updated_at)
-    .bind(task_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
+    if task_header_changed {
+        sqlx::query(
+            r#"
+            UPDATE tasks
+            SET downloaded_bytes = ?, speed_bps = ?, connection_count = ?, status = ?, updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(downloaded)
+        .bind(speed_bps)
+        .bind(connection_count)
+        .bind(status.as_str())
+        .bind(&updated_at)
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    sqlx::query(
-        r#"
-        UPDATE task_files
-        SET downloaded_bytes = ?, status = ?
-        WHERE task_id = ? AND selected = 1
-        "#,
-    )
-    .bind(downloaded)
-    .bind(status.as_str())
-    .bind(task_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
+        // Only write task_files on terminal status or when file selection changed,
+        // since the downloaded_bytes/status here duplicate the task header values.
+        if is_terminal || runtime_progress.files_selection_changed {
+            sqlx::query(
+                r#"
+                UPDATE task_files
+                SET downloaded_bytes = ?, status = ?
+                WHERE task_id = ? AND selected = 1
+                "#,
+            )
+            .bind(downloaded)
+            .bind(status.as_str())
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+    }
 
+    // Non-terminal force checkpoints still respect per-segment dirty to avoid
+    // writing all segments when only a few changed. Terminal force writes all.
     for (segment_id, segment) in runtime_progress
         .segments
         .iter_mut()
-        .filter(|(_, segment)| force || segment.dirty)
+        .filter(|(_, segment)| (is_terminal && force) || segment.dirty)
     {
         sqlx::query(
             r#"
@@ -1325,6 +1407,11 @@ async fn checkpoint_runtime_progress(
 
     tx.commit().await.map_err(|e| e.to_string())?;
     runtime_progress.last_checkpoint = Instant::now();
+    runtime_progress.files_selection_changed = false;
+    if task_header_changed {
+        runtime_progress.last_written_downloaded = downloaded;
+        runtime_progress.last_written_speed_bps = speed_bps;
+    }
     Ok(())
 }
 

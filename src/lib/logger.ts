@@ -18,8 +18,7 @@ export function createLogger(namespace: string): Logger {
     info: (...args: unknown[]) => console.info(prefix, ...args),
     warn: (...args: unknown[]) => console.warn(prefix, ...args),
     error: (...args: unknown[]) => console.error(prefix, ...args),
-    withContext: (ctx: Record<string, unknown>) =>
-      createLogger(`${namespace}:${formatContext(ctx)}`),
+    withContext: (ctx: Record<string, unknown>) => createLogger(`${namespace}:${formatContext(ctx)}`),
   };
 
   return logger;

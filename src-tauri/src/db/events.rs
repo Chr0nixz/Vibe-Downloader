@@ -26,6 +26,28 @@ pub async fn insert_task_event(
     Ok(())
 }
 
+/// Returns the event_type of the most recent pause-related event ("paused" or
+/// "paused_by_schedule") for a task, or `None` when no such event exists.
+pub async fn get_latest_pause_event_type(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Option<String>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT event_type FROM task_events
+        WHERE task_id = ? AND event_type IN ('paused', 'paused_by_schedule')
+        ORDER BY id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(row.map(|r| r.get::<String, _>("event_type")))
+}
+
 pub async fn list_task_events_page(
     pool: &SqlitePool,
     task_id: &str,

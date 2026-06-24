@@ -2,13 +2,7 @@ import type { ListTasksCursorInput, ListTasksInput } from "@/generated/bindings"
 import { sanitizeUrlForDisplay } from "@/lib/utils";
 import type { Task } from "@/types/task";
 
-import type {
-  FileTypeFilter,
-  NavFilter,
-  TaskFilters,
-  TaskSortDirection,
-  TaskSortKey,
-} from "./task-data-store";
+import type { FileTypeFilter, NavFilter, TaskFilters, TaskSortDirection, TaskSortKey } from "./task-data-store";
 
 export interface TaskQuerySnapshot {
   nav: NavFilter;
@@ -20,10 +14,7 @@ export interface TaskQuerySnapshot {
   pageSize: number;
 }
 
-export function buildTaskPageInput(
-  state: TaskQuerySnapshot,
-  page = state.page,
-): ListTasksInput {
+export function buildTaskPageInput(state: TaskQuerySnapshot, page = state.page): ListTasksInput {
   return {
     nav: state.nav,
     search: state.search,
@@ -38,10 +29,7 @@ export function buildTaskPageInput(
   };
 }
 
-export function buildTaskCursorInput(
-  state: TaskQuerySnapshot,
-  cursor: string | null = null,
-): ListTasksCursorInput {
+export function buildTaskCursorInput(state: TaskQuerySnapshot, cursor: string | null = null): ListTasksCursorInput {
   return {
     nav: state.nav,
     search: state.search,
@@ -70,9 +58,7 @@ export function mergePagedTasks(current: Task[], incoming: Task[]): Task[] {
 export function mergeTasksFromServer(current: Task[], fresh: Task[]): Task[] {
   const liveById = new Map(
     current
-      .filter(
-        (task) => task.status === "downloading" || task.status === "retrying",
-      )
+      .filter((task) => task.status === "downloading" || task.status === "retrying")
       .map((task) => [task.id, task] as const),
   );
 
@@ -83,8 +69,7 @@ export function mergeTasksFromServer(current: Task[], fresh: Task[]): Task[] {
       ...task,
       downloadedBytes: Math.max(task.downloadedBytes, live.downloadedBytes),
       speedBps: live.speedBps > 0 ? live.speedBps : task.speedBps,
-      connectionCount:
-        live.connectionCount > 0 ? live.connectionCount : task.connectionCount,
+      connectionCount: live.connectionCount > 0 ? live.connectionCount : task.connectionCount,
       status: live.status,
     };
   });
@@ -145,10 +130,7 @@ export function filterTasks(
 export function taskFileType(task: Task): FileTypeFilter {
   const name = task.fileName.toLowerCase();
   const contentType = task.contentType?.toLowerCase() ?? "";
-  if (
-    contentType.includes("zip") ||
-    /\.(zip|rar|7z|tar|gz|bz2|xz)$/i.test(name)
-  ) {
+  if (contentType.includes("zip") || /\.(zip|rar|7z|tar|gz|bz2|xz)$/i.test(name)) {
     return "archive";
   }
   if (contentType.startsWith("image/") || /\.(png|jpg|jpeg|gif|webp|avif|svg)$/i.test(name)) {
@@ -190,12 +172,7 @@ export function failureKind(task: Task): string {
   return "other";
 }
 
-function compareTasks(
-  a: Task,
-  b: Task,
-  sortKey: TaskSortKey,
-  direction: TaskSortDirection,
-): number {
+function compareTasks(a: Task, b: Task, sortKey: TaskSortKey, direction: TaskSortDirection): number {
   const multiplier = direction === "asc" ? 1 : -1;
   let result = 0;
   switch (sortKey) {
@@ -214,7 +191,6 @@ function compareTasks(
     case "status":
       result = statusRank(a.status) - statusRank(b.status);
       break;
-    case "updated_at":
     default:
       result = Date.parse(a.updatedAt) - Date.parse(b.updatedAt);
       break;

@@ -1,55 +1,57 @@
-import { Component, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { ChevronDown, X } from "lucide-react";
+import { Component, type ErrorInfo, type ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import type { Task } from "@/types/task";
-import type { TaskSegment } from "@/types/task-segment";
+import { ProgressBar } from "@/components/ui/progress-bar";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
+  ChecksumAlgorithm,
   HashVerificationState,
+  MetalinkMirrorView,
   RecoveryAction,
   RequestDiagnostic,
+  TaskChecksum,
+  TaskEvent,
   TaskPriority,
   TaskProxyMode,
   TaskProxySettings,
-  TaskEvent,
   TorrentRuntimeSnapshot,
 } from "@/generated/bindings";
+import { useIsCompactShell } from "@/hooks/use-shell-layout";
+import { errorMessage } from "@/lib/errors";
+import { createLogger } from "@/lib/logger";
+import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput, speedLimitInputFromBytes } from "@/lib/speed-limit";
 import {
+  computeFileHash,
   getTaskProxySettings,
   getTorrentRuntimeSnapshot,
+  listMetalinkMirrors,
   listSegmentsPage,
   listTaskEventsPage,
   listTaskRequestsPage,
-  updateTaskTransferOptions,
+  onTaskUpdated,
+  retryTaskWithMirror,
   updateTaskProxySettings,
+  updateTaskTransferOptions,
   updateTorrentFileSelection,
   updateTorrentSeeding,
   verifyTaskHash,
 } from "@/lib/tauri";
-import { errorMessage } from "@/lib/errors";
-import { createLogger } from "@/lib/logger";
-import { formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
-import { cn } from "@/lib/utils";
-import { ProgressBar } from "@/components/ui/progress-bar";
-import { useIsCompactShell } from "@/hooks/use-shell-layout";
-import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
+import { cn, formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
 import { useTaskDataStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
+import type { Task } from "@/types/task";
+import type { TaskSegment } from "@/types/task-segment";
 
 const log = createLogger("task-details");
 
-const SEGMENT_REFRESH_MS = 10_000;
+const SEGMENT_REFRESH_MS = 30_000;
+const DETAIL_REFRESH_MS = 30_000;
 const EMPTY_TASK_FILES: Task["files"] = [];
 
 interface TaskDetailsProps {
@@ -65,14 +67,7 @@ export function TaskDetails({ task, open, onClose, onResolveAttention }: TaskDet
   if (!open || !task) return null;
 
   if (compact) {
-    return (
-      <TaskDetailsDrawer
-        task={task}
-        open={open}
-        onClose={onClose}
-        onResolveAttention={onResolveAttention}
-      />
-    );
+    return <TaskDetailsDrawer task={task} open={open} onClose={onClose} onResolveAttention={onResolveAttention} />;
   }
 
   return (
@@ -118,10 +113,7 @@ class TaskDetailsErrorBoundary extends Component<
   render() {
     if (this.state.hasError) {
       return (
-        <TaskDetailsErrorFallback
-          onClose={this.props.onClose}
-          onRetry={() => this.setState({ hasError: false })}
-        />
+        <TaskDetailsErrorFallback onClose={this.props.onClose} onRetry={() => this.setState({ hasError: false })} />
       );
     }
 
@@ -129,27 +121,14 @@ class TaskDetailsErrorBoundary extends Component<
   }
 }
 
-function TaskDetailsErrorFallback({
-  onClose,
-  onRetry,
-}: {
-  onClose?: () => void;
-  onRetry: () => void;
-}) {
+function TaskDetailsErrorFallback({ onClose, onRetry }: { onClose?: () => void; onRetry: () => void }) {
   const { t } = useTranslation();
 
   return (
     <div className="flex min-h-0 flex-1 flex-col justify-center gap-3 px-4 py-6">
-      <div
-        className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-sm"
-        role="alert"
-      >
-        <p className="font-medium text-status-danger">
-          {t("taskDetails.detailsUnavailable")}
-        </p>
-        <p className="mt-1 text-xs leading-5 text-text-secondary">
-          {t("taskDetails.detailsUnavailableDescription")}
-        </p>
+      <div className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-sm" role="alert">
+        <p className="font-medium text-status-danger">{t("taskDetails.detailsUnavailable")}</p>
+        <p className="mt-1 text-xs leading-5 text-text-secondary">{t("taskDetails.detailsUnavailableDescription")}</p>
       </div>
       <div className="flex flex-wrap gap-2">
         <Button type="button" size="sm" variant="outline" onClick={onRetry}>
@@ -202,9 +181,7 @@ function TaskDetailsDrawer({
         >
           <header className="flex shrink-0 items-start gap-2 border-b border-border-subtle px-4 py-3">
             <div className="min-w-0 flex-1">
-              <Dialog.Title className="truncate text-sm font-medium">
-                {task.fileName}
-              </Dialog.Title>
+              <Dialog.Title className="truncate text-sm font-medium">{task.fileName}</Dialog.Title>
               <p className="truncate text-xs text-text-muted">{task.saveDir}</p>
             </div>
             <Dialog.Close asChild>
@@ -235,7 +212,9 @@ function TaskDetailsHeader({ task }: { task: Task }) {
   return (
     <header className="flex shrink-0 items-start gap-2 border-b border-border-subtle px-4 py-3">
       <div className="min-w-0 flex-1">
-        <h2 id="task-details-heading" className="truncate text-sm font-medium">{task.fileName}</h2>
+        <h2 id="task-details-heading" className="truncate text-sm font-medium">
+          {task.fileName}
+        </h2>
         <p className="truncate text-xs text-text-muted">{task.saveDir}</p>
       </div>
     </header>
@@ -263,22 +242,59 @@ function TaskDetailsPanel({
   const [requestsError, setRequestsError] = useState<string | null>(null);
   const [hashState, setHashState] = useState<HashVerificationState | null>(null);
   const [verifyingHash, setVerifyingHash] = useState(false);
+  const [checksumResults, setChecksumResults] = useState<Record<string, { actual: string; match: boolean }>>({});
+  const [verifyingChecksums, setVerifyingChecksums] = useState<Set<string>>(new Set());
   const [torrentSnapshot, setTorrentSnapshot] = useState<TorrentRuntimeSnapshot | null>(null);
   const [torrentSnapshotError, setTorrentSnapshotError] = useState<string | null>(null);
+  const [mirrors, setMirrors] = useState<MetalinkMirrorView[]>([]);
   const isTorrentTask = task.protocol === "bt" || task.protocol === "magnet";
+  const isMetalinkTask = task.protocol === "metalink";
 
   useEffect(() => {
     setActiveTab("overview");
     setDiagnosticsOpen(task.status === "failed" || task.status === "needs_attention");
     setHashState(null);
+    setChecksumResults({});
+    setVerifyingChecksums(new Set());
     setTorrentSnapshot(null);
     setTorrentSnapshotError(null);
+    setMirrors([]);
     setSegments([]);
     setSegmentsCursor(null);
     setEvents([]);
     setEventsCursor(null);
     setRequests([]);
     setRequestsCursor(null);
+  }, [task.id]);
+
+  // Event-driven refresh: re-fetch detail data when this task's status/metadata changes,
+  // instead of relying solely on polling. Uses a tick counter that polling effects
+  // depend on, so they re-run immediately when an event arrives.
+  // Debounced 300ms to avoid flooding when many progress events arrive in quick succession.
+  const [refreshTick, setRefreshTick] = useState(0);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    void onTaskUpdated((updatedTask) => {
+      if (cancelled) return;
+      if (updatedTask.id === task.id) {
+        if (refreshTimer.current) clearTimeout(refreshTimer.current);
+        refreshTimer.current = setTimeout(() => {
+          setRefreshTick((prev) => prev + 1);
+        }, 300);
+      }
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+      unlisten?.();
+    };
   }, [task.id]);
 
   useEffect(() => {
@@ -301,7 +317,16 @@ function TaskDetailsPanel({
       void listSegmentsPage({ taskId: task.id, cursor: null, pageSize: 100 })
         .then((result) => {
           if (!cancelled) {
-            setSegments(result.items);
+            // id-diff: skip setState if segment id set + key fields are unchanged
+            setSegments((prev) => {
+              if (
+                prev.length === result.items.length &&
+                prev.every((s, i) => s.id === result.items[i].id && s.status === result.items[i].status && s.downloadedUntil === result.items[i].downloadedUntil)
+              ) {
+                return prev;
+              }
+              return result.items;
+            });
             setSegmentsCursor(result.nextCursor);
             setSegmentError(null);
           }
@@ -313,8 +338,7 @@ function TaskDetailsPanel({
 
     loadSegments();
 
-    const isLive =
-      task.status === "downloading" || task.status === "retrying";
+    const isLive = task.status === "downloading" || task.status === "retrying";
     if (isLive) {
       intervalId = setInterval(loadSegments, SEGMENT_REFRESH_MS);
     }
@@ -323,7 +347,7 @@ function TaskDetailsPanel({
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [activeTab, task.id, task.status]);
+  }, [activeTab, task.id, task.status, refreshTick]);
 
   useEffect(() => {
     let cancelled = false;
@@ -351,19 +375,16 @@ function TaskDetailsPanel({
 
     loadRequests();
 
-    const isLive =
-      task.status === "downloading" ||
-      task.status === "retrying" ||
-      task.status === "queued";
+    const isLive = task.status === "downloading" || task.status === "retrying" || task.status === "queued";
     if (isLive) {
-      intervalId = setInterval(loadRequests, SEGMENT_REFRESH_MS);
+      intervalId = setInterval(loadRequests, DETAIL_REFRESH_MS);
     }
 
     return () => {
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [activeTab, task.id, task.status]);
+  }, [activeTab, task.id, task.status, refreshTick]);
 
   useEffect(() => {
     let cancelled = false;
@@ -390,19 +411,43 @@ function TaskDetailsPanel({
 
     loadSnapshot();
 
-    const isLive =
-      task.status === "downloading" ||
-      task.status === "retrying" ||
-      task.status === "queued";
+    const isLive = task.status === "downloading" || task.status === "retrying" || task.status === "queued";
     if (isLive) {
-      intervalId = setInterval(loadSnapshot, SEGMENT_REFRESH_MS);
+      intervalId = setInterval(loadSnapshot, DETAIL_REFRESH_MS);
     }
 
     return () => {
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [activeTab, isTorrentTask, task.id, task.status]);
+  }, [activeTab, isTorrentTask, task.id, task.status, refreshTick]);
+
+  // Load Metalink mirrors
+  useEffect(() => {
+    if (!isMetalinkTask || activeTab !== "overview") {
+      setMirrors([]);
+      return;
+    }
+    let cancelled = false;
+    void listMetalinkMirrors(task.id)
+      .then((data) => {
+        if (!cancelled) setMirrors(data);
+      })
+      .catch((err) => {
+        log.warn("failed to load metalink mirrors", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isMetalinkTask, task.id, task.status, refreshTick, activeTab]);
+
+  async function handleRetryWithMirror(mirrorUrl: string) {
+    try {
+      await retryTaskWithMirror(task.id, mirrorUrl);
+    } catch (err) {
+      log.warn("retry with mirror failed", err);
+    }
+  }
 
   async function runHashVerification() {
     setVerifyingHash(true);
@@ -412,6 +457,30 @@ function TaskDetailsPanel({
       log.warn("hash verification failed", err);
     } finally {
       setVerifyingHash(false);
+    }
+  }
+
+  async function verifyChecksum(algo: ChecksumAlgorithm) {
+    setVerifyingChecksums((prev) => new Set(prev).add(algo));
+    try {
+      const actual = await computeFileHash(task.id, algo);
+      const checksum = task.checksums.find((cs) => cs.algorithm === algo);
+      const match = checksum ? actual.toLowerCase() === checksum.expectedHash.toLowerCase() : false;
+      setChecksumResults((prev) => ({ ...prev, [algo]: { actual, match } }));
+    } catch (err) {
+      log.warn("checksum verification failed", err);
+    } finally {
+      setVerifyingChecksums((prev) => {
+        const next = new Set(prev);
+        next.delete(algo);
+        return next;
+      });
+    }
+  }
+
+  function verifyAllChecksums() {
+    for (const cs of task.checksums) {
+      void verifyChecksum(cs.algorithm);
     }
   }
 
@@ -489,209 +558,208 @@ function TaskDetailsPanel({
 
     loadEvents();
 
-    const isLive =
-      task.status === "downloading" ||
-      task.status === "retrying" ||
-      task.status === "queued";
+    const isLive = task.status === "downloading" || task.status === "retrying" || task.status === "queued";
     if (isLive) {
-      intervalId = setInterval(loadEvents, SEGMENT_REFRESH_MS);
+      intervalId = setInterval(loadEvents, DETAIL_REFRESH_MS);
     }
 
     return () => {
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [activeTab, task.id, task.status]);
+  }, [activeTab, task.id, task.status, refreshTick]);
 
   return (
-    <Tabs
-      value={activeTab}
-      onValueChange={setActiveTab}
-      className="flex min-h-0 flex-1 flex-col px-4 py-3"
-    >
-        <TabsList className="w-full justify-start overflow-x-auto">
-          <TabsTrigger value="overview">{t("taskDetails.overview")}</TabsTrigger>
-          <TabsTrigger value="logs">{t("taskDetails.logs")}</TabsTrigger>
-        </TabsList>
+    <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col px-4 py-3">
+      <TabsList className="w-full justify-start overflow-x-auto">
+        <TabsTrigger value="overview">{t("taskDetails.overview")}</TabsTrigger>
+        <TabsTrigger value="logs">{t("taskDetails.logs")}</TabsTrigger>
+      </TabsList>
 
-        {/* Diagnostics disclosure */}
-        <div className="mt-2 rounded-md border border-border-subtle/60">
-          <button
-            type="button"
-            onClick={() => setDiagnosticsOpen((v) => !v)}
-            className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-raised/40 hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary"
-            aria-expanded={diagnosticsOpen}
-          >
-            <ChevronDown
-              className={cn(
-                "h-3.5 w-3.5 shrink-0 transition-transform duration-200",
-                !diagnosticsOpen && "-rotate-90",
-              )}
-            />
-            <span>{t("taskDetails.diagnostics")}</span>
-            {!diagnosticsOpen && segments.length > 0 && (
-              <span className="ml-auto font-mono text-[11px] text-text-muted">
-                {segments.filter((s) => s.status === "failed").length > 0
-                  ? `${segments.filter((s) => s.status === "failed").length} ${t("taskDetails.diagFailedShort")}`
-                  : `${segments.length} ${t("taskDetails.diagSegmentsShort")}`}
-              </span>
-            )}
-          </button>
-
-          {diagnosticsOpen && (
-            <div className="border-t border-border-subtle/60 px-2 py-2">
-              <div
-                role="tablist"
-                aria-label={t("taskDetails.diagnostics")}
-                className="mb-2 flex gap-1"
-                onKeyDown={(e) => {
-                  const tabs = Array.from(
-                    e.currentTarget.querySelectorAll<HTMLButtonElement>(
-                      'button[role="tab"]:not([disabled])',
-                    ),
-                  );
-                  if (tabs.length === 0) return;
-
-                  const currentIndex = tabs.findIndex((tab) => tab === document.activeElement);
-
-                  let nextIndex = -1;
-                  switch (e.key) {
-                    case "ArrowRight":
-                      nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % tabs.length;
-                      break;
-                    case "ArrowLeft":
-                      nextIndex = currentIndex === -1 ? tabs.length - 1 : (currentIndex - 1 + tabs.length) % tabs.length;
-                      break;
-                    case "Home":
-                      nextIndex = 0;
-                      break;
-                    case "End":
-                      nextIndex = tabs.length - 1;
-                      break;
-                    default:
-                      return;
-                  }
-
-                  e.preventDefault();
-                  const target = tabs[nextIndex];
-                  target.focus();
-                  // Trigger the same activation as a click
-                  target.click();
-                }}
-              >
-                {(["chunks", "connections", "requests"] as const).map((key) => (
-                  <button
-                    key={key}
-                    role="tab"
-                    aria-selected={activeTab === key}
-                    aria-controls={`panel-${key}`}
-                    tabIndex={activeTab === key ? 0 : -1}
-                    onClick={() => {
-                      setActiveTab(key);
-                    }}
-                    className={cn(
-                      "rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
-                      activeTab === key
-                        ? "bg-accent-primary/12 text-accent-primary"
-                        : "text-text-muted hover:bg-surface-raised/60 hover:text-text-secondary",
-                    )}
-                  >
-                    {t(`taskDetails.${key}`)}
-                  </button>
-                ))}
-              </div>
-
-              <TabsContent value="chunks" id="panel-chunks">
-                <ChunkList
-                  segments={segments}
-                  error={segmentError}
-                  emptyLabel={t("taskDetails.noChunks")}
-                  rangeLabel={t("taskDetails.chunkRange")}
-                  progressLabel={t("taskDetails.chunkProgress")}
-                  retryLabel={t("taskDetails.chunkRetries")}
-                  hasMore={Boolean(segmentsCursor)}
-                  loadMoreLabel={t("taskDetails.loadMore")}
-                  onLoadMore={() => void loadMoreSegments()}
-                />
-              </TabsContent>
-              <TabsContent value="connections" id="panel-connections">
-                <ConnectionList
-                  segments={segments}
-                  taskSpeedBps={task.speedBps}
-                  error={segmentError}
-                  emptyLabel={t("taskDetails.noConnections")}
-                  connectionLabel={t("taskDetails.connection")}
-                  rangeLabel={t("taskDetails.connectionRange")}
-                  progressLabel={t("taskDetails.connectionProgress")}
-                  speedLabel={t("taskDetails.connectionSpeed")}
-                  hasMore={Boolean(segmentsCursor)}
-                  loadMoreLabel={t("taskDetails.loadMore")}
-                  onLoadMore={() => void loadMoreSegments()}
-                />
-              </TabsContent>
-              <TabsContent value="requests" id="panel-requests">
-                <RequestList
-                  requests={requests}
-                  error={requestsError}
-                  emptyLabel={t("taskDetails.noRequests")}
-                  hasMore={Boolean(requestsCursor)}
-                  loadMoreLabel={t("taskDetails.loadMore")}
-                  onLoadMore={() => void loadMoreRequests()}
-                />
-              </TabsContent>
-            </div>
+      {/* Diagnostics disclosure */}
+      <div className="mt-2 rounded-md border border-border-subtle/60">
+        <button
+          type="button"
+          onClick={() => setDiagnosticsOpen((v) => !v)}
+          className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-raised/40 hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary"
+          aria-expanded={diagnosticsOpen}
+        >
+          <ChevronDown
+            className={cn("h-3.5 w-3.5 shrink-0 transition-transform duration-200", !diagnosticsOpen && "-rotate-90")}
+          />
+          <span>{t("taskDetails.diagnostics")}</span>
+          {!diagnosticsOpen && segments.length > 0 && (
+            <span className="ml-auto font-mono text-[11px] text-text-muted">
+              {segments.filter((s) => s.status === "failed").length > 0
+                ? `${segments.filter((s) => s.status === "failed").length} ${t("taskDetails.diagFailedShort")}`
+                : `${segments.length} ${t("taskDetails.diagSegmentsShort")}`}
+            </span>
           )}
-        </div>
+        </button>
 
-        <ScrollArea className="min-h-0 flex-1">
-          <TabsContent value="overview" className="space-y-3 text-sm">
-            <div className="space-y-2">
-              <ProgressBar
-                value={task.totalSize > 0 ? task.downloadedBytes / task.totalSize : 0}
-                label={formatPercent(task.downloadedBytes, task.totalSize)}
-                active={task.status === "downloading" || task.status === "retrying"}
-                size="lg"
-                tone={task.status === "completed" ? "success" : task.status === "failed" ? "danger" : "primary"}
+        {diagnosticsOpen && (
+          <div className="border-t border-border-subtle/60 px-2 py-2">
+            <div
+              role="tablist"
+              aria-label={t("taskDetails.diagnostics")}
+              className="mb-2 flex gap-1"
+              onKeyDown={(e) => {
+                const tabs = Array.from(
+                  e.currentTarget.querySelectorAll<HTMLButtonElement>('button[role="tab"]:not([disabled])'),
+                );
+                if (tabs.length === 0) return;
+
+                const currentIndex = tabs.findIndex((tab) => tab === document.activeElement);
+
+                let nextIndex = -1;
+                switch (e.key) {
+                  case "ArrowRight":
+                    nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % tabs.length;
+                    break;
+                  case "ArrowLeft":
+                    nextIndex = currentIndex === -1 ? tabs.length - 1 : (currentIndex - 1 + tabs.length) % tabs.length;
+                    break;
+                  case "Home":
+                    nextIndex = 0;
+                    break;
+                  case "End":
+                    nextIndex = tabs.length - 1;
+                    break;
+                  default:
+                    return;
+                }
+
+                e.preventDefault();
+                const target = tabs[nextIndex];
+                target.focus();
+                // Trigger the same activation as a click
+                target.click();
+              }}
+            >
+              {(["chunks", "connections", "requests"] as const).map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === key}
+                  aria-controls={`panel-${key}`}
+                  tabIndex={activeTab === key ? 0 : -1}
+                  onClick={() => {
+                    setActiveTab(key);
+                  }}
+                  className={cn(
+                    "rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
+                    activeTab === key
+                      ? "bg-accent-primary/12 text-accent-primary"
+                      : "text-text-muted hover:bg-surface-raised/60 hover:text-text-secondary",
+                  )}
+                >
+                  {t(`taskDetails.${key}`)}
+                </button>
+              ))}
+            </div>
+
+            <TabsContent value="chunks" id="panel-chunks">
+              <ChunkList
+                segments={segments}
+                error={segmentError}
+                emptyLabel={t("taskDetails.noChunks")}
+                rangeLabel={t("taskDetails.chunkRange")}
+                progressLabel={t("taskDetails.chunkProgress")}
+                retryLabel={t("taskDetails.chunkRetries")}
+                hasMore={Boolean(segmentsCursor)}
+                loadMoreLabel={t("taskDetails.loadMore")}
+                onLoadMore={() => void loadMoreSegments()}
               />
-              <div className="flex items-center justify-between px-1">
-                <span className="text-xs text-text-muted">{formatPercent(task.downloadedBytes, task.totalSize)}</span>
-                <span className="font-mono text-xs text-text-muted">
-                  {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
-                </span>
-              </div>
+            </TabsContent>
+            <TabsContent value="connections" id="panel-connections">
+              <ConnectionList
+                segments={segments}
+                taskSpeedBps={task.speedBps}
+                error={segmentError}
+                emptyLabel={t("taskDetails.noConnections")}
+                connectionLabel={t("taskDetails.connection")}
+                rangeLabel={t("taskDetails.connectionRange")}
+                progressLabel={t("taskDetails.connectionProgress")}
+                speedLabel={t("taskDetails.connectionSpeed")}
+                hasMore={Boolean(segmentsCursor)}
+                loadMoreLabel={t("taskDetails.loadMore")}
+                onLoadMore={() => void loadMoreSegments()}
+              />
+            </TabsContent>
+            <TabsContent value="requests" id="panel-requests">
+              <RequestList
+                requests={requests}
+                error={requestsError}
+                emptyLabel={t("taskDetails.noRequests")}
+                hasMore={Boolean(requestsCursor)}
+                loadMoreLabel={t("taskDetails.loadMore")}
+                onLoadMore={() => void loadMoreRequests()}
+              />
+            </TabsContent>
+          </div>
+        )}
+      </div>
+
+      <ScrollArea className="min-h-0 flex-1">
+        <TabsContent value="overview" className="space-y-3 text-sm">
+          <div className="space-y-2">
+            <ProgressBar
+              value={task.totalSize > 0 ? task.downloadedBytes / task.totalSize : 0}
+              label={formatPercent(task.downloadedBytes, task.totalSize)}
+              active={task.status === "downloading" || task.status === "retrying"}
+              size="lg"
+              tone={task.status === "completed" ? "success" : task.status === "failed" ? "danger" : "primary"}
+            />
+            <div className="flex items-center justify-between px-1">
+              <span className="text-xs text-text-muted">{formatPercent(task.downloadedBytes, task.totalSize)}</span>
+              <span className="font-mono text-xs text-text-muted">
+                {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
+              </span>
             </div>
-            <div className="space-y-0.5">
-              <Row label={t("taskDetails.speed")} value={formatSpeed(task.speedBps)} />
-              <Row label={t("taskDetails.eta")} value={formatEta(task.downloadedBytes, task.totalSize, task.speedBps)} />
+          </div>
+          <div className="space-y-0.5">
+            <Row label={t("taskDetails.speed")} value={formatSpeed(task.speedBps)} />
+            <Row label={t("taskDetails.eta")} value={formatEta(task.downloadedBytes, task.totalSize, task.speedBps)} />
+          </div>
+          {task.protocol === "dash" ? (
+            <div className="rounded-md border border-border-warning bg-status-warning/10 px-3 py-2 text-[11px] leading-4 text-status-warning">
+              <p>{t("taskDetails.dashLimitationsNote")}</p>
             </div>
-            <HashPanel
-              task={task}
-              state={hashState}
-              verifying={verifyingHash}
-              onVerify={() => void runHashVerification()}
-            />
-            <TorrentRuntimePanel
-              task={task}
-              snapshot={torrentSnapshot}
-              error={torrentSnapshotError}
-            />
-            <TaskTransferPanel task={task} />
-            <TaskProxyPanel task={task} />
-            <TaskRecoveryActions task={task} onResolve={onResolveAttention} />
-          </TabsContent>
-          <TabsContent value="logs">
-            <EventList
-              events={events}
-              error={eventsError}
-              emptyLabel={t("taskDetails.noLogs")}
-              hasMore={Boolean(eventsCursor)}
-              loadMoreLabel={t("taskDetails.loadMore")}
-              onLoadMore={() => void loadMoreEvents()}
-            />
-          </TabsContent>
-        </ScrollArea>
-      </Tabs>
+          ) : null}
+          <HashPanel
+            task={task}
+            state={hashState}
+            verifying={verifyingHash}
+            onVerify={() => void runHashVerification()}
+            checksumResults={checksumResults}
+            verifyingChecksums={verifyingChecksums}
+            onVerifyChecksum={(algo) => void verifyChecksum(algo)}
+            onVerifyAllChecksums={verifyAllChecksums}
+          />
+          <TorrentRuntimePanel task={task} snapshot={torrentSnapshot} error={torrentSnapshotError} />
+          <MetalinkMirrorPanel
+            mirrors={mirrors}
+            taskStatus={task.status}
+            onRetryMirror={(url) => void handleRetryWithMirror(url)}
+          />
+          <TaskTransferPanel task={task} />
+          <TaskProxyPanel task={task} />
+          <TaskRecoveryActions task={task} onResolve={onResolveAttention} />
+        </TabsContent>
+        <TabsContent value="logs">
+          <EventList
+            events={events}
+            error={eventsError}
+            emptyLabel={t("taskDetails.noLogs")}
+            hasMore={Boolean(eventsCursor)}
+            loadMoreLabel={t("taskDetails.loadMore")}
+            onLoadMore={() => void loadMoreEvents()}
+          />
+        </TabsContent>
+      </ScrollArea>
+    </Tabs>
   );
 }
 
@@ -699,10 +767,86 @@ function Row({ label, value, mono = true }: { label: string; value: string; mono
   return (
     <div className="flex items-baseline justify-between gap-3 rounded-md bg-surface-root/50 px-3 py-2">
       <div className="text-xs text-text-muted">{label}</div>
-      <div className={cn(
-        "text-sm font-semibold text-text-primary",
-        mono && "font-mono tabular-nums",
-      )}>{value}</div>
+      <div className={cn("text-sm font-semibold text-text-primary", mono && "font-mono tabular-nums")}>{value}</div>
+    </div>
+  );
+}
+
+function formatAlgorithm(algo: string): string {
+  switch (algo) {
+    case "sha256": return "SHA-256";
+    case "sha512": return "SHA-512";
+    case "sha1": return "SHA-1";
+    case "md5": return "MD5";
+    default: return algo.toUpperCase();
+  }
+}
+
+function ChecksumRow({
+  checksum,
+  result,
+  verifying,
+  disabled,
+  onVerify,
+}: {
+  checksum: TaskChecksum;
+  result: { actual: string; match: boolean } | undefined;
+  verifying: boolean;
+  disabled: boolean;
+  onVerify: () => void;
+}) {
+  const { t } = useTranslation();
+  const actual = result?.actual ?? checksum.actualHash;
+  const match = result !== undefined
+    ? result.match
+    : checksum.status === "verified"
+      ? true
+      : checksum.status === "failed"
+        ? false
+        : null;
+
+  return (
+    <div className="rounded border border-border-subtle bg-surface-raised/20 p-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="font-semibold text-text-primary">{formatAlgorithm(checksum.algorithm)}</span>
+          {checksum.weak ? (
+            <span className="rounded bg-status-warning/15 px-1.5 py-0.5 text-[10px] text-status-warning">
+              {t("taskDetails.weakAlgorithm")}
+            </span>
+          ) : null}
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 text-[11px]"
+          onClick={onVerify}
+          disabled={verifying || disabled}
+        >
+          {verifying ? "…" : t("taskDetails.verifyHash")}
+        </Button>
+      </div>
+      <div className="mt-1 font-mono text-[11px] text-text-secondary">
+        <div className="truncate" title={checksum.expectedHash}>
+          <span className="text-text-muted">{t("taskDetails.expectedHash")} </span>
+          {checksum.expectedHash}
+        </div>
+        {actual ? (
+          <div className="truncate" title={actual}>
+            <span className="text-text-muted">{t("taskDetails.actualHash")} </span>
+            {actual}
+          </div>
+        ) : null}
+      </div>
+      {match !== null ? (
+        <p role="status" className={cn("mt-1 text-[11px] font-medium", match ? "text-status-success" : "text-status-danger")}>
+          {match ? t("taskDetails.checksumMatch") : t("taskDetails.checksumMismatch")}
+        </p>
+      ) : null}
+      {checksum.errorMessage ? (
+        <p role="alert" className="mt-1 text-[11px] text-status-danger">{checksum.errorMessage}</p>
+      ) : null}
     </div>
   );
 }
@@ -712,25 +856,66 @@ function HashPanel({
   state,
   verifying,
   onVerify,
+  checksumResults,
+  verifyingChecksums,
+  onVerifyChecksum,
+  onVerifyAllChecksums,
 }: {
   task: Task;
   state: HashVerificationState | null;
   verifying: boolean;
   onVerify: () => void;
+  checksumResults: Record<string, { actual: string; match: boolean }>;
+  verifyingChecksums: Set<string>;
+  onVerifyChecksum: (algo: ChecksumAlgorithm) => void;
+  onVerifyAllChecksums: () => void;
 }) {
   const { t } = useTranslation();
+  const checksums = task.checksums ?? [];
+  const isCompleted = task.status === "completed";
+  const anyVerifying = verifyingChecksums.size > 0;
+
+  if (checksums.length > 0) {
+    return (
+      <div className="rounded-md border border-border-subtle bg-surface-raised/40 p-3 text-xs">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-text-muted">
+            {t("taskDetails.checksumsHeader", { count: checksums.length })}
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 shrink-0"
+            onClick={onVerifyAllChecksums}
+            disabled={anyVerifying || !isCompleted}
+          >
+            {anyVerifying ? t("taskDetails.verifyingAll") : t("taskDetails.verifyAll")}
+          </Button>
+        </div>
+        <div className="mt-2 grid gap-2">
+          {checksums.map((cs) => (
+            <ChecksumRow
+              key={`${cs.algorithm}-${cs.id}`}
+              checksum={cs}
+              result={checksumResults[cs.algorithm]}
+              verifying={verifyingChecksums.has(cs.algorithm)}
+              disabled={!isCompleted}
+              onVerify={() => onVerifyChecksum(cs.algorithm)}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Legacy SHA-256 fallback
   const status = state?.status ?? task.hashStatus;
   const actual = state?.actualSha256 ?? task.actualHashSha256;
   const error = state?.errorMessage ?? task.hashError;
 
   if (!task.expectedHashSha256 && !state?.expectedSha256) {
-    return (
-      <Row
-        label={t("taskDetails.integrity")}
-        value={t("taskDetails.hashNotRequested")}
-        mono={false}
-      />
-    );
+    return <Row label={t("taskDetails.integrity")} value={t("taskDetails.hashNotRequested")} mono={false} />;
   }
 
   return (
@@ -738,9 +923,7 @@ function HashPanel({
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-text-muted">{t("taskDetails.integrity")}</div>
-          <div className={cn("font-medium", hashTone(status))}>
-            {t(`hash.status.${status}`)}
-          </div>
+          <div className={cn("font-medium", hashTone(status))}>{t(`hash.status.${status}`)}</div>
         </div>
         <Button
           type="button"
@@ -748,7 +931,7 @@ function HashPanel({
           variant="outline"
           className="h-8 shrink-0"
           onClick={onVerify}
-          disabled={verifying || task.status !== "completed"}
+          disabled={verifying || !isCompleted}
         >
           {verifying ? t("taskDetails.verifyingHash") : t("taskDetails.verifyHash")}
         </Button>
@@ -763,7 +946,82 @@ function HashPanel({
           </span>
         ) : null}
       </div>
-      {error ? <p className="mt-2 text-status-danger">{error}</p> : null}
+      {error ? <p role="alert" className="mt-2 text-status-danger">{error}</p> : null}
+    </div>
+  );
+}
+
+function mirrorTone(status: string): string {
+  switch (status) {
+    case "completed": return "text-status-success";
+    case "failed": return "text-status-danger";
+    default: return "text-text-secondary";
+  }
+}
+
+function MetalinkMirrorPanel({
+  mirrors,
+  taskStatus,
+  onRetryMirror,
+}: {
+  mirrors: MetalinkMirrorView[];
+  taskStatus: string;
+  onRetryMirror: (url: string) => void;
+}) {
+  const { t } = useTranslation();
+
+  if (mirrors.length === 0) return null;
+
+  const canRetry = taskStatus === "failed" || taskStatus === "needs_attention";
+
+  return (
+    <div className="rounded-md border border-border-subtle bg-surface-raised/40 p-3 text-xs">
+      <div className="text-text-muted">
+        {t("taskDetails.mirrorsHeader", { count: mirrors.length })}
+      </div>
+      <div className="mt-2 grid gap-2">
+        {mirrors.map((mirror) => (
+          <div
+            key={mirror.id}
+            className="flex items-start justify-between gap-2 rounded border border-border-subtle bg-surface-raised/20 p-2"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className={cn("text-[11px] font-medium", mirrorTone(mirror.status))}>
+                  {mirror.status}
+                </span>
+                {mirror.location ? (
+                  <span className="text-[10px] text-text-muted">
+                    {t("taskDetails.mirrorLocation")}: {mirror.location}
+                  </span>
+                ) : null}
+                {mirror.failureCount > 0 ? (
+                  <span className="text-[10px] text-status-danger">
+                    {t("taskDetails.mirrorFailures", { count: mirror.failureCount })}
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-0.5 truncate font-mono text-[11px] text-text-secondary" title={mirror.url}>
+                {mirror.url}
+              </div>
+              {mirror.lastError ? (
+                <p className="mt-0.5 text-[10px] text-status-danger">{mirror.lastError}</p>
+              ) : null}
+            </div>
+            {canRetry ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-6 shrink-0 px-2 text-[10px]"
+                onClick={() => onRetryMirror(mirror.url)}
+              >
+                {t("taskDetails.mirrorRetry")}
+              </Button>
+            ) : null}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -791,9 +1049,13 @@ function TorrentRuntimePanel({
   const canEditFiles = taskFiles.length > 1 && task.status !== "downloading" && task.status !== "retrying";
   const completedPieces = snapshot ? parseSnapshotNumber(snapshot.completedPieces) : 0;
   const pieceCount = snapshot ? Math.max(0, parseSnapshotNumber(snapshot.pieceCount)) : 0;
-  const pieceCells = pieceCount > 0
-    ? Array.from({ length: Math.min(80, pieceCount) }, (_, index) => index < Math.round((completedPieces / pieceCount) * Math.min(80, pieceCount)))
-    : [];
+  const pieceCells =
+    pieceCount > 0
+      ? Array.from(
+          { length: Math.min(80, pieceCount) },
+          (_, index) => index < Math.round((completedPieces / pieceCount) * Math.min(80, pieceCount)),
+        )
+      : [];
 
   async function saveFileSelection() {
     setSaving(true);
@@ -818,7 +1080,7 @@ function TorrentRuntimePanel({
 
   if (error) {
     return (
-      <p className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+      <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
         {error}
       </p>
     );
@@ -828,12 +1090,8 @@ function TorrentRuntimePanel({
     return (
       <div className="space-y-2">
         <div className="flex items-center justify-between gap-3 px-1">
-          <span className="text-xs font-medium text-text-secondary">
-            {t("taskDetails.btRuntime")}
-          </span>
-          <span className="text-[11px] text-text-muted">
-            {t("taskDetails.btSpeedLimitUnsupported")}
-          </span>
+          <span className="text-xs font-medium text-text-secondary">{t("taskDetails.btRuntime")}</span>
+          <span className="text-[11px] text-text-muted">{t("taskDetails.btSpeedLimitUnsupported")}</span>
         </div>
         <p className="rounded-md border border-border-divider bg-surface-root/50 px-3 py-2 text-xs text-text-secondary">
           {t("taskDetails.btNoRuntime")}
@@ -845,43 +1103,32 @@ function TorrentRuntimePanel({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-3 px-1">
-        <span className="text-xs font-medium text-text-secondary">
-          {t("taskDetails.btRuntime")}
-        </span>
+        <span className="text-xs font-medium text-text-secondary">{t("taskDetails.btRuntime")}</span>
         <span className="text-[11px] text-text-muted">
           {snapshot.seedingEnabled ? t("taskDetails.btSeedingEnabled") : t("taskDetails.btSeedingDisabled")}
         </span>
       </div>
       <div className="space-y-0.5">
-        <Row
-          label={t("taskDetails.btMetadataStatus")}
-          value={snapshot.metadataStatus}
-          mono={false}
-        />
-        <Row
-          label={t("taskDetails.btPeers")}
-          value={`${snapshot.peerCount} / ${snapshot.seedCount}`}
-        />
-        <Row
-          label={t("taskDetails.btPieces")}
-          value={`${snapshot.completedPieces} / ${snapshot.pieceCount}`}
-        />
-        <div className="grid gap-0.5 rounded-md bg-surface-root/50 px-3 py-2" style={{ gridTemplateColumns: "repeat(20, minmax(0, 1fr))" }}>
-          {pieceCells.length > 0 ? pieceCells.map((done, index) => (
-            <span
-              key={index}
-              className={cn("h-1.5 rounded-sm", done ? "bg-status-success" : "bg-border-subtle")}
-            />
-          )) : <span className="text-xs text-text-muted">{t("taskDetails.btNoPieces")}</span>}
+        <Row label={t("taskDetails.btMetadataStatus")} value={snapshot.metadataStatus} mono={false} />
+        <Row label={t("taskDetails.btPeers")} value={`${snapshot.peerCount} / ${snapshot.seedCount}`} />
+        <Row label={t("taskDetails.btPieces")} value={`${snapshot.completedPieces} / ${snapshot.pieceCount}`} />
+        <div
+          className="grid gap-0.5 rounded-md bg-surface-root/50 px-3 py-2"
+          style={{ gridTemplateColumns: "repeat(20, minmax(0, 1fr))" }}
+        >
+          {pieceCells.length > 0 ? (
+            pieceCells.map((done, index) => (
+              <span key={index} className={cn("h-1.5 rounded-sm", done ? "bg-status-success" : "bg-border-subtle")} />
+            ))
+          ) : (
+            <span className="text-xs text-text-muted">{t("taskDetails.btNoPieces")}</span>
+          )}
         </div>
         <Row
           label={t("taskDetails.btUpload")}
           value={`${formatBytes(parseSnapshotNumber(snapshot.uploadBytes))} / ${formatSpeed(parseSnapshotNumber(snapshot.uploadSpeedBps))}`}
         />
-        <Row
-          label={t("taskDetails.btRatio")}
-          value={snapshot.ratio == null ? "-" : snapshot.ratio.toFixed(3)}
-        />
+        <Row label={t("taskDetails.btRatio")} value={snapshot.ratio == null ? "-" : snapshot.ratio.toFixed(3)} />
         <Row
           label={t("taskDetails.btDht")}
           value={snapshot.dhtStatus ? t("taskDetails.btDhtActive") : t("taskDetails.btDhtUnknown")}
@@ -901,12 +1148,14 @@ function TorrentRuntimePanel({
           </div>
         ) : null}
         {snapshot.lastErrorMessage ? (
-          <p className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+          <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
             {snapshot.lastErrorMessage}
           </p>
         ) : null}
         <div className="flex items-center justify-between gap-3 rounded-md bg-surface-root/50 px-3 py-2">
-          <label htmlFor="bt-seeding-toggle" className="text-xs text-text-muted">{t("taskDetails.btSeeding")}</label>
+          <label htmlFor="bt-seeding-toggle" className="text-xs text-text-muted">
+            {t("taskDetails.btSeeding")}
+          </label>
           <input
             id="bt-seeding-toggle"
             type="checkbox"
@@ -957,21 +1206,7 @@ function TorrentRuntimePanel({
   );
 }
 
-const SPEED_LIMIT_UNITS = [
-  { value: "1", label: "B/s" },
-  { value: "1024", label: "KB/s" },
-  { value: "1048576", label: "MB/s" },
-] as const;
-
-const TASK_CATEGORY_OPTIONS = [
-  "none",
-  "archive",
-  "image",
-  "video",
-  "document",
-  "installer",
-  "other",
-] as const;
+const TASK_CATEGORY_OPTIONS = ["none", "archive", "image", "video", "document", "installer", "other"] as const;
 
 function TaskTransferPanel({ task }: { task: Task }) {
   const { t } = useTranslation();
@@ -1033,13 +1268,9 @@ function TaskTransferPanel({ task }: { task: Task }) {
     <div className="space-y-3 rounded-md border border-border-subtle bg-surface-raised/40 p-3">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-xs font-medium text-text-secondary">
-            {t("taskDetails.transferSettings")}
-          </div>
+          <div className="text-xs font-medium text-text-secondary">{t("taskDetails.transferSettings")}</div>
           <div className="mt-0.5 text-[11px] text-text-muted">
-            {editable
-              ? t("taskDetails.transferSettingsHint")
-              : t("taskDetails.transferSettingsRunningHint")}
+            {editable ? t("taskDetails.transferSettingsHint") : t("taskDetails.transferSettingsRunningHint")}
           </div>
         </div>
         <Button
@@ -1064,11 +1295,7 @@ function TaskTransferPanel({ task }: { task: Task }) {
               disabled={!editable || saving}
               className="h-8 bg-surface-root text-xs"
             />
-            <Select
-              value={speedUnit}
-              onValueChange={setSpeedUnit}
-              disabled={!editable || saving}
-            >
+            <Select value={speedUnit} onValueChange={setSpeedUnit} disabled={!editable || saving}>
               <SelectTrigger className="h-8 bg-surface-root text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -1102,11 +1329,7 @@ function TaskTransferPanel({ task }: { task: Task }) {
           </label>
           <label className="grid gap-1 text-xs text-text-muted">
             <span>{t("taskDetails.category")}</span>
-            <Select
-              value={category}
-              onValueChange={setCategory}
-              disabled={!editable || saving}
-            >
+            <Select value={category} onValueChange={setCategory} disabled={!editable || saving}>
               <SelectTrigger className="h-8 bg-surface-root text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -1131,7 +1354,7 @@ function TaskTransferPanel({ task }: { task: Task }) {
         </span>
         <span>{t("taskDetails.queuePosition", { position: task.queuePosition })}</span>
       </div>
-      {error ? <p className="text-xs text-status-danger">{error}</p> : null}
+      {error ? <p role="alert" className="text-xs text-status-danger">{error}</p> : null}
     </div>
   );
 }
@@ -1214,7 +1437,11 @@ function TaskProxyPanel({ task }: { task: Task }) {
           <Input
             value={proxyUrl}
             onChange={(event) => setProxyUrl(event.target.value)}
-            placeholder={task.protocol === "bt" || task.protocol.startsWith("ftp") ? "socks5://127.0.0.1:1080" : "http://127.0.0.1:8080"}
+            placeholder={
+              task.protocol === "bt" || task.protocol.startsWith("ftp")
+                ? "socks5://127.0.0.1:1080"
+                : "http://127.0.0.1:8080"
+            }
             aria-label={t("settings.proxyUrl")}
             disabled={!editable || saving}
             className="h-8 bg-surface-root text-xs"
@@ -1248,10 +1475,16 @@ function TaskProxyPanel({ task }: { task: Task }) {
           />
         </div>
       ) : null}
-      {error ? <p className="text-xs text-status-danger">{error}</p> : null}
+      {error ? <p role="alert" className="text-xs text-status-danger">{error}</p> : null}
       <div className="flex items-center justify-between gap-2">
         <p className="text-[11px] text-text-muted">{t("taskDetails.taskProxyHint")}</p>
-        <Button type="button" size="sm" variant="outline" disabled={!editable || saving} onClick={() => void saveProxy()}>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={!editable || saving}
+          onClick={() => void saveProxy()}
+        >
           {t("taskDetails.saveProxy")}
         </Button>
       </div>
@@ -1284,7 +1517,7 @@ function ChunkList({
 
   if (error) {
     return (
-      <p className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+      <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
         {error}
       </p>
     );
@@ -1308,8 +1541,7 @@ function ChunkList({
         const total = Math.max(1, segment.rangeEnd - segment.rangeStart + 1);
         const completed = Math.max(0, segment.downloadedUntil - segment.rangeStart);
         const progress = Math.min(1, completed / total);
-        const isLive =
-          segment.status === "downloading" || segment.status === "pending";
+        const isLive = segment.status === "downloading" || segment.status === "pending";
         const rangeText = `${formatBytes(segment.rangeStart)} - ${formatBytes(segment.rangeEnd)}`;
         const percentText = `${Math.round(progress * 100)}%`;
 
@@ -1340,13 +1572,7 @@ function ChunkList({
                 })}
                 active={segment.status !== "completed" && segment.status !== "failed"}
                 smooth={!isLive}
-                tone={
-                  segment.status === "failed"
-                    ? "danger"
-                    : segment.status === "completed"
-                      ? "success"
-                      : "primary"
-                }
+                tone={segment.status === "failed" ? "danger" : segment.status === "completed" ? "success" : "primary"}
                 className="h-1.5"
               />
             </div>
@@ -1358,9 +1584,7 @@ function ChunkList({
                 {retryLabel} {segment.retryCount}
               </span>
             </div>
-            {segment.lastError ? (
-              <p className="mt-2 text-status-danger">{segment.lastError}</p>
-            ) : null}
+            {segment.lastError ? <p role="alert" className="mt-2 text-status-danger">{segment.lastError}</p> : null}
           </div>
         );
       })}
@@ -1398,7 +1622,7 @@ function ConnectionList({
 
   if (error) {
     return (
-      <p className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+      <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
         {error}
       </p>
     );
@@ -1408,9 +1632,7 @@ function ConnectionList({
     return <p className="text-xs text-text-secondary">{emptyLabel}</p>;
   }
 
-  const activeSegments = segments.filter(
-    (segment) => segment.status === "downloading",
-  );
+  const activeSegments = segments.filter((segment) => segment.status === "downloading");
   return (
     <div className="space-y-2 text-xs">
       <p className="rounded-md border border-border-divider bg-surface-root/50 px-3 py-2 text-text-secondary">
@@ -1422,10 +1644,7 @@ function ConnectionList({
       </p>
       {segments.map((segment, index) => {
         const total = Math.max(1, segment.rangeEnd - segment.rangeStart + 1);
-        const completed = Math.max(
-          0,
-          segment.downloadedUntil - segment.rangeStart,
-        );
+        const completed = Math.max(0, segment.downloadedUntil - segment.rangeStart);
         const speed = segment.status === "downloading" ? segment.speedBps : 0;
         const rangeText = `${formatBytes(segment.rangeStart)} - ${formatBytes(segment.rangeEnd)}`;
         const percentText = formatPercent(completed, total);
@@ -1451,21 +1670,13 @@ function ConnectionList({
             </div>
             <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 text-text-muted">
               <span>{rangeLabel}</span>
-              <span className="text-right font-mono text-text-secondary">
-                {rangeText}
-              </span>
+              <span className="text-right font-mono text-text-secondary">{rangeText}</span>
               <span>{progressLabel}</span>
-              <span className="text-right font-mono text-text-secondary">
-                {percentText}
-              </span>
+              <span className="text-right font-mono text-text-secondary">{percentText}</span>
               <span>{speedLabel}</span>
-              <span className="text-right font-mono text-text-secondary">
-                {formatSpeed(speed)}
-              </span>
+              <span className="text-right font-mono text-text-secondary">{formatSpeed(speed)}</span>
             </div>
-            {segment.lastError ? (
-              <p className="mt-2 text-status-danger">{errorMessage(segment.lastError)}</p>
-            ) : null}
+            {segment.lastError ? <p role="alert" className="mt-2 text-status-danger">{errorMessage(segment.lastError)}</p> : null}
           </div>
         );
       })}
@@ -1493,7 +1704,7 @@ function EventList({
 
   if (error) {
     return (
-      <p className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+      <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
         {error}
       </p>
     );
@@ -1507,23 +1718,16 @@ function EventList({
     <div className="space-y-2 text-xs">
       <ol className="space-y-2">
         {events.map((event) => (
-          <li
-            key={event.id}
-            className="rounded-md border border-border-subtle bg-surface-raised/50 px-3 py-2"
-          >
+          <li key={event.id} className="rounded-md border border-border-subtle bg-surface-raised/50 px-3 py-2">
             <div className="flex items-start justify-between gap-3">
               <span className="font-medium text-text-primary">
                 {t(`taskEvent.${event.eventType}`, {
                   defaultValue: event.eventType,
                 })}
               </span>
-              <time className="shrink-0 font-mono text-[11px] text-text-muted">
-                {formatEventTime(event.createdAt)}
-              </time>
+              <time className="shrink-0 font-mono text-[11px] text-text-muted">{formatEventTime(event.createdAt)}</time>
             </div>
-            {event.payload ? (
-              <p className="mt-1 break-words text-text-secondary">{event.payload}</p>
-            ) : null}
+            {event.payload ? <p className="mt-1 break-words text-text-secondary">{event.payload}</p> : null}
           </li>
         ))}
       </ol>
@@ -1551,7 +1755,7 @@ function RequestList({
 
   if (error) {
     return (
-      <p className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+      <p role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
         {error}
       </p>
     );
@@ -1565,51 +1769,34 @@ function RequestList({
     <div className="space-y-2 text-xs">
       <ol className="space-y-2">
         {requests.map((request) => (
-          <li
-            key={request.id}
-            className="rounded-md border border-border-subtle bg-surface-raised/50 px-3 py-2"
-          >
-          <div className="flex items-start justify-between gap-3">
-            <span className="font-mono text-text-primary">
-              {request.method} {request.statusCode ?? t("taskDetails.requestFailed")}
-            </span>
-            <time className="shrink-0 font-mono text-[11px] text-text-muted">
-              {formatEventTime(request.createdAt)}
-            </time>
-          </div>
-          <p className="mt-1 break-all font-mono text-[11px] text-text-secondary">
-            {request.url}
-          </p>
-          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-text-muted">
-            <span>{t("taskDetails.requestRange")}</span>
-            <span className="truncate text-right font-mono text-text-secondary">
-              {request.rangeHeader ?? "-"}
-            </span>
-            <span>{t("taskDetails.requestIfRange")}</span>
-            <span className="truncate text-right font-mono text-text-secondary">
-              {request.ifRangeHeader ?? "-"}
-            </span>
-            <span>{t("taskDetails.requestLength")}</span>
-            <span className="text-right font-mono text-text-secondary">
-              {request.contentLength ? formatBytes(Number(request.contentLength)) : "-"}
-            </span>
-            <span>{t("taskDetails.requestDuration")}</span>
-            <span className="text-right font-mono text-text-secondary">
-              {request.durationMs} ms
-            </span>
-            <span>{t("taskDetails.requestRetries")}</span>
-            <span className="text-right font-mono text-text-secondary">
-              {request.retryCount}
-            </span>
-          </div>
-          {request.etag ? (
-            <p className="mt-2 break-all font-mono text-[11px] text-text-muted">
-              ETag {request.etag}
-            </p>
-          ) : null}
-          {request.errorMessage ? (
-            <p className="mt-2 text-status-danger">{request.errorMessage}</p>
-          ) : null}
+          <li key={request.id} className="rounded-md border border-border-subtle bg-surface-raised/50 px-3 py-2">
+            <div className="flex items-start justify-between gap-3">
+              <span className="font-mono text-text-primary">
+                {request.method} {request.statusCode ?? t("taskDetails.requestFailed")}
+              </span>
+              <time className="shrink-0 font-mono text-[11px] text-text-muted">
+                {formatEventTime(request.createdAt)}
+              </time>
+            </div>
+            <p className="mt-1 break-all font-mono text-[11px] text-text-secondary">{request.url}</p>
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-text-muted">
+              <span>{t("taskDetails.requestRange")}</span>
+              <span className="truncate text-right font-mono text-text-secondary">{request.rangeHeader ?? "-"}</span>
+              <span>{t("taskDetails.requestIfRange")}</span>
+              <span className="truncate text-right font-mono text-text-secondary">{request.ifRangeHeader ?? "-"}</span>
+              <span>{t("taskDetails.requestLength")}</span>
+              <span className="text-right font-mono text-text-secondary">
+                {request.contentLength ? formatBytes(Number(request.contentLength)) : "-"}
+              </span>
+              <span>{t("taskDetails.requestDuration")}</span>
+              <span className="text-right font-mono text-text-secondary">{request.durationMs} ms</span>
+              <span>{t("taskDetails.requestRetries")}</span>
+              <span className="text-right font-mono text-text-secondary">{request.retryCount}</span>
+            </div>
+            {request.etag ? (
+              <p className="mt-2 break-all font-mono text-[11px] text-text-muted">ETag {request.etag}</p>
+            ) : null}
+            {request.errorMessage ? <p role="alert" className="mt-2 text-status-danger">{request.errorMessage}</p> : null}
           </li>
         ))}
       </ol>
@@ -1618,15 +1805,7 @@ function RequestList({
   );
 }
 
-function LoadMoreButton({
-  visible,
-  label,
-  onClick,
-}: {
-  visible: boolean;
-  label: string;
-  onClick: () => void;
-}) {
+function LoadMoreButton({ visible, label, onClick }: { visible: boolean; label: string; onClick: () => void }) {
   if (!visible) return null;
   return (
     <Button type="button" variant="outline" size="sm" className="w-full" onClick={onClick}>
@@ -1660,44 +1839,6 @@ function formatEventTime(value: string): string {
 function parseSnapshotNumber(value: string): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-}
-
-function speedLimitInputFromBytes(value: string | null | undefined): {
-  amount: string;
-  unit: string;
-} {
-  const bytes = Number(value ?? 0);
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return { amount: "", unit: "1048576" };
-  }
-  const unit =
-    bytes >= 1024 * 1024 && bytes % (1024 * 1024) === 0
-      ? 1024 * 1024
-      : bytes >= 1024 && bytes % 1024 === 0
-        ? 1024
-        : 1;
-  return {
-    amount: String(bytes / unit),
-    unit: String(unit),
-  };
-}
-
-function speedLimitBytesFromInput(
-  amount: string,
-  unit: string,
-): number | null | undefined {
-  if (amount.trim() === "") return null;
-  const parsedAmount = Number(amount);
-  const parsedUnit = Number(unit);
-  if (
-    !Number.isFinite(parsedAmount) ||
-    !Number.isFinite(parsedUnit) ||
-    parsedAmount <= 0 ||
-    parsedUnit <= 0
-  ) {
-    return undefined;
-  }
-  return Math.round(parsedAmount * parsedUnit);
 }
 
 function hashTone(status: Task["hashStatus"]): string {

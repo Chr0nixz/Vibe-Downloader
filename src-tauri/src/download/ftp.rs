@@ -283,6 +283,7 @@ async fn run_ftp_download(
         pool,
         task,
         cancel,
+        cancel_token: _,
         finish: _,
         speed_limiter,
         connection_limit,
@@ -1398,11 +1399,12 @@ impl FtpTarget {
         if path.trim_matches('/').is_empty() || path.ends_with('/') {
             return Err("FTP URL must point to a file, not a directory.".to_string());
         }
-        let file_name = path
+        let raw_name = path
             .rsplit('/')
             .find(|part| !part.is_empty())
             .unwrap_or("download")
             .to_string();
+        let file_name = crate::download::sanitize::sanitize_single_file_name(&raw_name);
         let username = if parsed.username().is_empty() {
             "anonymous".to_string()
         } else {

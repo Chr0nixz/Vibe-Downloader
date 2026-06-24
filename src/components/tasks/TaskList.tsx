@@ -1,37 +1,35 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { ChevronDown, MoreHorizontal, Plus, Search, SlidersHorizontal, X } from "lucide-react";
+import { useReducedMotion } from "motion/react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useReducedMotion } from "framer-motion";
-import { ChevronDown, Plus, Search, SlidersHorizontal, X } from "lucide-react";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 
 const SettingsPage = lazy(() =>
   import("@/components/settings/SettingsPage").then((m) => ({
     default: m.SettingsPage,
   })),
 );
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Button } from "@/components/ui/button";
+
+import { ListContextMenu } from "@/components/tasks/TaskContextMenu";
 import { TaskRow } from "@/components/tasks/TaskRow";
 import { TASK_ROW_ESTIMATED_SIZE } from "@/components/tasks/task-layout";
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import type { RecoveryAction } from "@/generated/bindings";
+import { errorMessage } from "@/lib/errors";
+import { listTasksCursor } from "@/lib/tauri";
+import { cn } from "@/lib/utils";
 import {
+  type FileTypeFilter,
   failureKind,
+  type ResumeFilter,
   taskCursorInput,
   useTaskDataStore,
   useTaskUIStore,
-  type FileTypeFilter,
-  type ResumeFilter,
 } from "@/stores/task-store";
-import { readShellLayout } from "@/hooks/use-shell-layout";
-import { listTasksCursor } from "@/lib/tauri";
-import { errorMessage } from "@/lib/errors";
 import type { Task } from "@/types/task";
-import type { RecoveryAction } from "@/generated/bindings";
 
 export function TaskList({
   onToggleTransfer,
@@ -40,11 +38,14 @@ export function TaskList({
   onOpenFile,
   onOpenFolder,
   onResolveAttention,
+  onDelete,
+  onNewDownload,
   onBulkPause,
   onBulkResume,
   onBulkRetry,
   onBulkDelete,
   onBulkOpenFolder,
+  onBulkExport,
 }: {
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
@@ -52,11 +53,14 @@ export function TaskList({
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
+  onDelete: (task: Task) => void;
+  onNewDownload: () => void;
   onBulkPause: (tasks: Task[]) => void;
   onBulkResume: (tasks: Task[]) => void;
   onBulkRetry: (tasks: Task[]) => void;
   onBulkDelete: (tasks: Task[]) => void;
   onBulkOpenFolder: (tasks: Task[]) => void;
+  onBulkExport: (tasks: Task[], format: "json" | "csv") => void;
 }) {
   const { t } = useTranslation();
   const reduceMotion = !!useReducedMotion();
@@ -73,6 +77,10 @@ export function TaskList({
   const filterOptions = useTaskDataStore((s) => s.filterOptions);
   const nav = useTaskUIStore((s) => s.nav);
   const search = useTaskUIStore((s) => s.search);
+  // Debounce the value that drives backend queries and scroll resets so rapid
+  // typing doesn't fire a request per keystroke. The raw `search` value above
+  // is still used for the empty-state label so the UI stays responsive.
+  const debouncedSearch = useDebouncedValue(search, 300);
   const selectedId = useTaskUIStore((s) => s.selectedId);
   const selectedIds = useTaskUIStore((s) => s.selectedIds);
   const sortKey = useTaskUIStore((s) => s.sortKey);
@@ -129,46 +137,40 @@ export function TaskList({
   }, [t]);
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
-  const loadPage = useCallback(async (cursor: string | null, append = false) => {
-    if (loadingPageRef.current) return;
-    loadingPageRef.current = true;
-    if (!append) setLoading(true);
-    try {
-      const result = await listTasksCursor(taskCursorInput(cursor));
-      setTaskCursorPage(
-        result.items,
-        result.totalEstimate,
-        result.nextCursor,
-        result.filterOptions,
-        append,
-      );
-      if (!append) {
-        const currentSelectedId = useTaskUIStore.getState().selectedId;
-        if (
-          result.items.length > 0 &&
-          (!currentSelectedId || !result.items.some((task) => task.id === currentSelectedId))
-        ) {
-          selectTask(result.items[0].id);
-          if (readShellLayout() === "wide") {
-            setDetailOpen(true);
+  const loadPage = useCallback(
+    async (cursor: string | null, append = false) => {
+      if (loadingPageRef.current) return;
+      loadingPageRef.current = true;
+      if (!append) setLoading(true);
+      try {
+        const result = await listTasksCursor(taskCursorInput(cursor));
+        setTaskCursorPage(result.items, result.totalEstimate, result.nextCursor, result.filterOptions, append);
+        if (!append) {
+          const currentSelectedId = useTaskUIStore.getState().selectedId;
+          if (
+            result.items.length > 0 &&
+            (!currentSelectedId || !result.items.some((task) => task.id === currentSelectedId))
+          ) {
+            selectTask(result.items[0].id);
+          } else if (result.items.length === 0) {
+            selectTask(null);
           }
-        } else if (result.items.length === 0) {
-          selectTask(null);
         }
+        setError(null);
+      } catch (err) {
+        setError(errorMessage(err));
+      } finally {
+        setLoading(false);
+        loadingPageRef.current = false;
+        if (!append) initialLoadDoneRef.current = true;
       }
-      setError(null);
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setLoading(false);
-      loadingPageRef.current = false;
-      if (!append) initialLoadDoneRef.current = true;
-    }
-  }, [selectTask, setDetailOpen, setError, setLoading, setTaskCursorPage]);
+    },
+    [selectTask, setDetailOpen, setError, setLoading, setTaskCursorPage],
+  );
 
   useEffect(() => {
     void loadPage(null, false);
-  }, [filters, loadPage, nav, search, sortDirection, sortKey]);
+  }, [filters, loadPage, nav, debouncedSearch, sortDirection, sortKey]);
 
   /* Keep latest infinite-scroll state in refs so the virtualizer's onChange
      callback always sees fresh values without needing them as deps. */
@@ -204,20 +206,17 @@ export function TaskList({
   useEffect(() => {
     virtualizer.scrollToOffset(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters, nav, search, sortDirection, sortKey]);
+  }, [filters, nav, debouncedSearch, sortDirection, sortKey]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedTasks = useCallback(() => {
     const { taskById } = useTaskDataStore.getState();
-    return selectedIds
-      .map((id) => taskById[id])
-      .filter((task): task is Task => Boolean(task));
+    return selectedIds.map((id) => taskById[id]).filter((task): task is Task => Boolean(task));
   }, [selectedIds]);
   const visibleSelectedCount = useMemo(
     () => filtered.filter((taskId) => selectedIdSet.has(taskId)).length,
     [filtered, selectedIdSet],
   );
-  const allVisibleSelected =
-    filtered.length > 0 && visibleSelectedCount === filtered.length;
+  const allVisibleSelected = filtered.length > 0 && visibleSelectedCount === filtered.length;
   const sourceOptions = filterOptions.sources;
   const failureOptions = useMemo(
     () =>
@@ -240,7 +239,7 @@ export function TaskList({
       selectTask(taskId);
       setDetailOpen(true);
       const list = filteredRef.current;
-      const index = list.findIndex((id) => id === taskId);
+      const index = list.indexOf(taskId);
       if (index >= 0) {
         virtualizer.scrollToIndex(index, { align: "center" });
       }
@@ -253,10 +252,23 @@ export function TaskList({
     [selectTask, setDetailOpen, virtualizer],
   );
 
+  const handleShiftSelect = useCallback(
+    (anchorId: string, currentId: string) => {
+      const list = filteredRef.current;
+      const anchorIdx = list.indexOf(anchorId);
+      const currentIdx = list.indexOf(currentId);
+      if (anchorIdx === -1 || currentIdx === -1) return;
+      const [start, end] =
+        anchorIdx < currentIdx ? [anchorIdx, currentIdx] : [currentIdx, anchorIdx];
+      setSelectedIds(list.slice(start, end + 1));
+    },
+    [setSelectedIds],
+  );
+
   // Ensure the selected row is scrolled into view (e.g. after initial load).
   useEffect(() => {
     if (!selectedId || filtered.length === 0) return;
-    const index = filtered.findIndex((taskId) => taskId === selectedId);
+    const index = filtered.indexOf(selectedId);
     if (index >= 0) {
       virtualizer.scrollToIndex(index, { align: "center" });
     }
@@ -269,10 +281,7 @@ export function TaskList({
       const currentId = selectedIdRef.current;
       const currentIndex = list.findIndex((taskId) => taskId === currentId);
       const startIndex = currentIndex >= 0 ? currentIndex : 0;
-      const nextIndex =
-        direction === "next"
-          ? Math.min(list.length - 1, startIndex + 1)
-          : Math.max(0, startIndex - 1);
+      const nextIndex = direction === "next" ? Math.min(list.length - 1, startIndex + 1) : Math.max(0, startIndex - 1);
       const nextTask = list[nextIndex];
       if (nextTask) selectAndFocus(nextTask);
     },
@@ -319,12 +328,7 @@ export function TaskList({
       ) : null}
 
       {/* Screen reader status announcements */}
-      <div
-        className="sr-only"
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      >
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {statusAnnouncement}
       </div>
 
@@ -344,53 +348,44 @@ export function TaskList({
           >
             {t("taskList.selectVisible", { count: filtered.length })}
           </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 text-xs"
-            onClick={clearSelectedIds}
-          >
+          <Button type="button" variant="ghost" size="sm" className="h-7 text-xs" onClick={clearSelectedIds}>
             <X className="mr-1 h-3 w-3" aria-hidden />
             {t("taskList.clearSelection")}
           </Button>
           <div className="mx-1 h-4 w-px bg-border-subtle" aria-hidden />
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7"
-            onClick={() => onBulkPause(selectedTasks())}
-          >
+          <Button type="button" variant="ghost" size="sm" className="h-7" onClick={() => onBulkPause(selectedTasks())}>
             {t("taskList.bulkPause")}
           </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7"
-            onClick={() => onBulkResume(selectedTasks())}
-          >
+          <Button type="button" variant="ghost" size="sm" className="h-7" onClick={() => onBulkResume(selectedTasks())}>
             {t("taskList.bulkResume")}
           </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7"
-            onClick={() => onBulkRetry(selectedTasks())}
-          >
-            {t("taskList.bulkRetry")}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7"
-            onClick={() => onBulkOpenFolder(selectedTasks())}
-          >
-            {t("taskList.bulkOpenFolder")}
-          </Button>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7"
+                aria-label={t("taskList.moreBulkActions")}
+              >
+                <MoreHorizontal className="h-4 w-4" aria-hidden />
+                {t("taskList.more")}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-52">
+              <div className="space-y-0.5" role="menu">
+                <BulkMenuItem label={t("taskList.bulkRetry")} onClick={() => onBulkRetry(selectedTasks())} />
+                <BulkMenuItem label={t("taskList.bulkOpenFolder")} onClick={() => onBulkOpenFolder(selectedTasks())} />
+                <BulkMenuItem
+                  label={t("taskList.selectVisible", { count: filtered.length })}
+                  onClick={() => setSelectedIds(filtered)}
+                  disabled={allVisibleSelected}
+                />
+                <BulkMenuItem label={t("taskList.exportJson")} onClick={() => onBulkExport(selectedTasks(), "json")} />
+                <BulkMenuItem label={t("taskList.exportCsv")} onClick={() => onBulkExport(selectedTasks(), "csv")} />
+              </div>
+            </PopoverContent>
+          </Popover>
           <Button
             type="button"
             variant="danger"
@@ -409,7 +404,11 @@ export function TaskList({
           <FilterChip
             active={filters.fileType !== "all"}
             label={t("taskList.fileType")}
-            value={filters.fileType !== "all" ? t(`taskList.fileType${filters.fileType.charAt(0).toUpperCase() + filters.fileType.slice(1)}`) : ""}
+            value={
+              filters.fileType !== "all"
+                ? t(`taskList.fileType${filters.fileType.charAt(0).toUpperCase() + filters.fileType.slice(1)}`)
+                : ""
+            }
             onClear={() => setFilters({ fileType: "all" })}
           />
           <FilterChip
@@ -421,13 +420,21 @@ export function TaskList({
           <FilterChip
             active={filters.failure !== "all"}
             label={t("taskList.failure")}
-            value={filters.failure !== "all" ? t(`taskList.failure_${filters.failure}`, { defaultValue: filters.failure }) : ""}
+            value={
+              filters.failure !== "all"
+                ? t(`taskList.failure_${filters.failure}`, { defaultValue: filters.failure })
+                : ""
+            }
             onClear={() => setFilters({ failure: "all" })}
           />
           <FilterChip
             active={filters.resume !== "all"}
             label={t("taskList.resume")}
-            value={filters.resume !== "all" ? t(`taskList.${filters.resume === "resumable" ? "resumable" : "singleConnection"}`) : ""}
+            value={
+              filters.resume !== "all"
+                ? t(`taskList.${filters.resume === "resumable" ? "resumable" : "singleConnection"}`)
+                : ""
+            }
             onClear={() => setFilters({ resume: "all" })}
           />
           <Button
@@ -468,17 +475,12 @@ export function TaskList({
           ) : null}
           {t("taskList.toolPanel")}
           <ChevronDown
-            className={`h-4 w-4 transition-transform duration-ui ${
-              toolPanelOpen ? "rotate-180" : ""
-            }`}
+            className={`h-4 w-4 transition-transform duration-ui ${toolPanelOpen ? "rotate-180" : ""}`}
             aria-hidden="true"
           />
         </Button>
         {toolPanelOpen ? (
-          <div
-            id="task-list-tool-panel"
-            className="mt-2 flex flex-wrap items-center gap-2"
-          >
+          <div id="task-list-tool-panel" className="mt-2 flex flex-wrap items-center gap-2">
             <SelectControl
               label={t("taskList.fileType")}
               value={filters.fileType}
@@ -497,10 +499,7 @@ export function TaskList({
               label={t("taskList.source")}
               value={filters.source}
               onChange={(value) => setFilters({ source: value })}
-              options={[
-                ["all", t("taskList.allSources")],
-                ...sourceOptions.map((source) => [source, source] as const),
-              ]}
+              options={[["all", t("taskList.allSources")], ...sourceOptions.map((source) => [source, source] as const)]}
             />
             <SelectControl
               label={t("taskList.failure")}
@@ -508,10 +507,9 @@ export function TaskList({
               onChange={(value) => setFilters({ failure: value })}
               options={[
                 ["all", t("taskList.allFailures")],
-                ...failureOptions.map((failure) => [
-                  failure,
-                  t(`taskList.failure_${failure}`, { defaultValue: failure }),
-                ] as const),
+                ...failureOptions.map(
+                  (failure) => [failure, t(`taskList.failure_${failure}`, { defaultValue: failure })] as const,
+                ),
               ]}
             />
             <SelectControl
@@ -528,85 +526,84 @@ export function TaskList({
         ) : null}
       </div>
 
-      <div
-        ref={scrollContainerRef}
-        className="min-h-0 flex-1 overflow-y-auto"
-      >
-        {loading && !initialLoadDoneRef.current ? (
-          <TaskListLoadingSkeleton label={t("taskList.loading")} />
-        ) : filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-4 px-6 py-20 text-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-accent-primary/8">
-              {search ? (
-                <Search className="h-7 w-7 text-text-muted" />
-              ) : (
-                <Plus className="h-7 w-7 text-accent-primary/70" />
-              )}
+      <ListContextMenu onNewDownload={onNewDownload}>
+        <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto">
+          {loading && !initialLoadDoneRef.current ? (
+            <TaskListLoadingSkeleton label={t("taskList.loading")} />
+          ) : filtered.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-4 px-6 py-20 text-center">
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-accent-primary/8">
+                {search ? (
+                  <Search className="h-7 w-7 text-text-muted" />
+                ) : (
+                  <Plus className="h-7 w-7 text-accent-primary/70" />
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <p className="text-sm font-medium text-text-primary">
+                  {search ? t("taskList.emptySearch") : t("taskList.empty")}
+                </p>
+                {!search ? (
+                  <p className="max-w-xs text-xs leading-relaxed text-text-muted">{t("taskList.emptyHint")}</p>
+                ) : null}
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <p className="text-sm font-medium text-text-primary">
-                {search ? t("taskList.emptySearch") : t("taskList.empty")}
-              </p>
-              {!search ? (
-                <p className="max-w-xs text-xs leading-relaxed text-text-muted">
-                  {t("taskList.emptyHint")}
+          ) : (
+            <>
+              <div
+                role="listbox"
+                aria-label={t("taskList.aria")}
+                onKeyDown={handleListboxKeyDown}
+                className="relative [--lp:10px] sm:[--lp:12px] md:[--lp:16px] p-2.5 sm:p-3 md:p-4 pt-[var(--lp)]! pb-[var(--lp)]!"
+                style={{ height: `calc(${virtualizer.getTotalSize()}px + var(--lp, 16px) * 2)` }}
+              >
+                {virtualizer.getVirtualItems().map((virtualRow) => {
+                  const taskId = filtered[virtualRow.index];
+                  return (
+                    <div
+                      key={virtualRow.key}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      className="absolute inset-x-2.5 sm:inset-x-3 md:inset-x-4"
+                      style={{
+                        top: 0,
+                        transform: `translateY(calc(${virtualRow.start}px + var(--lp, 16px)))`,
+                        paddingBottom: virtualRow.index < filtered.length - 1 ? 8 : 0,
+                      }}
+                    >
+                      <TaskRow
+                        taskId={taskId}
+                        selected={taskId === selectedId}
+                        multiSelected={selectedIdSet.has(taskId)}
+                        isFirstFocusable={!selectedId && virtualRow.index === 0}
+                        reduceMotion={reduceMotion}
+                        position={virtualRow.index + 1}
+                        setSize={filtered.length}
+                        onSelectTask={selectAndFocus}
+                        onToggleSelected={setTaskSelected}
+                        onNavigate={navigateRow}
+                        onShiftSelect={handleShiftSelect}
+                        onToggleTransfer={onToggleTransfer}
+                        onRetry={onRetry}
+                        onFinishLiveRecording={onFinishLiveRecording}
+                        onOpenFile={onOpenFile}
+                        onOpenFolder={onOpenFolder}
+                        onDelete={onDelete}
+                        onResolveAttention={onResolveAttention}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+              {hasMore ? (
+                <p className="px-2 py-3 text-center text-xs text-text-muted">
+                  {t("taskList.loadingMore", { count: Math.max(0, total - filtered.length) })}
                 </p>
               ) : null}
-            </div>
-          </div>
-        ) : (
-          <>
-            <div
-              role="listbox"
-              aria-label={t("taskList.aria")}
-              onKeyDown={handleListboxKeyDown}
-              className="relative [--lp:10px] sm:[--lp:12px] md:[--lp:16px] p-2.5 sm:p-3 md:p-4 pt-[var(--lp)]! pb-[var(--lp)]!"
-              style={{ height: `calc(${virtualizer.getTotalSize()}px + var(--lp, 16px) * 2)` }}
-            >
-              {virtualizer.getVirtualItems().map((virtualRow) => {
-                const taskId = filtered[virtualRow.index];
-                return (
-              <div
-                    key={virtualRow.key}
-                    data-index={virtualRow.index}
-                    ref={virtualizer.measureElement}
-                    className="absolute inset-x-2.5 sm:inset-x-3 md:inset-x-4"
-                    style={{
-                      top: 0,
-                      transform: `translateY(calc(${virtualRow.start}px + var(--lp, 16px)))`,
-                      paddingBottom: virtualRow.index < filtered.length - 1 ? 8 : 0,
-                    }}
-                  >
-                    <TaskRow
-                      taskId={taskId}
-                      selected={taskId === selectedId}
-                      multiSelected={selectedIdSet.has(taskId)}
-                      isFirstFocusable={!selectedId && virtualRow.index === 0}
-                      reduceMotion={reduceMotion}
-                      position={virtualRow.index + 1}
-                      setSize={filtered.length}
-                      onSelectTask={selectAndFocus}
-                      onToggleSelected={setTaskSelected}
-                      onNavigate={navigateRow}
-                      onToggleTransfer={onToggleTransfer}
-                      onRetry={onRetry}
-                      onFinishLiveRecording={onFinishLiveRecording}
-                      onOpenFile={onOpenFile}
-                      onOpenFolder={onOpenFolder}
-                      onResolveAttention={onResolveAttention}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-            {hasMore ? (
-              <p className="px-2 py-3 text-center text-xs text-text-muted">
-                {t("taskList.loadingMore", { count: Math.max(0, total - filtered.length) })}
-              </p>
-            ) : null}
-          </>
-        )}
-      </div>
+            </>
+          )}
+        </div>
+      </ListContextMenu>
     </div>
   );
 }
@@ -667,15 +664,9 @@ function SelectControl({
 }) {
   return (
     <label className="flex h-11 items-center gap-1.5 text-text-muted md:h-8">
-      <span className="text-[11px] font-medium text-text-muted">
-        {label}
-      </span>
+      <span className="text-[11px] font-medium text-text-muted">{label}</span>
       <Select value={value} onValueChange={onChange}>
-        <SelectTrigger
-          aria-label={label}
-          title={label}
-          className="w-auto min-w-[6rem] px-2.5 text-xs font-medium"
-        >
+        <SelectTrigger aria-label={label} title={label} className="w-auto min-w-[6rem] px-2.5 text-xs font-medium">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -718,5 +709,25 @@ function FilterChip({
         <X className="h-3 w-3" aria-hidden />
       </button>
     </span>
+  );
+}
+
+function BulkMenuItem({ label, onClick, disabled }: { label: string; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "flex h-8 w-full items-center rounded-md px-2 text-left text-sm text-text-secondary",
+        "transition-[background-color,color] duration-[var(--motion-ui)] ease-out",
+        "hover:bg-surface-raised hover:text-text-primary",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
+        "disabled:pointer-events-none disabled:opacity-40",
+      )}
+    >
+      {label}
+    </button>
   );
 }

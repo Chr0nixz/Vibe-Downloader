@@ -48,7 +48,7 @@ async fn open_pool(db_path: &Path) -> Result<SqlitePool, String> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
 
     SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(16)
         .after_connect(|connection, _metadata| {
             Box::pin(async move {
                 sqlx::query("PRAGMA foreign_keys = ON")

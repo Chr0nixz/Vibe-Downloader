@@ -5,26 +5,28 @@ use reqwest::{
     Client, RequestBuilder, Response, StatusCode,
 };
 
+use crate::download::probe_error::reqwest_error_to_structured;
+use crate::download::retry::{with_retry, RetryPolicy};
+
 pub(super) async fn send_head_with_retry(
     client: &Client,
     url: &str,
     headers: &[(String, String)],
-) -> Result<Response, reqwest::Error> {
-    let mut last_error = None;
-    for attempt in 0..3 {
-        let request =
-            apply_forwarded_headers(client.head(url), headers).header(ACCEPT_ENCODING, "identity");
-        match request.send().await {
-            Ok(response) => return Ok(response),
-            Err(error) => {
-                last_error = Some(error);
-                if attempt < 2 {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-            }
+) -> Result<Response, String> {
+    let url = url.to_owned();
+    let headers = headers.to_owned();
+    with_retry(&RetryPolicy::http_request(), |_attempt| {
+        let request = apply_forwarded_headers(client.head(&url), &headers)
+            .header(ACCEPT_ENCODING, "identity");
+        async move {
+            request.send().await.map_err(|e| {
+                // Convert network errors to structured error format, matching
+                // send_get_with_retry so probe-stage HEAD failures are classifiable.
+                reqwest_error_to_structured(&e)
+            })
         }
-    }
-    Err(last_error.expect("head request attempted"))
+    })
+    .await
 }
 
 pub(super) async fn send_get_with_retry(
@@ -34,33 +36,27 @@ pub(super) async fn send_get_with_retry(
     if_range: Option<&str>,
     headers: &[(String, String)],
 ) -> Result<Response, String> {
-    let mut last_error = None;
-    for attempt in 0..3 {
-        let mut request =
-            apply_forwarded_headers(client.get(url), headers).header(ACCEPT_ENCODING, "identity");
-        if let Some(range) = range.as_deref() {
-            request = request.header(RANGE, range);
-            if let Some(if_range) = if_range {
-                request = request.header(IF_RANGE, if_range);
+    let url = url.to_owned();
+    let headers = headers.to_owned();
+    let range = range.clone();
+    let if_range = if_range.map(str::to_owned);
+    with_retry(&RetryPolicy::http_request(), |_attempt| {
+        let mut request = apply_forwarded_headers(client.get(&url), &headers)
+            .header(ACCEPT_ENCODING, "identity");
+        if let Some(ref range) = range {
+            request = request.header(RANGE, range.as_str());
+            if let Some(ref ifr) = if_range {
+                request = request.header(IF_RANGE, ifr.as_str());
             }
         }
-        match request.send().await {
-            Ok(response) => return Ok(response),
-            Err(error) => {
-                last_error = Some(error);
-                if attempt < 2 {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-            }
+        async move {
+            request.send().await.map_err(|e| {
+                // Convert network errors to structured error format
+                reqwest_error_to_structured(&e)
+            })
         }
-    }
-
-    Err(format!(
-        "Could not connect to the server: {}",
-        last_error
-            .map(|error| error.to_string())
-            .unwrap_or_else(|| "request failed".to_string())
-    ))
+    })
+    .await
 }
 
 pub(super) fn apply_forwarded_headers(

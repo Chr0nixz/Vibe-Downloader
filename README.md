@@ -11,7 +11,7 @@ tasks apply file selection before starting the runtime torrent; HTTP request
 diagnostics include Range and If-Range data for resume troubleshooting.
 Metalink `.meta4`/`.metalink` manifests are parsed into manifest tasks with
 multi-file selection, HTTP/HTTPS mirror fallback, per-file progress, and
-manifest-provided MD5/SHA-1/SHA-256/SHA-512 verification.
+manifest-provided checksum verification (strongest available algorithm per file).
 SFTP is implemented as a first-pass single-file engine with password
 credentials, pause/resume from the local temp file, one-level directory probing,
 SOCKS5-only proxy support, and TOFU host-key fingerprint checks.
@@ -43,7 +43,7 @@ Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下�
 - HLS/m3u8 流媒体下载：主播放列表变体选择、AES-128-CBC 解密、并发分段下载、直播轮询、ffmpeg 封装为 MP4。
 - DASH/MPD 流媒体下载：清单解析、ffmpeg 下载并封装为 MP4。
 - WebDAV/WebDAVS 文件下载：Basic Auth 认证、PROPFIND 目录探测、委托 HTTP 引擎下载。
-- Metalink4 清单下载：多文件选择、HTTP/HTTPS 镜像故障转移、MD5/SHA-1/SHA-256/SHA-512 校验和验证。
+- Metalink4 清单下载：多文件选择、HTTP/HTTPS 镜像故障转移、校验和验证（按可用算法优先级取最强一项验证）。
 - SFTP 单文件下载：密码认证、加密凭据存储、本地临时文件断点续传、目录探测、SOCKS5 代理、TOFU 主机密钥验证。
 - BitTorrent 下载：magnet 和 `.torrent` 支持、多文件选择、运行时快照（piece、peer、tracker、DHT、做种）、SOCKS5 代理、可配置做种。
 - FTP/FTPS 下载：动态并行分段、SOCKS5 代理、加密凭据存储、目录探测。
@@ -54,6 +54,8 @@ Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下�
 - 队列调度，默认同时运行 2 个下载任务。
 - 定时下载窗口、定时限速窗口和完成动作（可取消的退出应用、需确认的关机）。
 - 全局速度限制，覆盖所有协议下载。
+- 单任务限速，与全局限速取较小值强制执行。
+- 任务优先级（高/普通/低），调度器按优先级派发队列任务。
 - 逐任务代理覆盖（继承/关闭/自定义），HTTP(S) 支持 HTTP/HTTPS/SOCKS5，BT/FTP/SFTP 仅 SOCKS5。
 - 下载任务搜索、状态筛选、排序、文件类型/来源/失败原因/续传能力筛选。
 - 多选任务和批量暂停、继续、重试、删除。
@@ -77,7 +79,6 @@ Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下�
 这些功能还在后续计划中，不要把当前版本当成完整下载器使用：
 
 - 网盘解析、视频嗅探和插件协议。
-- 任务优先级、单任务限速。
 - 完整站点规则管理 UI。
 - 商店版浏览器扩展、Safari wrapper 和正式扩展签名。
 - 操作系统代码签名的生产安装包。

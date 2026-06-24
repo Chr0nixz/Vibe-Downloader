@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -894,6 +894,10 @@ pub enum CompletionAction {
     None,
     ExitApp,
     Shutdown,
+    Sleep,
+    Hibernate,
+    LockScreen,
+    RunCommand,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -909,6 +913,10 @@ impl CompletionAction {
             Self::None => "none",
             Self::ExitApp => "exit_app",
             Self::Shutdown => "shutdown",
+            Self::Sleep => "sleep",
+            Self::Hibernate => "hibernate",
+            Self::LockScreen => "lock_screen",
+            Self::RunCommand => "run_command",
         }
     }
 
@@ -916,23 +924,11 @@ impl CompletionAction {
         match value {
             "exit_app" => Self::ExitApp,
             "shutdown" => Self::Shutdown,
+            "sleep" => Self::Sleep,
+            "hibernate" => Self::Hibernate,
+            "lock_screen" => Self::LockScreen,
+            "run_command" => Self::RunCommand,
             _ => Self::None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum AppFontFamily {
-    System,
-    SourceHanSansSc,
-}
-
-impl AppFontFamily {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::SourceHanSansSc => "source_han_sans_sc",
         }
     }
 }
@@ -980,7 +976,6 @@ pub struct AppSettings {
     pub auto_resume_on_startup: bool,
     pub floating_window_enabled: bool,
     pub clipboard_monitor_enabled: bool,
-    pub font_family: AppFontFamily,
     pub accent_color: AppAccentColor,
     pub proxy_mode: AppProxyMode,
     pub proxy_url: String,
@@ -994,10 +989,11 @@ pub struct AppSettings {
     pub schedule_speed_limit_window_start: String,
     pub schedule_speed_limit_window_end: String,
     pub schedule_speed_limit_bps: Option<String>,
-    pub sidebar_stripe_enabled: bool,
     pub titlebar_gradient_enabled: bool,
     pub completion_action: CompletionAction,
     pub completion_countdown_seconds: i32,
+    pub completion_run_command: String,
+    pub delete_to_trash: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -1179,11 +1175,4 @@ impl AppErrorPayload {
 
 pub fn now_iso() -> String {
     Utc::now().to_rfc3339()
-}
-
-#[allow(dead_code)]
-pub fn parse_iso(value: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
 }

@@ -7,8 +7,8 @@ import {
   failureKind,
   filterTasks,
   mergeTasksFromServer,
-  taskFileType,
   type TaskQuerySnapshot,
+  taskFileType,
 } from "./task-query";
 import { normalizeTaskStatsSnapshot } from "./task-store";
 

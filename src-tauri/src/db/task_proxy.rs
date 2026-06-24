@@ -68,8 +68,11 @@ pub async fn upsert_task_proxy_settings(
     }
     if let Some(password) = input.proxy_password.as_deref().map(str::trim) {
         if !password.is_empty() {
-            let (ciphertext, secret_nonce) =
-                crate::secure_headers::encrypt_secret(password, "task proxy password")?;
+            let (ciphertext, secret_nonce) = crate::secure_headers::encrypt_secret(
+                password,
+                "task proxy password",
+                input.task_id.as_bytes(),
+            )?;
             password_ciphertext = Some(ciphertext);
             nonce = Some(secret_nonce);
         }
@@ -131,6 +134,7 @@ pub async fn resolve_task_proxy_config(
                     ciphertext,
                     nonce,
                     "task proxy password",
+                    task_id.as_bytes(),
                 )?),
                 _ => None,
             };

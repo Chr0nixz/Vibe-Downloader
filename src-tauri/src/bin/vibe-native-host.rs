@@ -3,6 +3,8 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::mpsc,
+    time::Duration,
 };
 
 use reqwest::Url;
@@ -63,7 +65,26 @@ fn main() {
     }
 }
 
+const NATIVE_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn read_native_message() -> Result<serde_json::Value, String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = read_raw_native_message();
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(NATIVE_MESSAGE_TIMEOUT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err("Timed out waiting for native message from browser.".to_string())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("Native message reader thread terminated unexpectedly.".to_string())
+        }
+    }
+}
+
+fn read_raw_native_message() -> Result<serde_json::Value, String> {
     let mut length = [0_u8; 4];
     io::stdin()
         .read_exact(&mut length)

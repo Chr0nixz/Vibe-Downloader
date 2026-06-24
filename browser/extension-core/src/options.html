@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>__MSG_optionsTitle__</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <header>
+    <h1>Vibe Downloader</h1>
+    <span id="status-badge" class="badge disconnected">__MSG_statusDisconnected__</span>
+  </header>
+
+  <main>
+    <section id="connection-section">
+      <h2>__MSG_connectionSection__</h2>
+      <p id="connection-info">__MSG_connectionChecking__</p>
+    </section>
+
+    <section id="capture-section">
+      <h2>__MSG_captureSection__</h2>
+      <div id="capture-disabled" class="notice">
+        __MSG_captureDisabled__
+      </div>
+      <div id="capture-controls" class="hidden">
+        <div class="field">
+          <label>
+            <input type="checkbox" id="auto-intercept" />
+            __MSG_autoIntercept__
+          </label>
+          <p class="hint">__MSG_autoInterceptHint__</p>
+        </div>
+        <div class="field">
+          <label for="headers-mode">__MSG_headersModeLabel__</label>
+          <select id="headers-mode">
+            <option value="disabled">__MSG_headersModeDisabled__</option>
+            <option value="ask">__MSG_headersModeAsk__</option>
+            <option value="enabled">__MSG_headersModeEnabled__</option>
+          </select>
+          <p class="hint">__MSG_headersModeHint__</p>
+        </div>
+        <div class="field">
+          <label for="file-extensions">__MSG_fileExtensionsLabel__</label>
+          <textarea id="file-extensions" rows="3" placeholder="zip, 7z, rar, exe, …"></textarea>
+          <p class="hint">__MSG_fileExtensionsHint__</p>
+        </div>
+        <div class="field">
+          <label for="min-size">__MSG_minSizeLabel__</label>
+          <input type="number" id="min-size" min="0" step="1" />
+          <p class="hint">__MSG_minSizeHint__</p>
+        </div>
+        <button id="save-settings" type="button" class="primary" disabled>__MSG_saveSettings__</button>
+      </div>
+    </section>
+
+    <section id="rules-section">
+      <h2>__MSG_rulesSection__</h2>
+      <p id="rules-empty" class="hint">__MSG_rulesEmpty__</p>
+      <ul id="rules-list"></ul>
+      <button id="add-rule" type="button" class="secondary">__MSG_addRule__</button>
+      <div id="rule-form" class="hidden">
+        <h3 id="rule-form-title">__MSG_newRule__</h3>
+        <div class="field">
+          <label for="rule-host">__MSG_ruleHost__</label>
+          <input type="text" id="rule-host" placeholder="example.com or *.example.com" />
+          <p class="hint">__MSG_ruleHostHint__</p>
+        </div>
+        <div class="field">
+          <label>
+            <input type="checkbox" id="rule-subdomains" />
+            __MSG_ruleSubdomains__
+          </label>
+        </div>
+        <div class="field">
+          <label for="rule-mode">__MSG_ruleMode__</label>
+          <select id="rule-mode">
+            <option value="auto">__MSG_ruleModeAuto__</option>
+            <option value="ask">__MSG_ruleModeAsk__</option>
+            <option value="never">__MSG_ruleModeNever__</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="rule-extensions">__MSG_ruleExtensions__</label>
+          <input type="text" id="rule-extensions" placeholder="zip, mp4, …" />
+          <p class="hint">__MSG_ruleExtensionsHint__</p>
+        </div>
+        <div class="field">
+          <label for="rule-min-size">__MSG_ruleMinSize__</label>
+          <input type="number" id="rule-min-size" min="0" step="1" placeholder="0" />
+        </div>
+        <div class="field">
+          <label for="rule-headers">__MSG_ruleHeaders__</label>
+          <select id="rule-headers">
+            <option value="">__MSG_ruleHeadersDefault__</option>
+            <option value="true">__MSG_ruleHeadersTrue__</option>
+            <option value="false">__MSG_ruleHeadersFalse__</option>
+          </select>
+        </div>
+        <div class="form-actions">
+          <button id="save-rule" type="button" class="primary">__MSG_saveRule__</button>
+          <button id="cancel-rule" type="button" class="secondary">__MSG_cancelRule__</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="options.js"></script>
+</body>
+</html>

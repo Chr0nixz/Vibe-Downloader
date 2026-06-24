@@ -2,14 +2,10 @@ import { Keyboard } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppUpdater } from "@/hooks/use-app-updater";
-import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
 import type { Platform } from "@/lib/platform";
+import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useTaskDataStore } from "@/stores/task-store";
 
@@ -35,31 +31,38 @@ export function StatusBar({
         className,
       )}
       role="contentinfo"
-      aria-live="polite"
-      aria-atomic="false"
     >
       <span className="flex min-w-0 items-center gap-1.5">
         <span className="text-text-muted">{t("statusBar.total")}</span>
-        <span className={cn(
-          "font-mono font-semibold tabular-nums",
-          stats.totalSpeed > 0 ? "text-xs text-accent-primary md:text-sm" : "text-text-secondary",
-        )}>
+        <span
+          className={cn(
+            "font-mono font-semibold tabular-nums",
+            stats.totalSpeed > 0 ? "text-xs text-accent-primary md:text-sm" : "text-text-secondary",
+          )}
+        >
           {formatSpeed(stats.totalSpeed)}
         </span>
       </span>
-      <span className="flex shrink-0 items-center gap-1.5 text-text-muted">
+      <span aria-live="polite" aria-atomic="true" className="flex shrink-0 items-center gap-1.5 text-text-muted">
         <span>{t("statusBar.active")}</span>
-        <span className={cn(
-          "font-mono font-bold tabular-nums",
-          stats.active > 0 ? "text-accent-primary" : "text-text-secondary",
-        )}>{stats.active}</span>
-        <span className="hidden sm:inline">
-          <span className="text-border-subtle">·</span>
-          {" "}{t("statusBar.queued")}{" "}
-          <span className={cn(
+        <span
+          className={cn(
             "font-mono font-bold tabular-nums",
-            stats.queued > 0 ? "text-text-primary" : "text-text-secondary",
-          )}>{stats.queued}</span>
+            stats.active > 0 ? "text-accent-primary" : "text-text-secondary",
+          )}
+        >
+          {stats.active}
+        </span>
+        <span className="hidden sm:inline">
+          <span className="text-border-subtle">·</span> {t("statusBar.queued")}{" "}
+          <span
+            className={cn(
+              "font-mono font-bold tabular-nums",
+              stats.queued > 0 ? "text-text-primary" : "text-text-secondary",
+            )}
+          >
+            {stats.queued}
+          </span>
         </span>
       </span>
       <span className="flex min-w-0 items-center justify-end gap-2">
@@ -76,9 +79,7 @@ export function StatusBar({
               disabled={installing}
               onClick={() => void installUpdate()}
             >
-              {installing
-                ? t("statusBar.updating")
-                : t("statusBar.installUpdate")}
+              {installing ? t("statusBar.updating") : t("statusBar.installUpdate")}
             </Button>
           </span>
         ) : error ? (

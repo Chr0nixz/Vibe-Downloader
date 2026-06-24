@@ -1,7 +1,7 @@
-import * as React from "react";
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "motion/react";
+import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -44,10 +44,7 @@ const SelectScrollUpButton = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <SelectPrimitive.ScrollUpButton
     ref={ref}
-    className={cn(
-      "flex cursor-default items-center justify-center py-1 text-text-muted",
-      className,
-    )}
+    className={cn("flex cursor-default items-center justify-center py-1 text-text-muted", className)}
     {...props}
   >
     <ChevronUp className="size-4" />
@@ -61,17 +58,13 @@ const SelectScrollDownButton = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <SelectPrimitive.ScrollDownButton
     ref={ref}
-    className={cn(
-      "flex cursor-default items-center justify-center py-1 text-text-muted",
-      className,
-    )}
+    className={cn("flex cursor-default items-center justify-center py-1 text-text-muted", className)}
     {...props}
   >
     <ChevronDown className="size-4" />
   </SelectPrimitive.ScrollDownButton>
 ));
-SelectScrollDownButton.displayName =
-  SelectPrimitive.ScrollDownButton.displayName;
+SelectScrollDownButton.displayName = SelectPrimitive.ScrollDownButton.displayName;
 
 /* ── Content (portal) ── */
 
@@ -87,22 +80,14 @@ const SelectContent = React.forwardRef<
         <motion.div
           ref={ref}
           className={cn(
-            "relative z-50 max-h-60 min-w-[8rem] overflow-hidden rounded-lg border border-border-subtle bg-surface-overlay shadow-lg",
+            "relative z-50 max-h-60 min-w-[8rem] overflow-hidden rounded-lg bg-surface-overlay shadow-md ring-1 ring-border-subtle",
             position === "popper" &&
               "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
             className,
           )}
-          initial={
-            reduceMotion
-              ? false
-              : { opacity: 0, y: -4, scale: 0.97 }
-          }
+          initial={reduceMotion ? false : { opacity: 0, y: -4, scale: 0.97 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={
-            reduceMotion
-              ? { opacity: 0 }
-              : { opacity: 0, y: -2, scale: 0.97 }
-          }
+          exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -2, scale: 0.97 }}
           transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
         >
           <SelectScrollUpButton />
@@ -170,23 +155,19 @@ const SelectSeparator = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Separator>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Separator>
 >(({ className, ...props }, ref) => (
-  <SelectPrimitive.Separator
-    ref={ref}
-    className={cn("-mx-1 my-1 h-px bg-border-divider", className)}
-    {...props}
-  />
+  <SelectPrimitive.Separator ref={ref} className={cn("-mx-1 my-1 h-px bg-border-divider", className)} {...props} />
 ));
 SelectSeparator.displayName = SelectPrimitive.Separator.displayName;
 
 export {
   Select,
-  SelectGroup,
-  SelectValue,
-  SelectTrigger,
   SelectContent,
-  SelectLabel,
+  SelectGroup,
   SelectItem,
-  SelectSeparator,
-  SelectScrollUpButton,
+  SelectLabel,
   SelectScrollDownButton,
+  SelectScrollUpButton,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
 };

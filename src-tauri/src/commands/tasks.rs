@@ -9,7 +9,8 @@ use std::{
 use reqwest::Url;
 use serde::Deserialize;
 use specta::Type;
-use tauri::AppHandle;
+use sqlx::Row;
+use tauri::{AppHandle, Manager};
 
 use super::task_file_planning::unique_final_path;
 pub use super::task_resume::{
@@ -30,7 +31,7 @@ use crate::{
         TaskFileRecord, TaskProxySettings, TaskProxySettingsInput, TaskRecord, TaskStatus,
         WebDavDirectoryProbe,
     },
-    AppState, DownloadControl, TaskRequestHeaders,
+    platform, AppState, DownloadControl, TaskRequestHeaders,
 };
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -285,106 +286,115 @@ async fn schedule_queued_tasks_inner(
 ) {
     let _guard = scheduler.lock().await;
 
-    loop {
-        let default_dir = super::settings::default_download_dir(&app).unwrap_or_default();
-        let settings = match db::get_settings(&pool, default_dir).await {
-            Ok(settings) => settings,
-            Err(error) => {
-                tracing::error!(error = %error, "failed to load settings for scheduler");
-                break;
-            }
-        };
-        let active_count = downloads.lock().await.len() as i32;
-        let available = settings.max_active_tasks.saturating_sub(active_count);
-        if available <= 0 {
-            tracing::debug!(
-                active_count,
-                max_active_tasks = settings.max_active_tasks,
-                "scheduler has no available slots"
-            );
-            break;
+    // Read settings and queued list ONCE outside the loop.
+    // Previously these were re-fetched every iteration (~240 DB round trips per burst).
+    let default_dir = super::settings::default_download_dir(&app).unwrap_or_default();
+    let settings = match db::get_settings(&pool, default_dir).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to load settings for scheduler");
+            return;
         }
-
-        let queued_limit = i64::from(settings.max_active_tasks)
-            .saturating_mul(i64::from(settings.max_connections_per_host).max(1))
-            .clamp(
-                i64::from(settings.max_active_tasks).max(1),
-                db::DEFAULT_TASK_PAGE_SIZE,
-            );
-        let queued = match db::list_queued_task_records(&pool, queued_limit).await {
-            Ok(tasks) => tasks,
-            Err(error) => {
-                tracing::error!(error = %error, "failed to load queued tasks");
-                break;
-            }
-        };
-        if queued.is_empty() {
-            break;
-        }
-
-        tracing::debug!(
-            available,
-            queued_count = queued.len(),
-            "scheduler dispatching queued tasks"
+    };
+    let queued_limit = i64::from(settings.max_active_tasks)
+        .saturating_mul(i64::from(settings.max_connections_per_host).max(1))
+        .clamp(
+            i64::from(settings.max_active_tasks).max(1),
+            db::DEFAULT_TASK_PAGE_SIZE,
         );
+    let queued = match db::list_queued_task_records(&pool, queued_limit).await {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to load queued tasks");
+            return;
+        }
+    };
+    if queued.is_empty() {
+        return;
+    }
 
-        let mut made_progress = false;
-        for task in queued {
-            if settings.schedule_download_window_enabled
-                && task.obey_schedule
-                && !db::local_time_window_active(
-                    &settings.schedule_download_window_start,
-                    &settings.schedule_download_window_end,
-                )
-            {
-                tracing::debug!(
-                    task_id = %task.id,
-                    "scheduler deferred task outside configured download window"
-                );
-                continue;
-            }
-            if downloads.lock().await.len() as i32 >= settings.max_active_tasks {
-                break;
-            }
-            let host_used = host_connection_slots(&downloads, &task.source_key).await;
-            let host_limit = usize::try_from(settings.max_connections_per_host)
-                .unwrap_or(usize::try_from(db::DEFAULT_MAX_CONNECTIONS_PER_HOST).unwrap_or(8))
-                .max(1);
-            if host_used >= host_limit {
-                tracing::debug!(
-                    task_id = %task.id,
-                    source_key = %task.source_key,
-                    host_used,
-                    host_limit,
-                    "scheduler deferred task because host connection limit is full"
-                );
-                continue;
-            }
-            let planned_slots = db::planned_segment_count_with_plan(
-                &task,
-                db::parse_multi_connection_threshold_bytes(
-                    &settings.multi_connection_threshold_bytes,
-                ),
-                settings.segment_count,
+    let mut active_count = downloads.lock().await.len() as i32;
+    let available = settings.max_active_tasks.saturating_sub(active_count);
+    if available <= 0 {
+        tracing::debug!(
+            active_count,
+            max_active_tasks = settings.max_active_tasks,
+            "scheduler has no available slots"
+        );
+        return;
+    }
+
+    tracing::debug!(
+        available,
+        queued_count = queued.len(),
+        "scheduler dispatching queued tasks"
+    );
+
+    let host_limit = usize::try_from(settings.max_connections_per_host)
+        .unwrap_or(usize::try_from(db::DEFAULT_MAX_CONNECTIONS_PER_HOST).unwrap_or(8))
+        .max(1);
+
+    for task in queued {
+        if active_count >= settings.max_active_tasks {
+            break;
+        }
+        if settings.schedule_download_window_enabled
+            && task.obey_schedule
+            && !db::local_time_window_active(
+                &settings.schedule_download_window_start,
+                &settings.schedule_download_window_end,
             )
-            .min(host_limit.saturating_sub(host_used))
-            .max(1);
-            let task_id = task.id.clone();
-            if let Err(error) = start_task_download(
-                DownloadStartContext {
-                    app: app.clone(),
-                    pool: pool.clone(),
-                    downloads: downloads.clone(),
-                    request_headers: request_headers.clone(),
-                    scheduler: scheduler.clone(),
-                    speed_limiter: speed_limiter.clone(),
-                    engine_registry: engine_registry.clone(),
-                },
-                task,
-                planned_slots,
-            )
-            .await
-            {
+        {
+            tracing::debug!(
+                task_id = %task.id,
+                "scheduler deferred task outside configured download window"
+            );
+            continue;
+        }
+        let host_used = host_connection_slots(&downloads, &task.source_key).await;
+        if host_used >= host_limit {
+            tracing::debug!(
+                task_id = %task.id,
+                source_key = %task.source_key,
+                host_used,
+                host_limit,
+                "scheduler deferred task because host connection limit is full"
+            );
+            continue;
+        }
+        let planned_slots = db::planned_segment_count_with_plan(
+            &task,
+            db::parse_multi_connection_threshold_bytes(
+                &settings.multi_connection_threshold_bytes,
+            ),
+            settings.segment_count,
+        )
+        .min(host_limit.saturating_sub(host_used))
+        .max(1);
+        let task_id = task.id.clone();
+        match start_task_download(
+            DownloadStartContext {
+                app: app.clone(),
+                pool: pool.clone(),
+                downloads: downloads.clone(),
+                request_headers: request_headers.clone(),
+                scheduler: scheduler.clone(),
+                speed_limiter: speed_limiter.clone(),
+                engine_registry: engine_registry.clone(),
+            },
+            task,
+            planned_slots,
+        )
+        .await
+        {
+            Ok(()) => {
+                // Task was inserted into the downloads map — count it.
+                active_count += 1;
+            }
+            Err(error) => {
+                // start_task_download failed before (or during) insert; the
+                // spawned task (if any) will clean up the downloads entry.
+                // Do NOT increment active_count — the task is not consuming a slot.
                 match db::get_task_record(&pool, &task_id).await {
                     Ok(Some(current)) if current.status == TaskStatus::Queued => {
                         mark_download_failed(&app, &pool, &task_id, error).await;
@@ -396,11 +406,6 @@ async fn schedule_queued_tasks_inner(
                     _ => {}
                 }
             }
-            made_progress = true;
-        }
-
-        if !made_progress {
-            break;
         }
     }
 
@@ -471,12 +476,14 @@ async fn start_task_download(
 
     let cancel = Arc::new(AtomicBool::new(false));
     let finish = Arc::new(AtomicBool::new(false));
+    let cancel_token = tokio_util::sync::CancellationToken::new();
     let downloads_map = downloads.clone();
     let task_id = task.id.clone();
     let map_task_id = task.id.clone();
     let source_key = task.source_key.clone();
     let task_app = app.clone();
     let task_cancel = cancel.clone();
+    let task_cancel_token = cancel_token.clone();
     let task_finish = finish.clone();
     let task_pool = pool.clone();
     let task_scheduler = scheduler.clone();
@@ -526,19 +533,47 @@ async fn start_task_download(
             state_speed_limiter.clone(),
             effective_task_limit,
         );
-        let result = engine
-            .download(DownloadContext {
-                app: task_app.clone(),
-                pool: task_pool.clone(),
-                task,
-                cancel: task_cancel.clone(),
-                finish: task_finish.clone(),
-                speed_limiter: task_speed_limiter,
-                connection_limit,
-                request_headers: task_request_headers.clone(),
-                proxy_config: task_proxy_config,
-            })
-            .await;
+        // Spawn the download as a nested task so that a panic inside the engine
+        // is caught by tokio's JoinHandle (returns Err(JoinError) with is_panic())
+        // instead of aborting the entire process. Requires panic = "unwind".
+        let download_handle = tokio::spawn(async move {
+            engine
+                .download(DownloadContext {
+                    app: task_app.clone(),
+                    pool: task_pool.clone(),
+                    task,
+                    cancel: task_cancel.clone(),
+                    cancel_token: task_cancel_token.clone(),
+                    finish: task_finish.clone(),
+                    speed_limiter: task_speed_limiter,
+                    connection_limit,
+                    request_headers: task_request_headers.clone(),
+                    proxy_config: task_proxy_config,
+                })
+                .await
+        });
+        let result = match download_handle.await {
+            Ok(result) => result,
+            Err(join_error) => {
+                let message = if join_error.is_panic() {
+                    let payload = join_error.into_panic();
+                    payload
+                        .downcast_ref::<String>()
+                        .map(|s| s.as_str())
+                        .or_else(|| payload.downcast_ref::<&str>().map(|s| *s))
+                        .unwrap_or("unknown panic")
+                        .to_string()
+                } else {
+                    "Download task was cancelled.".to_string()
+                };
+                tracing::error!(
+                    task_id = %task_id,
+                    error = %message,
+                    "download task terminated unexpectedly"
+                );
+                Err(message)
+            }
+        };
         let canceled = task_cancel.load(Ordering::SeqCst);
         let _ = downloads_map.lock().await.remove(&task_id);
         let _ = request_headers.lock().await.remove(&task_id);
@@ -586,6 +621,7 @@ async fn start_task_download(
         map_task_id,
         DownloadControl {
             cancel,
+            cancel_token,
             finish,
             handle,
             source_key,
@@ -644,6 +680,12 @@ async fn maybe_emit_completion_action(
     if settings.completion_action == CompletionAction::None {
         return;
     }
+    if settings.completion_action == CompletionAction::RunCommand {
+        if let Err(error) = platform::run_user_command(&settings.completion_run_command) {
+            tracing::warn!(error = %error, "completion run_command failed");
+        }
+        return;
+    }
     emit_completion_action_requested(
         app,
         &CompletionActionRequestedPayload {
@@ -695,6 +737,114 @@ fn spawn_schedule_queued_tasks_after(app: AppHandle, state: &AppState, delay: st
             engine_registry,
         )
         .await;
+    });
+}
+
+/// Enforces the configured download-window schedule by pausing active tasks
+/// when the window is closed and resuming previously schedule-paused tasks
+/// when it opens.  Called periodically by the background monitor and
+/// immediately after schedule-related settings change.
+pub(crate) async fn check_schedule_preemption(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let default_dir = super::settings::default_download_dir(&app).unwrap_or_default();
+    let settings = db::get_settings(&state.pool, default_dir).await?;
+    if !settings.schedule_download_window_enabled {
+        return Ok(());
+    }
+
+    let window_active = db::local_time_window_active(
+        &settings.schedule_download_window_start,
+        &settings.schedule_download_window_end,
+    );
+
+    if !window_active {
+        // Window just closed — pause downloading tasks that obey the schedule.
+        let active_ids: Vec<String> = {
+            let downloads = state.downloads.lock().await;
+            downloads.keys().cloned().collect()
+        };
+        for task_id in &active_ids {
+            let record = match db::get_task_record(&state.pool, task_id).await? {
+                Some(r) => r,
+                None => continue,
+            };
+            if !record.obey_schedule {
+                continue;
+            }
+            if record.status != TaskStatus::Downloading {
+                continue;
+            }
+            tracing::info!(task_id = %task_id, "pausing task: schedule window closed");
+            if let Err(err) = pause_task(app.clone(), state.clone(), task_id.clone()).await {
+                tracing::warn!(task_id = %task_id, error = %err, "schedule auto-pause failed");
+                continue;
+            }
+            // Tag as schedule-paused AFTER the normal "paused" event so this
+            // row has the highest ID and is seen as the latest pause reason.
+            let _ = db::insert_task_event(
+                &state.pool,
+                task_id,
+                "paused_by_schedule",
+                None,
+            )
+            .await;
+        }
+    } else {
+        // Window just opened — resume tasks that were paused by schedule.
+        let paused_rows = sqlx::query(
+            "SELECT id FROM tasks WHERE status = 'paused' AND obey_schedule = 1",
+        )
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let mut resumed_any = false;
+        for row in &paused_rows {
+            let task_id: String = row.get("id");
+            let latest_pause =
+                db::get_latest_pause_event_type(&state.pool, &task_id).await?;
+            if latest_pause.as_deref() != Some("paused_by_schedule") {
+                continue;
+            }
+            tracing::info!(task_id = %task_id, "resuming task: schedule window opened");
+            db::insert_task_event(&state.pool, &task_id, "resumed", None).await?;
+            if let Err(err) = queue_task_for_retry(&app, state.inner(), &task_id).await {
+                tracing::warn!(task_id = %task_id, error = %err, "schedule auto-resume failed");
+            }
+            resumed_any = true;
+        }
+        if resumed_any {
+            emit_queue_changed(&app);
+        }
+    }
+
+    Ok(())
+}
+
+/// Spawns a background task that checks the schedule window every 60 seconds
+/// and preempts running tasks or resumes paused tasks as needed.
+pub(crate) fn spawn_schedule_window_monitor(app: AppHandle, _state: &AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        // First tick fires immediately; skip it.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            // Exit gracefully when the app is shutting down so we don't
+            // access dropped state.
+            let state_ref = app.state::<AppState>();
+            if state_ref.quit_requested.load(Ordering::SeqCst) {
+                tracing::debug!("schedule window monitor exiting (shutdown requested)");
+                break;
+            }
+            if let Err(error) =
+                check_schedule_preemption(app.clone(), state_ref).await
+            {
+                tracing::warn!(error = %error, "schedule preemption check failed");
+            }
+        }
     });
 }
 
@@ -824,6 +974,10 @@ async fn restart_task_from_beginning(
             request_headers,
             pool: Some(state.pool.clone()),
             task_id: Some(task.id.clone()),
+            username: None,
+            password: None,
+            private_key_data: None,
+            private_key_passphrase: None,
         })
         .await?;
     db::update_task_remote_metadata(
@@ -947,6 +1101,10 @@ async fn prepare_task_for_download(
                 request_headers: request_headers.to_vec(),
                 pool: Some(pool.clone()),
                 task_id: Some(task.id.clone()),
+                username: None,
+                password: None,
+                private_key_data: None,
+                private_key_passphrase: None,
             })
             .await?;
         if let Some(message) = resume_mismatch_message(&task, &probe) {
@@ -1177,20 +1335,49 @@ fn emit_task_progress_snapshot(app: &AppHandle, task: &TaskRecord) {
     emit_task_progress(app, &payload);
 }
 
-fn remove_task_path(path: &str) -> Result<(), String> {
-    if std::fs::metadata(path)
-        .map(|metadata| metadata.is_dir())
-        .unwrap_or(false)
-    {
-        return match std::fs::remove_dir_all(path) {
+/// Delete a file or directory, optionally sending to the OS trash/recycle bin.
+///
+/// When `use_trash` is true, the `trash` crate attempts to move the path to
+/// the system's recycle bin. If that fails, an error is returned — the file
+/// is **not** permanently deleted, giving the caller a chance to warn the user.
+/// When `use_trash` is false, deletes permanently. `NotFound` errors are
+/// silently ignored in both modes.
+pub(super) fn delete_path(path: &str, use_trash: bool) -> Result<(), String> {
+    let path_obj = std::path::Path::new(path);
+    if !path_obj.exists() {
+        return Ok(());
+    }
+
+    if use_trash {
+        if let Err(error) = trash::delete(path_obj) {
+            // Return the error — do NOT fall through to permanent deletion.
+            // Silent permanent deletion when the user expected trash is a
+            // data-loss footgun (the user checks the recycle bin and finds nothing).
+            return Err(format!(
+                "Could not move {path} to the recycle bin: {error}. The file was not deleted."
+            ));
+        }
+        return Ok(());
+    }
+
+    // Permanent deletion
+    if path_obj.is_dir() {
+        match std::fs::remove_dir_all(path_obj) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("Could not delete the temporary folder: {error}")),
-        };
+            Err(error) => Err(format!("Could not delete {path}: {error}")),
+        }
+    } else {
+        match std::fs::remove_file(path_obj) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Could not delete {path}: {error}")),
+        }
     }
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Could not delete the temporary file: {error}")),
-    }
+}
+
+/// Delete a task's temporary file/folder. Always permanent (temp files
+/// should not clutter the recycle bin).
+fn remove_task_path(path: &str) -> Result<(), String> {
+    delete_path(path, false)
 }

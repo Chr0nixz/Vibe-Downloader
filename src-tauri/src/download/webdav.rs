@@ -143,7 +143,10 @@ pub async fn probe_webdav_directory_url(
     let credentials = target.credentials.clone();
     let headers = webdav_request_headers(&[], credentials.as_ref());
     let mut request = client
-        .request(Method::from_bytes(b"PROPFIND").expect("PROPFIND method"), &target.http_url)
+        .request(
+            Method::from_bytes(b"PROPFIND").expect("PROPFIND method"),
+            &target.http_url,
+        )
         .header(HeaderName::from_static("depth"), "1")
         .header(CONTENT_TYPE, "application/xml; charset=utf-8")
         .body(
@@ -158,10 +161,12 @@ pub async fn probe_webdav_directory_url(
 </d:propfind>"#,
         );
     request = apply_forwarded_headers(request, &headers);
-    let response = request
-        .send()
-        .await
-        .map_err(|e| webdav_error("webdav_propfind_failed", format!("WebDAV PROPFIND failed: {e}")))?;
+    let response = request.send().await.map_err(|e| {
+        webdav_error(
+            "webdav_propfind_failed",
+            format!("WebDAV PROPFIND failed: {e}"),
+        )
+    })?;
     let status = response.status();
     let text = response
         .text()
@@ -251,8 +256,7 @@ impl WebDavTarget {
     }
 
     fn parse(input: &str) -> Result<Self, String> {
-        let parsed =
-            Url::parse(input.trim()).map_err(|_| "WebDAV URL is invalid.".to_string())?;
+        let parsed = Url::parse(input.trim()).map_err(|_| "WebDAV URL is invalid.".to_string())?;
         let protocol = parsed.scheme().to_ascii_lowercase();
         if !matches!(protocol.as_str(), "webdav" | "webdavs") {
             return Err(format!(
@@ -265,21 +269,21 @@ impl WebDavTarget {
             .filter(|host| !host.is_empty())
             .ok_or_else(|| "WebDAV URL is missing a host.".to_string())?
             .to_string();
-        let port = parsed.port().unwrap_or(if protocol == "webdavs" {
-            443
-        } else {
-            80
-        });
+        let port = parsed
+            .port()
+            .unwrap_or(if protocol == "webdavs" { 443 } else { 80 });
         let sanitized_uri = sanitized_webdav_url(&parsed)?;
         let http_url = http_url_from_webdav(&parsed, &protocol)?;
         let path = percent_decode_lossy(parsed.path());
         let file_name = if path.ends_with('/') {
             String::new()
         } else {
-            path.rsplit('/')
+            let raw_name = path
+                .rsplit('/')
                 .find(|part| !part.is_empty())
                 .unwrap_or("download")
-                .to_string()
+                .to_string();
+            crate::download::sanitize::sanitize_single_file_name(&raw_name)
         };
         let credentials = credentials_from_url(&parsed);
         let source_key = format!("{protocol}://{host}:{port}");
@@ -300,7 +304,10 @@ fn credentials_from_url(parsed: &Url) -> Option<WebDavCredentials> {
     }
     Some(WebDavCredentials {
         username: percent_decode_lossy(parsed.username()),
-        password: parsed.password().map(percent_decode_lossy).unwrap_or_default(),
+        password: parsed
+            .password()
+            .map(percent_decode_lossy)
+            .unwrap_or_default(),
     })
 }
 
@@ -314,7 +321,11 @@ fn sanitized_webdav_url(parsed: &Url) -> Result<String, String> {
 }
 
 fn http_url_from_webdav(parsed: &Url, protocol: &str) -> Result<String, String> {
-    let http_scheme = if protocol == "webdavs" { "https" } else { "http" };
+    let http_scheme = if protocol == "webdavs" {
+        "https"
+    } else {
+        "http"
+    };
     let (_, rest) = parsed
         .as_str()
         .split_once(':')
@@ -468,7 +479,10 @@ impl ParsedDavResponse {
             name,
             href,
             is_collection: self.is_collection,
-            size: self.content_length.filter(|size| *size >= 0).map(|size| size.to_string()),
+            size: self
+                .content_length
+                .filter(|size| *size >= 0)
+                .map(|size| size.to_string()),
             content_type: self.content_type,
             probable_file_url,
         })
@@ -480,7 +494,9 @@ fn normalize_url_for_compare(value: &str) -> String {
 }
 
 fn name_from_href(url: &Url) -> String {
-    let path = percent_decode_lossy(url.path()).trim_end_matches('/').to_string();
+    let path = percent_decode_lossy(url.path())
+        .trim_end_matches('/')
+        .to_string();
     path.rsplit('/')
         .find(|part| !part.is_empty())
         .unwrap_or("resource")
@@ -525,9 +541,8 @@ mod tests {
 
     #[test]
     fn maps_webdav_url_to_http_without_credentials() {
-        let target =
-            WebDavTarget::parse_file("webdavs://alice:s3cret@example.com/dir/file.bin")
-                .expect("target");
+        let target = WebDavTarget::parse_file("webdavs://alice:s3cret@example.com/dir/file.bin")
+            .expect("target");
 
         assert_eq!(target.http_url, "https://example.com/dir/file.bin");
         assert_eq!(target.sanitized_uri, "webdavs://example.com/dir/file.bin");
@@ -537,8 +552,7 @@ mod tests {
 
     #[test]
     fn parses_multistatus_entries() {
-        let target = WebDavTarget::parse_directory("webdavs://example.com/files/")
-            .expect("target");
+        let target = WebDavTarget::parse_directory("webdavs://example.com/files/").expect("target");
         let entries = parse_webdav_multistatus(
             &target,
             r#"

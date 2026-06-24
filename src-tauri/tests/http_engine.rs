@@ -622,6 +622,121 @@ async fn segmented_direct_fails_when_range_is_not_honored() {
     assert!(!paths.final_path.exists());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_follows_redirect_and_resolves_file_name() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+
+    let probe = engine
+        .probe(&format!("{}/redirect-to-file", server.base_url))
+        .await
+        .expect("probe redirect");
+
+    assert_eq!(probe.file_name, "sample.bin");
+    assert_eq!(probe.total_size, SAMPLE.len() as i64);
+    assert!(probe.supports_parallel);
+    assert!(
+        probe.final_url.contains("/file"),
+        "final_url should point to the redirect target"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_prefers_rfc5987_filename_over_plain() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+
+    let probe = engine
+        .probe(&format!("{}/rfc5987-both", server.base_url))
+        .await
+        .expect("probe rfc5987");
+
+    assert_eq!(probe.file_name, "encoded name.txt");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_ensures_extension_from_content_type() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+
+    let probe = engine
+        .probe(&format!("{}/no-ext", server.base_url))
+        .await
+        .expect("probe no-ext");
+
+    assert!(
+        probe.file_name.ends_with(".pdf"),
+        "expected .pdf extension from Content-Type, got: {}",
+        probe.file_name
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_maps_401_as_denied() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+
+    let error = engine
+        .probe(&format!("{}/status/401", server.base_url))
+        .await
+        .expect_err("401 should fail");
+
+    let value: serde_json::Value = serde_json::from_str(&error).expect("401 payload");
+    assert_eq!(value["code"], "http_denied");
+    assert_eq!(
+        value["message"],
+        "The server denied access to this file."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_download_cancel_mid_stream_returns_partial() {
+    let server = TestServer::start();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("cancel-mid");
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    let cancel_clone = cancel.clone();
+    let engine_clone = engine.clone();
+    let request = DirectDownloadRequest {
+        url: format!("{}/slow", server.base_url),
+        temp_path: paths.temp.clone(),
+        final_path: paths.final_path.clone(),
+        total_size: slow_payload().len() as i64,
+        supports_resume: true,
+        supports_parallel: true,
+        etag: None,
+        last_modified: None,
+    };
+
+    let handle = tokio::spawn(async move {
+        engine_clone
+            .download_direct(request, cancel_clone)
+            .await
+    });
+
+    // Let some data flow, then cancel
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel.store(true, Ordering::SeqCst);
+
+    let result = handle.await.expect("join");
+    let downloaded = result.expect("cancel should return Ok with partial bytes");
+    assert!(
+        downloaded > 0,
+        "should have downloaded some bytes before cancel"
+    );
+    assert!(
+        downloaded < slow_payload().len() as i64,
+        "should not have completed the full download"
+    );
+    // Temp file should still exist (not finalized)
+    assert!(paths.temp.exists(), "temp file should remain after cancel");
+    assert!(
+        !paths.final_path.exists(),
+        "final file should not exist after cancel"
+    );
+}
+
 struct TestServer {
     base_url: String,
     stop: Arc<AtomicBool>,
@@ -882,6 +997,30 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
             "no-range.bin",
             false,
         ),
+        "/redirect-to-file" => {
+            let response = "HTTP/1.1 302 Found\r\nConnection: close\r\nLocation: /file\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+        "/rfc5987-both" => write_unknown_size_response(
+            &mut stream,
+            method,
+            SAMPLE,
+            &[
+                ("Content-Type", "application/octet-stream"),
+                (
+                    "Content-Disposition",
+                    "attachment; filename=\"plain.txt\"; filename*=UTF-8''encoded%20name.txt",
+                ),
+            ],
+        ),
+        "/no-ext" => write_unknown_size_response(
+            &mut stream,
+            method,
+            SAMPLE,
+            &[("Content-Type", "application/pdf")],
+        ),
+        "/status/401" => write_response(&mut stream, 401, &[], b"unauthorized", false),
         "/status/403" => write_response(&mut stream, 403, &[], b"denied", false),
         "/status/404" => write_response(&mut stream, 404, &[], b"missing", false),
         "/status/429" => write_response(&mut stream, 429, &[], b"limited", false),
@@ -1031,6 +1170,9 @@ fn write_response(
     let reason = match status {
         200 => "OK",
         206 => "Partial Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         429 => "Too Many Requests",

@@ -1,5 +1,5 @@
-import type { RecoveryAction } from "@/generated/bindings";
 import type { TFunction } from "i18next";
+import type { RecoveryAction } from "@/generated/bindings";
 
 export interface AppErrorPayload {
   code: string;
@@ -38,10 +38,25 @@ export function errorMessage(error: unknown): string {
   return String(error);
 }
 
-export function localizedMessage(
-  message: string | null | undefined,
-  t: TFunction,
-): string | undefined {
+const ERROR_CODE_I18N_MAP: Record<string, string> = {
+  duplicate_task: "errors.duplicateTask",
+  final_path_conflict: "errors.finalPathConflict",
+  remote_changed: "errors.remoteChanged",
+  resume_unavailable: "errors.resumeUnavailable",
+  temp_file_missing: "errors.tempFileMissing",
+  temp_file_smaller_than_progress: "errors.tempFileSmaller",
+  disk_write_failed: "errors.diskWriteFailed",
+  auth_headers_expired: "errors.authHeadersExpired",
+  http_denied: "errors.httpDenied",
+  http_not_found: "errors.httpNotFound",
+  server_rate_limited: "errors.serverRateLimited",
+};
+
+export function errorCodeToI18nKey(code: string): string | null {
+  return ERROR_CODE_I18N_MAP[code] ?? null;
+}
+
+export function localizedMessage(message: string | null | undefined, t: TFunction): string | undefined {
   if (!message) return undefined;
   if (message.startsWith("taskDiagnostics.")) {
     return t(message);
@@ -50,6 +65,11 @@ export function localizedMessage(
 }
 
 export function localizedErrorMessage(error: unknown, t: TFunction): string {
+  const payload = parseAppError(error);
+  if (payload) {
+    const i18nKey = errorCodeToI18nKey(payload.code);
+    if (i18nKey) return t(i18nKey);
+  }
   return localizedMessage(errorMessage(error), t) ?? "";
 }
 
@@ -135,12 +155,7 @@ function legacyAppError(error: string): AppErrorPayload | null {
       actions: fallbackActionsForCode("temp_file_smaller_than_progress"),
     };
   }
-  if (
-    error.includes("disk") ||
-    error.includes("Disk") ||
-    error.includes("write") ||
-    error.includes("Write")
-  ) {
+  if (error.includes("disk") || error.includes("Disk") || error.includes("write") || error.includes("Write")) {
     return {
       code: "disk_write_failed",
       message: error,

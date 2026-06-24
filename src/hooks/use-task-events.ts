@@ -1,24 +1,23 @@
 import { useEffect, useRef } from "react";
 import i18n from "@/i18n";
-
+import { localizedErrorMessage, localizedMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import {
-  isTauriRuntime,
   getTaskStats,
+  isTauriRuntime,
   listTasksCursor,
   onQueueChanged,
   onTaskProgress,
   onTaskUpdated,
 } from "@/lib/tauri";
+import { useSettingsStore } from "@/stores/settings-store";
 import {
   mergeTasksFromServer,
   normalizeTaskStatsSnapshot,
   taskCursorInput,
   useTaskDataStore,
 } from "@/stores/task-store";
-import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
-import { localizedErrorMessage, localizedMessage } from "@/lib/errors";
 import type { Task } from "@/types/task";
 
 const log = createLogger("task-events");
@@ -54,6 +53,22 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
   const notify = options.notify ?? true;
   const notifiedStatuses = useRef(new Set<string>());
 
+  // Prune notifiedStatuses when tasks are removed from the store.
+  // Use the stable `taskIds` array (only changes on add/remove) instead of
+  // `tasks.map(...)` which returns a new array on every progress tick.
+  const taskIds = useTaskDataStore((s) => s.taskIds);
+  useEffect(() => {
+    const activeIds = new Set(taskIds);
+    for (const key of notifiedStatuses.current) {
+      const colonIndex = key.lastIndexOf(":");
+      if (colonIndex === -1) continue;
+      const taskId = key.slice(0, colonIndex);
+      if (!activeIds.has(taskId)) {
+        notifiedStatuses.current.delete(key);
+      }
+    }
+  }, [taskIds]);
+
   useEffect(() => {
     let cancelled = false;
     let unlistenProgress: (() => void) | undefined;
@@ -75,11 +90,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
       for (const task of next) {
         const previousTask = previousById.get(task.id);
         if (!previousTask || previousTask.status === task.status) continue;
-        if (
-          task.status !== "completed" &&
-          task.status !== "failed" &&
-          task.status !== "needs_attention"
-        ) {
+        if (task.status !== "completed" && task.status !== "failed" && task.status !== "needs_attention") {
           clearTaskStatusNotifications(notifiedStatuses.current, task.id);
           continue;
         }
@@ -119,9 +130,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
         void getTaskStats()
           .then((stats) => {
             if (!cancelled) {
-              useTaskDataStore
-                .getState()
-                .setGlobalTaskStats(normalizeTaskStatsSnapshot(stats));
+              useTaskDataStore.getState().setGlobalTaskStats(normalizeTaskStatsSnapshot(stats));
             }
           })
           .catch((error) => {
@@ -227,12 +236,9 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
               const fresh = page.items;
               if (cancelled) return;
               const merged = mergeTasksFromServer(previous, fresh);
-              useTaskDataStore.getState().setTaskCursorPage(
-                merged,
-                page.totalEstimate,
-                page.nextCursor,
-                page.filterOptions,
-              );
+              useTaskDataStore
+                .getState()
+                .setTaskCursorPage(merged, page.totalEstimate, page.nextCursor, page.filterOptions);
               notifyTaskStatusChanges(previous, merged);
               scheduleRecalculateStats(150);
               scheduleStatsRefresh(150);
@@ -268,11 +274,9 @@ async function sendCompletionNotification(task: Task) {
   if (!useSettingsStore.getState().settings?.systemNotifications) return;
 
   try {
-    const {
-      isPermissionGranted,
-      requestPermission,
-      sendNotification,
-    } = await import("@tauri-apps/plugin-notification");
+    const { isPermissionGranted, requestPermission, sendNotification } = await import(
+      "@tauri-apps/plugin-notification"
+    );
     let granted = await isPermissionGranted();
     if (!granted) {
       const permission = await requestPermission();

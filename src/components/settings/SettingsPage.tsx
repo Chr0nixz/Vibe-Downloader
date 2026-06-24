@@ -1,4 +1,3 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
   Check,
@@ -14,22 +13,15 @@ import {
   X,
 } from "lucide-react";
 import { useTheme } from "next-themes";
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
+import { BrowserCaptureControls } from "@/components/settings/BrowserCaptureControls";
+import {
+  type SettingsSearchSection,
+  settingsSearchHasResults,
+  settingsSectionMatchesQuery,
+} from "@/components/settings/settings-search";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import {
   Dialog,
   DialogBody,
@@ -39,15 +31,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { BrowserCaptureControls } from "@/components/settings/BrowserCaptureControls";
-import {
-  settingsSearchHasResults,
-  settingsSectionMatchesQuery,
-  type SettingsSearchSection,
-} from "@/components/settings/settings-search";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type {
   AppAccentColor,
-  AppFontFamily,
   AppProxyMode,
   AppSettings,
   BrowserCaptureSettings,
@@ -55,7 +43,9 @@ import type {
   BrowserIntegrationStatus,
   CompletionAction,
 } from "@/generated/bindings";
-import { setLocale, SUPPORTED_LOCALES, type Locale } from "@/i18n";
+import { type Locale, LOCALE_LABEL_KEYS, STABLE_LOCALES, SUPPORTED_LOCALES, setLocale } from "@/i18n";
+import { localizedErrorMessage } from "@/lib/errors";
+import { createLogger } from "@/lib/logger";
 import {
   exportBrowserExtensionPackages,
   getBrowserCaptureSettings,
@@ -69,11 +59,10 @@ import {
   updateBrowserCaptureSettings,
   updateSettings,
 } from "@/lib/tauri";
-import { errorMessage } from "@/lib/errors";
-import { createLogger } from "@/lib/logger";
 import { cn, formatSpeed } from "@/lib/utils";
 
 const log = createLogger("settings");
+
 import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
 
@@ -91,7 +80,7 @@ const SECTION_IDS = [
   "browser-integration",
 ] as const;
 
-type SettingsSectionId = typeof SECTION_IDS[number];
+type SettingsSectionId = (typeof SECTION_IDS)[number];
 
 const DEFAULT_EXPANDED_SETTINGS_SECTIONS = new Set<SettingsSectionId>([
   "downloads",
@@ -100,14 +89,14 @@ const DEFAULT_EXPANDED_SETTINGS_SECTIONS = new Set<SettingsSectionId>([
 ]);
 
 const ACCENT_SWATCHES: Record<string, { light: string; dark: string }> = {
-  blue:   { light: "oklch(0.48 0.18 235)", dark: "oklch(0.76 0.14 235)" },
+  blue: { light: "oklch(0.48 0.18 235)", dark: "oklch(0.76 0.14 235)" },
   purple: { light: "oklch(0.48 0.18 290)", dark: "oklch(0.76 0.14 290)" },
-  teal:   { light: "oklch(0.48 0.15 190)", dark: "oklch(0.76 0.14 190)" },
-  green:  { light: "oklch(0.48 0.16 150)", dark: "oklch(0.76 0.14 150)" },
-  orange: { light: "oklch(0.48 0.16 55)",  dark: "oklch(0.76 0.14 55)" },
-  rose:   { light: "oklch(0.48 0.18 350)", dark: "oklch(0.76 0.14 350)" },
+  teal: { light: "oklch(0.48 0.15 190)", dark: "oklch(0.76 0.14 190)" },
+  green: { light: "oklch(0.48 0.16 150)", dark: "oklch(0.76 0.14 150)" },
+  orange: { light: "oklch(0.48 0.16 55)", dark: "oklch(0.76 0.14 55)" },
+  rose: { light: "oklch(0.48 0.18 350)", dark: "oklch(0.76 0.14 350)" },
   indigo: { light: "oklch(0.48 0.18 265)", dark: "oklch(0.76 0.14 265)" },
-  amber:  { light: "oklch(0.48 0.16 80)",  dark: "oklch(0.76 0.14 80)" },
+  amber: { light: "oklch(0.48 0.16 80)", dark: "oklch(0.76 0.14 80)" },
 };
 
 const SettingsSearchContext = createContext<{
@@ -143,9 +132,7 @@ export function SettingsPage() {
   const [autoResumeOnStartup, setAutoResumeOnStartup] = useState(false);
   const [floatingWindowEnabled, setFloatingWindowEnabled] = useState(false);
   const [clipboardMonitorEnabled, setClipboardMonitorEnabled] = useState(true);
-  const [fontFamily, setFontFamily] = useState<AppFontFamily>("source_han_sans_sc");
   const [accentColor, setAccentColor] = useState<AppAccentColor>("blue");
-  const [sidebarStripeEnabled, setSidebarStripeEnabled] = useState(true);
   const [titlebarGradientEnabled, setTitlebarGradientEnabled] = useState(true);
   const [proxyMode, setProxyMode] = useState<AppProxyMode>("off");
   const [proxyUrl, setProxyUrl] = useState("");
@@ -163,6 +150,8 @@ export function SettingsPage() {
   const [scheduleSpeedLimitBps, setScheduleSpeedLimitBps] = useState("");
   const [completionAction, setCompletionAction] = useState<CompletionAction>("none");
   const [completionCountdownSeconds, setCompletionCountdownSeconds] = useState(30);
+  const [completionRunCommand, setCompletionRunCommand] = useState("");
+  const [deleteToTrash, setDeleteToTrash] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const [showResetDialog, setShowResetDialog] = useState(false);
@@ -172,22 +161,21 @@ export function SettingsPage() {
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserAction, setBrowserAction] = useState<string | null>(null);
   const [browserExporting, setBrowserExporting] = useState(false);
-  const [browserExportResult, setBrowserExportResult] =
-    useState<BrowserExtensionExportResult | null>(null);
+  const [browserExportResult, setBrowserExportResult] = useState<BrowserExtensionExportResult | null>(null);
   const [browserCapture, setBrowserCapture] = useState<BrowserCaptureSettings | null>(null);
   const [browserCaptureSaving, setBrowserCaptureSaving] = useState(false);
-  const browserExperimentalCaptureEnabled =
-    browserStatus?.experimentalCaptureEnabled ?? false;
+  const browserExperimentalCaptureEnabled = browserStatus?.experimentalCaptureEnabled ?? false;
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveVersion = useRef(0);
-  const currentLocale = (SUPPORTED_LOCALES.includes(i18n.language as Locale)
-    ? (i18n.language as Locale)
-    : "en") as Locale;
+  const currentLocale = (
+    SUPPORTED_LOCALES.includes(i18n.language as Locale) ? (i18n.language as Locale) : "en"
+  ) as Locale;
   const controlsDisabled = loading;
   const parsedGlobalSpeedLimit = Number(globalSpeedLimitBps);
-  const speedLimitSummary = globalSpeedLimitBps.trim() && Number.isFinite(parsedGlobalSpeedLimit)
-    ? formatSpeed(parsedGlobalSpeedLimit)
-    : t("settings.speedUnlimited");
+  const speedLimitSummary =
+    globalSpeedLimitBps.trim() && Number.isFinite(parsedGlobalSpeedLimit)
+      ? formatSpeed(parsedGlobalSpeedLimit)
+      : t("settings.speedUnlimited");
   const proxyModeLabel =
     proxyMode === "system"
       ? t("settings.proxySystem")
@@ -200,12 +188,7 @@ export function SettingsPage() {
       : theme === "dark"
         ? t("settings.themeDark")
         : t("settings.themeSystem");
-  const currentLocaleKey =
-    currentLocale === "zh-CN"
-      ? "zhCN"
-      : currentLocale === "zh-TW"
-        ? "zhTW"
-        : currentLocale;
+  const currentLocaleKey = currentLocale === "zh-CN" ? "zhCN" : currentLocale;
   const localeLabel = t(`locale.${currentLocaleKey}`);
   const enabledDesktopIntegrations = [
     systemNotifications,
@@ -220,8 +203,7 @@ export function SettingsPage() {
     scheduleSpeedLimitWindowEnabled,
     completionAction !== "none",
   ].filter(Boolean).length;
-  const installedBrowserCount =
-    browserStatus?.browsers.filter((browser) => browser.manifestInstalled).length ?? 0;
+  const installedBrowserCount = browserStatus?.browsers.filter((browser) => browser.manifestInstalled).length ?? 0;
   const settingsSections = useMemo<SettingsSearchSection[]>(
     () => [
       {
@@ -240,6 +222,8 @@ export function SettingsPage() {
           t("settings.globalSpeedLimitTip"),
           t("settings.multiConnectionThreshold"),
           t("settings.multiConnectionThresholdTip"),
+          t("settings.deleteToTrash"),
+          t("settings.deleteToTrashTip"),
         ],
       },
       {
@@ -316,9 +300,6 @@ export function SettingsPage() {
           t("locale.label"),
           t("locale.en"),
           t("locale.zhCN"),
-          t("settings.fontFamily"),
-          t("settings.fontFamilySourceHanSans"),
-          t("settings.fontFamilySystem"),
           t("settings.accentColor"),
         ],
       },
@@ -391,6 +372,27 @@ export function SettingsPage() {
   );
   const settingsSearchHasMatch = settingsSearchHasResults(settingsSections, settingsSearch);
   const settingsSearchActive = settingsSearch.trim().length > 0;
+
+  // Scroll to and briefly highlight the first field matching the search query.
+  useEffect(() => {
+    if (!settingsSearchActive) return;
+    const normalized = settingsSearch.trim().toLowerCase();
+    const container = document.querySelector("[data-settings-scroll]");
+    if (!container) return;
+    const rows = container.querySelectorAll<HTMLElement>("[data-search-key]");
+    for (const row of rows) {
+      const key = (row.dataset.searchKey ?? "").toLowerCase();
+      if (key.includes(normalized)) {
+        row.scrollIntoView({ behavior: "smooth", block: "center" });
+        row.classList.add("ring-2", "ring-accent-primary", "rounded-md");
+        const timeoutId = window.setTimeout(() => {
+          row.classList.remove("ring-2", "ring-accent-primary", "rounded-md");
+        }, 2000);
+        return () => window.clearTimeout(timeoutId);
+      }
+    }
+  }, [settingsSearch, settingsSearchActive]);
+
   const getSectionProps = (id: SettingsSectionId) => {
     const section = settingsSectionById.get(id);
     if (!section) throw new Error(`Missing settings section: ${id}`);
@@ -420,10 +422,7 @@ export function SettingsPage() {
         if (isScrollingRef.current) return;
         let best: { id: string; ratio: number } | null = null;
         for (const entry of entries) {
-          if (
-            entry.isIntersecting &&
-            entry.intersectionRatio > (best?.ratio ?? 0)
-          ) {
+          if (entry.isIntersecting && entry.intersectionRatio > (best?.ratio ?? 0)) {
             best = { id: entry.target.id, ratio: entry.intersectionRatio };
           }
         }
@@ -449,9 +448,7 @@ export function SettingsPage() {
     const element = document.getElementById(id);
     if (!element) return;
     isScrollingRef.current = true;
-    const prefersReducedMotion = window.matchMedia(
-      "(prefers-reduced-motion: reduce)",
-    ).matches;
+    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     element.scrollIntoView({
       behavior: prefersReducedMotion ? "instant" : "smooth",
       block: "start",
@@ -475,9 +472,7 @@ export function SettingsPage() {
     setAutoResumeOnStartup(settings.autoResumeOnStartup);
     setFloatingWindowEnabled(settings.floatingWindowEnabled);
     setClipboardMonitorEnabled(settings.clipboardMonitorEnabled);
-    setFontFamily(settings.fontFamily);
     setAccentColor(settings.accentColor);
-    setSidebarStripeEnabled(settings.sidebarStripeEnabled);
     setTitlebarGradientEnabled(settings.titlebarGradientEnabled);
     setProxyMode(settings.proxyMode);
     setProxyUrl(settings.proxyUrl);
@@ -495,6 +490,8 @@ export function SettingsPage() {
     setScheduleSpeedLimitBps(settings.scheduleSpeedLimitBps ?? "");
     setCompletionAction(settings.completionAction);
     setCompletionCountdownSeconds(settings.completionCountdownSeconds);
+    setCompletionRunCommand(settings.completionRunCommand ?? "");
+    setDeleteToTrash(settings.deleteToTrash);
     setSaveState("saved");
   }, [settings]);
 
@@ -513,9 +510,7 @@ export function SettingsPage() {
       autoResumeOnStartup === settings.autoResumeOnStartup &&
       floatingWindowEnabled === settings.floatingWindowEnabled &&
       clipboardMonitorEnabled === settings.clipboardMonitorEnabled &&
-      fontFamily === settings.fontFamily &&
       accentColor === settings.accentColor &&
-      sidebarStripeEnabled === settings.sidebarStripeEnabled &&
       titlebarGradientEnabled === settings.titlebarGradientEnabled &&
       proxyMode === settings.proxyMode &&
       proxyUrl === settings.proxyUrl &&
@@ -530,6 +525,8 @@ export function SettingsPage() {
       scheduleSpeedLimitBps === (settings.scheduleSpeedLimitBps ?? "") &&
       completionAction === settings.completionAction &&
       completionCountdownSeconds === settings.completionCountdownSeconds &&
+      completionRunCommand === (settings.completionRunCommand ?? "") &&
+      deleteToTrash === settings.deleteToTrash &&
       proxyPassword.trim() === "" &&
       !clearProxyPassword
     ) {
@@ -552,9 +549,7 @@ export function SettingsPage() {
         autoResumeOnStartup,
         floatingWindowEnabled,
         clipboardMonitorEnabled,
-        fontFamily,
         accentColor,
-        sidebarStripeEnabled,
         titlebarGradientEnabled,
         proxyMode,
         proxyUrl,
@@ -570,6 +565,8 @@ export function SettingsPage() {
         scheduleSpeedLimitBps: scheduleSpeedLimitBps.trim() || null,
         completionAction,
         completionCountdownSeconds,
+        completionRunCommand,
+        deleteToTrash,
       });
     }, AUTO_SAVE_DELAY_MS);
 
@@ -591,9 +588,7 @@ export function SettingsPage() {
     autoResumeOnStartup,
     floatingWindowEnabled,
     clipboardMonitorEnabled,
-    fontFamily,
     accentColor,
-    sidebarStripeEnabled,
     titlebarGradientEnabled,
     proxyMode,
     proxyUrl,
@@ -611,6 +606,8 @@ export function SettingsPage() {
     scheduleSpeedLimitBps,
     completionAction,
     completionCountdownSeconds,
+    completionRunCommand,
+    deleteToTrash,
   ]);
 
   useEffect(() => {
@@ -626,7 +623,7 @@ export function SettingsPage() {
       setSettings(await getSettings());
     } catch (err) {
       log.error("settings refresh failed", err);
-      setError(errorMessage(err));
+      setError(localizedErrorMessage(err, t));
     } finally {
       setLoading(false);
     }
@@ -651,9 +648,7 @@ export function SettingsPage() {
         autoResumeOnStartup: nextSettings.autoResumeOnStartup,
         floatingWindowEnabled: nextSettings.floatingWindowEnabled,
         clipboardMonitorEnabled: nextSettings.clipboardMonitorEnabled,
-        fontFamily: nextSettings.fontFamily,
         accentColor: nextSettings.accentColor,
-        sidebarStripeEnabled: nextSettings.sidebarStripeEnabled,
         titlebarGradientEnabled: nextSettings.titlebarGradientEnabled,
         proxyMode: nextSettings.proxyMode,
         proxyUrl: nextSettings.proxyUrl,
@@ -670,6 +665,8 @@ export function SettingsPage() {
         scheduleSpeedLimitBps: nextSettings.scheduleSpeedLimitBps,
         completionAction: nextSettings.completionAction,
         completionCountdownSeconds: nextSettings.completionCountdownSeconds,
+        completionRunCommand: nextSettings.completionRunCommand ?? "",
+        deleteToTrash: nextSettings.deleteToTrash,
       });
       if (next.startOnBoot !== settings?.startOnBoot) {
         await syncAutostart(next.startOnBoot);
@@ -684,7 +681,7 @@ export function SettingsPage() {
     } catch (err) {
       if (version === saveVersion.current) {
         log.error("settings save failed", err);
-        setError(errorMessage(err));
+        setError(localizedErrorMessage(err, t));
         setSaveState("idle");
       }
     } finally {
@@ -706,7 +703,7 @@ export function SettingsPage() {
       addToast({
         tone: "error",
         title: t("toast.actionFailed"),
-        description: errorMessage(err),
+        description: localizedErrorMessage(err, t),
       });
     }
   }
@@ -732,9 +729,7 @@ export function SettingsPage() {
         autoResumeOnStartup: false,
         floatingWindowEnabled: false,
         clipboardMonitorEnabled: true,
-        fontFamily: "source_han_sans_sc",
         accentColor: "blue",
-        sidebarStripeEnabled: false,
         titlebarGradientEnabled: true,
         proxyMode: "off",
         proxyUrl: "",
@@ -751,17 +746,15 @@ export function SettingsPage() {
         scheduleSpeedLimitBps: null,
         completionAction: "none",
         completionCountdownSeconds: 30,
+        completionRunCommand: "",
+        deleteToTrash: true,
       });
       setSettings(updated);
       setDefaultSaveDir(updated.defaultSaveDir);
       setMaxActiveTasks(updated.maxActiveTasks);
-      setGlobalSpeedLimitBps(
-        updated.globalSpeedLimitBps ? String(updated.globalSpeedLimitBps) : "",
-      );
+      setGlobalSpeedLimitBps(updated.globalSpeedLimitBps ? String(updated.globalSpeedLimitBps) : "");
       setMultiConnectionThresholdBytes(
-        updated.multiConnectionThresholdBytes
-          ? String(updated.multiConnectionThresholdBytes)
-          : "",
+        updated.multiConnectionThresholdBytes ? String(updated.multiConnectionThresholdBytes) : "",
       );
       setSegmentCount(updated.segmentCount);
       setMaxConnectionsPerHost(updated.maxConnectionsPerHost);
@@ -771,9 +764,7 @@ export function SettingsPage() {
       setAutoResumeOnStartup(updated.autoResumeOnStartup);
       setFloatingWindowEnabled(updated.floatingWindowEnabled);
       setClipboardMonitorEnabled(updated.clipboardMonitorEnabled);
-      setFontFamily(updated.fontFamily);
       setAccentColor(updated.accentColor);
-      setSidebarStripeEnabled(updated.sidebarStripeEnabled);
       setTitlebarGradientEnabled(updated.titlebarGradientEnabled);
       setProxyMode(updated.proxyMode);
       setProxyUrl(updated.proxyUrl);
@@ -788,13 +779,11 @@ export function SettingsPage() {
       setScheduleSpeedLimitWindowEnabled(updated.scheduleSpeedLimitWindowEnabled);
       setScheduleSpeedLimitWindowStart(updated.scheduleSpeedLimitWindowStart);
       setScheduleSpeedLimitWindowEnd(updated.scheduleSpeedLimitWindowEnd);
-      setScheduleSpeedLimitBps(
-        updated.scheduleSpeedLimitBps
-          ? String(updated.scheduleSpeedLimitBps)
-          : "",
-      );
+      setScheduleSpeedLimitBps(updated.scheduleSpeedLimitBps ? String(updated.scheduleSpeedLimitBps) : "");
       setCompletionAction(updated.completionAction);
       setCompletionCountdownSeconds(updated.completionCountdownSeconds);
+      setCompletionRunCommand(updated.completionRunCommand ?? "");
+      setDeleteToTrash(updated.deleteToTrash);
       addToast({
         title: t("settings.resetDefaults"),
         tone: "success",
@@ -805,7 +794,7 @@ export function SettingsPage() {
       addToast({
         tone: "error",
         title: t("toast.actionFailed"),
-        description: errorMessage(err),
+        description: localizedErrorMessage(err, t),
       });
     } finally {
       setResetting(false);
@@ -842,7 +831,7 @@ export function SettingsPage() {
       addToast({
         tone: "error",
         title: t("toast.actionFailed"),
-        description: errorMessage(err),
+        description: localizedErrorMessage(err, t),
       });
     } finally {
       setBrowserExporting(false);
@@ -867,7 +856,7 @@ export function SettingsPage() {
       addToast({
         tone: "error",
         title: t("toast.actionFailed"),
-        description: errorMessage(err),
+        description: localizedErrorMessage(err, t),
       });
     } finally {
       setBrowserCaptureSaving(false);
@@ -906,7 +895,7 @@ export function SettingsPage() {
       addToast({
         tone: "error",
         title: t("toast.actionFailed"),
-        description: errorMessage(err),
+        description: localizedErrorMessage(err, t),
       });
     } finally {
       setBrowserLoading(false);
@@ -925,7 +914,7 @@ export function SettingsPage() {
       addToast({
         tone: "error",
         title: t("toast.actionFailed"),
-        description: errorMessage(err),
+        description: localizedErrorMessage(err, t),
       });
     } finally {
       setBrowserAction(null);
@@ -935,787 +924,775 @@ export function SettingsPage() {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-root">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border-subtle bg-surface-base/55 px-4 py-4 sm:px-5">
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold text-text-primary">
-              {t("settings.title")}
-            </h2>
-            <p className="mt-1 max-w-2xl text-sm leading-5 text-text-secondary">
-              {t("settings.description")}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-3">
-            <SaveStatus
-              state={saveState}
-              saving={saving}
-              className="hidden sm:inline-flex"
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowResetDialog(true)}
-              className="gap-1.5"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              {t("settings.resetDefaults")}
-            </Button>
-          </div>
-        </div>
-
         <SettingsSearchContext.Provider value={{ query: settingsSearch, setQuery: setSettingsSearch }}>
-        <div
-          ref={sectionNavRef}
-          data-settings-scroll
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
-        >
-          <nav
-            className="sticky top-0 z-10 border-b border-border-subtle bg-surface-base"
-            role="navigation"
-            aria-label={t("settings.sectionsNav")}
-          >
-            <div className="mx-auto max-w-4xl px-3 pt-2 sm:px-4 md:px-6">
-              <div className="relative flex items-center">
-                <Search className="pointer-events-none absolute left-3 h-4 w-4 text-text-muted" />
-                <Input
-                  value={settingsSearch}
-                  onChange={(e) => setSettingsSearch(e.target.value)}
-                  placeholder={t("settings.searchSettings")}
-                  className="h-9 w-full rounded-md border border-border-subtle bg-surface-root pl-9 pr-8 text-sm text-text-primary placeholder:text-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
-                />
-                {settingsSearch ? (
-                  <button
-                    type="button"
-                    onClick={() => setSettingsSearch("")}
-                    className="absolute right-2 rounded p-1.5 min-h-8 min-w-8 text-text-muted hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
-                    aria-label="Clear search"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                ) : null}
-              </div>
-            </div>
-            <div className="mx-auto flex max-w-4xl gap-1 overflow-x-auto px-3 sm:px-4 md:px-6">
-              {settingsSections.map(({ id, title }) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => scrollToSection(id)}
-                  className={cn(
-                    "relative shrink-0 px-3 py-2.5 text-[13px] font-medium transition-colors",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary",
-                    activeSection === id
-                      ? "text-accent-primary"
-                      : "text-text-muted hover:text-text-secondary",
-                  )}
-                >
-                  {title}
-                  {activeSection === id ? (
-                    <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-accent-primary" />
-                  ) : null}
-                </button>
-              ))}
-            </div>
-          </nav>
-          <div className="mx-auto flex w-full max-w-4xl flex-col px-3 py-4 sm:px-4 md:px-6 md:py-5">
-            {error ? (
-              <p
-                className="mb-4 rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-sm text-status-danger"
-                role="alert"
-              >
-                {error}
-              </p>
-            ) : null}
-
-            {settingsSearchActive && !settingsSearchHasMatch ? (
-              <div
-                className="mb-4 rounded-md border border-border-subtle bg-surface-base px-3 py-2 text-sm text-text-secondary"
-                role="status"
-              >
-                {t("settings.searchNoResults")}
-              </div>
-            ) : null}
-
-            <SettingsSection
-              {...getSectionProps("downloads")}
+          <div ref={sectionNavRef} data-settings-scroll className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+            <nav
+              className="sticky top-0 z-10 border-b border-border-subtle bg-surface-base"
+              aria-label={t("settings.sectionsNav")}
             >
-              <SettingsRow
-                title={t("settings.defaultSaveDir")}
-                htmlFor="default-save-dir"
-                controlClassName="max-w-2xl"
-              >
-                <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+              <div className="mx-auto max-w-4xl px-3 pt-2 sm:px-4 md:px-6">
+                <div className="relative flex items-center">
+                  <Search className="pointer-events-none absolute left-3 h-4 w-4 text-text-muted" />
                   <Input
-                    id="default-save-dir"
-                    value={defaultSaveDir}
-                    onChange={(event) => setDefaultSaveDir(event.target.value)}
-                    placeholder={t("settings.defaultSaveDirPlaceholder")}
-                    disabled={controlsDisabled}
-                    className="h-11 min-w-0 bg-surface-root md:h-8"
+                    value={settingsSearch}
+                    onChange={(e) => setSettingsSearch(e.target.value)}
+                    placeholder={t("settings.searchSettings")}
+                    className="h-9 w-full rounded-md border border-border-subtle bg-surface-root pl-9 pr-8 text-sm text-text-primary placeholder:text-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                   />
-                  <div className="flex gap-2">
-                    <Button
+                  {settingsSearch ? (
+                    <button
                       type="button"
-                      variant="outline"
-                      className="h-11 shrink-0 md:h-8"
-                      onClick={chooseDirectory}
-                      disabled={controlsDisabled || saving}
+                      onClick={() => setSettingsSearch("")}
+                      className="absolute right-2 rounded p-1.5 min-h-8 min-w-8 text-text-muted hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+                      aria-label={t("settings.clearSearch")}
                     >
-                      <FolderOpen className="h-4 w-4" />
-                      {t("settings.chooseDirectory")}
-                    </Button>
+                      <X className="h-4 w-4" />
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <div className="mx-auto flex max-w-4xl items-center px-3 sm:px-4 md:px-6">
+                <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto overflow-y-hidden">
+                  {settingsSections.map(({ id, title }) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => scrollToSection(id)}
+                      className={cn(
+                        "relative shrink-0 px-3 py-2.5 text-[13px] font-medium transition-colors",
+                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary",
+                        activeSection === id ? "text-accent-primary" : "text-text-muted hover:text-text-secondary",
+                      )}
+                    >
+                      {title}
+                      {activeSection === id ? (
+                        <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-accent-primary" />
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+                <SaveStatus state={saveState} saving={saving} className="ml-3 shrink-0" />
+              </div>
+            </nav>
+            <div className="mx-auto flex w-full max-w-4xl flex-col px-3 py-4 sm:px-4 md:px-6 md:py-5">
+              {error ? (
+                <p
+                  className="mb-4 rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-sm text-status-danger"
+                  role="alert"
+                >
+                  {error}
+                </p>
+              ) : null}
+
+              {settingsSearchActive && !settingsSearchHasMatch ? (
+                <div
+                  className="mb-4 rounded-md border border-border-subtle bg-surface-base px-3 py-2 text-sm text-text-secondary"
+                  role="status"
+                >
+                  {t("settings.searchNoResults")}
+                </div>
+              ) : null}
+
+              <SettingsSection {...getSectionProps("downloads")}>
+                <SettingsRow
+                  title={t("settings.defaultSaveDir")}
+                  htmlFor="default-save-dir"
+                  controlClassName="max-w-2xl"
+                >
+                  <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+                    <Input
+                      id="default-save-dir"
+                      value={defaultSaveDir}
+                      onChange={(event) => setDefaultSaveDir(event.target.value)}
+                      placeholder={t("settings.defaultSaveDirPlaceholder")}
+                      disabled={controlsDisabled}
+                      className="h-11 min-w-0 bg-surface-root md:h-8"
+                    />
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-11 shrink-0 md:h-8"
+                        onClick={chooseDirectory}
+                        disabled={controlsDisabled || saving}
+                      >
+                        <FolderOpen className="h-4 w-4" />
+                        {t("settings.chooseDirectory")}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-11 shrink-0 md:h-8"
+                        onClick={resetDirectory}
+                        disabled={controlsDisabled || saving}
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                        {t("settings.reset")}
+                      </Button>
+                    </div>
+                  </div>
+                </SettingsRow>
+
+                <SettingsRow
+                  title={t("settings.maxActiveTasks")}
+                  htmlFor="max-active-tasks"
+                  tip={t("settings.maxActiveTasksTip")}
+                  searchKey="max_active_tasks"
+                >
+                  <Input
+                    id="max-active-tasks"
+                    type="number"
+                    min={1}
+                    max={8}
+                    step={1}
+                    value={maxActiveTasks}
+                    onChange={(event) => {
+                      const next = event.target.valueAsNumber;
+                      if (Number.isFinite(next)) {
+                        setMaxActiveTasks(Math.min(8, Math.max(1, next)));
+                      }
+                    }}
+                    disabled={controlsDisabled}
+                    className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
+                  />
+                </SettingsRow>
+
+                <SettingsRow
+                  title={t("settings.globalSpeedLimit")}
+                  htmlFor="global-speed-limit"
+                  tip={t("settings.globalSpeedLimitTip")}
+                  searchKey="speed_limit"
+                >
+                  <ByteUnitInput
+                    id="global-speed-limit"
+                    valueBytes={globalSpeedLimitBps}
+                    onChange={setGlobalSpeedLimitBps}
+                    placeholder={t("settings.globalSpeedLimitPlaceholder")}
+                    disabled={controlsDisabled}
+                    unitAriaLabel={t("settings.speedUnit")}
+                    units={[
+                      ["1", "B/s"],
+                      ["1024", "KB/s"],
+                      ["1048576", "MB/s"],
+                      ["1073741824", "GB/s"],
+                    ]}
+                    allowEmpty
+                  />
+                </SettingsRow>
+
+                <SettingsRow
+                  title={t("settings.multiConnectionThreshold")}
+                  htmlFor="multi-connection-threshold"
+                  tip={t("settings.multiConnectionThresholdTip")}
+                >
+                  <ByteUnitInput
+                    id="multi-connection-threshold"
+                    valueBytes={multiConnectionThresholdBytes}
+                    onChange={setMultiConnectionThresholdBytes}
+                    disabled={controlsDisabled}
+                    unitAriaLabel={t("settings.sizeUnit")}
+                    units={[
+                      ["1048576", "MB"],
+                      ["1073741824", "GB"],
+                    ]}
+                  />
+                </SettingsRow>
+
+                <SettingsRow
+                  title={t("settings.deleteToTrash")}
+                  htmlFor="delete-to-trash"
+                  tip={t("settings.deleteToTrashTip")}
+                >
+                  <input
+                    id="delete-to-trash"
+                    type="checkbox"
+                    checked={deleteToTrash}
+                    onChange={(event) => setDeleteToTrash(event.target.checked)}
+                    disabled={controlsDisabled}
+                    className="h-4 w-4 shrink-0 rounded border-border-subtle accent-accent-primary"
+                  />
+                </SettingsRow>
+              </SettingsSection>
+
+              <SettingsSection {...getSectionProps("advanced-downloads")}>
+                <SettingsRow
+                  title={t("settings.segmentCount")}
+                  htmlFor="segment-count"
+                  tip={t("settings.segmentCountTip")}
+                >
+                  <Input
+                    id="segment-count"
+                    type="number"
+                    min={1}
+                    max={MAX_SEGMENT_COUNT}
+                    step={1}
+                    value={segmentCount}
+                    onChange={(event) => {
+                      const next = event.target.valueAsNumber;
+                      if (Number.isFinite(next)) {
+                        setSegmentCount(Math.min(MAX_SEGMENT_COUNT, Math.max(1, Math.floor(next))));
+                      }
+                    }}
+                    disabled={controlsDisabled}
+                    className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
+                  />
+                </SettingsRow>
+
+                <SettingsRow
+                  title={t("settings.maxConnectionsPerHost")}
+                  htmlFor="max-connections-per-host"
+                  tip={t("settings.maxConnectionsPerHostTip")}
+                  searchKey="max_connections"
+                >
+                  <Input
+                    id="max-connections-per-host"
+                    type="number"
+                    min={1}
+                    max={MAX_CONNECTIONS_PER_HOST}
+                    step={1}
+                    value={maxConnectionsPerHost}
+                    onChange={(event) => {
+                      const next = event.target.valueAsNumber;
+                      if (Number.isFinite(next)) {
+                        setMaxConnectionsPerHost(Math.min(MAX_CONNECTIONS_PER_HOST, Math.max(1, Math.floor(next))));
+                      }
+                    }}
+                    disabled={controlsDisabled}
+                    className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
+                  />
+                </SettingsRow>
+              </SettingsSection>
+
+              <SettingsSection {...getSectionProps("scheduled-downloads")}>
+                <SettingsSubHeading title={t("settings.scheduleGroupDownload")} />
+                <SettingsToggle
+                  title={t("settings.downloadWindow")}
+                  description={t("settings.downloadWindowDescription")}
+                  checked={scheduleDownloadWindowEnabled}
+                  disabled={controlsDisabled}
+                  onChange={setScheduleDownloadWindowEnabled}
+                />
+                <SettingsRow
+                  title={t("settings.downloadWindowTime")}
+                  controlClassName="max-w-sm"
+                  tip={t("settings.downloadWindowTimeTip")}
+                >
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="time"
+                      value={scheduleDownloadWindowStart}
+                      onChange={(event) => setScheduleDownloadWindowStart(event.target.value)}
+                      disabled={controlsDisabled || !scheduleDownloadWindowEnabled}
+                      aria-label={t("settings.startTime")}
+                      className="h-11 w-32 bg-surface-root font-mono md:h-8"
+                    />
+                    <span className="text-xs text-text-muted">-</span>
+                    <Input
+                      type="time"
+                      value={scheduleDownloadWindowEnd}
+                      onChange={(event) => setScheduleDownloadWindowEnd(event.target.value)}
+                      disabled={controlsDisabled || !scheduleDownloadWindowEnabled}
+                      aria-label={t("settings.endTime")}
+                      className="h-11 w-32 bg-surface-root font-mono md:h-8"
+                    />
+                  </div>
+                </SettingsRow>
+                <SettingsSubHeading title={t("settings.scheduleGroupSpeed")} />
+                <SettingsToggle
+                  title={t("settings.speedLimitWindow")}
+                  description={t("settings.speedLimitWindowDescription")}
+                  checked={scheduleSpeedLimitWindowEnabled}
+                  disabled={controlsDisabled}
+                  onChange={setScheduleSpeedLimitWindowEnabled}
+                />
+                <SettingsRow
+                  title={t("settings.speedLimitWindowTime")}
+                  controlClassName="max-w-sm"
+                  tip={t("settings.speedLimitWindowTimeTip")}
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Input
+                      type="time"
+                      value={scheduleSpeedLimitWindowStart}
+                      onChange={(event) => setScheduleSpeedLimitWindowStart(event.target.value)}
+                      disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
+                      aria-label={t("settings.startTime")}
+                      className="h-11 w-32 bg-surface-root font-mono md:h-8"
+                    />
+                    <span className="text-xs text-text-muted">-</span>
+                    <Input
+                      type="time"
+                      value={scheduleSpeedLimitWindowEnd}
+                      onChange={(event) => setScheduleSpeedLimitWindowEnd(event.target.value)}
+                      disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
+                      aria-label={t("settings.endTime")}
+                      className="h-11 w-32 bg-surface-root font-mono md:h-8"
+                    />
+                  </div>
+                </SettingsRow>
+                <SettingsRow
+                  title={t("settings.scheduledSpeedLimit")}
+                  htmlFor="scheduled-speed-limit"
+                  tip={t("settings.scheduledSpeedLimitTip")}
+                >
+                  <ByteUnitInput
+                    id="scheduled-speed-limit"
+                    valueBytes={scheduleSpeedLimitBps}
+                    onChange={setScheduleSpeedLimitBps}
+                    placeholder={t("settings.globalSpeedLimitPlaceholder")}
+                    disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
+                    unitAriaLabel={t("settings.speedUnit")}
+                    units={[
+                      ["1", "B/s"],
+                      ["1024", "KB/s"],
+                      ["1048576", "MB/s"],
+                      ["1073741824", "GB/s"],
+                    ]}
+                    allowEmpty
+                  />
+                </SettingsRow>
+                <SettingsSubHeading title={t("settings.scheduleGroupCompletion")} />
+                <SettingsRow
+                  title={t("settings.completionAction")}
+                  htmlFor="completion-action"
+                  tip={t("settings.completionActionTip")}
+                >
+                  <Select
+                    value={completionAction}
+                    onValueChange={(value) => setCompletionAction(value as CompletionAction)}
+                    disabled={controlsDisabled}
+                  >
+                    <SelectTrigger id="completion-action" className="w-full max-w-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">{t("settings.completionNone")}</SelectItem>
+                      <SelectItem value="exit_app">{t("settings.completionExit")}</SelectItem>
+                      <SelectItem value="shutdown">{t("settings.completionShutdown")}</SelectItem>
+                      <SelectItem value="sleep">{t("settings.completionSleep")}</SelectItem>
+                      <SelectItem value="hibernate">{t("settings.completionHibernate")}</SelectItem>
+                      <SelectItem value="lock_screen">{t("settings.completionLockScreen")}</SelectItem>
+                      <SelectItem value="run_command">{t("settings.completionRunCommand")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </SettingsRow>
+                {completionAction === "run_command" ? (
+                  <SettingsRow
+                    title={t("settings.completionCommandLabel")}
+                    htmlFor="completion-run-command"
+                    tip={t("settings.completionCommandTip")}
+                  >
+                    <Input
+                      id="completion-run-command"
+                      value={completionRunCommand}
+                      onChange={(event) => setCompletionRunCommand(event.target.value)}
+                      placeholder={t("settings.completionCommandPlaceholder")}
+                      disabled={controlsDisabled}
+                      className="h-8 font-mono"
+                    />
+                  </SettingsRow>
+                ) : null}
+                <SettingsRow
+                  title={t("settings.completionCountdown")}
+                  htmlFor="completion-countdown"
+                  tip={t("settings.completionCountdownTip")}
+                >
+                  <Input
+                    id="completion-countdown"
+                    type="number"
+                    min={5}
+                    max={300}
+                    step={5}
+                    value={completionCountdownSeconds}
+                    onChange={(event) => {
+                      const next = event.target.valueAsNumber;
+                      if (Number.isFinite(next)) {
+                        setCompletionCountdownSeconds(Math.min(300, Math.max(5, Math.floor(next))));
+                      }
+                    }}
+                    disabled={controlsDisabled || completionAction === "none"}
+                    className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
+                  />
+                </SettingsRow>
+              </SettingsSection>
+
+              <SettingsSection {...getSectionProps("network")}>
+                <SettingsRow
+                  title={t("settings.proxyMode")}
+                  htmlFor="proxy-mode-select"
+                  tip={t("settings.proxyModeTip")}
+                >
+                  <Select
+                    value={proxyMode}
+                    onValueChange={(value) => setProxyMode(value as AppProxyMode)}
+                    disabled={controlsDisabled}
+                  >
+                    <SelectTrigger id="proxy-mode-select" className="w-full max-w-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="off">{t("settings.proxyOff")}</SelectItem>
+                      <SelectItem value="system">{t("settings.proxySystem")}</SelectItem>
+                      <SelectItem value="custom">{t("settings.proxyCustom")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </SettingsRow>
+
+                <SettingsRow title={t("settings.proxyUrl")} htmlFor="proxy-url" searchKey="proxy_url">
+                  <div className="grid gap-2">
+                    <Input
+                      id="proxy-url"
+                      value={proxyUrl}
+                      onChange={(event) => setProxyUrl(event.target.value)}
+                      placeholder="socks5://127.0.0.1:1080"
+                      disabled={controlsDisabled || proxyMode !== "custom"}
+                      className="h-11 bg-surface-root font-mono md:h-8"
+                    />
+                    <p className="text-xs leading-5 text-text-muted">{t("settings.proxyUrlDescription")}</p>
+                  </div>
+                </SettingsRow>
+
+                <SettingsRow
+                  title={t("settings.proxyNoProxy")}
+                  htmlFor="proxy-no-proxy"
+                  tip={t("settings.proxyNoProxyTip")}
+                >
+                  <Input
+                    id="proxy-no-proxy"
+                    value={proxyNoProxy}
+                    onChange={(event) => setProxyNoProxy(event.target.value)}
+                    placeholder="localhost,127.0.0.1,.local"
+                    disabled={controlsDisabled || proxyMode !== "custom"}
+                    className="h-11 bg-surface-root font-mono md:h-8"
+                  />
+                </SettingsRow>
+
+                <SettingsRow
+                  title={t("settings.proxyUsername")}
+                  htmlFor="proxy-username"
+                  tip={t("settings.proxyAuthTip")}
+                >
+                  <Input
+                    id="proxy-username"
+                    value={proxyUsername}
+                    onChange={(event) => setProxyUsername(event.target.value)}
+                    disabled={controlsDisabled || proxyMode !== "custom"}
+                    className="h-11 bg-surface-root md:h-8"
+                  />
+                </SettingsRow>
+
+                <SettingsRow
+                  title={t("settings.proxyPassword")}
+                  htmlFor="proxy-password"
+                  tip={t("settings.proxyPasswordTip")}
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <Input
+                      id="proxy-password"
+                      type="password"
+                      value={proxyPassword}
+                      onChange={(event) => {
+                        setProxyPassword(event.target.value);
+                        setClearProxyPassword(false);
+                      }}
+                      placeholder={
+                        proxyPasswordSaved ? t("settings.proxyPasswordSaved") : t("settings.proxyPasswordPlaceholder")
+                      }
+                      disabled={controlsDisabled || proxyMode !== "custom"}
+                      className="h-11 bg-surface-root md:h-8"
+                    />
                     <Button
                       type="button"
                       variant="ghost"
                       className="h-11 shrink-0 md:h-8"
-                      onClick={resetDirectory}
-                      disabled={controlsDisabled || saving}
+                      onClick={() => {
+                        setProxyPassword("");
+                        setProxyPasswordSaved(false);
+                        setClearProxyPassword(true);
+                      }}
+                      disabled={controlsDisabled || proxyMode !== "custom" || !proxyPasswordSaved}
                     >
-                      <RotateCcw className="h-4 w-4" />
-                      {t("settings.reset")}
+                      <Trash2 className="h-4 w-4" />
+                      {t("settings.proxyClearPassword")}
                     </Button>
                   </div>
-                </div>
-              </SettingsRow>
+                </SettingsRow>
+              </SettingsSection>
 
-              <SettingsRow
-                title={t("settings.maxActiveTasks")}
-                htmlFor="max-active-tasks"
-                tip={t("settings.maxActiveTasksTip")}
-              >
-                <Input
-                  id="max-active-tasks"
-                  type="number"
-                  min={1}
-                  max={8}
-                  step={1}
-                  value={maxActiveTasks}
-                  onChange={(event) => {
-                    const next = event.target.valueAsNumber;
-                    if (Number.isFinite(next)) {
-                      setMaxActiveTasks(Math.min(8, Math.max(1, next)));
-                    }
-                  }}
-                  disabled={controlsDisabled}
-                  className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
-                />
-              </SettingsRow>
-
-              <SettingsRow
-                title={t("settings.globalSpeedLimit")}
-                htmlFor="global-speed-limit"
-                tip={t("settings.globalSpeedLimitTip")}
-              >
-                <ByteUnitInput
-                  id="global-speed-limit"
-                  valueBytes={globalSpeedLimitBps}
-                  onChange={setGlobalSpeedLimitBps}
-                  placeholder={t("settings.globalSpeedLimitPlaceholder")}
-                  disabled={controlsDisabled}
-                  unitAriaLabel={t("settings.speedUnit")}
-                  units={[
-                    ["1", "B/s"],
-                    ["1024", "KB/s"],
-                    ["1048576", "MB/s"],
-                    ["1073741824", "GB/s"],
-                  ]}
-                  allowEmpty
-                />
-              </SettingsRow>
-
-              <SettingsRow
-                title={t("settings.multiConnectionThreshold")}
-                htmlFor="multi-connection-threshold"
-                tip={t("settings.multiConnectionThresholdTip")}
-              >
-                <ByteUnitInput
-                  id="multi-connection-threshold"
-                  valueBytes={multiConnectionThresholdBytes}
-                  onChange={setMultiConnectionThresholdBytes}
-                  disabled={controlsDisabled}
-                  unitAriaLabel={t("settings.sizeUnit")}
-                  units={[
-                    ["1048576", "MB"],
-                    ["1073741824", "GB"],
-                  ]}
-                />
-              </SettingsRow>
-            </SettingsSection>
-
-            <SettingsSection
-              {...getSectionProps("advanced-downloads")}
-            >
-              <SettingsRow
-                title={t("settings.segmentCount")}
-                htmlFor="segment-count"
-                tip={t("settings.segmentCountTip")}
-              >
-                <Input
-                  id="segment-count"
-                  type="number"
-                  min={1}
-                  max={MAX_SEGMENT_COUNT}
-                  step={1}
-                  value={segmentCount}
-                  onChange={(event) => {
-                    const next = event.target.valueAsNumber;
-                    if (Number.isFinite(next)) {
-                      setSegmentCount(Math.min(MAX_SEGMENT_COUNT, Math.max(1, Math.floor(next))));
-                    }
-                  }}
-                  disabled={controlsDisabled}
-                  className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
-                />
-              </SettingsRow>
-
-              <SettingsRow
-                title={t("settings.maxConnectionsPerHost")}
-                htmlFor="max-connections-per-host"
-                tip={t("settings.maxConnectionsPerHostTip")}
-              >
-                <Input
-                  id="max-connections-per-host"
-                  type="number"
-                  min={1}
-                  max={MAX_CONNECTIONS_PER_HOST}
-                  step={1}
-                  value={maxConnectionsPerHost}
-                  onChange={(event) => {
-                    const next = event.target.valueAsNumber;
-                    if (Number.isFinite(next)) {
-                      setMaxConnectionsPerHost(
-                        Math.min(MAX_CONNECTIONS_PER_HOST, Math.max(1, Math.floor(next))),
-                      );
-                    }
-                  }}
-                  disabled={controlsDisabled}
-                  className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
-                />
-              </SettingsRow>
-            </SettingsSection>
-
-            <SettingsSection
-              {...getSectionProps("scheduled-downloads")}
-            >
-              <SettingsSubHeading title={t("settings.scheduleGroupDownload")} />
-              <SettingsToggle
-                title={t("settings.downloadWindow")}
-                description={t("settings.downloadWindowDescription")}
-                checked={scheduleDownloadWindowEnabled}
-                disabled={controlsDisabled}
-                onChange={setScheduleDownloadWindowEnabled}
-              />
-              <SettingsRow title={t("settings.downloadWindowTime")} controlClassName="max-w-sm" tip={t("settings.downloadWindowTimeTip")}>
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="time"
-                    value={scheduleDownloadWindowStart}
-                    onChange={(event) => setScheduleDownloadWindowStart(event.target.value)}
-                    disabled={controlsDisabled || !scheduleDownloadWindowEnabled}
-                    aria-label="Start time"
-                    className="h-11 w-32 bg-surface-root font-mono md:h-8"
-                  />
-                  <span className="text-xs text-text-muted">-</span>
-                  <Input
-                    type="time"
-                    value={scheduleDownloadWindowEnd}
-                    onChange={(event) => setScheduleDownloadWindowEnd(event.target.value)}
-                    disabled={controlsDisabled || !scheduleDownloadWindowEnabled}
-                    aria-label="End time"
-                    className="h-11 w-32 bg-surface-root font-mono md:h-8"
-                  />
-                </div>
-              </SettingsRow>
-              <SettingsSubHeading title={t("settings.scheduleGroupSpeed")} />
-              <SettingsToggle
-                title={t("settings.speedLimitWindow")}
-                description={t("settings.speedLimitWindowDescription")}
-                checked={scheduleSpeedLimitWindowEnabled}
-                disabled={controlsDisabled}
-                onChange={setScheduleSpeedLimitWindowEnabled}
-              />
-              <SettingsRow title={t("settings.speedLimitWindowTime")} controlClassName="max-w-sm" tip={t("settings.speedLimitWindowTimeTip")}>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Input
-                    type="time"
-                    value={scheduleSpeedLimitWindowStart}
-                    onChange={(event) => setScheduleSpeedLimitWindowStart(event.target.value)}
-                    disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
-                    aria-label="Start time"
-                    className="h-11 w-32 bg-surface-root font-mono md:h-8"
-                  />
-                  <span className="text-xs text-text-muted">-</span>
-                  <Input
-                    type="time"
-                    value={scheduleSpeedLimitWindowEnd}
-                    onChange={(event) => setScheduleSpeedLimitWindowEnd(event.target.value)}
-                    disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
-                    aria-label="End time"
-                    className="h-11 w-32 bg-surface-root font-mono md:h-8"
-                  />
-                </div>
-              </SettingsRow>
-              <SettingsRow title={t("settings.scheduledSpeedLimit")} htmlFor="scheduled-speed-limit" tip={t("settings.scheduledSpeedLimitTip")}>
-                <ByteUnitInput
-                  id="scheduled-speed-limit"
-                  valueBytes={scheduleSpeedLimitBps}
-                  onChange={setScheduleSpeedLimitBps}
-                  placeholder={t("settings.globalSpeedLimitPlaceholder")}
-                  disabled={controlsDisabled || !scheduleSpeedLimitWindowEnabled}
-                  unitAriaLabel={t("settings.speedUnit")}
-                  units={[
-                    ["1", "B/s"],
-                    ["1024", "KB/s"],
-                    ["1048576", "MB/s"],
-                    ["1073741824", "GB/s"],
-                  ]}
-                  allowEmpty
-                />
-              </SettingsRow>
-              <SettingsSubHeading title={t("settings.scheduleGroupCompletion")} />
-              <SettingsRow title={t("settings.completionAction")} htmlFor="completion-action" tip={t("settings.completionActionTip")}>
-                <Select
-                  value={completionAction}
-                  onValueChange={(value) => setCompletionAction(value as CompletionAction)}
-                  disabled={controlsDisabled}
-                >
-                  <SelectTrigger id="completion-action" className="w-full max-w-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">{t("settings.completionNone")}</SelectItem>
-                    <SelectItem value="exit_app">{t("settings.completionExit")}</SelectItem>
-                    <SelectItem value="shutdown">{t("settings.completionShutdown")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </SettingsRow>
-              <SettingsRow title={t("settings.completionCountdown")} htmlFor="completion-countdown" tip={t("settings.completionCountdownTip")}>
-                <Input
-                  id="completion-countdown"
-                  type="number"
-                  min={5}
-                  max={300}
-                  step={5}
-                  value={completionCountdownSeconds}
-                  onChange={(event) => {
-                    const next = event.target.valueAsNumber;
-                    if (Number.isFinite(next)) {
-                      setCompletionCountdownSeconds(Math.min(300, Math.max(5, Math.floor(next))));
-                    }
-                  }}
-                  disabled={controlsDisabled || completionAction === "none"}
-                  className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
-                />
-              </SettingsRow>
-            </SettingsSection>
-
-            <SettingsSection
-              {...getSectionProps("network")}
-            >
-              <SettingsRow title={t("settings.proxyMode")} htmlFor="proxy-mode-select" tip={t("settings.proxyModeTip")}>
-                <Select
-                  value={proxyMode}
-                  onValueChange={(value) => setProxyMode(value as AppProxyMode)}
-                  disabled={controlsDisabled}
-                >
-                  <SelectTrigger id="proxy-mode-select" className="w-full max-w-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="off">{t("settings.proxyOff")}</SelectItem>
-                    <SelectItem value="system">{t("settings.proxySystem")}</SelectItem>
-                    <SelectItem value="custom">{t("settings.proxyCustom")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </SettingsRow>
-
-              <SettingsRow title={t("settings.proxyUrl")} htmlFor="proxy-url">
-                <div className="grid gap-2">
-                  <Input
-                    id="proxy-url"
-                    value={proxyUrl}
-                    onChange={(event) => setProxyUrl(event.target.value)}
-                    placeholder="socks5://127.0.0.1:1080"
-                    disabled={controlsDisabled || proxyMode !== "custom"}
-                    className="h-11 bg-surface-root font-mono md:h-8"
-                  />
-                  <p className="text-xs leading-5 text-text-muted">
-                    {t("settings.proxyUrlDescription")}
-                  </p>
-                </div>
-              </SettingsRow>
-
-              <SettingsRow title={t("settings.proxyNoProxy")} htmlFor="proxy-no-proxy" tip={t("settings.proxyNoProxyTip")}>
-                <Input
-                  id="proxy-no-proxy"
-                  value={proxyNoProxy}
-                  onChange={(event) => setProxyNoProxy(event.target.value)}
-                  placeholder="localhost,127.0.0.1,.local"
-                  disabled={controlsDisabled || proxyMode !== "custom"}
-                  className="h-11 bg-surface-root font-mono md:h-8"
-                />
-              </SettingsRow>
-
-              <SettingsRow title={t("settings.proxyUsername")} htmlFor="proxy-username" tip={t("settings.proxyAuthTip")}>
-                <Input
-                  id="proxy-username"
-                  value={proxyUsername}
-                  onChange={(event) => setProxyUsername(event.target.value)}
-                  disabled={controlsDisabled || proxyMode !== "custom"}
-                  className="h-11 bg-surface-root md:h-8"
-                />
-              </SettingsRow>
-
-              <SettingsRow title={t("settings.proxyPassword")} htmlFor="proxy-password" tip={t("settings.proxyPasswordTip")}>
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                  <Input
-                    id="proxy-password"
-                    type="password"
-                    value={proxyPassword}
-                    onChange={(event) => {
-                      setProxyPassword(event.target.value);
-                      setClearProxyPassword(false);
-                    }}
-                    placeholder={
-                      proxyPasswordSaved
-                        ? t("settings.proxyPasswordSaved")
-                        : t("settings.proxyPasswordPlaceholder")
-                    }
-                    disabled={controlsDisabled || proxyMode !== "custom"}
-                    className="h-11 bg-surface-root md:h-8"
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="h-11 shrink-0 md:h-8"
-                    onClick={() => {
-                      setProxyPassword("");
-                      setProxyPasswordSaved(false);
-                      setClearProxyPassword(true);
-                    }}
-                    disabled={controlsDisabled || proxyMode !== "custom" || !proxyPasswordSaved}
+              <SettingsSection {...getSectionProps("interface")}>
+                <SettingsRow title={t("settings.themeMode")} htmlFor="theme-mode-select">
+                  <Select value={theme ?? "system"} onValueChange={(value) => setTheme(value)}>
+                    <SelectTrigger id="theme-mode-select" className="w-full max-w-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="system">{t("settings.themeSystem")}</SelectItem>
+                      <SelectItem value="light">{t("settings.themeLight")}</SelectItem>
+                      <SelectItem value="dark">{t("settings.themeDark")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </SettingsRow>
+                <SettingsRow title={t("locale.label")} htmlFor="locale-select">
+                  <Select
+                    value={currentLocale}
+                    onValueChange={(value) => setLocale(value as Locale)}
+                    disabled={controlsDisabled}
                   >
-                    <Trash2 className="h-4 w-4" />
-                    {t("settings.proxyClearPassword")}
-                  </Button>
-                </div>
-              </SettingsRow>
-            </SettingsSection>
-
-            <SettingsSection {...getSectionProps("interface")}>
-              <SettingsRow title={t("settings.themeMode")} htmlFor="theme-mode-select">
-                <Select value={theme ?? "system"} onValueChange={(value) => setTheme(value)}>
-                  <SelectTrigger id="theme-mode-select" className="w-full max-w-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="system">{t("settings.themeSystem")}</SelectItem>
-                    <SelectItem value="light">{t("settings.themeLight")}</SelectItem>
-                    <SelectItem value="dark">{t("settings.themeDark")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </SettingsRow>
-              <SettingsRow title={t("locale.label")} htmlFor="locale-select">
-                <Select
-                  value={currentLocale}
-                  onValueChange={(value) => setLocale(value as Locale)}
-                  disabled={controlsDisabled}
-                >
-                  <SelectTrigger id="locale-select" className="w-full max-w-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="en">{t("locale.en")}</SelectItem>
-                    <SelectItem value="zh-CN">{t("locale.zhCN")}</SelectItem>
-                    <SelectItem value="zh-TW">{t("locale.zhTW")}</SelectItem>
-                    <SelectItem value="ja">{t("locale.ja")}</SelectItem>
-                    <SelectItem value="ko">{t("locale.ko")}</SelectItem>
-                    <SelectItem value="ru">{t("locale.ru")}</SelectItem>
-                    <SelectItem value="es">{t("locale.es")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </SettingsRow>
-              <SettingsRow title={t("settings.fontFamily")} htmlFor="font-family-select">
-                <Select
-                  value={fontFamily}
-                  onValueChange={(value) => setFontFamily(value as AppFontFamily)}
-                  disabled={controlsDisabled}
-                >
-                  <SelectTrigger id="font-family-select" className="w-full max-w-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="source_han_sans_sc">
-                      {t("settings.fontFamilySourceHanSans")}
-                    </SelectItem>
-                    <SelectItem value="system">{t("settings.fontFamilySystem")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </SettingsRow>
-              <SettingsRow title={t("settings.accentColor")} htmlFor="accent-color-picker">
-                <div id="accent-color-picker" role="radiogroup" aria-label={t("settings.accentColor")} className="flex flex-wrap items-center gap-2.5">
-                  {(
-                    [
-                      ["blue", t("settings.accentBlue")],
-                      ["purple", t("settings.accentPurple")],
-                      ["teal", t("settings.accentTeal")],
-                      ["green", t("settings.accentGreen")],
-                      ["orange", t("settings.accentOrange")],
-                      ["rose", t("settings.accentRose")],
-                      ["indigo", t("settings.accentIndigo")],
-                      ["amber", t("settings.accentAmber")],
-                    ] as const
-                  ).map(([color, label]) => {
-                    const isSelected = accentColor === color;
-                    const swatchBg = isSelected
-                      ? "var(--accent-primary)"
-                      : ACCENT_SWATCHES[color]?.[isDark ? "dark" : "light"] ?? "var(--accent-primary)";
-                    return (
-                      <button
-                        key={color}
-                        type="button"
-                        role="radio"
-                        aria-checked={isSelected ? "true" : "false"}
-                        aria-label={label}
-                        title={label}
-                        disabled={controlsDisabled}
-                        onClick={() => setAccentColor(color as AppAccentColor)}
-                        className={cn(
-                          "h-8 w-8 rounded-full border-2 transition-all",
-                          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface-base",
-                          "disabled:opacity-50",
-                          isSelected
-                            ? "border-text-primary scale-110 shadow-md"
-                            : "border-border-subtle hover:scale-105 hover:border-text-secondary",
-                        )}
-                        style={{ backgroundColor: swatchBg }}
-                      />
-                    );
-                  })}
-                </div>
-              </SettingsRow>
-              <SettingsToggle
-                title={t("settings.sidebarStripe")}
-                description={t("settings.sidebarStripeDescription")}
-                checked={sidebarStripeEnabled}
-                disabled={controlsDisabled}
-                onChange={setSidebarStripeEnabled}
-              />
-              <SettingsToggle
-                title={t("settings.titlebarGradient")}
-                description={t("settings.titlebarGradientDescription")}
-                checked={titlebarGradientEnabled}
-                disabled={controlsDisabled}
-                onChange={setTitlebarGradientEnabled}
-              />
-            </SettingsSection>
-
-            <SettingsSection
-              {...getSectionProps("desktop-integration")}
-            >
-              <SettingsToggle
-                title={t("settings.systemNotifications")}
-                description={t("settings.systemNotificationsDescription")}
-                checked={systemNotifications}
-                disabled={controlsDisabled}
-                onChange={setSystemNotifications}
-              />
-              <SettingsToggle
-                title={t("settings.closeToTray")}
-                description={t("settings.closeToTrayDescription")}
-                checked={closeToTray}
-                disabled={controlsDisabled}
-                onChange={setCloseToTray}
-              />
-              <SettingsToggle
-                title={t("settings.startOnBoot")}
-                description={t("settings.startOnBootDescription")}
-                checked={startOnBoot}
-                disabled={controlsDisabled}
-                onChange={setStartOnBoot}
-              />
-              <SettingsToggle
-                title={t("settings.autoResumeOnStartup")}
-                description={t("settings.autoResumeOnStartupDescription")}
-                checked={autoResumeOnStartup}
-                disabled={controlsDisabled}
-                onChange={setAutoResumeOnStartup}
-              />
-              <SettingsToggle
-                title={t("settings.floatingWindow")}
-                description={t("settings.floatingWindowDescription")}
-                checked={floatingWindowEnabled}
-                disabled={controlsDisabled}
-                onChange={setFloatingWindowEnabled}
-              />
-              <SettingsToggle
-                title={t("settings.clipboardMonitor")}
-                description={t("settings.clipboardMonitorDescription")}
-                checked={clipboardMonitorEnabled}
-                disabled={controlsDisabled}
-                onChange={setClipboardMonitorEnabled}
-              />
-            </SettingsSection>
-
-            <SettingsSection
-              {...getSectionProps("browser-integration")}
-            >
-              <p className="border-b border-border-divider px-4 py-3 text-xs leading-5 text-text-muted">
-                {t("settings.browserIntegrationTip")}
-              </p>
-              {browserCapture && browserExperimentalCaptureEnabled ? (
-                <BrowserCaptureControls
-                  settings={browserCapture}
-                  disabled={browserLoading || browserCaptureSaving}
-                  onUpdate={(patch) => void updateBrowserCapture(patch)}
-                />
-              ) : null}
-              <div className="grid">
-                {browserStatus?.browsers.map((browser) => {
-                  const disabled =
-                    browserLoading ||
-                    browserAction === browser.browser ||
-                    !browser.supportedOnPlatform;
-                  const statusLabel = !browser.supportedOnPlatform
-                    ? t("settings.browserUnsupported")
-                    : browser.manifestInstalled
-                      ? t("settings.browserInstalled")
-                      : browser.detected
-                        ? t("settings.browserDetected")
-                        : t("settings.browserNotDetected");
-                  return (
-                    <div
-                      key={browser.browser}
-                      className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 md:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)_auto] md:items-center"
-                    >
-                      <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-text-secondary">
-                        <Puzzle className="h-4 w-4 shrink-0 text-text-muted" />
-                        <span className="truncate">{browser.displayName}</span>
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm text-text-primary">{statusLabel}</p>
-                        <p className="mt-1 truncate text-xs text-text-muted">
-                          {browser.manifestPath ?? t("settings.browserNoManifestPath")}
-                        </p>
-                        <p className="mt-1 truncate text-xs text-text-muted">
-                          {browser.profile} / {browser.extensionId ?? t("settings.browserNoExtensionId")}
-                        </p>
-                        {browser.lastError ? (
-                          <p className="mt-1 text-xs text-status-danger">{browser.lastError}</p>
-                        ) : null}
-                      </div>
-                      <Button
-                        type="button"
-                        variant={browser.manifestInstalled ? "ghost" : "outline"}
-                        className="h-11 justify-center md:h-9"
-                        onClick={() => void setBrowserInstalled(browser)}
-                        disabled={disabled}
-                      >
-                        {browser.manifestInstalled ? (
-                          <Trash2 className="h-4 w-4" />
-                        ) : (
-                          <Check className="h-4 w-4" />
-                        )}
-                        {browser.manifestInstalled
-                          ? t("settings.browserUninstall")
-                          : t("settings.browserInstall")}
-                      </Button>
-                    </div>
-                  );
-                }) ?? (
-                  <div className="flex items-center gap-2 px-4 py-4 text-sm text-text-muted">
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                    {t("settings.browserLoading")}
+                    <SelectTrigger id="locale-select" className="w-full max-w-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {STABLE_LOCALES.map((locale) => (
+                        <SelectItem key={locale} value={locale}>
+                          {LOCALE_LABEL_KEYS[locale] ? t(LOCALE_LABEL_KEYS[locale]) : locale}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </SettingsRow>
+                <SettingsRow title={t("settings.accentColor")} htmlFor="accent-color-picker">
+                  <div
+                    id="accent-color-picker"
+                    role="radiogroup"
+                    aria-label={t("settings.accentColor")}
+                    className="flex flex-wrap items-center gap-2.5"
+                  >
+                    {(
+                      [
+                        ["blue", t("settings.accentBlue")],
+                        ["purple", t("settings.accentPurple")],
+                        ["teal", t("settings.accentTeal")],
+                        ["green", t("settings.accentGreen")],
+                        ["orange", t("settings.accentOrange")],
+                        ["rose", t("settings.accentRose")],
+                        ["indigo", t("settings.accentIndigo")],
+                        ["amber", t("settings.accentAmber")],
+                      ] as const
+                    ).map(([color, label]) => {
+                      const isSelected = accentColor === color;
+                      const swatchBg = isSelected
+                        ? "var(--accent-primary)"
+                        : (ACCENT_SWATCHES[color]?.[isDark ? "dark" : "light"] ?? "var(--accent-primary)");
+                      return (
+                        <button
+                          key={color}
+                          type="button"
+                          role="radio"
+                          aria-checked={isSelected ? "true" : "false"}
+                          aria-label={label}
+                          title={label}
+                          disabled={controlsDisabled}
+                          onClick={() => setAccentColor(color as AppAccentColor)}
+                          className={cn(
+                            "h-8 w-8 rounded-full border-2 transition-all",
+                            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface-base",
+                            "disabled:opacity-50",
+                            isSelected
+                              ? "border-text-primary scale-110 shadow-md"
+                              : "border-border-subtle hover:scale-105 hover:border-text-secondary",
+                          )}
+                          style={{ backgroundColor: swatchBg }}
+                        />
+                      );
+                    })}
                   </div>
-                )}
-              </div>
-              {browserStatus ? (
-                <div className="border-t border-border-divider px-4 py-3 text-xs leading-5 text-text-muted">
-                  <p>
-                    {t("settings.browserHostName")}{" "}
-                    <span className="font-mono text-text-secondary">
-                      {browserStatus.nativeHostName}
-                    </span>
-                  </p>
-                  <p className="truncate">
-                    {t("settings.browserNativeHostPath")}{" "}
-                    <span className="font-mono text-text-secondary">
-                      {browserStatus.nativeHostPath ?? t("settings.browserNoManifestPath")}
-                    </span>
-                  </p>
-                  <p className="truncate">
-                    {t("settings.browserExtensionPath")}{" "}
-                    <span className="font-mono text-text-secondary">
-                      {browserStatus.extensionCorePath ?? t("settings.browserBuildExtensions")}
-                    </span>
-                  </p>
-                  {browserExportResult ? (
-                    <p className="mt-2 truncate">
-                      {t("settings.browserExportPath")}{" "}
+                </SettingsRow>
+                <SettingsToggle
+                  title={t("settings.titlebarGradient")}
+                  description={t("settings.titlebarGradientDescription")}
+                  checked={titlebarGradientEnabled}
+                  disabled={controlsDisabled}
+                  onChange={setTitlebarGradientEnabled}
+                />
+              </SettingsSection>
+
+              <SettingsSection {...getSectionProps("desktop-integration")}>
+                <SettingsToggle
+                  title={t("settings.systemNotifications")}
+                  description={t("settings.systemNotificationsDescription")}
+                  checked={systemNotifications}
+                  disabled={controlsDisabled}
+                  onChange={setSystemNotifications}
+                />
+                <SettingsToggle
+                  title={t("settings.closeToTray")}
+                  description={t("settings.closeToTrayDescription")}
+                  checked={closeToTray}
+                  disabled={controlsDisabled}
+                  onChange={setCloseToTray}
+                />
+                <SettingsToggle
+                  title={t("settings.startOnBoot")}
+                  description={t("settings.startOnBootDescription")}
+                  checked={startOnBoot}
+                  disabled={controlsDisabled}
+                  onChange={setStartOnBoot}
+                />
+                <SettingsToggle
+                  title={t("settings.autoResumeOnStartup")}
+                  description={t("settings.autoResumeOnStartupDescription")}
+                  checked={autoResumeOnStartup}
+                  disabled={controlsDisabled}
+                  onChange={setAutoResumeOnStartup}
+                />
+                <SettingsToggle
+                  title={t("settings.floatingWindow")}
+                  description={t("settings.floatingWindowDescription")}
+                  checked={floatingWindowEnabled}
+                  disabled={controlsDisabled}
+                  onChange={setFloatingWindowEnabled}
+                />
+                <SettingsToggle
+                  title={t("settings.clipboardMonitor")}
+                  description={t("settings.clipboardMonitorDescription")}
+                  checked={clipboardMonitorEnabled}
+                  disabled={controlsDisabled}
+                  onChange={setClipboardMonitorEnabled}
+                />
+              </SettingsSection>
+
+              <SettingsSection {...getSectionProps("browser-integration")}>
+                <p className="border-b border-border-divider px-4 py-3 text-xs leading-5 text-text-muted">
+                  {t("settings.browserIntegrationTip")}
+                </p>
+                {browserCapture && browserExperimentalCaptureEnabled ? (
+                  <BrowserCaptureControls
+                    settings={browserCapture}
+                    disabled={browserLoading || browserCaptureSaving}
+                    onUpdate={(patch) => void updateBrowserCapture(patch)}
+                  />
+                ) : null}
+                <div className="grid">
+                  {browserStatus?.browsers.map((browser) => {
+                    const disabled =
+                      browserLoading || browserAction === browser.browser || !browser.supportedOnPlatform;
+                    const statusLabel = !browser.supportedOnPlatform
+                      ? t("settings.browserUnsupported")
+                      : browser.manifestInstalled
+                        ? t("settings.browserInstalled")
+                        : browser.detected
+                          ? t("settings.browserDetected")
+                          : t("settings.browserNotDetected");
+                    return (
+                      <div
+                        key={browser.browser}
+                        className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 md:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)_auto] md:items-center"
+                      >
+                        <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-text-secondary">
+                          <Puzzle className="h-4 w-4 shrink-0 text-text-muted" />
+                          <span className="truncate">{browser.displayName}</span>
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm text-text-primary">{statusLabel}</p>
+                          <p className="mt-1 truncate text-xs text-text-muted">
+                            {browser.manifestPath ?? t("settings.browserNoManifestPath")}
+                          </p>
+                          <p className="mt-1 truncate text-xs text-text-muted">
+                            {browser.profile} / {browser.extensionId ?? t("settings.browserNoExtensionId")}
+                          </p>
+                          {browser.lastError ? (
+                            <p className="mt-1 text-xs text-status-danger">{browser.lastError}</p>
+                          ) : null}
+                        </div>
+                        <Button
+                          type="button"
+                          variant={browser.manifestInstalled ? "ghost" : "outline"}
+                          className="h-11 justify-center md:h-9"
+                          onClick={() => void setBrowserInstalled(browser)}
+                          disabled={disabled}
+                        >
+                          {browser.manifestInstalled ? <Trash2 className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+                          {browser.manifestInstalled ? t("settings.browserUninstall") : t("settings.browserInstall")}
+                        </Button>
+                      </div>
+                    );
+                  }) ?? (
+                    <div className="flex items-center gap-2 px-4 py-4 text-sm text-text-muted">
+                      <LoaderCircle className="h-4 w-4 animate-spin" />
+                      {t("settings.browserLoading")}
+                    </div>
+                  )}
+                </div>
+                {browserStatus ? (
+                  <div className="border-t border-border-divider px-4 py-3 text-xs leading-5 text-text-muted">
+                    <p>
+                      {t("settings.browserHostName")}{" "}
+                      <span className="font-mono text-text-secondary">{browserStatus.nativeHostName}</span>
+                    </p>
+                    <p className="truncate">
+                      {t("settings.browserNativeHostPath")}{" "}
                       <span className="font-mono text-text-secondary">
-                        {browserExportResult.outputDir}
+                        {browserStatus.nativeHostPath ?? t("settings.browserNoManifestPath")}
                       </span>
                     </p>
-                  ) : null}
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-11 md:h-8"
-                      onClick={() => void exportBrowserPackages()}
-                      disabled={browserExporting || browserLoading}
-                    >
-                      {browserExporting ? (
-                        <LoaderCircle className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Archive className="h-4 w-4" />
-                      )}
-                      {t("settings.browserExportPackages")}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-11 md:h-8"
-                      onClick={() => void copyBrowserDiagnostics()}
-                    >
-                      <Clipboard className="h-4 w-4" />
-                      {t("settings.browserCopyDiagnostics")}
-                    </Button>
+                    <p className="truncate">
+                      {t("settings.browserExtensionPath")}{" "}
+                      <span className="font-mono text-text-secondary">
+                        {browserStatus.extensionCorePath ?? t("settings.browserBuildExtensions")}
+                      </span>
+                    </p>
+                    {browserExportResult ? (
+                      <p className="mt-2 truncate">
+                        {t("settings.browserExportPath")}{" "}
+                        <span className="font-mono text-text-secondary">{browserExportResult.outputDir}</span>
+                      </p>
+                    ) : null}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-11 md:h-8"
+                        onClick={() => void exportBrowserPackages()}
+                        disabled={browserExporting || browserLoading}
+                      >
+                        {browserExporting ? (
+                          <LoaderCircle className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Archive className="h-4 w-4" />
+                        )}
+                        {t("settings.browserExportPackages")}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-11 md:h-8"
+                        onClick={() => void copyBrowserDiagnostics()}
+                      >
+                        <Clipboard className="h-4 w-4" />
+                        {t("settings.browserCopyDiagnostics")}
+                      </Button>
+                    </div>
                   </div>
-                </div>
-              ) : null}
-            </SettingsSection>
+                ) : null}
+              </SettingsSection>
+              <div className="flex justify-center pt-6 pb-2">
+                <button
+                  type="button"
+                  onClick={() => setShowResetDialog(true)}
+                  className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm text-text-muted transition-colors hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  {t("settings.resetDefaults")}
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
         </SettingsSearchContext.Provider>
-
-        <footer className="flex shrink-0 justify-end border-t border-border-subtle bg-surface-base/60 px-4 py-3 sm:hidden">
-          <SaveStatus state={saveState} saving={saving} className="w-full justify-center" />
-        </footer>
 
         <Dialog open={showResetDialog} onOpenChange={setShowResetDialog}>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>{t("settings.resetDefaultsTitle")}</DialogTitle>
-              <DialogDescription>
-                {t("settings.resetDefaultsConfirm")}
-              </DialogDescription>
+              <DialogDescription>{t("settings.resetDefaultsConfirm")}</DialogDescription>
             </DialogHeader>
             <DialogBody />
             <DialogFooter className="gap-2 sm:gap-2">
-              <Button
-                variant="outline"
-                onClick={() => setShowResetDialog(false)}
-                disabled={resetting}
-              >
+              <Button variant="outline" onClick={() => setShowResetDialog(false)} disabled={resetting}>
                 {t("actions.cancel")}
               </Button>
-              <Button
-                variant="danger"
-                onClick={handleResetDefaults}
-                disabled={resetting}
-              >
+              <Button variant="danger" onClick={handleResetDefaults} disabled={resetting}>
                 {resetting ? (
                   <LoaderCircle className="mr-1.5 h-4 w-4 animate-spin" />
                 ) : (
@@ -1742,11 +1719,7 @@ function SaveStatus({
 }) {
   const { t } = useTranslation();
   const isSaving = saving || state === "saving";
-  const label = isSaving
-    ? t("settings.saving")
-    : state === "saved"
-      ? t("settings.saved")
-      : t("settings.autoSave");
+  const label = isSaving ? t("settings.saving") : state === "saved" ? t("settings.saved") : t("settings.autoSave");
 
   return (
     <div
@@ -1813,11 +1786,7 @@ function SettingsSection({
               </span>
             ) : null}
           </span>
-          {description ? (
-            <span className="max-w-2xl text-sm leading-5 text-text-muted">
-              {description}
-            </span>
-          ) : null}
+          {description ? <span className="max-w-2xl text-sm leading-5 text-text-muted">{description}</span> : null}
         </span>
         <ChevronDown
           className={cn(
@@ -1835,10 +1804,7 @@ function SettingsSection({
             forceVisible: searchActive && matchesSearch,
           }}
         >
-          <div
-            id={panelId}
-            className="mt-2 overflow-hidden rounded-lg border border-border-panel bg-surface-base/70"
-          >
+          <div id={panelId} className="mt-2 overflow-hidden rounded-lg border border-border-panel bg-surface-base/70">
             {children}
           </div>
         </SettingsSearchContext.Provider>
@@ -1923,17 +1889,11 @@ function ByteUnitInput({
 function bestUnit(valueBytes: string, units: readonly (readonly [string, string])[]): string {
   const bytes = Number(valueBytes);
   if (!Number.isFinite(bytes) || bytes <= 0) return units[0]?.[0] ?? "1";
-  const exact = [...units]
-    .reverse()
-    .find(([unit]) => bytes >= Number(unit) && bytes % Number(unit) === 0);
+  const exact = [...units].reverse().find(([unit]) => bytes >= Number(unit) && bytes % Number(unit) === 0);
   return exact?.[0] ?? units[0]?.[0] ?? "1";
 }
 
-function displayAmount(
-  valueBytes: string,
-  unitSize: number,
-  allowEmpty?: boolean,
-): string {
+function displayAmount(valueBytes: string, unitSize: number, allowEmpty?: boolean): string {
   if (allowEmpty && valueBytes.trim() === "") return "";
   const bytes = Number(valueBytes);
   if (!Number.isFinite(bytes) || bytes < 0 || !Number.isFinite(unitSize) || unitSize <= 0) {
@@ -1957,7 +1917,9 @@ function SettingsToggle({
   onChange: (checked: boolean) => void;
 }) {
   const { query, forceVisible } = useSettingsSearch();
-  const matchesSearch = forceVisible || !query ||
+  const matchesSearch =
+    forceVisible ||
+    !query ||
     title.toLowerCase().includes(query.toLowerCase()) ||
     description.toLowerCase().includes(query.toLowerCase());
   if (!matchesSearch) return null;
@@ -1965,9 +1927,7 @@ function SettingsToggle({
     <label className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
       <span className="min-w-0">
         <span className="block text-sm font-medium text-text-primary">{title}</span>
-        <span className="mt-1 block text-xs leading-5 text-text-muted">
-          {description}
-        </span>
+        <span className="mt-1 block text-xs leading-5 text-text-muted">{description}</span>
       </span>
       <input
         type="checkbox"
@@ -1986,20 +1946,28 @@ function SettingsRow({
   htmlFor,
   controlClassName,
   tip,
+  searchKey,
 }: {
   title: string;
   children: ReactNode;
   htmlFor?: string;
   controlClassName?: string;
   tip?: string;
+  searchKey?: string;
 }) {
   const { query, forceVisible } = useSettingsSearch();
-  const matchesSearch = forceVisible || !query ||
+  const matchesSearch =
+    forceVisible ||
+    !query ||
     title.toLowerCase().includes(query.toLowerCase()) ||
-    (tip ?? "").toLowerCase().includes(query.toLowerCase());
+    (tip ?? "").toLowerCase().includes(query.toLowerCase()) ||
+    (searchKey ?? "").toLowerCase().includes(query.toLowerCase());
   if (!matchesSearch) return null;
   return (
-    <div className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 md:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)] md:items-center">
+    <div
+      data-search-key={searchKey}
+      className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 md:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)] md:items-center"
+    >
       <div className="flex items-center gap-1.5">
         <label className="text-sm font-medium text-text-secondary" htmlFor={htmlFor}>
           {title}
@@ -2030,9 +1998,7 @@ function SettingsRow({
 function SettingsSubHeading({ title }: { title: string }) {
   return (
     <div className="border-t border-border-subtle bg-surface-root/40 px-4 py-2">
-      <h3 className="text-xs font-medium uppercase tracking-wide text-text-muted">
-        {title}
-      </h3>
+      <h3 className="text-xs font-medium uppercase tracking-wide text-text-muted">{title}</h3>
     </div>
   );
 }

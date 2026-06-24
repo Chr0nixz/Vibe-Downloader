@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
+import { useCallback, useEffect, useState } from "react";
 
 import { createLogger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
@@ -20,10 +20,10 @@ export function useAppUpdater() {
     const timer = window.setTimeout(async () => {
       try {
         const update = await check();
-      if (update) {
-        setUpdateVersion(update.version);
-      }
-    } catch (err) {
+        if (update) {
+          setUpdateVersion(update.version);
+        }
+      } catch (err) {
         log.warn("update check failed", err);
         setError(err instanceof Error ? err.message : String(err));
       }

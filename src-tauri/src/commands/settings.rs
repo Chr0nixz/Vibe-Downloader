@@ -7,7 +7,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::{
     db,
     events::{emit_queue_changed, emit_settings_changed},
-    models::{AppAccentColor, AppFontFamily, AppSettings, CompletionAction},
+    models::{AppAccentColor, AppSettings, CompletionAction},
     proxy::{self, AppProxyMode},
     AppState,
 };
@@ -27,7 +27,6 @@ pub struct UpdateSettingsInput {
     pub auto_resume_on_startup: Option<bool>,
     pub floating_window_enabled: Option<bool>,
     pub clipboard_monitor_enabled: Option<bool>,
-    pub font_family: Option<AppFontFamily>,
     pub accent_color: Option<AppAccentColor>,
     pub proxy_mode: Option<AppProxyMode>,
     pub proxy_url: Option<String>,
@@ -42,10 +41,11 @@ pub struct UpdateSettingsInput {
     pub schedule_speed_limit_window_start: Option<String>,
     pub schedule_speed_limit_window_end: Option<String>,
     pub schedule_speed_limit_bps: Option<String>,
-    pub sidebar_stripe_enabled: Option<bool>,
     pub titlebar_gradient_enabled: Option<bool>,
     pub completion_action: Option<CompletionAction>,
     pub completion_countdown_seconds: Option<i32>,
+    pub completion_run_command: Option<String>,
+    pub delete_to_trash: Option<bool>,
 }
 
 #[tauri::command]
@@ -103,7 +103,6 @@ pub async fn update_settings(
     let clipboard_monitor_enabled = input
         .clipboard_monitor_enabled
         .unwrap_or(current.clipboard_monitor_enabled);
-    let font_family = input.font_family.unwrap_or(current.font_family);
     let accent_color = input.accent_color.unwrap_or(current.accent_color);
     let proxy_mode = input.proxy_mode.unwrap_or(current.proxy_mode);
     let proxy_url = input
@@ -183,9 +182,6 @@ pub async fn update_settings(
     let schedule_speed_limit_bps = input
         .schedule_speed_limit_bps
         .and_then(|value| db::normalize_speed_limit_bps(&value));
-    let sidebar_stripe_enabled = input
-        .sidebar_stripe_enabled
-        .unwrap_or(current.sidebar_stripe_enabled);
     let titlebar_gradient_enabled = input
         .titlebar_gradient_enabled
         .unwrap_or(current.titlebar_gradient_enabled);
@@ -194,6 +190,10 @@ pub async fn update_settings(
         .completion_countdown_seconds
         .unwrap_or(current.completion_countdown_seconds)
         .clamp(5, 300);
+    let completion_run_command = input
+        .completion_run_command
+        .unwrap_or_else(|| current.completion_run_command.clone());
+    let delete_to_trash = input.delete_to_trash.unwrap_or(current.delete_to_trash);
     let settings = AppSettings {
         max_active_tasks,
         default_save_dir,
@@ -207,7 +207,6 @@ pub async fn update_settings(
         auto_resume_on_startup,
         floating_window_enabled,
         clipboard_monitor_enabled,
-        font_family,
         accent_color,
         proxy_mode,
         proxy_url,
@@ -221,10 +220,11 @@ pub async fn update_settings(
         schedule_speed_limit_window_start,
         schedule_speed_limit_window_end,
         schedule_speed_limit_bps,
-        sidebar_stripe_enabled,
         titlebar_gradient_enabled,
         completion_action,
         completion_countdown_seconds,
+        completion_run_command,
+        delete_to_trash,
     };
 
     db::upsert_settings(&state.pool, &settings).await?;
@@ -234,11 +234,14 @@ pub async fn update_settings(
         .await;
     state.speed_limiter.set_limit(db::parse_speed_limit_bps(
         settings.global_speed_limit_bps.as_deref(),
-    ));
+    )).await;
     super::floating::sync_floating_status_window(&app, settings.floating_window_enabled)?;
     emit_settings_changed(&app);
     emit_queue_changed(&app);
-    super::tasks::schedule_queued_tasks(app, state.inner()).await;
+    super::tasks::schedule_queued_tasks(app.clone(), state.inner()).await;
+    if let Err(error) = super::tasks::check_schedule_preemption(app, state).await {
+        tracing::warn!(error = %error, "schedule preemption check failed after settings update");
+    }
 
     Ok(settings)
 }

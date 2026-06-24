@@ -139,7 +139,7 @@ async fn probe_torrent(uri: &str) -> Result<ProbeOutput, String> {
         return probe_magnet(uri);
     }
 
-    let add = add_torrent_source(uri).await?;
+    let (add, _) = add_torrent_source(uri).await?;
     let probe_dir = std::env::temp_dir().join("vibe-downloader-bt-probe");
     std::fs::create_dir_all(&probe_dir)
         .map_err(|e| format!("Could not create the torrent probe directory: {e}"))?;
@@ -250,7 +250,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             &proxy_config,
         )
         .await?;
-    let add = add_torrent_source(&task.url).await?;
+    let (add, private_flag) = add_torrent_source(&task.url).await?;
     let had_file_selection = !db::list_task_file_records(&pool, &task.id)
         .await?
         .is_empty();
@@ -295,7 +295,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         }
     }
 
-    persist_torrent_details(&pool, &task, &response, selected_paths.as_ref()).await?;
+    persist_torrent_details(&pool, &task, &response, selected_paths.as_ref(), private_flag).await?;
     if task.url.starts_with("magnet:")
         && !had_file_selection
         && response
@@ -835,6 +835,7 @@ async fn persist_torrent_details(
     task: &crate::models::TaskRecord,
     response: &ApiAddTorrentResponse,
     selected_paths: Option<&HashSet<String>>,
+    private_flag: Option<bool>,
 ) -> Result<(), String> {
     let details = &response.details;
     let files = torrent_files_from_details(details);
@@ -869,7 +870,7 @@ async fn persist_torrent_details(
             torrent_blob: None,
             piece_length: 0,
             piece_count: i64::from(details.total_pieces),
-            private: false,
+            private: private_flag.unwrap_or(false),
             trackers_json: trackers_json.as_deref(),
             seeding_enabled: false,
             seed_ratio_limit: None,
@@ -987,15 +988,15 @@ fn selected_torrent_total_size(
         .sum()
 }
 
-async fn add_torrent_source(uri: &str) -> Result<AddTorrent<'static>, String> {
+async fn add_torrent_source(uri: &str) -> Result<(AddTorrent<'static>, Option<bool>), String> {
     let trimmed = uri.trim();
     if trimmed.starts_with("magnet:") {
-        return Ok(AddTorrent::from_url(trimmed.to_string()));
+        return Ok((AddTorrent::from_url(trimmed.to_string()), None));
     }
 
     let parsed = Url::parse(trimmed).map_err(|_| "Torrent URL is invalid.".to_string())?;
     match parsed.scheme() {
-        "http" | "https" => Ok(AddTorrent::from_url(trimmed.to_string())),
+        "http" | "https" => Ok((AddTorrent::from_url(trimmed.to_string()), None)),
         "file" => {
             let path = parsed
                 .to_file_path()
@@ -1003,12 +1004,23 @@ async fn add_torrent_source(uri: &str) -> Result<AddTorrent<'static>, String> {
             let bytes = tokio::fs::read(&path)
                 .await
                 .map_err(|e| format!("Could not read torrent file {}: {e}", path.display()))?;
-            Ok(AddTorrent::from_bytes(bytes))
+            // Parse the private flag from the torrent's info dict so it can be
+            // persisted accurately. librqbit handles DHT/PEX disabling internally
+            // based on this flag, but TorrentDetailsResponse does not expose it.
+            let private = parse_torrent_private_flag(&bytes);
+            Ok((AddTorrent::from_bytes(bytes), private))
         }
         scheme => Err(format!(
             "The {scheme} protocol is not supported for torrent tasks."
         )),
     }
+}
+
+/// Parse the `info.private` flag from a .torrent file's bencoded bytes.
+/// Returns `None` if parsing fails or the field is absent (defaults to false per BEP 3).
+fn parse_torrent_private_flag(bytes: &[u8]) -> Option<bool> {
+    let meta = librqbit::torrent_from_bytes(bytes).ok()?;
+    Some(meta.info.data.private)
 }
 
 fn torrent_files_from_details(details: &TorrentDetailsResponse) -> Vec<ProbedFile> {
@@ -1118,7 +1130,7 @@ mod tests {
         std::fs::write(&path, bytes).expect("write torrent file");
         let url = Url::from_file_path(&path).expect("file url").to_string();
 
-        let add = add_torrent_source(&url)
+        let (add, private_flag) = add_torrent_source(&url)
             .await
             .expect("local torrent source");
 
@@ -1126,6 +1138,9 @@ mod tests {
             AddTorrent::TorrentFileBytes(actual) => assert_eq!(actual.as_ref(), bytes),
             AddTorrent::Url(value) => panic!("expected torrent bytes, got URL {value}"),
         }
+        // The test bytes (b"d4:infode") are a truncated torrent without a private
+        // field, so parsing returns None.
+        assert_eq!(private_flag, None);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1167,5 +1182,24 @@ mod tests {
         assert!(!torrent_should_start_paused(None));
         let selected = HashSet::from(["video/main.mkv".to_string()]);
         assert!(torrent_should_start_paused(Some(&selected)));
+    }
+
+    #[test]
+    fn parse_torrent_private_flag_detects_private_and_non_private() {
+        // A minimal non-private torrent: info dict with name + piece length + pieces + length.
+        // b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1eee"
+        let non_private = b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1eee";
+        assert_eq!(parse_torrent_private_flag(non_private), Some(false));
+
+        // Same torrent but with private=1 in the info dict.
+        // b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1e7:privatei1eee"
+        let private = b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1e7:privatei1eee";
+        assert_eq!(parse_torrent_private_flag(private), Some(true));
+    }
+
+    #[test]
+    fn parse_torrent_private_flag_returns_none_for_invalid_bytes() {
+        assert_eq!(parse_torrent_private_flag(b"not a torrent"), None);
+        assert_eq!(parse_torrent_private_flag(b""), None);
     }
 }

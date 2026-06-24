@@ -1,5 +1,5 @@
-import { useMemo } from "react";
 import type { TFunction } from "i18next";
+import { useMemo } from "react";
 
 import { cn, formatSpeed } from "@/lib/utils";
 import type { SpeedSample } from "@/stores/speed-history-store";
@@ -9,11 +9,7 @@ interface SpeedTrend {
   tone: "muted" | "stable" | "warning";
 }
 
-export function describeSpeedTrend(
-  samples: SpeedSample[],
-  currentSpeedBps: number,
-  t: TFunction,
-): SpeedTrend {
+export function describeSpeedTrend(samples: SpeedSample[], currentSpeedBps: number, t: TFunction): SpeedTrend {
   if (currentSpeedBps <= 0 || samples.length < 3) {
     return { label: t("taskDiagnostics.idle"), tone: "muted" };
   }
@@ -25,11 +21,7 @@ export function describeSpeedTrend(
   const recentMin = Math.min(...recent);
   const recentMax = Math.max(...recent);
 
-  if (
-    recentMin === 0 ||
-    recentMax > Math.max(1, recentMin) * 2.8 ||
-    recentAverage < previousAverage * 0.65
-  ) {
+  if (recentMin === 0 || recentMax > Math.max(1, recentMin) * 2.8 || recentAverage < previousAverage * 0.65) {
     return { label: t("taskDiagnostics.fluctuating"), tone: "warning" };
   }
 
@@ -61,10 +53,7 @@ export function SpeedSparkline({
         viewBox="0 0 120 32"
         role="img"
         aria-label={label}
-        className={cn(
-          "h-8 min-w-0 flex-1 overflow-visible text-accent-energy",
-          !hasData && "text-text-muted",
-        )}
+        className={cn("h-8 min-w-0 flex-1 overflow-visible text-accent-energy", !hasData && "text-text-muted")}
       >
         <polyline
           points={points}
@@ -76,9 +65,7 @@ export function SpeedSparkline({
           vectorEffect="non-scaling-stroke"
         />
       </svg>
-      <span className="shrink-0 font-mono text-xs text-text-primary">
-        {formatSpeed(currentSpeedBps)}
-      </span>
+      <span className="shrink-0 font-mono text-xs text-text-primary">{formatSpeed(currentSpeedBps)}</span>
     </div>
   );
 }

@@ -10,37 +10,37 @@ import type {
   CompletionActionRequestedPayload,
   CreateTaskInput,
   CursorPageInput,
+  FtpDirectoryProbe,
   HashVerificationState,
   ImportUrlsInput,
   ListTasksCursorInput,
-  ListTasksInput,
   ListTasksCursorResult,
+  ListTasksInput,
   ProbeTaskInput,
   ProbeTaskPayload,
-  FtpDirectoryProbe,
-  SftpDirectoryProbe,
-  WebDavDirectoryProbe,
-  RequestDiagnostic,
   RecoveryAction,
+  RequestDiagnostic,
   ResolveTaskAttentionInput,
   SegmentSummary,
+  SftpDirectoryProbe,
+  TaskEvent,
   TaskProxySettings,
   TaskProxySettingsInput,
   TaskStatsSnapshot,
-  TaskEvent,
   TorrentRuntimeSnapshot,
-  UpdateTorrentFileSelectionInput,
-  UpdateTorrentSeedingInput,
   UpdateSettingsInput,
   UpdateTaskTransferOptionsInput,
+  UpdateTorrentFileSelectionInput,
+  UpdateTorrentSeedingInput,
+  WebDavDirectoryProbe,
 } from "@/generated/bindings";
-import type { Task, TaskStatus } from "@/types/task";
-import { normalizeTask } from "@/types/task";
-import type { TaskSegment } from "@/types/task-segment";
-import { normalizeTaskSegment } from "@/types/task-segment";
-import type { TaskProgressPayload } from "@/types/task-progress";
 import { createLogger } from "@/lib/logger";
 import { sanitizeUrlForDisplay } from "@/lib/utils";
+import type { Task, TaskStatus } from "@/types/task";
+import { normalizeTask } from "@/types/task";
+import type { TaskProgressPayload } from "@/types/task-progress";
+import type { TaskSegment } from "@/types/task-segment";
+import { normalizeTaskSegment } from "@/types/task-segment";
 
 const log = createLogger("browser-mock");
 const STORAGE_KEY = "vibe-browser-mock-tasks";
@@ -51,17 +51,16 @@ const browserExperimentalCaptureEnabled = ["1", "true", "yes", "on"].includes(
 );
 
 const LEGACY_HEALTH_SUMMARY_KEYS: Record<string, string> = {
-  "Downloading": "taskDiagnostics.downloading",
+  Downloading: "taskDiagnostics.downloading",
   "Downloading steadily": "taskDiagnostics.downloadingSteadily",
   "Server limit detected": "taskDiagnostics.serverLimitDetected",
   "Network fluctuation, retrying": "taskDiagnostics.networkRetrying",
   "Resume unavailable": "taskDiagnostics.resumeUnavailable",
-  "Remote file changed. Restart download to avoid corruption.":
-    "taskDiagnostics.remoteChanged",
-  "Completed": "taskDiagnostics.completed",
+  "Remote file changed. Restart download to avoid corruption.": "taskDiagnostics.remoteChanged",
+  Completed: "taskDiagnostics.completed",
   "Waiting for network": "taskDiagnostics.waitingNetwork",
   "Disk write slower than network": "taskDiagnostics.diskWriteSlow",
-  "Queued": "taskDiagnostics.queued",
+  Queued: "taskDiagnostics.queued",
   "Finishing HLS recording": "taskDiagnostics.finishingHls",
 };
 
@@ -84,9 +83,7 @@ let settings: AppSettings = loadStoredSettings() ?? {
   autoResumeOnStartup: false,
   floatingWindowEnabled: false,
   clipboardMonitorEnabled: true,
-  fontFamily: "source_han_sans_sc",
   accentColor: "blue",
-  sidebarStripeEnabled: false,
   titlebarGradientEnabled: true,
   proxyMode: "off",
   proxyUrl: "",
@@ -102,6 +99,8 @@ let settings: AppSettings = loadStoredSettings() ?? {
   scheduleSpeedLimitBps: null,
   completionAction: "none",
   completionCountdownSeconds: 30,
+  completionRunCommand: "",
+  deleteToTrash: true,
 };
 const taskProxySettings = new Map<string, TaskProxySettings>();
 let progressTimer: ReturnType<typeof setInterval> | undefined;
@@ -179,8 +178,7 @@ function normalizeStoredMockTask(rawTask: Task): Task {
   const task = normalizeTask(rawTask);
   const healthSummary = normalizeMockHealthSummary(task.healthSummary);
   const derivedError = mockErrorForHealthSummary(healthSummary);
-  const isAttentionState =
-    task.status === "failed" || task.status === "needs_attention";
+  const isAttentionState = task.status === "failed" || task.status === "needs_attention";
 
   return {
     ...task,
@@ -190,9 +188,7 @@ function normalizeStoredMockTask(rawTask: Task): Task {
         ? derivedError.errorMessage
         : normalizeMockErrorMessage(task.errorMessage),
     recoveryActions:
-      isAttentionState && task.recoveryActions.length === 0
-        ? derivedError.recoveryActions
-        : task.recoveryActions,
+      isAttentionState && task.recoveryActions.length === 0 ? derivedError.recoveryActions : task.recoveryActions,
   };
 }
 
@@ -217,9 +213,7 @@ function loadStoredTasks(): Task[] | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown[];
-    return Array.isArray(parsed)
-      ? parsed.map((task) => normalizeStoredMockTask(task as Task))
-      : null;
+    return Array.isArray(parsed) ? parsed.map((task) => normalizeStoredMockTask(task as Task)) : null;
   } catch {
     return null;
   }
@@ -230,52 +224,26 @@ function loadStoredSettings(): AppSettings | null {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as AppSettings;
-    if (
-      typeof parsed.defaultSaveDir === "string" &&
-      typeof parsed.maxActiveTasks === "number"
-    ) {
+    if (typeof parsed.defaultSaveDir === "string" && typeof parsed.maxActiveTasks === "number") {
       return {
         ...parsed,
-        globalSpeedLimitBps:
-          typeof parsed.globalSpeedLimitBps === "string"
-            ? parsed.globalSpeedLimitBps
-            : null,
+        globalSpeedLimitBps: typeof parsed.globalSpeedLimitBps === "string" ? parsed.globalSpeedLimitBps : null,
         multiConnectionThresholdBytes:
           typeof parsed.multiConnectionThresholdBytes === "string"
             ? parsed.multiConnectionThresholdBytes
             : String(16 * 1024 * 1024),
-        segmentCount:
-          typeof parsed.segmentCount === "number"
-            ? Math.min(8, Math.max(1, parsed.segmentCount))
-            : 4,
+        segmentCount: typeof parsed.segmentCount === "number" ? Math.min(8, Math.max(1, parsed.segmentCount)) : 4,
         maxConnectionsPerHost:
           typeof parsed.maxConnectionsPerHost === "number"
             ? Math.min(16, Math.max(1, parsed.maxConnectionsPerHost))
             : 8,
-        systemNotifications:
-          typeof parsed.systemNotifications === "boolean"
-            ? parsed.systemNotifications
-            : true,
-        closeToTray:
-          typeof parsed.closeToTray === "boolean" ? parsed.closeToTray : false,
-        startOnBoot:
-          typeof parsed.startOnBoot === "boolean" ? parsed.startOnBoot : false,
-        autoResumeOnStartup:
-          typeof parsed.autoResumeOnStartup === "boolean"
-            ? parsed.autoResumeOnStartup
-            : false,
-        floatingWindowEnabled:
-          typeof parsed.floatingWindowEnabled === "boolean"
-            ? parsed.floatingWindowEnabled
-            : false,
+        systemNotifications: typeof parsed.systemNotifications === "boolean" ? parsed.systemNotifications : true,
+        closeToTray: typeof parsed.closeToTray === "boolean" ? parsed.closeToTray : false,
+        startOnBoot: typeof parsed.startOnBoot === "boolean" ? parsed.startOnBoot : false,
+        autoResumeOnStartup: typeof parsed.autoResumeOnStartup === "boolean" ? parsed.autoResumeOnStartup : false,
+        floatingWindowEnabled: typeof parsed.floatingWindowEnabled === "boolean" ? parsed.floatingWindowEnabled : false,
         clipboardMonitorEnabled:
-          typeof parsed.clipboardMonitorEnabled === "boolean"
-            ? parsed.clipboardMonitorEnabled
-            : true,
-        fontFamily:
-          parsed.fontFamily === "system" || parsed.fontFamily === "source_han_sans_sc"
-            ? parsed.fontFamily
-            : "source_han_sans_sc",
+          typeof parsed.clipboardMonitorEnabled === "boolean" ? parsed.clipboardMonitorEnabled : true,
         accentColor:
           parsed.accentColor === "blue" ||
           parsed.accentColor === "purple" ||
@@ -287,36 +255,23 @@ function loadStoredSettings(): AppSettings | null {
           parsed.accentColor === "amber"
             ? parsed.accentColor
             : "blue",
-        sidebarStripeEnabled: Boolean(parsed.sidebarStripeEnabled ?? false),
         titlebarGradientEnabled: Boolean(parsed.titlebarGradientEnabled ?? true),
-        proxyMode:
-          parsed.proxyMode === "system" || parsed.proxyMode === "custom" ? parsed.proxyMode : "off",
+        proxyMode: parsed.proxyMode === "system" || parsed.proxyMode === "custom" ? parsed.proxyMode : "off",
         proxyUrl: typeof parsed.proxyUrl === "string" ? parsed.proxyUrl : "",
         proxyNoProxy: typeof parsed.proxyNoProxy === "string" ? parsed.proxyNoProxy : "",
         proxyUsername: typeof parsed.proxyUsername === "string" ? parsed.proxyUsername : "",
         proxyPasswordSaved: Boolean(parsed.proxyPasswordSaved),
         scheduleDownloadWindowEnabled: Boolean(parsed.scheduleDownloadWindowEnabled),
         scheduleDownloadWindowStart:
-          typeof parsed.scheduleDownloadWindowStart === "string"
-            ? parsed.scheduleDownloadWindowStart
-            : "00:00",
+          typeof parsed.scheduleDownloadWindowStart === "string" ? parsed.scheduleDownloadWindowStart : "00:00",
         scheduleDownloadWindowEnd:
-          typeof parsed.scheduleDownloadWindowEnd === "string"
-            ? parsed.scheduleDownloadWindowEnd
-            : "06:00",
+          typeof parsed.scheduleDownloadWindowEnd === "string" ? parsed.scheduleDownloadWindowEnd : "06:00",
         scheduleSpeedLimitWindowEnabled: Boolean(parsed.scheduleSpeedLimitWindowEnabled),
         scheduleSpeedLimitWindowStart:
-          typeof parsed.scheduleSpeedLimitWindowStart === "string"
-            ? parsed.scheduleSpeedLimitWindowStart
-            : "18:00",
+          typeof parsed.scheduleSpeedLimitWindowStart === "string" ? parsed.scheduleSpeedLimitWindowStart : "18:00",
         scheduleSpeedLimitWindowEnd:
-          typeof parsed.scheduleSpeedLimitWindowEnd === "string"
-            ? parsed.scheduleSpeedLimitWindowEnd
-            : "23:00",
-        scheduleSpeedLimitBps:
-          typeof parsed.scheduleSpeedLimitBps === "string"
-            ? parsed.scheduleSpeedLimitBps
-            : null,
+          typeof parsed.scheduleSpeedLimitWindowEnd === "string" ? parsed.scheduleSpeedLimitWindowEnd : "23:00",
+        scheduleSpeedLimitBps: typeof parsed.scheduleSpeedLimitBps === "string" ? parsed.scheduleSpeedLimitBps : null,
         completionAction:
           parsed.completionAction === "exit_app" || parsed.completionAction === "shutdown"
             ? parsed.completionAction
@@ -325,6 +280,9 @@ function loadStoredSettings(): AppSettings | null {
           typeof parsed.completionCountdownSeconds === "number"
             ? Math.min(300, Math.max(5, parsed.completionCountdownSeconds))
             : 30,
+        completionRunCommand:
+          typeof parsed.completionRunCommand === "string" ? parsed.completionRunCommand : "",
+        deleteToTrash: typeof parsed.deleteToTrash === "boolean" ? parsed.deleteToTrash : true,
       };
     }
     return null;
@@ -339,7 +297,23 @@ function defaultBrowserCaptureSettings(): BrowserCaptureSettings {
     forwardHeaders: false,
     forwardHeadersMode: browserExperimentalCaptureEnabled ? "ask" : "disabled",
     minSizeBytes: "0",
-    fileExtensions: ["zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "pdf", "m3u8", "mpd", "meta4", "metalink"],
+    fileExtensions: [
+      "zip",
+      "7z",
+      "rar",
+      "exe",
+      "msi",
+      "dmg",
+      "pkg",
+      "iso",
+      "tar",
+      "gz",
+      "pdf",
+      "m3u8",
+      "mpd",
+      "meta4",
+      "metalink",
+    ],
     siteRules: [],
   };
 }
@@ -354,11 +328,7 @@ function loadStoredBrowserCaptureSettings(): BrowserCaptureSettings | null {
       ...parsed,
       forwardHeadersMode:
         parsed.forwardHeadersMode ??
-        (typeof parsed.forwardHeaders === "boolean"
-          ? parsed.forwardHeaders
-            ? "enabled"
-            : "disabled"
-          : "ask"),
+        (typeof parsed.forwardHeaders === "boolean" ? (parsed.forwardHeaders ? "enabled" : "disabled") : "ask"),
       forwardHeaders:
         parsed.forwardHeadersMode === "enabled" ||
         (parsed.forwardHeadersMode == null && parsed.forwardHeaders === true),
@@ -433,9 +403,7 @@ function browserTask(
   timestamp: string,
 ): Task {
   const needsError = status === "failed" || status === "needs_attention";
-  const mockError = needsError
-    ? mockErrorForHealthSummary(healthSummary)
-    : { errorMessage: null, recoveryActions: [] };
+  const mockError = needsError ? mockErrorForHealthSummary(healthSummary) : { errorMessage: null, recoveryActions: [] };
   const parsed = safeUrl(url);
   const protocol = parsed?.protocol.replace(":", "") || "https";
   return normalizeTask({
@@ -501,16 +469,136 @@ function browserTask(
 export function buildBrowserMockTasks(): Task[] {
   const now = nowIso();
   return [
-    browserTask("mock-ubuntu", "ubuntu-24.04.iso", "https://releases.ubuntu.com/noble/ubuntu-24.04-desktop-amd64.iso", "releases.ubuntu.com", "downloading", 4_200_000_000, 1_680_000_000, 8, 48_500_000, "taskDiagnostics.downloadingSteadily", now),
-    browserTask("mock-node", "node-v22.pkg", "https://nodejs.org/dist/v22.0.0/node-v22.0.0.pkg", "nodejs.org", "downloading", 80_000_000, 52_000_000, 4, 12_400_000, "taskDiagnostics.serverLimitDetected", now),
-    browserTask("mock-rust", "rust-docs.pdf", "https://doc.rust-lang.org/book.pdf", "doc.rust-lang.org", "paused", 12_000_000, 4_800_000, 0, 0, null, now),
-    browserTask("mock-game", "game-patch.zip", "https://cdn.example.com/patches/season-12.zip", "cdn.example.com", "queued", 2_400_000_000, 0, 0, 0, null, now),
-    browserTask("mock-dataset", "dataset.tar.gz", "https://data.example.org/ml/dataset.tar.gz", "data.example.org", "retrying", 900_000_000, 120_000_000, 2, 3_200_000, "taskDiagnostics.networkRetrying", now),
-    browserTask("mock-driver", "driver-setup.exe", "https://vendor.example.net/drivers/setup.exe", "vendor.example.net", "failed", 350_000_000, 89_000_000, 0, 0, "taskDiagnostics.resumeUnavailable", now),
-    browserTask("mock-llm", "llm-weights.safetensors", "https://models.example.ai/weights/v3.safetensors", "models.example.ai", "needs_attention", 8_000_000_000, 2_100_000_000, 0, 0, "taskDiagnostics.remoteChanged", now),
-    browserTask("mock-arch", "archlinux.iso", "https://mirror.archlinux.org/iso/latest/archlinux-x86_64.iso", "mirror.archlinux.org", "completed", 1_300_000_000, 1_300_000_000, 0, 0, "taskDiagnostics.completed", now),
-    browserTask("mock-fonts", "fonts-bundle.zip", "https://github.com/google/fonts/archive/refs/heads/main.zip", "github.com", "waiting_network", 220_000_000, 45_000_000, 0, 0, "taskDiagnostics.waitingNetwork", now),
-    browserTask("mock-vscode", "vscode.deb", "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64", "code.visualstudio.com", "downloading", 95_000_000, 71_000_000, 2, 8_900_000, "taskDiagnostics.diskWriteSlow", now),
+    browserTask(
+      "mock-ubuntu",
+      "ubuntu-24.04.iso",
+      "https://releases.ubuntu.com/noble/ubuntu-24.04-desktop-amd64.iso",
+      "releases.ubuntu.com",
+      "downloading",
+      4_200_000_000,
+      1_680_000_000,
+      8,
+      48_500_000,
+      "taskDiagnostics.downloadingSteadily",
+      now,
+    ),
+    browserTask(
+      "mock-node",
+      "node-v22.pkg",
+      "https://nodejs.org/dist/v22.0.0/node-v22.0.0.pkg",
+      "nodejs.org",
+      "downloading",
+      80_000_000,
+      52_000_000,
+      4,
+      12_400_000,
+      "taskDiagnostics.serverLimitDetected",
+      now,
+    ),
+    browserTask(
+      "mock-rust",
+      "rust-docs.pdf",
+      "https://doc.rust-lang.org/book.pdf",
+      "doc.rust-lang.org",
+      "paused",
+      12_000_000,
+      4_800_000,
+      0,
+      0,
+      null,
+      now,
+    ),
+    browserTask(
+      "mock-game",
+      "game-patch.zip",
+      "https://cdn.example.com/patches/season-12.zip",
+      "cdn.example.com",
+      "queued",
+      2_400_000_000,
+      0,
+      0,
+      0,
+      null,
+      now,
+    ),
+    browserTask(
+      "mock-dataset",
+      "dataset.tar.gz",
+      "https://data.example.org/ml/dataset.tar.gz",
+      "data.example.org",
+      "retrying",
+      900_000_000,
+      120_000_000,
+      2,
+      3_200_000,
+      "taskDiagnostics.networkRetrying",
+      now,
+    ),
+    browserTask(
+      "mock-driver",
+      "driver-setup.exe",
+      "https://vendor.example.net/drivers/setup.exe",
+      "vendor.example.net",
+      "failed",
+      350_000_000,
+      89_000_000,
+      0,
+      0,
+      "taskDiagnostics.resumeUnavailable",
+      now,
+    ),
+    browserTask(
+      "mock-llm",
+      "llm-weights.safetensors",
+      "https://models.example.ai/weights/v3.safetensors",
+      "models.example.ai",
+      "needs_attention",
+      8_000_000_000,
+      2_100_000_000,
+      0,
+      0,
+      "taskDiagnostics.remoteChanged",
+      now,
+    ),
+    browserTask(
+      "mock-arch",
+      "archlinux.iso",
+      "https://mirror.archlinux.org/iso/latest/archlinux-x86_64.iso",
+      "mirror.archlinux.org",
+      "completed",
+      1_300_000_000,
+      1_300_000_000,
+      0,
+      0,
+      "taskDiagnostics.completed",
+      now,
+    ),
+    browserTask(
+      "mock-fonts",
+      "fonts-bundle.zip",
+      "https://github.com/google/fonts/archive/refs/heads/main.zip",
+      "github.com",
+      "waiting_network",
+      220_000_000,
+      45_000_000,
+      0,
+      0,
+      "taskDiagnostics.waitingNetwork",
+      now,
+    ),
+    browserTask(
+      "mock-vscode",
+      "vscode.deb",
+      "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64",
+      "code.visualstudio.com",
+      "downloading",
+      95_000_000,
+      71_000_000,
+      2,
+      8_900_000,
+      "taskDiagnostics.diskWriteSlow",
+      now,
+    ),
   ];
 }
 
@@ -563,9 +651,7 @@ function updateTask(id: string, patch: Partial<Task>): Task {
 }
 
 function scheduleBrowserQueue(): void {
-  const activeCount = tasks.filter(
-    (task) => task.status === "downloading" || task.status === "retrying",
-  ).length;
+  const activeCount = tasks.filter((task) => task.status === "downloading" || task.status === "retrying").length;
   let available = Math.max(0, settings.maxActiveTasks - activeCount);
   if (available === 0) return;
 
@@ -645,9 +731,7 @@ function ensureProgressTimer(): void {
 
 function stopProgressTimerIfIdle(): void {
   const hasActive = tasks.some(
-    (task) =>
-      (task.status === "downloading" || task.status === "retrying") &&
-      task.downloadedBytes < task.totalSize,
+    (task) => (task.status === "downloading" || task.status === "retrying") && task.downloadedBytes < task.totalSize,
   );
   if (!hasActive && progressTimer) {
     clearInterval(progressTimer);
@@ -669,27 +753,23 @@ export async function getTask(id: string): Promise<Task | null> {
 }
 
 export async function getTaskStats(): Promise<TaskStatsSnapshot> {
-  const activeTasks = tasks.filter(
-    (task) => task.status === "downloading" || task.status === "retrying",
-  );
+  const activeTasks = tasks.filter((task) => task.status === "downloading" || task.status === "retrying");
   const fallback = tasks.find((task) =>
     ["queued", "paused", "failed", "needs_attention", "waiting_network"].includes(task.status),
   );
   const featuredTask =
-    activeTasks.reduce<Task | null>(
-      (best, task) => (!best || task.speedBps > best.speedBps ? task : best),
-      null,
-    ) ?? fallback ?? null;
+    activeTasks.reduce<Task | null>((best, task) => (!best || task.speedBps > best.speedBps ? task : best), null) ??
+    fallback ??
+    null;
 
   return {
     all: String(tasks.length),
     active: String(activeTasks.length),
     queued: String(tasks.filter((task) => task.status === "queued").length),
-    paused: String(tasks.filter((task) =>
-      task.status === "paused" ||
-      task.status === "queued" ||
-      task.status === "waiting_network",
-    ).length),
+    paused: String(
+      tasks.filter((task) => task.status === "paused" || task.status === "queued" || task.status === "waiting_network")
+        .length,
+    ),
     completed: String(tasks.filter((task) => task.status === "completed").length),
     failed: String(tasks.filter((task) => task.status === "failed" || task.status === "needs_attention").length),
     totalSpeed: String(activeTasks.reduce((sum, task) => sum + task.speedBps, 0)),
@@ -787,19 +867,13 @@ export async function getSegmentSummary(taskId: string): Promise<SegmentSummary>
     completed: segments.filter((segment) => segment.status === "completed").length,
     failed: segments.filter((segment) => segment.status === "failed").length,
     downloadedBytes: String(
-      segments.reduce(
-        (sum, segment) =>
-          sum + Math.max(0, segment.downloadedUntil - segment.rangeStart),
-        0,
-      ),
+      segments.reduce((sum, segment) => sum + Math.max(0, segment.downloadedUntil - segment.rangeStart), 0),
     ),
     speedBps: String(segments.reduce((sum, segment) => sum + segment.speedBps, 0)),
   };
 }
 
-export async function getTorrentRuntimeSnapshot(
-  taskId: string,
-): Promise<TorrentRuntimeSnapshot | null> {
+export async function getTorrentRuntimeSnapshot(taskId: string): Promise<TorrentRuntimeSnapshot | null> {
   const task = tasks.find((entry) => entry.id === taskId);
   if (!task || (task.protocol !== "bt" && task.protocol !== "magnet")) return null;
   const live = task.status === "downloading" || task.status === "retrying";
@@ -840,9 +914,7 @@ export async function getTaskProxySettings(taskId: string): Promise<TaskProxySet
   );
 }
 
-export async function updateTaskProxySettings(
-  input: TaskProxySettingsInput,
-): Promise<TaskProxySettings> {
+export async function updateTaskProxySettings(input: TaskProxySettingsInput): Promise<TaskProxySettings> {
   const next: TaskProxySettings = {
     taskId: input.taskId,
     mode: input.mode,
@@ -855,9 +927,7 @@ export async function updateTaskProxySettings(
   return next;
 }
 
-export async function updateTorrentFileSelection(
-  input: UpdateTorrentFileSelectionInput,
-): Promise<Task> {
+export async function updateTorrentFileSelection(input: UpdateTorrentFileSelectionInput): Promise<Task> {
   const task = tasks.find((entry) => entry.id === input.taskId);
   if (!task) throw new Error("Task not found.");
   const selected = new Set(input.selectedFilePaths);
@@ -905,7 +975,11 @@ export async function probeSftpDirectory(url: string): Promise<SftpDirectoryProb
     directoryUrl: base,
     currentDirectory: "/",
     entries: [
-      { name: "backup.tar.zst", raw: "-rw-r--r-- 1 user group 1048576 backup.tar.zst", probableFileUrl: `${base}backup.tar.zst` },
+      {
+        name: "backup.tar.zst",
+        raw: "-rw-r--r-- 1 user group 1048576 backup.tar.zst",
+        probableFileUrl: `${base}backup.tar.zst`,
+      },
       { name: "logs", raw: "drwxr-xr-x 1 user group 0 logs", probableFileUrl: null },
     ],
     diagnostics: ["Mock SFTP directory probe"],
@@ -1028,51 +1102,30 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
         ? null
         : normalizeSpeedLimit(input.globalSpeedLimitBps),
     multiConnectionThresholdBytes:
-      input.multiConnectionThresholdBytes === null ||
-      input.multiConnectionThresholdBytes === undefined
+      input.multiConnectionThresholdBytes === null || input.multiConnectionThresholdBytes === undefined
         ? settings.multiConnectionThresholdBytes
         : normalizeByteThreshold(input.multiConnectionThresholdBytes),
     segmentCount: Math.min(8, Math.max(1, input.segmentCount ?? settings.segmentCount)),
-    maxConnectionsPerHost: Math.min(
-      16,
-      Math.max(1, input.maxConnectionsPerHost ?? settings.maxConnectionsPerHost),
-    ),
+    maxConnectionsPerHost: Math.min(16, Math.max(1, input.maxConnectionsPerHost ?? settings.maxConnectionsPerHost)),
     systemNotifications: input.systemNotifications ?? settings.systemNotifications,
     closeToTray: input.closeToTray ?? settings.closeToTray,
     startOnBoot: input.startOnBoot ?? settings.startOnBoot,
-    autoResumeOnStartup:
-      input.autoResumeOnStartup ?? settings.autoResumeOnStartup,
-    floatingWindowEnabled:
-      input.floatingWindowEnabled ?? settings.floatingWindowEnabled,
-    clipboardMonitorEnabled:
-      input.clipboardMonitorEnabled ?? settings.clipboardMonitorEnabled,
-    fontFamily: input.fontFamily ?? settings.fontFamily,
+    autoResumeOnStartup: input.autoResumeOnStartup ?? settings.autoResumeOnStartup,
+    floatingWindowEnabled: input.floatingWindowEnabled ?? settings.floatingWindowEnabled,
+    clipboardMonitorEnabled: input.clipboardMonitorEnabled ?? settings.clipboardMonitorEnabled,
     accentColor: input.accentColor ?? settings.accentColor,
-    sidebarStripeEnabled:
-      input.sidebarStripeEnabled ?? settings.sidebarStripeEnabled,
-    titlebarGradientEnabled:
-      input.titlebarGradientEnabled ?? settings.titlebarGradientEnabled,
+    titlebarGradientEnabled: input.titlebarGradientEnabled ?? settings.titlebarGradientEnabled,
     proxyMode: input.proxyMode ?? settings.proxyMode,
     proxyUrl: input.proxyUrl ?? settings.proxyUrl,
     proxyNoProxy: input.proxyNoProxy ?? settings.proxyNoProxy,
     proxyUsername: input.proxyUsername ?? settings.proxyUsername,
-    proxyPasswordSaved: input.clearProxyPassword
-      ? false
-      : input.proxyPassword
-        ? true
-        : settings.proxyPasswordSaved,
-    scheduleDownloadWindowEnabled:
-      input.scheduleDownloadWindowEnabled ?? settings.scheduleDownloadWindowEnabled,
-    scheduleDownloadWindowStart:
-      input.scheduleDownloadWindowStart ?? settings.scheduleDownloadWindowStart,
-    scheduleDownloadWindowEnd:
-      input.scheduleDownloadWindowEnd ?? settings.scheduleDownloadWindowEnd,
-    scheduleSpeedLimitWindowEnabled:
-      input.scheduleSpeedLimitWindowEnabled ?? settings.scheduleSpeedLimitWindowEnabled,
-    scheduleSpeedLimitWindowStart:
-      input.scheduleSpeedLimitWindowStart ?? settings.scheduleSpeedLimitWindowStart,
-    scheduleSpeedLimitWindowEnd:
-      input.scheduleSpeedLimitWindowEnd ?? settings.scheduleSpeedLimitWindowEnd,
+    proxyPasswordSaved: input.clearProxyPassword ? false : input.proxyPassword ? true : settings.proxyPasswordSaved,
+    scheduleDownloadWindowEnabled: input.scheduleDownloadWindowEnabled ?? settings.scheduleDownloadWindowEnabled,
+    scheduleDownloadWindowStart: input.scheduleDownloadWindowStart ?? settings.scheduleDownloadWindowStart,
+    scheduleDownloadWindowEnd: input.scheduleDownloadWindowEnd ?? settings.scheduleDownloadWindowEnd,
+    scheduleSpeedLimitWindowEnabled: input.scheduleSpeedLimitWindowEnabled ?? settings.scheduleSpeedLimitWindowEnabled,
+    scheduleSpeedLimitWindowStart: input.scheduleSpeedLimitWindowStart ?? settings.scheduleSpeedLimitWindowStart,
+    scheduleSpeedLimitWindowEnd: input.scheduleSpeedLimitWindowEnd ?? settings.scheduleSpeedLimitWindowEnd,
     scheduleSpeedLimitBps:
       input.scheduleSpeedLimitBps === null || input.scheduleSpeedLimitBps === undefined
         ? settings.scheduleSpeedLimitBps
@@ -1082,6 +1135,8 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
       300,
       Math.max(5, input.completionCountdownSeconds ?? settings.completionCountdownSeconds),
     ),
+    completionRunCommand: input.completionRunCommand ?? settings.completionRunCommand,
+    deleteToTrash: input.deleteToTrash ?? settings.deleteToTrash,
   };
   persistSettings();
   emitSettingsChanged();
@@ -1110,9 +1165,7 @@ export interface PickedFile {
   name: string;
 }
 
-export async function openFilePicker(
-  _filters?: { name: string; extensions: string[] }[],
-): Promise<PickedFile | null> {
+export async function openFilePicker(_filters?: { name: string; extensions: string[] }[]): Promise<PickedFile | null> {
   return null;
 }
 
@@ -1127,16 +1180,7 @@ export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationS
       connected: true,
     },
     capture: { ...browserCaptureSettings },
-    browsers: [
-      "chrome",
-      "edge",
-      "firefox",
-      "safari",
-      "brave",
-      "opera",
-      "vivaldi",
-      "chromium",
-    ].map((browser) => ({
+    browsers: ["chrome", "edge", "firefox", "safari", "brave", "opera", "vivaldi", "chromium"].map((browser) => ({
       browser: browser as BrowserIntegrationStatus["browsers"][number]["browser"],
       displayName: browserDisplayName(browser),
       supportedOnPlatform: browser !== "safari",
@@ -1223,9 +1267,7 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   const now = nowIso();
   const normalizedUrl = input.url.trim();
   const probe =
-    input.probeSnapshot?.inputUrl.trim() === normalizedUrl
-      ? input.probeSnapshot
-      : await probeTask({ url: input.url });
+    input.probeSnapshot?.inputUrl.trim() === normalizedUrl ? input.probeSnapshot : await probeTask({ url: input.url, username: null, password: null, privateKeyData: null, privateKeyPassphrase: null });
   const duplicate = duplicateTaskForProbe(normalizedUrl, probe);
   if (duplicate && !input.allowDuplicate) {
     throw JSON.stringify({
@@ -1237,14 +1279,11 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   }
   const fileName = input.fileName?.trim() || probe.fileName || "download.bin";
   const isSelectableMultiFile =
-    (probe.protocol === "bt" || probe.protocol === "magnet" || probe.protocol === "metalink") &&
-    probe.files.length > 1;
+    (probe.protocol === "bt" || probe.protocol === "magnet" || probe.protocol === "metalink") && probe.files.length > 1;
   if (isSelectableMultiFile && input.selectedFilePaths && input.selectedFilePaths.length === 0) {
     throw new Error("Select at least one file to download.");
   }
-  const selectedFilePaths = new Set(
-    isSelectableMultiFile ? (input.selectedFilePaths ?? []).filter(Boolean) : [],
-  );
+  const selectedFilePaths = new Set(isSelectableMultiFile ? (input.selectedFilePaths ?? []).filter(Boolean) : []);
   if (selectedFilePaths.size > 0) {
     const availablePaths = new Set(probe.files.map((file) => file.relativePath));
     const unknown = Array.from(selectedFilePaths).filter((path) => !availablePaths.has(path));
@@ -1257,12 +1296,9 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
       ? probe.files
       : [{ relativePath: fileName, size: probe.totalSize, contentType: probe.contentType }];
   const taskFiles =
-    selectedFilePaths.size > 0
-      ? probeFiles.filter((file) => selectedFilePaths.has(file.relativePath))
-      : probeFiles;
+    selectedFilePaths.size > 0 ? probeFiles.filter((file) => selectedFilePaths.has(file.relativePath)) : probeFiles;
   const taskTotalSize =
-    taskFiles.reduce((sum, file) => sum + parseNumericString(file.size), 0) ||
-    parseNumericString(probe.totalSize);
+    taskFiles.reduce((sum, file) => sum + parseNumericString(file.size), 0) || parseNumericString(probe.totalSize);
   const parsed = safeUrl(input.url);
   const task = browserTask(
     `mock-${crypto.randomUUID()}`,
@@ -1311,9 +1347,7 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   return nextTask;
 }
 
-export async function updateTaskTransferOptions(
-  input: UpdateTaskTransferOptionsInput,
-): Promise<Task> {
+export async function updateTaskTransferOptions(input: UpdateTaskTransferOptionsInput): Promise<Task> {
   const task = tasks.find((item) => item.id === input.id);
   if (!task) throw new Error(`Task not found: ${input.id}`);
   return updateTask(input.id, {
@@ -1352,7 +1386,7 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
     }
     const duplicate = seen.has(normalized);
     seen.add(normalized);
-    const probe = duplicate ? null : await probeTask({ url: normalized });
+    const probe = duplicate ? null : await probeTask({ url: normalized, username: null, password: null, privateKeyData: null, privateKeyPassphrase: null });
     const existingTask = !duplicate && probe ? duplicateTaskForProbe(normalized, probe) : null;
     const isDuplicate = duplicate || Boolean(existingTask);
     const task =
@@ -1368,6 +1402,11 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
             probeSnapshot: probe,
             selectedFilePaths: null,
             allowDuplicate: false,
+            username: null,
+            password: null,
+            privateKeyData: null,
+            privateKeyPassphrase: null,
+            selectedHlsVariantUri: null,
           })
         : null;
     items.push({
@@ -1552,9 +1591,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
   }
   const isSftp = protocol === "sftp";
   const fileName = fileNameFromRelativePath(decodeUrlPath(path));
-  const sourceKey = isSftp && parsed
-    ? `sftp://${parsed.hostname}:${parsed.port || "22"}`
-    : `${protocol}://${host}`;
+  const sourceKey = isSftp && parsed ? `sftp://${parsed.hostname}:${parsed.port || "22"}` : `${protocol}://${host}`;
   return {
     inputUrl: input.url,
     finalUrl: input.url,
@@ -1576,7 +1613,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
     totalSize: "1048576",
     sourceKey,
     contentType: "application/octet-stream",
-    etag: isSftp ? null : "\"mock-etag\"",
+    etag: isSftp ? null : '"mock-etag"',
     lastModified: nowIso(),
     hlsVariants: [],
     probedAt: nowIso(),
@@ -1744,6 +1781,18 @@ export function onCompletionActionRequested(
   return Promise.resolve(() => {
     completionActionListeners.delete(handler);
   });
+}
+
+/**
+ * Native file drag-and-drop is not available in the browser preview mock.
+ * Returns a no-op unlisten so the AppShell subscription is harmless when
+ * running outside Tauri.
+ */
+export function onFileDrop(
+  _onDrop: (paths: string[]) => void,
+  _onDragStateChange?: (state: { active: boolean; paths?: string[] }) => void,
+): Promise<() => void> {
+  return Promise.resolve(() => {});
 }
 
 export async function requestSystemShutdown(): Promise<void> {

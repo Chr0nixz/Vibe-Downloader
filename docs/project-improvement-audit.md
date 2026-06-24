@@ -4,6 +4,8 @@
 
 本审计基于当前仓库代码、配置、测试和文档状态。它不替代 [ROADMAP.md](ROADMAP.md)，而是按风险和用户影响列出仍需处理的问题。
 
+> 另见 [architecture-audit.md](architecture-audit.md)：从用户交互便捷性、功能完整性、架构鲁棒性、运行效率四个维度出发的架构与工程审计，含分阶段修复计划；以及 [audit-report.md](audit-report.md)：前端可访问性与主题审计。
+
 ## 总体结论
 
 Vibe Downloader 已经远超最早 HTTP MVP：HTTP/HTTPS 下载核心（含自动加速分段）、SQLite 持久化（11 个迁移）、FTP/FTPS 动态并行、SFTP (TOFU)、BitTorrent (运行时快照)、HLS (AES-128-CBC)、DASH (ffmpeg)、WebDAV (PROPFIND)、Metalink (镜像故障转移 + 校验和)、加密凭据存储、逐任务代理、定时调度、浮动状态窗口、8 色主题、设置搜索、store 分解、虚拟无限滚动、浏览器 Native Messaging、WebSocket 实时桥、剪贴板监控、批量导入、命令面板和 CI 验证都已经落地。
@@ -25,7 +27,7 @@ Vibe Downloader 已经远超最早 HTTP MVP：HTTP/HTTPS 下载核心（含自�
 - HLS/m3u8 支持主播放列表变体选择、AES-128-CBC 解密、并发分段、直播轮询和 ffmpeg MP4 封装。
 - DASH/MPD 支持清单解析（拒绝 live）、ffmpeg 下载和 MP4 封装。
 - WebDAV/WebDAVS 支持 Basic Auth、PROPFIND 目录探测和 HTTP 引擎委托。
-- Metalink4 支持多文件选择、HTTP/HTTPS 镜像故障转移和 MD5/SHA-1/SHA-256/SHA-512 校验和验证。
+- Metalink4 支持多文件选择、HTTP/HTTPS 镜像故障转移和校验和验证（按可用算法优先级取最强一项验证）。
 - 加密凭据存储使用 ChaCha20-Poly1305，覆盖 FTP/FTPS、SFTP 和 WebDAV，启动时自动迁移旧明文。
 - 逐任务代理覆盖（继承/关闭/自定义），按协议验证兼容性。
 - 定时下载窗口、定时限速窗口、完成动作（可取消退出 + 确认关机）。

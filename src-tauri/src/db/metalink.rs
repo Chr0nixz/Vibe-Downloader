@@ -167,3 +167,65 @@ fn row_to_resource(row: sqlx::sqlite::SqliteRow) -> MetalinkResourceRecord {
         last_error: row.get("last_error"),
     }
 }
+
+pub async fn list_metalink_resources_for_task(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Vec<MetalinkResourceRecord>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, task_id, file_id, url, priority, location, status,
+               failure_count, last_error
+        FROM metalink_resources
+        WHERE task_id = ?
+        ORDER BY priority ASC, rowid ASC
+        "#,
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows.into_iter().map(row_to_resource).collect())
+}
+
+pub async fn reset_metalink_resource_statuses(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
+    let now = now_iso();
+    sqlx::query(
+        r#"
+        UPDATE metalink_resources
+        SET status = 'pending', failure_count = 0, last_error = NULL, updated_at = ?
+        WHERE task_id = ?
+        "#,
+    )
+    .bind(&now)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Boosts the preferred mirror's priority to 0 (tried first) so the Metalink
+/// engine selects it before other mirrors on the next download attempt.
+pub async fn promote_metalink_resource_for_retry(
+    pool: &SqlitePool,
+    task_id: &str,
+    mirror_url: &str,
+) -> Result<(), String> {
+    let now = now_iso();
+    sqlx::query(
+        r#"
+        UPDATE metalink_resources
+        SET priority = 0, updated_at = ?
+        WHERE task_id = ? AND url = ?
+        "#,
+    )
+    .bind(&now)
+    .bind(task_id)
+    .bind(mirror_url)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}

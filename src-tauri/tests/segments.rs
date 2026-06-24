@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri_app_lib::{
@@ -6,9 +5,8 @@ use tauri_app_lib::{
     db,
     download::ProbeResult,
     models::{
-        AppAccentColor, AppFontFamily, AppSettings, BrowserKind, CompletionAction,
-        HashVerificationStatus, SegmentStatus, Task, TaskKind, TaskPriority, TaskRecord,
-        TaskStatus, TaskUpdatedPayload,
+        AppAccentColor, AppSettings, BrowserKind, CompletionAction, HashVerificationStatus,
+        SegmentStatus, Task, TaskKind, TaskPriority, TaskRecord, TaskStatus, TaskUpdatedPayload,
     },
 };
 
@@ -111,7 +109,6 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         auto_resume_on_startup: false,
         floating_window_enabled: false,
         clipboard_monitor_enabled: true,
-        font_family: AppFontFamily::SourceHanSansSc,
         accent_color: AppAccentColor::Blue,
         proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
         proxy_url: String::new(),
@@ -125,10 +122,11 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         schedule_speed_limit_window_start: "18:00".to_string(),
         schedule_speed_limit_window_end: "23:00".to_string(),
         schedule_speed_limit_bps: None,
-        sidebar_stripe_enabled: true,
         titlebar_gradient_enabled: true,
         completion_action: CompletionAction::None,
         completion_countdown_seconds: 30,
+        completion_run_command: String::new(),
+        delete_to_trash: true,
     };
 
     let segments = db::ensure_task_segments_with_settings(&pool, &task, &settings)
@@ -172,7 +170,6 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
         auto_resume_on_startup: false,
         floating_window_enabled: false,
         clipboard_monitor_enabled: true,
-        font_family: AppFontFamily::SourceHanSansSc,
         accent_color: AppAccentColor::Blue,
         proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
         proxy_url: String::new(),
@@ -186,10 +183,11 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
         schedule_speed_limit_window_start: "18:00".to_string(),
         schedule_speed_limit_window_end: "23:00".to_string(),
         schedule_speed_limit_bps: None,
-        sidebar_stripe_enabled: true,
         titlebar_gradient_enabled: true,
         completion_action: CompletionAction::None,
         completion_countdown_seconds: 30,
+        completion_run_command: String::new(),
+        delete_to_trash: true,
     };
 
     let planned_slots = db::planned_segment_count_with_plan(
@@ -366,7 +364,6 @@ async fn settings_defaults_use_download_dir_and_two_active_tasks() {
         db::DEFAULT_MAX_CONNECTIONS_PER_HOST
     );
     assert!(!settings.floating_window_enabled);
-    assert_eq!(settings.font_family, AppFontFamily::SourceHanSansSc);
     assert!(settings.clipboard_monitor_enabled);
     assert!(!settings.auto_resume_on_startup);
     assert_eq!(settings.proxy_mode, tauri_app_lib::proxy::AppProxyMode::Off);
@@ -394,7 +391,6 @@ async fn settings_upsert_and_clamp_active_task_count() {
             auto_resume_on_startup: true,
             floating_window_enabled: false,
             clipboard_monitor_enabled: true,
-            font_family: AppFontFamily::System,
             accent_color: AppAccentColor::Blue,
             proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
             proxy_url: String::new(),
@@ -408,10 +404,11 @@ async fn settings_upsert_and_clamp_active_task_count() {
             schedule_speed_limit_window_start: "18:00".to_string(),
             schedule_speed_limit_window_end: "23:00".to_string(),
             schedule_speed_limit_bps: None,
-            sidebar_stripe_enabled: true,
             titlebar_gradient_enabled: true,
             completion_action: CompletionAction::None,
             completion_countdown_seconds: 30,
+            completion_run_command: String::new(),
+        delete_to_trash: true,
         },
     )
     .await
@@ -425,7 +422,6 @@ async fn settings_upsert_and_clamp_active_task_count() {
     assert_eq!(settings.multi_connection_threshold_bytes, "1048576");
     assert_eq!(settings.segment_count, db::MAX_SEGMENT_COUNT);
     assert_eq!(settings.max_connections_per_host, 12);
-    assert_eq!(settings.font_family, AppFontFamily::System);
     assert!(settings.clipboard_monitor_enabled);
 
     db::upsert_settings(
@@ -443,7 +439,6 @@ async fn settings_upsert_and_clamp_active_task_count() {
             auto_resume_on_startup: false,
             floating_window_enabled: true,
             clipboard_monitor_enabled: false,
-            font_family: AppFontFamily::SourceHanSansSc,
             accent_color: AppAccentColor::Blue,
             proxy_mode: tauri_app_lib::proxy::AppProxyMode::Off,
             proxy_url: String::new(),
@@ -457,10 +452,11 @@ async fn settings_upsert_and_clamp_active_task_count() {
             schedule_speed_limit_window_start: "18:00".to_string(),
             schedule_speed_limit_window_end: "23:00".to_string(),
             schedule_speed_limit_bps: Some("1024".to_string()),
-            sidebar_stripe_enabled: false,
             titlebar_gradient_enabled: false,
             completion_action: CompletionAction::ExitApp,
             completion_countdown_seconds: 45,
+            completion_run_command: String::new(),
+        delete_to_trash: true,
         },
     )
     .await
@@ -637,9 +633,9 @@ async fn cursor_task_query_pages_and_maps_failure_categories() {
         task.updated_at = format!("2024-01-01T00:{index:02}:00Z");
         task.created_at = task.updated_at.clone();
         task.source_key = if index % 2 == 0 {
-            "source-a".to_string()
+            format!("source-a-{}", index)
         } else {
-            "source-b".to_string()
+            format!("source-b-{}", index)
         };
         if index == 3 || index == 7 {
             task.status = TaskStatus::NeedsAttention;
@@ -847,7 +843,6 @@ async fn browser_realtime_task_query_returns_active_plus_recent() {
     assert!(records.iter().any(|task| task.id == "browser-recent-59"));
     assert!(!records.iter().any(|task| task.id == "browser-recent-00"));
 }
-
 
 #[tokio::test]
 async fn reset_interrupted_tasks_pauses_active_records() {
@@ -1073,13 +1068,13 @@ fn sample_task(id: &str, total_size: i64) -> TaskRecord {
         file_name: "file.bin".to_string(),
         save_dir: std::env::temp_dir().to_string_lossy().to_string(),
         temp_path: Some(
-            PathBuf::from(std::env::temp_dir())
+            std::env::temp_dir()
                 .join(format!("{id}.vibe-downloading"))
                 .to_string_lossy()
                 .to_string(),
         ),
         final_path: Some(
-            PathBuf::from(std::env::temp_dir())
+            std::env::temp_dir()
                 .join(format!("{id}.bin"))
                 .to_string_lossy()
                 .to_string(),
@@ -1093,7 +1088,7 @@ fn sample_task(id: &str, total_size: i64) -> TaskRecord {
         supports_resume: true,
         supports_parallel: true,
         supports_multi_file: false,
-        source_key: "127.0.0.1".to_string(),
+        source_key: format!("http://127.0.0.1/{}", id),
         connection_count: 0,
         speed_bps: 0,
         task_speed_limit_bps: None,

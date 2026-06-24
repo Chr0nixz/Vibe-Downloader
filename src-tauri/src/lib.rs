@@ -29,6 +29,7 @@ const TRAY_MENU_SCREEN_MARGIN: f64 = 10.0;
 
 pub struct DownloadControl {
     pub cancel: Arc<AtomicBool>,
+    pub cancel_token: tokio_util::sync::CancellationToken,
     pub finish: Arc<AtomicBool>,
     pub handle: JoinHandle<()>,
     pub source_key: String,
@@ -82,6 +83,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
         commands::system::request_system_shutdown,
+        commands::system::request_system_sleep,
+        commands::system::request_system_hibernate,
+        commands::system::request_lock_screen,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
         commands::tasks::probe_sftp_directory,
@@ -93,13 +97,18 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::tasks::update_torrent_seeding,
         commands::tasks::update_task_proxy_settings,
         commands::tasks::verify_task_hash,
+        commands::tasks::compute_file_hash,
         commands::tasks::pause_task,
         commands::tasks::resume_task,
         commands::tasks::retry_task,
+        commands::tasks::list_metalink_mirrors,
+        commands::tasks::retry_task_with_mirror,
         commands::tasks::finish_live_recording,
         commands::tasks::resolve_task_attention,
         commands::tasks::cancel_task,
         commands::tasks::delete_task,
+        commands::tasks::bulk_delete_tasks,
+        commands::tasks::bulk_task_action,
         commands::tasks::open_task_file,
         commands::tasks::open_task_folder,
         commands::tasks::seed_mock_tasks,
@@ -135,6 +144,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
         commands::system::request_system_shutdown,
+        commands::system::request_system_sleep,
+        commands::system::request_system_hibernate,
+        commands::system::request_lock_screen,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
         commands::tasks::probe_sftp_directory,
@@ -146,13 +158,17 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::tasks::update_torrent_seeding,
         commands::tasks::update_task_proxy_settings,
         commands::tasks::verify_task_hash,
+        commands::tasks::compute_file_hash,
         commands::tasks::pause_task,
         commands::tasks::resume_task,
         commands::tasks::retry_task,
+        commands::tasks::list_metalink_mirrors,
+        commands::tasks::retry_task_with_mirror,
         commands::tasks::finish_live_recording,
         commands::tasks::resolve_task_attention,
         commands::tasks::cancel_task,
         commands::tasks::delete_task,
+        commands::tasks::bulk_delete_tasks,
         commands::tasks::open_task_file,
         commands::tasks::open_task_folder,
     ]);
@@ -296,6 +312,11 @@ pub fn run() {
                 if close_to_tray {
                     api.prevent_close();
                     let _ = window.hide();
+                } else {
+                    // Window is actually closing — signal background tasks to stop.
+                    state
+                        .quit_requested
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             }
         });
@@ -330,6 +351,9 @@ pub fn run() {
         commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
         commands::system::request_system_shutdown,
+        commands::system::request_system_sleep,
+        commands::system::request_system_hibernate,
+        commands::system::request_lock_screen,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
         commands::tasks::probe_sftp_directory,
@@ -341,13 +365,18 @@ pub fn run() {
         commands::tasks::update_torrent_seeding,
         commands::tasks::update_task_proxy_settings,
         commands::tasks::verify_task_hash,
+        commands::tasks::compute_file_hash,
         commands::tasks::pause_task,
         commands::tasks::resume_task,
         commands::tasks::retry_task,
+        commands::tasks::list_metalink_mirrors,
+        commands::tasks::retry_task_with_mirror,
         commands::tasks::finish_live_recording,
         commands::tasks::resolve_task_attention,
         commands::tasks::cancel_task,
         commands::tasks::delete_task,
+        commands::tasks::bulk_delete_tasks,
+        commands::tasks::bulk_task_action,
         commands::tasks::open_task_file,
         commands::tasks::open_task_folder,
         commands::tasks::seed_mock_tasks,
@@ -383,6 +412,9 @@ pub fn run() {
         commands::floating::show_tray_menu_at,
         commands::tray::run_tray_menu_action,
         commands::system::request_system_shutdown,
+        commands::system::request_system_sleep,
+        commands::system::request_system_hibernate,
+        commands::system::request_lock_screen,
         commands::tasks::probe_task,
         commands::tasks::probe_ftp_directory,
         commands::tasks::probe_sftp_directory,
@@ -394,13 +426,17 @@ pub fn run() {
         commands::tasks::update_torrent_seeding,
         commands::tasks::update_task_proxy_settings,
         commands::tasks::verify_task_hash,
+        commands::tasks::compute_file_hash,
         commands::tasks::pause_task,
         commands::tasks::resume_task,
         commands::tasks::retry_task,
+        commands::tasks::list_metalink_mirrors,
+        commands::tasks::retry_task_with_mirror,
         commands::tasks::finish_live_recording,
         commands::tasks::resolve_task_attention,
         commands::tasks::cancel_task,
         commands::tasks::delete_task,
+        commands::tasks::bulk_delete_tasks,
         commands::tasks::open_task_file,
         commands::tasks::open_task_folder,
     ]);
@@ -416,6 +452,9 @@ pub fn run() {
                 tauri::async_runtime::block_on(async { db::connect(&db_path).await })?;
             let data_was_reset = db_connection.data_was_reset;
             let pool = db_connection.pool;
+            // Run non-critical maintenance synchronously so it finishes before
+            // scheduling starts.  Best-effort; failures are logged but never
+            // abort startup.
             tauri::async_runtime::block_on(async {
                 if let Err(error) = db::clear_expired_task_request_headers(&pool).await {
                     tracing::warn!(error = %error, "expired browser request header cleanup failed");
@@ -456,14 +495,27 @@ pub fn run() {
             tauri::async_runtime::block_on(async {
                 browser_realtime::start(handle.clone(), browser_realtime).await
             })?;
+            // Spawn scheduling — downloads start without blocking UI.
             {
-                let state = handle.state::<AppState>();
-                tauri::async_runtime::block_on(async {
-                    commands::tasks::schedule_queued_tasks(handle.clone(), state.inner()).await;
-                    commands::tasks::schedule_retry_after_wakeup(handle.clone(), state.inner())
-                        .await
+                let handle_clone = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    commands::tasks::schedule_queued_tasks(
+                        handle_clone.clone(),
+                        handle_clone.state::<AppState>().inner(),
+                    )
+                    .await;
+                    commands::tasks::schedule_retry_after_wakeup(
+                        handle_clone.clone(),
+                        handle_clone.state::<AppState>().inner(),
+                    )
+                    .await;
                 });
             }
+            // Background schedule-window monitor: pauses/resumes tasks every 60s.
+            commands::tasks::spawn_schedule_window_monitor(
+                handle.clone(),
+                handle.state::<AppState>().inner(),
+            );
             create_tray(&handle)?;
             process_browser_handoff_files_from_args(
                 &handle,
@@ -473,6 +525,7 @@ pub fn run() {
 
             if let Some(window) = app.get_webview_window("main") {
                 platform::configure_main_window(&window)?;
+                let _ = window.show();
             }
             if settings.floating_window_enabled {
                 commands::floating::sync_floating_status_window(&handle, true)?;

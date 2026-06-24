@@ -1,46 +1,19 @@
-import {
-  ArrowUpDown,
-  Check,
-  Command,
-  Gauge,
-  LoaderCircle,
-  Pause,
-  Play,
-  Plus,
-  Search,
-  Trash2,
-} from "lucide-react";
+import { ArrowUpDown, Check, Command, Gauge, LoaderCircle, Pause, Play, Plus, Search, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import type { Platform } from "@/lib/platform";
 import { applyGlobalSpeedLimit } from "@/lib/settings";
+import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput, speedLimitInputFromBytes } from "@/lib/speed-limit";
 import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
-import {
-  useTaskUIStore,
-  type TaskSortKey,
-} from "@/stores/task-store";
+import { type TaskSortKey, useTaskUIStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 
@@ -83,19 +56,19 @@ export function CommandBar({
   const sortDirection = useTaskUIStore((s) => s.sortDirection);
   const setSort = useTaskUIStore((s) => s.setSort);
   const [speedPopoverOpen, setSpeedPopoverOpen] = useState(false);
-  const [customLimit, setCustomLimit] = useState("");
+  const initialLimit = speedLimitInputFromBytes(
+    settings?.globalSpeedLimitBps != null ? String(settings.globalSpeedLimitBps) : null,
+  );
+  const [customAmount, setCustomAmount] = useState(initialLimit.amount);
+  const [customUnit, setCustomUnit] = useState(initialLimit.unit);
   const [savingSpeed, setSavingSpeed] = useState(false);
   const speedTriggerRef = useRef<HTMLButtonElement>(null);
   const canStart =
     !!selectedTask &&
-    (selectedTask.status === "paused" ||
-      selectedTask.status === "failed" ||
-      selectedTask.status === "waiting_network");
+    (selectedTask.status === "paused" || selectedTask.status === "failed" || selectedTask.status === "waiting_network");
   const canPause =
     !!selectedTask &&
-    (selectedTask.status === "downloading" ||
-      selectedTask.status === "retrying" ||
-      selectedTask.status === "queued");
+    (selectedTask.status === "downloading" || selectedTask.status === "retrying" || selectedTask.status === "queued");
   const canDelete = !!selectedTask;
   const currentLimit = Number(settings?.globalSpeedLimitBps ?? 0);
 
@@ -129,10 +102,21 @@ export function CommandBar({
   }
 
   function applyCustomSpeed() {
-    const parsed = Number(customLimit);
-    if (!Number.isFinite(parsed) || parsed <= 0) return;
-    void setSpeedLimit(Math.round(parsed));
+    const bytes = speedLimitBytesFromInput(customAmount, customUnit);
+    // null = blank input (unlimited), undefined = invalid. Block both to match
+    // the Apply button's disabled state and avoid Enter bypassing it.
+    if (bytes == null) return;
+    void setSpeedLimit(bytes);
   }
+
+  // Keep the amount/unit fields in sync when the global limit changes elsewhere.
+  useEffect(() => {
+    const next = speedLimitInputFromBytes(
+      settings?.globalSpeedLimitBps != null ? String(settings.globalSpeedLimitBps) : null,
+    );
+    setCustomAmount(next.amount);
+    setCustomUnit(next.unit);
+  }, [settings?.globalSpeedLimitBps]);
 
   return (
     <section
@@ -152,31 +136,14 @@ export function CommandBar({
           </Button>
         </TooltipTrigger>
         <TooltipContent className={firstRunTip ? "max-w-56 text-balance" : undefined}>
-          {firstRunTip
-            ? t("commandBar.newDownloadFirstRunTip")
-            : t("commandBar.newDownload")}
+          {firstRunTip ? t("commandBar.newDownloadFirstRunTip") : t("commandBar.newDownload")}
         </TooltipContent>
       </Tooltip>
 
       <div className="hidden shrink-0 items-center gap-1 md:flex md:gap-2">
-        <ActionIcon
-          label={t("commandBar.start")}
-          icon={Play}
-          onClick={onStart}
-          disabled={!canStart}
-        />
-        <ActionIcon
-          label={t("commandBar.pause")}
-          icon={Pause}
-          onClick={onPause}
-          disabled={!canPause}
-        />
-        <ActionIcon
-          label={t("commandBar.delete")}
-          icon={Trash2}
-          onClick={onDelete}
-          disabled={!canDelete}
-        />
+        <ActionIcon label={t("commandBar.start")} icon={Play} onClick={onStart} disabled={!canStart} />
+        <ActionIcon label={t("commandBar.pause")} icon={Pause} onClick={onPause} disabled={!canPause} />
+        <ActionIcon label={t("commandBar.delete")} icon={Trash2} onClick={onDelete} disabled={!canDelete} />
         <Popover open={speedPopoverOpen} onOpenChange={setSpeedPopoverOpen}>
           <PopoverTrigger asChild>
             <ActionIcon
@@ -188,10 +155,7 @@ export function CommandBar({
                   : t("commandBar.speedLimit")
               }
               icon={savingSpeed ? LoaderCircle : Gauge}
-              className={cn(
-                "hidden md:inline-flex",
-                savingSpeed && "animate-spin",
-              )}
+              className={cn("hidden md:inline-flex", savingSpeed && "animate-spin")}
               disabled={!settings || savingSpeed}
               buttonRef={speedTriggerRef}
             />
@@ -214,25 +178,38 @@ export function CommandBar({
             </div>
             <div className="mt-1.5 border-t border-border-subtle pt-1.5">
               <label className="block px-2 py-1 text-[11px] font-medium text-text-muted">
-                {t("speedLimit.customBytes")}
+                {t("speedLimit.custom")}
               </label>
               <div className="flex gap-1 px-1">
                 <Input
-                  value={customLimit}
-                  onChange={(event) => setCustomLimit(event.target.value)}
+                  value={customAmount}
+                  onChange={(event) => setCustomAmount(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") applyCustomSpeed();
                   }}
-                  inputMode="numeric"
-                  placeholder="1048576"
+                  inputMode="decimal"
+                  placeholder={t("settings.globalSpeedLimitPlaceholder")}
+                  aria-label={t("speedLimit.custom")}
                   className="h-8"
                 />
+                <Select value={customUnit} onValueChange={setCustomUnit}>
+                  <SelectTrigger aria-label={t("settings.speedUnit")} className="h-8 w-auto min-w-[5rem] px-2 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SPEED_LIMIT_UNITS.map((unit) => (
+                      <SelectItem key={unit.value} value={unit.value}>
+                        {unit.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   onClick={applyCustomSpeed}
-                  disabled={savingSpeed || !customLimit.trim()}
+                  disabled={savingSpeed || !customAmount.trim()}
                 >
                   {t("speedLimit.apply")}
                 </Button>
@@ -295,12 +272,7 @@ export function CommandBar({
         <TooltipContent>{t("commandBar.palette")}</TooltipContent>
       </Tooltip>
 
-      <Button
-        variant="outline"
-        size="sm"
-        className="hidden shrink-0 gap-2 md:inline-flex"
-        onClick={onOpenPalette}
-      >
+      <Button variant="outline" size="sm" className="hidden shrink-0 gap-2 md:inline-flex" onClick={onOpenPalette}>
         {t("commandBar.palette")}
         <kbd className="ml-1 rounded border border-border-subtle bg-surface-root px-1.5 py-0.5 font-mono text-[10px] font-semibold text-text-secondary">
           {formatShortcut("mod+K", platform)}
@@ -317,15 +289,7 @@ const SPEED_LIMIT_PRESETS = [
   { label: "10 MB/s", value: 10 * 1024 * 1024 },
 ];
 
-function SpeedOption({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
+function SpeedOption({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
     <button
       type="button"
@@ -341,9 +305,7 @@ function SpeedOption({
       onClick={onClick}
     >
       <span>{label}</span>
-      {active ? (
-        <Check className="h-4 w-4 text-accent-primary" />
-      ) : null}
+      {active ? <Check className="h-4 w-4 text-accent-primary" /> : null}
     </button>
   );
 }

@@ -137,3 +137,145 @@ pub fn shutdown_now() -> Result<(), String> {
         Err("The operating system rejected the shutdown request.".to_string())
     }
 }
+
+pub fn sleep_now() -> Result<(), String> {
+    tracing::warn!("system sleep requested by confirmed completion action");
+
+    let status = if cfg!(target_os = "windows") {
+        Command::new("rundll32.exe")
+            .args(["powrprof.dll,SetSuspendState", "0,1,0"])
+            .status()
+            .map_err(|e| format!("Failed to request sleep: {e}"))?
+    } else if cfg!(target_os = "macos") {
+        Command::new("pmset")
+            .args(["sleepnow"])
+            .status()
+            .map_err(|e| format!("Failed to request sleep: {e}"))?
+    } else {
+        Command::new("systemctl")
+            .arg("suspend")
+            .status()
+            .map_err(|e| format!("Failed to request sleep: {e}"))?
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("The operating system rejected the sleep request.".to_string())
+    }
+}
+
+pub fn hibernate_now() -> Result<(), String> {
+    tracing::warn!("system hibernate requested by confirmed completion action");
+
+    let status = if cfg!(target_os = "windows") {
+        Command::new("rundll32.exe")
+            .args(["powrprof.dll,SetSuspendState", "1,1,0"])
+            .status()
+            .map_err(|e| format!("Failed to request hibernate: {e}"))?
+    } else if cfg!(target_os = "macos") {
+        // macOS does not have a separate hibernate; pmset sleepnow uses standby mode.
+        Command::new("pmset")
+            .args(["sleepnow"])
+            .status()
+            .map_err(|e| format!("Failed to request hibernate: {e}"))?
+    } else {
+        Command::new("systemctl")
+            .arg("hibernate")
+            .status()
+            .map_err(|e| format!("Failed to request hibernate: {e}"))?
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("The operating system rejected the hibernate request.".to_string())
+    }
+}
+
+pub fn lock_screen_now() -> Result<(), String> {
+    tracing::warn!("screen lock requested by confirmed completion action");
+
+    let status = if cfg!(target_os = "windows") {
+        Command::new("rundll32.exe")
+            .args(["user32.dll,LockWorkStation"])
+            .status()
+            .map_err(|e| format!("Failed to lock screen: {e}"))?
+    } else if cfg!(target_os = "macos") {
+        Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to keystroke \"q\" using {command down, control down}"])
+            .status()
+            .map_err(|e| format!("Failed to lock screen: {e}"))?
+    } else {
+        // Try loginctl first (systemd), fall back to xdg-screensaver.
+        let result = Command::new("loginctl")
+            .arg("lock-sessions")
+            .status();
+        match result {
+            Ok(s) if s.success() => return Ok(()),
+            _ => Command::new("xdg-screensaver")
+                .arg("lock")
+                .status()
+                .map_err(|e| format!("Failed to lock screen: {e}"))?,
+        }
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("The operating system rejected the screen lock request.".to_string())
+    }
+}
+
+/// Characters that are dangerous when passed through a shell.
+/// Covers both Windows cmd.exe and POSIX sh metacharacters, plus
+/// control characters that could truncate or inject commands.
+const SHELL_METACHARACTERS: &[char] = &[
+    '&', '|', ';', '<', '>', '^', '%', '$', '`', '\n', '\r', '\0', '(', ')', '{', '}', '[', ']',
+    '!', '~',
+];
+
+pub fn run_user_command(command: &str) -> Result<(), String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err("No command configured for the Run command completion action.".to_string());
+    }
+    // Reject shell metacharacters to prevent command injection via IPC.
+    if let Some(ch) = trimmed.chars().find(|c| SHELL_METACHARACTERS.contains(c)) {
+        tracing::warn!(
+            command = %trimmed,
+            rejected_char = %ch,
+            "user command rejected: contains shell metacharacter"
+        );
+        return Err(format!(
+            "The configured command contains a disallowed character ('{ch}'). \
+             Remove shell metacharacters (&, |, ;, <, >, etc.) and try again."
+        ));
+    }
+    tracing::warn!(command = %trimmed, "user command requested by confirmed completion action");
+
+    let shell = if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "sh"
+    };
+    let shell_flag = if cfg!(target_os = "windows") {
+        "/C"
+    } else {
+        "-c"
+    };
+
+    let status = Command::new(shell)
+        .args([shell_flag, command])
+        .status()
+        .map_err(|e| format!("Failed to execute command: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Command exited with status {}.",
+            status.code().unwrap_or(-1)
+        ))
+    }
+}

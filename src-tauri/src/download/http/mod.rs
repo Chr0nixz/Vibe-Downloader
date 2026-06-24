@@ -6,11 +6,16 @@ mod request;
 mod segmented;
 
 use std::{
+    collections::HashMap,
+    net::SocketAddr,
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc},
+    time::Duration,
 };
 
+use hickory_resolver::{config::*, TokioResolver};
 use reqwest::{Client, NoProxy, Proxy, StatusCode};
+use tokio::sync::RwLock;
 
 use super::GlobalSpeedLimiter;
 use crate::{
@@ -72,6 +77,9 @@ pub struct DirectSegmentedDownloadRequest {
 #[derive(Debug, Clone)]
 pub struct HttpEngine {
     proxy_config: SharedProxyConfig,
+    /// Client cache keyed by proxy fingerprint to reuse TCP/TLS connections
+    /// across downloads to the same host with the same proxy configuration.
+    clients: Arc<RwLock<HashMap<String, Client>>>,
 }
 
 impl HttpEngine {
@@ -80,12 +88,36 @@ impl HttpEngine {
     }
 
     pub fn with_proxy_config(proxy_config: SharedProxyConfig) -> Result<Self, String> {
-        Ok(Self { proxy_config })
+        Ok(Self {
+            proxy_config,
+            clients: Arc::new(RwLock::new(HashMap::new())),
+        })
     }
 
+    /// Returns a cached `Client` for the current proxy configuration, building
+    /// one on first use. Reusing the client avoids repeated TCP/TLS handshakes
+    /// when multiple downloads target the same host.
     async fn client(&self) -> Result<Client, String> {
         let config = self.proxy_config.read().await;
-        build_client(&config)
+        let fingerprint = proxy_fingerprint(&config);
+        {
+            let cache = self.clients.read().await;
+            if let Some(client) = cache.get(&fingerprint) {
+                return Ok(client.clone());
+            }
+        }
+        let client = build_client(&config)?;
+        self.clients
+            .write()
+            .await
+            .insert(fingerprint, client.clone());
+        Ok(client)
+    }
+
+    /// Clear the client cache. Called when proxy configuration changes so
+    /// subsequent downloads build fresh clients with the new proxy settings.
+    pub async fn invalidate_clients(&self) {
+        self.clients.write().await.clear();
     }
 
     pub async fn probe(&self, url: &str) -> Result<ProbeResult, String> {
@@ -152,13 +184,16 @@ impl HttpEngine {
     }
 
     pub async fn download(&self, context: DownloadContext) -> Result<(), String> {
-        let client = build_client(&context.proxy_config)?;
+        // Use the cached client (keyed by proxy fingerprint) instead of building
+        // a fresh one per download. This reuses TCP/TLS connections across tasks.
+        let client = self.client().await?;
         run_segmented_download(segmented::SegmentedDownloadContext {
             client: &client,
             app: context.app,
             pool: context.pool,
             task: context.task,
             cancel: context.cancel,
+            cancel_token: context.cancel_token,
             speed_limiter: context.speed_limiter,
             connection_limit: context.connection_limit,
             request_headers: context.request_headers,
@@ -196,10 +231,64 @@ impl HttpEngine {
     }
 }
 
+fn proxy_fingerprint(config: &ResolvedProxyConfig) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        config.mode.as_str(),
+        config.url.as_deref().unwrap_or(""),
+        config.username.as_deref().unwrap_or(""),
+        config.no_proxy.as_deref().unwrap_or(""),
+    )
+}
+
+/// DNS resolver adapter wrapping hickory-resolver to implement reqwest's `Resolve` trait.
+/// hickory-resolver provides built-in caching, avoiding repeated system DNS lookups
+/// when multiple downloads target the same host.
+#[derive(Clone, Debug)]
+struct HickoryResolver(TokioResolver);
+
+impl HickoryResolver {
+    fn new() -> Self {
+        Self(
+            TokioResolver::builder_with_config(
+                ResolverConfig::default(),
+                hickory_resolver::net::runtime::TokioRuntimeProvider::new(),
+            )
+            .with_options(ResolverOpts::default())
+            .build()
+            .expect("failed to create DNS resolver"),
+        )
+    }
+}
+
+impl reqwest::dns::Resolve for HickoryResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let resolver = self.0.clone();
+        Box::pin(async move {
+            let lookup = resolver
+                .lookup_ip(name.as_str())
+                .await
+                .map_err(|e| {
+                    Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                        as Box<dyn std::error::Error + Send + Sync>
+                })?;
+            let addrs: Vec<SocketAddr> = lookup.iter().map(|ip| SocketAddr::new(ip, 0)).collect();
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
 pub(crate) fn build_client(config: &ResolvedProxyConfig) -> Result<Client, String> {
     let mut builder = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
-        .user_agent("VibeDownloader/0.1");
+        .user_agent("VibeDownloader/0.1")
+        .dns_resolver(Arc::new(HickoryResolver::new()))
+        .connect_timeout(Duration::from_secs(30))
+        // Overall request timeout: prevents downloads from hanging forever
+        // when the network stalls. reqwest applies this to the full request
+        // lifecycle including body streaming, so we set it generously (60s)
+        // to avoid impacting legitimate large-file transfers.
+        .timeout(Duration::from_secs(60));
 
     match config.mode {
         AppProxyMode::Off => {

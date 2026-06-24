@@ -236,6 +236,11 @@ pub async fn create_browser_handoff_task_with_state(
         probe_snapshot: None,
         selected_file_paths: None,
         allow_duplicate: Some(false),
+        username: None,
+        password: None,
+        private_key_data: None,
+        private_key_passphrase: None,
+        selected_hls_variant_uri: None,
     });
 
     let create_input = match task_result {
@@ -940,18 +945,18 @@ fn extension_id(browser: BrowserKind) -> Option<&'static str> {
     let release = integration_profile() == "release";
     match browser {
         BrowserKind::Firefox => Some(if release {
-            FIREFOX_RELEASE_EXTENSION_ID
+            option_env!("VIBE_FIREFOX_EXTENSION_ID").unwrap_or(FIREFOX_RELEASE_EXTENSION_ID)
         } else {
             FIREFOX_DEV_EXTENSION_ID
         }),
         BrowserKind::Edge => Some(if release {
-            EDGE_RELEASE_EXTENSION_ID
+            option_env!("VIBE_EDGE_EXTENSION_ID").unwrap_or(EDGE_RELEASE_EXTENSION_ID)
         } else {
             CHROMIUM_DEV_EXTENSION_ID
         }),
         BrowserKind::Safari => None,
         _ => Some(if release {
-            CHROMIUM_RELEASE_EXTENSION_ID
+            option_env!("VIBE_CHROME_EXTENSION_ID").unwrap_or(CHROMIUM_RELEASE_EXTENSION_ID)
         } else {
             CHROMIUM_DEV_EXTENSION_ID
         }),

@@ -13,7 +13,7 @@ use reqwest::{
 };
 use tokio::{
     fs,
-    io::{AsyncSeekExt, AsyncWriteExt},
+    io::{AsyncSeekExt, AsyncWriteExt, BufWriter},
     sync::mpsc,
 };
 
@@ -40,6 +40,7 @@ pub(in crate::download::http) struct SegmentWorkerRequest {
     pub(in crate::download::http) segment_count: usize,
     pub(in crate::download::http) supports_parallel: bool,
     pub(in crate::download::http) cancel: Arc<AtomicBool>,
+    pub(in crate::download::http) cancel_token: tokio_util::sync::CancellationToken,
     pub(in crate::download::http) progress_tx: mpsc::Sender<SegmentMessage>,
     pub(in crate::download::http) range_end: Arc<AtomicI64>,
     pub(in crate::download::http) speed_limiter: Arc<GlobalSpeedLimiter>,
@@ -60,6 +61,7 @@ pub(in crate::download::http) async fn download_segment_worker(
         segment_count,
         supports_parallel,
         cancel,
+        cancel_token,
         progress_tx,
         range_end,
         speed_limiter,
@@ -88,6 +90,7 @@ pub(in crate::download::http) async fn download_segment_worker(
             segment_count,
             supports_parallel,
             cancel: &cancel,
+            cancel_token: &cancel_token,
             progress_tx: &progress_tx,
             range_end: &range_end,
             speed_limiter: &speed_limiter,
@@ -131,6 +134,7 @@ struct SegmentAttemptRequest<'a> {
     segment_count: usize,
     supports_parallel: bool,
     cancel: &'a Arc<AtomicBool>,
+    cancel_token: &'a tokio_util::sync::CancellationToken,
     progress_tx: &'a mpsc::Sender<SegmentMessage>,
     range_end: &'a Arc<AtomicI64>,
     speed_limiter: &'a Arc<GlobalSpeedLimiter>,
@@ -158,6 +162,7 @@ async fn download_segment_once(
         segment_count,
         supports_parallel,
         cancel,
+        cancel_token,
         progress_tx,
         range_end,
         speed_limiter,
@@ -294,17 +299,37 @@ async fn download_segment_once(
             ))
         })?;
 
+    let mut file = BufWriter::with_capacity(256 * 1024, file);
+
     let mut last_emit = Instant::now();
     let mut last_tick = Instant::now();
     let mut last_bytes = offset;
 
-    while let Some(chunk) = response.chunk().await.map_err(|e| {
-        retryable(segment_failure(
-            segment,
-            offset,
-            &format!("The connection failed while downloading: {e}"),
-        ))
-    })? {
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                file.flush().await.map_err(|e| {
+                    non_retryable(segment_failure(
+                        segment,
+                        offset,
+                        &format!("Could not flush the temporary file: {e}"),
+                    ))
+                })?;
+                send_segment_progress(progress_tx, &segment.id, offset, 0)
+                    .await
+                    .map_err(non_retryable_attempt)?;
+                return Ok(offset);
+            }
+            chunk = response.chunk() => match chunk {
+                Ok(Some(data)) => data,
+                Ok(None) => break,
+                Err(e) => return Err(retryable(segment_failure(
+                    segment,
+                    offset,
+                    &format!("The connection failed while downloading: {e}"),
+                ))),
+            }
+        };
         if cancel.load(Ordering::SeqCst) {
             file.flush().await.map_err(|e| {
                 non_retryable(segment_failure(

@@ -1,5 +1,3 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { useTranslation } from "react-i18next";
 import {
   Check,
   ChevronDown,
@@ -14,6 +12,8 @@ import {
   Pencil,
   X,
 } from "lucide-react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -26,16 +26,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type {
   BatchImportResult,
   FtpDirectoryProbe,
-  ProbeTaskPayload,
   ProbedFile,
+  ProbeTaskPayload,
   SftpDirectoryProbe,
   WebDavDirectoryProbe,
 } from "@/generated/bindings";
+import { localizedErrorMessage, parseAppError } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
-import { errorMessage, parseAppError } from "@/lib/errors";
 import {
   createTask,
   importUrls,
@@ -43,22 +44,64 @@ import {
   openFilePicker,
   probeFtpDirectory,
   probeSftpDirectory,
-  probeWebdavDirectory,
   probeTask,
+  probeWebdavDirectory,
 } from "@/lib/tauri";
 
 const log = createLogger("new-download");
+
+import { getLocalFileKind, pathToFileUrl, readFileAsText } from "@/lib/local-file";
 import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
-import { parseByteCount } from "@/types/task";
-import { normalizeTask } from "@/types/task";
 import type { Task } from "@/types/task";
+import { normalizeTask, parseByteCount } from "@/types/task";
 
 /* ------------------------------------------------------------------ */
 /*  Probe error classification                                       */
 /* ------------------------------------------------------------------ */
 
-function probeErrorHintKey(message: string): string {
+function probeErrorHintKey(rawError: unknown, message: string): string {
+  // Prefer structured error codes from AppErrorPayload when available.
+  const appError = parseAppError(rawError);
+  if (appError) {
+    switch (appError.code) {
+      case "dns_failure":
+        return "newDownload.probeErrorDns";
+      case "http_denied":
+      case "sftp_auth_failed":
+      case "sftp_credentials_required":
+        return "newDownload.probeErrorDenied";
+      case "http_not_found":
+      case "sftp_directory_not_file":
+        return "newDownload.probeErrorNotFound";
+      case "server_rate_limited":
+        return "newDownload.probeErrorRateLimited";
+      case "timeout":
+        return "newDownload.probeErrorTimeout";
+      case "connection_refused":
+      case "network_unreachable":
+      case "sftp_connect_failed":
+      case "sftp_proxy_connect_failed":
+      case "ftp_connect_failed":
+        return "newDownload.probeErrorConnection";
+      case "tls_error":
+        return "newDownload.probeErrorTls";
+      case "hls_ffmpeg_missing":
+      case "dash_ffmpeg_missing":
+        return "newDownload.probeErrorFfmpeg";
+      case "hls_invalid_playlist":
+      case "hls_unsupported_encryption":
+      case "dash_invalid_manifest":
+      case "dash_live_unsupported":
+      case "metalink_invalid_manifest":
+      case "metalink_no_resources":
+        return "newDownload.probeErrorManifest";
+      default:
+        break;
+    }
+  }
+
+  // Fallback: string-match legacy plain-text errors.
   const lower = message.toLowerCase();
   if (
     lower.includes("dns") ||
@@ -79,18 +122,10 @@ function probeErrorHintKey(message: string): string {
   if (/\b404\b/.test(message) || lower.includes("not found")) {
     return "newDownload.probeErrorNotFound";
   }
-  if (
-    /\b429\b/.test(message) ||
-    lower.includes("rate") ||
-    lower.includes("too many")
-  ) {
+  if (/\b429\b/.test(message) || lower.includes("rate") || lower.includes("too many")) {
     return "newDownload.probeErrorRateLimited";
   }
-  if (
-    lower.includes("timeout") ||
-    lower.includes("timed out") ||
-    lower.includes("deadline")
-  ) {
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("deadline")) {
     return "newDownload.probeErrorTimeout";
   }
   if (
@@ -131,37 +166,6 @@ function remoteDirectoryEntryKey(entry: RemoteDirectoryEntry): string {
   return "raw" in entry ? `${entry.name}-${entry.raw}` : `${entry.name}-${entry.href}`;
 }
 
-function getLocalFileKind(name: string): SelectedLocalFile["kind"] {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (ext === "torrent") return "torrent";
-  if (ext === "meta4" || ext === "metalink") return "metalink";
-  if (ext === "mpd") return "dash";
-  return "text";
-}
-
-function readFileAsText(filePath: string): Promise<string> {
-  return import("@tauri-apps/plugin-fs").then(({ readTextFile }) =>
-    readTextFile(filePath),
-  );
-}
-
-function encodePathSegments(path: string): string {
-  return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
-}
-
-function pathToFileUrl(filePath: string): string {
-  const normalized = filePath.replace(/\\/g, "/");
-  if (/^[A-Za-z]:\//.test(normalized)) {
-    const drive = normalized.slice(0, 2);
-    return `file:///${drive}${encodePathSegments(normalized.slice(2))}`;
-  }
-  if (normalized.startsWith("//")) {
-    const [host = "", ...segments] = normalized.slice(2).split("/");
-    return `file://${encodeURIComponent(host)}/${segments.map((segment) => encodeURIComponent(segment)).join("/")}`;
-  }
-  return `file://${encodePathSegments(normalized.startsWith("/") ? normalized : `/${normalized}`)}`;
-}
-
 function localFileKindLabel(kind: SelectedLocalFile["kind"], t: (key: string) => string): string {
   if (kind === "torrent") return t("newDownload.fileKindTorrent");
   if (kind === "metalink") return t("newDownload.fileKindMetalink");
@@ -175,12 +179,10 @@ function localFileKindLabel(kind: SelectedLocalFile["kind"], t: (key: string) =>
 
 function fileIcon(name: string, className = "h-4 w-4") {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst"].includes(ext))
-    return <FileArchive className={className} />;
+  if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst"].includes(ext)) return <FileArchive className={className} />;
   if (["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "ts"].includes(ext))
     return <FileVideo className={className} />;
-  if (["mp3", "flac", "wav", "aac", "ogg", "m4a", "opus"].includes(ext))
-    return <FileAudio className={className} />;
+  if (["mp3", "flac", "wav", "aac", "ogg", "m4a", "opus"].includes(ext)) return <FileAudio className={className} />;
   if (["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "ico"].includes(ext))
     return <FileImage className={className} />;
   if (["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "epub"].includes(ext))
@@ -222,6 +224,20 @@ export function NewDownloadDialog({
   const [batchInput, setBatchInput] = useState("");
   const [batchResult, setBatchResult] = useState<BatchImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [rawError, setRawError] = useState<unknown>(null);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [privateKeyData, setPrivateKeyData] = useState("");
+  const [privateKeyPassphrase, setPrivateKeyPassphrase] = useState("");
+
+  function setFormError(err: unknown) {
+    setError(localizedErrorMessage(err, t));
+    setRawError(err);
+  }
+  function clearFormError() {
+    setError(null);
+    setRawError(null);
+  }
   const [remoteDirectoryProbe, setRemoteDirectoryProbe] = useState<RemoteDirectoryProbe | null>(null);
   const [remoteDirectoryLoading, setRemoteDirectoryLoading] = useState(false);
   const [duplicateOverrideAvailable, setDuplicateOverrideAvailable] = useState(false);
@@ -233,6 +249,7 @@ export function NewDownloadDialog({
 
   // Multi-file selection: set of selected indices from probe.files
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
+  const [selectedHlsVariantUri, setSelectedHlsVariantUri] = useState<string | null>(null);
 
   const probeRequestId = useRef(0);
   const batchInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -241,6 +258,7 @@ export function NewDownloadDialog({
   const isMetalinkProbe = probe?.protocol === "metalink";
   const isHlsProbe = probe?.protocol === "hls";
   const isDashProbe = probe?.protocol === "dash";
+  const isSftpUrl = /^sftp:\/\//i.test(url.trim());
   const isSelectableMultiFileProbe = isTorrentProbe || isMetalinkProbe;
   const isMultiFile = probe != null && probe.files.length > 1;
   const shouldShowManifestProtocolHint =
@@ -252,10 +270,8 @@ export function NewDownloadDialog({
     selectedLocalFile?.kind === "metalink" ||
     selectedLocalFile?.kind === "dash" ||
     /\.(torrent|meta4|metalink|m3u8|mpd)(?:[?#].*)?$/i.test(url.trim());
-  const fileSelectionRequired =
-    isSelectableMultiFileProbe && isMultiFile && selectedFiles.size === 0;
-  const canProbeRemoteDirectory =
-    /^(ftp|ftps|sftp|webdav|webdavs):\/\//i.test(url.trim()) && url.trim().endsWith("/");
+  const fileSelectionRequired = isSelectableMultiFileProbe && isMultiFile && selectedFiles.size === 0;
+  const canProbeRemoteDirectory = /^(ftp|ftps|sftp|webdav|webdavs):\/\//i.test(url.trim()) && url.trim().endsWith("/");
 
   // Initialize selectedFiles when probe changes
   useEffect(() => {
@@ -264,6 +280,12 @@ export function NewDownloadDialog({
     } else {
       setSelectedFiles(new Set());
     }
+    if (probe && probe.hlsVariants.length > 1) {
+      const autoSelected = probe.hlsVariants.find((v) => v.selected);
+      setSelectedHlsVariantUri(autoSelected?.uri ?? probe.hlsVariants[0].uri);
+    } else {
+      setSelectedHlsVariantUri(null);
+    }
   }, [probe]);
 
   async function detect(nextUrl = url.trim(), automatic = false) {
@@ -271,23 +293,29 @@ export function NewDownloadDialog({
     const requestId = ++probeRequestId.current;
     setProbing(true);
     setDuplicateOverrideAvailable(false);
-    if (!automatic) setError(null);
+    if (!automatic) clearFormError();
     setProbe(null);
     setProbeUrl("");
     setRemoteDirectoryProbe(null);
     try {
-      const nextProbe = await probeTask({ url: nextUrl });
+      const nextProbe = await probeTask({
+        url: nextUrl,
+        username: username.trim() || null,
+        password: password || null,
+        privateKeyData: privateKeyData || null,
+        privateKeyPassphrase: privateKeyPassphrase || null,
+      });
       if (requestId !== probeRequestId.current) return;
       setProbe(nextProbe);
       setProbeUrl(nextUrl);
       if (!fileName.trim()) {
         setFileName(nextProbe.fileName);
       }
-      setError(null);
+      clearFormError();
     } catch (err) {
       if (requestId !== probeRequestId.current) return;
       log.warn("probe failed", err);
-      setError(errorMessage(err));
+      setFormError(err);
     } finally {
       if (requestId === probeRequestId.current) setProbing(false);
     }
@@ -302,11 +330,11 @@ export function NewDownloadDialog({
         /^webdavs?:\/\//i.test(nextUrl)
           ? await probeWebdavDirectory(nextUrl)
           : /^sftp:\/\//i.test(nextUrl)
-          ? await probeSftpDirectory(nextUrl)
-          : await probeFtpDirectory(nextUrl),
+            ? await probeSftpDirectory(nextUrl)
+            : await probeFtpDirectory(nextUrl),
       );
     } catch (err) {
-      setError(errorMessage(err));
+      setError(localizedErrorMessage(err, t));
     } finally {
       setRemoteDirectoryLoading(false);
     }
@@ -343,8 +371,7 @@ export function NewDownloadDialog({
   async function submitCurrent(allowDuplicate: boolean) {
     const currentUrl = url.trim();
     const currentProbe = probe && probeUrl === currentUrl ? probe : null;
-    const currentIsTorrentProbe =
-      currentProbe?.protocol === "bt" || currentProbe?.protocol === "magnet";
+    const currentIsTorrentProbe = currentProbe?.protocol === "bt" || currentProbe?.protocol === "magnet";
     const currentIsMetalinkProbe = currentProbe?.protocol === "metalink";
     const currentIsHlsProbe = currentProbe?.protocol === "hls";
     const currentIsDashProbe = currentProbe?.protocol === "dash";
@@ -370,11 +397,7 @@ export function NewDownloadDialog({
     setSubmitting(true);
     setError(null);
     setDuplicateOverrideAvailable(false);
-    setSubmitStatus(
-      currentProbe
-        ? t("newDownload.usingProbe")
-        : t("newDownload.revalidating"),
-    );
+    setSubmitStatus(currentProbe ? t("newDownload.usingProbe") : t("newDownload.revalidating"));
     try {
       const task = await createTask({
         url: currentUrl,
@@ -390,6 +413,12 @@ export function NewDownloadDialog({
         probeSnapshot: currentProbe,
         selectedFilePaths,
         allowDuplicate,
+        username: username.trim() || null,
+        password: password || null,
+        privateKeyData: privateKeyData || null,
+        privateKeyPassphrase: privateKeyPassphrase || null,
+        selectedHlsVariantUri:
+          currentIsHlsProbe && selectedHlsVariantUri ? selectedHlsVariantUri : null,
       });
       onCreated(task);
       resetForm();
@@ -398,7 +427,7 @@ export function NewDownloadDialog({
       log.error("create task failed", err);
       const appError = parseAppError(err);
       setDuplicateOverrideAvailable(appError?.code === "duplicate_task");
-      setError(errorMessage(err));
+      setError(localizedErrorMessage(err, t));
     } finally {
       setSubmitting(false);
       setSubmitStatus(null);
@@ -420,6 +449,11 @@ export function NewDownloadDialog({
     setSelectedLocalFile(null);
     setSelectedFiles(new Set());
     setEditingName(false);
+    setUsername("");
+    setPassword("");
+    setPrivateKeyData("");
+    setPrivateKeyPassphrase("");
+    setSelectedHlsVariantUri(null);
   }
 
   async function chooseDirectory() {
@@ -452,14 +486,28 @@ export function NewDownloadDialog({
           setAdvancedOpen(true);
         } catch (err) {
           log.warn("failed to read text file", err);
-          setError(errorMessage(err));
+          setError(localizedErrorMessage(err, t));
         }
       }
     } catch (err) {
       log.error("file picker failed", err);
-      setError(errorMessage(err));
+      setError(localizedErrorMessage(err, t));
     } finally {
       setFileLoading(false);
+    }
+  }
+
+  async function chooseSshKeyFile() {
+    try {
+      const picked = await openFilePicker([
+        { name: "SSH Private Key", extensions: ["pem", "key", "id_rsa", "id_ed25519", "id_ecdsa", ""] },
+      ]);
+      if (!picked) return;
+      const content = await readFileAsText(picked.path);
+      setPrivateKeyData(content);
+    } catch (err) {
+      log.error("SSH key file picker failed", err);
+      setError(localizedErrorMessage(err, t));
     }
   }
 
@@ -497,7 +545,7 @@ export function NewDownloadDialog({
       }
     } catch (err) {
       log.error("batch import failed", err);
-      setError(errorMessage(err));
+      setError(localizedErrorMessage(err, t));
     } finally {
       setSubmitting(false);
     }
@@ -537,15 +585,7 @@ export function NewDownloadDialog({
           selectedLocalFile,
       ),
     );
-  }, [
-    batchInput,
-    expectedHashSha256,
-    fileName,
-    onDraftStateChange,
-    saveDir,
-    selectedLocalFile,
-    url,
-  ]);
+  }, [batchInput, expectedHashSha256, fileName, onDraftStateChange, saveDir, selectedLocalFile, url]);
 
   // Toggle all files
   function toggleAllFiles() {
@@ -582,9 +622,7 @@ export function NewDownloadDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("newDownload.title")}</DialogTitle>
-          <DialogDescription className="sr-only">
-            {t("newDownload.description")}
-          </DialogDescription>
+          <DialogDescription className="sr-only">{t("newDownload.description")}</DialogDescription>
         </DialogHeader>
         <form className="flex min-h-0 flex-1 flex-col overflow-hidden" onSubmit={submit}>
           <DialogBody className="flex flex-col gap-3 py-4">
@@ -628,9 +666,17 @@ export function NewDownloadDialog({
             </label>
 
             {shouldShowManifestProtocolHint ? (
-              <p className="text-[11px] leading-4 text-text-muted">
-                {t("newDownload.manifestProtocolHint")}
-              </p>
+              <p className="text-[11px] leading-4 text-text-muted">{t("newDownload.manifestProtocolHint")}</p>
+            ) : null}
+
+            {isDashProbe ? (
+              <div
+                role="note"
+                className="rounded-md border border-border-warning bg-status-warning/10 px-3 py-2 text-[11px] leading-4 text-status-warning"
+              >
+                <p className="font-medium">{t("newDownload.dashLimitationsTitle")}</p>
+                <p>{t("newDownload.dashLimitationsDescription")}</p>
+              </div>
             ) : null}
 
             {canProbeRemoteDirectory ? (
@@ -702,9 +748,7 @@ export function NewDownloadDialog({
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm text-text-primary">{selectedLocalFile.name}</p>
-                  <p className="text-xs text-text-muted">
-                    {localFileKindLabel(selectedLocalFile.kind, t)}
-                  </p>
+                  <p className="text-xs text-text-muted">{localFileKindLabel(selectedLocalFile.kind, t)}</p>
                 </div>
                 <button
                   type="button"
@@ -724,9 +768,7 @@ export function NewDownloadDialog({
                 <Input
                   value={saveDir}
                   onChange={(event) => setSaveDir(event.target.value)}
-                  placeholder={
-                    settings?.defaultSaveDir ?? t("newDownload.saveDirPlaceholder")
-                  }
+                  placeholder={settings?.defaultSaveDir ?? t("newDownload.saveDirPlaceholder")}
                   className="h-11 min-w-0 flex-1 md:h-8"
                 />
                 <Button
@@ -748,16 +790,27 @@ export function NewDownloadDialog({
               <div className="rounded-md border border-border-subtle bg-surface-raised/40 overflow-hidden">
                 <div className="flex items-center gap-2 border-b border-border-separator px-3 py-1.5 text-[11px] text-text-muted">
                   <span className="rounded bg-surface-raised px-1.5 py-0.5 font-medium text-text-secondary">
-                    {probe.protocol === "bt" ? "BT" :
-                     probe.protocol === "magnet" ? "Magnet" :
-                     probe.protocol === "metalink" ? "Metalink" :
-                     probe.protocol === "hls" ? "HLS" :
-                     probe.protocol === "dash" ? "DASH" :
-                     probe.protocol === "ftp" ? "FTP" :
-                     probe.protocol === "ftps" ? "FTPS" :
-                     probe.protocol === "sftp" ? "SFTP" :
-                     probe.protocol === "webdav" ? "WebDAV" :
-                     probe.protocol === "webdavs" ? "WebDAVS" : "HTTP"}
+                    {probe.protocol === "bt"
+                      ? "BT"
+                      : probe.protocol === "magnet"
+                        ? "Magnet"
+                        : probe.protocol === "metalink"
+                          ? "Metalink"
+                          : probe.protocol === "hls"
+                            ? "HLS"
+                            : probe.protocol === "dash"
+                              ? "DASH"
+                              : probe.protocol === "ftp"
+                                ? "FTP"
+                                : probe.protocol === "ftps"
+                                  ? "FTPS"
+                                  : probe.protocol === "sftp"
+                                    ? "SFTP"
+                                    : probe.protocol === "webdav"
+                                      ? "WebDAV"
+                                      : probe.protocol === "webdavs"
+                                        ? "WebDAVS"
+                                        : "HTTP"}
                   </span>
                   {probe.capabilities.supportsResume ? (
                     <span>{t("newDownload.probeResumable")}</span>
@@ -790,9 +843,7 @@ export function NewDownloadDialog({
                               : "border-border-subtle"
                           }`}
                         >
-                          {selectedFiles.size === probe.files.length ? (
-                            <Check className="h-3 w-3" />
-                          ) : null}
+                          {selectedFiles.size === probe.files.length ? <Check className="h-3 w-3" /> : null}
                         </span>
                         {selectedFiles.size === probe.files.length
                           ? t("newDownload.deselectAll")
@@ -822,9 +873,7 @@ export function NewDownloadDialog({
                     {/* Footer summary */}
                     <div className="flex items-center justify-between border-t border-border-subtle px-3 py-2 text-xs text-text-muted">
                       <span>{t("newDownload.totalSize")}</span>
-                      <span className="font-mono text-text-primary">
-                        {formatBytes(selectedTotal)}
-                      </span>
+                      <span className="font-mono text-text-primary">{formatBytes(selectedTotal)}</span>
                     </div>
                   </>
                 ) : (
@@ -856,9 +905,7 @@ export function NewDownloadDialog({
                           className="group flex w-full items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                           title={t("newDownload.editFileName")}
                         >
-                          <span className="truncate text-sm text-text-primary">
-                            {fileName || probe.fileName}
-                          </span>
+                          <span className="truncate text-sm text-text-primary">{fileName || probe.fileName}</span>
                           <Pencil className="h-3 w-3 shrink-0 text-text-muted opacity-0 transition-opacity group-hover:opacity-100" />
                         </button>
                       )}
@@ -877,10 +924,31 @@ export function NewDownloadDialog({
             ) : null}
 
             {/* Auto-detecting indicator */}
-            {!probe && probing ? (
-              <p className="text-xs text-text-muted">
-                {t("newDownload.autoDetecting")}
-              </p>
+            {!probe && probing ? <p className="text-xs text-text-muted">{t("newDownload.autoDetecting")}</p> : null}
+
+            {/* HLS quality picker */}
+            {isHlsProbe && probe && probe.hlsVariants.length > 1 ? (
+              <label className="flex flex-col gap-1 text-xs text-text-muted">
+                {t("newDownload.hlsQuality")}
+                <Select
+                  value={selectedHlsVariantUri ?? ""}
+                  onValueChange={(value) => setSelectedHlsVariantUri(value)}
+                >
+                  <SelectTrigger className="h-8 w-full text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {probe.hlsVariants.map((variant) => (
+                      <SelectItem key={variant.uri} value={variant.uri}>
+                        {variant.resolution ?? t("newDownload.hlsAudioOnly")}
+                        {" · "}
+                        {Math.round(Number(variant.bandwidth) / 1000)} kbps
+                        {variant.codecs ? ` · ${variant.codecs}` : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
             ) : null}
 
             {/* Advanced options toggle */}
@@ -920,6 +988,85 @@ export function NewDownloadDialog({
                   </label>
                 ) : null}
 
+                {/* Authentication */}
+                {!isTorrentProbe && !isMetalinkProbe && !isHlsProbe && !isDashProbe ? (
+                  <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
+                    <span className="text-xs font-medium text-text-secondary">
+                      {t("newDownload.authentication")}
+                    </span>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="flex flex-col gap-1 text-xs text-text-muted">
+                        {t("newDownload.authUsername")}
+                        <Input
+                          value={username}
+                          onChange={(event) => setUsername(event.target.value)}
+                          placeholder={t("newDownload.authUsernamePlaceholder")}
+                          className="h-8"
+                          autoComplete="username"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs text-text-muted">
+                        {t("newDownload.authPassword")}
+                        <Input
+                          type="password"
+                          value={password}
+                          onChange={(event) => setPassword(event.target.value)}
+                          placeholder={t("newDownload.authPasswordPlaceholder")}
+                          className="h-8"
+                          autoComplete="current-password"
+                        />
+                      </label>
+                    </div>
+                    {isSftpUrl ? (
+                      <div className="flex flex-col gap-2">
+                        <span className="text-xs font-medium text-text-secondary">
+                          {t("newDownload.sshKeyAuth")}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={chooseSshKeyFile}
+                            className="shrink-0"
+                          >
+                            <FolderOpen className="mr-1 size-3.5" />
+                            {t("newDownload.sshKeyBrowse")}
+                          </Button>
+                          {privateKeyData ? (
+                            <span className="truncate text-xs text-text-secondary">
+                              {t("newDownload.sshKeyLoaded")}
+                            </span>
+                          ) : null}
+                          {privateKeyData ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setPrivateKeyData("")}
+                              className="shrink-0"
+                            >
+                              <X className="size-3.5" />
+                            </Button>
+                          ) : null}
+                        </div>
+                        <label className="flex flex-col gap-1 text-xs text-text-muted">
+                          {t("newDownload.sshKeyPassphrase")}
+                          <Input
+                            type="password"
+                            value={privateKeyPassphrase}
+                            onChange={(event) => setPrivateKeyPassphrase(event.target.value)}
+                            placeholder={t("newDownload.sshKeyPassphrasePlaceholder")}
+                            className="h-8"
+                            autoComplete="current-password"
+                            disabled={!privateKeyData}
+                          />
+                        </label>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
                 {/* Batch import */}
                 <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
                   <label htmlFor="batch-urls-input" className="text-xs text-text-muted">
@@ -955,29 +1102,31 @@ export function NewDownloadDialog({
                       {t("newDownload.createBatch")}
                     </Button>
                   </div>
-                  {batchResult ? (
-                    <BatchResultSummary result={batchResult} />
-                  ) : null}
+                  {batchResult ? <BatchResultSummary result={batchResult} /> : null}
                 </div>
               </div>
             ) : null}
 
             {/* Submit status */}
             {submitStatus ? (
-              <p role="status" className="rounded-md border border-border-accent bg-accent-primary/10 px-3 py-2 text-xs text-accent-primary">
+              <p
+                role="status"
+                className="rounded-md border border-border-accent bg-accent-primary/10 px-3 py-2 text-xs text-accent-primary"
+              >
                 {submitStatus}
               </p>
             ) : null}
 
             {/* Error */}
             {error ? (
-              <div role="alert" className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger">
+              <div
+                role="alert"
+                className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+              >
                 <p>{error}</p>
                 {duplicateOverrideAvailable ? (
                   <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <p className="text-text-secondary">
-                      {t("newDownload.duplicateHint")}
-                    </p>
+                    <p className="text-text-secondary">{t("newDownload.duplicateHint")}</p>
                     <Button
                       type="button"
                       variant="outline"
@@ -990,9 +1139,7 @@ export function NewDownloadDialog({
                     </Button>
                   </div>
                 ) : (
-                  <p className="mt-1 text-text-secondary">
-                    {t(probeErrorHintKey(error))}
-                  </p>
+                  <p className="mt-1 text-text-secondary">{t(probeErrorHintKey(rawError, error))}</p>
                 )}
               </div>
             ) : null}
@@ -1020,7 +1167,9 @@ export function NewDownloadDialog({
                   </svg>
                   {t("newDownload.starting")}
                 </>
-              ) : t("newDownload.start")}
+              ) : (
+                t("newDownload.start")
+              )}
             </Button>
           </DialogFooter>
         </form>
@@ -1063,25 +1212,23 @@ function FileRow({
       <span
         aria-hidden="true"
         className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
-          checked
-            ? "border-accent-primary bg-accent-primary text-text-on-accent"
-            : "border-border-subtle"
+          checked ? "border-accent-primary bg-accent-primary text-text-on-accent" : "border-border-subtle"
         }`}
       >
         {checked ? <Check className="h-3 w-3" /> : null}
       </span>
       <span className="shrink-0 text-text-muted">{fileIcon(displayName)}</span>
       <div className="min-w-0 flex-1">
-        <p className={`truncate text-sm ${checked ? "text-text-primary" : "text-text-muted"}`}>
-          {displayName}
-        </p>
+        <p className={`truncate text-sm ${checked ? "text-text-primary" : "text-text-muted"}`}>{displayName}</p>
         {hasPath ? (
           <p className="truncate text-[10px] text-text-muted">
             {file.relativePath.slice(0, file.relativePath.length - displayName.length - 1)}
           </p>
         ) : null}
       </div>
-      <span className={`shrink-0 font-mono text-xs tabular-nums ${checked ? "text-text-secondary" : "text-text-muted"}`}>
+      <span
+        className={`shrink-0 font-mono text-xs tabular-nums ${checked ? "text-text-secondary" : "text-text-muted"}`}
+      >
         {formatBytes(size)}
       </span>
     </button>
@@ -1091,7 +1238,7 @@ function FileRow({
 function BatchResultSummary({ result }: { result: BatchImportResult }) {
   const { t } = useTranslation();
   return (
-    <div className="grid gap-2 text-xs">
+    <div role="status" aria-live="polite" className="grid gap-2 text-xs">
       <p className="text-text-secondary">
         {t("newDownload.batchSummary", {
           total: result.items.length,

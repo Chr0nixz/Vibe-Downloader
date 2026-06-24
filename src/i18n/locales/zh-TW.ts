@@ -119,7 +119,7 @@ const zhTW = {
     loadingMore: "正在載入更多，剩餘 {{count}} 項",
     empty: "此檢視中沒有任務。",
     emptySearch: "沒有匹配的任務。",
-    emptyHint: "點擊上方的 + 按鈕或按 Ctrl+K 添加下載連結。瀏覽器擴充功能也可以自動發送下載。",
+    emptyHint: "點擊上方的 + 按鈕或按 Ctrl+N 添加下載。瀏覽器擴充功能也可以自動發送下載。按 Ctrl+K 開啟命令面板。",
     aria: "下載任務清單",
     selectTask: "選擇 {{name}}",
     toolPanel: "篩選和批次",
@@ -183,7 +183,8 @@ const zhTW = {
     globalSpeedLimitTip: "限制所有下載任務的總速度。留空表示不限速。適合需要保留頻寬給其他應用程式的場景",
     multiConnectionThresholdTip: "檔案大於此閾值時才會使用多連線加速。小檔案用單連線更有效率",
     segmentCountTip: "每個下載任務的分段數。更多分段可加速大檔案下載，但過多會增加伺服器壓力。建議：4\u20138",
-    maxConnectionsPerHostTip: "每個主機允許的最大並行連線數。提高可加速下載，但某些伺服器會限制過多連線。建議：8\u201316",
+    maxConnectionsPerHostTip:
+      "每個主機允許的最大並行連線數。提高可加速下載，但某些伺服器會限制過多連線。建議：8\u201316",
     speedUnit: "速度單位",
     sizeUnit: "大小單位",
     scheduleGroupDownload: "\u4e0b\u8f09\u6642\u6bb5",
@@ -194,9 +195,6 @@ const zhTW = {
     themeSystem: "跟隨系統",
     themeLight: "淺色",
     themeDark: "深色",
-    fontFamily: "字型",
-    fontFamilySourceHanSans: "思源黑體",
-    fontFamilySystem: "系統預設",
     accentColor: "主題色",
     accentBlue: "藍色",
     accentPurple: "紫色",
@@ -215,20 +213,15 @@ const zhTW = {
     startOnBoot: "開機時啟動",
     startOnBootDescription: "登入系統後自動啟動 Vibe Downloader。",
     floatingWindow: "浮動狀態視窗",
-    floatingWindowDescription:
-      "顯示一個釘選在最上層的小型下載摘要，包含總速度和目前進度。",
+    floatingWindowDescription: "顯示一個釘選在最上層的小型下載摘要，包含總速度和目前進度。",
     browserIntegration: "瀏覽器整合",
-    browserIntegrationDescription:
-      "安裝瀏覽器擴充功能用於傳送 URL 的 Native Messaging 主機。",
+    browserIntegrationDescription: "安裝瀏覽器擴充功能用於傳送 URL 的 Native Messaging 主機。",
     browserAutoIntercept: "自動接管瀏覽器下載",
-    browserAutoInterceptDescription:
-      "將符合規則的瀏覽器下載自動交給 Vibe。關閉後僅保留手動傳送。",
+    browserAutoInterceptDescription: "將符合規則的瀏覽器下載自動交給 Vibe。關閉後僅保留手動傳送。",
     browserForwardHeaders: "轉發 Cookie 和請求標頭",
-    browserForwardHeadersDescription:
-      "對需要登入狀態的下載使用瀏覽器 Cookie 和安全請求標頭。",
+    browserForwardHeadersDescription: "對需要登入狀態的下載使用瀏覽器 Cookie 和安全請求標頭。",
     browserForwardHeadersMode: "Cookie/請求標頭轉發",
-    browserForwardHeadersModeDescription:
-      "轉發登入狀態請求標頭前先詢問，或選擇固定模式。關閉會清除已儲存的請求標頭。",
+    browserForwardHeadersModeDescription: "轉發登入狀態請求標頭前先詢問，或選擇固定模式。關閉會清除已儲存的請求標頭。",
     browserForwardHeadersAsk: "首次詢問",
     browserForwardHeadersEnabled: "始終轉發",
     browserForwardHeadersDisabled: "不轉發",
@@ -259,6 +252,9 @@ const zhTW = {
     resetDefaultsConfirm: "這將重置所有設定為預設值，此操作不可復原。",
     searchSettings: "搜尋設定...",
     searchNoResults: "未找到符合的設定。",
+    clearSearch: "清除搜尋",
+    startTime: "開始時間",
+    endTime: "結束時間",
   },
   deleteDialog: {
     title: "刪除任務",
@@ -429,9 +425,7 @@ const zhTW = {
     connectionsSummary: "{{total}} 個連線中 {{active}} 個進行中，總速度 {{speed}}。",
     chunkTooltip: "範圍 {{range}}，已完成 {{percent}}，重試 {{retries}} 次",
     connectionTooltip: "連線 {{index}}，範圍 {{range}}，{{percent}}，{{speed}}",
-    chunksPlaceholder: "HTTP MVP 分塊熱力圖佔位內容。",
     loadMore: "載入更多",
-    connectionsPlaceholder: "連線索引標籤佔位內容。",
     close: "關閉詳細資訊",
     closeBackdrop: "關閉詳細資訊",
     drawerAria: "工作詳細資訊",
@@ -511,6 +505,17 @@ const zhTW = {
     ko: "韓文",
     ru: "俄文",
     es: "西班牙文",
+  },
+  format: {
+    byteUnit: { b: "B", kb: "KB", mb: "MB", gb: "GB", tb: "TB" },
+    speed: "{{value}} {{unit}}/s",
+    eta: {
+      seconds: "{{n}}秒",
+      minutes: "{{n}}分",
+      hours: "{{h}}時{{m}}分",
+      days: "{{d}}天{{h}}時",
+    },
+    percent: "{{value}}%",
   },
 } as const;
 

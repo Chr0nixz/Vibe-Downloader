@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use chrono::Timelike;
 use sqlx::{Row, SqlitePool};
 
-use crate::models::{AppAccentColor, AppFontFamily, AppSettings, CompletionAction};
+use crate::models::{AppAccentColor, AppSettings, CompletionAction};
 use crate::proxy::{self, AppProxyMode};
 
 use super::{
@@ -24,7 +26,6 @@ const SETTING_START_ON_BOOT: &str = "start_on_boot";
 const SETTING_AUTO_RESUME_ON_STARTUP: &str = "auto_resume_on_startup";
 const SETTING_FLOATING_WINDOW_ENABLED: &str = "floating_window_enabled";
 const SETTING_CLIPBOARD_MONITOR_ENABLED: &str = "clipboard_monitor_enabled";
-const SETTING_FONT_FAMILY: &str = "font_family";
 const SETTING_ACCENT_COLOR: &str = "accent_color";
 const SETTING_PROXY_MODE: &str = "proxy_mode";
 const SETTING_PROXY_URL: &str = "proxy_url";
@@ -38,117 +39,110 @@ const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED: &str = "schedule_speed_limit_
 const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START: &str = "schedule_speed_limit_window_start";
 const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END: &str = "schedule_speed_limit_window_end";
 const SETTING_SCHEDULE_SPEED_LIMIT_BPS: &str = "schedule_speed_limit_bps";
-const SETTING_SIDEBAR_STRIPE_ENABLED: &str = "sidebar_stripe_enabled";
 const SETTING_TITLEBAR_GRADIENT_ENABLED: &str = "titlebar_gradient_enabled";
 const SETTING_COMPLETION_ACTION: &str = "completion_action";
 const SETTING_COMPLETION_COUNTDOWN_SECONDS: &str = "completion_countdown_seconds";
+const SETTING_COMPLETION_RUN_COMMAND: &str = "completion_run_command";
+const SETTING_DELETE_TO_TRASH: &str = "delete_to_trash";
 
 pub async fn get_settings(
     pool: &SqlitePool,
     default_save_dir: String,
 ) -> Result<AppSettings, String> {
-    let max_active_tasks = get_setting_value(pool, SETTING_MAX_ACTIVE_TASKS)
-        .await?
-        .and_then(|value| value.parse::<i32>().ok())
+    let kv = load_all_settings(pool).await?;
+
+    let max_active_tasks = kv
+        .get(SETTING_MAX_ACTIVE_TASKS)
+        .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or(DEFAULT_MAX_ACTIVE_TASKS)
         .clamp(MIN_MAX_ACTIVE_TASKS, MAX_MAX_ACTIVE_TASKS);
-    let default_save_dir = get_setting_value(pool, SETTING_DEFAULT_SAVE_DIR)
-        .await?
-        .filter(|value| !value.trim().is_empty())
+    let default_save_dir = kv
+        .get(SETTING_DEFAULT_SAVE_DIR)
+        .filter(|v| !v.trim().is_empty())
+        .cloned()
         .unwrap_or(default_save_dir);
-    let global_speed_limit_bps = get_setting_value(pool, SETTING_GLOBAL_SPEED_LIMIT_BPS)
-        .await?
-        .and_then(|value| normalize_speed_limit_bps(&value));
-    let multi_connection_threshold_bytes =
-        get_setting_value(pool, SETTING_MULTI_CONNECTION_THRESHOLD_BYTES)
-            .await?
-            .and_then(|value| normalize_multi_connection_threshold_bytes(&value))
-            .unwrap_or_else(|| DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES.to_string());
-    let segment_count = get_setting_value(pool, SETTING_SEGMENT_COUNT)
-        .await?
-        .and_then(|value| value.parse::<i32>().ok())
+    let global_speed_limit_bps = kv
+        .get(SETTING_GLOBAL_SPEED_LIMIT_BPS)
+        .and_then(|v| normalize_speed_limit_bps(v));
+    let multi_connection_threshold_bytes = kv
+        .get(SETTING_MULTI_CONNECTION_THRESHOLD_BYTES)
+        .and_then(|v| normalize_multi_connection_threshold_bytes(v))
+        .unwrap_or_else(|| DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES.to_string());
+    let segment_count = kv
+        .get(SETTING_SEGMENT_COUNT)
+        .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or(DEFAULT_SEGMENT_COUNT)
         .clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT);
-    let max_connections_per_host = get_setting_value(pool, SETTING_MAX_CONNECTIONS_PER_HOST)
-        .await?
-        .and_then(|value| value.parse::<i32>().ok())
+    let max_connections_per_host = kv
+        .get(SETTING_MAX_CONNECTIONS_PER_HOST)
+        .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or(DEFAULT_MAX_CONNECTIONS_PER_HOST)
         .clamp(MIN_MAX_CONNECTIONS_PER_HOST, MAX_MAX_CONNECTIONS_PER_HOST);
-    let system_notifications = get_bool_setting(pool, SETTING_SYSTEM_NOTIFICATIONS, true).await?;
-    let close_to_tray = get_bool_setting(pool, SETTING_CLOSE_TO_TRAY, false).await?;
-    let start_on_boot = get_bool_setting(pool, SETTING_START_ON_BOOT, false).await?;
-    let auto_resume_on_startup =
-        get_bool_setting(pool, SETTING_AUTO_RESUME_ON_STARTUP, false).await?;
-    let floating_window_enabled =
-        get_bool_setting(pool, SETTING_FLOATING_WINDOW_ENABLED, false).await?;
-    let clipboard_monitor_enabled =
-        get_bool_setting(pool, SETTING_CLIPBOARD_MONITOR_ENABLED, true).await?;
-    let font_family = get_setting_value(pool, SETTING_FONT_FAMILY)
-        .await?
-        .map(|value| normalize_font_family(&value))
-        .unwrap_or(AppFontFamily::SourceHanSansSc);
-    let accent_color = get_setting_value(pool, SETTING_ACCENT_COLOR)
-        .await?
-        .map(|value| normalize_accent_color(&value))
+    let system_notifications = kv_bool(&kv, SETTING_SYSTEM_NOTIFICATIONS, true);
+    let close_to_tray = kv_bool(&kv, SETTING_CLOSE_TO_TRAY, false);
+    let start_on_boot = kv_bool(&kv, SETTING_START_ON_BOOT, false);
+    let auto_resume_on_startup = kv_bool(&kv, SETTING_AUTO_RESUME_ON_STARTUP, false);
+    let floating_window_enabled = kv_bool(&kv, SETTING_FLOATING_WINDOW_ENABLED, false);
+    let clipboard_monitor_enabled = kv_bool(&kv, SETTING_CLIPBOARD_MONITOR_ENABLED, true);
+    let accent_color = kv
+        .get(SETTING_ACCENT_COLOR)
+        .map(|v| normalize_accent_color(v))
         .unwrap_or(AppAccentColor::Blue);
-    let proxy_mode = get_setting_value(pool, SETTING_PROXY_MODE)
-        .await?
-        .map(|value| normalize_proxy_mode(&value))
+    let proxy_mode = kv
+        .get(SETTING_PROXY_MODE)
+        .map(|v| normalize_proxy_mode(v))
         .unwrap_or(AppProxyMode::Off);
-    let proxy_url = get_setting_value(pool, SETTING_PROXY_URL)
-        .await?
-        .and_then(|value| normalize_proxy_url(&value))
+    let proxy_url = kv
+        .get(SETTING_PROXY_URL)
+        .and_then(|v| normalize_proxy_url(v))
         .unwrap_or_default();
-    let proxy_no_proxy = get_setting_value(pool, SETTING_PROXY_NO_PROXY)
-        .await?
-        .and_then(|value| normalize_proxy_no_proxy(&value))
+    let proxy_no_proxy = kv
+        .get(SETTING_PROXY_NO_PROXY)
+        .and_then(|v| normalize_proxy_no_proxy(v))
         .unwrap_or_default();
-    let proxy_username = get_setting_value(pool, SETTING_PROXY_USERNAME)
-        .await?
-        .and_then(|value| normalize_proxy_optional(&value))
+    let proxy_username = kv
+        .get(SETTING_PROXY_USERNAME)
+        .and_then(|v| normalize_proxy_optional(v))
         .unwrap_or_default();
-    let proxy_password_saved = get_bool_setting(pool, SETTING_PROXY_PASSWORD_SAVED, false).await?;
+    let proxy_password_saved = kv_bool(&kv, SETTING_PROXY_PASSWORD_SAVED, false);
     let schedule_download_window_enabled =
-        get_bool_setting(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED, false).await?;
-    let schedule_download_window_start =
-        get_setting_value(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_START)
-            .await?
-            .and_then(|value| normalize_local_time(&value))
-            .unwrap_or_else(|| "00:00".to_string());
-    let schedule_download_window_end =
-        get_setting_value(pool, SETTING_SCHEDULE_DOWNLOAD_WINDOW_END)
-            .await?
-            .and_then(|value| normalize_local_time(&value))
-            .unwrap_or_else(|| "06:00".to_string());
+        kv_bool(&kv, SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED, false);
+    let schedule_download_window_start = kv
+        .get(SETTING_SCHEDULE_DOWNLOAD_WINDOW_START)
+        .and_then(|v| normalize_local_time(v))
+        .unwrap_or_else(|| "00:00".to_string());
+    let schedule_download_window_end = kv
+        .get(SETTING_SCHEDULE_DOWNLOAD_WINDOW_END)
+        .and_then(|v| normalize_local_time(v))
+        .unwrap_or_else(|| "06:00".to_string());
     let schedule_speed_limit_window_enabled =
-        get_bool_setting(pool, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED, false).await?;
-    let schedule_speed_limit_window_start =
-        get_setting_value(pool, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START)
-            .await?
-            .and_then(|value| normalize_local_time(&value))
-            .unwrap_or_else(|| "18:00".to_string());
-    let schedule_speed_limit_window_end =
-        get_setting_value(pool, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END)
-            .await?
-            .and_then(|value| normalize_local_time(&value))
-            .unwrap_or_else(|| "23:00".to_string());
-    let schedule_speed_limit_bps = get_setting_value(pool, SETTING_SCHEDULE_SPEED_LIMIT_BPS)
-        .await?
-        .and_then(|value| normalize_speed_limit_bps(&value));
-    let sidebar_stripe_enabled =
-        get_bool_setting(pool, SETTING_SIDEBAR_STRIPE_ENABLED, false).await?;
-    let titlebar_gradient_enabled =
-        get_bool_setting(pool, SETTING_TITLEBAR_GRADIENT_ENABLED, true).await?;
-    let completion_action = get_setting_value(pool, SETTING_COMPLETION_ACTION)
-        .await?
-        .map(|value| CompletionAction::from_db_str(&value))
+        kv_bool(&kv, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED, false);
+    let schedule_speed_limit_window_start = kv
+        .get(SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START)
+        .and_then(|v| normalize_local_time(v))
+        .unwrap_or_else(|| "18:00".to_string());
+    let schedule_speed_limit_window_end = kv
+        .get(SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END)
+        .and_then(|v| normalize_local_time(v))
+        .unwrap_or_else(|| "23:00".to_string());
+    let schedule_speed_limit_bps = kv
+        .get(SETTING_SCHEDULE_SPEED_LIMIT_BPS)
+        .and_then(|v| normalize_speed_limit_bps(v));
+    let titlebar_gradient_enabled = kv_bool(&kv, SETTING_TITLEBAR_GRADIENT_ENABLED, true);
+    let completion_action = kv
+        .get(SETTING_COMPLETION_ACTION)
+        .map(|v| CompletionAction::from_db_str(v))
         .unwrap_or(CompletionAction::None);
-    let completion_countdown_seconds =
-        get_setting_value(pool, SETTING_COMPLETION_COUNTDOWN_SECONDS)
-            .await?
-            .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(30)
-            .clamp(5, 300);
+    let completion_countdown_seconds = kv
+        .get(SETTING_COMPLETION_COUNTDOWN_SECONDS)
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(30)
+        .clamp(5, 300);
+    let completion_run_command = kv
+        .get(SETTING_COMPLETION_RUN_COMMAND)
+        .cloned()
+        .unwrap_or_default();
+    let delete_to_trash = kv_bool(&kv, SETTING_DELETE_TO_TRASH, true);
 
     Ok(AppSettings {
         max_active_tasks,
@@ -163,7 +157,6 @@ pub async fn get_settings(
         auto_resume_on_startup,
         floating_window_enabled,
         clipboard_monitor_enabled,
-        font_family,
         accent_color,
         proxy_mode,
         proxy_url,
@@ -177,10 +170,11 @@ pub async fn get_settings(
         schedule_speed_limit_window_start,
         schedule_speed_limit_window_end,
         schedule_speed_limit_bps,
-        sidebar_stripe_enabled,
         titlebar_gradient_enabled,
         completion_action,
         completion_countdown_seconds,
+        completion_run_command,
+        delete_to_trash,
     })
 }
 
@@ -252,7 +246,6 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         bool_setting_value(settings.clipboard_monitor_enabled),
     )
     .await?;
-    upsert_setting_value(pool, SETTING_FONT_FAMILY, settings.font_family.as_str()).await?;
     upsert_setting_value(pool, SETTING_ACCENT_COLOR, settings.accent_color.as_str()).await?;
     upsert_setting_value(pool, SETTING_PROXY_MODE, settings.proxy_mode.as_str()).await?;
     upsert_setting_value(pool, SETTING_PROXY_URL, &settings.proxy_url).await?;
@@ -308,12 +301,6 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
     .await?;
     upsert_setting_value(
         pool,
-        SETTING_SIDEBAR_STRIPE_ENABLED,
-        bool_setting_value(settings.sidebar_stripe_enabled),
-    )
-    .await?;
-    upsert_setting_value(
-        pool,
         SETTING_TITLEBAR_GRADIENT_ENABLED,
         bool_setting_value(settings.titlebar_gradient_enabled),
     )
@@ -329,19 +316,29 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         SETTING_COMPLETION_COUNTDOWN_SECONDS,
         &settings.completion_countdown_seconds.to_string(),
     )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_COMPLETION_RUN_COMMAND,
+        &settings.completion_run_command,
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_DELETE_TO_TRASH,
+        bool_setting_value(settings.delete_to_trash),
+    )
     .await
 }
 
 pub async fn clipboard_monitor_enabled(pool: &SqlitePool) -> Result<bool, String> {
-    get_bool_setting(pool, SETTING_CLIPBOARD_MONITOR_ENABLED, true).await
+    let kv = load_all_settings(pool).await?;
+    Ok(kv_bool(&kv, SETTING_CLIPBOARD_MONITOR_ENABLED, true))
 }
 
-pub fn normalize_font_family(value: &str) -> AppFontFamily {
-    match value.trim() {
-        "system" => AppFontFamily::System,
-        "source_han_sans_sc" => AppFontFamily::SourceHanSansSc,
-        _ => AppFontFamily::SourceHanSansSc,
-    }
+pub async fn delete_to_trash_enabled(pool: &SqlitePool) -> Result<bool, String> {
+    let kv = load_all_settings(pool).await?;
+    Ok(kv_bool(&kv, SETTING_DELETE_TO_TRASH, true))
 }
 
 pub fn normalize_accent_color(value: &str) -> AppAccentColor {
@@ -445,21 +442,25 @@ pub fn parse_multi_connection_threshold_bytes(value: &str) -> i64 {
         .unwrap_or(DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES)
 }
 
-async fn get_setting_value(pool: &SqlitePool, key: &str) -> Result<Option<String>, String> {
-    let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
-        .bind(key)
-        .fetch_optional(pool)
+async fn load_all_settings(pool: &SqlitePool) -> Result<HashMap<String, String>, String> {
+    let rows = sqlx::query("SELECT key, value FROM settings")
+        .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(row.map(|row| row.get("value")))
+    let mut map = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let key: String = row.get("key");
+        let value: String = row.get("value");
+        map.insert(key, value);
+    }
+    Ok(map)
 }
 
-async fn get_bool_setting(pool: &SqlitePool, key: &str, default: bool) -> Result<bool, String> {
-    Ok(get_setting_value(pool, key)
-        .await?
-        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(default))
+fn kv_bool(kv: &HashMap<String, String>, key: &str, default: bool) -> bool {
+    kv.get(key)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default)
 }
 
 fn bool_setting_value(value: bool) -> &'static str {

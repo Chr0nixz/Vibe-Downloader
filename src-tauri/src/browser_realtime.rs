@@ -166,7 +166,8 @@ async fn ws_handler(
     if query.token != state.realtime.token {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(move |socket| handle_socket(state, socket))
+    ws.max_message_size(64 * 1024)
+        .on_upgrade(move |socket| handle_socket(state, socket))
 }
 
 async fn handle_socket(state: ServerState, socket: WebSocket) {
@@ -333,7 +334,21 @@ fn write_bootstrap_file(bootstrap: &BrowserBridgeBootstrap) -> Result<(), String
             "Could not write browser bridge bootstrap file at {}: {e}",
             path.display()
         )
-    })
+    })?;
+    // Restrict the token file to read-only to limit tampering by other local processes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400));
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(mut perms) = std::fs::metadata(&path).map(|m| m.permissions()) {
+            perms.set_readonly(true);
+            let _ = std::fs::set_permissions(&path, perms);
+        }
+    }
+    Ok(())
 }
 
 pub fn read_bootstrap_file() -> Result<BrowserBridgeBootstrap, String> {

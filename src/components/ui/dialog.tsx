@@ -1,6 +1,6 @@
-import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "motion/react";
+import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -43,22 +43,14 @@ const DialogContent = React.forwardRef<
         <motion.div
           ref={ref}
           className={cn(
-            "fixed left-1/2 z-50 flex w-[calc(100%-1.5rem)] max-w-lg -translate-x-1/2 flex-col overflow-hidden rounded-lg border border-border-subtle bg-surface-overlay shadow-lg focus:outline-none",
+            "fixed left-1/2 z-50 flex w-[calc(100%-1.5rem)] max-w-lg -translate-x-1/2 flex-col overflow-hidden rounded-lg bg-surface-overlay shadow-md ring-1 ring-border-subtle focus:outline-none",
             "top-1/2 max-h-[calc(100dvh-1.5rem)] -translate-y-1/2",
-            "md:top-[16%] md:max-h-[min(32rem,calc(100dvh-2rem))] md:translate-y-0",
+            "md:top-[16%] md:max-h-[min(40rem,calc(100dvh-2rem))] md:translate-y-0",
             className,
           )}
-          initial={
-            reduceMotion
-              ? false
-              : { opacity: 0, y: 10, scale: 0.98 }
-          }
+          initial={reduceMotion ? false : { opacity: 0, y: 10, scale: 0.98 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={
-            reduceMotion
-              ? { opacity: 0 }
-              : { opacity: 0, y: 8, scale: 0.98 }
-          }
+          exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.98 }}
           transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
         >
           {children}
@@ -69,30 +61,15 @@ const DialogContent = React.forwardRef<
 });
 DialogContent.displayName = DialogPrimitive.Content.displayName;
 
-const DialogHeader = ({
-  className,
-  ...props
-}: React.HTMLAttributes<HTMLDivElement>) => (
-  <div
-    className={cn("shrink-0 border-b border-border-subtle px-4 py-3", className)}
-    {...props}
-  />
+const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn("shrink-0 border-b border-border-subtle px-4 py-3", className)} {...props} />
 );
 
-const DialogBody = ({
-  className,
-  ...props
-}: React.HTMLAttributes<HTMLDivElement>) => (
-  <div
-    className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4", className)}
-    {...props}
-  />
+const DialogBody = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4", className)} {...props} />
 );
 
-const DialogFooter = ({
-  className,
-  ...props
-}: React.HTMLAttributes<HTMLDivElement>) => (
+const DialogFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     className={cn(
       "flex shrink-0 flex-col-reverse gap-2 border-t border-border-subtle px-4 py-3 sm:flex-row sm:justify-end",
@@ -106,11 +83,7 @@ const DialogTitle = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Title>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
 >(({ className, ...props }, ref) => (
-  <DialogPrimitive.Title
-    ref={ref}
-    className={cn("text-sm font-medium text-text-primary", className)}
-    {...props}
-  />
+  <DialogPrimitive.Title ref={ref} className={cn("text-sm font-medium text-text-primary", className)} {...props} />
 ));
 DialogTitle.displayName = DialogPrimitive.Title.displayName;
 
@@ -118,24 +91,20 @@ const DialogDescription = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Description>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
 >(({ className, ...props }, ref) => (
-  <DialogPrimitive.Description
-    ref={ref}
-    className={cn("text-sm text-text-muted", className)}
-    {...props}
-  />
+  <DialogPrimitive.Description ref={ref} className={cn("text-sm text-text-muted", className)} {...props} />
 ));
 DialogDescription.displayName = DialogPrimitive.Description.displayName;
 
 export {
   Dialog,
-  DialogPortal,
-  DialogOverlay,
-  DialogTrigger,
+  DialogBody,
   DialogClose,
   DialogContent,
-  DialogHeader,
-  DialogBody,
-  DialogFooter,
-  DialogTitle,
   DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogOverlay,
+  DialogPortal,
+  DialogTitle,
+  DialogTrigger,
 };

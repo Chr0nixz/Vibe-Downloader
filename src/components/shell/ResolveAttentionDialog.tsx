@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -15,10 +15,7 @@ import { Input } from "@/components/ui/input";
 import type { RecoveryAction } from "@/generated/bindings";
 import type { Task } from "@/types/task";
 
-export type AttentionDialogAction = Extract<
-  RecoveryAction,
-  "choose_another_name" | "restart"
->;
+export type AttentionDialogAction = Extract<RecoveryAction, "choose_another_name" | "restart">;
 
 export interface AttentionDialogRequest {
   task: Task;
@@ -61,11 +58,7 @@ export function ResolveAttentionDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>
-            {isSaveAs
-              ? t("recoveryDialog.saveAsTitle")
-              : t("recoveryDialog.restartTitle")}
-          </DialogTitle>
+          <DialogTitle>{isSaveAs ? t("recoveryDialog.saveAsTitle") : t("recoveryDialog.restartTitle")}</DialogTitle>
         </DialogHeader>
         <form className="flex min-h-0 flex-1 flex-col" onSubmit={submit}>
           <DialogBody className="space-y-4 py-4">
@@ -92,12 +85,7 @@ export function ResolveAttentionDialog({
             ) : null}
           </DialogBody>
           <DialogFooter>
-            <Button
-              type="button"
-              variant="ghost"
-              className="w-full sm:w-auto"
-              onClick={() => onOpenChange(false)}
-            >
+            <Button type="button" variant="ghost" className="w-full sm:w-auto" onClick={() => onOpenChange(false)}>
               {t("recoveryDialog.cancel")}
             </Button>
             <Button
@@ -106,9 +94,7 @@ export function ResolveAttentionDialog({
               className="w-full sm:w-auto"
               disabled={isSaveAs && !fileName.trim()}
             >
-              {isSaveAs
-                ? t("recoveryDialog.confirmSaveAs")
-                : t("recoveryDialog.confirmRestart")}
+              {isSaveAs ? t("recoveryDialog.confirmSaveAs") : t("recoveryDialog.confirmRestart")}
             </Button>
           </DialogFooter>
         </form>

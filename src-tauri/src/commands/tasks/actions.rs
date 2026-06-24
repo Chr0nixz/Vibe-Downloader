@@ -3,28 +3,54 @@ use std::{
     sync::atomic::Ordering,
 };
 
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, State};
-use tokio::io::AsyncReadExt;
 
 use crate::{
     db,
+    download::checksum::hash_file,
     events::{emit_queue_changed, emit_task_updated_record},
     models::{
-        task::now_iso, HashVerificationState, HashVerificationStatus, RecoveryAction, Task,
-        TaskPriority, TaskStatus,
+        task::now_iso, ChecksumAlgorithm, HashVerificationState, HashVerificationStatus,
+        RecoveryAction, Task, TaskPriority, TaskStatus,
     },
     platform, AppState,
 };
 
 use super::{
-    emit_task_progress_snapshot, is_bt_protocol, queue_task_for_retry, queue_task_for_retry_at,
-    require_task, restart_required_error_code, restart_task_from_beginning, schedule_queued_tasks,
-    spawn_schedule_queued_tasks_after, task_error_code, task_from_record_with_files, task_payload,
-    update_recovery_target, ResolveTaskAttentionInput,
+    delete_path, emit_task_progress_snapshot, is_bt_protocol, queue_task_for_retry,
+    queue_task_for_retry_at, require_task, restart_required_error_code,
+    restart_task_from_beginning, schedule_queued_tasks, spawn_schedule_queued_tasks_after,
+    task_error_code, task_from_record_with_files, task_payload, update_recovery_target,
+    ResolveTaskAttentionInput,
 };
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MetalinkMirrorView {
+    pub id: String,
+    pub url: String,
+    pub priority: i32,
+    pub location: Option<String>,
+    pub status: String,
+    pub failure_count: i32,
+    pub last_error: Option<String>,
+}
+
+impl MetalinkMirrorView {
+    fn from_record(r: db::MetalinkResourceRecord) -> Self {
+        Self {
+            id: r.id,
+            url: r.url,
+            priority: r.priority as i32,
+            location: r.location,
+            status: r.status,
+            failure_count: r.failure_count as i32,
+            last_error: r.last_error,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -96,6 +122,7 @@ pub async fn pause_task(
     {
         if let Some(control) = state.downloads.lock().await.remove(&id) {
             control.cancel.store(true, Ordering::SeqCst);
+            control.cancel_token.cancel();
             control.handle.abort();
         }
         if let Some(task) = task_for_runtime.as_ref() {
@@ -104,6 +131,7 @@ pub async fn pause_task(
         let _ = state.request_headers.lock().await.remove(&id);
     } else if let Some(control) = state.downloads.lock().await.get(&id) {
         control.cancel.store(true, Ordering::SeqCst);
+        control.cancel_token.cancel();
     }
     db::update_task_status(
         &state.pool,
@@ -169,10 +197,54 @@ pub async fn retry_task(
     }
     if let Some(control) = state.downloads.lock().await.remove(&id) {
         control.cancel.store(true, Ordering::SeqCst);
+        control.cancel_token.cancel();
         control.handle.abort();
     }
 
     db::insert_task_event(&state.pool, &id, "retrying", None).await?;
+    let task = queue_task_for_retry(&app, state.inner(), &id).await?;
+    task_from_record_with_files(&state.pool, task).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_metalink_mirrors(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<MetalinkMirrorView>, String> {
+    let records = db::list_metalink_resources_for_task(&state.pool, &id).await?;
+    Ok(records.into_iter().map(MetalinkMirrorView::from_record).collect())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn retry_task_with_mirror(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    mirror_url: String,
+) -> Result<Task, String> {
+    tracing::info!(task_id = %id, mirror_url = %mirror_url, "retrying task with specific mirror");
+    let task = require_task(&state.pool, &id).await?;
+    if task.protocol != "metalink" {
+        return Err("Mirror retry is only supported for Metalink tasks.".to_string());
+    }
+    if let Some(control) = state.downloads.lock().await.remove(&id) {
+        control.cancel.store(true, Ordering::SeqCst);
+        control.cancel_token.cancel();
+        control.handle.abort();
+    }
+
+    db::reset_metalink_resource_statuses(&state.pool, &id).await?;
+    // Boost the chosen mirror's priority so the Metalink engine tries it first.
+    db::promote_metalink_resource_for_retry(&state.pool, &id, &mirror_url).await?;
+    db::insert_task_event(
+        &state.pool,
+        &id,
+        "retrying_with_mirror",
+        Some(&mirror_url),
+    )
+    .await?;
     let task = queue_task_for_retry(&app, state.inner(), &id).await?;
     task_from_record_with_files(&state.pool, task).await
 }
@@ -224,6 +296,7 @@ pub async fn cancel_task(
     {
         if let Some(control) = state.downloads.lock().await.remove(&id) {
             control.cancel.store(true, Ordering::SeqCst);
+            control.cancel_token.cancel();
             control.handle.abort();
         }
         if let Some(task) = task_for_runtime.as_ref() {
@@ -232,6 +305,7 @@ pub async fn cancel_task(
         let _ = state.request_headers.lock().await.remove(&id);
     } else if let Some(control) = state.downloads.lock().await.get(&id) {
         control.cancel.store(true, Ordering::SeqCst);
+        control.cancel_token.cancel();
     }
     db::update_task_status(
         &state.pool,
@@ -272,6 +346,7 @@ pub async fn delete_task(
     let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
     if let Some(control) = state.downloads.lock().await.remove(&id) {
         control.cancel.store(true, Ordering::SeqCst);
+        control.cancel_token.cancel();
         if task_for_runtime
             .as_ref()
             .is_none_or(|task| !is_bt_protocol(&task.protocol))
@@ -287,15 +362,35 @@ pub async fn delete_task(
     }
 
     if delete_file {
+        let use_trash = db::delete_to_trash_enabled(&state.pool).await.unwrap_or(true);
+        let mut file_warnings: Vec<String> = Vec::new();
         if let Some(task) = task_for_runtime {
             for file in db::list_task_file_records(&state.pool, &id).await? {
-                for path in [file.temp_path, file.final_path].into_iter().flatten() {
-                    remove_task_file_path(&path)?;
+                // temp files always permanent; final files respect trash setting
+                if let Some(ref p) = file.temp_path {
+                    if let Err(e) = delete_path(p, false) {
+                        file_warnings.push(e);
+                    }
+                }
+                if let Some(ref p) = file.final_path {
+                    if let Err(e) = delete_path(p, use_trash) {
+                        file_warnings.push(e);
+                    }
                 }
             }
-            for path in [task.temp_path, task.final_path].into_iter().flatten() {
-                remove_task_file_path(&path)?;
+            if let Some(ref p) = task.temp_path {
+                if let Err(e) = delete_path(p, false) {
+                    file_warnings.push(e);
+                }
             }
+            if let Some(ref p) = task.final_path {
+                if let Err(e) = delete_path(p, use_trash) {
+                    file_warnings.push(e);
+                }
+            }
+        }
+        for warning in &file_warnings {
+            tracing::warn!(task_id = %id, warning, "file deletion warning during task removal");
         }
     }
 
@@ -303,6 +398,122 @@ pub async fn delete_task(
     emit_queue_changed(&app);
     schedule_queued_tasks(app, state.inner()).await;
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn bulk_delete_tasks(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+    delete_file: bool,
+) -> Result<u32, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    tracing::info!(count = ids.len(), delete_file, "bulk deleting tasks");
+    let use_trash = if delete_file {
+        db::delete_to_trash_enabled(&state.pool).await.unwrap_or(true)
+    } else {
+        false
+    };
+
+    // Phase 1: Cancel active downloads and clean up runtime state.
+    let mut file_warnings: Vec<String> = Vec::new();
+    for id in &ids {
+        let task_for_runtime = db::get_task_record(&state.pool, id).await?;
+        if let Some(control) = state.downloads.lock().await.remove(id) {
+            control.cancel.store(true, Ordering::SeqCst);
+            control.cancel_token.cancel();
+            if task_for_runtime
+                .as_ref()
+                .is_none_or(|task| !is_bt_protocol(&task.protocol))
+            {
+                control.handle.abort();
+            }
+        }
+        if let Some(task) = task_for_runtime.as_ref() {
+            state
+                .engine_registry
+                .delete_runtime_task(task, delete_file)
+                .await;
+        }
+
+        // Phase 2: Delete files (best-effort, filesystem ops cannot be transactional).
+        if delete_file {
+            if let Some(task) = task_for_runtime {
+                for file in db::list_task_file_records(&state.pool, id).await? {
+                    if let Some(ref p) = file.temp_path {
+                        if let Err(e) = delete_path(p, false) {
+                            file_warnings.push(e);
+                        }
+                    }
+                    if let Some(ref p) = file.final_path {
+                        if let Err(e) = delete_path(p, use_trash) {
+                            file_warnings.push(e);
+                        }
+                    }
+                }
+                if let Some(ref p) = task.temp_path {
+                    if let Err(e) = delete_path(p, false) {
+                        file_warnings.push(e);
+                    }
+                }
+                if let Some(ref p) = task.final_path {
+                    if let Err(e) = delete_path(p, use_trash) {
+                        file_warnings.push(e);
+                    }
+                }
+            }
+        }
+    }
+    for warning in &file_warnings {
+        tracing::warn!(warning, "file deletion warning during bulk delete");
+    }
+
+    // Phase 3: Delete all DB records in a single transaction.
+    db::delete_task_records_batch(&state.pool, &ids).await?;
+
+    emit_queue_changed(&app);
+    schedule_queued_tasks(app, state.inner()).await;
+    Ok(ids.len() as u32)
+}
+
+/// Bulk apply a transfer action (pause/resume/retry) to multiple tasks in a
+/// single IPC call. Returns the number of tasks successfully processed.
+/// Individual task failures are logged and skipped; the call only fails if a
+/// fatal error occurs before the loop.
+#[tauri::command]
+#[specta::specta]
+pub async fn bulk_task_action(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+    action: String,
+) -> Result<u32, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let normalized = action.trim().to_ascii_lowercase();
+    tracing::info!(count = ids.len(), action = %normalized, "bulk task action");
+    let mut succeeded: u32 = 0;
+    for id in &ids {
+        let result = match normalized.as_str() {
+            "pause" => pause_task(app.clone(), state.clone(), id.clone()).await,
+            "resume" => resume_task(app.clone(), state.clone(), id.clone()).await,
+            "retry" => retry_task(app.clone(), state.clone(), id.clone()).await,
+            other => {
+                return Err(format!("Unknown bulk action: {other}"));
+            }
+        };
+        match result {
+            Ok(_) => succeeded += 1,
+            Err(err) => {
+                tracing::warn!(task_id = %id, error = %err, "bulk action failed for task");
+            }
+        }
+    }
+    Ok(succeeded)
 }
 
 #[tauri::command]
@@ -428,6 +639,20 @@ pub async fn verify_task_hash(
     verify_task_hash_with_pool(&state.pool, &id).await
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn compute_file_hash(
+    state: State<'_, AppState>,
+    id: String,
+    algorithm: ChecksumAlgorithm,
+) -> Result<String, String> {
+    let task = require_task(&state.pool, &id).await?;
+    let final_path = task
+        .final_path
+        .ok_or_else(|| "Downloaded file path is not available.".to_string())?;
+    hash_file(&PathBuf::from(final_path), algorithm).await
+}
+
 pub(crate) async fn verify_task_hash_with_pool(
     pool: &sqlx::SqlitePool,
     id: &str,
@@ -465,7 +690,7 @@ pub(crate) async fn verify_task_hash_with_pool(
 
     db::update_hash_verification(pool, &task.id, None, HashVerificationStatus::Pending, None)
         .await?;
-    let actual = sha256_file(&PathBuf::from(final_path)).await?;
+    let actual = hash_file(&PathBuf::from(final_path), ChecksumAlgorithm::Sha256).await?;
     let status = if actual.eq_ignore_ascii_case(&expected) {
         HashVerificationStatus::Verified
     } else {
@@ -506,39 +731,3 @@ pub(crate) async fn verify_task_hash_with_pool(
     })
 }
 
-async fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| format!("Could not open file for checksum verification: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .await
-            .map_err(|e| format!("Could not read file for checksum verification: {e}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn remove_task_file_path(path: &str) -> Result<(), String> {
-    if std::fs::metadata(path)
-        .map(|metadata| metadata.is_dir())
-        .unwrap_or(false)
-    {
-        return match std::fs::remove_dir_all(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("Could not delete {path}: {error}")),
-        };
-    }
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Could not delete {path}: {error}")),
-    }
-}

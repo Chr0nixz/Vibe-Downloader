@@ -1,42 +1,9 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
-@font-face {
-  font-family: "Vibe Source Han Sans SC";
-  src: url("/fonts/source-han-sans-sc/SourceHanSansSC-Normal.otf") format("opentype");
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Vibe Source Han Sans SC";
-  src: url("/fonts/source-han-sans-sc/SourceHanSansSC-Regular.otf") format("opentype");
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Vibe Source Han Sans SC";
-  src: url("/fonts/source-han-sans-sc/SourceHanSansSC-Medium.otf") format("opentype");
-  font-style: normal;
-  font-weight: 600 700;
-  font-display: swap;
-}
-
 :root {
-  --vibe-font-sans-system: Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  --vibe-font-sans-source-han: Inter, "Segoe UI Variable", "Segoe UI", "Vibe Source Han Sans SC", "Source Han Sans SC", "Noto Sans CJK SC", "Noto Sans CJK JP", "Source Han Sans CN", "Source Han Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic", "MS PGothic", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
-  --vibe-font-sans: var(--vibe-font-sans-source-han);
-}
-
-:root[data-font-family="system"] {
-  --vibe-font-sans: var(--vibe-font-sans-system);
-}
-
-:root[data-font-family="source_han_sans_sc"] {
-  --vibe-font-sans: var(--vibe-font-sans-source-han);
+  --vibe-font-sans:
+    Inter, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", "Source Han Sans CN", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic", "MS PGothic", system-ui, sans-serif;
 }
 
 @theme inline {
@@ -104,6 +71,7 @@
   input::placeholder,
   textarea::placeholder {
     @apply font-sans;
+    color: var(--text-secondary);
   }
 
   button:not(:disabled),
@@ -116,8 +84,8 @@
   .dark [data-radix-select-content],
   .dark [data-radix-popover-content] {
     box-shadow:
-      0 10px 15px -3px oklch(0 0 0 / 0.35),
-      0 4px 6px -4px oklch(0 0 0 / 0.3),
+      0 4px 6px -1px oklch(0 0 0 / 0.4),
+      0 2px 4px -2px oklch(0 0 0 / 0.35),
       0 0 0 1px oklch(0.33 0.012 255 / 0.5);
   }
 }
@@ -132,34 +100,15 @@
   }
 }
 
-@keyframes splash-fade-out {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
-}
-
-@keyframes splash-breathe {
-  0%,
-  100% {
-    opacity: 0.25;
-    transform: scale(0.92);
-  }
-  50% {
-    opacity: 0.7;
-    transform: scale(1);
-  }
-}
-
 @keyframes completion-glow {
   0% {
     box-shadow: 0 0 0 0 transparent;
     border-color: var(--border-subtle);
   }
   20% {
-    box-shadow: 0 0 0 3px color-mix(in oklch, var(--status-success) 30%, transparent), 0 0 16px color-mix(in oklch, var(--status-success) 20%, transparent);
+    box-shadow:
+      0 0 0 3px color-mix(in oklch, var(--status-success) 30%, transparent),
+      0 0 16px color-mix(in oklch, var(--status-success) 20%, transparent);
     border-color: var(--status-success);
   }
   100% {
@@ -191,16 +140,16 @@
 @media (prefers-reduced-motion: reduce) {
   .completion-flash,
   .completion-flash-progress {
-    animation: none !important;
-    transition: none !important;
+    animation: none;
+    transition: none;
   }
 
   .floating-ball-glow {
-    animation: none !important;
+    animation: none;
   }
 
   .floating-ball {
-    transition: none !important;
+    transition: none;
   }
 
   .floating-ball:hover {
@@ -212,59 +161,31 @@
   }
 
   .floating-ring {
-    transition: none !important;
-  }
-
-  .floating-aurora {
-    animation: none !important;
-    opacity: 0.5 !important;
-  }
-
-  .floating-surface-tint {
-    display: none;
+    transition: none;
   }
 
   .floating-ball-peak {
-    animation: none !important;
+    animation: none;
   }
 
   .floating-ball-completion {
-    animation: none !important;
-  }
-
-  .splash-overlay {
-    animation-duration: 0.01ms !important;
-  }
-
-  .splash-indicator {
-    animation: none !important;
-    opacity: 0.4 !important;
+    animation: none;
   }
 
   .nav-indicator {
-    animation: none !important;
+    animation: none;
   }
 
   .nav-dot-pulse {
-    animation: none !important;
+    animation: none;
   }
 }
 
 /* ── Sidebar navigation ── */
 
-@keyframes nav-indicator-enter {
-  from {
-    transform: scaleY(0);
-    opacity: 0;
-  }
-  to {
-    transform: scaleY(1);
-    opacity: 1;
-  }
-}
-
 @keyframes nav-dot-pulse {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 0.5;
     transform: scale(0.85);
   }
@@ -330,36 +251,6 @@
   filter: brightness(1.35) saturate(1.2);
 }
 
-/* Layer 0: Soft ambient halo behind the ball (static, opacity controlled by state) */
-.floating-aurora {
-  width: 88px;
-  height: 88px;
-  border-radius: 50%;
-  background: radial-gradient(
-    circle,
-    color-mix(in oklch, var(--accent-primary) 18%, transparent) 0%,
-    color-mix(in oklch, var(--accent-energy) 8%, transparent) 45%,
-    transparent 70%
-  );
-  filter: blur(8px);
-  pointer-events: none;
-  transform: translate(-50%, -50%);
-  transition: opacity 320ms ease-out;
-  z-index: -1;
-}
-
-/* Layer 2: Subtle surface tint for depth */
-.floating-surface-tint {
-  background: radial-gradient(
-    circle at 35% 35%,
-    color-mix(in oklch, var(--accent-energy) 8%, transparent) 0%,
-    color-mix(in oklch, var(--accent-primary) 4%, transparent) 50%,
-    transparent 70%
-  );
-  pointer-events: none;
-  z-index: 0;
-}
-
 /* Active state — steady accent glow (no animation, single-layer) */
 .floating-ball-glow {
   box-shadow: 0 0 14px color-mix(in oklch, var(--accent-primary) 22%, transparent);
@@ -373,12 +264,12 @@
 .floating-ball-peak {
   box-shadow:
     0 0 24px color-mix(in oklch, var(--accent-energy) 45%, transparent),
-    0 0 8px color-mix(in oklch, var(--accent-primary) 20%, transparent) !important;
+    0 0 8px color-mix(in oklch, var(--accent-primary) 20%, transparent);
 }
 
 /* Completion burst — one-shot single-layer expansion and fade */
 .floating-ball-completion {
-  animation: floating-completion 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  animation: floating-completion 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 @keyframes floating-completion {
@@ -395,18 +286,14 @@
 
 /* Reduced motion overrides for floating ball effects */
 @media (prefers-reduced-motion: reduce) {
-  .floating-aurora {
-    opacity: 0.4 !important;
-  }
-
   .floating-ball-completion {
-    animation: none !important;
+    animation: none;
   }
 
   .floating-bar-left,
   .floating-bar-right {
-    transform: none !important;
-    transition: none !important;
+    transform: none;
+    transition: none;
   }
 }
 
@@ -443,13 +330,6 @@
 .floating-bar-left:hover,
 .floating-bar-right:hover {
   transform: scale(1.02);
-}
-
-/* Compressed aurora glow in bar mode */
-.floating-bar .floating-aurora {
-  width: 200px;
-  height: 56px;
-  border-radius: 28px;
 }
 
 @keyframes detail-enter {

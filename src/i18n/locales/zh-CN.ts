@@ -1,4 +1,4 @@
-﻿const zhCN = {
+const zhCN = {
   app: {
     name: "Vibe Downloader",
     navAria: "\u4e3b\u5bfc\u822a",
@@ -46,7 +46,8 @@
     serverLimitDetected: "\u68c0\u6d4b\u5230\u670d\u52a1\u5668\u9650\u901f",
     networkRetrying: "\u7f51\u7edc\u6ce2\u52a8\uff0c\u6b63\u5728\u91cd\u8bd5",
     resumeUnavailable: "\u65e0\u6cd5\u7eed\u4f20",
-    remoteChanged: "\u8fdc\u7a0b\u6587\u4ef6\u5df2\u53d8\u66f4\u3002\u8bf7\u91cd\u65b0\u5f00\u59cb\uff0c\u907f\u514d\u6587\u4ef6\u635f\u574f\u3002",
+    remoteChanged:
+      "\u8fdc\u7a0b\u6587\u4ef6\u5df2\u53d8\u66f4\u3002\u8bf7\u91cd\u65b0\u5f00\u59cb\uff0c\u907f\u514d\u6587\u4ef6\u635f\u574f\u3002",
     completed: "\u5df2\u5b8c\u6210",
     waitingNetwork: "\u7b49\u5f85\u7f51\u7edc",
     diskWriteSlow: "\u78c1\u76d8\u5199\u5165\u6162\u4e8e\u7f51\u7edc",
@@ -74,10 +75,11 @@
     searchAria: "\u641c\u7d22\u4efb\u52a1",
     palette: "\u547d\u4ee4\u9762\u677f",
     newDownloadFirstRunTip:
-      "\u7c98\u8d34 URL\u3001\u5bfc\u5165\u6279\u91cf\u5217\u8868\u6216\u6dfb\u52a0\u79cd\u5b50\u6587\u4ef6\u3002\u53ef\u4ee5\u968f\u65f6\u6309 Ctrl+N \u6253\u5f00\u3002",
+      "\u7c98\u8d34 URL\u3001\u5bfc\u5165\u6279\u91cf\u6216\u62d6\u5165 .torrent / .metalink / .mpd \u6587\u4ef6\u3002\u968f\u65f6\u53ef\u7528 Ctrl+N\u3002",
   },
   speedLimit: {
     unlimited: "\u4e0d\u9650\u901f",
+    custom: "\u81ea\u5b9a\u4e49\u9650\u901f",
     customBytes: "\u81ea\u5b9a\u4e49\u9650\u901f (B/s)",
     apply: "\u5e94\u7528",
   },
@@ -130,29 +132,57 @@
     taskFailed: "{{name}} \u9700\u8981\u5904\u7406",
     bulkProgress: "\u6b63\u5728{{action}} {{done}}/{{total}}\u2026",
     bulkComplete: "{{action}}\u5b8c\u6210\uff1a{{done}}/{{total}}",
+    bulkFailed: "{{action}}失败",
+    bulkPartialFailure: "{{action}}部分失败：{{failed}}/{{total}} 个失败",
+    bulkFailureDetail: "{{total}} 个任务中有 {{failed}} 个失败",
     clipboardLinkDetected: "\u68c0\u6d4b\u5230\u526a\u5207\u677f\u94fe\u63a5",
     clipboardLinksDetected: "\u68c0\u6d4b\u5230 {{count}} \u4e2a\u526a\u5207\u677f\u94fe\u63a5",
-    clipboardLinksDetectedDescription:
-      "\u7528 {{count}} \u4e2a\u94fe\u63a5\u6253\u5f00\u6279\u91cf\u9884\u89c8\u3002",
+    clipboardLinksDetectedDescription: "\u7528 {{count}} \u4e2a\u94fe\u63a5\u6253\u5f00\u6279\u91cf\u9884\u89c8\u3002",
     useClipboardLink: "\u4f7f\u7528\u94fe\u63a5",
+    droppedFileReady: "\u5df2\u62d6\u5165\u6587\u4ef6",
+    droppedFileReadyDescription:
+      "\u6253\u5f00\u201c\u65b0\u5efa\u4e0b\u8f7d\u201d\u4ee5\u4f7f\u7528\u8be5\u6587\u4ef6\u3002",
+    useDroppedFile: "\u4f7f\u7528\u6587\u4ef6",
+    unsupportedDroppedFiles: "\u4e0d\u652f\u6301\u7684\u6587\u4ef6\u7c7b\u578b",
+    unsupportedDroppedFilesDescription:
+      "\u8bf7\u62d6\u5165 .torrent\u3001.metalink\u3001.meta4\u3001.mpd \u6216 .txt \u6587\u4ef6\u3002",
+    dropToStart: "\u677e\u5f00\u4ee5\u5f00\u59cb\u4e0b\u8f7d",
+    dropHere: "\u5c06 torrent\u3001metalink\u3001DASH \u6216\u6587\u672c\u6587\u4ef6\u62d6\u5165\u6b64\u5904",
   },
   completionDialog: {
-    exitTitle: "\u4e0b\u8f7d\u5b8c\u6210\u540e\u9000\u51fa",
-    exitDescription:
+    exit_appTitle: "\u4e0b\u8f7d\u5b8c\u6210\u540e\u9000\u51fa",
+    exit_appDescription:
       "\u5168\u90e8\u8ba1\u5212\u4efb\u52a1\u5df2\u5b8c\u6210\u3002Vibe \u5c06\u5728 {{seconds}} \u79d2\u540e\u9000\u51fa\u3002",
     shutdownTitle: "\u786e\u8ba4\u5173\u673a",
     shutdownDescription:
       "\u5168\u90e8\u8ba1\u5212\u4efb\u52a1\u5df2\u5b8c\u6210\u3002\u53ea\u6709\u5728\u4f60\u786e\u8ba4\u53ef\u4ee5\u7ed3\u675f\u5f53\u524d\u4f1a\u8bdd\u65f6\u624d\u6267\u884c\u5173\u673a\u3002",
+    sleepTitle: "\u786e\u8ba4\u4f11\u7720",
+    sleepDescription:
+      "\u5168\u90e8\u8ba1\u5212\u4efb\u52a1\u5df2\u5b8c\u6210\u3002\u53ea\u6709\u5728\u4f60\u786e\u8ba4\u65f6\u624d\u8ba9\u7535\u8111\u8fdb\u5165\u4f11\u7720\u3002",
+    hibernateTitle: "\u786e\u8ba4\u4f11\u7720",
+    hibernateDescription:
+      "\u5168\u90e8\u8ba1\u5212\u4efb\u52a1\u5df2\u5b8c\u6210\u3002\u53ea\u6709\u5728\u4f60\u786e\u8ba4\u65f6\u624d\u8ba9\u7535\u8111\u4f11\u7720\u3002",
+    lock_screenTitle: "\u4e0b\u8f7d\u5b8c\u6210\u540e\u9501\u5c4f",
+    lock_screenDescription:
+      "\u5168\u90e8\u8ba1\u5212\u4efb\u52a1\u5df2\u5b8c\u6210\u3002\u5c06\u5728 {{seconds}} \u79d2\u540e\u9501\u5b9a\u5c4f\u5e55\u3002",
+    run_commandTitle: "\u4e0b\u8f7d\u5b8c\u6210\u540e\u8fd0\u884c\u547d\u4ee4",
+    run_commandDescription:
+      "\u5168\u90e8\u8ba1\u5212\u4efb\u52a1\u5df2\u5b8c\u6210\u3002\u5c06\u5728 {{seconds}} \u79d2\u540e\u8fd0\u884c\u547d\u4ee4\u3002",
     cancel: "\u53d6\u6d88",
-    exitNow: "\u7acb\u5373\u9000\u51fa",
+    confirmExit: "\u7acb\u5373\u9000\u51fa",
     confirmShutdown: "\u7acb\u5373\u5173\u673a",
+    confirmSleep: "\u7acb\u5373\u4f11\u7720",
+    confirmHibernate: "\u7acb\u5373\u4f11\u7720",
+    confirmLock: "\u7acb\u5373\u9501\u5c4f",
+    confirmRun: "\u7acb\u5373\u8fd0\u884c",
   },
   taskList: {
     loading: "\u6b63\u5728\u52a0\u8f7d\u4efb\u52a1\u2026",
     loadingMore: "\u6b63\u5728\u52a0\u8f7d\u66f4\u591a\uff0c\u5269\u4f59 {{count}} \u9879",
     empty: "\u6b64\u89c6\u56fe\u4e2d\u6ca1\u6709\u4efb\u52a1\u3002",
     emptySearch: "\u6ca1\u6709\u5339\u914d\u7684\u4efb\u52a1\u3002",
-    emptyHint: "\u70b9\u51fb\u4e0a\u65b9\u7684 + \u6309\u94ae\u6216\u6309 Ctrl+K \u6dfb\u52a0\u4e0b\u8f7d\u94fe\u63a5\u3002\u6d4f\u89c8\u5668\u6269\u5c55\u4e5f\u53ef\u4ee5\u81ea\u52a8\u53d1\u9001\u4e0b\u8f7d\u3002",
+    emptyHint:
+      "\u70b9\u51fb\u4e0a\u65b9\u7684 + \u6309\u94ae\u6216\u6309 Ctrl+N \u6dfb\u52a0\u4e0b\u8f7d\u3002\u6d4f\u89c8\u5668\u6269\u5c55\u4e5f\u53ef\u4ee5\u81ea\u52a8\u53d1\u9001\u4e0b\u8f7d\u3002\u6309 Ctrl+K \u6253\u5f00\u547d\u4ee4\u9762\u677f\u3002",
     aria: "\u4e0b\u8f7d\u4efb\u52a1\u5217\u8868",
     selectTask: "\u9009\u62e9 {{name}}",
     toolPanel: "\u7b5b\u9009\u548c\u6279\u91cf",
@@ -163,8 +193,13 @@
     bulkPause: "\u6682\u505c",
     bulkResume: "\u7eed\u4f20",
     bulkRetry: "\u91cd\u8bd5",
-    bulkOpenFolder: "\u6253\u5f00\u6587\u4ef6\u5939",
-    bulkDelete: "\u5220\u9664 {{count}}",
+    bulkOpenFolder: "打开文件夹",
+    exportJson: "导出为 JSON",
+    exportCsv: "导出为 CSV",
+    exportSuccess: "已导出 {{count}} 个任务",
+    bulkDelete: "删除 {{count}}",
+    more: "\u66f4\u591a",
+    moreBulkActions: "\u66f4\u591a\u6279\u91cf\u64cd\u4f5c",
     selectedCount: "\u5df2\u9009\u62e9 {{count}} \u9879",
     clearSelection: "\u6e05\u9664\u9009\u62e9",
     clearAllFilters: "\u6e05\u9664\u5168\u90e8",
@@ -207,10 +242,12 @@
   },
   settings: {
     title: "\u8bbe\u7f6e",
-    description: "\u63a7\u5236\u65b0\u4efb\u52a1\u7684\u4fdd\u5b58\u4f4d\u7f6e\u548c\u540c\u65f6\u8fd0\u884c\u6570\u91cf\u3002",
+    description:
+      "\u63a7\u5236\u65b0\u4efb\u52a1\u7684\u4fdd\u5b58\u4f4d\u7f6e\u548c\u540c\u65f6\u8fd0\u884c\u6570\u91cf\u3002",
     sectionsNav: "\u8bbe\u7f6e\u5206\u7c7b",
     downloads: "\u4e0b\u8f7d",
-    downloadsDescription: "\u8fd9\u4e9b\u9ed8\u8ba4\u503c\u9002\u7528\u4e8e\u65b0\u4efb\u52a1\uff0c\u5df2\u6709\u4efb\u52a1\u4fdd\u7559\u539f\u4fdd\u5b58\u8def\u5f84\u3002",
+    downloadsDescription:
+      "\u8fd9\u4e9b\u9ed8\u8ba4\u503c\u9002\u7528\u4e8e\u65b0\u4efb\u52a1\uff0c\u5df2\u6709\u4efb\u52a1\u4fdd\u7559\u539f\u4fdd\u5b58\u8def\u5f84\u3002",
     advancedDownloads: "\u9ad8\u7ea7\u4e0b\u8f7d",
     advancedDownloadsDescription:
       "\u8c03\u6574\u9488\u5bf9\u670d\u52a1\u5668\u548c\u5927\u6587\u4ef6\u7684\u8fde\u63a5\u89c4\u5212\u3002",
@@ -227,27 +264,37 @@
     multiConnectionThreshold: "\u591a\u8fde\u63a5\u9608\u503c",
     segmentCount: "\u521d\u59cb\u5206\u7247\u6570",
     maxConnectionsPerHost: "\u6bcf\u4e2a\u4e3b\u673a\u6700\u5927\u8fde\u63a5\u6570",
-    maxActiveTasksTip: "\u540c\u65f6\u8fd0\u884c\u7684\u4e0b\u8f7d\u4efb\u52a1\u6570\u91cf\u3002\u66f4\u591a\u4efb\u52a1\u4f1a\u5171\u4eab\u5e26\u5bbd\u548c\u8fde\u63a5\u8d44\u6e90\u3002\u63a8\u8350\uff1a3\u20135",
-    globalSpeedLimitTip: "\u9650\u5236\u6240\u6709\u4e0b\u8f7d\u4efb\u52a1\u7684\u603b\u901f\u5ea6\u3002\u7559\u7a7a\u8868\u793a\u4e0d\u9650\u901f\u3002\u9002\u5408\u9700\u8981\u4fdd\u7559\u5e26\u5bbd\u7ed9\u5176\u4ed6\u5e94\u7528\u7684\u573a\u666f",
-    multiConnectionThresholdTip: "\u6587\u4ef6\u5927\u4e8e\u6b64\u9608\u503c\u65f6\u624d\u4f1a\u4f7f\u7528\u591a\u8fde\u63a5\u52a0\u901f\u3002\u5c0f\u6587\u4ef6\u7528\u5355\u8fde\u63a5\u66f4\u9ad8\u6548",
-    segmentCountTip: "\u6bcf\u4e2a\u4e0b\u8f7d\u4efb\u52a1\u7684\u5206\u6bb5\u6570\u3002\u66f4\u591a\u5206\u6bb5\u53ef\u52a0\u901f\u5927\u6587\u4ef6\u4e0b\u8f7d\uff0c\u4f46\u8fc7\u591a\u4f1a\u589e\u52a0\u670d\u52a1\u5668\u538b\u529b\u3002\u63a8\u8350\uff1a4\u20138",
-    maxConnectionsPerHostTip: "\u6bcf\u4e2a\u4e3b\u673a\u5141\u8bb8\u7684\u6700\u5927\u5e76\u884c\u8fde\u63a5\u6570\u3002\u63d0\u9ad8\u53ef\u52a0\u901f\u4e0b\u8f7d\uff0c\u4f46\u67d0\u4e9b\u670d\u52a1\u5668\u4f1a\u9650\u5236\u8fc7\u591a\u8fde\u63a5\u3002\u63a8\u8350\uff1a8\u201316",
+    maxActiveTasksTip:
+      "\u540c\u65f6\u8fd0\u884c\u7684\u4e0b\u8f7d\u4efb\u52a1\u6570\u91cf\u3002\u66f4\u591a\u4efb\u52a1\u4f1a\u5171\u4eab\u5e26\u5bbd\u548c\u8fde\u63a5\u8d44\u6e90\u3002\u63a8\u8350\uff1a3\u20135",
+    globalSpeedLimitTip:
+      "\u9650\u5236\u6240\u6709\u4e0b\u8f7d\u4efb\u52a1\u7684\u603b\u901f\u5ea6\u3002\u7559\u7a7a\u8868\u793a\u4e0d\u9650\u901f\u3002\u9002\u5408\u9700\u8981\u4fdd\u7559\u5e26\u5bbd\u7ed9\u5176\u4ed6\u5e94\u7528\u7684\u573a\u666f",
+    multiConnectionThresholdTip:
+      "\u6587\u4ef6\u5927\u4e8e\u6b64\u9608\u503c\u65f6\u624d\u4f1a\u4f7f\u7528\u591a\u8fde\u63a5\u52a0\u901f\u3002\u5c0f\u6587\u4ef6\u7528\u5355\u8fde\u63a5\u66f4\u9ad8\u6548",
+    segmentCountTip:
+      "\u6bcf\u4e2a\u4e0b\u8f7d\u4efb\u52a1\u7684\u5206\u6bb5\u6570\u3002\u66f4\u591a\u5206\u6bb5\u53ef\u52a0\u901f\u5927\u6587\u4ef6\u4e0b\u8f7d\uff0c\u4f46\u8fc7\u591a\u4f1a\u589e\u52a0\u670d\u52a1\u5668\u538b\u529b\u3002\u63a8\u8350\uff1a4\u20138",
+    maxConnectionsPerHostTip:
+      "\u6bcf\u4e2a\u4e3b\u673a\u5141\u8bb8\u7684\u6700\u5927\u5e76\u884c\u8fde\u63a5\u6570\u3002\u63d0\u9ad8\u53ef\u52a0\u901f\u4e0b\u8f7d\uff0c\u4f46\u67d0\u4e9b\u670d\u52a1\u5668\u4f1a\u9650\u5236\u8fc7\u591a\u8fde\u63a5\u3002\u63a8\u8350\uff1a8\u201316",
+    deleteToTrash: "删除文件时移至回收站",
+    deleteToTrashTip: "启用后，删除任务文件会移至系统回收站，而非永久删除。",
     speedUnit: "\u901f\u5ea6\u5355\u4f4d",
     sizeUnit: "\u5927\u5c0f\u5355\u4f4d",
     scheduledDownloads: "\u8ba1\u5212\u4e0b\u8f7d",
-    scheduledDownloadsDescription: "\u8bbe\u7f6e\u4e0b\u8f7d\u65f6\u6bb5\u3001\u9650\u901f\u65f6\u6bb5\uff0c\u4ee5\u53ca\u5168\u90e8\u4efb\u52a1\u5b8c\u6210\u540e\u7684\u52a8\u4f5c\u3002",
+    scheduledDownloadsDescription:
+      "\u8bbe\u7f6e\u4e0b\u8f7d\u65f6\u6bb5\u3001\u9650\u901f\u65f6\u6bb5\uff0c\u4ee5\u53ca\u5168\u90e8\u4efb\u52a1\u5b8c\u6210\u540e\u7684\u52a8\u4f5c\u3002",
     scheduledDownloadsOff: "\u672a\u542f\u7528\u8ba1\u5212",
     scheduledDownloadsSummary: "\u5df2\u542f\u7528 {{count}} \u6761\u89c4\u5219",
     scheduleGroupDownload: "\u4e0b\u8f7d\u65f6\u6bb5",
     scheduleGroupSpeed: "\u9650\u901f\u65f6\u6bb5",
     scheduleGroupCompletion: "\u5b8c\u6210\u540e",
     downloadWindow: "\u591c\u95f4\u4e0b\u8f7d\u7a97\u53e3",
-    downloadWindowDescription: "\u9075\u5b88\u8ba1\u5212\u7684\u6392\u961f\u4efb\u52a1\u53ea\u4f1a\u5728\u8fd9\u4e2a\u672c\u5730\u65f6\u95f4\u7a97\u53e3\u5185\u542f\u52a8\u3002",
+    downloadWindowDescription:
+      "\u9075\u5b88\u8ba1\u5212\u7684\u6392\u961f\u4efb\u52a1\u53ea\u4f1a\u5728\u8fd9\u4e2a\u672c\u5730\u65f6\u95f4\u7a97\u53e3\u5185\u542f\u52a8\u3002",
     downloadWindowTime: "\u4e0b\u8f7d\u7a97\u53e3",
     downloadWindowTimeTip:
       "\u4efb\u52a1\u4ec5\u5728\u8fd9\u4e2a\u65f6\u95f4\u6bb5\u5185\u542f\u52a8\uff08\u672c\u5730\u65f6\u95f4\uff09\uff0c\u9002\u5408\u5229\u7528\u7a7a\u95f2\u5e26\u5bbd\u3002",
     speedLimitWindow: "\u9650\u901f\u65f6\u6bb5",
-    speedLimitWindowDescription: "\u5728\u6307\u5b9a\u672c\u5730\u65f6\u95f4\u7a97\u53e3\u5185\u53e0\u52a0\u4e00\u4e2a\u5168\u5c40\u9650\u901f\u3002",
+    speedLimitWindowDescription:
+      "\u5728\u6307\u5b9a\u672c\u5730\u65f6\u95f4\u7a97\u53e3\u5185\u53e0\u52a0\u4e00\u4e2a\u5168\u5c40\u9650\u901f\u3002",
     speedLimitWindowTime: "\u9650\u901f\u7a97\u53e3",
     speedLimitWindowTimeTip:
       "\u65f6\u6bb5\u9650\u901f\u4ec5\u5728\u8fd9\u4e2a\u65f6\u95f4\u6bb5\u5185\u751f\u6548\u3002",
@@ -260,6 +307,14 @@
     completionNone: "\u4e0d\u6267\u884c\u64cd\u4f5c",
     completionExit: "\u5012\u8ba1\u65f6\u540e\u9000\u51fa\u5e94\u7528",
     completionShutdown: "\u786e\u8ba4\u540e\u5173\u673a",
+    completionSleep: "\u786e\u8ba4\u540e\u4f11\u7720",
+    completionHibernate: "\u786e\u8ba4\u540e\u4f11\u7720",
+    completionLockScreen: "\u5012\u8ba1\u65f6\u540e\u9501\u5c4f",
+    completionRunCommand: "\u5012\u8ba1\u65f6\u540e\u8fd0\u884c\u547d\u4ee4",
+    completionCommandLabel: "\u547d\u4ee4",
+    completionCommandTip:
+      "\u5168\u90e8\u4efb\u52a1\u5b8c\u6210\u540e\u8fd0\u884c\u7684 Shell \u547d\u4ee4\u3002Windows \u7528 cmd\uff0cmacOS/Linux \u7528 sh\u3002",
+    completionCommandPlaceholder: "\u4f8b\u5982 shutdown /s /t 60",
     completionCountdown: "\u5012\u8ba1\u65f6\u79d2\u6570",
     completionCountdownTip:
       "\u5168\u90e8\u4efb\u52a1\u5b8c\u6210\u540e\u9000\u51fa\u6216\u5173\u673a\u524d\u7684\u7b49\u5f85\u79d2\u6570\uff0c\u8303\u56f4 5\u2013300\u3002",
@@ -293,9 +348,6 @@
     themeSystem: "\u8ddf\u968f\u7cfb\u7edf",
     themeLight: "\u6d45\u8272",
     themeDark: "\u6df1\u8272",
-    fontFamily: "\u5b57\u4f53",
-    fontFamilySourceHanSans: "\u601d\u6e90\u9ed1\u4f53",
-    fontFamilySystem: "\u7cfb\u7edf\u9ed8\u8ba4",
     accentColor: "\u4e3b\u9898\u8272",
     accentBlue: "\u84dd\u8272",
     accentPurple: "\u7d2b\u8272",
@@ -305,22 +357,19 @@
     accentRose: "\u73ab\u7470\u7ea2",
     accentIndigo: "\u975b\u84dd",
     accentAmber: "\u7425\u73c0",
-    sidebarStripe: "\u4fa7\u8fb9\u680f\u5bfc\u822a\u6307\u793a\u6761",
-    sidebarStripeDescription: "\u5728\u5f53\u524d\u5bfc\u822a\u9879\u5de6\u4fa7\u663e\u793a\u4e00\u6761\u4e3b\u9898\u8272\u6307\u793a\u6761\u3002",
     titlebarGradient: "\u6807\u9898\u680f\u6e10\u53d8\u7ebf",
-    titlebarGradientDescription: "\u5728\u6807\u9898\u680f\u5e95\u90e8\u663e\u793a\u4e00\u6761\u7ec6\u5fae\u7684\u6e10\u53d8\u88c5\u9970\u7ebf\u3002",
+    titlebarGradientDescription:
+      "\u5728\u6807\u9898\u680f\u5e95\u90e8\u663e\u793a\u4e00\u6761\u7ec6\u5fae\u7684\u6e10\u53d8\u88c5\u9970\u7ebf\u3002",
     desktopIntegration: "\u684c\u9762\u96c6\u6210",
     desktopIntegrationDescription: "\u63a7\u5236\u4e3b\u7a97\u53e3\u4e4b\u5916\u7684\u7cfb\u7edf\u884c\u4e3a\u3002",
     desktopIntegrationSummary: "\u5df2\u542f\u7528 {{count}} \u9879",
     systemNotifications: "\u4e0b\u8f7d\u5b8c\u6210\u7cfb\u7edf\u901a\u77e5",
-    systemNotificationsDescription:
-      "\u4efb\u52a1\u5b8c\u6210\u65f6\u663e\u793a\u7cfb\u7edf\u901a\u77e5\u3002",
+    systemNotificationsDescription: "\u4efb\u52a1\u5b8c\u6210\u65f6\u663e\u793a\u7cfb\u7edf\u901a\u77e5\u3002",
     closeToTray: "\u5173\u95ed\u5230\u6258\u76d8",
     closeToTrayDescription:
       "\u5173\u95ed\u4e3b\u7a97\u53e3\u65f6\u8ba9 Vibe \u7ee7\u7eed\u5728\u7cfb\u7edf\u6258\u76d8\u8fd0\u884c\u3002",
     startOnBoot: "\u5f00\u673a\u542f\u52a8",
-    startOnBootDescription:
-      "\u767b\u5f55\u7cfb\u7edf\u540e\u81ea\u52a8\u542f\u52a8 Vibe Downloader\u3002",
+    startOnBootDescription: "\u767b\u5f55\u7cfb\u7edf\u540e\u81ea\u52a8\u542f\u52a8 Vibe Downloader\u3002",
     autoResumeOnStartup: "\u542f\u52a8\u540e\u7eed\u4f20\u4e2d\u65ad\u4efb\u52a1",
     autoResumeOnStartupDescription:
       "\u5c06\u4e0a\u6b21\u5173\u95ed\u65f6\u6b63\u5728\u4e0b\u8f7d\u7684\u4efb\u52a1\u91cd\u65b0\u6392\u961f\uff0c\u590d\u7528\u5df2\u4e0b\u8f7d\u6570\u636e\u524d\u4ecd\u4f1a\u6267\u884c\u7eed\u4f20\u6821\u9a8c\u3002",
@@ -351,16 +400,13 @@
     browserForwardHeadersEnabled: "\u59cb\u7ec8\u8f6c\u53d1",
     browserForwardHeadersDisabled: "\u4e0d\u8f6c\u53d1",
     browserInstalled: "Native \u4e3b\u673a\u5df2\u5b89\u88c5",
-    browserDetected:
-      "\u5df2\u68c0\u6d4b\u5230\u6d4f\u89c8\u5668\uff0cNative \u4e3b\u673a\u672a\u5b89\u88c5",
-    browserNotDetected:
-      "\u672a\u68c0\u6d4b\u5230\u6d4f\u89c8\u5668\uff0c\u4ecd\u53ef\u5b89\u88c5 Native \u4e3b\u673a",
+    browserDetected: "\u5df2\u68c0\u6d4b\u5230\u6d4f\u89c8\u5668\uff0cNative \u4e3b\u673a\u672a\u5b89\u88c5",
+    browserNotDetected: "\u672a\u68c0\u6d4b\u5230\u6d4f\u89c8\u5668\uff0c\u4ecd\u53ef\u5b89\u88c5 Native \u4e3b\u673a",
     browserUnsupported: "\u5f53\u524d\u5e73\u53f0\u4e0d\u652f\u6301",
     browserNoManifestPath: "Manifest \u8def\u5f84\u4e0d\u53ef\u7528",
     browserInstall: "\u5b89\u88c5",
     browserUninstall: "\u5378\u8f7d",
-    browserLoading:
-      "\u6b63\u5728\u52a0\u8f7d\u6d4f\u89c8\u5668\u96c6\u6210\u72b6\u6001\u2026",
+    browserLoading: "\u6b63\u5728\u52a0\u8f7d\u6d4f\u89c8\u5668\u96c6\u6210\u72b6\u6001\u2026",
     browserHostName: "Native \u4e3b\u673a",
     browserNativeHostPath: "Native \u4e3b\u673a\u8def\u5f84",
     browserExtensionPath: "\u6269\u5c55\u6e90\u7801",
@@ -377,9 +423,13 @@
     saving: "\u6b63\u5728\u4fdd\u5b58\u2026",
     resetDefaults: "\u6062\u590d\u9ed8\u8ba4\u8bbe\u7f6e",
     resetDefaultsTitle: "\u6062\u590d\u9ed8\u8ba4\u8bbe\u7f6e",
-    resetDefaultsConfirm: "\u8fd9\u5c06\u91cd\u7f6e\u6240\u6709\u8bbe\u7f6e\u4e3a\u9ed8\u8ba4\u503c\uff0c\u6b64\u64cd\u4f5c\u4e0d\u53ef\u64a4\u9500\u3002",
+    resetDefaultsConfirm:
+      "\u8fd9\u5c06\u91cd\u7f6e\u6240\u6709\u8bbe\u7f6e\u4e3a\u9ed8\u8ba4\u503c\uff0c\u6b64\u64cd\u4f5c\u4e0d\u53ef\u64a4\u9500\u3002",
     searchSettings: "\u641c\u7d22\u8bbe\u7f6e...",
     searchNoResults: "\u672a\u627e\u5230\u5339\u914d\u7684\u8bbe\u7f6e\u3002",
+    clearSearch: "清除搜索",
+    startTime: "开始时间",
+    endTime: "结束时间",
   },
   deleteDialog: {
     title: "\u5220\u9664\u4efb\u52a1",
@@ -399,7 +449,8 @@
   },
   newDownload: {
     title: "\u65b0\u5efa\u4e0b\u8f7d",
-    description: "\u6dfb\u52a0 URL\uff0c\u9009\u62e9\u4fdd\u5b58\u4f4d\u7f6e\uff0c\u7136\u540e\u5f00\u59cb\u4e0b\u8f7d\u3002",
+    description:
+      "\u6dfb\u52a0 URL\uff0c\u9009\u62e9\u4fdd\u5b58\u4f4d\u7f6e\uff0c\u7136\u540e\u5f00\u59cb\u4e0b\u8f7d\u3002",
     url: "URL",
     urlPlaceholder: "\u7c98\u8d34\u4e0b\u8f7d\u94fe\u63a5",
     detect: "\u68c0\u6d4b",
@@ -408,12 +459,10 @@
     autoDetecting: "\u6b63\u5728\u68c0\u67e5 URL\u2026",
     usingProbe:
       "\u5c06\u4f7f\u7528\u6700\u8fd1\u68c0\u6d4b\u7ed3\u679c\uff0c\u542f\u52a8\u524d\u4f1a\u518d\u6b21\u9a8c\u8bc1\u670d\u52a1\u5668\u3002",
-    revalidating:
-      "\u542f\u52a8\u4efb\u52a1\u524d\u6b63\u5728\u9a8c\u8bc1\u670d\u52a1\u5668\u3002",
+    revalidating: "\u542f\u52a8\u4efb\u52a1\u524d\u6b63\u5728\u9a8c\u8bc1\u670d\u52a1\u5668\u3002",
     probeFailedHint:
       "\u53ef\u4ee5\u4fee\u6539 URL\u3001\u91cd\u65b0\u68c0\u6d4b\uff0c\u6216\u76f4\u63a5\u5f00\u59cb\u5e76\u8ba9\u4e0b\u8f7d\u5668\u91cd\u8bd5\u3002",
-    probeErrorDns:
-      "\u65e0\u6cd5\u89e3\u6790\u5730\u5740\uff0c\u8bf7\u68c0\u67e5 URL \u662f\u5426\u6709\u8bef\u3002",
+    probeErrorDns: "\u65e0\u6cd5\u89e3\u6790\u5730\u5740\uff0c\u8bf7\u68c0\u67e5 URL \u662f\u5426\u6709\u8bef\u3002",
     probeErrorDenied:
       "\u670d\u52a1\u5668\u62d2\u7edd\u4e86\u8bbf\u95ee\uff0c\u8be5\u94fe\u63a5\u53ef\u80fd\u9700\u8981\u8ba4\u8bc1\u6216\u5df2\u8fc7\u671f\u3002",
     probeErrorNotFound:
@@ -422,8 +471,10 @@
       "\u670d\u52a1\u5668\u9650\u5236\u4e86\u8bf7\u6c42\u9891\u7387\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002",
     probeErrorConnection:
       "\u65e0\u6cd5\u8fde\u63a5\u670d\u52a1\u5668\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u8fde\u63a5\u548c URL\u3002",
-    probeErrorTimeout:
-      "\u670d\u52a1\u5668\u54cd\u5e94\u8d85\u65f6\uff0c\u53ef\u80fd\u662f\u4e34\u65f6\u6545\u969c\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002",
+    probeErrorTimeout: "服务器响应超时，可能是临时故障，请稍后重试。",
+    probeErrorTls: "安全连接失败，服务器的 SSL/TLS 证书可能无效或不受信任。",
+    probeErrorFfmpeg: "此下载需要 ffmpeg，但未找到。请安装 ffmpeg 后重试。",
+    probeErrorManifest: "无法解析下载清单，或清单格式不受支持。",
     duplicateHint:
       "\u5982\u679c\u4f60\u786e\u5b9e\u9700\u8981\u91cd\u590d\u4e0b\u8f7d\uff0c\u53ef\u4ee5\u521b\u5efa\u4e00\u4e2a\u526f\u672c\uff0c\u6700\u7ec8\u6587\u4ef6\u540d\u4ecd\u4f1a\u6309\u51b2\u7a81\u89c4\u5219\u81ea\u52a8\u8c03\u6574\u3002",
     createDuplicate: "\u4ecd\u7136\u521b\u5efa\u526f\u672c",
@@ -434,9 +485,20 @@
     fileNamePlaceholder: "\u7531\u670d\u52a1\u5668\u68c0\u6d4b",
     sha256: "SHA-256",
     sha256Placeholder: "\u53ef\u9009\u6821\u9a8c\u503c",
+    authentication: "\u8eab\u4efd\u8ba4\u8bc1",
+    authUsername: "\u7528\u6237\u540d",
+    authUsernamePlaceholder: "HTTP Basic Auth \u7528\u6237\u540d",
+    authPassword: "\u5bc6\u7801",
+    authPasswordPlaceholder: "HTTP Basic Auth \u5bc6\u7801",
+    sshKeyAuth: "SSH \u516c\u94a5\u8ba4\u8bc1",
+    sshKeyBrowse: "\u6d4f\u89c8\u5bc6\u94a5\u6587\u4ef6\u2026",
+    sshKeyLoaded: "\u5bc6\u94a5\u5df2\u52a0\u8f7d",
+    sshKeyPassphrase: "\u5bc6\u94a5\u53e3\u4ee4",
+    sshKeyPassphrasePlaceholder: "\u52a0\u5bc6\u5bc6\u94a5\u7684\u53e3\u4ee4\uff08\u53ef\u9009\uff09",
     batchUrls: "\u6279\u91cf URL",
     batchImport: "\u6279\u91cf\u5bfc\u5165 URL",
-    batchUrlsPlaceholder: "每行粘贴一个 HTTP/HTTPS、FTP/FTPS、SFTP、WebDAV、磁力链接、.torrent、Metalink、HLS 或 DASH URL",
+    batchUrlsPlaceholder:
+      "每行粘贴一个 HTTP/HTTPS、FTP/FTPS、SFTP、WebDAV、磁力链接、.torrent、Metalink、HLS 或 DASH URL",
     previewBatch: "\u9884\u89c8\u6279\u91cf",
     createBatch: "\u521b\u5efa\u6279\u91cf",
     batchSummary:
@@ -450,8 +512,10 @@
     probeResumable: "\u652f\u6301\u7eed\u4f20",
     probeSingleConnection: "\u5355\u8fde\u63a5",
     resumeSupported: "\u652f\u6301",
-    resumeUnavailable: "\u7eed\u4f20\u4e0d\u53ef\u7528",
-    advancedOptions: "\u9ad8\u7ea7\u9009\u9879",
+    resumeUnavailable: "续传不可用",
+    hlsQuality: "画质",
+    hlsAudioOnly: "仅音频",
+    advancedOptions: "高级选项",
     chooseFile: "\u9009\u62e9\u6587\u4ef6",
     removeFile: "\u79fb\u9664\u6587\u4ef6",
     fileKindTorrent: "\u79cd\u5b50\u6587\u4ef6",
@@ -463,8 +527,11 @@
     selectedCount: "\u5df2\u9009 {{count}}/{{total}}",
     totalSize: "\u603b\u8ba1",
     editFileName: "\u4fee\u6539\u6587\u4ef6\u540d",
-    torrentProtocolHint: "HTTP/HTTPS .torrent URL 和本地 .torrent 文件默认创建 BitTorrent 任务；浏览器 handoff 仍仅支持 HTTP/HTTPS。",
+    torrentProtocolHint:
+      "HTTP/HTTPS .torrent URL 和本地 .torrent 文件默认创建 BitTorrent 任务；浏览器 handoff 仍仅支持 HTTP/HTTPS。",
     manifestProtocolHint: "Torrent、Metalink、HLS 和 DASH 清单会在任务启动前解析；浏览器 handoff 仍仅支持 HTTP/HTTPS。",
+    dashLimitationsTitle: "DASH 限制",
+    dashLimitationsDescription: "DASH 下载启动后无法恢复。媒体流不支持代理和限速。",
     torrentSelectionRequired: "请至少选择一个 torrent 文件。",
     fileSelectionRequired: "请至少选择一个文件。",
     probeDirectory: "探测目录",
@@ -537,7 +604,8 @@
       bulkOpenFolder: "\u6253\u5f00\u7b2c\u4e00\u4e2a\u9009\u4e2d\u4efb\u52a1\u7684\u6587\u4ef6\u5939\u3002",
       view: "\u5207\u6362\u5f53\u524d\u4efb\u52a1\u89c6\u56fe\u3002",
       sort: "\u8c03\u6574\u4efb\u52a1\u5217\u8868\u6392\u5e8f\u3002",
-      resetFilters: "\u6e05\u9664\u6587\u4ef6\u7c7b\u578b\u3001\u6765\u6e90\u3001\u5931\u8d25\u539f\u56e0\u548c\u7eed\u4f20\u7b5b\u9009\u3002",
+      resetFilters:
+        "\u6e05\u9664\u6587\u4ef6\u7c7b\u578b\u3001\u6765\u6e90\u3001\u5931\u8d25\u539f\u56e0\u548c\u7eed\u4f20\u7b5b\u9009\u3002",
       speed: "\u5c06\u5168\u5c40\u4e0b\u8f7d\u901f\u5ea6\u9650\u5236\u4e3a {{speed}}\u3002",
       speedUnlimited: "\u79fb\u9664\u5168\u5c40\u901f\u5ea6\u9650\u5236\u3002",
       resetMockTasks: "\u91cd\u65b0\u751f\u6210\u5f00\u53d1\u793a\u4f8b\u4efb\u52a1\u3002",
@@ -574,13 +642,26 @@
     noConnections: "\u6b64\u4efb\u52a1\u6682\u65e0\u8fde\u63a5\u6570\u636e\u3002",
     noRequests: "\u6b64\u4efb\u52a1\u6682\u65e0 HTTP \u8bf7\u6c42\u8bca\u65ad\u3002",
     noLogs: "\u6b64\u4efb\u52a1\u6682\u65e0\u751f\u547d\u5468\u671f\u4e8b\u4ef6\u3002",
+
+    dashLimitationsNote: "DASH 下载无法恢复。媒体流不支持代理和限速。",
     integrity: "\u5b8c\u6574\u6027",
     hashNotRequested: "\u672a\u8981\u6c42\u6821\u9a8c",
     verifyHash: "\u6821\u9a8c",
     verifyingHash: "\u6821\u9a8c\u4e2d\u2026",
-    expectedHash: "\u9884\u671f",
-    actualHash: "\u5b9e\u9645",
-    requestFailed: "\u5931\u8d25",
+    expectedHash: "预期",
+    actualHash: "实际",
+    checksumsHeader: "校验和（{{count}}）",
+    verifyAll: "全部校验",
+    verifyingAll: "校验中...",
+    noChecksums: "无可用校验和",
+    weakAlgorithm: "弱算法",
+    checksumMatch: "匹配",
+    checksumMismatch: "不匹配",
+    mirrorsHeader: "镜像源（{{count}}）",
+    mirrorRetry: "从此镜像重试",
+    mirrorLocation: "位置",
+    mirrorFailures: "失败 {{count}} 次",
+    requestFailed: "失败",
     requestRange: "\u8303\u56f4",
     requestIfRange: "If-Range",
     requestLength: "\u957f\u5ea6",
@@ -590,13 +671,13 @@
     connectionRange: "\u8303\u56f4",
     connectionProgress: "\u8fdb\u5ea6",
     connectionSpeed: "\u901f\u5ea6",
-    chunksSummary: "{{total}} \u4e2a\u5206\u5757\u4e2d {{completed}} \u4e2a\u5df2\u5b8c\u6210\uff0c{{active}} \u4e2a\u6d3b\u8dc3\uff0c{{failed}} \u4e2a\u5931\u8d25\u3002",
-    connectionsSummary: "{{total}} \u4e2a\u8fde\u63a5\u4e2d {{active}} \u4e2a\u6d3b\u8dc3\uff0c\u603b\u901f\u5ea6 {{speed}}\u3002",
+    chunksSummary:
+      "{{total}} \u4e2a\u5206\u5757\u4e2d {{completed}} \u4e2a\u5df2\u5b8c\u6210\uff0c{{active}} \u4e2a\u6d3b\u8dc3\uff0c{{failed}} \u4e2a\u5931\u8d25\u3002",
+    connectionsSummary:
+      "{{total}} \u4e2a\u8fde\u63a5\u4e2d {{active}} \u4e2a\u6d3b\u8dc3\uff0c\u603b\u901f\u5ea6 {{speed}}\u3002",
     chunkTooltip: "\u8303\u56f4 {{range}}\uff0c\u5df2\u5b8c\u6210 {{percent}}\uff0c\u91cd\u8bd5 {{retries}} \u6b21",
     connectionTooltip: "\u8fde\u63a5 {{index}}\uff0c\u8303\u56f4 {{range}}\uff0c{{percent}}\uff0c{{speed}}",
-    chunksPlaceholder: "HTTP MVP \u5206\u5757\u70ed\u529b\u56fe\u5360\u4f4d\u5185\u5bb9\u3002",
     loadMore: "\u52a0\u8f7d\u66f4\u591a",
-    connectionsPlaceholder: "\u8fde\u63a5\u6807\u7b7e\u5360\u4f4d\u5185\u5bb9\u3002",
     btRuntime: "BitTorrent \u8fd0\u884c\u72b6\u6001",
     btNoRuntime: "\u6b64\u4efb\u52a1\u6682\u65e0 BitTorrent \u8fd0\u884c\u6570\u636e\u3002",
     btMetadataStatus: "\u5143\u6570\u636e",
@@ -616,7 +697,8 @@
     btRatio: "\u5206\u4eab\u7387",
     transferSettings: "\u4f20\u8f93\u8bbe\u7f6e",
     transferSettingsHint: "\u5728\u4efb\u52a1\u4e0b\u6b21\u6392\u961f\u6216\u5f00\u59cb\u65f6\u751f\u6548\u3002",
-    transferSettingsRunningHint: "\u8bf7\u5148\u6682\u505c\u6b64\u4efb\u52a1\uff0c\u518d\u4fee\u6539\u4f20\u8f93\u8bbe\u7f6e\u3002",
+    transferSettingsRunningHint:
+      "\u8bf7\u5148\u6682\u505c\u6b64\u4efb\u52a1\uff0c\u518d\u4fee\u6539\u4f20\u8f93\u8bbe\u7f6e\u3002",
     taskSpeedLimit: "\u4efb\u52a1\u9650\u901f",
     noTaskSpeedLimit: "\u672a\u8bbe\u7f6e\u4efb\u52a1\u9650\u901f",
     currentTaskSpeedLimit: "\u4efb\u52a1\u9650\u901f {{speed}}",
@@ -638,7 +720,8 @@
     saveTransfer: "\u4fdd\u5b58",
     savingTransfer: "\u4fdd\u5b58\u4e2d\u2026",
     transferSaved: "\u4f20\u8f93\u8bbe\u7f6e\u5df2\u4fdd\u5b58",
-    invalidSpeedLimit: "\u8bf7\u8f93\u5165\u6b63\u6570\u9650\u901f\uff0c\u6216\u7559\u7a7a\u8868\u793a\u4e0d\u9650\u901f\u3002",
+    invalidSpeedLimit:
+      "\u8bf7\u8f93\u5165\u6b63\u6570\u9650\u901f\uff0c\u6216\u7559\u7a7a\u8868\u793a\u4e0d\u9650\u901f\u3002",
     taskProxy: "\u4efb\u52a1\u4ee3\u7406",
     taskProxyHint: "HTTP \u652f\u6301 HTTP/HTTPS/SOCKS5\uff1bBT \u548c FTP \u4f7f\u7528 SOCKS5\u3002",
     proxyInherit: "\u7ee7\u627f\u5168\u5c40",
@@ -759,6 +842,27 @@
     selectAll: "\u9009\u62e9\u5f53\u524d\u7ed3\u679c",
     clearSelection: "\u6e05\u9664\u9009\u62e9",
   },
+  onboarding: {
+    title: "欢迎使用 Vibe Downloader",
+    step1Title: "开始下载",
+    step1Body: "按 Ctrl+N 打开「新建下载」。粘贴 URL、导入批量链接，或拖入 .torrent / .metalink / .mpd 文件。",
+    step2Title: "剪贴板和浏览器扩展",
+    step2Body: "剪贴板链接会被自动检测。安装浏览器扩展后，可从 Chrome、Edge、Firefox 和 Opera 一键交接下载。",
+    step3Title: "键盘快捷键",
+    step3Body: "按 Ctrl+K 打开命令面板，Ctrl+N 新建下载，Ctrl+, 打开设置。随时按 ? 查看全部快捷键。",
+    skip: "跳过",
+    next: "下一步",
+    start: "开始使用",
+    help: "帮助",
+  },
+  errorBoundary: {
+    title: "\u5e94\u7528\u51fa\u73b0\u5f02\u5e38",
+    description:
+      "\u7a0b\u5e8f\u9047\u5230\u4e86\u672a\u9884\u671f\u7684\u9519\u8bef\u3002\u4f60\u53ef\u4ee5\u5c1d\u8bd5\u91cd\u65b0\u52a0\u8f7d\uff0c\u6216\u5c06\u9519\u8bef\u4fe1\u606f\u590d\u5236\u540e\u53cd\u9988\u3002",
+    reload: "\u91cd\u65b0\u52a0\u8f7d",
+    copyError: "\u590d\u5236\u9519\u8bef",
+    home: "\u56de\u9996\u9875",
+  },
   locale: {
     label: "\u8bed\u8a00",
     en: "English",
@@ -768,6 +872,30 @@
     ko: "\u97e9\u6587",
     ru: "\u4fc4\u6587",
     es: "\u897f\u73ed\u7259\u6587",
+  },
+  format: {
+    byteUnit: { b: "B", kb: "KB", mb: "MB", gb: "GB", tb: "TB" },
+    speed: "{{value}} {{unit}}/s",
+    eta: {
+      seconds: "{{n}}秒",
+      minutes: "{{n}}分",
+      hours: "{{h}}时{{m}}分",
+      days: "{{d}}天{{h}}时",
+    },
+    percent: "{{value}}%",
+  },
+  errors: {
+    duplicateTask: "此资源已存在下载任务。",
+    finalPathConflict: "目标文件已存在，请选择其他名称或文件夹。",
+    remoteChanged: "远程文件自上次下载后已更改，请重新开始下载。",
+    resumeUnavailable: "服务器不再支持断点续传，请重新开始下载。",
+    tempFileMissing: "临时下载文件已丢失，请重新开始下载。",
+    tempFileSmaller: "临时文件小于已记录的进度，请重新开始下载。",
+    diskWriteFailed: "写入磁盘失败，请释放空间或选择其他文件夹。",
+    authHeadersExpired: "认证凭据已过期，请检查 URL 后重试。",
+    httpDenied: "访问被拒绝（403），请检查 URL 或凭据。",
+    httpNotFound: "资源未找到（404），请检查 URL。",
+    serverRateLimited: "服务器正在限制请求频率，请稍后重试。",
   },
 } as const;
 

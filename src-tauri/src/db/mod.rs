@@ -22,7 +22,7 @@ pub use self::browser_messages::{
     update_browser_message_status,
 };
 pub use self::connection::{connect, DbConnection};
-pub use self::events::{insert_task_event, list_task_events_page};
+pub use self::events::{get_latest_pause_event_type, insert_task_event, list_task_events_page};
 pub use self::hash::update_hash_verification;
 pub use self::hls::{
     get_hls_task, hls_finish_requested, list_hls_segments, request_hls_finish,
@@ -31,9 +31,10 @@ pub use self::hls::{
     HlsTaskUpsert,
 };
 pub use self::metalink::{
-    insert_metalink_resource, list_metalink_resources_for_file, mark_metalink_resource_completed,
-    mark_metalink_resource_failed, upsert_metalink_task, MetalinkResourceInsert,
-    MetalinkResourceRecord, MetalinkTaskUpsert,
+    insert_metalink_resource, list_metalink_resources_for_file, list_metalink_resources_for_task,
+    mark_metalink_resource_completed, mark_metalink_resource_failed,
+    promote_metalink_resource_for_retry, reset_metalink_resource_statuses,
+    upsert_metalink_task, MetalinkResourceInsert, MetalinkResourceRecord, MetalinkTaskUpsert,
 };
 pub use self::request_diagnostics::{insert_request_diagnostic, list_request_diagnostics_page};
 pub use self::request_headers::{
@@ -55,8 +56,8 @@ pub use self::segments::{
     update_segments_status_for_task, SegmentSplit,
 };
 pub use self::settings::{
-    clipboard_monitor_enabled, get_settings, local_time_window_active, normalize_accent_color,
-    normalize_font_family, normalize_local_time, normalize_multi_connection_threshold_bytes,
+    clipboard_monitor_enabled, delete_to_trash_enabled, get_settings, local_time_window_active,
+    normalize_accent_color, normalize_local_time, normalize_multi_connection_threshold_bytes,
     normalize_proxy_mode, normalize_proxy_no_proxy, normalize_proxy_optional, normalize_proxy_url,
     normalize_speed_limit_bps, parse_multi_connection_threshold_bytes, parse_speed_limit_bps,
     upsert_settings,
@@ -88,10 +89,10 @@ pub use self::task_records::{
 pub use self::task_state::{
     clear_tasks, complete_segment, complete_task, complete_task_segment,
     complete_unknown_size_task, delete_segments_for_task, delete_task_files_for_task,
-    delete_task_record, reset_interrupted_tasks, reset_task_download_state,
-    update_task_and_segment_progress, update_task_final_path, update_task_health_summary,
-    update_task_progress, update_task_retry_after, update_task_runtime_progress,
-    update_task_save_target, update_task_status,
+    delete_task_record, delete_task_records_batch, reset_interrupted_tasks,
+    reset_task_download_state, update_task_and_segment_progress, update_task_final_path,
+    update_task_health_summary, update_task_progress, update_task_retry_after,
+    update_task_runtime_progress, update_task_save_target, update_task_status,
 };
 pub use self::torrent::{
     get_torrent_runtime_snapshot, torrent_seeding_enabled, update_task_remote_metadata,

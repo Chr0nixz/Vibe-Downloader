@@ -1,4 +1,4 @@
-use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
+use sqlx::{Executor, QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::models::{
     AppErrorPayload, HashVerificationStatus, RecoveryAction, TaskKind, TaskPriority, TaskRecord,
@@ -499,12 +499,15 @@ pub async fn get_task_record(pool: &SqlitePool, id: &str) -> Result<Option<TaskR
     row.as_ref().map(row_to_task).transpose()
 }
 
-pub async fn find_duplicate_task_record(
-    pool: &SqlitePool,
+pub async fn find_duplicate_task_record<'e, E>(
+    executor: E,
     url: &str,
     final_url: Option<&str>,
     bt_source_key: Option<&str>,
-) -> Result<Option<TaskRecord>, String> {
+) -> Result<Option<TaskRecord>, String>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     let final_url = final_url.unwrap_or("");
     let bt_source_key = bt_source_key.unwrap_or("");
     let row = sqlx::query(
@@ -541,7 +544,7 @@ pub async fn find_duplicate_task_record(
     .bind(final_url)
     .bind(bt_source_key)
     .bind(bt_source_key)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -563,7 +566,7 @@ pub async fn list_queued_task_records(
                hash_status, hash_error, hash_verified_at, created_at, updated_at
         FROM tasks
         WHERE status = 'queued' AND (retry_after_at IS NULL OR retry_after_at <= ?)
-        ORDER BY queue_position ASC, created_at ASC
+        ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, queue_position ASC, created_at ASC
         LIMIT ?
         "#,
     )
@@ -774,7 +777,13 @@ fn legacy_error_code(error: &str) -> Option<String> {
     None
 }
 
-pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<(), String> {
+pub async fn insert_task_record<'e, E>(
+    executor: E,
+    task: &TaskRecord,
+) -> Result<(), String>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     sqlx::query(
         r#"
         INSERT INTO tasks (
@@ -826,7 +835,7 @@ pub async fn insert_task_record(pool: &SqlitePool, task: &TaskRecord) -> Result<
     .bind(&task.hash_verified_at)
     .bind(&task.created_at)
     .bind(&task.updated_at)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|e| e.to_string())?;
 

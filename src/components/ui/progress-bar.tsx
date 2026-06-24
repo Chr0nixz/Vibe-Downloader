@@ -19,20 +19,16 @@ const sizeClass: Record<NonNullable<ProgressBarProps["size"]>, string> = {
 };
 
 const toneFill: Record<NonNullable<ProgressBarProps["tone"]>, string> = {
-  primary:
-    "bg-[linear-gradient(90deg,var(--accent-primary),var(--accent-energy))]",
+  primary: "bg-accent-primary",
   success: "bg-status-success",
   danger: "bg-status-danger",
   neutral: "bg-border-subtle",
 };
 
 const toneGlow: Record<NonNullable<ProgressBarProps["tone"]>, string> = {
-  primary:
-    "shadow-[0_0_8px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
-  success:
-    "shadow-[0_0_6px_color-mix(in_oklch,var(--status-success)_30%,transparent)]",
-  danger:
-    "shadow-[0_0_6px_color-mix(in_oklch,var(--status-danger)_30%,transparent)]",
+  primary: "shadow-[0_0_8px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
+  success: "shadow-[0_0_6px_color-mix(in_oklch,var(--status-success)_30%,transparent)]",
+  danger: "shadow-[0_0_6px_color-mix(in_oklch,var(--status-danger)_30%,transparent)]",
   neutral: "",
 };
 

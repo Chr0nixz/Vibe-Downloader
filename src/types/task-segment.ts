@@ -1,15 +1,9 @@
-import type {
-  SegmentStatus,
-  TaskSegment as GeneratedTaskSegment,
-} from "@/generated/bindings";
+import type { TaskSegment as GeneratedTaskSegment, SegmentStatus } from "@/generated/bindings";
 import { parseByteCount } from "@/types/task";
 
 export type { SegmentStatus };
 
-export type TaskSegment = Omit<
-  GeneratedTaskSegment,
-  "rangeStart" | "rangeEnd" | "downloadedUntil" | "speedBps"
-> & {
+export type TaskSegment = Omit<GeneratedTaskSegment, "rangeStart" | "rangeEnd" | "downloadedUntil" | "speedBps"> & {
   rangeStart: number;
   rangeEnd: number;
   downloadedUntil: number;
