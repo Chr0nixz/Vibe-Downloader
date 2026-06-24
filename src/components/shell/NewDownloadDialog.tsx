@@ -8,7 +8,6 @@ import {
   FileText,
   FileVideo,
   FolderOpen,
-  ListPlus,
   Pencil,
   X,
 } from "lucide-react";
@@ -550,11 +549,6 @@ export function NewDownloadDialog({
     }
   }
 
-  function openBatchImport() {
-    setAdvancedOpen(true);
-    window.setTimeout(() => batchInputRef.current?.focus(), 0);
-  }
-
   useEffect(() => {
     if (!initialSourceId || appliedInitialSourceId.current === initialSourceId) return;
     appliedInitialSourceId.current = initialSourceId;
@@ -958,16 +952,6 @@ export function NewDownloadDialog({
               />
               {t("newDownload.advancedOptions")}
             </button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-8 self-start px-2 text-xs"
-              onClick={openBatchImport}
-            >
-              <ListPlus className="h-4 w-4" />
-              {t("newDownload.batchImport")}
-            </Button>
 
             {/* Advanced section */}
             {advancedOpen ? (
