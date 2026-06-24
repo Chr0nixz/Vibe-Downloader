@@ -7,6 +7,7 @@ import {
   Filter,
   FolderOpen,
   Gauge,
+  Info,
   ListChecks,
   Moon,
   Pause,
@@ -634,6 +635,18 @@ function buildCommands({
     active: nav === "settings",
     featured: true,
     run: () => onSetNav("settings"),
+  });
+  push({
+    id: "app.about",
+    label: t("palette.commands.openAbout"),
+    description: t("palette.descriptions.openAbout"),
+    group: "app",
+    icon: Info,
+    keywords: keyword("about", "version", "info", "关于", "版本", "信息"),
+    enabled: true,
+    active: nav === "about",
+    featured: false,
+    run: () => onSetNav("about"),
   });
   push({
     id: "app.theme.dark",

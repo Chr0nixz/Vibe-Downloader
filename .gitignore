@@ -17,6 +17,7 @@ browser/dist
 .vscode/*
 !.vscode/extensions.json
 .idea
+.trae/
 .DS_Store
 .impeccable/
 *.suo

@@ -1084,6 +1084,10 @@ export async function seedMockTasks(): Promise<Task[]> {
   return cloneTasks();
 }
 
+export async function getAppVersion(): Promise<string> {
+  return "0.2.0";
+}
+
 export async function getSettings(): Promise<AppSettings> {
   return { ...settings };
 }

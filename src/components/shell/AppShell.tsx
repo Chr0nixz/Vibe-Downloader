@@ -153,7 +153,7 @@ export function AppShell() {
   const addToast = useToastStore((s) => s.addToast);
   const dismissToast = useToastStore((s) => s.dismissToast);
 
-  const taskSurfaceActive = nav !== "settings";
+  const taskSurfaceActive = nav !== "settings" && nav !== "about";
 
   const refreshTasks = useCallback(
     async (selectId?: string) => {

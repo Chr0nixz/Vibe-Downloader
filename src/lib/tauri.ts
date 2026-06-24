@@ -792,3 +792,11 @@ export function onFileDrop(
 }
 
 export { isTauriRuntime };
+
+export async function getAppVersion(): Promise<string> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getAppVersion();
+  }
+  const { getVersion } = await import("@tauri-apps/api/app");
+  return getVersion();
+}

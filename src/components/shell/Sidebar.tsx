@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Download,
   HelpCircle,
+  Info,
   LayoutGrid,
   PauseCircle,
   Settings,
@@ -37,6 +38,12 @@ const settingsItem: NavItemDef = {
   id: "settings",
   labelKey: "nav.settings",
   icon: Settings,
+};
+
+const aboutItem: NavItemDef = {
+  id: "about",
+  labelKey: "nav.about",
+  icon: Info,
 };
 
 export function Sidebar({ onOpenOnboarding }: { onOpenOnboarding?: () => void }) {
@@ -128,6 +135,14 @@ export function Sidebar({ onOpenOnboarding }: { onOpenOnboarding?: () => void })
           count={0}
           compact={collapsed}
           onClick={() => setNav("settings")}
+        />
+        <NavItem
+          item={aboutItem}
+          active={nav === "about"}
+          label={t(aboutItem.labelKey)}
+          count={0}
+          compact={collapsed}
+          onClick={() => setNav("about")}
         />
 
         {/* Help / onboarding button */}

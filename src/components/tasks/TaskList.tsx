@@ -11,6 +11,12 @@ const SettingsPage = lazy(() =>
   })),
 );
 
+const AboutPage = lazy(() =>
+  import("@/components/about/AboutPage").then((m) => ({
+    default: m.AboutPage,
+  })),
+);
+
 import { ListContextMenu } from "@/components/tasks/TaskContextMenu";
 import { TaskRow } from "@/components/tasks/TaskRow";
 import { TASK_ROW_ESTIMATED_SIZE } from "@/components/tasks/task-layout";
@@ -311,6 +317,14 @@ export function TaskList({
     return (
       <Suspense fallback={<div className="flex min-h-0 min-w-0 flex-1 animate-pulse bg-surface-root" />}>
         <SettingsPage />
+      </Suspense>
+    );
+  }
+
+  if (nav === "about") {
+    return (
+      <Suspense fallback={<div className="flex min-h-0 min-w-0 flex-1 animate-pulse bg-surface-root" />}>
+        <AboutPage />
       </Suspense>
     );
   }

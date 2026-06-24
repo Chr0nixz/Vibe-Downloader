@@ -10,7 +10,7 @@ import { useTaskUIStore } from "./task-ui-store";
 
 /* ── Types ── */
 
-export type NavFilter = "all" | "downloading" | "paused" | "completed" | "failed" | "settings";
+export type NavFilter = "all" | "downloading" | "paused" | "completed" | "failed" | "settings" | "about";
 
 export type TaskSortKey = "updated_at" | "created_at" | "file_size" | "progress" | "speed" | "status";
 
