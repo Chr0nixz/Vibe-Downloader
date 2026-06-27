@@ -181,7 +181,19 @@ pub async fn get_settings(
 }
 
 pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Result<(), String> {
-    validate_settings(settings)?;
+    let settings = AppSettings {
+        max_active_tasks: settings
+            .max_active_tasks
+            .clamp(MIN_MAX_ACTIVE_TASKS, MAX_MAX_ACTIVE_TASKS),
+        segment_count: settings
+            .segment_count
+            .clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT),
+        max_connections_per_host: settings.max_connections_per_host.clamp(
+            MIN_MAX_CONNECTIONS_PER_HOST,
+            MAX_MAX_CONNECTIONS_PER_HOST,
+        ),
+        ..settings.clone()
+    };
     upsert_setting_value(
         pool,
         SETTING_MAX_ACTIVE_TASKS,
@@ -520,24 +532,6 @@ fn parse_i32_or_default(
     Ok(parsed.clamp(min, max))
 }
 
-fn validate_settings(settings: &AppSettings) -> Result<(), String> {
-    if settings.max_active_tasks < MIN_MAX_ACTIVE_TASKS || settings.max_active_tasks > MAX_MAX_ACTIVE_TASKS {
-        return Err("max_active_tasks is out of range.".to_string());
-    }
-    if settings.segment_count < MIN_SEGMENT_COUNT || settings.segment_count > MAX_SEGMENT_COUNT {
-        return Err("segment_count is out of range.".to_string());
-    }
-    if settings.max_connections_per_host < MIN_MAX_CONNECTIONS_PER_HOST
-        || settings.max_connections_per_host > MAX_MAX_CONNECTIONS_PER_HOST
-    {
-        return Err("max_connections_per_host is out of range.".to_string());
-    }
-    if settings.completion_countdown_seconds < 5 || settings.completion_countdown_seconds > 300 {
-        return Err("completion_countdown_seconds must be between 5 and 300.".to_string());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,45 +563,6 @@ mod tests {
         assert_eq!(parse_i32_or_default(None, 4, 1, 8).expect("default"), 4);
         let err = parse_i32_or_default(Some("oops"), 4, 1, 8).expect_err("invalid int");
         assert!(err.contains("Invalid integer value: oops"));
-    }
-
-    #[test]
-    fn validate_settings_rejects_out_of_range_fields() {
-        let settings = AppSettings {
-            max_active_tasks: 0,
-            default_save_dir: String::new(),
-            global_speed_limit_bps: None,
-            multi_connection_threshold_bytes: "0".to_string(),
-            segment_count: 1,
-            max_connections_per_host: 1,
-            system_notifications: true,
-            close_to_tray: false,
-            start_on_boot: false,
-            auto_resume_on_startup: false,
-            floating_window_enabled: false,
-            clipboard_monitor_enabled: true,
-            accent_color: AppAccentColor::Blue,
-            proxy_mode: AppProxyMode::Off,
-            proxy_url: String::new(),
-            proxy_no_proxy: String::new(),
-            proxy_username: String::new(),
-            proxy_password_saved: false,
-            schedule_download_window_enabled: false,
-            schedule_download_window_start: "00:00".to_string(),
-            schedule_download_window_end: "06:00".to_string(),
-            schedule_speed_limit_window_enabled: false,
-            schedule_speed_limit_window_start: "18:00".to_string(),
-            schedule_speed_limit_window_end: "23:00".to_string(),
-            schedule_speed_limit_bps: None,
-            titlebar_gradient_enabled: true,
-            completion_action: CompletionAction::None,
-            completion_countdown_seconds: 30,
-            completion_run_command: String::new(),
-            delete_to_trash: true,
-        };
-
-        let err = validate_settings(&settings).expect_err("invalid settings");
-        assert!(err.contains("max_active_tasks is out of range"));
     }
 
     #[tokio::test]
