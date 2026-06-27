@@ -173,7 +173,7 @@ pub async fn migrate_legacy_ftp_credentials(pool: &SqlitePool) -> Result<(), Str
                     )
                     .bind(sanitized_url)
                     .bind(sanitized_final_url)
-                    .bind(&task_credentials_encrypt_error(&error))
+                    .bind(task_credentials_encrypt_error(&error))
                     .bind(&now)
                     .bind(&task_id)
                     .execute(&mut *tx)
@@ -188,7 +188,7 @@ pub async fn migrate_legacy_ftp_credentials(pool: &SqlitePool) -> Result<(), Str
                         "#,
                     )
                     .bind(&task_id)
-                    .bind(&task_credentials_encrypt_error(&error))
+                    .bind(task_credentials_encrypt_error(&error))
                     .bind(&event_now)
                     .execute(&mut *tx)
                     .await

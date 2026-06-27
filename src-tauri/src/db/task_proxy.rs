@@ -73,7 +73,7 @@ pub async fn upsert_task_proxy_settings(
                 "task proxy password",
                 input.task_id.as_bytes(),
             )
-            .map_err(|error| proxy_secret_encrypt_error(error))?;
+            .map_err(proxy_secret_encrypt_error)?;
             password_ciphertext = Some(ciphertext);
             nonce = Some(secret_nonce);
         }
@@ -137,7 +137,7 @@ pub async fn resolve_task_proxy_config(
                     "task proxy password",
                     task_id.as_bytes(),
                 )
-                .map_err(|error| proxy_secret_decrypt_error(error))?),
+                .map_err(proxy_secret_decrypt_error)?),
                 _ => None,
             };
             Ok(ResolvedProxyConfig {
