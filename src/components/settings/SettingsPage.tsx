@@ -16,6 +16,7 @@ import { useTheme } from "next-themes";
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { BrowserCaptureControls } from "@/components/settings/BrowserCaptureControls";
+import { ClassificationRulesEditor } from "@/components/settings/ClassificationRulesEditor";
 import {
   type SettingsSearchSection,
   settingsSearchHasResults,
@@ -164,7 +165,6 @@ export function SettingsPage() {
   const [browserExportResult, setBrowserExportResult] = useState<BrowserExtensionExportResult | null>(null);
   const [browserCapture, setBrowserCapture] = useState<BrowserCaptureSettings | null>(null);
   const [browserCaptureSaving, setBrowserCaptureSaving] = useState(false);
-  const browserExperimentalCaptureEnabled = browserStatus?.experimentalCaptureEnabled ?? false;
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveVersion = useRef(0);
   const currentLocale = (
@@ -842,12 +842,14 @@ export function SettingsPage() {
     setBrowserCaptureSaving(true);
     try {
       const next = await updateBrowserCaptureSettings({
+        experimentalCaptureEnabled: patch.experimentalCaptureEnabled ?? null,
         autoIntercept: patch.autoIntercept ?? null,
         forwardHeaders: patch.forwardHeaders ?? null,
         forwardHeadersMode: patch.forwardHeadersMode ?? null,
         minSizeBytes: patch.minSizeBytes ?? null,
         fileExtensions: patch.fileExtensions ?? null,
         siteRules: patch.siteRules ?? null,
+        allowIntranetHandoff: patch.allowIntranetHandoff ?? null,
       });
       setBrowserCapture(next);
       setBrowserStatus((current) => (current ? { ...current, capture: next } : current));
@@ -937,7 +939,7 @@ export function SettingsPage() {
                     value={settingsSearch}
                     onChange={(e) => setSettingsSearch(e.target.value)}
                     placeholder={t("settings.searchSettings")}
-                    className="h-9 w-full rounded-md border border-border-subtle bg-surface-root pl-9 pr-8 text-sm text-text-primary placeholder:text-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+                    className="h-9 w-full rounded-md border border-border-subtle bg-surface-root pl-9 pr-8 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                   />
                   {settingsSearch ? (
                     <button
@@ -1161,6 +1163,8 @@ export function SettingsPage() {
                     className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
                   />
                 </SettingsRow>
+
+                <ClassificationRulesEditor />
               </SettingsSection>
 
               <SettingsSection {...getSectionProps("scheduled-downloads")}>
@@ -1555,7 +1559,7 @@ export function SettingsPage() {
                 <p className="border-b border-border-divider px-4 py-3 text-xs leading-5 text-text-muted">
                   {t("settings.browserIntegrationTip")}
                 </p>
-                {browserCapture && browserExperimentalCaptureEnabled ? (
+                {browserCapture ? (
                   <BrowserCaptureControls
                     settings={browserCapture}
                     disabled={browserLoading || browserCaptureSaving}
@@ -1597,7 +1601,7 @@ export function SettingsPage() {
                         <Button
                           type="button"
                           variant={browser.manifestInstalled ? "ghost" : "outline"}
-                          className="h-11 justify-center md:h-9"
+                          className="h-11 justify-center md:h-8"
                           onClick={() => void setBrowserInstalled(browser)}
                           disabled={disabled}
                         >

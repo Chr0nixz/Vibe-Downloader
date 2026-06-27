@@ -34,7 +34,7 @@ function refresh() {
       if (response?.ok) render(response.status);
     },
     (error) => {
-      connectionInfo.textContent = `Failed to communicate with the extension: ${String(error?.message ?? error)}`;
+      connectionInfo.textContent = i18n("errCommFailed", [String(error?.message ?? error)]);
     },
   );
 }
@@ -84,9 +84,11 @@ function render(status) {
       strong.textContent = rule.hostPattern ?? "";
       info.appendChild(strong);
 
-      info.appendChild(document.createTextNode(` — mode: ${rule.mode ?? "default"}`));
+      info.appendChild(document.createTextNode(` — ${i18n("ruleModeLabel", [rule.mode ?? "default"])}`));
       if (rule.forwardHeaders != null) {
-        info.appendChild(document.createTextNode(`, headers: ${rule.forwardHeaders ? "on" : "off"}`));
+        info.appendChild(
+          document.createTextNode(`, ${i18n("ruleHeadersStatus", [rule.forwardHeaders ? "on" : "off"])}`),
+        );
       }
 
       const actions = document.createElement("div");
@@ -209,7 +211,7 @@ function saveRules(rules) {
       refresh();
     })
     .catch((error) => {
-      alert(`Failed to save rules: ${String(error?.message ?? error)}`);
+      alert(i18n("errSaveRulesFailed", [String(error?.message ?? error)]));
     });
 }
 
@@ -244,7 +246,7 @@ saveButton.addEventListener("click", () => {
       }, 2_000);
     })
     .catch((error) => {
-      saveButton.textContent = `Error: ${String(error?.message ?? error)}`;
+      saveButton.textContent = i18n("errGeneric", [String(error?.message ?? error)]);
     });
 });
 

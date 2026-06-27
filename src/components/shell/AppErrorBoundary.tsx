@@ -2,6 +2,8 @@ import { useCallback } from "react";
 import { ErrorBoundary, type FallbackProps } from "react-error-boundary";
 import { useTranslation } from "react-i18next";
 
+import { Button } from "@/components/ui/button";
+
 // Defensive fallbacks: the error boundary fires when the app is broken,
 // so the i18n bundle may not be initialized. Always have English strings ready.
 const FALLBACK = {
@@ -18,7 +20,6 @@ function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
   const title = t("errorBoundary.title", { defaultValue: FALLBACK.title });
   const description = t("errorBoundary.description", { defaultValue: FALLBACK.description });
   const reloadLabel = t("errorBoundary.reload", { defaultValue: FALLBACK.reload });
-  const copyLabel = t("errorBoundary.copyError", { defaultValue: FALLBACK.copyError });
   const homeLabel = t("errorBoundary.home", { defaultValue: FALLBACK.home });
 
   const handleReload = useCallback(() => {
@@ -35,7 +36,7 @@ function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
       role="alert"
       className="flex h-full w-full flex-col items-center justify-center gap-6 bg-surface-root p-8 text-center"
     >
-      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--status-danger)]/10">
+      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-status-danger/10">
         <svg
           xmlns="http://www.w3.org/2000/svg"
           viewBox="0 0 24 24"
@@ -64,27 +65,15 @@ function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
       )}
 
       <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={handleReload}
-          className="inline-flex h-9 items-center justify-center rounded-md bg-accent-primary px-4 text-sm font-medium text-text-on-accent transition-colors hover:bg-accent-energy"
-        >
+        <Button type="button" onClick={handleReload}>
           {reloadLabel}
-        </button>
-        <button
-          type="button"
-          onClick={handleCopy}
-          className="inline-flex h-9 items-center justify-center rounded-md border border-border-subtle bg-surface-base px-4 text-sm font-medium text-text-primary transition-colors hover:bg-surface-hover"
-        >
-          {copyLabel}
-        </button>
-        <button
-          type="button"
-          onClick={resetErrorBoundary}
-          className="inline-flex h-9 items-center justify-center rounded-md border border-border-subtle bg-surface-base px-4 text-sm font-medium text-text-primary transition-colors hover:bg-surface-hover"
-        >
+        </Button>
+        <Button type="button" variant="outline" onClick={handleCopy}>
+          {t("errorBoundary.copy")}
+        </Button>
+        <Button type="button" variant="outline" onClick={resetErrorBoundary}>
           {homeLabel}
-        </button>
+        </Button>
       </div>
     </div>
   );

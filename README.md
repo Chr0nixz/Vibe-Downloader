@@ -163,7 +163,8 @@ Chrome、Edge、Brave、Vivaldi、Chromium 可以加载 Chromium 包。Firefox �
 | `pnpm dev` | 启动 Vite dev server |
 | `pnpm build` | TypeScript 编译并构建前端 |
 | `pnpm typecheck` | TypeScript 类型检查 |
-| `pnpm lint` | 当前等同于 `tsc --noEmit` |
+| `pnpm lint` | Biome 静态分析（lint + 格式检查，不含类型检查） |
+| `pnpm check` | typecheck + lint 组合检查 |
 | `pnpm test:frontend` | 运行 Vitest 纯 TS 逻辑测试 |
 | `pnpm tauri dev` | 启动桌面应用 |
 | `pnpm dev:tauri` | 带 Rust 调试日志启动桌面应用 |
@@ -202,7 +203,7 @@ docs/                        发布、日志、浏览器集成、路线图、审
 ## 技术栈
 
 - 桌面框架：Tauri 2
-- 前端：React 19、TypeScript、Zustand、Tailwind v4、Radix primitives、Framer Motion、i18next
+- 前端：React 19、TypeScript、Zustand、Tailwind v4、Radix primitives、Motion、i18next
 - 后端：Rust、tokio、reqwest、sqlx SQLite、tracing
 - 协议引擎：suppaftp (FTP/FTPS)、russh + russh-sftp (SFTP)、librqbit (BitTorrent)、hls_m3u8 + aes/cbc (HLS)、quick-xml (Metalink/DASH)、chacha20poly1305 (凭据加密)
 - 类型导出：tauri-specta

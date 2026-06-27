@@ -21,6 +21,9 @@
   --color-border-danger: var(--border-danger);
   --color-border-danger-strong: var(--border-danger-strong);
   --color-border-danger-subtle: var(--border-danger-subtle);
+  --color-border-warning: var(--border-warning);
+  --color-border-warning-strong: var(--border-warning-strong);
+  --color-border-warning-subtle: var(--border-warning-subtle);
   --color-border-success: var(--border-success);
   --color-border-success-strong: var(--border-success-strong);
   --color-border-accent: var(--border-accent);
@@ -70,8 +73,7 @@
 
   input::placeholder,
   textarea::placeholder {
-    @apply font-sans;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   button:not(:disabled),
@@ -260,36 +262,8 @@
   box-shadow: 0 0 16px color-mix(in oklch, var(--accent-primary) 28%, transparent);
 }
 
-/* Peak speed state — brighter steady accent glow */
-.floating-ball-peak {
-  box-shadow:
-    0 0 24px color-mix(in oklch, var(--accent-energy) 45%, transparent),
-    0 0 8px color-mix(in oklch, var(--accent-primary) 20%, transparent);
-}
-
-/* Completion burst — one-shot single-layer expansion and fade */
-.floating-ball-completion {
-  animation: floating-completion 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
-
-@keyframes floating-completion {
-  0% {
-    box-shadow: 0 0 14px color-mix(in oklch, var(--accent-primary) 22%, transparent);
-  }
-  35% {
-    box-shadow: 0 0 36px color-mix(in oklch, var(--accent-energy) 55%, transparent);
-  }
-  100% {
-    box-shadow: 0 0 0 0 transparent;
-  }
-}
-
 /* Reduced motion overrides for floating ball effects */
 @media (prefers-reduced-motion: reduce) {
-  .floating-ball-completion {
-    animation: none;
-  }
-
   .floating-bar-left,
   .floating-bar-right {
     transform: none;
@@ -321,7 +295,7 @@
     0 0 5px color-mix(in oklch, var(--accent-energy) 10%, transparent);
 }
 
-/* Hover: subtle scale + glow intensification */
+/* Hover: widen slightly so the narrow bar is easier to grab */
 .floating-bar-left,
 .floating-bar-right {
   transform: none;
@@ -329,7 +303,7 @@
 
 .floating-bar-left:hover,
 .floating-bar-right:hover {
-  transform: scale(1.02);
+  transform: scaleX(1.25);
 }
 
 @keyframes detail-enter {

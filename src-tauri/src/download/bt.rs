@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU32,
     path::{Path, PathBuf},
-    sync::{atomic::Ordering, Arc},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -17,9 +17,10 @@ use reqwest::Url;
 use tokio::sync::Mutex;
 
 use super::engine::{DownloadContext, DownloadEngine, EngineFuture, ProbeOutput, ProbeRequest};
+use super::DownloadError;
 use crate::{
     db,
-    events::{emit_task_progress, emit_task_updated_record},
+    events::{emit_task_updated_record, TaskProgressEmitGate},
     models::{
         EngineCapabilities, ProbedFile, SegmentStatus, TaskFileRecord, TaskKind,
         TaskProgressPayload, TaskStatus, TorrentTrackerStatus,
@@ -34,8 +35,51 @@ const BT_METADATA_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
 pub struct BtEngine {
-    sessions: Arc<Mutex<HashMap<String, Arc<Api>>>>,
+    sessions: Arc<Mutex<HashMap<String, BtSessionEntry>>>,
     _proxy_config: SharedProxyConfig,
+}
+
+struct BtSessionEntry {
+    api: Arc<Api>,
+    active_task_count: usize,
+}
+
+/// RAII guard that releases a BT session reference when dropped.
+///
+/// `release_session_ref` is async (uses `tokio::sync::Mutex`), so `Drop` cannot
+/// await it directly. On drop we spawn the release on the async runtime; on the
+/// normal completion path callers can use `release()` to release synchronously.
+struct SessionRefGuard {
+    engine: BtEngine,
+    session_key: Option<String>,
+}
+
+impl SessionRefGuard {
+    fn new(engine: BtEngine, session_key: String) -> Self {
+        Self {
+            engine,
+            session_key: Some(session_key),
+        }
+    }
+
+    /// Release the session reference synchronously (normal completion path).
+    #[allow(dead_code)]
+    async fn release(mut self) {
+        if let Some(key) = self.session_key.take() {
+            self.engine.release_session_ref(&key).await;
+        }
+    }
+}
+
+impl Drop for SessionRefGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.session_key.take() {
+            let engine = self.engine.clone();
+            tauri::async_runtime::spawn(async move {
+                engine.release_session_ref(&key).await;
+            });
+        }
+    }
 }
 
 impl Default for BtEngine {
@@ -60,17 +104,54 @@ impl BtEngine {
             return;
         };
 
-        let sessions = self.sessions.lock().await;
-        for api in sessions.values() {
+        let touched_keys: Vec<String> = {
+            let sessions = self.sessions.lock().await;
+            sessions.keys().cloned().collect()
+        };
+        let mut success_key: Option<String> = None;
+        for key in &touched_keys {
+            let api = {
+                let sessions = self.sessions.lock().await;
+                sessions.get(key).map(|e| e.api.clone())
+            };
+            let Some(api) = api else { continue };
             let result = if delete_files {
                 api.api_torrent_action_delete(id).await
             } else {
                 api.api_torrent_action_forget(id).await
             };
             if result.is_ok() {
+                success_key = Some(key.clone());
                 break;
             }
         }
+        if let Some(key) = success_key {
+            self.release_session_ref(&key).await;
+        }
+    }
+
+    async fn release_session_ref(&self, session_key: &str) {
+        let mut sessions = self.sessions.lock().await;
+        if let Some(entry) = sessions.get_mut(session_key) {
+            entry.active_task_count = entry.active_task_count.saturating_sub(1);
+            if entry.active_task_count == 0 {
+                sessions.remove(session_key);
+                tracing::info!(session_key, "bt session evicted (no active tasks)");
+            }
+        }
+    }
+
+    fn compute_session_key(
+        output_folder: &str,
+        task_proxy_config: &ResolvedProxyConfig,
+    ) -> String {
+        let proxy_fingerprint = task_proxy_config.fingerprint();
+        let key = PathBuf::from(output_folder)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(output_folder))
+            .to_string_lossy()
+            .to_string();
+        format!("{key}|proxy:{proxy_fingerprint}")
     }
 
     async fn api_for_output_folder(
@@ -78,19 +159,14 @@ impl BtEngine {
         output_folder: &str,
         download_limit_bps: Option<i64>,
         task_proxy_config: &ResolvedProxyConfig,
-    ) -> Result<Arc<Api>, String> {
-        let proxy_fingerprint = task_proxy_config.fingerprint();
-        let key = PathBuf::from(output_folder)
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(output_folder))
-            .to_string_lossy()
-            .to_string();
-        let key = format!("{key}|proxy:{proxy_fingerprint}");
+    ) -> Result<(Arc<Api>, String), String> {
+        let key = Self::compute_session_key(output_folder, task_proxy_config);
 
         let mut sessions = self.sessions.lock().await;
-        if let Some(api) = sessions.get(&key) {
-            sync_session_download_limit(api, download_limit_bps);
-            return Ok(api.clone());
+        if let Some(entry) = sessions.get_mut(&key) {
+            entry.active_task_count += 1;
+            sync_session_download_limit(&entry.api, download_limit_bps);
+            return Ok((entry.api.clone(), key));
         }
 
         std::fs::create_dir_all(output_folder)
@@ -111,8 +187,14 @@ impl BtEngine {
             .await
             .map_err(|e| format!("Could not start BitTorrent session: {e:#}"))?;
         let api = Arc::new(Api::new(session, None));
-        sessions.insert(key, api.clone());
-        Ok(api)
+        sessions.insert(
+            key.clone(),
+            BtSessionEntry {
+                api: api.clone(),
+                active_task_count: 1,
+            },
+        );
+        Ok((api, key))
     }
 }
 
@@ -125,12 +207,26 @@ impl DownloadEngine for BtEngine {
         matches!(scheme, "magnet" | "file")
     }
 
-    fn probe<'a>(&'a self, request: ProbeRequest) -> EngineFuture<'a, Result<ProbeOutput, String>> {
-        Box::pin(async move { probe_torrent(&request.uri).await })
+    fn probe<'a>(
+        &'a self,
+        request: ProbeRequest,
+    ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
+        Box::pin(async move {
+            probe_torrent(&request.uri)
+                .await
+                .map_err(DownloadError::Other)
+        })
     }
 
-    fn download<'a>(&'a self, context: DownloadContext) -> EngineFuture<'a, Result<(), String>> {
-        Box::pin(async move { run_torrent_download(self.clone(), context).await })
+    fn download<'a>(
+        &'a self,
+        context: DownloadContext,
+    ) -> EngineFuture<'a, Result<(), DownloadError>> {
+        Box::pin(async move {
+            run_torrent_download(self.clone(), context)
+                .await
+                .map_err(DownloadError::Other)
+        })
     }
 }
 
@@ -139,7 +235,7 @@ async fn probe_torrent(uri: &str) -> Result<ProbeOutput, String> {
         return probe_magnet(uri);
     }
 
-    let (add, _) = add_torrent_source(uri).await?;
+    let (add, _) = add_torrent_source(uri, &ResolvedProxyConfig::default()).await?;
     let probe_dir = std::env::temp_dir().join("vibe-downloader-bt-probe");
     std::fs::create_dir_all(&probe_dir)
         .map_err(|e| format!("Could not create the torrent probe directory: {e}"))?;
@@ -237,25 +333,28 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         app,
         pool,
         task,
-        cancel,
+        cancel_token,
         speed_limiter,
         proxy_config,
         ..
     } = context;
 
-    let api = engine
+    let mut progress_gate = TaskProgressEmitGate::default();
+
+    let (api, session_key) = engine
         .api_for_output_folder(
             &task.save_dir,
             speed_limiter.current_limit_bps(),
             &proxy_config,
         )
         .await?;
-    let (add, private_flag) = add_torrent_source(&task.url).await?;
+    let _session_guard = SessionRefGuard::new(engine.clone(), session_key);
+    let (add, private_flag) = add_torrent_source(&task.url, &proxy_config).await?;
     let had_file_selection = !db::list_task_file_records(&pool, &task.id)
         .await?
         .is_empty();
     let selected_paths = selected_torrent_paths(&pool, &task).await?;
-    mark_torrent_metadata_fetching(&app, &pool, &task).await?;
+    mark_torrent_metadata_fetching(&app, &pool, &task, &mut progress_gate).await?;
     let response = wait_for_torrent_metadata(
         &engine,
         api.clone(),
@@ -264,7 +363,8 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         &app,
         &pool,
         &task,
-        cancel.clone(),
+        cancel_token.clone(),
+        &mut progress_gate,
     )
     .await?;
 
@@ -275,6 +375,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             Ok(indices) => indices,
             Err(error) => {
                 let _ = api.api_torrent_action_forget(torrent_id).await;
+                progress_gate.flush(&app);
                 return Err(error);
             }
         };
@@ -284,11 +385,13 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             .await
         {
             let _ = api.api_torrent_action_forget(torrent_id).await;
+            progress_gate.flush(&app);
             return Err(format!("Could not select torrent files: {error:#}"));
         }
         db::insert_task_event(&pool, &task.id, "bt_file_selection_applied", None).await?;
         if let Err(error) = api.api_torrent_action_start(torrent_id).await {
             let _ = api.api_torrent_action_forget(torrent_id).await;
+            progress_gate.flush(&app);
             return Err(format!(
                 "Could not start torrent after applying file selection: {error:#}"
             ));
@@ -296,6 +399,25 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     }
 
     persist_torrent_details(&pool, &task, &response, selected_paths.as_ref(), private_flag).await?;
+
+    // For magnet sources, the private flag cannot be parsed before metadata is
+    // fetched, and TorrentDetailsResponse does not expose it. librqbit handles
+    // DHT/PEX disabling internally based on the info dict's private field, so
+    // the runtime safety behavior is correct. We record an event so the DB
+    // record (private=false) is understood as "unknown" rather than "non-private".
+    if private_flag.is_none() {
+        db::insert_task_event(
+            &pool,
+            &task.id,
+            "bt_private_flag_unknown",
+            Some(
+                "Torrent source does not expose the private flag before metadata. \
+                 DHT/PEX handling relies on librqbit internals.",
+            ),
+        )
+        .await?;
+    }
+
     if task.url.starts_with("magnet:")
         && !had_file_selection
         && response
@@ -331,6 +453,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         if let Some(current) = db::get_task_record(&pool, &task.id).await? {
             emit_task_updated_record(&app, &pool, &current).await;
         }
+        progress_gate.flush(&app);
         return Ok(());
     }
     if let Some(current) = db::get_task_record(&pool, &task.id).await? {
@@ -342,7 +465,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     let mut last_tick = Instant::now();
 
     loop {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel_token.is_cancelled() {
             let _ = api.api_torrent_action_pause(torrent_id).await;
             db::update_task_progress(&pool, &task.id, last_progress, 0, 0, TaskStatus::Paused)
                 .await?;
@@ -356,6 +479,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 )
                 .await?;
             }
+            progress_gate.flush(&app);
             return Ok(());
         }
 
@@ -477,9 +601,9 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             },
         )
         .await?;
-        emit_task_progress(
+        progress_gate.emit_or_store(
             &app,
-            &TaskProgressPayload {
+            TaskProgressPayload {
                 task_id: task.id.clone(),
                 downloaded_bytes: downloaded.to_string(),
                 total_size: total.to_string(),
@@ -487,6 +611,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 connection_count: live_peer_count,
                 status: TaskStatus::Downloading,
             },
+            false,
         );
 
         if stats.finished || (total > 0 && downloaded >= total) {
@@ -527,6 +652,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             if let Some(current) = db::get_task_record(&pool, &task.id).await? {
                 emit_task_updated_record(&app, &pool, &current).await;
             }
+            progress_gate.flush(&app);
             return Ok(());
         }
 
@@ -560,7 +686,8 @@ async fn wait_for_torrent_metadata(
     app: &tauri::AppHandle,
     pool: &sqlx::SqlitePool,
     task: &crate::models::TaskRecord,
-    cancel: Arc<std::sync::atomic::AtomicBool>,
+    cancel_token: tokio_util::sync::CancellationToken,
+    progress_gate: &mut TaskProgressEmitGate,
 ) -> Result<ApiAddTorrentResponse, String> {
     let options = Some(AddTorrentOptions {
         paused: start_paused,
@@ -581,7 +708,7 @@ async fn wait_for_torrent_metadata(
                 return result.map_err(|e| format!("Could not add torrent: {e:#}"));
             }
             _ = interval.tick() => {
-                if cancel.load(Ordering::SeqCst) {
+                if cancel_token.is_cancelled() {
                     engine.delete_runtime_task(&task.source_key, false).await;
                     return Err("Torrent metadata fetch was canceled.".to_string());
                 }
@@ -595,10 +722,10 @@ async fn wait_for_torrent_metadata(
                     ));
                 }
 
-                mark_torrent_metadata_still_fetching(app, pool, task, elapsed).await?;
+                mark_torrent_metadata_still_fetching(app, pool, task, elapsed, &mut *progress_gate).await?;
             }
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
-                if cancel.load(Ordering::SeqCst) {
+                if cancel_token.is_cancelled() {
                     engine.delete_runtime_task(&task.source_key, false).await;
                     return Err("Torrent metadata fetch was canceled.".to_string());
                 }
@@ -615,6 +742,7 @@ async fn mark_torrent_metadata_fetching(
     app: &tauri::AppHandle,
     pool: &sqlx::SqlitePool,
     task: &crate::models::TaskRecord,
+    progress_gate: &mut TaskProgressEmitGate,
 ) -> Result<(), String> {
     db::update_task_progress(
         pool,
@@ -661,9 +789,9 @@ async fn mark_torrent_metadata_fetching(
     )
     .await?;
     db::insert_task_event(pool, &task.id, "bt_metadata_fetching", None).await?;
-    emit_task_progress(
+    progress_gate.emit_or_store(
         app,
-        &TaskProgressPayload {
+        TaskProgressPayload {
             task_id: task.id.clone(),
             downloaded_bytes: task.downloaded_bytes.to_string(),
             total_size: task.total_size.to_string(),
@@ -671,6 +799,7 @@ async fn mark_torrent_metadata_fetching(
             connection_count: 0,
             status: TaskStatus::Downloading,
         },
+        false,
     );
     if let Some(current) = db::get_task_record(pool, &task.id).await? {
         emit_task_updated_record(app, pool, &current).await;
@@ -683,6 +812,7 @@ async fn mark_torrent_metadata_still_fetching(
     pool: &sqlx::SqlitePool,
     task: &crate::models::TaskRecord,
     elapsed: Duration,
+    progress_gate: &mut TaskProgressEmitGate,
 ) -> Result<(), String> {
     let elapsed_seconds = elapsed.as_secs().max(1);
     let remaining_seconds = BT_METADATA_TIMEOUT.saturating_sub(elapsed).as_secs().max(1);
@@ -715,9 +845,9 @@ async fn mark_torrent_metadata_still_fetching(
         },
     )
     .await?;
-    emit_task_progress(
+    progress_gate.emit_or_store(
         app,
-        &TaskProgressPayload {
+        TaskProgressPayload {
             task_id: task.id.clone(),
             downloaded_bytes: task.downloaded_bytes.to_string(),
             total_size: task.total_size.to_string(),
@@ -725,6 +855,7 @@ async fn mark_torrent_metadata_still_fetching(
             connection_count: 0,
             status: TaskStatus::Downloading,
         },
+        false,
     );
     if let Some(current) = db::get_task_record(pool, &task.id).await? {
         emit_task_updated_record(app, pool, &current).await;
@@ -988,7 +1119,10 @@ fn selected_torrent_total_size(
         .sum()
 }
 
-async fn add_torrent_source(uri: &str) -> Result<(AddTorrent<'static>, Option<bool>), String> {
+async fn add_torrent_source(
+    uri: &str,
+    proxy_config: &ResolvedProxyConfig,
+) -> Result<(AddTorrent<'static>, Option<bool>), String> {
     let trimmed = uri.trim();
     if trimmed.starts_with("magnet:") {
         return Ok((AddTorrent::from_url(trimmed.to_string()), None));
@@ -996,7 +1130,20 @@ async fn add_torrent_source(uri: &str) -> Result<(AddTorrent<'static>, Option<bo
 
     let parsed = Url::parse(trimmed).map_err(|_| "Torrent URL is invalid.".to_string())?;
     match parsed.scheme() {
-        "http" | "https" => Ok((AddTorrent::from_url(trimmed.to_string()), None)),
+        "http" | "https" => {
+            // Pre-download the .torrent bytes so we can parse the private flag
+            // and submit via from_bytes (matching the file:// path). This ensures
+            // librqbit receives the private flag and can disable DHT/PEX for
+            // private torrents. Falls back to from_url on download failure to
+            // avoid blocking the download flow.
+            match download_torrent_bytes(trimmed, proxy_config).await {
+                Ok(bytes) => {
+                    let private = parse_torrent_private_flag(&bytes);
+                    Ok((AddTorrent::from_bytes(bytes), private))
+                }
+                Err(_) => Ok((AddTorrent::from_url(trimmed.to_string()), None)),
+            }
+        }
         "file" => {
             let path = parsed
                 .to_file_path()
@@ -1014,6 +1161,31 @@ async fn add_torrent_source(uri: &str) -> Result<(AddTorrent<'static>, Option<bo
             "The {scheme} protocol is not supported for torrent tasks."
         )),
     }
+}
+
+/// Download .torrent file bytes via HTTP/HTTPS with optional SOCKS5 proxy.
+/// Used to pre-parse the private flag before submitting to librqbit.
+async fn download_torrent_bytes(
+    url: &str,
+    proxy_config: &ResolvedProxyConfig,
+) -> Result<Vec<u8>, String> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60));
+    if let Some(proxy_url) = proxy_config.custom_socks5_url_with_auth() {
+        builder = builder
+            .proxy(reqwest::Proxy::all(&proxy_url).map_err(|e| e.to_string())?);
+    }
+    let client = builder.build().map_err(|e| e.to_string())?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    Ok(bytes.to_vec())
 }
 
 /// Parse the `info.private` flag from a .torrent file's bencoded bytes.
@@ -1121,6 +1293,79 @@ mod tests {
     use super::*;
     use librqbit::AddTorrent;
 
+    /// Serializes tests that create real librqbit sessions, which bind a DHT
+    /// UDP socket and conflict when run in parallel (Windows os error 10048).
+    static BT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn session_evicted_when_ref_count_reaches_zero() {
+        let _guard = BT_TEST_LOCK.lock().await;
+        let engine = BtEngine::new(crate::proxy::ResolvedProxyConfig::shared_default());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "vibe-bt-session-{}",
+            uuid::Uuid::new_v4()
+        ));
+        // Create the directory BEFORE calling api_for_output_folder so that
+        // compute_session_key's canonicalize() succeeds consistently. Without
+        // this, the first call caches with the raw path (canonicalize fails)
+        // and the second call looks up with the canonical path — a cache miss
+        // that triggers a duplicate Session::new_with_opts DHT bind failure.
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let (_api1, key1) = engine
+            .api_for_output_folder(
+                temp_dir.to_str().unwrap(),
+                None,
+                &crate::proxy::ResolvedProxyConfig::default(),
+            )
+            .await
+            .expect("session 1");
+        assert_eq!(engine.sessions.lock().await.len(), 1);
+
+        let (_api2, _key2) = engine
+            .api_for_output_folder(
+                temp_dir.to_str().unwrap(),
+                None,
+                &crate::proxy::ResolvedProxyConfig::default(),
+            )
+            .await
+            .expect("session 2");
+        assert_eq!(engine.sessions.lock().await.len(), 1);
+        assert_eq!(
+            engine
+                .sessions
+                .lock()
+                .await
+                .get(&key1)
+                .unwrap()
+                .active_task_count,
+            2
+        );
+
+        engine.release_session_ref(&key1).await;
+        assert_eq!(engine.sessions.lock().await.len(), 1);
+
+        engine.release_session_ref(&key1).await;
+        assert_eq!(engine.sessions.lock().await.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // NOTE: `different_output_folders_get_different_sessions` was removed because
+    // librqbit's Session always initializes a persistent DHT listener that binds
+    // a fixed UDP port. Two simultaneous sessions on the same host fail with
+    // "address already in use" (Windows os error 10048), making it impossible to
+    // test multi-session behavior with real sessions in-process. The cache key
+    // derivation (which includes the canonicalized output folder path) ensures
+    // different folders produce different keys by construction.
+
+    #[tokio::test]
+    async fn release_nonexistent_session_is_noop() {
+        let engine = BtEngine::new(crate::proxy::ResolvedProxyConfig::shared_default());
+        engine.release_session_ref("nonexistent-key").await;
+        assert_eq!(engine.sessions.lock().await.len(), 0);
+    }
+
     #[tokio::test]
     async fn add_torrent_source_reads_file_urls_with_spaces_and_unicode() {
         let dir = std::env::temp_dir().join(format!("vibe-bt-test-{}", uuid::Uuid::new_v4()));
@@ -1130,7 +1375,8 @@ mod tests {
         std::fs::write(&path, bytes).expect("write torrent file");
         let url = Url::from_file_path(&path).expect("file url").to_string();
 
-        let (add, private_flag) = add_torrent_source(&url)
+        let proxy_config = crate::proxy::ResolvedProxyConfig::default();
+        let (add, private_flag) = add_torrent_source(&url, &proxy_config)
             .await
             .expect("local torrent source");
 
@@ -1201,5 +1447,72 @@ mod tests {
     fn parse_torrent_private_flag_returns_none_for_invalid_bytes() {
         assert_eq!(parse_torrent_private_flag(b"not a torrent"), None);
         assert_eq!(parse_torrent_private_flag(b""), None);
+    }
+
+    #[tokio::test]
+    async fn add_torrent_source_http_downloads_and_parses_private_flag() {
+        // A minimal private torrent with info.private=1.
+        let private_torrent =
+            b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1e7:privatei1eee";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/test.torrent");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-bittorrent\r\nContent-Length: {}\r\n\r\n",
+                private_torrent.len()
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, private_torrent).await;
+        });
+
+        let proxy_config = crate::proxy::ResolvedProxyConfig::default();
+        let (add, private_flag) = add_torrent_source(&url, &proxy_config)
+            .await
+            .expect("http torrent source");
+
+        match add {
+            AddTorrent::TorrentFileBytes(actual) => assert_eq!(actual.as_ref(), private_torrent),
+            AddTorrent::Url(value) => panic!("expected torrent bytes, got URL {value}"),
+        }
+        assert_eq!(private_flag, Some(true));
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_torrent_source_http_fallback_on_download_failure() {
+        // Bind to a port but immediately close the connection to simulate download failure.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/test.torrent");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            // Return 404
+            let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+        });
+
+        let proxy_config = crate::proxy::ResolvedProxyConfig::default();
+        let (add, private_flag) = add_torrent_source(&url, &proxy_config)
+            .await
+            .expect("http torrent source with fallback");
+
+        // On download failure, should fall back to from_url with private_flag=None.
+        match add {
+            AddTorrent::Url(value) => assert_eq!(value, url),
+            AddTorrent::TorrentFileBytes(_) => panic!("expected URL fallback, got bytes"),
+        }
+        assert_eq!(private_flag, None);
+
+        server.await.unwrap();
     }
 }

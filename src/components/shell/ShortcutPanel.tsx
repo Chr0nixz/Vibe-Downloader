@@ -71,6 +71,11 @@ function buildGroups(t: (key: string) => string, platform: Platform): ShortcutGr
         { keys: `${mod}Shift+A`, label: t("shortcuts.clearSelection") },
       ],
     },
+    {
+      id: "recovery",
+      label: t("shortcuts.groups.recovery"),
+      shortcuts: [{ keys: `${mod}R`, label: t("shortcuts.retryFailed") }],
+    },
   ];
 }
 

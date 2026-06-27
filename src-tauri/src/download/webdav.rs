@@ -6,11 +6,12 @@ use reqwest::{
 };
 
 use super::{
-    engine::EngineFuture, http::HttpEngine, DownloadContext, DownloadEngine, ProbeOutput,
-    ProbeRequest,
+    engine::EngineFuture, http::HttpEngine, DownloadContext, DownloadEngine, DownloadError,
+    ProbeOutput, ProbeRequest,
 };
 use crate::{
     db,
+    download::error::engine_error,
     models::{
         EngineCapabilities, ProbedFile, TaskKind, WebDavDirectoryEntry, WebDavDirectoryProbe,
     },
@@ -125,12 +126,26 @@ impl DownloadEngine for WebDavEngine {
         matches!(scheme, "webdav" | "webdavs")
     }
 
-    fn probe<'a>(&'a self, request: ProbeRequest) -> EngineFuture<'a, Result<ProbeOutput, String>> {
-        Box::pin(async move { self.probe_target(&request).await })
+    fn probe<'a>(
+        &'a self,
+        request: ProbeRequest,
+    ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
+        Box::pin(async move {
+            self.probe_target(&request)
+                .await
+                .map_err(DownloadError::Other)
+        })
     }
 
-    fn download<'a>(&'a self, context: DownloadContext) -> EngineFuture<'a, Result<(), String>> {
-        Box::pin(async move { self.run_download(context).await })
+    fn download<'a>(
+        &'a self,
+        context: DownloadContext,
+    ) -> EngineFuture<'a, Result<(), DownloadError>> {
+        Box::pin(async move {
+            self.run_download(context)
+                .await
+                .map_err(DownloadError::Other)
+        })
     }
 }
 
@@ -162,9 +177,10 @@ pub async fn probe_webdav_directory_url(
         );
     request = apply_forwarded_headers(request, &headers);
     let response = request.send().await.map_err(|e| {
-        webdav_error(
+        engine_error(
             "webdav_propfind_failed",
             format!("WebDAV PROPFIND failed: {e}"),
+            true,
         )
     })?;
     let status = response.status();
@@ -173,9 +189,10 @@ pub async fn probe_webdav_directory_url(
         .await
         .map_err(|e| format!("Could not read WebDAV directory response: {e}"))?;
     if !status.is_success() {
-        return Err(webdav_error(
+        return Err(engine_error(
             "webdav_propfind_failed",
             format!("WebDAV directory returned {status}."),
+            true,
         ));
     }
     let entries = parse_webdav_multistatus(&target, &text)?;
@@ -431,9 +448,10 @@ fn parse_webdav_multistatus(
             }
             Ok(Event::Eof) => break,
             Err(error) => {
-                return Err(webdav_error(
+                return Err(engine_error(
                     "webdav_invalid_multistatus",
                     format!("WebDAV directory response could not be parsed: {error}"),
+                    false,
                 ))
             }
             _ => {}
@@ -528,11 +546,6 @@ fn percent_decode_lossy(value: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&out).to_string()
-}
-
-fn webdav_error(code: &str, message: impl Into<String>) -> String {
-    crate::models::AppErrorPayload::new(code, message, true, vec!["retry", "check_url"])
-        .command_error()
 }
 
 #[cfg(test)]

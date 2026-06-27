@@ -5,7 +5,7 @@ import type { Task } from "@/types/task";
 import { parseByteCount } from "@/types/task";
 import { normalizeTaskProgressPayload, type TaskProgressPayload } from "@/types/task-progress";
 import { useSpeedHistoryStore } from "./speed-history-store";
-import { buildTaskCursorInput, buildTaskPageInput, mergePagedTasks } from "./task-query";
+import { buildTaskCursorInput, buildTaskPageInput, failureKind, mergePagedTasks } from "./task-query";
 import { useTaskUIStore } from "./task-ui-store";
 
 /* ── Types ── */
@@ -145,7 +145,13 @@ function taskCollections(tasks: Task[]) {
     taskById: mapTasksById(tasks),
     taskIndexById: indexTasks(tasks),
     taskStats: calculateTaskStats(tasks),
+    failureOptions: computeFailureOptions(tasks),
   };
+}
+
+/** E-3: 从任务列表计算失败类别选项（仅在任务加载/状态变化时调用，不在进度 tick 时重算） */
+function computeFailureOptions(tasks: Task[]): string[] {
+  return Array.from(new Set(tasks.map(failureKind).filter((kind) => kind !== "none"))).sort();
 }
 
 function applyProgressToTask(task: Task, payload: TaskProgressPayload): Task {
@@ -192,6 +198,7 @@ interface TaskDataStore {
   taskById: Record<string, Task>;
   taskIndexById: Record<string, number>;
   taskStats: TaskStats;
+  failureOptions: string[];
   globalTaskStats: TaskStats | null;
   total: number;
   page: number;
@@ -232,6 +239,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
   taskById: {},
   taskIndexById: {},
   taskStats: { ...EMPTY_TASK_STATS },
+  failureOptions: [],
   globalTaskStats: null,
   total: 0,
   page: 0,
@@ -356,12 +364,21 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       tasks[existingIndex] = merged;
       const taskById = { ...state.taskById, [task.id]: merged };
 
+      // E-3: 仅当 status/failureCategory/errorCode/errorMessage 变化时重算 failureOptions，
+      // 避免每 250ms 进度 tick 重算。
+      const statusChanged =
+        existing.status !== merged.status ||
+        existing.failureCategory !== merged.failureCategory ||
+        existing.errorCode !== merged.errorCode ||
+        existing.errorMessage !== merged.errorMessage;
+
       return {
         tasks,
         taskById,
         // taskIds and taskIndexById are unchanged — keep existing references
         taskIds: state.taskIds,
         taskIndexById: state.taskIndexById,
+        failureOptions: statusChanged ? computeFailureOptions(tasks) : state.failureOptions,
       };
     }),
 
@@ -382,6 +399,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       let tasks = state.tasks;
       let taskById = state.taskById;
       let changed = false;
+      let statusChanged = false;
 
       // Incremental stats deltas
       let dActive = 0;
@@ -412,6 +430,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
 
         // Accumulate stats delta
         if (old.status !== nextTask.status) {
+          statusChanged = true;
           for (const key of statusCounterKeys(old.status)) {
             if (key === "active") dActive -= 1;
             else if (key === "queued") dQueued -= 1;
@@ -454,6 +473,8 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
         taskStats: nextStats,
         taskIds: state.taskIds,
         taskIndexById: state.taskIndexById,
+        // E-3: 仅在 status 变化时重算，避免每 250ms 进度 tick 重算 failureOptions
+        failureOptions: statusChanged ? computeFailureOptions(tasks) : state.failureOptions,
       };
     });
 

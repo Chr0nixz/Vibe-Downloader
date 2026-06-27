@@ -21,6 +21,12 @@
   "noLiveTasks": { "message": "无实时任务" },
   "optionsButton": { "message": "选项" },
 
+  "mediaSection": { "message": "检测到的媒体" },
+  "noMediaCandidates": { "message": "此标签页未检测到媒体。" },
+  "mediaCandidateDownload": { "message": "下载" },
+  "mediaCandidateType": { "message": "类型" },
+  "mediaCandidateSize": { "message": "大小" },
+
   "optionsTitle": { "message": "Vibe Downloader — 选项" },
   "connectionSection": { "message": "连接" },
   "connectionChecking": { "message": "正在检查连接状态…" },
@@ -78,5 +84,28 @@
   "unknownHost": { "message": "未知" },
 
   "ctxDownloadLink": { "message": "使用 Vibe Downloader 下载" },
-  "ctxDownloadSelection": { "message": "使用 Vibe Downloader 下载选中的 URL" }
+  "ctxDownloadSelection": { "message": "使用 Vibe Downloader 下载选中的 URL" },
+
+  "errNotHttpUrl": { "message": "当前标签页不是 HTTP 下载链接。" },
+  "errHandoffRejected": { "message": "Vibe 未接受该链接。" },
+  "errCommFailed": {
+    "message": "与扩展通信失败: $1",
+    "placeholders": { "detail": { "content": "$1", "example": "error message" } }
+  },
+  "errSaveRulesFailed": {
+    "message": "保存规则失败: $1",
+    "placeholders": { "detail": { "content": "$1", "example": "error message" } }
+  },
+  "errGeneric": {
+    "message": "错误: $1",
+    "placeholders": { "detail": { "content": "$1", "example": "error message" } }
+  },
+  "ruleModeLabel": {
+    "message": "模式: $1",
+    "placeholders": { "mode": { "content": "$1", "example": "auto" } }
+  },
+  "ruleHeadersStatus": {
+    "message": "请求头: $1",
+    "placeholders": { "status": { "content": "$1", "example": "on" } }
+  }
 }

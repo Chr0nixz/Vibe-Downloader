@@ -1,14 +1,14 @@
 # 项目改进审计
 
-最后更新：2026-06-17
+最后更新：2026-06-25
 
 本审计基于当前仓库代码、配置、测试和文档状态。它不替代 [ROADMAP.md](ROADMAP.md)，而是按风险和用户影响列出仍需处理的问题。
 
-> 另见 [architecture-audit.md](architecture-audit.md)：从用户交互便捷性、功能完整性、架构鲁棒性、运行效率四个维度出发的架构与工程审计，含分阶段修复计划；以及 [audit-report.md](audit-report.md)：前端可访问性与主题审计。
+> 另见 [architecture-audit.md](architecture-audit.md)：从用户交互便捷性、功能完整性、架构鲁棒性、运行效率四个维度出发的架构与工程审计，含分阶段修复计划。
 
 ## 总体结论
 
-Vibe Downloader 已经远超最早 HTTP MVP：HTTP/HTTPS 下载核心（含自动加速分段）、SQLite 持久化（11 个迁移）、FTP/FTPS 动态并行、SFTP (TOFU)、BitTorrent (运行时快照)、HLS (AES-128-CBC)、DASH (ffmpeg)、WebDAV (PROPFIND)、Metalink (镜像故障转移 + 校验和)、加密凭据存储、逐任务代理、定时调度、浮动状态窗口、8 色主题、设置搜索、store 分解、虚拟无限滚动、浏览器 Native Messaging、WebSocket 实时桥、剪贴板监控、批量导入、命令面板和 CI 验证都已经落地。
+Vibe Downloader 已经远超最早 HTTP MVP：HTTP/HTTPS 下载核心（含自动加速分段）、SQLite 持久化（12 个迁移）、FTP/FTPS 动态并行、SFTP (TOFU)、BitTorrent (运行时快照)、HLS (AES-128-CBC)、DASH (ffmpeg)、WebDAV (PROPFIND)、Metalink (镜像故障转移 + 校验和)、加密凭据存储、逐任务代理、定时调度、浮动状态窗口、8 色主题、设置搜索、store 分解、虚拟无限滚动、浏览器 Native Messaging、WebSocket 实时桥、剪贴板监控、批量导入、命令面板和 CI 验证都已经落地。
 
 当前主要风险集中在四类：
 
@@ -107,7 +107,7 @@ HTTP（最多 5 段重试）、FTP（最多 2 worker 重试）、SFTP、BT（90s
 
 ### 2. 数据库迁移规范
 
-项目已累积到 011 号迁移，包括一个涉及表重建的 `009_metalink.sql`（task_checksums 新增 file_id 列）。
+项目已累积到 012 号迁移，包括一个涉及表重建的 `009_metalink.sql`（task_checksums 新增 file_id 列）和一个 `012_dedup_unique.sql` 去重约束。
 
 - 后续只新增 additive migration，不重写历史 migration。
 - 复杂迁移必须有旧数据升级测试。
@@ -172,6 +172,3 @@ pnpm build:extensions
 ```bash
 pnpm tauri build --config src-tauri/tauri.ci.conf.json
 ```
-# Protocol and engine update
-
-2026-06-17: HLS/m3u8 streaming engine (AES-128-CBC, live polling, ffmpeg remux), DASH/MPD engine (ffmpeg), WebDAV/WebDAVS engine (PROPFIND, Basic Auth), Metalink4 engine (mirror failover, checksum verification), SFTP engine (TOFU, SOCKS5), FTP/FTPS dynamic parallel segments, HTTP auto-acceleration, encrypted credential storage (ChaCha20-Poly1305) with legacy migration, per-task proxy overrides, scheduled download windows, floating status window, store decomposition, accent color themes, and settings page overhaul.

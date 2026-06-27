@@ -56,17 +56,6 @@ const FORWARDED_HEADER_ALLOWLIST: &[&str] = &[
     "pragma",
 ];
 
-fn browser_experimental_capture_enabled() -> bool {
-    std::env::var("VIBE_BROWSER_EXPERIMENTAL_CAPTURE")
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-}
-
 #[tauri::command]
 #[specta::specta]
 pub async fn get_browser_integration_status(
@@ -146,7 +135,10 @@ pub async fn update_browser_capture_settings(
             })
         })
         .unwrap_or(current.forward_headers_mode);
-    let next = enforce_browser_capture_settings_policy(BrowserCaptureSettings {
+    let next = BrowserCaptureSettings {
+        experimental_capture_enabled: input
+            .experimental_capture_enabled
+            .unwrap_or(current.experimental_capture_enabled),
         auto_intercept: input.auto_intercept.unwrap_or(current.auto_intercept),
         forward_headers: matches!(forward_headers_mode, BrowserForwardHeadersMode::Enabled),
         forward_headers_mode,
@@ -161,7 +153,10 @@ pub async fn update_browser_capture_settings(
             .map(normalize_extensions)
             .unwrap_or(current.file_extensions),
         site_rules: input.site_rules.unwrap_or(current.site_rules),
-    });
+        allow_intranet_handoff: input
+            .allow_intranet_handoff
+            .unwrap_or(current.allow_intranet_handoff),
+    };
     upsert_browser_capture_settings(&state.pool, &next).await?;
     if matches!(
         next.forward_headers_mode,
@@ -210,7 +205,7 @@ pub async fn create_browser_handoff_task_with_state(
     }
 
     let capture_settings = browser_capture_settings(&state.pool).await?;
-    let forwarded_headers = if browser_experimental_capture_enabled() {
+    let forwarded_headers = if capture_settings.experimental_capture_enabled {
         sanitize_forwarded_headers(input.forwarded_headers.as_deref())
     } else {
         Vec::new()
@@ -225,7 +220,12 @@ pub async fn create_browser_handoff_task_with_state(
         Vec::new()
     };
 
-    let task_result = validate_handoff(&input, &state.engine_registry).map(|url| CreateTaskInput {
+    let task_result = validate_handoff(
+        &input,
+        &state.engine_registry,
+        capture_settings.allow_intranet_handoff,
+    )
+    .map(|url| CreateTaskInput {
         url,
         save_dir: None,
         file_name: sanitize_suggested_file_name(input.suggested_file_name.as_deref()),
@@ -367,32 +367,26 @@ pub async fn upsert_browser_capture_settings(
 }
 
 fn default_browser_capture_settings() -> BrowserCaptureSettings {
-    let experimental = browser_experimental_capture_enabled();
     BrowserCaptureSettings {
-        auto_intercept: experimental,
+        experimental_capture_enabled: false,
+        auto_intercept: false,
         forward_headers: false,
-        forward_headers_mode: if experimental {
-            BrowserForwardHeadersMode::Ask
-        } else {
-            BrowserForwardHeadersMode::Disabled
-        },
+        forward_headers_mode: BrowserForwardHeadersMode::Disabled,
         min_size_bytes: DEFAULT_BROWSER_MIN_SIZE_BYTES.to_string(),
         file_extensions: DEFAULT_BROWSER_EXTENSIONS
             .iter()
             .map(|value| (*value).to_string())
             .collect(),
         site_rules: Vec::new(),
+        allow_intranet_handoff: false,
     }
 }
 
 pub fn enforce_browser_capture_settings_policy(
-    mut settings: BrowserCaptureSettings,
+    settings: BrowserCaptureSettings,
 ) -> BrowserCaptureSettings {
-    if !browser_experimental_capture_enabled() {
-        settings.auto_intercept = false;
-        settings.forward_headers = false;
-        settings.forward_headers_mode = BrowserForwardHeadersMode::Disabled;
-    }
+    // No more environment variable gating — experimental capture is controlled
+    // by the `experimental_capture_enabled` field in BrowserCaptureSettings.
     settings
 }
 
@@ -401,6 +395,10 @@ fn parse_browser_capture_settings(raw: &str) -> BrowserCaptureSettings {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
         return settings;
     };
+    settings.experimental_capture_enabled = value
+        .get("experimentalCaptureEnabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(settings.experimental_capture_enabled);
     settings.auto_intercept = value
         .get("autoIntercept")
         .and_then(serde_json::Value::as_bool)
@@ -446,6 +444,10 @@ fn parse_browser_capture_settings(raw: &str) -> BrowserCaptureSettings {
             settings.site_rules = values;
         }
     }
+    settings.allow_intranet_handoff = value
+        .get("allowIntranetHandoff")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(settings.allow_intranet_handoff);
     settings
 }
 
@@ -487,6 +489,8 @@ async fn export_extension_packages(
 
     let default_dir = super::settings::default_download_dir(app)?;
     let settings = db::get_settings(&state.pool, default_dir).await?;
+    let capture_settings = browser_capture_settings(&state.pool).await?;
+    let experimental = capture_settings.experimental_capture_enabled;
     let output_dir = PathBuf::from(settings.default_save_dir)
         .join("Vibe Downloader Extensions")
         .join(format!("v{}", env!("CARGO_PKG_VERSION")));
@@ -517,8 +521,8 @@ async fn export_extension_packages(
                 .map_err(|e| format!("Could not replace existing extension package: {e}"))?;
         }
 
-        let manifest = extension_manifest(&manifest_template, &variant)?;
-        let background = extension_background(&background_template, variant.browser_kind);
+        let manifest = extension_manifest(&manifest_template, &variant, experimental)?;
+        let background = extension_background(&background_template, variant.browser_kind, experimental);
         write_extension_package(
             &package_path,
             &source_dir,
@@ -583,16 +587,17 @@ async fn integration_status(
     }
 
     let realtime = state.browser_realtime.status().await;
+    let capture = browser_capture_settings(&state.pool).await?;
     Ok(BrowserIntegrationStatus {
         native_host_name: NATIVE_HOST_NAME.to_string(),
         native_host_path,
         extension_core_path,
-        experimental_capture_enabled: browser_experimental_capture_enabled(),
+        experimental_capture_enabled: capture.experimental_capture_enabled,
         realtime: BrowserRealtimeStatus {
             ws_url: realtime.ws_url,
             connected: realtime.connected,
         },
-        capture: browser_capture_settings(&state.pool).await?,
+        capture,
         browsers,
     })
 }
@@ -600,6 +605,7 @@ async fn integration_status(
 fn validate_handoff(
     input: &BrowserHandoffInput,
     registry: &EngineRegistry,
+    allow_intranet: bool,
 ) -> Result<String, String> {
     if input.version != 1 {
         return Err("Unsupported browser handoff payload version.".to_string());
@@ -613,11 +619,49 @@ fn validate_handoff(
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("Browser handoff only supports HTTP and HTTPS URLs.".to_string());
     }
+    if !allow_intranet && is_private_or_reserved_url(&parsed) {
+        return Err(
+            "Browser handoff URL points to a private or reserved address. \
+             Enable \"Allow intranet handoff\" in settings to override."
+                .to_string(),
+        );
+    }
     registry.engine_for_uri(parsed.as_str())?;
     if parsed.username() != "" || parsed.password().is_some() {
         return Err("Browser handoff URLs must not contain embedded credentials.".to_string());
     }
     Ok(parsed.to_string())
+}
+
+pub fn is_private_or_reserved_url(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    if host == "localhost" {
+        return true;
+    }
+    // url::host_str() serializes IPv6 hosts inside brackets (e.g. "[::1]").
+    // Strip them so parse::<IpAddr>() succeeds and loopback/private IPv6
+    // addresses are caught by the SSRF guard.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return is_private_ip(&ip);
+    }
+    false
+}
+
+pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unspecified() || v6.is_multicast()
+        }
+    }
 }
 
 fn sanitize_forwarded_headers(headers: Option<&[BrowserForwardedHeader]>) -> Vec<(String, String)> {
@@ -704,11 +748,15 @@ fn extension_package_variants() -> [ExtensionPackageVariant; 4] {
     ]
 }
 
-fn extension_manifest(template: &str, variant: &ExtensionPackageVariant) -> Result<String, String> {
+fn extension_manifest(
+    template: &str,
+    variant: &ExtensionPackageVariant,
+    experimental: bool,
+) -> Result<String, String> {
     let mut manifest: serde_json::Value = serde_json::from_str(template)
         .map_err(|e| format!("Invalid extension manifest template: {e}"))?;
     manifest["version"] = serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string());
-    apply_extension_capture_permissions(&mut manifest);
+    apply_extension_capture_permissions(&mut manifest, experimental);
     if variant.id == "firefox" {
         manifest["name"] = serde_json::Value::String("Vibe Downloader (Firefox)".to_string());
     }
@@ -723,21 +771,17 @@ fn extension_manifest(template: &str, variant: &ExtensionPackageVariant) -> Resu
     serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())
 }
 
-fn extension_background(template: &str, browser_kind: &str) -> String {
+fn extension_background(template: &str, browser_kind: &str, experimental: bool) -> String {
     template
         .replace("__VIBE_BROWSER_KIND__", browser_kind)
         .replace(
             "__VIBE_EXPERIMENTAL_CAPTURE__",
-            if browser_experimental_capture_enabled() {
-                "true"
-            } else {
-                "false"
-            },
+            if experimental { "true" } else { "false" },
         )
 }
 
-fn apply_extension_capture_permissions(manifest: &mut serde_json::Value) {
-    if browser_experimental_capture_enabled() {
+fn apply_extension_capture_permissions(manifest: &mut serde_json::Value, experimental: bool) {
+    if experimental {
         let permissions = manifest
             .get_mut("permissions")
             .and_then(serde_json::Value::as_array_mut)

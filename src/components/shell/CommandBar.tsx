@@ -127,7 +127,7 @@ export function CommandBar({
         <TooltipTrigger asChild>
           <Button
             variant="default"
-            className="h-11 shrink-0 gap-2 px-4 text-sm font-semibold md:h-9 md:px-3.5"
+            className="h-11 shrink-0 gap-2 px-4 text-sm font-semibold md:h-8 md:px-3.5"
             aria-label={t("commandBar.newDownloadAria")}
             onClick={onNewDownload}
           >
@@ -136,14 +136,29 @@ export function CommandBar({
           </Button>
         </TooltipTrigger>
         <TooltipContent className={firstRunTip ? "max-w-56 text-balance" : undefined}>
-          {firstRunTip ? t("commandBar.newDownloadFirstRunTip") : t("commandBar.newDownload")}
+          {firstRunTip ? (
+            t("commandBar.newDownloadFirstRunTip")
+          ) : (
+            <>
+              <span>{t("commandBar.newDownload")}</span>
+              <kbd className="ml-1.5 rounded border border-border-subtle bg-surface-root px-1.5 py-0.5 font-mono text-[10px] font-semibold text-text-secondary">
+                {formatShortcut("mod+N", platform)}
+              </kbd>
+            </>
+          )}
         </TooltipContent>
       </Tooltip>
 
       <div className="hidden shrink-0 items-center gap-1 md:flex md:gap-2">
         <ActionIcon label={t("commandBar.start")} icon={Play} onClick={onStart} disabled={!canStart} />
         <ActionIcon label={t("commandBar.pause")} icon={Pause} onClick={onPause} disabled={!canPause} />
-        <ActionIcon label={t("commandBar.delete")} icon={Trash2} onClick={onDelete} disabled={!canDelete} />
+        <ActionIcon
+          label={t("commandBar.delete")}
+          icon={Trash2}
+          onClick={onDelete}
+          disabled={!canDelete}
+          shortcutLabel={formatShortcut("Delete", platform)}
+        />
         <Popover open={speedPopoverOpen} onOpenChange={setSpeedPopoverOpen}>
           <PopoverTrigger asChild>
             <ActionIcon
@@ -269,7 +284,12 @@ export function CommandBar({
             <Command className="h-4 w-4" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{t("commandBar.palette")}</TooltipContent>
+        <TooltipContent>
+          <span>{t("commandBar.palette")}</span>
+          <kbd className="ml-1.5 rounded border border-border-subtle bg-surface-root px-1.5 py-0.5 font-mono text-[10px] font-semibold text-text-secondary">
+            {formatShortcut("mod+K", platform)}
+          </kbd>
+        </TooltipContent>
       </Tooltip>
 
       <Button variant="outline" size="sm" className="hidden shrink-0 gap-2 md:inline-flex" onClick={onOpenPalette}>
@@ -317,6 +337,7 @@ function ActionIcon({
   disabled,
   className,
   buttonRef,
+  shortcutLabel,
 }: {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
@@ -324,6 +345,7 @@ function ActionIcon({
   disabled?: boolean;
   className?: string;
   buttonRef?: React.Ref<HTMLButtonElement>;
+  shortcutLabel?: string;
 }) {
   return (
     <Tooltip>
@@ -340,7 +362,14 @@ function ActionIcon({
           <Icon className="h-4 w-4" />
         </Button>
       </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
+      <TooltipContent>
+        <span>{label}</span>
+        {shortcutLabel ? (
+          <kbd className="ml-1.5 rounded border border-border-subtle bg-surface-root px-1.5 py-0.5 font-mono text-[10px] font-semibold text-text-secondary">
+            {shortcutLabel}
+          </kbd>
+        ) : null}
+      </TooltipContent>
     </Tooltip>
   );
 }

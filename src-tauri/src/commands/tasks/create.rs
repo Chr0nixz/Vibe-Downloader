@@ -26,8 +26,7 @@ use crate::commands::task_file_planning::{
 };
 
 use super::{
-    is_bt_protocol, is_dash_url, is_metalink_url, is_torrent_url, schedule_queued_tasks,
-    task_payload,
+    is_bt_protocol, is_dash_url, is_metalink_url, is_torrent_url, task_payload,
 };
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -84,6 +83,20 @@ pub async fn probe_task(
 
     tracing::debug!(url = %sanitize_url(url), "probing download url");
     let engine = state.engine_registry.engine_for_uri(url)?;
+    let credentials = if input.username.is_some()
+        || input.password.is_some()
+        || input.private_key_data.is_some()
+        || input.private_key_passphrase.is_some()
+    {
+        Some(db::TaskCredentials {
+            username: input.username.clone().unwrap_or_default(),
+            password: input.password.clone().unwrap_or_default(),
+            private_key_data: input.private_key_data.clone(),
+            private_key_passphrase: input.private_key_passphrase.clone(),
+        })
+    } else {
+        None
+    };
     let probe = engine
         .probe(ProbeRequest {
             uri: url.to_string(),
@@ -91,13 +104,10 @@ pub async fn probe_task(
             request_headers,
             pool: Some(state.pool.clone()),
             task_id: None,
-            username: input.username.clone(),
-            password: input.password.clone(),
-            private_key_data: input.private_key_data.clone(),
-            private_key_passphrase: input.private_key_passphrase.clone(),
+            credentials,
         })
         .await
-        .map_err(ensure_structured_error)?;
+        .map_err(|e| ensure_structured_error(e.to_string()))?;
     tracing::debug!(
         url = %sanitize_url(url),
         total_size = probe.total_size,
@@ -126,13 +136,10 @@ async fn resolve_create_probe(
             request_headers: request_headers.to_vec(),
             pool: Some(state.pool.clone()),
             task_id: None,
-            username: None,
-            password: None,
-            private_key_data: None,
-            private_key_passphrase: None,
+            credentials: None,
         })
         .await
-        .map_err(ensure_structured_error)
+        .map_err(|e| ensure_structured_error(e.to_string()))
 }
 
 fn probe_payload_from_output(input_url: &str, probe: ProbeOutput) -> ProbeTaskPayload {
@@ -415,13 +422,10 @@ pub async fn import_urls(
                             request_headers: Vec::new(),
                             pool: Some(state.pool.clone()),
                             task_id: None,
-                            username: None,
-                            password: None,
-                            private_key_data: None,
-                            private_key_passphrase: None,
+                            credentials: None,
                         })
                         .await
-                        .map_err(ensure_structured_error)
+                        .map_err(|e| ensure_structured_error(e.to_string()))
                 }
                 Err(error) => Err(ensure_structured_error(error)),
             };
@@ -597,19 +601,6 @@ pub(crate) async fn create_task_with_state_and_headers(
         .filter(|value| !value.is_empty())
         .filter(|_| uses_single_output_file)
         .unwrap_or(&probe.display_name);
-    let final_path = unique_final_path(&save_dir, requested_file_name);
-    let file_name = final_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            // Defensive fallback: unique_final_path already sanitizes via
-            // sanitize_file_name, so Path::file_name() should only return
-            // None for degenerate inputs (e.g. trailing `..`). Re-sanitize
-            // through the shared helper rather than echoing the raw request.
-            crate::download::sanitize::sanitize_single_file_name(requested_file_name)
-        });
-    let temp_path = PathBuf::from(format!("{}.vibe-downloading", final_path.display()));
     let now = now_iso();
     let expected_hash_sha256 = if is_bt_protocol(&probe.protocol)
         || probe.protocol == "hls"
@@ -630,12 +621,60 @@ pub(crate) async fn create_task_with_state_and_headers(
         .as_deref()
         .and_then(db::normalize_speed_limit_bps);
     let priority = input.priority.unwrap_or(TaskPriority::Normal);
-    let category_key = input
+    let mut category_key = input
         .category_key
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    // 自动分类：用户未显式指定 category_key 时，按分类规则匹配
+    if category_key.is_none() {
+        if let Ok(rules) = db::list_classification_rules(&state.pool).await {
+            if let Some(target_subdir) =
+                db::apply_classification_rules(&storage_url, requested_file_name, "", &rules)
+            {
+                category_key = Some(target_subdir);
+            }
+        }
+    }
+    // 安全校验：category_key 作为子目录名，禁止包含路径分隔符或父目录引用
+    if let Some(ref key) = category_key {
+        if key.contains('/') || key.contains('\\') || key.contains("..") || key.is_empty() {
+            log::warn!("Classification rule returned invalid target_subdir {:?}, ignoring", key);
+            category_key = None;
+        }
+    }
+    // 计算实际保存目录：若命中分类规则或用户指定 category_key，拼接子目录
+    let effective_save_dir = if let Some(ref subdir) = category_key {
+        let target = save_dir.join(subdir);
+        std::fs::create_dir_all(&target)
+            .map_err(|e| format!("Could not create the classification subdirectory: {e}"))?;
+        // 路径穿越校验：canonicalize 后确认 target 在 save_dir 之下
+        let canonical_save = save_dir.canonicalize().unwrap_or_else(|_| save_dir.clone());
+        let canonical_target = target.canonicalize().unwrap_or_else(|_| target.clone());
+        if !canonical_target.starts_with(&canonical_save) {
+            return Err(format!(
+                "Classification target directory escapes the save directory: {}",
+                target.display()
+            ));
+        }
+        target
+    } else {
+        save_dir.clone()
+    };
+    let final_path = unique_final_path(&effective_save_dir, requested_file_name);
+    let file_name = final_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            // Defensive fallback: unique_final_path already sanitizes via
+            // sanitize_file_name, so Path::file_name() should only return
+            // None for degenerate inputs (e.g. trailing `..`). Re-sanitize
+            // through the shared helper rather than echoing the raw request.
+            crate::download::sanitize::sanitize_single_file_name(requested_file_name)
+        });
+    let temp_path = PathBuf::from(format!("{}.vibe-downloading", final_path.display()));
     let queue_position = db::next_queue_position(&state.pool).await?;
 
     let task_url = match input.selected_hls_variant_uri.as_deref() {
@@ -686,6 +725,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         hash_verified_at: None,
         created_at: now.clone(),
         updated_at: now,
+        files_version: 0,
     };
 
     // Close the TOCTOU race: BEGIN IMMEDIATE acquires a RESERVED lock before any
@@ -693,49 +733,26 @@ pub(crate) async fn create_task_with_state_and_headers(
     // its dup-check SELECT will then see our INSERT. (sqlx's `begin()` uses DEFERRED,
     // which reads a WAL snapshot and would let both creators pass the dup-check.)
     {
-        let mut conn = state.pool.acquire().await.map_err(|e| e.to_string())?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let outcome: Result<(), String> = async {
-            if !input.allow_duplicate.unwrap_or(false) {
-                let bt_source_key = if record.source_key.starts_with("bt:") {
-                    Some(record.source_key.as_str())
-                } else {
-                    None
-                };
-                if let Some(duplicate) = db::find_duplicate_task_record(
-                    &mut *conn,
-                    &record.url,
-                    record.final_url.as_deref(),
-                    bt_source_key,
-                )
-                .await?
-                {
-                    return Err(
-                        AppErrorPayload::duplicate_task(&duplicate.file_name).command_error(),
-                    );
-                }
-            }
-            db::insert_task_record(&mut *conn, &record).await?;
-            Ok(())
-        }
-        .await;
-
-        match outcome {
-            Ok(()) => {
-                sqlx::query("COMMIT")
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
-            Err(err) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                return Err(err);
+        let mut tx = state.pool.begin().await.map_err(|e| e.to_string())?;
+        if !input.allow_duplicate.unwrap_or(false) {
+            let bt_source_key = if record.source_key.starts_with("bt:") {
+                Some(record.source_key.as_str())
+            } else {
+                None
+            };
+            if let Some(duplicate) = db::find_duplicate_task_record(
+                &mut *tx,
+                &record.url,
+                record.final_url.as_deref(),
+                bt_source_key,
+            )
+            .await?
+            {
+                return Err(AppErrorPayload::duplicate_task(&duplicate.file_name).command_error());
             }
         }
+        db::insert_task_record_in_tx(&mut tx, &record).await?;
+        tx.commit().await.map_err(|e| e.to_string())?;
     }
     if let Some(expected_hash) = record.expected_hash_sha256.clone() {
         let checksum = TaskChecksumRecord {
@@ -870,7 +887,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         "task created"
     );
     emit_queue_changed(&app);
-    schedule_queued_tasks(app.clone(), state).await;
+    state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
 
     let task = task_payload(&state.pool, &record.id).await?;
     emit_task_updated(&app, &task);

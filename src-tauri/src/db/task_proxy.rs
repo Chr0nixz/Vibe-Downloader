@@ -72,7 +72,8 @@ pub async fn upsert_task_proxy_settings(
                 password,
                 "task proxy password",
                 input.task_id.as_bytes(),
-            )?;
+            )
+            .map_err(|error| proxy_secret_encrypt_error(error))?;
             password_ciphertext = Some(ciphertext);
             nonce = Some(secret_nonce);
         }
@@ -135,7 +136,8 @@ pub async fn resolve_task_proxy_config(
                     nonce,
                     "task proxy password",
                     task_id.as_bytes(),
-                )?),
+                )
+                .map_err(|error| proxy_secret_decrypt_error(error))?),
                 _ => None,
             };
             Ok(ResolvedProxyConfig {
@@ -186,6 +188,26 @@ fn proxy_protocol_error(protocol: &str, message: &str) -> String {
         recoverable: true,
         actions: vec!["check_url".to_string()],
     }
+    .command_error()
+}
+
+fn proxy_secret_encrypt_error(error: String) -> String {
+    crate::models::AppErrorPayload::new(
+        "proxy_secret_encrypt_failed",
+        format!("Could not encrypt task proxy secret: {error}"),
+        true,
+        vec!["restart", "check_url"],
+    )
+    .command_error()
+}
+
+fn proxy_secret_decrypt_error(error: String) -> String {
+    crate::models::AppErrorPayload::new(
+        "proxy_secret_decrypt_failed",
+        format!("Could not decrypt task proxy secret: {error}"),
+        true,
+        vec!["restart", "check_url"],
+    )
     .command_error()
 }
 
@@ -246,5 +268,31 @@ fn proxy_mode_for_task(mode: TaskProxyMode) -> AppProxyMode {
     match mode {
         TaskProxyMode::Custom => AppProxyMode::Custom,
         _ => AppProxyMode::Off,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_task_proxy_protocol_rejects_http_for_ftp_and_sftp() {
+        let ftp_err = validate_task_proxy_protocol("ftp", "http://proxy.local:8080")
+            .expect_err("ftp should reject http proxy");
+        assert!(ftp_err.contains("proxy_scheme_unsupported_for_task"));
+        assert!(ftp_err.contains("FTP and FTPS tasks only support SOCKS5"));
+
+        let sftp_err = validate_task_proxy_protocol("sftp", "http://proxy.local:8080")
+            .expect_err("sftp should reject http proxy");
+        assert!(sftp_err.contains("proxy_scheme_unsupported_for_task"));
+        assert!(sftp_err.contains("SFTP tasks only support SOCKS5"));
+    }
+
+    #[test]
+    fn proxy_error_payloads_are_distinct() {
+        let encrypt = proxy_secret_encrypt_error("boom".to_string());
+        let decrypt = proxy_secret_decrypt_error("boom".to_string());
+        assert!(encrypt.contains("proxy_secret_encrypt_failed"));
+        assert!(decrypt.contains("proxy_secret_decrypt_failed"));
     }
 }

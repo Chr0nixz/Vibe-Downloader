@@ -54,3 +54,38 @@ fn ignores_oversized_clipboard_text() {
     let text = format!("{} https://example.com/file.zip", "x".repeat(64 * 1024));
     assert!(extract_download_urls(&text).is_empty());
 }
+
+#[test]
+fn short_circuits_plain_text_without_url_scheme() {
+    // E-9: 纯文本无 "://" 且无 "magnet:" 应直接返回，不触发 to_ascii_lowercase 分配
+    let plain_text = "x".repeat(60 * 1024);
+    assert!(extract_download_urls(&plain_text).is_empty());
+}
+
+#[test]
+fn short_circuit_still_extracts_magnet_lowercase() {
+    // magnet: 无 "://"，短路逻辑须单独检查 "magnet:"
+    let urls = extract_download_urls("magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10");
+    assert_eq!(
+        urls,
+        vec!["magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string()]
+    );
+}
+
+#[test]
+fn short_circuit_falls_back_for_uppercase_magnet() {
+    // 大写 MAGNET: 不命中 case-sensitive "magnet:" 快路径，
+    // 但后续 to_ascii_lowercase + 前缀匹配应兜底提取
+    let urls = extract_download_urls("MAGNET:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10");
+    assert_eq!(
+        urls,
+        vec!["magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string()]
+    );
+}
+
+#[test]
+fn short_circuit_passes_through_non_download_scheme() {
+    // 含 "://" 但非下载协议（如 foo://），短路放行后由 normalize_download_url 过滤
+    let urls = extract_download_urls("foo://bar baz qux");
+    assert!(urls.is_empty());
+}

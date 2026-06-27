@@ -29,7 +29,6 @@ import { listTasksCursor } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import {
   type FileTypeFilter,
-  failureKind,
   type ResumeFilter,
   taskCursorInput,
   useTaskDataStore,
@@ -52,6 +51,7 @@ export function TaskList({
   onBulkDelete,
   onBulkOpenFolder,
   onBulkExport,
+  onOpenOnboarding,
 }: {
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
@@ -67,6 +67,7 @@ export function TaskList({
   onBulkDelete: (tasks: Task[]) => void;
   onBulkOpenFolder: (tasks: Task[]) => void;
   onBulkExport: (tasks: Task[], format: "json" | "csv") => void;
+  onOpenOnboarding: () => void;
 }) {
   const { t } = useTranslation();
   const reduceMotion = !!useReducedMotion();
@@ -77,6 +78,7 @@ export function TaskList({
   const loadingPageRef = useRef(false);
   const initialLoadDoneRef = useRef(false);
   const taskIds = useTaskDataStore((s) => s.taskIds);
+  const storeFailureOptions = useTaskDataStore((s) => s.failureOptions);
   const total = useTaskDataStore((s) => s.total);
   const nextCursor = useTaskDataStore((s) => s.nextCursor);
   const hasMore = useTaskDataStore((s) => s.hasMore);
@@ -224,21 +226,10 @@ export function TaskList({
   );
   const allVisibleSelected = filtered.length > 0 && visibleSelectedCount === filtered.length;
   const sourceOptions = filterOptions.sources;
-  const failureOptions = useMemo(
-    () =>
-      filterOptions.failureCategories.length > 0
-        ? filterOptions.failureCategories
-        : Array.from(
-            new Set(
-              taskIds
-                .map((taskId) => useTaskDataStore.getState().taskById[taskId])
-                .filter((task): task is Task => Boolean(task))
-                .map(failureKind)
-                .filter((kind) => kind !== "none"),
-            ),
-          ).sort(),
-    [filterOptions.failureCategories, taskIds],
-  );
+  // E-3: failureOptions 从 store 读取，避免依赖 taskById（每 250ms 重建引用）导致每帧重算。
+  // 后端已提供 failureCategories 时优先使用，否则用 store 计算的值。
+  const failureOptions =
+    filterOptions.failureCategories.length > 0 ? filterOptions.failureCategories : storeFailureOptions;
 
   const selectAndFocus = useCallback(
     (taskId: string) => {
@@ -298,6 +289,16 @@ export function TaskList({
       const list = filteredRef.current;
       if (list.length === 0) return;
 
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        navigateRow("next");
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        navigateRow("prev");
+        return;
+      }
       if (event.key === "Home") {
         event.preventDefault();
         virtualizer.scrollToIndex(0, { align: "start" });
@@ -310,7 +311,7 @@ export function TaskList({
         selectAndFocus(list[list.length - 1]);
       }
     },
-    [selectAndFocus, virtualizer],
+    [navigateRow, selectAndFocus, virtualizer],
   );
 
   if (nav === "settings") {
@@ -324,7 +325,7 @@ export function TaskList({
   if (nav === "about") {
     return (
       <Suspense fallback={<div className="flex min-h-0 min-w-0 flex-1 animate-pulse bg-surface-root" />}>
-        <AboutPage />
+        <AboutPage onOpenOnboarding={onOpenOnboarding} />
       </Suspense>
     );
   }
@@ -355,21 +356,33 @@ export function TaskList({
             type="button"
             variant="ghost"
             size="sm"
-            className="h-7 text-xs"
+            className="h-9 text-xs md:h-7"
             onClick={() => setSelectedIds(filtered)}
             disabled={allVisibleSelected}
           >
             {t("taskList.selectVisible", { count: filtered.length })}
           </Button>
-          <Button type="button" variant="ghost" size="sm" className="h-7 text-xs" onClick={clearSelectedIds}>
+          <Button type="button" variant="ghost" size="sm" className="h-9 text-xs md:h-7" onClick={clearSelectedIds}>
             <X className="mr-1 h-3 w-3" aria-hidden />
             {t("taskList.clearSelection")}
           </Button>
           <div className="mx-1 h-4 w-px bg-border-subtle" aria-hidden />
-          <Button type="button" variant="ghost" size="sm" className="h-7" onClick={() => onBulkPause(selectedTasks())}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-11 md:h-8"
+            onClick={() => onBulkPause(selectedTasks())}
+          >
             {t("taskList.bulkPause")}
           </Button>
-          <Button type="button" variant="ghost" size="sm" className="h-7" onClick={() => onBulkResume(selectedTasks())}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-11 md:h-8"
+            onClick={() => onBulkResume(selectedTasks())}
+          >
             {t("taskList.bulkResume")}
           </Button>
           <Popover>
@@ -378,7 +391,7 @@ export function TaskList({
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="h-7"
+                className="h-11 md:h-8"
                 aria-label={t("taskList.moreBulkActions")}
               >
                 <MoreHorizontal className="h-4 w-4" aria-hidden />
@@ -403,7 +416,7 @@ export function TaskList({
             type="button"
             variant="danger"
             size="sm"
-            className="h-7"
+            className="h-11 md:h-8"
             onClick={() => onBulkDelete(selectedTasks())}
           >
             {t("taskList.bulkDelete", { count: selectedIds.length })}
@@ -712,7 +725,7 @@ function FilterChip({
       {value}
       <button
         type="button"
-        className="ml-0.5 -mr-0.5 inline-flex min-h-8 min-w-8 items-center justify-center rounded-full text-text-muted transition-colors hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:outline-none"
+        className="ml-0.5 -mr-0.5 inline-flex min-h-9 min-w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:outline-none md:min-h-8 md:min-w-8"
         aria-label={`${label}: ${value}`}
         onClick={(event) => {
           event.stopPropagation();
@@ -733,7 +746,7 @@ function BulkMenuItem({ label, onClick, disabled }: { label: string; onClick: ()
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "flex h-8 w-full items-center rounded-md px-2 text-left text-sm text-text-secondary",
+        "flex h-9 w-full items-center rounded-md px-2 text-left text-sm text-text-secondary md:h-8",
         "transition-[background-color,color] duration-[var(--motion-ui)] ease-out",
         "hover:bg-surface-raised hover:text-text-primary",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",

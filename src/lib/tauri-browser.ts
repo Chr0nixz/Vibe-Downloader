@@ -293,6 +293,7 @@ function loadStoredSettings(): AppSettings | null {
 function defaultBrowserCaptureSettings(): BrowserCaptureSettings {
   return {
     autoIntercept: browserExperimentalCaptureEnabled,
+    experimentalCaptureEnabled: browserExperimentalCaptureEnabled,
     forwardHeaders: false,
     forwardHeadersMode: browserExperimentalCaptureEnabled ? "ask" : "disabled",
     minSizeBytes: "0",
@@ -313,6 +314,7 @@ function defaultBrowserCaptureSettings(): BrowserCaptureSettings {
       "meta4",
       "metalink",
     ],
+    allowIntranetHandoff: false,
     siteRules: [],
   };
 }

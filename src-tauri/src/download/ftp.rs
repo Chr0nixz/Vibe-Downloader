@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicI64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -26,7 +26,7 @@ use suppaftp::{
 use tauri::AppHandle;
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter},
     sync::mpsc,
     task::JoinSet,
 };
@@ -34,20 +34,22 @@ use uuid::Uuid;
 
 use super::{
     engine::EngineFuture,
-    http::file::{finalize_download_file, persist_completed_path},
-    DownloadContext, DownloadEngine, GlobalSpeedLimiter, ProbeOutput, ProbeRequest,
+    file_ops::{finalize_download_file, persist_completed_path},
+    DownloadContext, DownloadEngine, DownloadError, GlobalSpeedLimiter, ProbeOutput, ProbeRequest,
 };
+use crate::download::error::engine_error;
 use crate::{
     db,
     events::{emit_task_updated_record, TaskProgressEmitGate},
     logging::sanitize_url,
     models::{
         EngineCapabilities, FtpDirectoryEntry, FtpDirectoryProbe, ProbedFile,
-        RequestDiagnosticRecord, SegmentStatus, TaskKind, TaskProgressPayload, TaskRecord,
+        SegmentStatus, TaskKind, TaskProgressPayload, TaskRecord,
         TaskSegmentRecord, TaskStatus,
     },
     proxy::{socks5_connect, ResolvedProxyConfig, SharedProxyConfig},
 };
+use crate::download::retry::RetryPolicy;
 
 const FTP_MAX_DYNAMIC_CONNECTIONS: usize = 4;
 const FTP_DYNAMIC_WARMUP: Duration = Duration::from_secs(8);
@@ -114,7 +116,7 @@ struct WorkerRequest {
     pool: SqlitePool,
     temp_path: PathBuf,
     total_size: i64,
-    cancel: Arc<AtomicBool>,
+    cancel_token: tokio_util::sync::CancellationToken,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     progress_tx: mpsc::UnboundedSender<WorkerProgress>,
     proxy_config: ResolvedProxyConfig,
@@ -260,16 +262,28 @@ impl DownloadEngine for FtpEngine {
         matches!(scheme, "ftp" | "ftps")
     }
 
-    fn probe<'a>(&'a self, request: ProbeRequest) -> EngineFuture<'a, Result<ProbeOutput, String>> {
+    fn probe<'a>(
+        &'a self,
+        request: ProbeRequest,
+    ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
-            let target = FtpTarget::parse(&request.uri)?;
+            let target = FtpTarget::parse(&request.uri).map_err(DownloadError::Other)?;
             tracing::debug!(url = %target.sanitized_uri, "probing ftp url");
-            self.probe_target(target).await
+            self.probe_target(target)
+                .await
+                .map_err(DownloadError::Other)
         })
     }
 
-    fn download<'a>(&'a self, context: DownloadContext) -> EngineFuture<'a, Result<(), String>> {
-        Box::pin(async move { self.run_download(context).await })
+    fn download<'a>(
+        &'a self,
+        context: DownloadContext,
+    ) -> EngineFuture<'a, Result<(), DownloadError>> {
+        Box::pin(async move {
+            self.run_download(context)
+                .await
+                .map_err(DownloadError::Other)
+        })
     }
 }
 
@@ -282,8 +296,7 @@ async fn run_ftp_download(
         app,
         pool,
         task,
-        cancel,
-        cancel_token: _,
+        cancel_token,
         finish: _,
         speed_limiter,
         connection_limit,
@@ -342,13 +355,14 @@ async fn run_ftp_download(
     let mut progress_gate = TaskProgressEmitGate::default();
     let mut acceleration_disabled = false;
     let mut dynamic_failures = 0_i32;
+    let retry_policy = RetryPolicy::ftp_worker();
 
     start_next_ftp_worker(
         &target,
         &task,
         &pool,
         &temp_path,
-        &cancel,
+        &cancel_token,
         &speed_limiter,
         &progress_tx,
         &mut pending,
@@ -372,7 +386,7 @@ async fn run_ftp_download(
     .await?;
 
     while !pending.is_empty() || !running.is_empty() {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel_token.is_cancelled() {
             emit_ftp_progress(
                 &mut progress,
                 &mut last_checkpoint,
@@ -425,7 +439,7 @@ async fn run_ftp_download(
                             segment.dirty = true;
                         }
                     }
-                    Err(_error) if cancel.load(Ordering::SeqCst) => return Ok(()),
+                    Err(_error) if cancel_token.is_cancelled() => return Ok(()),
                     Err(error) => {
                         let progress_len = progress.len();
                         let Some(segment) = progress.get_mut(&finished.segment_id) else {
@@ -461,6 +475,17 @@ async fn run_ftp_download(
                         }
                         if segment.retry_count > FTP_WORKER_RETRIES {
                             return Err(error);
+                        }
+                        // Backoff before re-queueing the failed segment.
+                        // The delay is based on the retry count (1-indexed for delay calculation).
+                        let delay = retry_policy.delay_for_attempt(
+                            u32::try_from(segment.retry_count).unwrap_or(1),
+                        );
+                        if !delay.is_zero() {
+                            tokio::select! {
+                                _ = cancel_token.cancelled() => return Ok(()),
+                                _ = tokio::time::sleep(delay) => {}
+                            }
                         }
                         pending.push_front(TaskSegmentRecord {
                             id: finished.segment_id.clone(),
@@ -505,7 +530,7 @@ async fn run_ftp_download(
                 &task,
                 &pool,
                 &temp_path,
-                &cancel,
+                &cancel_token,
                 &speed_limiter,
                 &progress_tx,
                 &mut pending,
@@ -548,7 +573,7 @@ async fn run_ftp_download(
         }
     }
 
-    if cancel.load(Ordering::SeqCst) {
+    if cancel_token.is_cancelled() {
         emit_ftp_progress(
             &mut progress,
             &mut last_checkpoint,
@@ -611,7 +636,7 @@ fn start_next_ftp_worker(
     task: &TaskRecord,
     pool: &SqlitePool,
     temp_path: &Path,
-    cancel: &Arc<AtomicBool>,
+    cancel_token: &tokio_util::sync::CancellationToken,
     speed_limiter: &Arc<GlobalSpeedLimiter>,
     progress_tx: &mpsc::UnboundedSender<WorkerProgress>,
     pending: &mut VecDeque<TaskSegmentRecord>,
@@ -637,7 +662,7 @@ fn start_next_ftp_worker(
         pool: pool.clone(),
         temp_path: temp_path.to_path_buf(),
         total_size: task.total_size,
-        cancel: cancel.clone(),
+        cancel_token: cancel_token.clone(),
         speed_limiter: speed_limiter.clone(),
         progress_tx: progress_tx.clone(),
         proxy_config: proxy_config.clone(),
@@ -660,13 +685,19 @@ async fn download_ftp_segment(request: WorkerRequest) -> Result<i64, String> {
         None
     };
     let result = download_ftp_segment_inner(&request).await;
-    persist_ftp_diagnostic(
-        &request.pool,
-        &request.task_id,
-        &request.target.sanitized_uri,
-        range_label,
-        result.as_ref().err().map(String::as_str),
-        started.elapsed(),
+    crate::download::diagnostics::persist_engine_diagnostic(
+        crate::download::diagnostics::EngineDiagnosticContext {
+            pool: &request.pool,
+            task_id: &request.task_id,
+            method: "FTP RETR",
+            url: &request.target.sanitized_uri,
+            range_header: range_label,
+            status_code: result.as_ref().ok().map(|_| 226),
+            content_length: None,
+            error: result.as_ref().err().map(String::as_str),
+            retry_count: 0,
+            duration: started.elapsed(),
+        },
     )
     .await;
     result
@@ -706,12 +737,13 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
     file.seek(std::io::SeekFrom::Start(u64::try_from(offset).unwrap_or(0)))
         .await
         .map_err(|e| format!("Could not seek in the temporary file: {e}"))?;
+    let mut file = BufWriter::with_capacity(256 * 1024, file);
 
     let mut buffer = vec![0_u8; FTP_READ_BUFFER_SIZE];
     let mut last_emit = Instant::now();
     let mut last_emit_bytes = offset;
     loop {
-        if request.cancel.load(Ordering::SeqCst) {
+        if request.cancel_token.is_cancelled() {
             let _ = session.abort(remote_stream).await;
             return Err("Download canceled.".to_string());
         }
@@ -846,33 +878,6 @@ async fn emit_ftp_progress(
         force_emit,
     );
     Ok(())
-}
-
-async fn persist_ftp_diagnostic(
-    pool: &SqlitePool,
-    task_id: &str,
-    url: &str,
-    range_header: Option<String>,
-    error: Option<&str>,
-    duration: Duration,
-) {
-    let record = RequestDiagnosticRecord {
-        task_id: task_id.to_string(),
-        method: "FTP RETR".to_string(),
-        url: sanitize_url(url),
-        range_header,
-        if_range_header: None,
-        status_code: if error.is_some() { None } else { Some(226) },
-        etag: None,
-        last_modified: None,
-        content_length: None,
-        error_message: error.map(str::to_string),
-        retry_count: 0,
-        duration_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
-    };
-    if let Err(error) = db::insert_request_diagnostic(pool, &record).await {
-        tracing::warn!(task_id, error = %error, "failed to persist ftp diagnostic");
-    }
 }
 
 fn progress_from_segments(segments: &[TaskSegmentRecord]) -> HashMap<String, SegmentProgress> {
@@ -1115,7 +1120,7 @@ async fn connect_session(
         }
         FtpSecurityMode::ImplicitTls => {
             if proxy_config.is_custom_socks5() {
-                return Err(ftp_error_payload(
+                return Err(engine_error(
                     "ftp_proxy_unsupported_for_implicit_tls",
                     "Implicit FTPS over a task SOCKS5 proxy is not supported by the current FTP runtime. Use explicit FTPS on port 21, plain FTP through SOCKS5, or disable the task proxy for this task.",
                     true,
@@ -1207,21 +1212,11 @@ fn ftp_connect_error(mode: FtpSecurityMode, error: suppaftp::FtpError) -> String
         FtpSecurityMode::Plain => "ftp_connect_failed",
         FtpSecurityMode::ExplicitTls | FtpSecurityMode::ImplicitTls => "ftp_tls_handshake_failed",
     };
-    ftp_error_payload(
+    engine_error(
         code,
-        &format!("FTP connection failed while using {mode_hint}: {error}"),
+        format!("FTP connection failed while using {mode_hint}: {error}"),
         true,
     )
-}
-
-fn ftp_error_payload(code: &str, message: &str, recoverable: bool) -> String {
-    crate::models::AppErrorPayload {
-        code: code.to_string(),
-        message: message.to_string(),
-        recoverable,
-        actions: vec!["check_url".to_string()],
-    }
-    .command_error()
 }
 
 fn rustls_connector() -> AsyncRustlsConnector {

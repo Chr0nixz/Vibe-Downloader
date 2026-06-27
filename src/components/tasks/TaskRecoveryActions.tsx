@@ -9,11 +9,9 @@ import type { Task } from "@/types/task";
 export function TaskRecoveryActions({
   task,
   onResolve,
-  compact = false,
 }: {
   task: Task;
   onResolve: (task: Task, action: RecoveryAction) => void;
-  compact?: boolean;
 }) {
   const { t } = useTranslation();
   const recoveryActions = task.recoveryActions ?? [];
@@ -35,7 +33,7 @@ export function TaskRecoveryActions({
             key={action}
             type="button"
             variant={action === "restart" ? "danger" : "outline"}
-            className={compact ? "h-8" : "h-9"}
+            className="h-8"
             onClick={(event) => {
               event.stopPropagation();
               onResolve(task, action);

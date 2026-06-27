@@ -8483,7 +8483,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vibe-downloader"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aes 0.9.1",
  "axum",
@@ -8524,6 +8524,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-specta",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",

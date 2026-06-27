@@ -8,6 +8,9 @@ const liveTasks = document.querySelector("#live-tasks");
 const captureControls = document.querySelector("#capture-controls");
 const autoIntercept = document.querySelector("#auto-intercept");
 const forwardHeadersMode = document.querySelector("#forward-headers-mode");
+const mediaCandidatesSection = document.querySelector("#media-candidates-section");
+const mediaCandidatesList = document.querySelector("#media-candidates-list");
+const noMediaCandidates = document.querySelector("#no-media-candidates");
 
 void refresh();
 
@@ -17,7 +20,7 @@ button.addEventListener("click", async () => {
   try {
     const [tab] = await api.tabs.query({ active: true, currentWindow: true });
     if (!tab?.url || !/^https?:\/\//i.test(tab.url)) {
-      throw new Error("Current tab is not an HTTP download URL.");
+      throw new Error(i18n("errNotHttpUrl"));
     }
     const response = await sendRuntimeMessage({
       type: "vibe-download-current-tab",
@@ -25,7 +28,7 @@ button.addEventListener("click", async () => {
       pageUrl: tab.url,
     });
     if (!response?.ok) {
-      throw new Error(response?.error ?? "Vibe did not accept the URL.");
+      throw new Error(response?.error ?? i18n("errHandoffRejected"));
     }
     status.textContent = i18n("statusSent");
     await refresh();
@@ -59,11 +62,13 @@ async function refresh() {
       snapshot.settings?.forwardHeadersMode ?? (snapshot.settings?.forwardHeaders === true ? "enabled" : "ask");
     renderRecent(snapshot.recent ?? []);
     renderLive(snapshot.tasks ?? []);
+    renderMediaCandidates(snapshot.mediaCandidates ?? []);
   } catch (error) {
     log.warn("failed to refresh popup", error);
     status.textContent = i18n("statusDisconnected");
     renderRecent([]);
     renderLive([]);
+    renderMediaCandidates([]);
   }
 }
 
@@ -93,6 +98,72 @@ function renderLive(tasks) {
   liveTasks.replaceChildren(
     ...(tasks.length > 0 ? tasks.map((task) => liveItem(task)) : [emptyItem(i18n("noLiveTasks"))]),
   );
+}
+
+function renderMediaCandidates(candidates) {
+  if (!mediaCandidatesSection || !mediaCandidatesList || !noMediaCandidates) return;
+  if (!candidates || candidates.length === 0) {
+    mediaCandidatesSection.hidden = true;
+    mediaCandidatesList.replaceChildren();
+    return;
+  }
+  mediaCandidatesSection.hidden = false;
+  noMediaCandidates.hidden = true;
+  mediaCandidatesList.replaceChildren(...candidates.map((candidate) => mediaCandidateItem(candidate)));
+}
+
+function mediaCandidateItem(candidate) {
+  const li = document.createElement("li");
+  li.className = "media-candidate";
+
+  const url = document.createElement("div");
+  url.className = "recent-url media-candidate-url";
+  const rawUrl = candidate.url ?? "";
+  url.textContent = rawUrl.length > 60 ? `${rawUrl.slice(0, 57)}…` : rawUrl;
+  url.title = rawUrl;
+
+  const meta = document.createElement("div");
+  meta.className = "recent-meta media-candidate-meta";
+  const parts = [];
+  if (candidate.contentType) parts.push(`${i18n("mediaCandidateType")}: ${candidate.contentType}`);
+  if (candidate.contentLength) {
+    const bytes = Number(candidate.contentLength);
+    if (bytes > 0) parts.push(`${i18n("mediaCandidateSize")}: ${formatBytes(bytes)}`);
+  }
+  meta.textContent = parts.join(" · ");
+
+  const downloadButton = document.createElement("button");
+  downloadButton.type = "button";
+  downloadButton.className = "media-candidate-download";
+  downloadButton.textContent = i18n("mediaCandidateDownload");
+  downloadButton.addEventListener("click", async () => {
+    downloadButton.disabled = true;
+    try {
+      const response = await sendRuntimeMessage({
+        type: "vibe-download-current-tab",
+        url: candidate.url,
+        pageUrl: candidate.pageUrl ?? candidate.url,
+      });
+      if (!response?.ok) throw new Error(response?.error ?? i18n("errHandoffRejected"));
+      status.textContent = i18n("statusSent");
+      await refresh();
+    } catch (error) {
+      log.error("media candidate download failed", error);
+      status.textContent = String(error?.message ?? error);
+    } finally {
+      downloadButton.disabled = false;
+    }
+  });
+
+  li.append(url, meta, downloadButton);
+  return li;
+}
+
+function formatBytes(bytes) {
+  if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(1)} GB`;
+  if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
 }
 
 function liveItem(task) {

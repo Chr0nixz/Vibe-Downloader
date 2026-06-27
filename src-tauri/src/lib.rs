@@ -8,7 +8,9 @@ pub mod logging;
 pub mod models;
 pub mod platform;
 pub mod proxy;
+pub mod scheduler;
 pub mod secure_headers;
+pub mod state_machine;
 
 use std::{
     collections::HashMap,
@@ -18,7 +20,7 @@ use std::{
 use sqlx::SqlitePool;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tokio::{sync::Mutex, task::JoinHandle};
 
@@ -28,7 +30,6 @@ const TRAY_MENU_HEIGHT: f64 = 260.0;
 const TRAY_MENU_SCREEN_MARGIN: f64 = 10.0;
 
 pub struct DownloadControl {
-    pub cancel: Arc<AtomicBool>,
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub finish: Arc<AtomicBool>,
     pub handle: JoinHandle<()>,
@@ -44,15 +45,65 @@ pub struct AppState {
     pub downloads: Arc<Mutex<HashMap<String, DownloadControl>>>,
     pub request_headers: TaskRequestHeaders,
     pub browser_realtime: Arc<browser_realtime::BrowserRealtimeState>,
-    pub scheduler: Arc<Mutex<()>>,
+    pub scheduler: Arc<scheduler::Scheduler>,
     pub speed_limiter: Arc<download::GlobalSpeedLimiter>,
     pub engine_registry: Arc<download::EngineRegistry>,
     pub quit_requested: Arc<AtomicBool>,
 }
 
+/// Cancel all active downloads and wait for checkpoint flush (up to `timeout`).
+/// Called at app exit to prevent progress loss.
+pub async fn shutdown_active_downloads(state: &AppState, timeout: std::time::Duration) {
+    let downloads = state.downloads.lock().await;
+    if downloads.is_empty() {
+        return;
+    }
+    let count = downloads.len();
+    tracing::info!(active_count = count, "shutting down active downloads");
+
+    for (task_id, control) in downloads.iter() {
+        tracing::debug!(task_id, "cancelling download for shutdown");
+        control.cancel_token.cancel();
+    }
+    drop(downloads);
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut remaining = state.downloads.lock().await;
+    let mut handles: Vec<(String, JoinHandle<()>)> = Vec::new();
+    for (task_id, control) in remaining.drain() {
+        handles.push((task_id, control.handle));
+    }
+    drop(remaining);
+
+    for (task_id, mut handle) in handles {
+        let remaining_time = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining_time.is_zero() {
+            tracing::warn!(task_id, "shutdown timeout reached, aborting remaining task");
+            handle.abort();
+            continue;
+        }
+        tokio::select! {
+            result = &mut handle => {
+                match result {
+                    Ok(()) => tracing::debug!(task_id, "download task exited cleanly"),
+                    Err(e) => tracing::warn!(task_id, error = %e, "download task exited with error"),
+                }
+            }
+            _ = tokio::time::sleep(remaining_time) => {
+                tracing::warn!(task_id, "download task did not exit in time, aborting");
+                handle.abort();
+            }
+        }
+    }
+    tracing::info!("shutdown_active_downloads complete");
+}
+
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     use tauri_specta::{collect_commands, Builder};
 
+    // 注意：tauri-specta 的 `Builder::commands()` 会覆盖而非追加命令列表，
+    // 因此无法用二次调用追加 debug-only 命令。这里保留 debug/release 两段
+    // 列表，仅在末尾差异处（seed_mock_tasks / bulk_task_action）分支。
     #[cfg(debug_assertions)]
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
         commands::tasks::list_tasks,
@@ -76,6 +127,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::browser::get_browser_capture_settings,
         commands::browser::update_browser_capture_settings,
         commands::browser::create_browser_handoff_task,
+        commands::classification::list_classification_rules,
+        commands::classification::create_classification_rule,
+        commands::classification::update_classification_rule,
+        commands::classification::delete_classification_rule,
+        commands::classification::reorder_classification_rules,
         commands::floating::show_floating_status_window,
         commands::floating::hide_floating_status_window,
         commands::floating::toggle_floating_status_window,
@@ -137,6 +193,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::browser::get_browser_capture_settings,
         commands::browser::update_browser_capture_settings,
         commands::browser::create_browser_handoff_task,
+        commands::classification::list_classification_rules,
+        commands::classification::create_classification_rule,
+        commands::classification::update_classification_rule,
+        commands::classification::delete_classification_rule,
+        commands::classification::reorder_classification_rules,
         commands::floating::show_floating_status_window,
         commands::floating::hide_floating_status_window,
         commands::floating::toggle_floating_status_window,
@@ -169,6 +230,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         commands::tasks::cancel_task,
         commands::tasks::delete_task,
         commands::tasks::bulk_delete_tasks,
+        commands::tasks::bulk_task_action,
         commands::tasks::open_task_file,
         commands::tasks::open_task_folder,
     ]);
@@ -313,14 +375,30 @@ pub fn run() {
                     api.prevent_close();
                     let _ = window.hide();
                 } else {
-                    // Window is actually closing — signal background tasks to stop.
+                    // Window is actually closing — prevent immediate close,
+                    // signal background tasks, show shutdown overlay, wait for
+                    // checkpoint flush, then exit.
+                    api.prevent_close();
                     state
                         .quit_requested
                         .store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = app.emit("app://shutting-down", ());
+
+                    let app_handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app_handle.state::<AppState>();
+                        shutdown_active_downloads(
+                            state.inner(),
+                            std::time::Duration::from_secs(3),
+                        )
+                        .await;
+                        app_handle.exit(0);
+                    });
                 }
             }
         });
 
+    // 注意：Tauri 的 `invoke_handler()` 也会覆盖而非追加，同样需要两段式。
     #[cfg(debug_assertions)]
     let builder = builder.invoke_handler(tauri::generate_handler![
         commands::tasks::list_tasks,
@@ -344,6 +422,11 @@ pub fn run() {
         commands::browser::get_browser_capture_settings,
         commands::browser::update_browser_capture_settings,
         commands::browser::create_browser_handoff_task,
+        commands::classification::list_classification_rules,
+        commands::classification::create_classification_rule,
+        commands::classification::update_classification_rule,
+        commands::classification::delete_classification_rule,
+        commands::classification::reorder_classification_rules,
         commands::floating::show_floating_status_window,
         commands::floating::hide_floating_status_window,
         commands::floating::toggle_floating_status_window,
@@ -405,6 +488,11 @@ pub fn run() {
         commands::browser::get_browser_capture_settings,
         commands::browser::update_browser_capture_settings,
         commands::browser::create_browser_handoff_task,
+        commands::classification::list_classification_rules,
+        commands::classification::create_classification_rule,
+        commands::classification::update_classification_rule,
+        commands::classification::delete_classification_rule,
+        commands::classification::reorder_classification_rules,
         commands::floating::show_floating_status_window,
         commands::floating::hide_floating_status_window,
         commands::floating::toggle_floating_status_window,
@@ -437,6 +525,7 @@ pub fn run() {
         commands::tasks::cancel_task,
         commands::tasks::delete_task,
         commands::tasks::bulk_delete_tasks,
+        commands::tasks::bulk_task_action,
         commands::tasks::open_task_file,
         commands::tasks::open_task_folder,
     ]);
@@ -447,11 +536,32 @@ pub fn run() {
 
             let handle = app.handle().clone();
 
+            // Show the main window as early as possible so the user sees the
+            // splash placeholder (rendered by index.html before React mounts)
+            // instead of a blank frame while the DB / settings / network stack
+            // finishes initializing below.
+            if let Some(window) = app.get_webview_window("main") {
+                platform::configure_main_window(&window)?;
+                let _ = window.show();
+            }
+
             let db_path = platform::db_path(&handle)?;
             let db_connection =
                 tauri::async_runtime::block_on(async { db::connect(&db_path).await })?;
             let data_was_reset = db_connection.data_was_reset;
+            let backup_path = db_connection.backup_path;
             let pool = db_connection.pool;
+            // Startup WAL checkpoint: if the `-wal` file exceeds 100 MB after
+            // an unclean shutdown or a long session, truncate it now so the
+            // app starts with a bounded journal.
+            if db::wal_file_size_bytes(&db_path) > 100 * 1024 * 1024 {
+                tracing::info!("WAL file exceeds 100MB, running checkpoint on startup");
+                tauri::async_runtime::block_on(async {
+                    if let Err(e) = db::wal_checkpoint(&pool).await {
+                        tracing::warn!(error = %e, "startup WAL checkpoint failed");
+                    }
+                });
+            }
             // Run non-critical maintenance synchronously so it finishes before
             // scheduling starts.  Best-effort; failures are logged but never
             // abort startup.
@@ -461,6 +571,15 @@ pub fn run() {
                 }
                 if let Err(error) = db::migrate_legacy_ftp_credentials(&pool).await {
                     tracing::warn!(error = %error, "legacy FTP credential migration failed");
+                }
+                match db::prune_request_diagnostics(&pool).await {
+                    Ok(0) => {}
+                    Ok(removed) => {
+                        tracing::info!(removed, "startup request diagnostics prune");
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "request diagnostics prune failed");
+                    }
                 }
             });
             let default_dir = commands::settings::default_download_dir(&handle)?;
@@ -480,13 +599,21 @@ pub fn run() {
                     .await
             });
             let browser_realtime = browser_realtime::BrowserRealtimeState::new();
+            let downloads = Arc::new(Mutex::new(HashMap::new()));
+            let request_headers: TaskRequestHeaders = Arc::new(Mutex::new(HashMap::new()));
+            let scheduler = Arc::new(scheduler::Scheduler::new(
+                downloads.clone(),
+                request_headers.clone(),
+                speed_limiter.clone(),
+                engine_registry.clone(),
+            ));
 
             app.manage(AppState {
                 pool: pool.clone(),
-                downloads: Arc::new(Mutex::new(HashMap::new())),
-                request_headers: Arc::new(Mutex::new(HashMap::new())),
+                downloads,
+                request_headers,
                 browser_realtime: browser_realtime.clone(),
-                scheduler: Arc::new(Mutex::new(())),
+                scheduler,
                 speed_limiter,
                 engine_registry,
                 quit_requested: Arc::new(AtomicBool::new(false)),
@@ -498,17 +625,12 @@ pub fn run() {
             // Spawn scheduling — downloads start without blocking UI.
             {
                 let handle_clone = handle.clone();
+                let state = handle_clone.state::<AppState>();
+                let scheduler = state.scheduler.clone();
+                let pool_clone = state.pool.clone();
                 tauri::async_runtime::spawn(async move {
-                    commands::tasks::schedule_queued_tasks(
-                        handle_clone.clone(),
-                        handle_clone.state::<AppState>().inner(),
-                    )
-                    .await;
-                    commands::tasks::schedule_retry_after_wakeup(
-                        handle_clone.clone(),
-                        handle_clone.state::<AppState>().inner(),
-                    )
-                    .await;
+                    scheduler.clone().dispatch(handle_clone.clone(), pool_clone.clone()).await;
+                    scheduler.schedule_retry_after_wakeup(handle_clone, pool_clone).await;
                 });
             }
             // Background schedule-window monitor: pauses/resumes tasks every 60s.
@@ -516,6 +638,11 @@ pub fn run() {
                 handle.clone(),
                 handle.state::<AppState>().inner(),
             );
+            // Background request-diagnostics cleanup: bounds `task_requests`
+            // growth for long-running / high-retry sessions.
+            commands::tasks::spawn_request_diagnostics_cleanup(handle.clone());
+            // Background WAL checkpoint: bounds `-wal` growth for long sessions.
+            commands::tasks::spawn_wal_checkpoint_monitor(handle.clone());
             create_tray(&handle)?;
             process_browser_handoff_files_from_args(
                 &handle,
@@ -523,15 +650,11 @@ pub fn run() {
                 "initial-launch",
             );
 
-            if let Some(window) = app.get_webview_window("main") {
-                platform::configure_main_window(&window)?;
-                let _ = window.show();
-            }
             if settings.floating_window_enabled {
                 commands::floating::sync_floating_status_window(&handle, true)?;
             }
             if data_was_reset {
-                show_database_reset_dialog(&handle);
+                show_database_reset_dialog(&handle, backup_path.as_deref());
             }
 
             Ok(())
@@ -540,15 +663,21 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn show_database_reset_dialog(app: &tauri::AppHandle) {
+fn show_database_reset_dialog(app: &tauri::AppHandle, backup_path: Option<&std::path::Path>) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+    let message = match backup_path {
+        Some(path) => format!(
+            "数据库迁移失败，已自动备份旧数据库并重建。\n\n备份路径：{}\n\nVibe Downloader 已删除并重建数据库，原有下载任务和设置已清空。如需恢复旧数据，请从备份文件手动还原。",
+            path.display()
+        ),
+        None => "数据库迁移失败，已重建数据库。原有下载任务和设置已清空。".to_string(),
+    };
+
     app.dialog()
-        .message(
-            "开发数据库已重置。\n\n迁移历史已压平，旧的本地开发数据与当前 schema 不兼容。Vibe Downloader 已删除并重建数据库，原有下载任务和设置已清空。",
-        )
+        .message(message)
         .title("Database reset")
-        .kind(MessageDialogKind::Error)
+        .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::Ok)
         .show(|_| {});
 }

@@ -1,17 +1,16 @@
+mod common;
+
 use std::{
     collections::HashMap,
     fs,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
-    },
+    net::TcpStream,
+    sync::{Arc, Mutex},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
+use common::{TestServer, TestPaths};
 use sha2::{Digest, Sha256};
 use tauri_app_lib::{
     download::GlobalSpeedLimiter,
@@ -25,7 +24,7 @@ const LARGE_PAYLOAD_SHA256: &str =
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_reads_headers_and_range_support() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
     let probe = engine
@@ -45,7 +44,7 @@ async fn probe_reads_headers_and_range_support() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_falls_back_to_get_range_when_head_is_incomplete() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
     let probe = engine
@@ -60,7 +59,7 @@ async fn probe_falls_back_to_get_range_when_head_is_incomplete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_sends_identity_accept_encoding() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
     let probe = engine
@@ -74,7 +73,7 @@ async fn probe_sends_identity_accept_encoding() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_allows_unknown_size_single_streams() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
     let probe = engine
@@ -89,7 +88,7 @@ async fn probe_allows_unknown_size_single_streams() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_uses_extended_file_name_sources() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
     let content_location = engine
@@ -115,7 +114,7 @@ async fn probe_uses_extended_file_name_sources() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_maps_common_http_failures() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
     let not_found = engine
@@ -152,7 +151,7 @@ async fn probe_maps_common_http_failures() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_download_writes_final_file() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("complete");
 
@@ -169,7 +168,7 @@ async fn direct_download_writes_final_file() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("download");
@@ -181,7 +180,7 @@ async fn direct_download_writes_final_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_unknown_size_download_writes_final_file() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("unknown-complete");
 
@@ -198,7 +197,7 @@ async fn direct_unknown_size_download_writes_final_file() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("download");
@@ -209,7 +208,7 @@ async fn direct_unknown_size_download_writes_final_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_download_renames_when_final_path_exists() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("final-conflict");
     let existing = b"existing user file";
@@ -228,7 +227,7 @@ async fn direct_download_renames_when_final_path_exists() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("download");
@@ -248,10 +247,10 @@ async fn direct_download_renames_when_final_path_exists() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_download_can_resume_from_temp_file() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("resume");
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = tokio_util::sync::CancellationToken::new();
 
     let first_cancel = cancel.clone();
     let first = tokio::spawn({
@@ -271,7 +270,7 @@ async fn direct_download_can_resume_from_temp_file() {
     });
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    cancel.store(true, Ordering::SeqCst);
+    cancel.cancel();
     let partial = first.await.expect("join").expect("partial");
     assert!(partial > 0);
     assert!(partial < slow_payload().len() as i64);
@@ -290,7 +289,7 @@ async fn direct_download_can_resume_from_temp_file() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("resume");
@@ -303,7 +302,7 @@ async fn direct_download_can_resume_from_temp_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_download_respects_speed_limiter() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("speed-limit");
     let started = std::time::Instant::now();
@@ -321,7 +320,7 @@ async fn direct_download_respects_speed_limiter() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
             Arc::new(GlobalSpeedLimiter::new(Some(32 * 1024))),
         )
         .await
@@ -336,7 +335,7 @@ async fn direct_download_respects_speed_limiter() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_resume_fails_when_range_is_unavailable() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("no-range");
     fs::write(&paths.temp, b"partial").expect("write temp");
@@ -354,7 +353,7 @@ async fn direct_resume_fails_when_range_is_unavailable() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect_err("resume should fail");
@@ -367,7 +366,7 @@ async fn direct_resume_fails_when_range_is_unavailable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_resume_sends_if_range_and_validates_content_range() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("direct-if-range");
     fs::write(&paths.temp, &SAMPLE[..5]).expect("write temp");
@@ -384,7 +383,7 @@ async fn direct_resume_sends_if_range_and_validates_content_range() {
                 etag: Some("\"strong\"".to_string()),
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("resume with If-Range");
@@ -394,7 +393,7 @@ async fn direct_resume_sends_if_range_and_validates_content_range() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_resume_fails_on_mismatched_content_range() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("direct-bad-content-range");
     let payload = large_payload();
@@ -412,7 +411,7 @@ async fn direct_resume_fails_on_mismatched_content_range() {
                 etag: None,
                 last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect_err("mismatched direct Content-Range should fail");
@@ -426,7 +425,7 @@ async fn direct_resume_fails_on_mismatched_content_range() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_direct_download_writes_all_ranges_to_one_file() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("segmented-complete");
     let payload = large_payload();
@@ -446,7 +445,7 @@ async fn segmented_direct_download_writes_all_ranges_to_one_file() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("segmented download");
@@ -461,7 +460,7 @@ async fn segmented_direct_download_writes_all_ranges_to_one_file() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_direct_retries_transient_segment_failures() {
     std::env::set_var("VIBE_FAST_RETRY_DELAYS", "1");
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("segmented-retry");
     let payload = large_payload();
@@ -480,7 +479,7 @@ async fn segmented_direct_retries_transient_segment_failures() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("segmented retry");
@@ -492,7 +491,7 @@ async fn segmented_direct_retries_transient_segment_failures() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_direct_resume_skips_completed_ranges() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("segmented-resume");
     let payload = large_payload();
@@ -516,7 +515,7 @@ async fn segmented_direct_resume_skips_completed_ranges() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("resume segmented download");
@@ -527,7 +526,7 @@ async fn segmented_direct_resume_skips_completed_ranges() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_direct_failure_does_not_rename_temp_file() {
     std::env::set_var("VIBE_FAST_RETRY_DELAYS", "1");
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("segmented-failure");
     let payload = large_payload();
@@ -546,7 +545,7 @@ async fn segmented_direct_failure_does_not_rename_temp_file() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect_err("segment should fail");
@@ -558,7 +557,7 @@ async fn segmented_direct_failure_does_not_rename_temp_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_direct_fails_on_mismatched_content_range() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("segmented-bad-content-range");
     let payload = large_payload();
@@ -577,7 +576,7 @@ async fn segmented_direct_fails_on_mismatched_content_range() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect_err("mismatched Content-Range should fail");
@@ -591,7 +590,7 @@ async fn segmented_direct_fails_on_mismatched_content_range() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_direct_fails_when_range_is_not_honored() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("segmented-range-ignored");
     let payload = large_payload();
@@ -610,7 +609,7 @@ async fn segmented_direct_fails_when_range_is_not_honored() {
                 etag: None,
                 last_modified: None,
             },
-            Arc::new(AtomicBool::new(false)),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect_err("ignored Range should fail");
@@ -624,7 +623,7 @@ async fn segmented_direct_fails_when_range_is_not_honored() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_follows_redirect_and_resolves_file_name() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
     let probe = engine
@@ -643,7 +642,7 @@ async fn probe_follows_redirect_and_resolves_file_name() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_prefers_rfc5987_filename_over_plain() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
     let probe = engine
@@ -656,7 +655,7 @@ async fn probe_prefers_rfc5987_filename_over_plain() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_ensures_extension_from_content_type() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
     let probe = engine
@@ -673,7 +672,7 @@ async fn probe_ensures_extension_from_content_type() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_maps_401_as_denied() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
     let error = engine
@@ -691,10 +690,10 @@ async fn probe_maps_401_as_denied() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_download_cancel_mid_stream_returns_partial() {
-    let server = TestServer::start();
+    let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("cancel-mid");
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = tokio_util::sync::CancellationToken::new();
 
     let cancel_clone = cancel.clone();
     let engine_clone = engine.clone();
@@ -717,7 +716,7 @@ async fn direct_download_cancel_mid_stream_returns_partial() {
 
     // Let some data flow, then cancel
     tokio::time::sleep(Duration::from_millis(100)).await;
-    cancel.store(true, Ordering::SeqCst);
+    cancel.cancel();
 
     let result = handle.await.expect("join");
     let downloaded = result.expect("cancel should return Ok with partial bytes");
@@ -737,75 +736,9 @@ async fn direct_download_cancel_mid_stream_returns_partial() {
     );
 }
 
-struct TestServer {
-    base_url: String,
-    stop: Arc<AtomicBool>,
-    _state: Arc<Mutex<HashMap<String, usize>>>,
-}
-
-impl TestServer {
-    fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = stop.clone();
-        let state = Arc::new(Mutex::new(HashMap::new()));
-        let thread_state = state.clone();
-        let (ready_tx, ready_rx) = mpsc::channel();
-
-        thread::spawn(move || {
-            listener.set_nonblocking(true).expect("nonblocking");
-            let _ = ready_tx.send(());
-            while !thread_stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let state = thread_state.clone();
-                        thread::spawn(move || handle_connection(stream, state));
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        ready_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("test server ready");
-
-        Self {
-            base_url: format!("http://{addr}"),
-            stop,
-            _state: state,
-        }
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        let _ = TcpStream::connect(self.base_url.trim_start_matches("http://"));
-    }
-}
-
-struct TestPaths {
-    temp: PathBuf,
-    final_path: PathBuf,
-}
-
-impl TestPaths {
-    fn new(label: &str) -> Self {
-        let id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("vibe-downloader-{label}-{id}"));
-        fs::create_dir_all(&dir).expect("create temp dir");
-        Self {
-            temp: dir.join("file.bin.vibe-downloading"),
-            final_path: dir.join("file.bin"),
-        }
-    }
+fn start_test_server() -> TestServer {
+    let state: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+    TestServer::start(move |stream| handle_connection(stream, state.clone()))
 }
 
 fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usize>>>) {

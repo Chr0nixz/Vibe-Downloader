@@ -265,9 +265,9 @@ const es = {
       "Esto restablecer\u00e1 todos los ajustes a sus valores predeterminados. Esta acci\u00f3n no se puede deshacer.",
     searchSettings: "Buscar ajustes...",
     searchNoResults: "No se encontraron ajustes coincidentes.",
-    clearSearch: "Clear search",
-    startTime: "Start time",
-    endTime: "End time",
+    clearSearch: "Borrar b\u00fasqueda",
+    startTime: "Hora de inicio",
+    endTime: "Hora de fin",
   },
   deleteDialog: {
     title: "Eliminar tarea",

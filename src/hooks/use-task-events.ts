@@ -199,56 +199,61 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
     }
 
     void (async () => {
-      unlistenProgress = await onTaskProgress((payload) => {
-        if (!cancelled) {
-          pendingProgressPayloads.push(payload);
-          scheduleProgressFlush();
-        }
-      });
-      if (cancelled) {
-        unlistenProgress();
-        return;
-      }
+      // Subscribe to all three event streams in parallel — they have no
+      // dependency on each other, so sequential awaits only add IPC round-trip
+      // latency before the queue listener is registered.
+      const results = await Promise.allSettled([
+        onTaskProgress((payload) => {
+          if (!cancelled) {
+            pendingProgressPayloads.push(payload);
+            scheduleProgressFlush();
+          }
+        }),
+        onTaskUpdated((task) => {
+          if (cancelled) return;
+          flushProgressBatch();
+          const previous = useTaskDataStore.getState().tasks;
+          useTaskDataStore.getState().upsertTask(task);
+          notifyTaskStatusChanges(previous, useTaskDataStore.getState().tasks);
+          scheduleRecalculateStats(150);
+          scheduleStatsRefresh(150);
+        }),
+        onQueueChanged(async () => {
+          if (cancelled) return;
+          flushProgressBatch();
+          if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
+          queueRefreshTimer = setTimeout(() => {
+            void (async () => {
+              try {
+                const previous = useTaskDataStore.getState().tasks;
+                const page = await listTasksCursor(taskCursorInput(null));
+                const fresh = page.items;
+                if (cancelled) return;
+                const merged = mergeTasksFromServer(previous, fresh);
+                useTaskDataStore
+                  .getState()
+                  .setTaskCursorPage(merged, page.totalEstimate, page.nextCursor, page.filterOptions);
+                notifyTaskStatusChanges(previous, merged);
+                scheduleRecalculateStats(150);
+                scheduleStatsRefresh(150);
+              } catch (error) {
+                log.warn("queue refresh failed", error);
+              }
+            })();
+          }, 100);
+        }),
+      ]);
 
-      unlistenTaskUpdated = await onTaskUpdated((task) => {
-        if (cancelled) return;
-        flushProgressBatch();
-        const previous = useTaskDataStore.getState().tasks;
-        useTaskDataStore.getState().upsertTask(task);
-        notifyTaskStatusChanges(previous, useTaskDataStore.getState().tasks);
-        scheduleRecalculateStats(150);
-        scheduleStatsRefresh(150);
-      });
-      if (cancelled) {
-        unlistenTaskUpdated();
-        return;
-      }
+      if (results[0].status === "fulfilled") unlistenProgress = results[0].value;
+      else log.warn("task progress listener registration failed", results[0].reason);
+      if (results[1].status === "fulfilled") unlistenTaskUpdated = results[1].value;
+      else log.warn("task updated listener registration failed", results[1].reason);
+      if (results[2].status === "fulfilled") unlistenQueue = results[2].value;
+      else log.warn("queue changed listener registration failed", results[2].reason);
 
-      unlistenQueue = await onQueueChanged(async () => {
-        if (cancelled) return;
-        flushProgressBatch();
-        if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
-        queueRefreshTimer = setTimeout(() => {
-          void (async () => {
-            try {
-              const previous = useTaskDataStore.getState().tasks;
-              const page = await listTasksCursor(taskCursorInput(null));
-              const fresh = page.items;
-              if (cancelled) return;
-              const merged = mergeTasksFromServer(previous, fresh);
-              useTaskDataStore
-                .getState()
-                .setTaskCursorPage(merged, page.totalEstimate, page.nextCursor, page.filterOptions);
-              notifyTaskStatusChanges(previous, merged);
-              scheduleRecalculateStats(150);
-              scheduleStatsRefresh(150);
-            } catch (error) {
-              log.warn("queue refresh failed", error);
-            }
-          })();
-        }, 100);
-      });
       if (cancelled) {
+        unlistenProgress?.();
+        unlistenTaskUpdated?.();
         unlistenQueue?.();
       }
     })();

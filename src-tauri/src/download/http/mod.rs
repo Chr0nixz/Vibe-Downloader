@@ -1,6 +1,5 @@
 mod direct;
 mod error;
-pub(crate) mod file;
 mod probe;
 mod request;
 mod segmented;
@@ -9,7 +8,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc},
+    sync::Arc,
     time::Duration,
 };
 
@@ -33,7 +32,12 @@ use self::{
     segmented::run_segmented_download,
 };
 use super::engine::EngineFuture;
-use super::{DownloadContext, DownloadEngine, ProbeOutput, ProbeRequest};
+use super::{DownloadContext, DownloadEngine, DownloadError, ProbeOutput, ProbeRequest};
+
+/// Maximum idle time between chunk reads before a download is considered stalled.
+/// Prevents stalled servers from hanging the scheduler without breaking large
+/// file downloads (data flowing resets the timer each chunk).
+pub(crate) const HTTP_CHUNK_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct ProbeResult {
@@ -192,7 +196,6 @@ impl HttpEngine {
             app: context.app,
             pool: context.pool,
             task: context.task,
-            cancel: context.cancel,
             cancel_token: context.cancel_token,
             speed_limiter: context.speed_limiter,
             connection_limit: context.connection_limit,
@@ -204,29 +207,29 @@ impl HttpEngine {
     pub async fn download_direct(
         &self,
         request: DirectDownloadRequest,
-        cancel: Arc<AtomicBool>,
+        cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<i64, String> {
         let client = self.client().await?;
-        run_direct_download(&client, request, cancel, GlobalSpeedLimiter::disabled()).await
+        run_direct_download(&client, request, cancel_token, GlobalSpeedLimiter::disabled()).await
     }
 
     pub async fn download_direct_with_limiter(
         &self,
         request: DirectDownloadRequest,
-        cancel: Arc<AtomicBool>,
+        cancel_token: tokio_util::sync::CancellationToken,
         speed_limiter: Arc<GlobalSpeedLimiter>,
     ) -> Result<i64, String> {
         let client = self.client().await?;
-        run_direct_download(&client, request, cancel, speed_limiter).await
+        run_direct_download(&client, request, cancel_token, speed_limiter).await
     }
 
     pub async fn download_segmented_direct(
         &self,
         request: DirectSegmentedDownloadRequest,
-        cancel: Arc<AtomicBool>,
+        cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<i64, String> {
         let client = self.client().await?;
-        run_direct_segmented_download(&client, request, cancel, GlobalSpeedLimiter::disabled())
+        run_direct_segmented_download(&client, request, cancel_token, GlobalSpeedLimiter::disabled())
             .await
     }
 }
@@ -281,14 +284,19 @@ impl reqwest::dns::Resolve for HickoryResolver {
 pub(crate) fn build_client(config: &ResolvedProxyConfig) -> Result<Client, String> {
     let mut builder = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
-        .user_agent("VibeDownloader/0.1")
+        .user_agent(concat!(
+            "VibeDownloader/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .dns_resolver(Arc::new(HickoryResolver::new()))
+        // 仅设置连接建立阶段超时；流式下载不应受整体 timeout 限制，
+        // 否则大文件下载会在 60s 后被中断。应用层超时由各引擎在 Response
+        // 上按需设置。
         .connect_timeout(Duration::from_secs(30))
-        // Overall request timeout: prevents downloads from hanging forever
-        // when the network stalls. reqwest applies this to the full request
-        // lifecycle including body streaming, so we set it generously (60s)
-        // to avoid impacting legitimate large-file transfers.
-        .timeout(Duration::from_secs(60));
+        // 连接池优化（E-10）：增大每 host 空闲连接数，设置 90s 空闲超时，
+        // 避免短间隔重复下载同一 host 时反复握手。
+        .pool_max_idle_per_host(64)
+        .pool_idle_timeout(Duration::from_secs(90));
 
     match config.mode {
         AppProxyMode::Off => {
@@ -335,11 +343,15 @@ impl DownloadEngine for HttpEngine {
         matches!(scheme, "http" | "https")
     }
 
-    fn probe<'a>(&'a self, request: ProbeRequest) -> EngineFuture<'a, Result<ProbeOutput, String>> {
+    fn probe<'a>(
+        &'a self,
+        request: ProbeRequest,
+    ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
             let probe =
                 HttpEngine::probe_with_headers(self, &request.uri, &request.request_headers)
-                    .await?;
+                    .await
+                    .map_err(DownloadError::Other)?;
             Ok(ProbeOutput {
                 protocol: reqwest::Url::parse(&probe.final_url)
                     .map(|url| url.scheme().to_string())
@@ -368,7 +380,14 @@ impl DownloadEngine for HttpEngine {
         })
     }
 
-    fn download<'a>(&'a self, context: DownloadContext) -> EngineFuture<'a, Result<(), String>> {
-        Box::pin(async move { HttpEngine::download(self, context).await })
+    fn download<'a>(
+        &'a self,
+        context: DownloadContext,
+    ) -> EngineFuture<'a, Result<(), DownloadError>> {
+        Box::pin(async move {
+            HttpEngine::download(self, context)
+                .await
+                .map_err(DownloadError::Other)
+        })
     }
 }

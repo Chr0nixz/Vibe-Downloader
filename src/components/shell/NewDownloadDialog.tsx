@@ -620,10 +620,11 @@ export function NewDownloadDialog({
         <form className="flex min-h-0 flex-1 flex-col overflow-hidden" onSubmit={submit}>
           <DialogBody className="flex flex-col gap-3 py-4">
             {/* URL input */}
-            <label className="flex flex-col gap-1 text-xs text-text-muted">
+            <label htmlFor="new-download-url" className="flex flex-col gap-1 text-xs text-text-muted">
               {t("newDownload.url")}
               <div className="flex gap-2">
                 <Input
+                  id="new-download-url"
                   value={url}
                   onChange={(event) => {
                     setUrl(event.target.value);
@@ -755,10 +756,11 @@ export function NewDownloadDialog({
             ) : null}
 
             {/* Save directory */}
-            <label className="flex flex-col gap-1 text-xs text-text-muted">
+            <label htmlFor="new-download-save-dir" className="flex flex-col gap-1 text-xs text-text-muted">
               {t("newDownload.saveDir")}
               <div className="flex gap-2">
                 <Input
+                  id="new-download-save-dir"
                   value={saveDir}
                   onChange={(event) => setSaveDir(event.target.value)}
                   placeholder={settings?.defaultSaveDir ?? t("newDownload.saveDirPlaceholder")}
@@ -888,7 +890,7 @@ export function NewDownloadDialog({
                             }
                           }}
                           aria-label={t("newDownload.fileName")}
-                          className="h-7 text-sm"
+                          className="h-8 text-sm"
                           autoFocus
                         />
                       ) : (
@@ -921,10 +923,10 @@ export function NewDownloadDialog({
 
             {/* HLS quality picker */}
             {isHlsProbe && probe && probe.hlsVariants.length > 1 ? (
-              <label className="flex flex-col gap-1 text-xs text-text-muted">
+              <label htmlFor="new-download-hls-quality" className="flex flex-col gap-1 text-xs text-text-muted">
                 {t("newDownload.hlsQuality")}
                 <Select value={selectedHlsVariantUri ?? ""} onValueChange={(value) => setSelectedHlsVariantUri(value)}>
-                  <SelectTrigger className="h-8 w-full text-xs">
+                  <SelectTrigger id="new-download-hls-quality" className="h-8 w-full text-xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -957,9 +959,10 @@ export function NewDownloadDialog({
             {advancedOpen ? (
               <div className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3">
                 {!isTorrentProbe && !isMetalinkProbe && !isHlsProbe && !isDashProbe ? (
-                  <label className="flex flex-col gap-1 text-xs text-text-muted">
+                  <label htmlFor="new-download-sha256" className="flex flex-col gap-1 text-xs text-text-muted">
                     {t("newDownload.sha256")}
                     <Input
+                      id="new-download-sha256"
                       value={expectedHashSha256}
                       onChange={(event) => setExpectedHashSha256(event.target.value)}
                       placeholder={t("newDownload.sha256Placeholder")}
@@ -973,9 +976,10 @@ export function NewDownloadDialog({
                   <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
                     <span className="text-xs font-medium text-text-secondary">{t("newDownload.authentication")}</span>
                     <div className="grid grid-cols-2 gap-2">
-                      <label className="flex flex-col gap-1 text-xs text-text-muted">
+                      <label htmlFor="new-download-username" className="flex flex-col gap-1 text-xs text-text-muted">
                         {t("newDownload.authUsername")}
                         <Input
+                          id="new-download-username"
                           value={username}
                           onChange={(event) => setUsername(event.target.value)}
                           placeholder={t("newDownload.authUsernamePlaceholder")}
@@ -983,9 +987,10 @@ export function NewDownloadDialog({
                           autoComplete="username"
                         />
                       </label>
-                      <label className="flex flex-col gap-1 text-xs text-text-muted">
+                      <label htmlFor="new-download-password" className="flex flex-col gap-1 text-xs text-text-muted">
                         {t("newDownload.authPassword")}
                         <Input
+                          id="new-download-password"
                           type="password"
                           value={password}
                           onChange={(event) => setPassword(event.target.value)}
@@ -1026,9 +1031,13 @@ export function NewDownloadDialog({
                             </Button>
                           ) : null}
                         </div>
-                        <label className="flex flex-col gap-1 text-xs text-text-muted">
+                        <label
+                          htmlFor="new-download-ssh-passphrase"
+                          className="flex flex-col gap-1 text-xs text-text-muted"
+                        >
                           {t("newDownload.sshKeyPassphrase")}
                           <Input
+                            id="new-download-ssh-passphrase"
                             type="password"
                             value={privateKeyPassphrase}
                             onChange={(event) => setPrivateKeyPassphrase(event.target.value)}

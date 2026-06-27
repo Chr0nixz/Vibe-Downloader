@@ -13,7 +13,11 @@ export function ToastViewport() {
   const { t } = useTranslation();
   const toasts = useToastStore((s) => s.toasts);
   const dismissToast = useToastStore((s) => s.dismissToast);
+  const clearToasts = useToastStore((s) => s.clearToasts);
   const reduceMotion = useReducedMotion();
+
+  const visible = toasts.slice(0, 4);
+  const hiddenCount = toasts.length - visible.length;
 
   return (
     <div
@@ -22,7 +26,7 @@ export function ToastViewport() {
       aria-atomic="false"
     >
       <AnimatePresence initial={false}>
-        {toasts.map((toast) => (
+        {visible.map((toast) => (
           <ToastItem
             key={toast.id}
             toast={toast}
@@ -32,6 +36,15 @@ export function ToastViewport() {
           />
         ))}
       </AnimatePresence>
+      {hiddenCount > 0 ? (
+        <button
+          type="button"
+          onClick={() => clearToasts()}
+          className="pointer-events-auto self-center rounded-full border border-border-subtle bg-surface-overlay px-3 py-1 text-xs text-text-secondary shadow-md transition-colors hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+        >
+          {t("toast.moreCount", { count: hiddenCount })}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -119,7 +132,7 @@ function ToastItem({
             type="button"
             variant="ghost"
             size="sm"
-            className="mt-2 h-10 px-3 text-xs md:h-7 md:px-2"
+            className="mt-2 h-11 px-3 text-xs md:h-7 md:px-2"
             onClick={() => {
               toast.action?.onClick();
               onDismiss();
@@ -133,7 +146,7 @@ function ToastItem({
         type="button"
         variant="ghost"
         size="icon"
-        className="h-10 w-10 shrink-0 md:h-7 md:w-7"
+        className="h-11 w-11 shrink-0 md:h-8 md:w-8"
         aria-label={dismissLabel}
         onClick={onDismiss}
       >

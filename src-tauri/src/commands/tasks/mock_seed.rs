@@ -244,5 +244,6 @@ fn mock_task(input: MockTaskInput, now: &str) -> TaskRecord {
         hash_verified_at: None,
         created_at: now.to_string(),
         updated_at: now.to_string(),
+        files_version: 0,
     }
 }

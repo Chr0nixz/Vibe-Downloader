@@ -3,7 +3,7 @@ use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::Ordering,
         Arc,
     },
     time::{Duration, Instant},
@@ -22,15 +22,16 @@ use tokio::{fs, io::AsyncWriteExt, process::Command, task::JoinSet};
 use uuid::Uuid;
 
 use super::{
-    engine::EngineFuture, http::build_client, DownloadContext, DownloadEngine, ProbeOutput,
-    ProbeRequest,
+    engine::EngineFuture, http::build_client, DownloadContext, DownloadEngine, DownloadError,
+    ProbeOutput, ProbeRequest,
 };
+use crate::download::error::engine_error;
+use crate::download::retry::RetryPolicy;
 use crate::{
     db,
-    events::{emit_task_progress, emit_task_updated_record},
-    logging::sanitize_url,
+    events::{emit_task_updated_record, TaskProgressEmitGate},
     models::{
-        AppErrorPayload, EngineCapabilities, HlsVariant, ProbedFile, RequestDiagnosticRecord,
+        AppErrorPayload, EngineCapabilities, HlsVariant, ProbedFile,
         SegmentStatus, TaskKind, TaskProgressPayload, TaskRecord, TaskStatus,
     },
     proxy::SharedProxyConfig,
@@ -215,11 +216,15 @@ impl DownloadEngine for HlsEngine {
         matches!(scheme, "http" | "https")
     }
 
-    fn probe<'a>(&'a self, request: ProbeRequest) -> EngineFuture<'a, Result<ProbeOutput, String>> {
+    fn probe<'a>(
+        &'a self,
+        request: ProbeRequest,
+    ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
             let plan = self
                 .probe_hls(&request.uri, &request.request_headers)
-                .await?;
+                .await
+                .map_err(DownloadError::Other)?;
             let source_key = reqwest::Url::parse(&plan.media_url)
                 .ok()
                 .and_then(|url| url.host_str().map(str::to_string))
@@ -250,8 +255,15 @@ impl DownloadEngine for HlsEngine {
         })
     }
 
-    fn download<'a>(&'a self, context: DownloadContext) -> EngineFuture<'a, Result<(), String>> {
-        Box::pin(async move { run_hls_download(self.clone(), context).await })
+    fn download<'a>(
+        &'a self,
+        context: DownloadContext,
+    ) -> EngineFuture<'a, Result<(), DownloadError>> {
+        Box::pin(async move {
+            run_hls_download(self.clone(), context)
+                .await
+                .map_err(DownloadError::Other)
+        })
     }
 }
 
@@ -260,8 +272,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         app,
         pool,
         task,
-        cancel,
-        cancel_token: _,
+        cancel_token,
         finish,
         speed_limiter,
         connection_limit,
@@ -273,7 +284,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     // if ffmpeg were removed between ensure_ffmpeg_available() and run_ffmpeg(),
     // the second call would return None and fail after a long download.
     let ffmpeg = ffmpeg_path().ok_or_else(|| {
-        hls_error(
+        engine_error(
             "hls_ffmpeg_missing",
             "ffmpeg was not found. Install ffmpeg or set VIBE_FFMPEG_PATH before creating HLS tasks.",
             true,
@@ -318,10 +329,12 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     let mut downloaded_total = existing_hls_downloaded_bytes(&pool, &task.id).await?;
     let mut seen = existing_hls_sequences(&pool, &task.id).await?;
     let mut idle_polls = 0_usize;
+    let mut progress_gate = TaskProgressEmitGate::default();
 
     loop {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel_token.is_cancelled() {
             pause_hls_task(&app, &pool, &task, downloaded_total).await?;
+            progress_gate.flush(&app);
             return Ok(());
         }
         if finish.load(Ordering::SeqCst) || db::hls_finish_requested(&pool, &task.id).await? {
@@ -358,10 +371,11 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                 &client,
                 &request_headers,
                 &speed_limiter,
-                &cancel,
+                &cancel_token,
                 connection_limit.max(1),
                 downloaded_total,
                 plans,
+                &mut progress_gate,
             )
             .await?;
             downloaded_total = downloaded;
@@ -378,11 +392,13 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         tokio::time::sleep(delay).await;
     }
 
-    if cancel.load(Ordering::SeqCst) {
+    if cancel_token.is_cancelled() {
         pause_hls_task(&app, &pool, &task, downloaded_total).await?;
+        progress_gate.flush(&app);
         return Ok(());
     }
 
+    progress_gate.flush(&app);
     finalize_hls_task(&app, &pool, &task, &staging_dir, downloaded_total, &ffmpeg).await
 }
 
@@ -479,10 +495,11 @@ async fn download_hls_segments(
     client: &Client,
     request_headers: &[(String, String)],
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
-    cancel: &Arc<AtomicBool>,
+    cancel_token: &tokio_util::sync::CancellationToken,
     connection_limit: usize,
     initial_downloaded: i64,
     plans: Vec<SegmentDownloadPlan>,
+    progress_gate: &mut TaskProgressEmitGate,
 ) -> Result<i64, String> {
     let mut pending = plans.into_iter();
     let mut workers = JoinSet::new();
@@ -499,9 +516,9 @@ async fn download_hls_segments(
             let pool = pool.clone();
             let request_headers = request_headers.to_vec();
             let speed_limiter = speed_limiter.clone();
-            let cancel = cancel.clone();
+            let cancel_token = cancel_token.clone();
             workers.spawn(async move {
-                download_hls_segment(&pool, &client, request_headers, speed_limiter, cancel, plan)
+                download_hls_segment(&pool, &client, request_headers, speed_limiter, cancel_token, plan)
                     .await
             });
         }
@@ -519,12 +536,22 @@ async fn download_hls_segments(
             Ok(()) => {
                 downloaded_total = downloaded_total.saturating_add(result.bytes);
                 db::update_hls_last_media_sequence(pool, &task.id, result.media_sequence).await?;
-                emit_hls_progress(app, pool, task, downloaded_total, active + 1).await?;
+                emit_hls_progress(
+                    app,
+                    pool,
+                    task,
+                    downloaded_total,
+                    active + 1,
+                    progress_gate,
+                    false,
+                )
+                .await?;
             }
             Err(error) => {
-                cancel.store(true, Ordering::SeqCst);
+                cancel_token.cancel();
                 workers.abort_all();
-                return Err(hls_error(
+                progress_gate.flush(app);
+                return Err(engine_error(
                     "hls_segment_failed",
                     format!("HLS segment download failed: {error}"),
                     true,
@@ -532,7 +559,7 @@ async fn download_hls_segments(
             }
         }
 
-        if cancel.load(Ordering::SeqCst) {
+        if cancel_token.is_cancelled() {
             workers.abort_all();
             break;
         }
@@ -546,9 +573,10 @@ async fn download_hls_segment(
     client: &Client,
     request_headers: Vec<(String, String)>,
     speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
-    cancel: Arc<AtomicBool>,
+    cancel_token: tokio_util::sync::CancellationToken,
     plan: SegmentDownloadPlan,
 ) -> SegmentDownloadResult {
+    let retry_policy = RetryPolicy::hls_segment();
     let mut retry_count = 0;
     let mut last_error = None;
     loop {
@@ -558,16 +586,23 @@ async fn download_hls_segment(
             client,
             &request_headers,
             &speed_limiter,
-            &cancel,
+            &cancel_token,
             &plan,
         )
         .await;
-        persist_hls_diagnostic(
-            pool,
-            &plan,
-            result.as_ref().err().map(String::as_str),
-            retry_count,
-            started.elapsed(),
+        crate::download::diagnostics::persist_engine_diagnostic(
+            crate::download::diagnostics::EngineDiagnosticContext {
+                pool,
+                task_id: &plan.task_id,
+                method: "GET",
+                url: &plan.uri,
+                range_header: plan.byte_range.as_ref().map(byte_range_header),
+                status_code: result.as_ref().ok().map(|_| 200),
+                content_length: None,
+                error: result.as_ref().err().map(String::as_str),
+                retry_count,
+                duration: started.elapsed(),
+            },
         )
         .await;
         match result {
@@ -587,7 +622,7 @@ async fn download_hls_segment(
                     result: Ok(()),
                 };
             }
-            Err(error) if cancel.load(Ordering::SeqCst) => {
+            Err(error) if cancel_token.is_cancelled() => {
                 return SegmentDownloadResult {
                     media_sequence: plan.media_sequence,
                     bytes: 0,
@@ -606,10 +641,20 @@ async fn download_hls_segment(
                     Some(&error),
                 )
                 .await;
-                tokio::time::sleep(Duration::from_millis(
-                    200 * u64::try_from(retry_count).unwrap_or(1),
-                ))
-                .await;
+                let delay =
+                    retry_policy.delay_for_attempt(u32::try_from(retry_count).unwrap_or(1));
+                if !delay.is_zero() {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            return SegmentDownloadResult {
+                                media_sequence: plan.media_sequence,
+                                bytes: 0,
+                                result: Err(last_error.unwrap_or(error)),
+                            };
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                }
             }
             Err(error) => {
                 let message = last_error.unwrap_or(error);
@@ -637,7 +682,7 @@ async fn download_hls_segment_once(
     client: &Client,
     request_headers: &[(String, String)],
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
-    cancel: &Arc<AtomicBool>,
+    cancel_token: &tokio_util::sync::CancellationToken,
     plan: &SegmentDownloadPlan,
 ) -> Result<i64, String> {
     db::update_hls_segment_status(pool, &plan.id, 0, SegmentStatus::Downloading, 0, None).await?;
@@ -648,7 +693,7 @@ async fn download_hls_segment_once(
         })?;
     }
     if let Some(init_map) = &plan.init_map {
-        ensure_hls_init_map(client, request_headers, speed_limiter, cancel, init_map).await?;
+        ensure_hls_init_map(client, request_headers, speed_limiter, cancel_token, init_map).await?;
     }
     let mut response = apply_forwarded_headers(client.get(&plan.uri), request_headers)
         .header(ACCEPT_ENCODING, "identity");
@@ -672,7 +717,7 @@ async fn download_hls_segment_once(
         .await
         .map_err(|e| format!("HLS segment connection failed: {e}"))?
     {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel_token.is_cancelled() {
             return Err("Download canceled.".to_string());
         }
         speed_limiter.throttle(chunk.len()).await;
@@ -704,7 +749,7 @@ async fn ensure_hls_init_map(
     client: &Client,
     request_headers: &[(String, String)],
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
-    cancel: &Arc<AtomicBool>,
+    cancel_token: &tokio_util::sync::CancellationToken,
     init_map: &ResolvedHlsInitMap,
 ) -> Result<(), String> {
     if fs::try_exists(&init_map.local_path).await.unwrap_or(false) {
@@ -717,7 +762,7 @@ async fn ensure_hls_init_map(
         init_map.byte_range.as_ref().map(byte_range_header),
     )
     .await?;
-    if cancel.load(Ordering::SeqCst) {
+    if cancel_token.is_cancelled() {
         return Err("Download canceled.".to_string());
     }
     speed_limiter.throttle(data.len()).await;
@@ -752,14 +797,14 @@ async fn decrypt_hls_segment(
         return Ok(data);
     }
     if !key.method.eq_ignore_ascii_case("AES-128") {
-        return Err(hls_error(
+        return Err(engine_error(
             "hls_unsupported_encryption",
             format!("Unsupported HLS encryption method: {}", key.method),
             false,
         ));
     }
     let uri = key.uri.as_deref().ok_or_else(|| {
-        hls_error(
+        engine_error(
             "hls_unsupported_encryption",
             "AES-128 HLS key is missing a URI.",
             false,
@@ -767,7 +812,7 @@ async fn decrypt_hls_segment(
     })?;
     let key_bytes = fetch_bytes(client, uri, request_headers, None).await?;
     if key_bytes.len() != 16 {
-        return Err(hls_error(
+        return Err(engine_error(
             "hls_unsupported_encryption",
             "AES-128 HLS key must be 16 bytes.",
             false,
@@ -806,8 +851,8 @@ async fn finalize_hls_task(
         .map(PathBuf::from)
         .ok_or_else(|| "HLS task is missing a final path.".to_string())?;
     let completed_path =
-        crate::download::http::file::finalize_download_file(&mp4_temp, &final_path).await?;
-    crate::download::http::file::persist_completed_path(pool, &task.id, &completed_path).await?;
+        crate::download::file_ops::finalize_download_file(&mp4_temp, &final_path).await?;
+    crate::download::file_ops::persist_completed_path(pool, &task.id, &completed_path).await?;
     if let Some(segment) = db::get_first_segment_record(pool, &task.id).await? {
         db::complete_unknown_size_task(pool, &task.id, &segment.id, downloaded_total).await?;
     } else {
@@ -830,7 +875,7 @@ async fn write_local_hls_playlist(
         .filter(|segment| segment.status == SegmentStatus::Completed)
         .collect::<Vec<_>>();
     if completed.is_empty() {
-        return Err(hls_error(
+        return Err(engine_error(
             "hls_segment_failed",
             "No completed HLS segments are available to convert.",
             true,
@@ -949,13 +994,16 @@ async fn emit_hls_progress(
     task: &TaskRecord,
     downloaded: i64,
     connection_count: usize,
+    progress_gate: &mut TaskProgressEmitGate,
+    force: bool,
 ) -> Result<(), String> {
+    let connection_count_i32 = i32::try_from(connection_count).unwrap_or(i32::MAX);
     db::update_task_progress(
         pool,
         &task.id,
         downloaded,
         0,
-        i32::try_from(connection_count).unwrap_or(i32::MAX),
+        connection_count_i32,
         TaskStatus::Downloading,
     )
     .await?;
@@ -969,16 +1017,17 @@ async fn emit_hls_progress(
         )
         .await?;
     }
-    emit_task_progress(
+    progress_gate.emit_or_store(
         app,
-        &TaskProgressPayload {
+        TaskProgressPayload {
             task_id: task.id.clone(),
             downloaded_bytes: downloaded.to_string(),
             total_size: task.total_size.to_string(),
             speed_bps: "0".to_string(),
-            connection_count: i32::try_from(connection_count).unwrap_or(i32::MAX),
+            connection_count: connection_count_i32,
             status: TaskStatus::Downloading,
         },
+        force,
     );
     Ok(())
 }
@@ -1011,7 +1060,7 @@ async fn fetch_text(
 ) -> Result<String, String> {
     let bytes = fetch_bytes(client, url, headers, None).await?;
     String::from_utf8(bytes).map_err(|_| {
-        hls_error(
+        engine_error(
             "hls_invalid_playlist",
             "HLS playlist is not valid UTF-8.",
             false,
@@ -1059,32 +1108,6 @@ fn apply_forwarded_headers(
     request
 }
 
-async fn persist_hls_diagnostic(
-    pool: &SqlitePool,
-    plan: &SegmentDownloadPlan,
-    error: Option<&str>,
-    retry_count: i32,
-    duration: Duration,
-) {
-    let record = RequestDiagnosticRecord {
-        task_id: plan.task_id.clone(),
-        method: "GET".to_string(),
-        url: sanitize_url(&plan.uri),
-        range_header: plan.byte_range.as_ref().map(byte_range_header),
-        if_range_header: None,
-        status_code: if error.is_some() { None } else { Some(200) },
-        etag: None,
-        last_modified: None,
-        content_length: None,
-        error_message: error.map(str::to_string),
-        retry_count,
-        duration_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
-    };
-    if let Err(error) = db::insert_request_diagnostic(pool, &record).await {
-        tracing::warn!(error = %error, "failed to persist hls request diagnostic");
-    }
-}
-
 fn is_master_playlist(body: &str) -> bool {
     body.lines()
         .any(|line| line.trim_start().starts_with("#EXT-X-STREAM-INF"))
@@ -1097,7 +1120,7 @@ fn validate_playlist_syntax(body: &str) -> Result<(), String> {
         ParsedMediaPlaylist::try_from(body).map(|_| ())
     };
     parsed.map_err(|error| {
-        hls_error(
+        engine_error(
             "hls_invalid_playlist",
             format!("HLS playlist could not be parsed: {error}"),
             false,
@@ -1119,7 +1142,7 @@ fn choose_master_variant(body: &str) -> Result<MasterVariant, String> {
             )
         })
         .ok_or_else(|| {
-            hls_error(
+            engine_error(
                 "hls_invalid_playlist",
                 "HLS master playlist does not contain a playable variant.",
                 false,
@@ -1178,7 +1201,7 @@ fn parse_master_variants(body: &str) -> Vec<MasterVariant> {
 
 fn parse_media_playlist(body: &str) -> Result<MediaPlaylist, String> {
     if !body.lines().any(|line| line.trim() == "#EXTM3U") {
-        return Err(hls_error(
+        return Err(engine_error(
             "hls_invalid_playlist",
             "HLS playlist is missing #EXTM3U.",
             false,
@@ -1272,7 +1295,7 @@ fn reject_unsupported_media_playlist(body: &str) -> Result<(), String> {
             let attrs = parse_attributes(line.trim_start_matches("#EXT-X-KEY:"));
             let method = attrs.get("METHOD").map(String::as_str).unwrap_or("NONE");
             if !matches!(method, "NONE" | "AES-128") {
-                return Err(hls_error(
+                return Err(engine_error(
                     "hls_unsupported_encryption",
                     format!("Unsupported HLS encryption method: {method}"),
                     false,
@@ -1282,7 +1305,7 @@ fn reject_unsupported_media_playlist(body: &str) -> Result<(), String> {
                 .get("KEYFORMAT")
                 .is_some_and(|value| value != "identity" && value != "\"identity\"")
             {
-                return Err(hls_error(
+                return Err(engine_error(
                     "hls_unsupported_encryption",
                     "Only identity HLS AES-128 keys are supported.",
                     false,
@@ -1303,7 +1326,7 @@ fn parse_key(value: &str) -> Result<Option<HlsKey>, String> {
         return Ok(None);
     }
     if method != "AES-128" {
-        return Err(hls_error(
+        return Err(engine_error(
             "hls_unsupported_encryption",
             format!("Unsupported HLS encryption method: {method}"),
             false,
@@ -1319,7 +1342,7 @@ fn parse_key(value: &str) -> Result<Option<HlsKey>, String> {
 fn parse_init_map(value: &str) -> Result<HlsInitMap, String> {
     let attrs = parse_attributes(value);
     let uri = attrs.get("URI").cloned().ok_or_else(|| {
-        hls_error(
+        engine_error(
             "hls_invalid_playlist",
             "HLS EXT-X-MAP is missing a URI.",
             false,
@@ -1460,7 +1483,7 @@ fn ensure_ffmpeg_available() -> Result<(), String> {
     if ffmpeg_path().is_some() {
         Ok(())
     } else {
-        Err(hls_error(
+        Err(engine_error(
             "hls_ffmpeg_missing",
             "ffmpeg was not found. Install ffmpeg or set VIBE_FFMPEG_PATH before creating HLS tasks.",
             true,
@@ -1491,20 +1514,6 @@ fn executable_in_path(name: &str) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn hls_error(code: &str, message: impl Into<String>, recoverable: bool) -> String {
-    AppErrorPayload::new(
-        code,
-        message,
-        recoverable,
-        if recoverable {
-            vec!["retry", "check_url"]
-        } else {
-            vec!["check_url"]
-        },
-    )
-    .command_error()
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, Ordering},
+    atomic::AtomicI64,
     Arc,
 };
 
@@ -8,18 +8,21 @@ use tokio::{fs, io::{AsyncWriteExt, BufWriter}, sync::mpsc, task::JoinSet};
 
 use super::{
     error::format_http_status,
-    file::{finalize_download_file, preallocate_temp_file},
     request::send_get_with_retry,
     segmented::diagnostics::{if_range_header_from, parse_content_range},
     segmented::{download_segment_worker, SegmentMessage, SegmentWorkerRequest},
-    DirectDownloadRequest, DirectSegmentedDownloadRequest,
+    DirectDownloadRequest, DirectSegmentedDownloadRequest, HTTP_CHUNK_READ_TIMEOUT,
 };
-use crate::{db, download::GlobalSpeedLimiter, models::AppErrorPayload};
+use crate::{
+    db,
+    download::{file_ops::{finalize_download_file, preallocate_temp_file}, GlobalSpeedLimiter},
+    models::AppErrorPayload,
+};
 
 pub(super) async fn run_direct_download(
     client: &Client,
     request: DirectDownloadRequest,
-    cancel: Arc<AtomicBool>,
+    cancel_token: tokio_util::sync::CancellationToken,
     speed_limiter: Arc<GlobalSpeedLimiter>,
 ) -> Result<i64, String> {
     let resume_from = fs::metadata(&request.temp_path)
@@ -76,24 +79,27 @@ pub(super) async fn run_direct_download(
     let mut file = BufWriter::with_capacity(256 * 1024, raw_file);
 
     let mut downloaded = resume_from;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("The connection failed while downloading: {e}"))?
-    {
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                file.flush()
+                    .await
+                    .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
+                return Ok(downloaded);
+            }
+            chunk = tokio::time::timeout(HTTP_CHUNK_READ_TIMEOUT, response.chunk()) => match chunk {
+                Ok(Ok(Some(data))) => data,
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => return Err(format!("The connection failed while downloading: {e}")),
+                Err(_) => return Err("Connection stalled: no data received for 60 seconds.".to_string()),
+            }
+        };
         speed_limiter.throttle(chunk.len()).await;
         file.write_all(&chunk).await.map_err(|e| {
             AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
                 .command_error()
         })?;
         downloaded += i64::try_from(chunk.len()).unwrap_or(0);
-
-        if cancel.load(Ordering::SeqCst) {
-            file.flush()
-                .await
-                .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
-            return Ok(downloaded);
-        }
     }
 
     file.flush()
@@ -112,7 +118,7 @@ pub(super) async fn run_direct_download(
 pub(super) async fn run_direct_segmented_download(
     client: &Client,
     request: DirectSegmentedDownloadRequest,
-    cancel: Arc<AtomicBool>,
+    cancel_token: tokio_util::sync::CancellationToken,
     speed_limiter: Arc<GlobalSpeedLimiter>,
 ) -> Result<i64, String> {
     if request.segments.is_empty() {
@@ -146,7 +152,6 @@ pub(super) async fn run_direct_segmented_download(
     let segment_count = request.segments.len();
     let mut active_workers = 0_usize;
     let if_range = if_range_header_from(request.etag.as_deref(), request.last_modified.as_deref());
-    let cancel_token = tokio_util::sync::CancellationToken::new();
 
     for segment in request.segments {
         let offset = segment
@@ -166,7 +171,6 @@ pub(super) async fn run_direct_segmented_download(
             total_size: request.total_size,
             segment_count,
             supports_parallel: request.supports_parallel,
-            cancel: cancel.clone(),
             cancel_token: cancel_token.clone(),
             progress_tx: progress_tx.clone(),
             range_end: Arc::new(AtomicI64::new(range_end)),
@@ -185,12 +189,12 @@ pub(super) async fn run_direct_segmented_download(
                 match result {
                     Ok(Ok(())) => {}
                     Ok(Err(failure)) => {
-                        cancel.store(true, Ordering::SeqCst);
+                        cancel_token.cancel();
                         workers.abort_all();
                         return Err(failure.error);
                     }
                     Err(error) => {
-                        cancel.store(true, Ordering::SeqCst);
+                        cancel_token.cancel();
                         workers.abort_all();
                         return Err(format!("A download worker stopped unexpectedly: {error}"));
                     }
@@ -200,7 +204,7 @@ pub(super) async fn run_direct_segmented_download(
         }
     }
 
-    if cancel.load(Ordering::SeqCst) {
+    if cancel_token.is_cancelled() {
         return Ok(initial_downloaded);
     }
 

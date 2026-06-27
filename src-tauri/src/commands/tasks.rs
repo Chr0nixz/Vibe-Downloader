@@ -1,15 +1,10 @@
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::atomic::Ordering,
 };
 
-use reqwest::Url;
 use serde::Deserialize;
 use specta::Type;
-use sqlx::Row;
 use tauri::{AppHandle, Manager};
 
 use super::task_file_planning::unique_final_path;
@@ -19,19 +14,14 @@ pub use super::task_resume::{
 
 use crate::{
     db,
-    download::{DownloadContext, EngineRegistry, ProbeRequest},
-    events::{
-        emit_completion_action_requested, emit_queue_changed, emit_task_progress,
-        emit_task_updated_record,
-    },
-    logging::sanitize_url,
+    download::{EngineRegistry, ProbeRequest},
+    events::{emit_queue_changed, emit_task_progress, emit_task_updated_record},
     models::{
-        AppErrorPayload, CompletionAction, CompletionActionRequestedPayload, FtpDirectoryProbe,
-        HashVerificationStatus, RecoveryAction, SftpDirectoryProbe, Task, TaskChecksumRecord,
-        TaskFileRecord, TaskProxySettings, TaskProxySettingsInput, TaskRecord, TaskStatus,
-        WebDavDirectoryProbe,
+        AppErrorPayload, FtpDirectoryProbe, RecoveryAction, SftpDirectoryProbe, Task,
+        TaskChecksumRecord, TaskFileRecord, TaskProxySettings, TaskProxySettingsInput, TaskRecord,
+        TaskStatus, WebDavDirectoryProbe,
     },
-    platform, AppState, DownloadControl, TaskRequestHeaders,
+    AppState, TaskRequestHeaders,
 };
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -106,8 +96,12 @@ pub async fn update_torrent_file_selection(
         }
         .command_error());
     }
-    db::update_task_file_selection(&state.pool, &task.id, &selected).await?;
-    db::update_task_status(
+    let mut tx = state.pool.begin().await.map_err(|e| e.to_string())?;
+    db::update_task_file_selection_in_tx(&mut tx, &task.id, &selected).await?;
+    db::insert_task_event_in_tx(&mut tx, &task.id, "bt_file_selection_updated", None).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    crate::state_machine::transition_task(
+        &app,
         &state.pool,
         &task.id,
         TaskStatus::Queued,
@@ -116,10 +110,10 @@ pub async fn update_torrent_file_selection(
         Some("Queued"),
         None,
     )
-    .await?;
-    db::insert_task_event(&state.pool, &task.id, "bt_file_selection_updated", None).await?;
+    .await
+    .map_err(String::from)?;
     emit_queue_changed(&app);
-    schedule_queued_tasks(app.clone(), state.inner()).await;
+    state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
     task_payload(&state.pool, &task.id).await
 }
 
@@ -237,513 +231,7 @@ pub async fn probe_webdav_directory(
     crate::download::webdav::probe_webdav_directory_url(&url, proxy_config).await
 }
 
-pub(crate) async fn schedule_queued_tasks(app: AppHandle, state: &AppState) {
-    schedule_queued_tasks_inner(
-        app,
-        state.pool.clone(),
-        state.downloads.clone(),
-        state.request_headers.clone(),
-        state.scheduler.clone(),
-        state.speed_limiter.clone(),
-        state.engine_registry.clone(),
-    )
-    .await;
-}
-
-pub(crate) async fn schedule_retry_after_wakeup(app: AppHandle, state: &AppState) {
-    let Some(next) = (match db::next_retry_after_at(&state.pool).await {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(error = %error, "failed to inspect retry-after queue");
-            None
-        }
-    }) else {
-        return;
-    };
-    let when = chrono::DateTime::parse_from_rfc3339(&next)
-        .map(|value| value.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|_| chrono::Utc::now());
-    let now = chrono::Utc::now();
-    let delay = when
-        .signed_duration_since(now)
-        .to_std()
-        .unwrap_or_else(|_| std::time::Duration::from_secs(0));
-    if delay.is_zero() {
-        schedule_queued_tasks(app, state).await;
-    } else {
-        spawn_schedule_queued_tasks_after(app, state, delay);
-    }
-}
-
-async fn schedule_queued_tasks_inner(
-    app: AppHandle,
-    pool: sqlx::SqlitePool,
-    downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
-    request_headers: TaskRequestHeaders,
-    scheduler: Arc<tokio::sync::Mutex<()>>,
-    speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
-    engine_registry: Arc<EngineRegistry>,
-) {
-    let _guard = scheduler.lock().await;
-
-    // Read settings and queued list ONCE outside the loop.
-    // Previously these were re-fetched every iteration (~240 DB round trips per burst).
-    let default_dir = super::settings::default_download_dir(&app).unwrap_or_default();
-    let settings = match db::get_settings(&pool, default_dir).await {
-        Ok(settings) => settings,
-        Err(error) => {
-            tracing::error!(error = %error, "failed to load settings for scheduler");
-            return;
-        }
-    };
-    let queued_limit = i64::from(settings.max_active_tasks)
-        .saturating_mul(i64::from(settings.max_connections_per_host).max(1))
-        .clamp(
-            i64::from(settings.max_active_tasks).max(1),
-            db::DEFAULT_TASK_PAGE_SIZE,
-        );
-    let queued = match db::list_queued_task_records(&pool, queued_limit).await {
-        Ok(tasks) => tasks,
-        Err(error) => {
-            tracing::error!(error = %error, "failed to load queued tasks");
-            return;
-        }
-    };
-    if queued.is_empty() {
-        return;
-    }
-
-    let mut active_count = downloads.lock().await.len() as i32;
-    let available = settings.max_active_tasks.saturating_sub(active_count);
-    if available <= 0 {
-        tracing::debug!(
-            active_count,
-            max_active_tasks = settings.max_active_tasks,
-            "scheduler has no available slots"
-        );
-        return;
-    }
-
-    tracing::debug!(
-        available,
-        queued_count = queued.len(),
-        "scheduler dispatching queued tasks"
-    );
-
-    let host_limit = usize::try_from(settings.max_connections_per_host)
-        .unwrap_or(usize::try_from(db::DEFAULT_MAX_CONNECTIONS_PER_HOST).unwrap_or(8))
-        .max(1);
-
-    for task in queued {
-        if active_count >= settings.max_active_tasks {
-            break;
-        }
-        if settings.schedule_download_window_enabled
-            && task.obey_schedule
-            && !db::local_time_window_active(
-                &settings.schedule_download_window_start,
-                &settings.schedule_download_window_end,
-            )
-        {
-            tracing::debug!(
-                task_id = %task.id,
-                "scheduler deferred task outside configured download window"
-            );
-            continue;
-        }
-        let host_used = host_connection_slots(&downloads, &task.source_key).await;
-        if host_used >= host_limit {
-            tracing::debug!(
-                task_id = %task.id,
-                source_key = %task.source_key,
-                host_used,
-                host_limit,
-                "scheduler deferred task because host connection limit is full"
-            );
-            continue;
-        }
-        let planned_slots = db::planned_segment_count_with_plan(
-            &task,
-            db::parse_multi_connection_threshold_bytes(
-                &settings.multi_connection_threshold_bytes,
-            ),
-            settings.segment_count,
-        )
-        .min(host_limit.saturating_sub(host_used))
-        .max(1);
-        let task_id = task.id.clone();
-        match start_task_download(
-            DownloadStartContext {
-                app: app.clone(),
-                pool: pool.clone(),
-                downloads: downloads.clone(),
-                request_headers: request_headers.clone(),
-                scheduler: scheduler.clone(),
-                speed_limiter: speed_limiter.clone(),
-                engine_registry: engine_registry.clone(),
-            },
-            task,
-            planned_slots,
-        )
-        .await
-        {
-            Ok(()) => {
-                // Task was inserted into the downloads map — count it.
-                active_count += 1;
-            }
-            Err(error) => {
-                // start_task_download failed before (or during) insert; the
-                // spawned task (if any) will clean up the downloads entry.
-                // Do NOT increment active_count — the task is not consuming a slot.
-                match db::get_task_record(&pool, &task_id).await {
-                    Ok(Some(current)) if current.status == TaskStatus::Queued => {
-                        mark_download_failed(&app, &pool, &task_id, error).await;
-                    }
-                    Ok(Some(current)) => {
-                        emit_task_progress_snapshot(&app, &current);
-                        emit_task_updated_record(&app, &pool, &current).await;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    emit_queue_changed(&app);
-}
-
-struct DownloadStartContext {
-    app: AppHandle,
-    pool: sqlx::SqlitePool,
-    downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
-    request_headers: TaskRequestHeaders,
-    scheduler: Arc<tokio::sync::Mutex<()>>,
-    speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
-    engine_registry: Arc<EngineRegistry>,
-}
-
-async fn start_task_download(
-    context: DownloadStartContext,
-    task: TaskRecord,
-    connection_limit: usize,
-) -> Result<(), String> {
-    let DownloadStartContext {
-        app,
-        pool,
-        downloads,
-        request_headers,
-        scheduler,
-        speed_limiter,
-        engine_registry,
-    } = context;
-
-    let task_request_headers =
-        resolve_task_request_headers(&pool, request_headers.clone(), &task.id).await?;
-    let global_proxy_config = engine_registry.proxy_config().await;
-    let task_proxy_config =
-        db::resolve_task_proxy_config(&pool, &task.id, &task.protocol, &global_proxy_config)
-            .await?;
-    let task =
-        prepare_task_for_download(&pool, &engine_registry, task, &task_request_headers).await?;
-    if downloads.lock().await.contains_key(&task.id) {
-        tracing::debug!(task_id = %task.id, "download already active, skipping start");
-        return Ok(());
-    }
-
-    tracing::info!(
-        task_id = %task.id,
-        url = %sanitize_url(&task.url),
-        total_size = task.total_size,
-        connection_limit,
-        "starting task download"
-    );
-
-    let connection_count = i32::try_from(connection_limit.max(1)).unwrap_or(1);
-    db::update_task_status(
-        &pool,
-        &task.id,
-        TaskStatus::Downloading,
-        0,
-        connection_count,
-        Some("Downloading"),
-        None,
-    )
-    .await?;
-    db::insert_task_event(&pool, &task.id, "started", None).await?;
-    if let Some(current) = db::get_task_record(&pool, &task.id).await? {
-        emit_task_updated_record(&app, &pool, &current).await;
-    }
-
-    let cancel = Arc::new(AtomicBool::new(false));
-    let finish = Arc::new(AtomicBool::new(false));
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-    let downloads_map = downloads.clone();
-    let task_id = task.id.clone();
-    let map_task_id = task.id.clone();
-    let source_key = task.source_key.clone();
-    let task_app = app.clone();
-    let task_cancel = cancel.clone();
-    let task_cancel_token = cancel_token.clone();
-    let task_finish = finish.clone();
-    let task_pool = pool.clone();
-    let task_scheduler = scheduler.clone();
-    let state_speed_limiter = speed_limiter.clone();
-    let task_engine_registry = engine_registry.clone();
-
-    let handle = tokio::spawn(async move {
-        let engine = match task_engine_registry.engine_for_uri(&task.url) {
-            Ok(engine) => engine,
-            Err(error) => {
-                mark_download_failed(&task_app, &task_pool, &task_id, error).await;
-                let _ = downloads_map.lock().await.remove(&task_id);
-                spawn_schedule_queued_tasks(
-                    task_app.clone(),
-                    task_pool.clone(),
-                    downloads_map.clone(),
-                    request_headers.clone(),
-                    task_scheduler.clone(),
-                    state_speed_limiter.clone(),
-                    task_engine_registry.clone(),
-                );
-                return;
-            }
-        };
-
-        let task_limit_bps = db::parse_speed_limit_bps(task.task_speed_limit_bps.as_deref());
-        let scheduled_limit_bps = db::get_settings(
-            &task_pool,
-            super::settings::default_download_dir(&task_app).unwrap_or_default(),
-        )
-        .await
-        .ok()
-        .and_then(|settings| {
-            if settings.schedule_speed_limit_window_enabled
-                && db::local_time_window_active(
-                    &settings.schedule_speed_limit_window_start,
-                    &settings.schedule_speed_limit_window_end,
-                )
-            {
-                db::parse_speed_limit_bps(settings.schedule_speed_limit_bps.as_deref())
-            } else {
-                None
-            }
-        });
-        let effective_task_limit = min_optional_limit(task_limit_bps, scheduled_limit_bps);
-        let task_speed_limiter = crate::download::GlobalSpeedLimiter::with_parent(
-            state_speed_limiter.clone(),
-            effective_task_limit,
-        );
-        // Spawn the download as a nested task so that a panic inside the engine
-        // is caught by tokio's JoinHandle (returns Err(JoinError) with is_panic())
-        // instead of aborting the entire process. Requires panic = "unwind".
-        // Clone the shared handles that are still needed after the nested spawn
-        // so the outer task retains access once `async move` captures them.
-        let inner_app = task_app.clone();
-        let inner_pool = task_pool.clone();
-        let inner_cancel = task_cancel.clone();
-        let download_handle = tokio::spawn(async move {
-            engine
-                .download(DownloadContext {
-                    app: inner_app,
-                    pool: inner_pool,
-                    task,
-                    cancel: inner_cancel,
-                    cancel_token: task_cancel_token.clone(),
-                    finish: task_finish.clone(),
-                    speed_limiter: task_speed_limiter,
-                    connection_limit,
-                    request_headers: task_request_headers.clone(),
-                    proxy_config: task_proxy_config,
-                })
-                .await
-        });
-        let result = match download_handle.await {
-            Ok(result) => result,
-            Err(join_error) => {
-                let message = if join_error.is_panic() {
-                    let payload = join_error.into_panic();
-                    payload
-                        .downcast_ref::<String>()
-                        .map(|s| s.as_str())
-                        .or_else(|| payload.downcast_ref::<&str>().copied())
-                        .unwrap_or("unknown panic")
-                        .to_string()
-                } else {
-                    "Download task was cancelled.".to_string()
-                };
-                tracing::error!(
-                    task_id = %task_id,
-                    error = %message,
-                    "download task terminated unexpectedly"
-                );
-                Err(message)
-            }
-        };
-        let canceled = task_cancel.load(Ordering::SeqCst);
-        let _ = downloads_map.lock().await.remove(&task_id);
-        let _ = request_headers.lock().await.remove(&task_id);
-
-        if let Err(error) = result {
-            if !canceled {
-                mark_download_failed(&task_app, &task_pool, &task_id, error).await;
-            }
-        } else if !canceled {
-            match verify_task_hash_with_pool(&task_pool, &task_id).await {
-                Ok(state) if state.status != HashVerificationStatus::NotRequested => {
-                    tracing::info!(
-                        task_id = %task_id,
-                        status = ?state.status,
-                        "hash verification completed"
-                    );
-                    if let Ok(Some(current)) = db::get_task_record(&task_pool, &task_id).await {
-                        emit_task_updated_record(&task_app, &task_pool, &current).await;
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        task_id = %task_id,
-                        error = %error,
-                        "hash verification failed to run"
-                    );
-                }
-            }
-            maybe_emit_completion_action(&task_app, &task_pool, downloads_map.clone()).await;
-        }
-
-        spawn_schedule_queued_tasks(
-            task_app,
-            task_pool,
-            downloads_map,
-            request_headers,
-            task_scheduler,
-            state_speed_limiter,
-            task_engine_registry,
-        );
-    });
-
-    downloads.lock().await.insert(
-        map_task_id,
-        DownloadControl {
-            cancel,
-            cancel_token,
-            finish,
-            handle,
-            source_key,
-            connection_slots: connection_limit.max(1),
-        },
-    );
-
-    emit_queue_changed(&app);
-    Ok(())
-}
-
-async fn host_connection_slots(
-    downloads: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
-    source_key: &str,
-) -> usize {
-    downloads
-        .lock()
-        .await
-        .values()
-        .filter(|control| control.source_key == source_key)
-        .map(|control| control.connection_slots)
-        .sum()
-}
-
-fn min_optional_limit(left: Option<i64>, right: Option<i64>) -> Option<i64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-async fn maybe_emit_completion_action(
-    app: &AppHandle,
-    pool: &sqlx::SqlitePool,
-    downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
-) {
-    if !downloads.lock().await.is_empty() {
-        return;
-    }
-    if db::list_queued_task_records(pool, 1)
-        .await
-        .map(|tasks| !tasks.is_empty())
-        .unwrap_or(true)
-    {
-        return;
-    }
-    let Ok(settings) = db::get_settings(
-        pool,
-        super::settings::default_download_dir(app).unwrap_or_default(),
-    )
-    .await
-    else {
-        return;
-    };
-    if settings.completion_action == CompletionAction::None {
-        return;
-    }
-    if settings.completion_action == CompletionAction::RunCommand {
-        if let Err(error) = platform::run_user_command(&settings.completion_run_command) {
-            tracing::warn!(error = %error, "completion run_command failed");
-        }
-        return;
-    }
-    emit_completion_action_requested(
-        app,
-        &CompletionActionRequestedPayload {
-            action: settings.completion_action,
-            countdown_seconds: settings.completion_countdown_seconds,
-        },
-    );
-}
-
-fn spawn_schedule_queued_tasks(
-    app: AppHandle,
-    pool: sqlx::SqlitePool,
-    downloads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, DownloadControl>>>,
-    request_headers: TaskRequestHeaders,
-    scheduler: Arc<tokio::sync::Mutex<()>>,
-    speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
-    engine_registry: Arc<EngineRegistry>,
-) {
-    tokio::spawn(async move {
-        schedule_queued_tasks_inner(
-            app,
-            pool,
-            downloads,
-            request_headers,
-            scheduler,
-            speed_limiter,
-            engine_registry,
-        )
-        .await;
-    });
-}
-
-fn spawn_schedule_queued_tasks_after(app: AppHandle, state: &AppState, delay: std::time::Duration) {
-    let pool = state.pool.clone();
-    let downloads = state.downloads.clone();
-    let request_headers = state.request_headers.clone();
-    let scheduler = state.scheduler.clone();
-    let speed_limiter = state.speed_limiter.clone();
-    let engine_registry = state.engine_registry.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        schedule_queued_tasks_inner(
-            app,
-            pool,
-            downloads,
-            request_headers,
-            scheduler,
-            speed_limiter,
-            engine_registry,
-        )
-        .await;
-    });
-}
+// --- migrated scheduler functions removed (see crate::scheduler) ---
 
 /// Enforces the configured download-window schedule by pausing active tasks
 /// when the window is closed and resuming previously schedule-paused tasks
@@ -798,24 +286,20 @@ pub(crate) async fn check_schedule_preemption(
         }
     } else {
         // Window just opened — resume tasks that were paused by schedule.
-        let paused_rows = sqlx::query(
-            "SELECT id FROM tasks WHERE status = 'paused' AND obey_schedule = 1",
-        )
-        .fetch_all(&state.pool)
-        .await
-        .map_err(|e| e.to_string())?;
+        let paused_ids = db::list_paused_schedulable_tasks(&state.pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
         let mut resumed_any = false;
-        for row in &paused_rows {
-            let task_id: String = row.get("id");
+        for task_id in &paused_ids {
             let latest_pause =
-                db::get_latest_pause_event_type(&state.pool, &task_id).await?;
+                db::get_latest_pause_event_type(&state.pool, task_id).await?;
             if latest_pause.as_deref() != Some("paused_by_schedule") {
                 continue;
             }
             tracing::info!(task_id = %task_id, "resuming task: schedule window opened");
-            db::insert_task_event(&state.pool, &task_id, "resumed", None).await?;
-            if let Err(err) = queue_task_for_retry(&app, state.inner(), &task_id).await {
+            db::insert_task_event(&state.pool, task_id, "resumed", None).await?;
+            if let Err(err) = queue_task_for_retry(&app, state.inner(), task_id).await {
                 tracing::warn!(task_id = %task_id, error = %err, "schedule auto-resume failed");
             }
             resumed_any = true;
@@ -853,7 +337,68 @@ pub(crate) fn spawn_schedule_window_monitor(app: AppHandle, _state: &AppState) {
     });
 }
 
-async fn resolve_task_request_headers(
+/// Interval between background `task_requests` cleanup passes. Long enough
+/// that it never contends with hot download paths, short enough that the
+/// table stays bounded for long-running sessions (HLS/live, high-retry).
+const REQUEST_DIAGNOSTICS_CLEANUP_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+/// Spawns a background task that periodically prunes the `task_requests`
+/// diagnostic table. The first pass also runs shortly after startup so a
+/// long-closed app gets cleaned before any new traffic arrives.
+pub(crate) fn spawn_request_diagnostics_cleanup(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(
+                REQUEST_DIAGNOSTICS_CLEANUP_INTERVAL_SECS,
+            ));
+        // First tick fires immediately; skip it — startup cleanup runs
+        // synchronously in `lib.rs` setup() before this spawns.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let state_ref = app.state::<AppState>();
+            if state_ref.quit_requested.load(Ordering::SeqCst) {
+                tracing::debug!("request diagnostics cleanup exiting (shutdown requested)");
+                break;
+            }
+            match db::prune_request_diagnostics(&state_ref.pool).await {
+                Ok(0) => {}
+                Ok(removed) => {
+                    tracing::info!(removed, "pruned stale request diagnostics");
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "request diagnostics prune failed");
+                }
+            }
+        }
+    });
+}
+
+/// Interval between background WAL checkpoint passes.
+const WAL_CHECKPOINT_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+/// Spawns a background task that periodically runs `PRAGMA wal_checkpoint(TRUNCATE)`
+/// to bound `-wal` file growth for long-running sessions.
+pub(crate) fn spawn_wal_checkpoint_monitor(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(WAL_CHECKPOINT_INTERVAL_SECS));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let state_ref = app.state::<AppState>();
+            if state_ref.quit_requested.load(Ordering::SeqCst) {
+                tracing::debug!("wal checkpoint monitor exiting (shutdown requested)");
+                break;
+            }
+            if let Err(error) = db::wal_checkpoint(&state_ref.pool).await {
+                tracing::warn!(error = %error, "periodic WAL checkpoint failed");
+            }
+        }
+    });
+}
+
+pub(crate) async fn resolve_task_request_headers(
     pool: &sqlx::SqlitePool,
     request_headers: TaskRequestHeaders,
     task_id: &str,
@@ -885,7 +430,8 @@ async fn queue_task_for_retry_at(
     id: &str,
     retry_after_at: Option<&str>,
 ) -> Result<TaskRecord, String> {
-    db::update_task_status(
+    crate::state_machine::transition_task(
+        app,
         &state.pool,
         id,
         TaskStatus::Queued,
@@ -894,7 +440,8 @@ async fn queue_task_for_retry_at(
         Some("Queued"),
         None,
     )
-    .await?;
+    .await
+    .map_err(String::from)?;
     db::update_task_retry_after(&state.pool, id, retry_after_at).await?;
     db::update_segments_status_for_task(
         &state.pool,
@@ -905,10 +452,9 @@ async fn queue_task_for_retry_at(
     .await?;
     let task = require_task(&state.pool, id).await?;
     emit_task_progress_snapshot(app, &task);
-    emit_task_updated_record(app, &state.pool, &task).await;
     emit_queue_changed(app);
     if retry_after_at.is_none() {
-        schedule_queued_tasks(app.clone(), state).await;
+        state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
     }
     require_task(&state.pool, id).await
 }
@@ -962,7 +508,7 @@ async fn restart_task_from_beginning(
     task: &TaskRecord,
 ) -> Result<TaskRecord, String> {
     if let Some(control) = state.downloads.lock().await.remove(&task.id) {
-        control.cancel.store(true, Ordering::SeqCst);
+        control.cancel_token.cancel();
         control.handle.abort();
     }
     if let Some(temp_path) = task.temp_path.as_deref() {
@@ -979,10 +525,7 @@ async fn restart_task_from_beginning(
             request_headers,
             pool: Some(state.pool.clone()),
             task_id: Some(task.id.clone()),
-            username: None,
-            password: None,
-            private_key_data: None,
-            private_key_passphrase: None,
+            credentials: None,
         })
         .await?;
     db::update_task_remote_metadata(
@@ -1016,7 +559,7 @@ async fn restart_task_from_beginning(
     emit_task_progress_snapshot(app, &task);
     emit_task_updated_record(app, &state.pool, &task).await;
     emit_queue_changed(app);
-    schedule_queued_tasks(app.clone(), state).await;
+    state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
     require_task(&state.pool, &task.id).await
 }
 
@@ -1053,7 +596,8 @@ fn task_error_code(task: &TaskRecord) -> Option<String> {
     None
 }
 
-async fn prepare_task_for_download(
+pub(crate) async fn prepare_task_for_download(
+    app: &AppHandle,
     pool: &sqlx::SqlitePool,
     engine_registry: &EngineRegistry,
     task: TaskRecord,
@@ -1091,7 +635,7 @@ async fn prepare_task_for_download(
         task.total_size,
         task.supports_resume,
     ) {
-        fail_task_and_segments(pool, &task.id, message).await?;
+        fail_task_and_segments(app, pool, &task.id, message).await?;
         db::insert_task_event(pool, &task.id, "resume_blocked", Some(message)).await?;
         return Err(message.to_string());
     }
@@ -1106,23 +650,22 @@ async fn prepare_task_for_download(
                 request_headers: request_headers.to_vec(),
                 pool: Some(pool.clone()),
                 task_id: Some(task.id.clone()),
-                username: None,
-                password: None,
-                private_key_data: None,
-                private_key_passphrase: None,
+                credentials: None,
             })
             .await?;
         if let Some(message) = resume_mismatch_message(&task, &probe) {
-            db::update_task_status(
+            crate::state_machine::transition_task(
+                app,
                 pool,
                 &task.id,
                 TaskStatus::NeedsAttention,
                 0,
                 0,
                 Some(&message),
-                Some(&message),
+                Some("resume_blocked"),
             )
-            .await?;
+            .await
+            .map_err(String::from)?;
             db::update_segments_status_for_task(
                 pool,
                 &task.id,
@@ -1130,7 +673,6 @@ async fn prepare_task_for_download(
                 Some(&message),
             )
             .await?;
-            db::insert_task_event(pool, &task.id, "resume_blocked", Some(&message)).await?;
             return Err(message);
         }
         if let Some(message) = resume_decision_message(&task, &probe) {
@@ -1174,48 +716,28 @@ fn is_sftp_protocol(protocol: &str) -> bool {
     protocol == "sftp"
 }
 
-fn is_torrent_url(url: &Url) -> bool {
-    matches!(url.scheme(), "http" | "https" | "file")
-        && url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".torrent"))
-}
-
-pub(crate) fn is_metalink_url(url: &Url) -> bool {
-    matches!(url.scheme(), "http" | "https" | "file")
-        && url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .is_some_and(|name| {
-                let name = name.to_ascii_lowercase();
-                name.ends_with(".meta4") || name.ends_with(".metalink")
-            })
-}
-
-pub(crate) fn is_dash_url(url: &Url) -> bool {
-    matches!(url.scheme(), "http" | "https" | "file")
-        && url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".mpd"))
-}
+// URL 分类函数已统一至 `crate::download::url_classify`，此处 re-export 以保持
+// `super::is_torrent_url` 等调用路径不变。
+pub(crate) use crate::download::url_classify::{is_dash_url, is_metalink_url, is_torrent_url};
 
 async fn fail_task_and_segments(
+    app: &AppHandle,
     pool: &sqlx::SqlitePool,
     task_id: &str,
     message: &str,
 ) -> Result<(), String> {
-    db::update_task_status(
+    crate::state_machine::transition_task(
+        app,
         pool,
         task_id,
         TaskStatus::Failed,
         0,
         0,
         Some(message),
-        Some(message),
+        None,
     )
-    .await?;
+    .await
+    .map_err(String::from)?;
     db::update_segments_status_for_task(
         pool,
         task_id,
@@ -1223,57 +745,6 @@ async fn fail_task_and_segments(
         Some(message),
     )
     .await
-}
-
-async fn mark_download_failed(
-    app: &AppHandle,
-    pool: &sqlx::SqlitePool,
-    task_id: &str,
-    error: String,
-) {
-    tracing::error!(task_id = %task_id, error = %error, "download failed");
-    let payload = serde_json::from_str::<AppErrorPayload>(&error).ok();
-    let status = match payload.as_ref().map(|payload| payload.code.as_str()) {
-        Some("final_path_conflict" | "auth_headers_expired" | "auth_headers_unavailable") => {
-            TaskStatus::NeedsAttention
-        }
-        _ => TaskStatus::Failed,
-    };
-    if let Err(db_error) =
-        db::update_task_status(pool, task_id, status, 0, 0, Some(&error), Some(&error)).await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            error = %db_error,
-            "failed to persist task failure status"
-        );
-    }
-    if let Err(db_error) = db::insert_task_event(pool, task_id, "failed", Some(&error)).await {
-        tracing::warn!(
-            task_id = %task_id,
-            error = %db_error,
-            "failed to persist task failure event"
-        );
-    }
-    if let Err(db_error) = db::update_segments_status_for_task(
-        pool,
-        task_id,
-        crate::models::SegmentStatus::Failed,
-        Some(&error),
-    )
-    .await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            error = %db_error,
-            "failed to persist segment failure status"
-        );
-    }
-    if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
-        emit_task_progress_snapshot(app, &task);
-        emit_task_updated_record(app, pool, &task).await;
-    }
-    emit_queue_changed(app);
 }
 
 async fn require_task(pool: &sqlx::SqlitePool, id: &str) -> Result<TaskRecord, String> {
@@ -1328,7 +799,7 @@ fn task_from_record_and_files(
     task
 }
 
-fn emit_task_progress_snapshot(app: &AppHandle, task: &TaskRecord) {
+pub(crate) fn emit_task_progress_snapshot(app: &AppHandle, task: &TaskRecord) {
     let payload = crate::models::TaskProgressPayload {
         task_id: task.id.clone(),
         downloaded_bytes: task.downloaded_bytes.to_string(),

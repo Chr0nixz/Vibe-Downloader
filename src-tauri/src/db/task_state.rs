@@ -1,8 +1,8 @@
 use sqlx::SqlitePool;
 
-use crate::models::{SegmentStatus, TaskStatus};
+use crate::models::{SegmentStatus, TaskRecord, TaskStatus};
 
-use super::task_records::{error_state_from_message, recovery_actions_json};
+use super::task_records::{error_state_from_message, recovery_actions_json, row_to_task};
 
 // ---------------------------------------------------------------------------
 // Private transaction helpers — shared SQL fragments used by multiple public
@@ -303,21 +303,24 @@ pub async fn update_task_and_segment_progress(
     Ok(())
 }
 
-pub async fn update_task_status(
-    pool: &SqlitePool,
+/// E-1: Transaction-scoped variant of update_task_status. Uses RETURNING * to
+/// return the updated TaskRecord in the same round trip, eliminating the need
+/// for a follow-up get_task_record SELECT. Callers that need to combine this
+/// with other writes (e.g. insert_task_event_in_tx) can pass the same tx.
+pub async fn update_task_status_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     task_id: &str,
     status: TaskStatus,
     speed_bps: i64,
     connection_count: i32,
     health_summary: Option<&str>,
     error_message: Option<&str>,
-) -> Result<(), String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+) -> Result<TaskRecord, String> {
     let updated_at = crate::models::task::now_iso();
     let (error_code, recovery_actions) = error_state_from_message(error_message);
     let recovery_actions = recovery_actions_json(&recovery_actions)?;
 
-    sqlx::query(
+    let row = sqlx::query(
         r#"
         UPDATE tasks
         SET status = ?, speed_bps = ?, connection_count = ?,
@@ -325,6 +328,7 @@ pub async fn update_task_status(
             retry_after_at = CASE WHEN ? IS NULL THEN NULL ELSE retry_after_at END,
             updated_at = ?
         WHERE id = ?
+        RETURNING *
         "#,
     )
     .bind(status.as_str())
@@ -337,9 +341,11 @@ pub async fn update_task_status(
     .bind(error_message)
     .bind(&updated_at)
     .bind(task_id)
-    .execute(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    let record = row_to_task(&row)?;
 
     sqlx::query(
         r#"
@@ -350,12 +356,26 @@ pub async fn update_task_status(
     )
     .bind(status.as_str())
     .bind(task_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(|e| e.to_string())?;
 
+    Ok(record)
+}
+
+pub async fn update_task_status(
+    pool: &SqlitePool,
+    task_id: &str,
+    status: TaskStatus,
+    speed_bps: i64,
+    connection_count: i32,
+    health_summary: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<TaskRecord, String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let record = update_task_status_in_tx(&mut tx, task_id, status, speed_bps, connection_count, health_summary, error_message).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(record)
 }
 
 pub async fn update_task_retry_after(
@@ -419,6 +439,13 @@ pub async fn update_task_final_path(
     .await
     .map_err(|e| e.to_string())?;
 
+    // E-7: file paths changed → bump files_version.
+    sqlx::query("UPDATE tasks SET files_version = files_version + 1 WHERE id = ?")
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -466,6 +493,13 @@ pub async fn update_task_save_target(
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    // E-7: save target changed → bump files_version.
+    sqlx::query("UPDATE tasks SET files_version = files_version + 1 WHERE id = ?")
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
@@ -674,6 +708,86 @@ pub async fn complete_unknown_size_task(
     finalize_completion_in_tx(&mut tx, task_id).await?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Bundles the task-header progress fields written by `checkpoint_task_progress`.
+/// Grouping these avoids exceeding clippy's `too_many_arguments` threshold.
+pub struct TaskProgressCheckpoint<'a> {
+    pub task_id: &'a str,
+    pub downloaded_bytes: i64,
+    pub speed_bps: i64,
+    pub connection_count: i32,
+    pub status: &'a str,
+    pub update_files: bool,
+}
+
+/// Checkpoints runtime progress for a segmented download in a single transaction.
+///
+/// Updates the `tasks` header row, optionally updates all selected `task_files`
+/// rows (when `update_files` is true), and updates each work unit in
+/// `work_units`. The caller decides which work units to include and whether
+/// file rows need updating, preserving the original checkpoint gating logic.
+pub async fn checkpoint_task_progress(
+    pool: &SqlitePool,
+    checkpoint: TaskProgressCheckpoint<'_>,
+    work_units: &[(String, i64, i64, String)],
+) -> sqlx::Result<()> {
+    let updated_at = crate::models::task::now_iso();
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET downloaded_bytes = ?, speed_bps = ?, connection_count = ?, status = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(checkpoint.downloaded_bytes)
+    .bind(checkpoint.speed_bps)
+    .bind(checkpoint.connection_count)
+    .bind(checkpoint.status)
+    .bind(&updated_at)
+    .bind(checkpoint.task_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // Only write task_files on terminal status or when file selection changed,
+    // since the downloaded_bytes/status here duplicate the task header values.
+    if checkpoint.update_files {
+        sqlx::query(
+            r#"
+            UPDATE task_files
+            SET downloaded_bytes = ?, status = ?
+            WHERE task_id = ? AND selected = 1
+            "#,
+        )
+        .bind(checkpoint.downloaded_bytes)
+        .bind(checkpoint.status)
+        .bind(checkpoint.task_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Non-terminal force checkpoints still respect per-segment dirty to avoid
+    // writing all segments when only a few changed. Terminal force writes all.
+    for (work_unit_id, downloaded_until, unit_speed_bps, unit_status) in work_units {
+        sqlx::query(
+            r#"
+            UPDATE task_work_units
+            SET downloaded_until = ?, speed_bps = ?, status = ?, last_error = NULL
+            WHERE id = ?
+            "#,
+        )
+        .bind(downloaded_until)
+        .bind(unit_speed_bps)
+        .bind(unit_status)
+        .bind(work_unit_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
     Ok(())
 }
 

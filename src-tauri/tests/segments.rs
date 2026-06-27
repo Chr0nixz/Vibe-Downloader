@@ -1108,6 +1108,7 @@ fn sample_task(id: &str, total_size: i64) -> TaskRecord {
         hash_verified_at: None,
         created_at: now.clone(),
         updated_at: now,
+        files_version: 0,
     }
 }
 

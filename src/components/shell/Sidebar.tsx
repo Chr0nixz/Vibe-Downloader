@@ -4,7 +4,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
-  HelpCircle,
   Info,
   LayoutGrid,
   PauseCircle,
@@ -46,7 +45,7 @@ const aboutItem: NavItemDef = {
   icon: Info,
 };
 
-export function Sidebar({ onOpenOnboarding }: { onOpenOnboarding?: () => void }) {
+export function Sidebar() {
   const { t } = useTranslation();
   const nav = useTaskUIStore((s) => s.nav);
   const setNav = useTaskUIStore((s) => s.setNav);
@@ -103,7 +102,7 @@ export function Sidebar({ onOpenOnboarding }: { onOpenOnboarding?: () => void })
         {/* Group label — only when expanded (wide) */}
         <span
           className={cn(
-            "hidden px-3 py-1 text-[10px] font-medium tracking-[0.08em] text-text-muted uppercase lg:block",
+            "hidden px-3 py-1 text-[11px] font-medium tracking-[0.08em] text-text-muted uppercase lg:block",
             collapsed && "lg:hidden",
           )}
         >
@@ -145,35 +144,6 @@ export function Sidebar({ onOpenOnboarding }: { onOpenOnboarding?: () => void })
           onClick={() => setNav("about")}
         />
 
-        {/* Help / onboarding button */}
-        {onOpenOnboarding ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={onOpenOnboarding}
-                aria-label={t("onboarding.help")}
-                className={cn(
-                  "group hidden h-9 w-9 flex-none justify-center p-0 md:flex",
-                  "text-text-muted",
-                  "hover:bg-accent-primary/10 hover:text-accent-primary",
-                  "md:mt-0.5 md:h-10 md:w-full md:flex-row md:gap-2",
-                  "transition-all duration-[var(--motion-ui)]",
-                )}
-              >
-                <HelpCircle className="h-[18px] w-[18px] shrink-0" aria-hidden />
-                <span className={cn("hidden text-xs font-medium md:inline lg:hidden", collapsed && "lg:hidden")}>
-                  {t("onboarding.help")}
-                </span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side={collapsed ? "right" : "top"} className={cn("lg:hidden", collapsed && "lg:block")}>
-              {t("onboarding.help")}
-            </TooltipContent>
-          </Tooltip>
-        ) : null}
-
         {/* Collapse / expand toggle */}
         <div className="hidden md:mx-1.5 md:mt-0.5 md:block lg:mx-2.5">
           <div className="h-px bg-border-subtle/40" />
@@ -184,7 +154,7 @@ export function Sidebar({ onOpenOnboarding }: { onOpenOnboarding?: () => void })
           onClick={toggleCollapse}
           aria-label={collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
           className={cn(
-            "group hidden h-9 w-9 flex-none justify-center p-0 md:flex",
+            "group hidden h-8 w-8 flex-none justify-center p-0 md:flex",
             "text-text-muted",
             "hover:bg-accent-primary/10 hover:text-accent-primary",
             "md:mt-1 md:h-10 md:w-full md:flex-row md:gap-2",

@@ -1,12 +1,12 @@
 # Vibe Downloader Roadmap
 
-Last updated: 2026-06-17
+Last updated: 2026-06-25
 
 This roadmap reflects the current repository state. Product and design constraints live in [PRODUCT.md](../PRODUCT.md) and [DESIGN.md](../DESIGN.md). Error and browser header-forwarding details live in [error-codes.md](error-codes.md) and [browser-header-forwarding.md](browser-header-forwarding.md).
 
 ## Current Baseline
 
-Version: `0.1.1`.
+Version: `0.2.0`.
 
 The app now includes a working HTTP/HTTPS desktop download manager, plus lower-maturity FTP/FTPS, SFTP, BitTorrent, HLS, DASH, WebDAV, and Metalink entry points, with:
 

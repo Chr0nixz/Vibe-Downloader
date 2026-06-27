@@ -93,3 +93,41 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }}
+
+  build-extensions:
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Sync version from tag
+        run: node scripts/sync-version.mjs "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+
+      - name: Build browser extension packages
+        run: pnpm build:extensions
+        env:
+          VIBE_BROWSER_PROFILE: release
+          VIBE_BROWSER_EXPERIMENTAL_CAPTURE: "true"
+          # Extension IDs — configure these secrets before publishing to stores:
+          # VIBE_CHROME_EXTENSION_ID: ${{ secrets.VIBE_CHROME_EXTENSION_ID }}
+          # VIBE_EDGE_EXTENSION_ID: ${{ secrets.VIBE_EDGE_EXTENSION_ID }}
+          # VIBE_FIREFOX_EXTENSION_ID: ${{ secrets.VIBE_FIREFOX_EXTENSION_ID }}
+
+      - name: Upload extension artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-extensions
+          path: browser/dist/
+          if-no-files-found: error

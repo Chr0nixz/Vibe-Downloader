@@ -15,9 +15,9 @@ const buttonVariants = cva(
         danger: "bg-status-danger/15 text-status-danger hover:bg-status-danger/25 font-semibold",
       },
       size: {
-        default: "h-9 px-3.5",
+        default: "h-8 px-3.5",
         sm: "h-8 px-2.5 text-xs",
-        icon: "h-9 w-9",
+        icon: "h-8 w-8",
       },
     },
     defaultVariants: {

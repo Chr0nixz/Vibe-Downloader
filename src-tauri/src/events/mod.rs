@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use sqlx::SqlitePool;
@@ -88,17 +90,46 @@ pub fn emit_task_updated(app: &AppHandle, task: &Task) {
     }
 }
 
+/// E-7: Cache of task_id → last emitted files_version. When a task's
+/// files_version hasn't changed since the last emit, we skip the
+/// list_task_file_records query and emit with empty files — the frontend
+/// store preserves existing files when an incoming task has no files
+/// (see `mergedFiles` logic in upsertTask). This avoids a DB query on every
+/// status/progress transition where files haven't structurally changed.
+static FILES_VERSION_CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+
+fn files_version_cache() -> &'static Mutex<HashMap<String, i64>> {
+    FILES_VERSION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub async fn emit_task_updated_record(app: &AppHandle, pool: &SqlitePool, task: &TaskRecord) {
-    let files = match db::list_task_file_records(pool, &task.id).await {
-        Ok(files) => files.into_iter().map(Into::into).collect(),
-        Err(error) => {
-            tracing::warn!(
-                task_id = %task.id,
-                error = %error,
-                "failed to load task files for update event"
-            );
-            Vec::new()
+    // E-7: short-circuit — if files_version hasn't changed since the last emit
+    // for this task, skip the task_files query. The frontend keeps its existing
+    // files when the incoming event has an empty files array.
+    let cache_hit = {
+        let cache = files_version_cache().lock().ok();
+        cache.is_some_and(|guard| guard.get(&task.id) == Some(&task.files_version))
+    };
+
+    let files = if cache_hit {
+        Vec::new()
+    } else {
+        let loaded = match db::list_task_file_records(pool, &task.id).await {
+            Ok(files) => files.into_iter().map(Into::into).collect(),
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %error,
+                    "failed to load task files for update event"
+                );
+                Vec::new()
+            }
+        };
+        // Update cache with the current version so subsequent emits can skip.
+        if let Ok(mut guard) = files_version_cache().lock() {
+            guard.insert(task.id.clone(), task.files_version);
         }
+        loaded
     };
     let mut task = Task::from(task.clone());
     task.files = files;

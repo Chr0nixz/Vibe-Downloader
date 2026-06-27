@@ -51,39 +51,41 @@ pub async fn get_settings(
 ) -> Result<AppSettings, String> {
     let kv = load_all_settings(pool).await?;
 
-    let max_active_tasks = kv
-        .get(SETTING_MAX_ACTIVE_TASKS)
-        .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(DEFAULT_MAX_ACTIVE_TASKS)
-        .clamp(MIN_MAX_ACTIVE_TASKS, MAX_MAX_ACTIVE_TASKS);
+    let max_active_tasks = parse_i32_or_default(
+        kv.get(SETTING_MAX_ACTIVE_TASKS).map(String::as_str),
+        DEFAULT_MAX_ACTIVE_TASKS,
+        MIN_MAX_ACTIVE_TASKS,
+        MAX_MAX_ACTIVE_TASKS,
+    )?;
     let default_save_dir = kv
         .get(SETTING_DEFAULT_SAVE_DIR)
         .filter(|v| !v.trim().is_empty())
         .cloned()
         .unwrap_or(default_save_dir);
-    let global_speed_limit_bps = kv
-        .get(SETTING_GLOBAL_SPEED_LIMIT_BPS)
-        .and_then(|v| normalize_speed_limit_bps(v));
+    let global_speed_limit_bps =
+        normalize_speed_limit_bps(kv.get(SETTING_GLOBAL_SPEED_LIMIT_BPS).map(String::as_str).unwrap_or(""));
     let multi_connection_threshold_bytes = kv
         .get(SETTING_MULTI_CONNECTION_THRESHOLD_BYTES)
         .and_then(|v| normalize_multi_connection_threshold_bytes(v))
         .unwrap_or_else(|| DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES.to_string());
-    let segment_count = kv
-        .get(SETTING_SEGMENT_COUNT)
-        .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(DEFAULT_SEGMENT_COUNT)
-        .clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT);
-    let max_connections_per_host = kv
-        .get(SETTING_MAX_CONNECTIONS_PER_HOST)
-        .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(DEFAULT_MAX_CONNECTIONS_PER_HOST)
-        .clamp(MIN_MAX_CONNECTIONS_PER_HOST, MAX_MAX_CONNECTIONS_PER_HOST);
-    let system_notifications = kv_bool(&kv, SETTING_SYSTEM_NOTIFICATIONS, true);
-    let close_to_tray = kv_bool(&kv, SETTING_CLOSE_TO_TRAY, false);
-    let start_on_boot = kv_bool(&kv, SETTING_START_ON_BOOT, false);
-    let auto_resume_on_startup = kv_bool(&kv, SETTING_AUTO_RESUME_ON_STARTUP, false);
-    let floating_window_enabled = kv_bool(&kv, SETTING_FLOATING_WINDOW_ENABLED, false);
-    let clipboard_monitor_enabled = kv_bool(&kv, SETTING_CLIPBOARD_MONITOR_ENABLED, true);
+    let segment_count = parse_i32_or_default(
+        kv.get(SETTING_SEGMENT_COUNT).map(String::as_str),
+        DEFAULT_SEGMENT_COUNT,
+        MIN_SEGMENT_COUNT,
+        MAX_SEGMENT_COUNT,
+    )?;
+    let max_connections_per_host = parse_i32_or_default(
+        kv.get(SETTING_MAX_CONNECTIONS_PER_HOST).map(String::as_str),
+        DEFAULT_MAX_CONNECTIONS_PER_HOST,
+        MIN_MAX_CONNECTIONS_PER_HOST,
+        MAX_MAX_CONNECTIONS_PER_HOST,
+    )?;
+    let system_notifications = parse_bool_setting(&kv, SETTING_SYSTEM_NOTIFICATIONS, true)?;
+    let close_to_tray = parse_bool_setting(&kv, SETTING_CLOSE_TO_TRAY, false)?;
+    let start_on_boot = parse_bool_setting(&kv, SETTING_START_ON_BOOT, false)?;
+    let auto_resume_on_startup = parse_bool_setting(&kv, SETTING_AUTO_RESUME_ON_STARTUP, false)?;
+    let floating_window_enabled = parse_bool_setting(&kv, SETTING_FLOATING_WINDOW_ENABLED, false)?;
+    let clipboard_monitor_enabled = parse_bool_setting(&kv, SETTING_CLIPBOARD_MONITOR_ENABLED, true)?;
     let accent_color = kv
         .get(SETTING_ACCENT_COLOR)
         .map(|v| normalize_accent_color(v))
@@ -104,45 +106,45 @@ pub async fn get_settings(
         .get(SETTING_PROXY_USERNAME)
         .and_then(|v| normalize_proxy_optional(v))
         .unwrap_or_default();
-    let proxy_password_saved = kv_bool(&kv, SETTING_PROXY_PASSWORD_SAVED, false);
+    let proxy_password_saved = parse_bool_setting(&kv, SETTING_PROXY_PASSWORD_SAVED, false)?;
     let schedule_download_window_enabled =
-        kv_bool(&kv, SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED, false);
-    let schedule_download_window_start = kv
-        .get(SETTING_SCHEDULE_DOWNLOAD_WINDOW_START)
-        .and_then(|v| normalize_local_time(v))
-        .unwrap_or_else(|| "00:00".to_string());
-    let schedule_download_window_end = kv
-        .get(SETTING_SCHEDULE_DOWNLOAD_WINDOW_END)
-        .and_then(|v| normalize_local_time(v))
-        .unwrap_or_else(|| "06:00".to_string());
+        parse_bool_setting(&kv, SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED, false)?;
+    let schedule_download_window_start = normalize_local_time(
+        kv.get(SETTING_SCHEDULE_DOWNLOAD_WINDOW_START).map(String::as_str).unwrap_or(""),
+    )
+    .unwrap_or_else(|| "00:00".to_string());
+    let schedule_download_window_end = normalize_local_time(
+        kv.get(SETTING_SCHEDULE_DOWNLOAD_WINDOW_END).map(String::as_str).unwrap_or(""),
+    )
+    .unwrap_or_else(|| "06:00".to_string());
     let schedule_speed_limit_window_enabled =
-        kv_bool(&kv, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED, false);
-    let schedule_speed_limit_window_start = kv
-        .get(SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START)
-        .and_then(|v| normalize_local_time(v))
-        .unwrap_or_else(|| "18:00".to_string());
-    let schedule_speed_limit_window_end = kv
-        .get(SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END)
-        .and_then(|v| normalize_local_time(v))
-        .unwrap_or_else(|| "23:00".to_string());
-    let schedule_speed_limit_bps = kv
-        .get(SETTING_SCHEDULE_SPEED_LIMIT_BPS)
-        .and_then(|v| normalize_speed_limit_bps(v));
-    let titlebar_gradient_enabled = kv_bool(&kv, SETTING_TITLEBAR_GRADIENT_ENABLED, true);
+        parse_bool_setting(&kv, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED, false)?;
+    let schedule_speed_limit_window_start = normalize_local_time(
+        kv.get(SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START).map(String::as_str).unwrap_or(""),
+    )
+    .unwrap_or_else(|| "18:00".to_string());
+    let schedule_speed_limit_window_end = normalize_local_time(
+        kv.get(SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END).map(String::as_str).unwrap_or(""),
+    )
+    .unwrap_or_else(|| "23:00".to_string());
+    let schedule_speed_limit_bps =
+        normalize_speed_limit_bps(kv.get(SETTING_SCHEDULE_SPEED_LIMIT_BPS).map(String::as_str).unwrap_or(""));
+    let titlebar_gradient_enabled = parse_bool_setting(&kv, SETTING_TITLEBAR_GRADIENT_ENABLED, true)?;
     let completion_action = kv
         .get(SETTING_COMPLETION_ACTION)
         .map(|v| CompletionAction::from_db_str(v))
         .unwrap_or(CompletionAction::None);
-    let completion_countdown_seconds = kv
-        .get(SETTING_COMPLETION_COUNTDOWN_SECONDS)
-        .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(30)
-        .clamp(5, 300);
+    let completion_countdown_seconds = parse_i32_or_default(
+        kv.get(SETTING_COMPLETION_COUNTDOWN_SECONDS).map(String::as_str),
+        30,
+        5,
+        300,
+    )?;
     let completion_run_command = kv
         .get(SETTING_COMPLETION_RUN_COMMAND)
         .cloned()
         .unwrap_or_default();
-    let delete_to_trash = kv_bool(&kv, SETTING_DELETE_TO_TRASH, true);
+    let delete_to_trash = parse_bool_setting(&kv, SETTING_DELETE_TO_TRASH, true)?;
 
     Ok(AppSettings {
         max_active_tasks,
@@ -179,6 +181,7 @@ pub async fn get_settings(
 }
 
 pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Result<(), String> {
+    validate_settings(settings)?;
     upsert_setting_value(
         pool,
         SETTING_MAX_ACTIVE_TASKS,
@@ -459,7 +462,7 @@ async fn load_all_settings(pool: &SqlitePool) -> Result<HashMap<String, String>,
 
 fn kv_bool(kv: &HashMap<String, String>, key: &str, default: bool) -> bool {
     kv.get(key)
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(default)
 }
 
@@ -486,4 +489,159 @@ async fn upsert_setting_value(pool: &SqlitePool, key: &str, value: &str) -> Resu
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+fn parse_bool_setting(
+    kv: &HashMap<String, String>,
+    key: &str,
+    default: bool,
+) -> Result<bool, String> {
+    match kv.get(key).map(|value| value.trim().to_ascii_lowercase()) {
+        None => Ok(default),
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => Ok(true),
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => Ok(false),
+        Some(value) => Err(format!("Invalid boolean value for setting '{key}': {value}")),
+    }
+}
+
+fn parse_i32_or_default(
+    value: Option<&str>,
+    default: i32,
+    min: i32,
+    max: i32,
+) -> Result<i32, String> {
+    let parsed = match value {
+        Some(raw) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| format!("Invalid integer value: {raw}"))?,
+        _ => default,
+    };
+    Ok(parsed.clamp(min, max))
+}
+
+fn validate_settings(settings: &AppSettings) -> Result<(), String> {
+    if settings.max_active_tasks < MIN_MAX_ACTIVE_TASKS || settings.max_active_tasks > MAX_MAX_ACTIVE_TASKS {
+        return Err("max_active_tasks is out of range.".to_string());
+    }
+    if settings.segment_count < MIN_SEGMENT_COUNT || settings.segment_count > MAX_SEGMENT_COUNT {
+        return Err("segment_count is out of range.".to_string());
+    }
+    if settings.max_connections_per_host < MIN_MAX_CONNECTIONS_PER_HOST
+        || settings.max_connections_per_host > MAX_MAX_CONNECTIONS_PER_HOST
+    {
+        return Err("max_connections_per_host is out of range.".to_string());
+    }
+    if settings.completion_countdown_seconds < 5 || settings.completion_countdown_seconds > 300 {
+        return Err("completion_countdown_seconds must be between 5 and 300.".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_bool_setting_accepts_known_values() {
+        let mut kv = HashMap::new();
+        kv.insert("flag".to_string(), " yes ".to_string());
+        assert!(parse_bool_setting(&kv, "flag", false).expect("parse bool"));
+
+        kv.insert("flag".to_string(), " off ".to_string());
+        assert!(!parse_bool_setting(&kv, "flag", true).expect("parse bool"));
+    }
+
+    #[test]
+    fn parse_bool_setting_rejects_unknown_values() {
+        let mut kv = HashMap::new();
+        kv.insert("flag".to_string(), "maybe".to_string());
+        let err = parse_bool_setting(&kv, "flag", false).expect_err("invalid bool");
+        assert!(err.contains("Invalid boolean value for setting 'flag': maybe"));
+    }
+
+    #[test]
+    fn parse_i32_or_default_clamps_and_rejects_invalid_values() {
+        assert_eq!(
+            parse_i32_or_default(Some(" 9 "), 4, 1, 8).expect("parse int"),
+            8
+        );
+        assert_eq!(parse_i32_or_default(None, 4, 1, 8).expect("default"), 4);
+        let err = parse_i32_or_default(Some("oops"), 4, 1, 8).expect_err("invalid int");
+        assert!(err.contains("Invalid integer value: oops"));
+    }
+
+    #[test]
+    fn validate_settings_rejects_out_of_range_fields() {
+        let settings = AppSettings {
+            max_active_tasks: 0,
+            default_save_dir: String::new(),
+            global_speed_limit_bps: None,
+            multi_connection_threshold_bytes: "0".to_string(),
+            segment_count: 1,
+            max_connections_per_host: 1,
+            system_notifications: true,
+            close_to_tray: false,
+            start_on_boot: false,
+            auto_resume_on_startup: false,
+            floating_window_enabled: false,
+            clipboard_monitor_enabled: true,
+            accent_color: AppAccentColor::Blue,
+            proxy_mode: AppProxyMode::Off,
+            proxy_url: String::new(),
+            proxy_no_proxy: String::new(),
+            proxy_username: String::new(),
+            proxy_password_saved: false,
+            schedule_download_window_enabled: false,
+            schedule_download_window_start: "00:00".to_string(),
+            schedule_download_window_end: "06:00".to_string(),
+            schedule_speed_limit_window_enabled: false,
+            schedule_speed_limit_window_start: "18:00".to_string(),
+            schedule_speed_limit_window_end: "23:00".to_string(),
+            schedule_speed_limit_bps: None,
+            titlebar_gradient_enabled: true,
+            completion_action: CompletionAction::None,
+            completion_countdown_seconds: 30,
+            completion_run_command: String::new(),
+            delete_to_trash: true,
+        };
+
+        let err = validate_settings(&settings).expect_err("invalid settings");
+        assert!(err.contains("max_active_tasks is out of range"));
+    }
+
+    #[tokio::test]
+    async fn get_settings_rejects_invalid_persisted_values() {
+        let pool = temp_pool().await;
+        sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?)")
+            .bind(SETTING_CLIPBOARD_MONITOR_ENABLED)
+            .bind("maybe")
+            .execute(&pool)
+            .await
+            .expect("insert bool");
+        let err = get_settings(&pool, "C:\\Downloads".to_string())
+            .await
+            .expect_err("invalid bool");
+        assert!(err.contains("Invalid boolean value for setting 'clipboard_monitor_enabled'"));
+    }
+
+    async fn temp_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        sqlx::query(
+            r#"
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("settings table");
+        pool
+    }
 }

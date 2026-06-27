@@ -8,7 +8,6 @@ import {
   getTaskStats,
   hideFloatingStatusWindow,
   isTauriRuntime,
-  listTasksCursor,
   showTrayMenuAt,
 } from "@/lib/tauri";
 import { cn, formatSpeed } from "@/lib/utils";
@@ -19,10 +18,12 @@ const log = createLogger("floating-status");
 
 const RING_R = 28;
 const RING_C = 2 * Math.PI * RING_R;
-const BAR_WIDTH = 240;
-const BAR_HEIGHT = 72;
-const EDGE_THRESHOLD = 30;
+const BALL_SIZE = 84;
+const BAR_WIDTH = 18;
+const BAR_HEIGHT = 160;
+const EDGE_THRESHOLD = 40;
 const UNDOCK_THRESHOLD = 80;
+const UNDOCK_OFFSET = 100;
 
 type TauriWindow = Awaited<ReturnType<typeof import("@tauri-apps/api/window").getCurrentWindow>>;
 type TauriMonitor = NonNullable<Awaited<ReturnType<typeof import("@tauri-apps/api/window").currentMonitor>>>;
@@ -51,7 +52,6 @@ async function dockToEdge(
 }
 
 async function undock(
-  _logicalX: number,
   logicalY: number,
   win: TauriWindow,
   monitor: TauriMonitor,
@@ -67,24 +67,25 @@ async function undock(
   // Restore ball near the docked edge, beyond UNDOCK_THRESHOLD to avoid re-trigger
   let restoreX: number;
   if (prevEdge === "right") {
-    restoreX = waRight - 84 - 100;
+    restoreX = waRight - BALL_SIZE - UNDOCK_OFFSET;
   } else if (prevEdge === "left") {
-    restoreX = waLeft + 100;
+    restoreX = waLeft + UNDOCK_OFFSET;
   } else {
-    restoreX = waLeft + (waRight - waLeft) / 2 - 42;
+    restoreX = waLeft + (waRight - waLeft) / 2 - BALL_SIZE / 2;
   }
-  const clampedY = Math.max(wa.position.y / scale, Math.min(logicalY, (wa.position.y + wa.size.height) / scale - 84));
+  const clampedY = Math.max(
+    wa.position.y / scale,
+    Math.min(logicalY, (wa.position.y + wa.size.height) / scale - BALL_SIZE),
+  );
 
-  await win.setSize(new LogicalSizeCtor(84, 84));
+  await win.setSize(new LogicalSizeCtor(BALL_SIZE, BALL_SIZE));
   await win.setPosition(new LogicalPositionCtor(restoreX, clampedY));
 }
 
 export function FloatingStatusWindow() {
   const { t } = useTranslation();
   const stats = useTaskDataStore((s) => s.globalTaskStats ?? s.taskStats);
-  const setTasks = useTaskDataStore((s) => s.setTasks);
   const setGlobalTaskStats = useTaskDataStore((s) => s.setGlobalTaskStats);
-  const setLoading = useTaskDataStore((s) => s.setLoading);
 
   useTaskEvents({ notify: false });
 
@@ -103,39 +104,24 @@ export function FloatingStatusWindow() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // The floating ball only renders global stats; it does not need the task list.
+  // Subscribe to task events to keep `globalTaskStats` live-updated.
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
       try {
-        const data = await listTasksCursor({
-          nav: "downloading",
-          search: null,
-          sortKey: "speed",
-          sortDirection: "desc",
-          fileType: "all",
-          source: "all",
-          failureCategory: "all",
-          resume: "all",
-          cursor: null,
-          pageSize: 50,
-        });
-        const stats = await getTaskStats();
-        if (!cancelled) {
-          setTasks(data.items);
-          setGlobalTaskStats(stats);
-        }
+        const snapshot = await getTaskStats();
+        if (!cancelled) setGlobalTaskStats(snapshot);
       } catch (err) {
-        if (!cancelled) log.error("initial task load failed", err);
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) log.error("initial stats load failed", err);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [setGlobalTaskStats, setLoading, setTasks]);
+  }, [setGlobalTaskStats]);
 
   const percent = stats.totalBytes > 0 ? Math.min(100, (stats.totalDownloaded / stats.totalBytes) * 100) : 0;
   const idle = stats.active === 0;
@@ -149,35 +135,22 @@ export function FloatingStatusWindow() {
 
   const compact = speedText.length > 6;
 
-  // Peak speed tracking for glow intensity
-  const peakSpeedRef = useRef(0);
-  useEffect(() => {
-    if (stats.totalSpeed > peakSpeedRef.current) {
-      peakSpeedRef.current = stats.totalSpeed;
-    }
-  }, [stats.totalSpeed]);
-
-  const isPeak = !idle && stats.totalSpeed > peakSpeedRef.current * 0.8 && peakSpeedRef.current > 0;
-
-  // Completion burst detection: transition from active downloads to idle
-  const prevIdleRef = useRef(idle);
-  const [completionBurst, setCompletionBurst] = useState(false);
-  useEffect(() => {
-    if (idle && !prevIdleRef.current) {
-      setCompletionBurst(true);
-      const timer = setTimeout(() => setCompletionBurst(false), 1200);
-      return () => clearTimeout(timer);
-    }
-    prevIdleRef.current = idle;
-  }, [idle]);
-
   // ── Edge snapping ──
-  const [dockedEdge, setDockedEdge] = useState<"left" | "right" | null>(null);
+  // Mirror dockedEdge in a ref so the `onMoved` listener can read the latest
+  // value without resubscribing on every state change. Resubscribing caused
+  // events to be missed during the 200ms debounce window.
+  const [dockedEdge, setDockedEdgeState] = useState<"left" | "right" | null>(null);
+  const dockedEdgeRef = useRef<"left" | "right" | null>(null);
+  const setDockedEdge = useCallback((edge: "left" | "right" | null) => {
+    dockedEdgeRef.current = edge;
+    setDockedEdgeState(edge);
+  }, []);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
 
     void (async () => {
       try {
@@ -189,6 +162,7 @@ export function FloatingStatusWindow() {
         unlisten = await win.onMoved(async ({ payload: pos }) => {
           if (debounceRef.current) clearTimeout(debounceRef.current);
           debounceRef.current = setTimeout(async () => {
+            if (cancelled) return;
             try {
               const monitor = await currentMonitor();
               if (!monitor) return;
@@ -197,19 +171,28 @@ export function FloatingStatusWindow() {
               const wa = monitor.workArea;
               const waLeft = wa.position.x / scale;
               const waRight = (wa.position.x + wa.size.width) / scale;
+              const currentEdge = dockedEdgeRef.current;
+              // Use the window's actual current width so edge detection works
+              // correctly whether the window is in ball (84) or bar (BAR_WIDTH) form.
+              const physSize = await win.outerSize();
+              const currentWidth = physSize.width / scale;
 
               if (logicalX - waLeft <= EDGE_THRESHOLD) {
-                setDockedEdge("left");
-                await dockToEdge("left", pos.y / scale, win, monitor, LogicalSize, LogicalPosition);
-              } else if (waRight - (logicalX + 84) <= EDGE_THRESHOLD) {
-                setDockedEdge("right");
-                await dockToEdge("right", pos.y / scale, win, monitor, LogicalSize, LogicalPosition);
+                if (currentEdge !== "left") {
+                  setDockedEdge("left");
+                  await dockToEdge("left", pos.y / scale, win, monitor, LogicalSize, LogicalPosition);
+                }
+              } else if (waRight - (logicalX + currentWidth) <= EDGE_THRESHOLD) {
+                if (currentEdge !== "right") {
+                  setDockedEdge("right");
+                  await dockToEdge("right", pos.y / scale, win, monitor, LogicalSize, LogicalPosition);
+                }
               } else if (
-                (dockedEdge === "left" && logicalX - waLeft > UNDOCK_THRESHOLD) ||
-                (dockedEdge === "right" && waRight - (logicalX + BAR_WIDTH) > UNDOCK_THRESHOLD)
+                (currentEdge === "left" && logicalX - waLeft > UNDOCK_THRESHOLD) ||
+                (currentEdge === "right" && waRight - (logicalX + currentWidth) > UNDOCK_THRESHOLD)
               ) {
                 setDockedEdge(null);
-                await undock(logicalX, pos.y / scale, win, monitor, LogicalSize, LogicalPosition, dockedEdge);
+                await undock(pos.y / scale, win, monitor, LogicalSize, LogicalPosition, currentEdge);
               }
             } catch (err) {
               log.error("edge check failed", err);
@@ -222,40 +205,20 @@ export function FloatingStatusWindow() {
     })();
 
     return () => {
+      cancelled = true;
       unlisten?.();
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [dockedEdge]);
+  }, [setDockedEdge]);
 
-  const handleDrag = useCallback(
-    async (event: React.MouseEvent) => {
-      if (event.button !== 0) return;
-      if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
-      if (dockedEdge) {
-        try {
-          const winApi = await import("@tauri-apps/api/window");
-          const { LogicalSize, LogicalPosition } = winApi;
-          const win = winApi.getCurrentWindow();
-          const scale = (await win.scaleFactor()) || 1;
-          const pos = await win.innerPosition();
-          const monitor = await winApi.currentMonitor();
-          await win.setSize(new LogicalSize(84, 84));
-          if (monitor) {
-            const wa = monitor.workArea;
-            const waLeft = wa.position.x / scale;
-            const waRight = (wa.position.x + wa.size.width) / scale;
-            const restoreX = dockedEdge === "right" ? waRight - 84 - 100 : waLeft + 100;
-            await win.setPosition(new LogicalPosition(restoreX, pos.y / scale));
-          }
-        } catch {
-          // ignore
-        }
-        setDockedEdge(null);
-      }
-      void startWindowDrag();
-    },
-    [dockedEdge],
-  );
+  const handleDrag = useCallback(async (event: React.MouseEvent) => {
+    if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
+    // Start dragging directly. The onMoved listener handles dock/undock
+    // based on the final position — no need to undock first, which previously
+    // caused the window to jump 100px inward and miss edge snapping.
+    void startWindowDrag();
+  }, []);
 
   const handleDoubleClick = useCallback((event: React.MouseEvent) => {
     if ((event.target as HTMLElement).closest("[data-no-drag]")) return;
@@ -275,101 +238,36 @@ export function FloatingStatusWindow() {
     return (
       <main
         className={cn(
-          "floating-bar group relative flex h-full w-full select-none items-center overflow-visible",
+          "floating-bar group relative flex h-full w-full select-none items-center justify-center overflow-visible",
           dockedEdge === "left" ? "floating-bar-left" : "floating-bar-right",
         )}
         onMouseDown={handleDrag}
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       >
-        {/* Tooltip */}
-        <div className="pointer-events-none absolute -top-9 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-surface-overlay px-2.5 py-1 text-[0.65rem] leading-4 text-text-secondary opacity-0 shadow-lg ring-1 ring-border-container transition-opacity duration-200 group-hover:opacity-100">
+        {/* Tooltip — appears beside the bar */}
+        <div
+          className={cn(
+            "pointer-events-none absolute top-1/2 z-10 -translate-y-1/2 whitespace-nowrap rounded-md bg-surface-overlay px-2.5 py-1 text-[0.65rem] leading-4 text-text-secondary opacity-0 shadow-lg ring-1 ring-border-container transition-opacity duration-200 group-hover:opacity-100",
+            dockedEdge === "left" ? "left-full ml-2" : "right-full mr-2",
+          )}
+        >
           {idle ? t("floatingStatus.idle") : `${speedText} · ${Math.round(percent)}%`}
         </div>
 
-        {/* Circular progress ball at the edge side */}
-        <div
-          className={cn(
-            "floating-ball relative z-10 grid h-16 w-16 shrink-0 place-items-center rounded-full",
-            idle
-              ? "bg-surface-overlay shadow-[var(--shadow-idle-ball)] ring-1 ring-border-container"
-              : cn(
-                  "bg-surface-overlay ring-1 ring-accent-primary/25 floating-ball-glow",
-                  isPeak && "floating-ball-peak",
-                  completionBurst && "floating-ball-completion",
-                ),
-          )}
-          style={dockedEdge === "left" ? { marginLeft: 4 } : { marginRight: 4, order: 1 }}
-        >
-          {/* SVG progress ring */}
-          <svg viewBox="0 0 64 64" className="floating-ring absolute inset-0 h-full w-full -rotate-90" aria-hidden>
-            <defs>
-              <filter id="bar-glow-dot-filter">
-                <feGaussianBlur stdDeviation="2.5" result="blur" />
-                <feMerge>
-                  <feMergeNode in="blur" />
-                  <feMergeNode in="SourceGraphic" />
-                </feMerge>
-              </filter>
-            </defs>
-            <circle
-              cx="32"
-              cy="32"
-              r={RING_R}
-              fill="none"
-              strokeWidth="2.5"
-              className="stroke-border-subtle opacity-25"
+        {/* Vertical progress track */}
+        <div className="relative h-[calc(100%-8px)] w-2.5 overflow-hidden rounded-full">
+          <div className="absolute inset-0 rounded-full bg-border-subtle/40" />
+          {!idle && percent > 0 && (
+            <div
+              className="absolute bottom-0 left-0 w-full rounded-full transition-[height] duration-500 ease-out"
+              style={{
+                height: `${percent}%`,
+                background: "var(--accent-primary)",
+                boxShadow: "0 0 10px color-mix(in oklch, var(--accent-primary) 60%, transparent)",
+              }}
             />
-            {!idle && percent > 0 && (
-              <>
-                <circle
-                  cx="32"
-                  cy="32"
-                  r={RING_R}
-                  fill="none"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeDasharray={RING_C}
-                  strokeDashoffset={dashoffset}
-                  stroke="var(--accent-primary)"
-                  className="transition-[stroke-dashoffset] duration-500 ease-out"
-                />
-                <circle
-                  cx={32 + RING_R * Math.cos((percent / 100) * Math.PI * 2)}
-                  cy={32 + RING_R * Math.sin((percent / 100) * Math.PI * 2)}
-                  r="2"
-                  fill="var(--accent-energy)"
-                  filter="url(#bar-glow-dot-filter)"
-                />
-              </>
-            )}
-          </svg>
-
-          {/* Ball content */}
-          <div className="relative flex flex-col items-center gap-px">
-            {idle ? (
-              <img
-                src="/logo-48.png"
-                alt=""
-                width={24}
-                height={24}
-                className="select-none opacity-70"
-                draggable={false}
-              />
-            ) : (
-              <span className="font-mono text-[9px] font-bold leading-none text-text-primary">
-                {Math.round(percent)}%
-              </span>
-            )}
-          </div>
-        </div>
-
-        {/* Info panel */}
-        <div className="relative z-10 flex flex-1 flex-col items-center justify-center px-2">
-          <span className="font-mono text-[11px] font-bold leading-none text-text-primary">{speedText || "—"}</span>
-          <span className="mt-1 text-[9px] leading-none text-text-muted">
-            {idle ? t("floatingStatus.idle") : `${Math.round(percent)}%`}
-          </span>
+          )}
         </div>
       </main>
     );
@@ -393,11 +291,7 @@ export function FloatingStatusWindow() {
           "floating-ball relative grid h-16 w-16 place-items-center rounded-full",
           idle
             ? "bg-surface-overlay shadow-[var(--shadow-idle-ball)] ring-1 ring-border-container"
-            : cn(
-                "bg-surface-overlay ring-1 ring-accent-primary/25 floating-ball-glow",
-                isPeak && "floating-ball-peak",
-                completionBurst && "floating-ball-completion",
-              ),
+            : "bg-surface-overlay ring-1 ring-accent-primary/25 floating-ball-glow",
         )}
         aria-label={t("floatingStatus.title")}
       >

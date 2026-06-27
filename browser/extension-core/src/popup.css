@@ -115,6 +115,57 @@ section {
   list-style: none;
 }
 
+.media-candidates-list {
+  display: grid;
+  gap: 6px;
+  max-height: 200px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.media-candidates-list li,
+.media-candidate {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #2c3442;
+  border-radius: 6px;
+  background: #171b22;
+}
+
+.media-candidate-url {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.media-candidate-meta {
+  font-size: 10px;
+}
+
+.media-candidate-download {
+  height: 26px;
+  margin-top: 2px;
+  border: 1px solid #384252;
+  border-radius: 5px;
+  background: #1d9bf0;
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.media-candidate-download:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.media-candidate-download:hover:not(:disabled) {
+  background: #0f8cdc;
+}
+
 #live-tasks li,
 #recent-tasks li {
   display: grid;

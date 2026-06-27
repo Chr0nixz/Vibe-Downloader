@@ -39,7 +39,8 @@ pub async fn upsert_task_credentials(
     })
     .map_err(|e| format!("Could not serialize task credentials: {e}"))?;
     let (credentials_ciphertext, nonce) =
-        crate::secure_headers::encrypt_secret(&secret, "task credentials", task_id.as_bytes())?;
+        crate::secure_headers::encrypt_secret(&secret, "task credentials", task_id.as_bytes())
+            .map_err(|error| task_credentials_encrypt_error(&error))?;
     sqlx::query(
         r#"
         INSERT INTO task_credentials (
@@ -91,14 +92,9 @@ pub async fn resolve_task_credentials(
         "task credentials",
         task_id.as_bytes(),
     )
-    .map_err(|error| {
-            AppErrorPayload::auth_headers_unavailable(format!(
-                "Task credentials are unavailable: {error}"
-            ))
-            .command_error()
-        })?;
+    .map_err(|error| task_credentials_decrypt_error(&error))?;
     let credentials: TaskCredentialsSecret = serde_json::from_str(&secret)
-        .map_err(|_| "Stored task credentials are invalid.".to_string())?;
+        .map_err(|_| task_credentials_invalid_error("Stored task credentials are invalid."))?;
     Ok(Some(TaskCredentials {
         username: credentials.username,
         password: credentials.password,
@@ -177,7 +173,7 @@ pub async fn migrate_legacy_ftp_credentials(pool: &SqlitePool) -> Result<(), Str
                     )
                     .bind(sanitized_url)
                     .bind(sanitized_final_url)
-                    .bind(&error)
+                    .bind(&task_credentials_encrypt_error(&error))
                     .bind(&now)
                     .bind(&task_id)
                     .execute(&mut *tx)
@@ -192,7 +188,7 @@ pub async fn migrate_legacy_ftp_credentials(pool: &SqlitePool) -> Result<(), Str
                         "#,
                     )
                     .bind(&task_id)
-                    .bind(&error)
+                    .bind(&task_credentials_encrypt_error(&error))
                     .bind(&event_now)
                     .execute(&mut *tx)
                     .await
@@ -257,6 +253,36 @@ pub struct LegacyCredentials {
     pub username: String,
     pub password: String,
     pub sanitized_url: String,
+}
+
+fn task_credentials_encrypt_error(error: &str) -> String {
+    AppErrorPayload::new(
+        "task_credentials_encrypt_failed",
+        format!("Could not encrypt task credentials: {error}"),
+        true,
+        vec!["restart", "check_url"],
+    )
+    .command_error()
+}
+
+fn task_credentials_decrypt_error(error: &str) -> String {
+    AppErrorPayload::new(
+        "task_credentials_decrypt_failed",
+        format!("Could not decrypt stored task credentials: {error}"),
+        true,
+        vec!["restart", "check_url"],
+    )
+    .command_error()
+}
+
+fn task_credentials_invalid_error(message: &str) -> String {
+    AppErrorPayload::new(
+        "task_credentials_invalid",
+        message.to_string(),
+        true,
+        vec!["restart", "check_url"],
+    )
+    .command_error()
 }
 
 pub fn legacy_credentials_from_url(input: &str) -> Option<LegacyCredentials> {
@@ -480,6 +506,19 @@ mod tests {
             .expect("credentials");
         assert_eq!(credentials.username, "alice");
         assert_eq!(credentials.password, "s3cret");
+    }
+
+    #[test]
+    fn credential_error_payloads_are_distinct() {
+        let encrypt = task_credentials_encrypt_error("boom");
+        let decrypt = task_credentials_decrypt_error("boom");
+        let invalid = task_credentials_invalid_error("bad data");
+
+        assert!(encrypt.contains("task_credentials_encrypt_failed"));
+        assert!(decrypt.contains("task_credentials_decrypt_failed"));
+        assert!(invalid.contains("task_credentials_invalid"));
+        assert!(!encrypt.contains("task_credentials_decrypt_failed"));
+        assert!(!decrypt.contains("task_credentials_encrypt_failed"));
     }
 
     async fn credential_pool() -> sqlx::SqlitePool {

@@ -1,4 +1,5 @@
 pub mod browser;
+pub mod classification;
 pub mod task;
 
 pub use browser::{
@@ -8,6 +9,7 @@ pub use browser::{
     BrowserIntegrationUpdateInput, BrowserKind, BrowserRealtimeStatus, BrowserSiteRule,
     BrowserSiteRuleMode,
 };
+pub use classification::{ClassificationMatchKind, ClassificationRule, ClassificationRuleInput};
 pub use task::{
     AppAccentColor, AppErrorPayload, AppSettings, BatchImportItem, BatchImportResult,
     ChecksumAlgorithm, CompletionAction, CompletionActionRequestedPayload, EngineCapabilities,

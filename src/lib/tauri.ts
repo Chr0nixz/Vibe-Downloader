@@ -7,6 +7,8 @@ import type {
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
   ChecksumAlgorithm,
+  ClassificationRule,
+  ClassificationRuleInput,
   ClipboardLinkDetectedPayload,
   CompletionActionRequestedPayload,
   CreateTaskInput,
@@ -56,6 +58,7 @@ export const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED = "tray-new-download-requested";
 export const EVENT_TRAY_SETTINGS_REQUESTED = "tray-settings-requested";
 export const EVENT_CLIPBOARD_LINK_DETECTED = "clipboard-link-detected";
 export const EVENT_COMPLETION_ACTION_REQUESTED = "completion-action-requested";
+export const EVENT_SHUTTING_DOWN = "app://shutting-down";
 export const canSeedMockTasks = !isTauriRuntime() || import.meta.env.DEV;
 
 const log = createLogger("tauri");
@@ -481,6 +484,34 @@ export async function updateBrowserCaptureSettings(
   return runCommand("updateBrowserCaptureSettings", () => commands.updateBrowserCaptureSettings(input));
 }
 
+export async function listClassificationRules(): Promise<ClassificationRule[]> {
+  const commands = await loadNativeCommands();
+  return runCommand("listClassificationRules", () => commands.listClassificationRules());
+}
+
+export async function createClassificationRule(input: ClassificationRuleInput): Promise<ClassificationRule> {
+  const commands = await loadNativeCommands();
+  return runCommand("createClassificationRule", () => commands.createClassificationRule(input));
+}
+
+export async function updateClassificationRule(
+  id: string,
+  input: ClassificationRuleInput,
+): Promise<ClassificationRule> {
+  const commands = await loadNativeCommands();
+  return runCommand("updateClassificationRule", () => commands.updateClassificationRule(id, input));
+}
+
+export async function deleteClassificationRule(id: string): Promise<void> {
+  const commands = await loadNativeCommands();
+  await runCommand("deleteClassificationRule", () => commands.deleteClassificationRule(id));
+}
+
+export async function reorderClassificationRules(ids: string[]): Promise<void> {
+  const commands = await loadNativeCommands();
+  await runCommand("reorderClassificationRules", () => commands.reorderClassificationRules(ids));
+}
+
 export async function createTask(input: CreateTaskInput): Promise<Task> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).createTask(input);
@@ -748,6 +779,21 @@ export function onCompletionActionRequested(
     listen<CompletionActionRequestedPayload>(EVENT_COMPLETION_ACTION_REQUESTED, (event) => {
       handler(event.payload);
     }).then((unlisten) => unlisten),
+  );
+}
+
+/**
+ * Emitted by the Rust backend when the app begins its graceful shutdown
+ * (window close or tray Quit). The frontend uses this to show a "saving
+ * progress" overlay while active downloads are cancelled and checkpoints
+ * are flushed.
+ */
+export function onShuttingDown(handler: () => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(() => {});
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen(EVENT_SHUTTING_DOWN, () => handler()).then((unlisten) => unlisten),
   );
 }
 

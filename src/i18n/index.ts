@@ -75,8 +75,13 @@ function normalizeLocale(value: string | null | undefined): Locale {
 
 function detectInitialLocale(): Locale {
   const stored = readStoredLocale();
-  if (stored) return normalizeLocale(stored);
-  return normalizeLocale(readNavigatorLanguage());
+  const locale = normalizeLocale(stored ?? readNavigatorLanguage());
+  if (!STABLE_LOCALES.includes(locale)) {
+    console.warn(
+      `[i18n] Locale "${locale}" is in beta (unstable translation). Visit Settings to switch to a stable locale.`,
+    );
+  }
+  return locale;
 }
 
 function readStoredLocale(): string | null {

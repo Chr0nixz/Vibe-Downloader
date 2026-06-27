@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { CommandBar } from "@/components/shell/CommandBar";
 import type { AttentionDialogRequest } from "@/components/shell/ResolveAttentionDialog";
+import { ShutdownOverlay } from "@/components/shell/ShutdownOverlay";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { StatusBar } from "@/components/shell/StatusBar";
 import { TitleBar } from "@/components/shell/TitleBar";
@@ -151,7 +152,7 @@ export function AppShell() {
   const setSettingsLoading = useSettingsStore((s) => s.setLoading);
   const setSettingsError = useSettingsStore((s) => s.setError);
   const addToast = useToastStore((s) => s.addToast);
-  const dismissToast = useToastStore((s) => s.dismissToast);
+  const updateToast = useToastStore((s) => s.updateToast);
 
   const taskSurfaceActive = nav !== "settings" && nav !== "about";
 
@@ -248,43 +249,49 @@ export function AppShell() {
 
   // Single-IPC bulk transfer action (pause/resume/retry) via bulk_task_action.
   // Replaces N serial IPC calls with one aggregated call + one refresh.
+  // Uses toast key deduplication so consecutive bulk operations update the
+  // existing toast instead of stacking new ones.
   const runBulkTransferAction = useCallback(
     async (ids: string[], action: "pause" | "resume" | "retry", label: string) => {
       if (ids.length === 0) return;
       const total = ids.length;
+      const toastKey = `bulk-${action}`;
       const toastId = addToast({
         tone: "info",
         title: t("toast.bulkProgress", { action: label, done: 0, total }),
+        key: toastKey,
       });
       try {
         const succeeded = await bulkTaskAction(ids, action);
-        dismissToast(toastId);
         const failed = total - succeeded;
         await refreshTasks();
         if (failed === 0) {
-          addToast({
+          updateToast(toastId, {
             tone: "success",
             title: t("toast.bulkComplete", { action: label, done: succeeded, total }),
           });
         } else if (failed === total) {
-          addToast({
+          updateToast(toastId, {
             tone: "error",
             title: t("toast.bulkFailed", { action: label }),
             description: t("toast.bulkFailureDetail", { failed, total }),
           });
         } else {
-          addToast({
+          updateToast(toastId, {
             tone: "error",
             title: t("toast.bulkPartialFailure", { action: label, failed, total }),
           });
         }
       } catch (err) {
-        dismissToast(toastId);
         const message = localizedErrorMessage(err, t);
-        addToast({ tone: "error", title: t("toast.bulkFailed", { action: label }), description: message });
+        updateToast(toastId, {
+          tone: "error",
+          title: t("toast.bulkFailed", { action: label }),
+          description: message,
+        });
       }
     },
-    [addToast, dismissToast, refreshTasks, t],
+    [addToast, updateToast, refreshTasks, t],
   );
 
   const bulkPause = useCallback(
@@ -354,12 +361,14 @@ export function AppShell() {
           addToast({
             tone: "success",
             title: t("toast.bulkComplete", { action: label, done, total }),
+            key: "bulk-delete",
           });
         } catch (error) {
           addToast({
             tone: "error",
             title: t("toast.bulkFailed", { action: label }),
             description: error instanceof Error ? error.message : String(error),
+            key: "bulk-delete",
           });
         }
         clearSelectedIds();
@@ -617,7 +626,13 @@ export function AppShell() {
   }, []);
 
   useEffect(() => {
-    document.documentElement.dataset.accent = settings?.accentColor ?? "blue";
+    const accent = settings?.accentColor ?? "blue";
+    document.documentElement.dataset.accent = accent;
+    try {
+      localStorage.setItem("vibe-accent", accent);
+    } catch {
+      // localStorage unavailable; skip persistence
+    }
   }, [settings?.accentColor]);
 
   const [dropActive, setDropActive] = useState(false);
@@ -787,6 +802,15 @@ export function AppShell() {
           return;
         }
 
+        // Retry failed task: Mod+R
+        if (matchesShortcut(event, "mod+r", platform) && selected) {
+          if (selected.status === "failed" || selected.status === "needs_attention") {
+            event.preventDefault();
+            retry(selected);
+          }
+          return;
+        }
+
         // Delete: Del
         if (event.key === "Delete" && selected) {
           event.preventDefault();
@@ -818,6 +842,7 @@ export function AppShell() {
     openFolder,
     openNewDownload,
     platform,
+    retry,
     selectTask,
     selected,
     selectedId,
@@ -846,7 +871,7 @@ export function AppShell() {
         }}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
-        <Sidebar onOpenOnboarding={() => setOnboardingOpen(true)} />
+        <Sidebar />
         <main className="order-1 flex min-h-0 min-w-0 flex-1 md:order-none">
           <h1 className="sr-only">{t("app.name")}</h1>
           <TaskList
@@ -864,6 +889,7 @@ export function AppShell() {
             onBulkDelete={bulkDelete}
             onBulkOpenFolder={bulkOpenFolder}
             onBulkExport={bulkExport}
+            onOpenOnboarding={() => setOnboardingOpen(true)}
           />
           <Suspense fallback={null}>
             <TaskDetails
@@ -882,9 +908,8 @@ export function AppShell() {
             />
           </Suspense>
         </main>
-        <StatusBar className="md:hidden" platform={platform} onOpenShortcuts={() => setShortcutPanelOpen(true)} />
       </div>
-      <StatusBar className="hidden md:flex" platform={platform} onOpenShortcuts={() => setShortcutPanelOpen(true)} />
+      <StatusBar className="flex" platform={platform} onOpenShortcuts={() => setShortcutPanelOpen(true)} />
       <ToastViewport />
       {paletteOpen ? (
         <Suspense fallback={null}>
@@ -1010,7 +1035,14 @@ export function AppShell() {
       ) : null}
       {onboardingOpen ? (
         <Suspense fallback={null}>
-          <OnboardingDialog open={onboardingOpen} onOpenChange={setOnboardingOpen} />
+          <OnboardingDialog
+            open={onboardingOpen}
+            onOpenChange={setOnboardingOpen}
+            onOpenSettings={() => {
+              setNav("settings");
+              setOnboardingOpen(false);
+            }}
+          />
         </Suspense>
       ) : null}
       {dropActive ? (
@@ -1026,6 +1058,7 @@ export function AppShell() {
           </div>
         </div>
       ) : null}
+      <ShutdownOverlay />
     </div>
   );
 }

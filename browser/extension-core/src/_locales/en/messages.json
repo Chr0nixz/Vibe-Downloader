@@ -21,6 +21,12 @@
   "noLiveTasks": { "message": "No live tasks" },
   "optionsButton": { "message": "Options" },
 
+  "mediaSection": { "message": "Detected media" },
+  "noMediaCandidates": { "message": "No media detected on this tab." },
+  "mediaCandidateDownload": { "message": "Download" },
+  "mediaCandidateType": { "message": "Type" },
+  "mediaCandidateSize": { "message": "Size" },
+
   "optionsTitle": { "message": "Vibe Downloader — Options" },
   "connectionSection": { "message": "Connection" },
   "connectionChecking": { "message": "Checking connection status…" },
@@ -80,5 +86,28 @@
   "unknownHost": { "message": "unknown" },
 
   "ctxDownloadLink": { "message": "Download with Vibe Downloader" },
-  "ctxDownloadSelection": { "message": "Download selected URL with Vibe Downloader" }
+  "ctxDownloadSelection": { "message": "Download selected URL with Vibe Downloader" },
+
+  "errNotHttpUrl": { "message": "Current tab is not an HTTP download URL." },
+  "errHandoffRejected": { "message": "Vibe did not accept the URL." },
+  "errCommFailed": {
+    "message": "Failed to communicate with the extension: $1",
+    "placeholders": { "detail": { "content": "$1", "example": "error message" } }
+  },
+  "errSaveRulesFailed": {
+    "message": "Failed to save rules: $1",
+    "placeholders": { "detail": { "content": "$1", "example": "error message" } }
+  },
+  "errGeneric": {
+    "message": "Error: $1",
+    "placeholders": { "detail": { "content": "$1", "example": "error message" } }
+  },
+  "ruleModeLabel": {
+    "message": "mode: $1",
+    "placeholders": { "mode": { "content": "$1", "example": "auto" } }
+  },
+  "ruleHeadersStatus": {
+    "message": "headers: $1",
+    "placeholders": { "status": { "content": "$1", "example": "on" } }
+  }
 }

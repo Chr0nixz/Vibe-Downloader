@@ -41,6 +41,7 @@ let bridge = null;
 let reconnectTimer = null;
 let lastStatus = "disconnected";
 let captureSettingsCache = normalizeCaptureSettings(null);
+let runtimeCaptureEnabled = EXPERIMENTAL_CAPTURE;
 
 /* ── Session state persistence (survives SW termination) ── */
 
@@ -197,7 +198,7 @@ if (EXPERIMENTAL_CAPTURE && api.webRequest?.onHeadersReceived) {
 }
 
 async function handleBrowserDownload(download) {
-  if (!EXPERIMENTAL_CAPTURE) return;
+  if (!runtimeCaptureEnabled) return;
   if (!download?.url || !/^https?:\/\//i.test(download.url)) return;
   const settings = await getCaptureSettings();
   const decision = shouldIntercept(download, settings);
@@ -490,7 +491,7 @@ async function nativeMessage(payload) {
 }
 
 function cacheRequestHeaders(details) {
-  if (!EXPERIMENTAL_CAPTURE) return {};
+  if (!runtimeCaptureEnabled) return {};
   cleanupHeaderCache();
   const headerConsent = headerForwardingDecision(details.url, captureSettingsCache);
   if (!headerConsent.forward) return {};
@@ -508,7 +509,7 @@ function cacheRequestHeaders(details) {
 }
 
 async function forwardedHeaders(url) {
-  if (!EXPERIMENTAL_CAPTURE) return [];
+  if (!runtimeCaptureEnabled) return [];
   const cached = headerCache.get(url);
   const headers = cached && Date.now() - cached.createdAt < HEADER_CACHE_TTL_MS ? [...cached.headers] : [];
   const hasCookie = headers.some((header) => header.name.toLowerCase() === "cookie");
@@ -534,7 +535,7 @@ function cleanupHeaderCache() {
 }
 
 function recordMediaCandidate(details) {
-  if (!EXPERIMENTAL_CAPTURE || !details?.url || details.method === "OPTIONS") return {};
+  if (!runtimeCaptureEnabled || !details?.url || details.method === "OPTIONS") return {};
   const headers = details.responseHeaders ?? [];
   const contentType = headerValue(headers, "content-type").toLowerCase();
   const contentLength = headerValue(headers, "content-length");
@@ -585,14 +586,31 @@ function pruneMediaCandidates() {
 async function getCaptureSettings() {
   const stored = await api.storage.local.get(SETTINGS_KEY);
   captureSettingsCache = normalizeCaptureSettings(stored?.[SETTINGS_KEY]);
+  if (EXPERIMENTAL_CAPTURE) {
+    runtimeCaptureEnabled = captureSettingsCache.experimentalCaptureEnabled !== false;
+  }
   return captureSettingsCache;
 }
 
 async function saveLocalCaptureSettings(settings) {
   const normalized = normalizeCaptureSettings(settings);
   captureSettingsCache = normalized;
+  if (EXPERIMENTAL_CAPTURE) {
+    runtimeCaptureEnabled = normalized.experimentalCaptureEnabled !== false;
+  }
   await api.storage.local.set({ [SETTINGS_KEY]: normalized });
   return normalized;
+}
+
+if (EXPERIMENTAL_CAPTURE && api.storage?.onChanged) {
+  api.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    const change = changes[SETTINGS_KEY];
+    if (!change) return;
+    const normalized = normalizeCaptureSettings(change.newValue);
+    captureSettingsCache = normalized;
+    runtimeCaptureEnabled = normalized.experimentalCaptureEnabled !== false;
+  });
 }
 
 async function updateCaptureSettings(patch) {
@@ -641,6 +659,7 @@ function normalizeCaptureSettings(value) {
   }
   return {
     autoIntercept: value?.autoIntercept !== false,
+    experimentalCaptureEnabled: value?.experimentalCaptureEnabled !== false,
     forwardHeadersMode:
       value?.forwardHeadersMode ??
       (typeof value?.forwardHeaders === "boolean" ? (value.forwardHeaders ? "enabled" : "disabled") : "ask"),
@@ -731,7 +750,7 @@ async function popupStatus() {
   const stored = await api.storage.local.get(RECENT_KEY);
   return {
     bridgeStatus: lastStatus,
-    experimentalCapture: EXPERIMENTAL_CAPTURE,
+    experimentalCapture: runtimeCaptureEnabled,
     settings: await getCaptureSettings(),
     recent: Array.isArray(stored?.[RECENT_KEY]) ? stored[RECENT_KEY] : [],
     tasks: Array.from(liveTasks.values()).slice(0, 8),

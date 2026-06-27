@@ -2,6 +2,14 @@ use sqlx::{Row, SqlitePool};
 
 use crate::models::{RequestDiagnostic, RequestDiagnosticRecord};
 
+/// Maximum age (in days) for retained request diagnostic rows.
+/// Rows older than this are removed by [`prune_request_diagnostics`].
+pub const REQUEST_DIAGNOSTICS_MAX_AGE_DAYS: i64 = 14;
+
+/// Maximum number of request diagnostic rows kept per task.
+/// When a task exceeds this count, only the most recent rows are retained.
+pub const REQUEST_DIAGNOSTICS_MAX_PER_TASK: i64 = 200;
+
 pub async fn insert_request_diagnostic(
     pool: &SqlitePool,
     record: &RequestDiagnosticRecord,
@@ -81,4 +89,56 @@ pub async fn list_request_diagnostics_page(
             created_at: row.get("created_at"),
         })
         .collect())
+}
+
+/// Prunes stale request diagnostic rows to keep the `task_requests` table bounded.
+///
+/// Two retention rules are applied:
+/// 1. **Age cap**: rows whose `created_at` is older than
+///    [`REQUEST_DIAGNOSTICS_MAX_AGE_DAYS`] days are deleted.
+/// 2. **Per-task cap**: for each task, only the most recent
+///    [`REQUEST_DIAGNOSTICS_MAX_PER_TASK`] rows are kept; older surplus rows
+///    are deleted even if they fall within the age window.
+///
+/// Returns the total number of rows deleted. Failures of individual steps are
+/// returned as errors; partial deletions from the age cap may have already
+/// committed before a per-task-cap error surfaces.
+pub async fn prune_request_diagnostics(pool: &SqlitePool) -> Result<u64, String> {
+    // Step 1: age-based deletion. RFC 3339 lexical ordering matches SQLite
+    // TEXT comparison because `now_iso()` emits a fixed-offset UTC string.
+    let cutoff =
+        chrono::Utc::now() - chrono::Duration::days(REQUEST_DIAGNOSTICS_MAX_AGE_DAYS);
+    let cutoff_iso = cutoff.to_rfc3339();
+    let age_result = sqlx::query("DELETE FROM task_requests WHERE created_at < ?")
+        .bind(&cutoff_iso)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut removed = age_result.rows_affected();
+
+    // Step 2: per-task cap. SQLite supports ROW_NUMBER() (>= 3.25), so we
+    // rank rows within each task_id partition by descending id and delete
+    // any row whose rank exceeds the cap.
+    let cap_result = sqlx::query(
+        r#"
+        DELETE FROM task_requests
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY task_id
+                           ORDER BY id DESC
+                       ) AS rn
+                FROM task_requests
+            )
+            WHERE rn > ?
+        )
+        "#,
+    )
+    .bind(REQUEST_DIAGNOSTICS_MAX_PER_TASK)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    removed += cap_result.rows_affected();
+    Ok(removed)
 }

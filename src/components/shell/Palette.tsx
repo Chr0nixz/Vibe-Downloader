@@ -21,7 +21,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { type ComponentType, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ComponentType, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -159,15 +159,23 @@ export function Palette({
   const addToast = useToastStore((s) => s.addToast);
   const { setTheme } = useTheme();
 
+  // E-12: useDeferredValue 让命令面板的派生计算在空闲时跑，
+  // 不阻塞主列表的进度 tick 渲染（tasks 每 250ms 变化）。
+  // selectedTasks 保持实时 tasks（选中集小，需实时反馈）。
+  const deferredTasks = useDeferredValue(tasks);
+
   const visibleTasks = useMemo(
-    () => filterTasks(tasks, nav, taskSearch, sortKey, sortDirection, filters),
-    [filters, nav, sortDirection, sortKey, taskSearch, tasks],
+    () => filterTasks(deferredTasks, nav, taskSearch, sortKey, sortDirection, filters),
+    [deferredTasks, filters, nav, sortDirection, sortKey, taskSearch],
   );
   const selectedTasks = useMemo(() => tasks.filter((task) => selectedIds.includes(task.id)), [selectedIds, tasks]);
-  const sourceOptions = useMemo(() => Array.from(new Set(tasks.map((task) => task.sourceKey))).sort(), [tasks]);
+  const sourceOptions = useMemo(
+    () => Array.from(new Set(deferredTasks.map((task) => task.sourceKey))).sort(),
+    [deferredTasks],
+  );
   const failureOptions = useMemo(
-    () => Array.from(new Set(tasks.map(failureKind).filter((kind) => kind !== "none"))).sort(),
-    [tasks],
+    () => Array.from(new Set(deferredTasks.map(failureKind).filter((kind) => kind !== "none"))).sort(),
+    [deferredTasks],
   );
 
   const commands = useMemo(
@@ -382,7 +390,7 @@ export function Palette({
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={t("palette.searchPlaceholder")}
-                className="h-10 bg-surface-base pl-9"
+                className="h-9 bg-surface-base pl-9"
                 role="combobox"
                 aria-expanded={open}
                 aria-controls="command-palette-results"

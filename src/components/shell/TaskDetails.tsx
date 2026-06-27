@@ -230,7 +230,7 @@ function TaskDetailsPanel({
 }) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("overview");
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [diagSubTab, setDiagSubTab] = useState<"chunks" | "connections" | "requests">("chunks");
   const [segments, setSegments] = useState<TaskSegment[]>([]);
   const [segmentsCursor, setSegmentsCursor] = useState<string | null>(null);
   const [segmentError, setSegmentError] = useState<string | null>(null);
@@ -251,8 +251,8 @@ function TaskDetailsPanel({
   const isMetalinkTask = task.protocol === "metalink";
 
   useEffect(() => {
-    setActiveTab("overview");
-    setDiagnosticsOpen(task.status === "failed" || task.status === "needs_attention");
+    setActiveTab(task.status === "failed" || task.status === "needs_attention" ? "chunks" : "overview");
+    setDiagSubTab("chunks");
     setHashState(null);
     setChecksumResults({});
     setVerifyingChecksums(new Set());
@@ -298,16 +298,10 @@ function TaskDetailsPanel({
   }, [task.id]);
 
   useEffect(() => {
-    if (task.status === "failed" || task.status === "needs_attention") {
-      setDiagnosticsOpen(true);
-    }
-  }, [task.status]);
-
-  useEffect(() => {
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
 
-    if (activeTab !== "chunks" && activeTab !== "connections") {
+    if (activeTab !== "chunks") {
       setSegments([]);
       setSegmentError(null);
       return;
@@ -358,7 +352,7 @@ function TaskDetailsPanel({
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
 
-    if (activeTab !== "requests") {
+    if (activeTab !== "chunks" || diagSubTab !== "requests") {
       setRequests([]);
       setRequestsError(null);
       return;
@@ -389,7 +383,7 @@ function TaskDetailsPanel({
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [activeTab, task.id, task.status, refreshTick]);
+  }, [activeTab, diagSubTab, task.id, task.status, refreshTick]);
 
   useEffect(() => {
     let cancelled = false;
@@ -574,97 +568,50 @@ function TaskDetailsPanel({
     };
   }, [activeTab, task.id, task.status, refreshTick]);
 
+  const isFailedOrAttention = task.status === "failed" || task.status === "needs_attention";
+  const isCompleted = task.status === "completed";
+
+  const hashPanel = (
+    <HashPanel
+      task={task}
+      state={hashState}
+      verifying={verifyingHash}
+      onVerify={() => void runHashVerification()}
+      checksumResults={checksumResults}
+      verifyingChecksums={verifyingChecksums}
+      onVerifyChecksum={(algo) => void verifyChecksum(algo)}
+      onVerifyAllChecksums={verifyAllChecksums}
+    />
+  );
+  const recoveryActions = <TaskRecoveryActions task={task} onResolve={onResolveAttention} />;
+
   return (
     <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col px-4 py-3">
       <TabsList className="w-full justify-start overflow-x-auto">
         <TabsTrigger value="overview">{t("taskDetails.overview")}</TabsTrigger>
+        <TabsTrigger value="chunks">{t("taskDetails.chunks")}</TabsTrigger>
         <TabsTrigger value="logs">{t("taskDetails.logs")}</TabsTrigger>
       </TabsList>
 
-      {/* Diagnostics disclosure */}
-      <div className="mt-2 rounded-md border border-border-subtle/60">
-        <button
-          type="button"
-          onClick={() => setDiagnosticsOpen((v) => !v)}
-          className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-raised/40 hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary"
-          aria-expanded={diagnosticsOpen}
-        >
-          <ChevronDown
-            className={cn("h-3.5 w-3.5 shrink-0 transition-transform duration-200", !diagnosticsOpen && "-rotate-90")}
-          />
-          <span>{t("taskDetails.diagnostics")}</span>
-          {!diagnosticsOpen && segments.length > 0 && (
-            <span className="ml-auto font-mono text-[11px] text-text-muted">
-              {segments.filter((s) => s.status === "failed").length > 0
-                ? `${segments.filter((s) => s.status === "failed").length} ${t("taskDetails.diagFailedShort")}`
-                : `${segments.length} ${t("taskDetails.diagSegmentsShort")}`}
-            </span>
-          )}
-        </button>
+      <TabsContent value="chunks" className="flex min-h-0 flex-1 flex-col">
+        <Tabs value={diagSubTab} onValueChange={(v) => setDiagSubTab(v as "chunks" | "connections" | "requests")}>
+          <TabsList aria-label={t("taskDetails.diagnostics")} className="mb-2 flex h-auto gap-1 bg-transparent p-0">
+            {(["chunks", "connections", "requests"] as const).map((key) => (
+              <TabsTrigger
+                key={key}
+                value={key}
+                className={cn(
+                  "rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
+                  "data-[state=active]:bg-accent-primary/12 data-[state=active]:text-accent-primary data-[state=active]:shadow-none",
+                  "data-[state=inactive]:text-text-muted data-[state=inactive]:hover:bg-surface-raised/60 data-[state=inactive]:hover:text-text-secondary",
+                )}
+              >
+                {t(`taskDetails.${key}`)}
+              </TabsTrigger>
+            ))}
+          </TabsList>
 
-        {diagnosticsOpen && (
-          <div className="border-t border-border-subtle/60 px-2 py-2">
-            <div
-              role="tablist"
-              aria-label={t("taskDetails.diagnostics")}
-              className="mb-2 flex gap-1"
-              onKeyDown={(e) => {
-                const tabs = Array.from(
-                  e.currentTarget.querySelectorAll<HTMLButtonElement>('button[role="tab"]:not([disabled])'),
-                );
-                if (tabs.length === 0) return;
-
-                const currentIndex = tabs.findIndex((tab) => tab === document.activeElement);
-
-                let nextIndex = -1;
-                switch (e.key) {
-                  case "ArrowRight":
-                    nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % tabs.length;
-                    break;
-                  case "ArrowLeft":
-                    nextIndex = currentIndex === -1 ? tabs.length - 1 : (currentIndex - 1 + tabs.length) % tabs.length;
-                    break;
-                  case "Home":
-                    nextIndex = 0;
-                    break;
-                  case "End":
-                    nextIndex = tabs.length - 1;
-                    break;
-                  default:
-                    return;
-                }
-
-                e.preventDefault();
-                const target = tabs[nextIndex];
-                target.focus();
-                // Trigger the same activation as a click
-                target.click();
-              }}
-            >
-              {(["chunks", "connections", "requests"] as const).map((key) => (
-                <button
-                  key={key}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeTab === key}
-                  aria-controls={`panel-${key}`}
-                  tabIndex={activeTab === key ? 0 : -1}
-                  onClick={() => {
-                    setActiveTab(key);
-                  }}
-                  className={cn(
-                    "rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
-                    activeTab === key
-                      ? "bg-accent-primary/12 text-accent-primary"
-                      : "text-text-muted hover:bg-surface-raised/60 hover:text-text-secondary",
-                  )}
-                >
-                  {t(`taskDetails.${key}`)}
-                </button>
-              ))}
-            </div>
-
+          <ScrollArea className="min-h-0 flex-1">
             <TabsContent value="chunks" id="panel-chunks">
               <ChunkList
                 segments={segments}
@@ -703,9 +650,9 @@ function TaskDetailsPanel({
                 onLoadMore={() => void loadMoreRequests()}
               />
             </TabsContent>
-          </div>
-        )}
-      </div>
+          </ScrollArea>
+        </Tabs>
+      </TabsContent>
 
       <ScrollArea className="min-h-0 flex-1">
         <TabsContent value="overview" className="space-y-3 text-sm">
@@ -733,25 +680,21 @@ function TaskDetailsPanel({
               <p>{t("taskDetails.dashLimitationsNote")}</p>
             </div>
           ) : null}
-          <HashPanel
-            task={task}
-            state={hashState}
-            verifying={verifyingHash}
-            onVerify={() => void runHashVerification()}
-            checksumResults={checksumResults}
-            verifyingChecksums={verifyingChecksums}
-            onVerifyChecksum={(algo) => void verifyChecksum(algo)}
-            onVerifyAllChecksums={verifyAllChecksums}
-          />
+          {/* Status-priority panel: failed → recovery first; completed → hash first */}
+          {isFailedOrAttention ? recoveryActions : null}
+          {isCompleted && !isFailedOrAttention ? hashPanel : null}
+          {/* Protocol runtime panels */}
           <TorrentRuntimePanel task={task} snapshot={torrentSnapshot} error={torrentSnapshotError} />
           <MetalinkMirrorPanel
             mirrors={mirrors}
             taskStatus={task.status}
             onRetryMirror={(url) => void handleRetryWithMirror(url)}
           />
-          <TaskTransferPanel task={task} />
-          <TaskProxyPanel task={task} />
-          <TaskRecoveryActions task={task} onResolve={onResolveAttention} />
+          {/* Non-priority hash/recovery */}
+          {!isCompleted || isFailedOrAttention ? hashPanel : null}
+          {!isFailedOrAttention ? recoveryActions : null}
+          {/* Advanced settings (collapsed by default to reduce cognitive load) */}
+          <AdvancedSettingsDisclosure task={task} />
         </TabsContent>
         <TabsContent value="logs">
           <EventList
@@ -1229,6 +1172,30 @@ function TorrentRuntimePanel({
 
 const TASK_CATEGORY_OPTIONS = ["none", "archive", "image", "video", "document", "installer", "other"] as const;
 
+function AdvancedSettingsDisclosure({ task }: { task: Task }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-1 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary"
+        aria-expanded={open}
+      >
+        <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform duration-200", !open && "-rotate-90")} />
+        <span>{t("taskDetails.advancedSettings")}</span>
+      </button>
+      {open ? (
+        <div className="space-y-3 pt-1">
+          <TaskTransferPanel task={task} />
+          <TaskProxyPanel task={task} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function TaskTransferPanel({ task }: { task: Task }) {
   const { t } = useTranslation();
   const upsertTask = useTaskDataStore((s) => s.upsertTask);
@@ -1578,15 +1545,7 @@ function ChunkList({
         const percentText = `${Math.round(progress * 100)}%`;
 
         return (
-          <div
-            key={segment.id}
-            className="rounded-md border border-border-subtle bg-surface-raised/50 p-3"
-            title={t("taskDetails.chunkTooltip", {
-              range: rangeText,
-              percent: percentText,
-              retries: segment.retryCount,
-            })}
-          >
+          <div key={segment.id} className="rounded-md border border-border-subtle bg-surface-raised/50 p-3">
             <div className="flex items-center justify-between gap-3">
               <span className="font-medium text-text-primary">
                 {rangeLabel} {rangeText}
@@ -1689,16 +1648,7 @@ function ConnectionList({
         const percentText = formatPercent(completed, total);
 
         return (
-          <div
-            key={segment.id}
-            className="rounded-md border border-border-subtle bg-surface-raised/50 p-3"
-            title={t("taskDetails.connectionTooltip", {
-              index: index + 1,
-              range: rangeText,
-              percent: percentText,
-              speed: formatSpeed(speed),
-            })}
-          >
+          <div key={segment.id} className="rounded-md border border-border-subtle bg-surface-raised/50 p-3">
             <div className="flex items-center justify-between gap-3">
               <span className="font-medium text-text-primary">
                 {connectionLabel} {index + 1}

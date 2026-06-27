@@ -1,5 +1,7 @@
 mod browser_messages;
+mod classification_rules;
 mod connection;
+mod dash;
 mod events;
 mod hash;
 mod hls;
@@ -21,8 +23,21 @@ pub use self::browser_messages::{
     browser_message_exists, insert_browser_message, latest_browser_error,
     update_browser_message_status,
 };
-pub use self::connection::{connect, DbConnection};
-pub use self::events::{get_latest_pause_event_type, insert_task_event, list_task_events_page};
+pub use self::classification_rules::{
+    apply_classification_rules, create_classification_rule, delete_classification_rule,
+    get_classification_rule, list_classification_rules, reorder_classification_rules,
+    update_classification_rule,
+};
+pub use self::connection::{connect, wal_checkpoint, wal_file_size_bytes, DbConnection};
+pub use self::dash::{
+    dash_finish_requested, existing_dash_downloaded_bytes, existing_dash_segment_keys,
+    get_dash_task, list_dash_segments, request_dash_finish, reset_dash_segments_for_task,
+    update_dash_segment_status, upsert_dash_segment, upsert_dash_task, DashSegmentRecord,
+    DashSegmentUpsert, DashTaskRecord, DashTaskUpsert,
+};
+pub use self::events::{
+    get_latest_pause_event_type, insert_task_event, insert_task_event_in_tx, list_task_events_page,
+};
 pub use self::hash::update_hash_verification;
 pub use self::hls::{
     get_hls_task, hls_finish_requested, list_hls_segments, request_hls_finish,
@@ -36,7 +51,10 @@ pub use self::metalink::{
     promote_metalink_resource_for_retry, reset_metalink_resource_statuses,
     upsert_metalink_task, MetalinkResourceInsert, MetalinkResourceRecord, MetalinkTaskUpsert,
 };
-pub use self::request_diagnostics::{insert_request_diagnostic, list_request_diagnostics_page};
+pub use self::request_diagnostics::{
+    insert_request_diagnostic, list_request_diagnostics_page, prune_request_diagnostics,
+    REQUEST_DIAGNOSTICS_MAX_AGE_DAYS, REQUEST_DIAGNOSTICS_MAX_PER_TASK,
+};
 pub use self::request_headers::{
     clear_all_task_request_headers, clear_expired_task_request_headers,
     delete_task_request_headers, resolve_task_request_headers, upsert_task_request_headers,
@@ -72,8 +90,9 @@ pub use self::task_credentials::{
     upsert_task_credentials, TaskCredentials,
 };
 pub use self::task_files::{
-    insert_task_file_record, list_task_file_records, list_task_file_records_for_tasks,
-    update_task_file_progress, update_task_file_selection,
+    bump_task_files_version, bump_task_files_version_in_tx, insert_task_file_record,
+    insert_task_file_record_in_tx, list_task_file_records, list_task_file_records_for_tasks,
+    update_task_file_progress, update_task_file_selection, update_task_file_selection_in_tx,
 };
 pub use self::task_proxy::{
     get_task_proxy_settings, resolve_task_proxy_config, upsert_task_proxy_settings,
@@ -81,24 +100,26 @@ pub use self::task_proxy::{
 };
 pub use self::task_records::{
     find_duplicate_task_record, get_task_record, insert_task_record,
-    list_browser_realtime_task_records, list_queued_task_records, list_task_records,
-    list_task_records_cursor, list_task_records_page, next_queue_position, next_retry_after_at,
-    task_filter_options, task_stats_snapshot, update_task_transfer_options, TaskFilterOptions,
-    TaskListPage, TaskListQuery, TaskTransferOptionsUpdate,
+    insert_task_record_in_tx,
+    list_browser_realtime_task_records, list_paused_schedulable_tasks, list_queued_task_records,
+    list_task_records, list_task_records_cursor, list_task_records_page, next_queue_position,
+    next_retry_after_at, task_filter_options, task_stats_snapshot, update_task_transfer_options,
+    TaskFilterOptions, TaskListPage, TaskListQuery, TaskTransferOptionsUpdate,
 };
 pub use self::task_state::{
-    clear_tasks, complete_segment, complete_task, complete_task_segment,
-    complete_unknown_size_task, delete_segments_for_task, delete_task_files_for_task,
-    delete_task_record, delete_task_records_batch, reset_interrupted_tasks,
-    reset_task_download_state, update_task_and_segment_progress, update_task_final_path,
-    update_task_health_summary, update_task_progress, update_task_retry_after,
-    update_task_runtime_progress, update_task_save_target, update_task_status,
+    checkpoint_task_progress, clear_tasks, complete_segment, complete_task,
+    complete_task_segment, complete_unknown_size_task, delete_segments_for_task,
+    delete_task_files_for_task, delete_task_record, delete_task_records_batch,
+    reset_interrupted_tasks, reset_task_download_state, update_task_and_segment_progress,
+    update_task_final_path, update_task_health_summary, update_task_progress,
+    update_task_retry_after, update_task_runtime_progress, update_task_save_target,
+    update_task_status, update_task_status_in_tx, TaskProgressCheckpoint,
 };
 pub use self::torrent::{
     get_torrent_runtime_snapshot, torrent_seeding_enabled, update_task_remote_metadata,
-    update_task_torrent_metadata, update_torrent_seeding, upsert_torrent_runtime_snapshot,
-    upsert_torrent_task, TaskRemoteMetadataUpdate, TaskTorrentMetadataUpdate,
-    TorrentRuntimeSnapshotUpsert, TorrentTaskUpsert,
+    update_task_torrent_metadata, update_torrent_seeding,
+    upsert_torrent_runtime_snapshot, upsert_torrent_task, TaskRemoteMetadataUpdate,
+    TaskTorrentMetadataUpdate, TorrentRuntimeSnapshotUpsert, TorrentTaskUpsert,
 };
 
 pub const DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;

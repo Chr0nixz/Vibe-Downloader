@@ -55,7 +55,7 @@ pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, Str
                task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
-               hash_status, hash_error, hash_verified_at, created_at, updated_at
+               hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
         FROM tasks
         ORDER BY
             CASE status
@@ -151,7 +151,7 @@ pub async fn list_browser_realtime_task_records(
                task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
-               hash_status, hash_error, hash_verified_at, created_at, updated_at
+               hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
         FROM tasks
         WHERE status IN ('downloading', 'retrying', 'queued', 'paused', 'waiting_network', 'needs_attention')
         ORDER BY
@@ -179,7 +179,7 @@ pub async fn list_browser_realtime_task_records(
                task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
-               hash_status, hash_error, hash_verified_at, created_at, updated_at
+               hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
         FROM tasks
         WHERE status NOT IN ('downloading', 'retrying', 'queued', 'paused', 'waiting_network', 'needs_attention')
         ORDER BY updated_at DESC
@@ -221,7 +221,7 @@ pub async fn list_task_records_page(
                task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
-               hash_status, hash_error, hash_verified_at, created_at, updated_at
+               hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
         FROM tasks
         "#,
     );
@@ -269,7 +269,7 @@ pub async fn list_task_records_cursor(
                task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
-               hash_status, hash_error, hash_verified_at, created_at, updated_at
+               hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
         FROM tasks
         "#,
     );
@@ -487,7 +487,7 @@ pub async fn get_task_record(pool: &SqlitePool, id: &str) -> Result<Option<TaskR
                task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
-               hash_status, hash_error, hash_verified_at, created_at, updated_at
+               hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
         FROM tasks WHERE id = ?
         "#,
     )
@@ -518,7 +518,7 @@ where
                task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
-               hash_status, hash_error, hash_verified_at, created_at, updated_at
+               hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
         FROM tasks
         WHERE url IN (?, ?)
            OR final_url IN (?, ?)
@@ -563,7 +563,7 @@ pub async fn list_queued_task_records(
                task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
                health_summary, error_message, error_code, recovery_actions, retry_after_at,
                expected_hash_sha256, actual_hash_sha256,
-               hash_status, hash_error, hash_verified_at, created_at, updated_at
+               hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
         FROM tasks
         WHERE status = 'queued' AND (retry_after_at IS NULL OR retry_after_at <= ?)
         ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, queue_position ASC, created_at ASC
@@ -577,6 +577,20 @@ pub async fn list_queued_task_records(
     .map_err(|e| e.to_string())?;
 
     rows.iter().map(row_to_task).collect()
+}
+
+/// Lists task IDs that are paused and obey the schedule (replaces raw SQL in check_schedule_preemption).
+pub async fn list_paused_schedulable_tasks(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id FROM tasks
+        WHERE status = 'paused' AND obey_schedule = 1
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.iter().map(|row| row.get("id")).collect())
 }
 
 pub async fn next_retry_after_at(pool: &SqlitePool) -> Result<Option<String>, String> {
@@ -631,7 +645,7 @@ pub async fn update_task_transfer_options(
     Ok(())
 }
 
-fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
+pub(super) fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
     Ok(TaskRecord {
         id: row.get("id"),
         url: row.get("url"),
@@ -673,6 +687,7 @@ fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
         hash_verified_at: row.get("hash_verified_at"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        files_version: row.get("files_version"),
     })
 }
 
@@ -793,8 +808,8 @@ where
             task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
             health_summary, error_message, error_code, recovery_actions, retry_after_at,
             expected_hash_sha256, actual_hash_sha256,
-            hash_status, hash_error, hash_verified_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&task.id)
@@ -835,7 +850,71 @@ where
     .bind(&task.hash_verified_at)
     .bind(&task.created_at)
     .bind(&task.updated_at)
+    .bind(task.files_version)
     .execute(executor)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn insert_task_record_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task: &TaskRecord,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        INSERT INTO tasks (
+            id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
+            total_size, downloaded_bytes, status, etag, last_modified, content_type,
+            supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+            task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
+            health_summary, error_message, error_code, recovery_actions, retry_after_at,
+            expected_hash_sha256, actual_hash_sha256,
+            hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&task.id)
+    .bind(&task.url)
+    .bind(&task.final_url)
+    .bind(&task.protocol)
+    .bind(task.task_kind.as_str())
+    .bind(&task.file_name)
+    .bind(&task.save_dir)
+    .bind(&task.temp_path)
+    .bind(&task.final_path)
+    .bind(task.total_size)
+    .bind(task.downloaded_bytes)
+    .bind(task.status.as_str())
+    .bind(&task.etag)
+    .bind(&task.last_modified)
+    .bind(&task.content_type)
+    .bind(if task.supports_resume { 1 } else { 0 })
+    .bind(if task.supports_parallel { 1 } else { 0 })
+    .bind(if task.supports_multi_file { 1 } else { 0 })
+    .bind(&task.source_key)
+    .bind(task.connection_count)
+    .bind(task.speed_bps)
+    .bind(&task.task_speed_limit_bps)
+    .bind(task.priority.as_str())
+    .bind(task.queue_position)
+    .bind(&task.category_key)
+    .bind(if task.obey_schedule { 1 } else { 0 })
+    .bind(&task.health_summary)
+    .bind(&task.error_message)
+    .bind(&task.error_code)
+    .bind(recovery_actions_json(&task.recovery_actions)?)
+    .bind(&task.retry_after_at)
+    .bind(&task.expected_hash_sha256)
+    .bind(&task.actual_hash_sha256)
+    .bind(task.hash_status.as_str())
+    .bind(&task.hash_error)
+    .bind(&task.hash_verified_at)
+    .bind(&task.created_at)
+    .bind(&task.updated_at)
+    .bind(task.files_version)
+    .execute(&mut **tx)
     .await
     .map_err(|e| e.to_string())?;
 

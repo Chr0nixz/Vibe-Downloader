@@ -50,6 +50,13 @@ async fn run_monitor(app: AppHandle) {
         let Some(state) = app.try_state::<AppState>() else {
             continue;
         };
+        if state
+            .quit_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            tracing::debug!("clipboard monitor exiting (shutdown requested)");
+            break;
+        }
         let enabled = match db::clipboard_monitor_enabled(&state.pool).await {
             Ok(enabled) => enabled,
             Err(error) => {
@@ -99,6 +106,14 @@ async fn run_monitor(app: AppHandle) {
 
 pub fn extract_download_urls(text: &str) -> Vec<String> {
     if text.trim().is_empty() || text.len() > MAX_CLIPBOARD_TEXT_LEN {
+        return Vec::new();
+    }
+
+    // E-9: 廉价短路。所有支持的协议 URL 都含 ":" (http://, magnet:, file:// 等)。
+    // 若文本不含 ":"，直接返回，避免对 64KB 纯文本做 to_ascii_lowercase 全量分配
+    // + 9 次子串搜索。":" 检查是 case-sensitive 的且无字母，对所有大小写形式均有效。
+    // 误判（普通文本含冒号）会走完整路径，由 normalize_download_url 过滤，无功能影响。
+    if !text.contains(':') {
         return Vec::new();
     }
 

@@ -75,7 +75,7 @@ export function StatusBar({
               type="button"
               variant="outline"
               size="sm"
-              className="h-7 shrink-0 px-2 text-xs md:h-8"
+              className="h-8 shrink-0 px-2 text-xs"
               disabled={installing}
               onClick={() => void installUpdate()}
             >

@@ -86,6 +86,11 @@ export const commands = {
 	getBrowserCaptureSettings: () => typedError<BrowserCaptureSettings, string>(__TAURI_INVOKE("get_browser_capture_settings")),
 	updateBrowserCaptureSettings: (input: BrowserCaptureSettingsInput) => typedError<BrowserCaptureSettings, string>(__TAURI_INVOKE("update_browser_capture_settings", { input })),
 	createBrowserHandoffTask: (input: BrowserHandoffInput) => typedError<BrowserHandoffResult, string>(__TAURI_INVOKE("create_browser_handoff_task", { input })),
+	listClassificationRules: () => typedError<ClassificationRule[], string>(__TAURI_INVOKE("list_classification_rules")),
+	createClassificationRule: (input: ClassificationRuleInput) => typedError<ClassificationRule, string>(__TAURI_INVOKE("create_classification_rule", { input })),
+	updateClassificationRule: (id: string, input: ClassificationRuleInput) => typedError<ClassificationRule, string>(__TAURI_INVOKE("update_classification_rule", { id, input })),
+	deleteClassificationRule: (id: string) => typedError<null, string>(__TAURI_INVOKE("delete_classification_rule", { id })),
+	reorderClassificationRules: (ids: string[]) => typedError<null, string>(__TAURI_INVOKE("reorder_classification_rules", { ids })),
 	showFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("show_floating_status_window")),
 	hideFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("hide_floating_status_window")),
 	toggleFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("toggle_floating_status_window")),
@@ -196,21 +201,25 @@ export type BatchImportResult = {
 };
 
 export type BrowserCaptureSettings = {
+	experimentalCaptureEnabled: boolean,
 	autoIntercept: boolean,
 	forwardHeaders: boolean,
 	forwardHeadersMode: BrowserForwardHeadersMode,
 	minSizeBytes: string,
 	fileExtensions: string[],
 	siteRules: BrowserSiteRule[],
+	allowIntranetHandoff: boolean,
 };
 
 export type BrowserCaptureSettingsInput = {
+	experimentalCaptureEnabled: boolean | null,
 	autoIntercept: boolean | null,
 	forwardHeaders: boolean | null,
 	forwardHeadersMode: BrowserForwardHeadersMode | null,
 	minSizeBytes: string | null,
 	fileExtensions: string[] | null,
 	siteRules: BrowserSiteRule[] | null,
+	allowIntranetHandoff: boolean | null,
 };
 
 export type BrowserExtensionExportResult = {
@@ -306,6 +315,35 @@ export type BrowserSiteRule = {
 export type BrowserSiteRuleMode = "auto" | "ask" | "never";
 
 export type ChecksumAlgorithm = "sha256" | "sha512" | "sha1" | "md5";
+
+export type ClassificationMatchKind = 
+/**  按文件扩展名匹配，如 "mp4" */
+"extension" | 
+/**  按 MIME 前缀匹配，如 "video/" */
+"mime" | 
+/**  按 URL 关键词包含匹配，如 "example.com/video" */
+"url_contains";
+
+export type ClassificationRule = {
+	id: string,
+	name: string,
+	enabled: boolean,
+	position: number,
+	matchKind: ClassificationMatchKind,
+	pattern: string,
+	targetSubdir: string,
+	createdAt: string,
+	updatedAt: string,
+};
+
+export type ClassificationRuleInput = {
+	name: string | null,
+	enabled: boolean | null,
+	position: number | null,
+	matchKind: ClassificationMatchKind | null,
+	pattern: string | null,
+	targetSubdir: string | null,
+};
 
 export type ClipboardLinkDetectedPayload = {
 	id: string,

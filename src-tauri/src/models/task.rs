@@ -17,6 +17,28 @@ pub enum TaskStatus {
     NeedsAttention,
 }
 
+impl TaskStatus {
+    /// 合法状态转换表。返回 `true` 表示 `self → target` 是允许的语义状态变更。
+    /// 进度数值更新（Downloading → Downloading）不走此校验，直接写 DB。
+    pub fn can_transition_to(self, target: TaskStatus) -> bool {
+        use TaskStatus::*;
+        matches!(
+            (self, target),
+            (Queued, Downloading | Paused | Failed | NeedsAttention | WaitingNetwork)
+                | (
+                    Downloading,
+                    Paused | Completed | Failed | Retrying | NeedsAttention | WaitingNetwork
+                )
+                | (Paused, Queued | Downloading | Failed)
+                | (Retrying, Downloading | Paused | Failed | NeedsAttention)
+                | (WaitingNetwork, Queued | Downloading | Failed)
+                | (NeedsAttention, Queued | Failed)
+                | (Failed, Queued | Retrying | NeedsAttention)
+                // Completed 是终态，不允许转出（重新下载走 delete + create）
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum HashVerificationStatus {
@@ -268,6 +290,11 @@ pub struct TaskRecord {
     pub hash_verified_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// E-7: bumped only when task_files *structure* changes (selection,
+    /// final_path, save_target, create). Used by emit_task_updated_record to
+    /// short-circuit list_task_file_records queries on pure status/progress
+    /// transitions. Internal optimization field — not exposed to frontend.
+    pub files_version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

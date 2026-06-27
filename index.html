@@ -5,11 +5,185 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vibe Downloader</title>
+    <script>
+      // Apply cached accent + locale as early as possible so the inline splash
+      // (rendered below before React mounts) and the first AppShell paint use
+      // the same accent, avoiding a blue → user-color flash before settings
+      // IPC resolves. Values are overwritten once settings load.
+      (() => {
+        try {
+          var l = localStorage.getItem("vibe-locale");
+          if (l) document.documentElement.lang = l;
+          var accent = localStorage.getItem("vibe-accent") || "blue";
+          document.documentElement.dataset.accent = accent;
+          var lightMap = {
+            blue: "oklch(0.4 0.18 235)",
+            purple: "oklch(0.4 0.18 290)",
+            teal: "oklch(0.4 0.15 190)",
+            green: "oklch(0.4 0.16 150)",
+            orange: "oklch(0.4 0.16 55)",
+            rose: "oklch(0.4 0.18 350)",
+            indigo: "oklch(0.4 0.18 265)",
+            amber: "oklch(0.4 0.16 80)",
+          };
+          var darkMap = {
+            blue: "oklch(0.76 0.14 235)",
+            purple: "oklch(0.76 0.14 290)",
+            teal: "oklch(0.76 0.14 190)",
+            green: "oklch(0.76 0.14 150)",
+            orange: "oklch(0.76 0.14 55)",
+            rose: "oklch(0.76 0.14 350)",
+            indigo: "oklch(0.76 0.14 265)",
+            amber: "oklch(0.76 0.14 80)",
+          };
+          var isDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+          var map = isDark ? darkMap : lightMap;
+          document.documentElement.style.setProperty(
+            "--vibe-splash-accent",
+            map[accent] || lightMap.blue,
+          );
+        } catch (_e) {
+          /* localStorage unavailable; fall back to blue defaults */
+        }
+      })();
+    </script>
+    <style>
+      /* Inline splash styles — must not depend on globals.css (not loaded yet). */
+      #vibe-splash {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1.25rem;
+        background: oklch(0.975 0.004 255);
+        color: oklch(0.22 0.012 255);
+        font-family: Inter, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        z-index: 2147483647;
+        opacity: 0;
+        animation: vibe-splash-fade-in 220ms ease-out 0ms forwards;
+      }
+
+      #vibe-splash__brand {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.875rem;
+      }
+
+      #vibe-splash__logo {
+        width: 56px;
+        height: 56px;
+        border-radius: 14px;
+        background: linear-gradient(
+          160deg,
+          color-mix(in oklch, var(--vibe-splash-accent, oklch(0.4 0.18 235)) 75%, white 25%),
+          var(--vibe-splash-accent, oklch(0.4 0.18 235))
+        );
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow:
+          0 6px 14px -4px color-mix(in oklch, var(--vibe-splash-accent, oklch(0.4 0.18 235)) 45%, transparent),
+          0 1px 2px oklch(0.12 0.01 255 / 0.18);
+        animation: vibe-splash-breathe 1.8s ease-in-out infinite;
+      }
+
+      #vibe-splash__logo svg {
+        width: 28px;
+        height: 28px;
+        color: oklch(0.98 0.004 255);
+      }
+
+      #vibe-splash__title {
+        font-size: 0.9375rem;
+        font-weight: 600;
+        letter-spacing: 0.005em;
+        color: oklch(0.28 0.015 255);
+      }
+
+      #vibe-splash__bar {
+        width: 180px;
+        height: 2px;
+        border-radius: 999px;
+        background: oklch(0.84 0.01 255 / 0.6);
+        overflow: hidden;
+        position: relative;
+      }
+
+      #vibe-splash__bar::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -40%;
+        width: 40%;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--vibe-splash-accent, oklch(0.4 0.18 235));
+        animation: vibe-splash-slide 1.1s cubic-bezier(0.65, 0.05, 0.36, 1) infinite;
+      }
+
+      @keyframes vibe-splash-fade-in {
+        to { opacity: 1; }
+      }
+
+      @keyframes vibe-splash-breathe {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.04); }
+      }
+
+      @keyframes vibe-splash-slide {
+        0% { left: -40%; }
+        100% { left: 100%; }
+      }
+
+      /* Dark mode: respect system preference until next-themes applies. */
+      @media (prefers-color-scheme: dark) {
+        #vibe-splash {
+          background: oklch(0.145 0.006 255);
+          color: oklch(0.93 0.006 255);
+        }
+
+        #vibe-splash__title {
+          color: oklch(0.84 0.008 255);
+        }
+
+        #vibe-splash__bar {
+          background: oklch(0.33 0.012 255 / 0.6);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #vibe-splash {
+          animation: none;
+          opacity: 1;
+        }
+        #vibe-splash__logo,
+        #vibe-splash__bar::after {
+          animation: none;
+        }
+      }
+    </style>
   </head>
 
   <body>
-    <div id="root"></div>
-    <script>try{var l=localStorage.getItem("vibe-locale");if(l)document.documentElement.lang=l}catch(_e){}</script>
+    <div id="root">
+      <div id="vibe-splash" aria-hidden="true">
+        <div id="vibe-splash__brand">
+          <div id="vibe-splash__logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3v11" />
+              <path d="m7 10 5 5 5-5" />
+              <path d="M5 19h14" />
+            </svg>
+          </div>
+          <div id="vibe-splash__title">Vibe Downloader</div>
+        </div>
+        <div id="vibe-splash__bar"></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

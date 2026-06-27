@@ -1,10 +1,7 @@
 use std::{
     io::SeekFrom,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -20,22 +17,22 @@ use sqlx::SqlitePool;
 use tauri::AppHandle;
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter},
     sync::Mutex,
 };
 
 use super::{
     engine::EngineFuture,
-    http::file::{finalize_download_file, persist_completed_path},
-    DownloadContext, DownloadEngine, ProbeOutput, ProbeRequest,
+    file_ops::{finalize_download_file, persist_completed_path},
+    DownloadContext, DownloadEngine, DownloadError, ProbeOutput, ProbeRequest,
 };
 use crate::{
     db,
+    download::error::engine_error,
     download::retry::{with_retry_if, RetryPolicy},
-    events::{emit_task_progress, emit_task_updated_record},
-    logging::sanitize_url,
+    events::{emit_task_updated_record, TaskProgressEmitGate},
     models::{
-        AppErrorPayload, EngineCapabilities, ProbedFile, RequestDiagnosticRecord, SegmentStatus,
+        AppErrorPayload, EngineCapabilities, ProbedFile, SegmentStatus,
         SftpDirectoryEntry, SftpDirectoryProbe, TaskKind, TaskProgressPayload, TaskRecord,
         TaskSegmentRecord, TaskStatus,
     },
@@ -127,14 +124,14 @@ impl SftpEngine {
             .metadata(&target.path)
             .await
             .map_err(|e| {
-                sftp_error(
+                engine_error(
                     "sftp_stat_failed",
                     format!("Could not inspect SFTP file: {e}"),
                     true,
                 )
             })?;
         if metadata.is_dir() {
-            return Err(sftp_error(
+            return Err(engine_error(
                 "sftp_directory_not_file",
                 "SFTP URL points to a directory. Probe the directory and choose a file.",
                 true,
@@ -190,7 +187,7 @@ impl SftpEngine {
             target.private_key_passphrase = credentials.private_key_passphrase;
         }
         if target.username.is_empty() {
-            return Err(sftp_error(
+            return Err(engine_error(
                 "sftp_credentials_required",
                 "SFTP username and password are required. Include credentials in the URL when creating the task.",
                 true,
@@ -210,33 +207,40 @@ impl DownloadEngine for SftpEngine {
         scheme == PROTOCOL_SFTP
     }
 
-    fn probe<'a>(&'a self, request: ProbeRequest) -> EngineFuture<'a, Result<ProbeOutput, String>> {
+    fn probe<'a>(
+        &'a self,
+        request: ProbeRequest,
+    ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
-            let mut target = SftpTarget::parse_file(&request.uri)?;
+            let mut target =
+                SftpTarget::parse_file(&request.uri).map_err(DownloadError::Other)?;
             let pool = request.pool.as_ref().ok_or_else(|| {
-                sftp_error(
+                engine_error(
                     "sftp_probe_state_unavailable",
                     "SFTP probe requires database state for host key verification.",
                     true,
                 )
-            })?;
+            }).map_err(DownloadError::Other)?;
             // Prefer credentials passed directly in the request (from the dialog).
-            if let Some(user) = request.username.as_deref() {
-                if !user.is_empty() {
-                    target.username = user.to_string();
+            if let Some(creds) = &request.credentials {
+                if !creds.username.is_empty() {
+                    target.username = creds.username.clone();
                 }
-            }
-            if request.password.is_some() {
-                target.password = request.password.clone().unwrap_or_default();
-            }
-            if request.private_key_data.is_some() {
-                target.private_key_data = request.private_key_data.clone();
-                target.private_key_passphrase = request.private_key_passphrase.clone();
+                if !creds.password.is_empty() {
+                    target.password = creds.password.clone();
+                }
+                if creds.private_key_data.is_some() {
+                    target.private_key_data = creds.private_key_data.clone();
+                    target.private_key_passphrase = creds.private_key_passphrase.clone();
+                }
             }
             // Fall back to DB-stored credentials when a task_id is available.
             if target.username.is_empty() {
                 if let Some(task_id) = request.task_id.as_deref() {
-                    if let Some(credentials) = db::resolve_task_credentials(pool, task_id).await? {
+                    if let Some(credentials) = db::resolve_task_credentials(pool, task_id)
+                        .await
+                        .map_err(DownloadError::Other)?
+                    {
                         target.username = credentials.username;
                         target.password = credentials.password;
                         target.private_key_data = credentials.private_key_data;
@@ -244,12 +248,21 @@ impl DownloadEngine for SftpEngine {
                     }
                 }
             }
-            self.probe_target(pool, target).await
+            self.probe_target(pool, target)
+                .await
+                .map_err(DownloadError::Other)
         })
     }
 
-    fn download<'a>(&'a self, context: DownloadContext) -> EngineFuture<'a, Result<(), String>> {
-        Box::pin(async move { self.run_download(context).await })
+    fn download<'a>(
+        &'a self,
+        context: DownloadContext,
+    ) -> EngineFuture<'a, Result<(), DownloadError>> {
+        Box::pin(async move {
+            self.run_download(context)
+                .await
+                .map_err(DownloadError::Other)
+        })
     }
 }
 
@@ -271,7 +284,7 @@ pub async fn probe_sftp_directory_url(
         .read_dir(&target.path)
         .await
         .map_err(|e| {
-            sftp_error(
+            engine_error(
                 "sftp_directory_probe_failed",
                 format!("Could not list SFTP directory: {e}"),
                 true,
@@ -314,7 +327,7 @@ async fn run_sftp_download(
         app,
         pool,
         task,
-        cancel,
+        cancel_token,
         speed_limiter,
         ..
     } = context;
@@ -324,7 +337,7 @@ async fn run_sftp_download(
         .metadata(&target.path)
         .await
         .map_err(|e| {
-            sftp_error(
+            engine_error(
                 "sftp_stat_failed",
                 format!("Could not inspect SFTP file: {e}"),
                 true,
@@ -353,18 +366,18 @@ async fn run_sftp_download(
         &target,
         remote_size,
         &temp_path,
-        &cancel,
+        &cancel_token,
         &speed_limiter,
     )
     .await?;
 
-    if cancel.load(Ordering::SeqCst) {
+    if cancel_token.is_cancelled() {
         pause_sftp_task(&app, &pool, &task, &segment, downloaded).await?;
         let _ = connection.session.close().await;
         return Ok(());
     }
     if remote_size > 0 && downloaded != remote_size {
-        return Err(sftp_error(
+        return Err(engine_error(
             "sftp_size_mismatch",
             format!("SFTP file size changed while downloading. Expected {remote_size}, got {downloaded}."),
             true,
@@ -390,7 +403,7 @@ async fn download_sftp_file(
     target: &SftpTarget,
     remote_size: i64,
     temp_path: &Path,
-    cancel: &Arc<AtomicBool>,
+    cancel_token: &tokio_util::sync::CancellationToken,
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
 ) -> Result<i64, String> {
     if let Some(parent) = temp_path.parent() {
@@ -409,7 +422,7 @@ async fn download_sftp_file(
     }
     let started = Instant::now();
     let mut remote = session.open(&target.path).await.map_err(|e| {
-        sftp_error(
+        engine_error(
             "sftp_open_failed",
             format!("Could not open SFTP file: {e}"),
             true,
@@ -420,25 +433,30 @@ async fn download_sftp_file(
             .seek(SeekFrom::Start(u64::try_from(resume_from).unwrap_or(0)))
             .await
             .map_err(|e| {
-                sftp_error(
+                engine_error(
                     "sftp_resume_failed",
                     format!("Could not seek SFTP file: {e}"),
                     true,
                 )
             })?;
     }
-    persist_sftp_diagnostic(
-        pool,
-        task,
-        "READ",
-        (resume_from > 0).then(|| format!("bytes={resume_from}-")),
-        None,
-        None,
-        started.elapsed(),
+    crate::download::diagnostics::persist_engine_diagnostic(
+        crate::download::diagnostics::EngineDiagnosticContext {
+            pool,
+            task_id: &task.id,
+            method: "READ",
+            url: task.final_url.as_deref().unwrap_or(&task.url),
+            range_header: (resume_from > 0).then(|| format!("bytes={resume_from}-")),
+            status_code: None,
+            content_length: None,
+            error: None,
+            retry_count: 0,
+            duration: started.elapsed(),
+        },
     )
     .await;
 
-    let mut out = if resume_from > 0 {
+    let out = if resume_from > 0 {
         fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -451,20 +469,23 @@ async fn download_sftp_file(
         AppErrorPayload::disk_write_failed(format!("Could not open SFTP temp file: {e}"))
             .command_error()
     })?;
+    let mut out = BufWriter::with_capacity(256 * 1024, out);
+    let mut progress_gate = TaskProgressEmitGate::default();
     let mut downloaded = resume_from;
     let mut last_emit = Instant::now();
     let mut last_bytes = downloaded;
     let mut buffer = vec![0_u8; SFTP_READ_BUFFER_SIZE];
 
     loop {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel_token.is_cancelled() {
             out.flush()
                 .await
                 .map_err(|e| format!("Could not flush SFTP temp file: {e}"))?;
+            progress_gate.flush(app);
             return Ok(downloaded);
         }
         let read = remote.read(&mut buffer).await.map_err(|e| {
-            sftp_error(
+            engine_error(
                 "sftp_read_failed",
                 format!("SFTP file read failed: {e}"),
                 true,
@@ -482,7 +503,7 @@ async fn download_sftp_file(
         if last_emit.elapsed() >= SFTP_PROGRESS_INTERVAL {
             let elapsed = last_emit.elapsed().as_secs_f64().max(0.001);
             let speed = ((downloaded - last_bytes).max(0) as f64 / elapsed).round() as i64;
-            emit_sftp_progress(app, pool, task, segment, downloaded, speed).await?;
+            emit_sftp_progress(app, pool, task, segment, downloaded, speed, &mut progress_gate, false).await?;
             last_emit = Instant::now();
             last_bytes = downloaded;
         }
@@ -490,20 +511,27 @@ async fn download_sftp_file(
     out.flush()
         .await
         .map_err(|e| format!("Could not flush SFTP temp file: {e}"))?;
-    emit_sftp_progress(app, pool, task, segment, downloaded, 0).await?;
-    persist_sftp_diagnostic(
-        pool,
-        task,
-        "READ",
-        (resume_from > 0).then(|| format!("bytes={resume_from}-")),
-        Some(downloaded.saturating_sub(resume_from)),
-        None,
-        started.elapsed(),
+    emit_sftp_progress(app, pool, task, segment, downloaded, 0, &mut progress_gate, true).await?;
+    progress_gate.flush(app);
+    crate::download::diagnostics::persist_engine_diagnostic(
+        crate::download::diagnostics::EngineDiagnosticContext {
+            pool,
+            task_id: &task.id,
+            method: "READ",
+            url: task.final_url.as_deref().unwrap_or(&task.url),
+            range_header: (resume_from > 0).then(|| format!("bytes={resume_from}-")),
+            status_code: None,
+            content_length: Some(downloaded.saturating_sub(resume_from)),
+            error: None,
+            retry_count: 0,
+            duration: started.elapsed(),
+        },
     )
     .await;
     Ok(downloaded)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn emit_sftp_progress(
     app: &AppHandle,
     pool: &SqlitePool,
@@ -511,6 +539,8 @@ async fn emit_sftp_progress(
     segment: &TaskSegmentRecord,
     downloaded: i64,
     speed_bps: i64,
+    progress_gate: &mut TaskProgressEmitGate,
+    force: bool,
 ) -> Result<(), String> {
     db::update_task_and_segment_progress(
         pool,
@@ -522,9 +552,9 @@ async fn emit_sftp_progress(
         TaskStatus::Downloading,
     )
     .await?;
-    emit_task_progress(
+    progress_gate.emit_or_store(
         app,
-        &TaskProgressPayload {
+        TaskProgressPayload {
             task_id: task.id.clone(),
             downloaded_bytes: downloaded.to_string(),
             total_size: task.total_size.to_string(),
@@ -532,6 +562,7 @@ async fn emit_sftp_progress(
             connection_count: 1,
             status: TaskStatus::Downloading,
         },
+        force,
     );
     Ok(())
 }
@@ -564,14 +595,14 @@ async fn connect_sftp(
     proxy_config: &ResolvedProxyConfig,
 ) -> Result<SftpConnection, String> {
     if target.username.is_empty() {
-        return Err(sftp_error(
+        return Err(engine_error(
             "sftp_credentials_required",
             "SFTP username and password are required. Include credentials in the URL when creating the task.",
             true,
         ));
     }
     if matches!(proxy_config.mode, AppProxyMode::Custom) && !proxy_config.is_custom_socks5() {
-        return Err(sftp_error(
+        return Err(engine_error(
             "sftp_proxy_unsupported",
             "SFTP tasks only support SOCKS5 custom proxies.",
             true,
@@ -608,7 +639,7 @@ async fn connect_sftp(
                 )
                 .await
                 .map_err(|e| {
-                    sftp_error(
+                    engine_error(
                         "sftp_proxy_connect_failed",
                         format!("SFTP proxy connection failed: {e}"),
                         true,
@@ -623,7 +654,7 @@ async fn connect_sftp(
                 Err(error) => {
                     let failure = failure.lock().await.clone();
                     Err(failure.unwrap_or_else(|| {
-                        sftp_error(
+                        engine_error(
                             "sftp_connect_failed",
                             format!("Could not connect to SFTP server: {error}"),
                             true,
@@ -656,7 +687,7 @@ async fn connect_sftp(
                     match key.decrypt(passphrase) {
                         Ok(decrypted) => key = decrypted,
                         Err(e) => {
-                            return Err(sftp_error(
+                            return Err(engine_error(
                                 "sftp_auth_failed",
                                 format!("Failed to decrypt SSH private key: {e}"),
                                 true,
@@ -681,7 +712,7 @@ async fn connect_sftp(
                 }
             }
             Err(e) => {
-                return Err(sftp_error(
+                return Err(engine_error(
                     "sftp_auth_failed",
                     format!("Failed to parse SSH private key: {e}"),
                     true,
@@ -696,7 +727,7 @@ async fn connect_sftp(
             .authenticate_password(target.username.clone(), target.password.clone())
             .await
             .map_err(|e| {
-                sftp_error(
+                engine_error(
                     "sftp_auth_failed",
                     format!("SFTP password authentication failed: {e}"),
                     true,
@@ -704,7 +735,7 @@ async fn connect_sftp(
             })? {
             AuthResult::Success => {}
             AuthResult::Failure { .. } => {
-                return Err(sftp_error(
+                return Err(engine_error(
                     "sftp_auth_failed",
                     "SFTP authentication failed.",
                     true,
@@ -713,21 +744,21 @@ async fn connect_sftp(
         }
     }
     let channel = handle.channel_open_session().await.map_err(|e| {
-        sftp_error(
+        engine_error(
             "sftp_channel_failed",
             format!("Could not open SFTP channel: {e}"),
             true,
         )
     })?;
     channel.request_subsystem(true, "sftp").await.map_err(|e| {
-        sftp_error(
+        engine_error(
             "sftp_subsystem_failed",
             format!("Could not start SFTP subsystem: {e}"),
             true,
         )
     })?;
     let session = SftpSession::new(channel.into_stream()).await.map_err(|e| {
-        sftp_error(
+        engine_error(
             "sftp_subsystem_failed",
             format!("Could not initialize SFTP session: {e}"),
             true,
@@ -743,7 +774,7 @@ impl SftpTarget {
     fn parse_file(input: &str) -> Result<Self, String> {
         let target = Self::parse(input)?;
         if target.path == "/" || target.path.ends_with('/') {
-            return Err(sftp_error(
+            return Err(engine_error(
                 "sftp_directory_not_file",
                 "SFTP URL points to a directory. Probe the directory and choose a file.",
                 true,
@@ -770,7 +801,7 @@ impl SftpTarget {
 
     fn parse(input: &str) -> Result<Self, String> {
         let mut parsed = reqwest::Url::parse(input.trim())
-            .map_err(|_| sftp_error("sftp_invalid_url", "SFTP URL is invalid.", true))?;
+            .map_err(|_| engine_error("sftp_invalid_url", "SFTP URL is invalid.", true))?;
         if parsed.scheme() != PROTOCOL_SFTP {
             return Err(format!(
                 "The {} protocol is not supported by the SFTP engine.",
@@ -780,11 +811,11 @@ impl SftpTarget {
         let host = parsed
             .host_str()
             .map(str::to_ascii_lowercase)
-            .ok_or_else(|| sftp_error("sftp_invalid_url", "SFTP URL is missing a host.", true))?;
+            .ok_or_else(|| engine_error("sftp_invalid_url", "SFTP URL is missing a host.", true))?;
         let port = parsed.port().unwrap_or(DEFAULT_SFTP_PORT);
         let path = percent_decode_lossy(parsed.path());
         if path.trim().is_empty() || !path.starts_with('/') {
-            return Err(sftp_error(
+            return Err(engine_error(
                 "sftp_invalid_url",
                 "SFTP URL must include an absolute remote path.",
                 true,
@@ -800,7 +831,7 @@ impl SftpTarget {
             .map(percent_decode_lossy)
             .unwrap_or_default();
         if parsed.set_username("").is_err() {
-            return Err(sftp_error(
+            return Err(engine_error(
                 "sftp_invalid_url",
                 "Could not sanitize SFTP URL credentials.",
                 true,
@@ -827,34 +858,6 @@ impl SftpTarget {
             private_key_data: None,
             private_key_passphrase: None,
         })
-    }
-}
-
-async fn persist_sftp_diagnostic(
-    pool: &SqlitePool,
-    task: &TaskRecord,
-    method: &str,
-    range_header: Option<String>,
-    content_length: Option<i64>,
-    error: Option<&str>,
-    duration: Duration,
-) {
-    let record = RequestDiagnosticRecord {
-        task_id: task.id.clone(),
-        method: method.to_string(),
-        url: sanitize_url(task.final_url.as_deref().unwrap_or(&task.url)),
-        range_header,
-        if_range_header: None,
-        status_code: None,
-        etag: None,
-        last_modified: None,
-        content_length,
-        error_message: error.map(str::to_string),
-        retry_count: 0,
-        duration_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
-    };
-    if let Err(error) = db::insert_request_diagnostic(pool, &record).await {
-        tracing::warn!(error = %error, "failed to persist sftp diagnostic");
     }
 }
 
@@ -916,20 +919,6 @@ fn percent_decode_lossy(value: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&out).to_string()
-}
-
-fn sftp_error(code: &str, message: impl Into<String>, recoverable: bool) -> String {
-    AppErrorPayload::new(
-        code,
-        message,
-        recoverable,
-        if recoverable {
-            vec!["retry", "check_url"]
-        } else {
-            vec!["check_url"]
-        },
-    )
-    .command_error()
 }
 
 #[cfg(test)]

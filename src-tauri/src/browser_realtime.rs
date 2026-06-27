@@ -151,7 +151,24 @@ pub async fn start(app: AppHandle, realtime: Arc<BrowserRealtimeState>) -> Resul
     realtime.broadcast(BrowserRealtimeEvent::Ready(bootstrap));
 
     tokio::spawn(async move {
-        if let Err(error) = axum::serve(listener, router).await {
+        let app_for_shutdown = app.clone();
+        let shutdown_signal = async move {
+            loop {
+                if let Some(state) = app_for_shutdown.try_state::<crate::AppState>() {
+                    if state
+                        .quit_requested
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        };
+        if let Err(error) = axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal)
+            .await
+        {
             tracing::error!(error = %error, "browser realtime bridge stopped");
         }
     });
@@ -263,6 +280,9 @@ async fn handle_client_message(app: &AppHandle, raw: &str) -> String {
                     .unwrap_or(current.forward_headers_mode);
                 let next = commands::browser::enforce_browser_capture_settings_policy(
                     crate::models::BrowserCaptureSettings {
+                        experimental_capture_enabled: input
+                            .experimental_capture_enabled
+                            .unwrap_or(current.experimental_capture_enabled),
                         auto_intercept: input.auto_intercept.unwrap_or(current.auto_intercept),
                         forward_headers: matches!(
                             forward_headers_mode,
@@ -272,6 +292,9 @@ async fn handle_client_message(app: &AppHandle, raw: &str) -> String {
                         min_size_bytes: input.min_size_bytes.unwrap_or(current.min_size_bytes),
                         file_extensions: input.file_extensions.unwrap_or(current.file_extensions),
                         site_rules: input.site_rules.unwrap_or(current.site_rules),
+                        allow_intranet_handoff: input
+                            .allow_intranet_handoff
+                            .unwrap_or(current.allow_intranet_handoff),
                     },
                 );
                 commands::browser::upsert_browser_capture_settings(&state.pool, &next).await?;

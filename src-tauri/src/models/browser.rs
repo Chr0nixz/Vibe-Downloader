@@ -94,12 +94,14 @@ pub struct BrowserRealtimeStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserCaptureSettings {
+    pub experimental_capture_enabled: bool,
     pub auto_intercept: bool,
     pub forward_headers: bool,
     pub forward_headers_mode: BrowserForwardHeadersMode,
     pub min_size_bytes: String,
     pub file_extensions: Vec<String>,
     pub site_rules: Vec<BrowserSiteRule>,
+    pub allow_intranet_handoff: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -166,12 +168,14 @@ pub struct BrowserIntegrationUpdateInput {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserCaptureSettingsInput {
+    pub experimental_capture_enabled: Option<bool>,
     pub auto_intercept: Option<bool>,
     pub forward_headers: Option<bool>,
     pub forward_headers_mode: Option<BrowserForwardHeadersMode>,
     pub min_size_bytes: Option<String>,
     pub file_extensions: Option<Vec<String>>,
     pub site_rules: Option<Vec<BrowserSiteRule>>,
+    pub allow_intranet_handoff: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

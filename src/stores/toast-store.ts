@@ -44,7 +44,7 @@ export const useToastStore = create<ToastStore>((set, get) => ({
     }
     const id = `toast-${Date.now()}-${toastSequence++}`;
     set((state) => ({
-      toasts: [{ ...toast, id }, ...state.toasts].slice(0, 4),
+      toasts: [{ ...toast, id }, ...state.toasts].slice(0, 20),
     }));
     return id;
   },

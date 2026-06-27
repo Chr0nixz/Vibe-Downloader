@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicI64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -20,6 +20,7 @@ use tokio::{
 use super::super::{
     error::format_http_status,
     request::{apply_forwarded_headers, is_retryable_status, retry_after_duration},
+    HTTP_CHUNK_READ_TIMEOUT,
 };
 use super::{
     diagnostics::{error_diagnostic_record, parse_content_range, response_diagnostic_record},
@@ -39,7 +40,6 @@ pub(in crate::download::http) struct SegmentWorkerRequest {
     pub(in crate::download::http) total_size: i64,
     pub(in crate::download::http) segment_count: usize,
     pub(in crate::download::http) supports_parallel: bool,
-    pub(in crate::download::http) cancel: Arc<AtomicBool>,
     pub(in crate::download::http) cancel_token: tokio_util::sync::CancellationToken,
     pub(in crate::download::http) progress_tx: mpsc::Sender<SegmentMessage>,
     pub(in crate::download::http) range_end: Arc<AtomicI64>,
@@ -60,7 +60,6 @@ pub(in crate::download::http) async fn download_segment_worker(
         total_size,
         segment_count,
         supports_parallel,
-        cancel,
         cancel_token,
         progress_tx,
         range_end,
@@ -75,7 +74,7 @@ pub(in crate::download::http) async fn download_segment_worker(
     let mut retry_count = segment.retry_count.max(0);
 
     loop {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel_token.is_cancelled() {
             send_segment_progress(&progress_tx, &segment.id, offset, 0).await?;
             return Ok(());
         }
@@ -89,7 +88,6 @@ pub(in crate::download::http) async fn download_segment_worker(
             total_size,
             segment_count,
             supports_parallel,
-            cancel: &cancel,
             cancel_token: &cancel_token,
             progress_tx: &progress_tx,
             range_end: &range_end,
@@ -133,7 +131,6 @@ struct SegmentAttemptRequest<'a> {
     total_size: i64,
     segment_count: usize,
     supports_parallel: bool,
-    cancel: &'a Arc<AtomicBool>,
     cancel_token: &'a tokio_util::sync::CancellationToken,
     progress_tx: &'a mpsc::Sender<SegmentMessage>,
     range_end: &'a Arc<AtomicI64>,
@@ -161,7 +158,6 @@ async fn download_segment_once(
         total_size,
         segment_count,
         supports_parallel,
-        cancel,
         cancel_token,
         progress_tx,
         range_end,
@@ -320,17 +316,22 @@ async fn download_segment_once(
                     .map_err(non_retryable_attempt)?;
                 return Ok(offset);
             }
-            chunk = response.chunk() => match chunk {
-                Ok(Some(data)) => data,
-                Ok(None) => break,
-                Err(e) => return Err(retryable(segment_failure(
+            chunk = tokio::time::timeout(HTTP_CHUNK_READ_TIMEOUT, response.chunk()) => match chunk {
+                Ok(Ok(Some(data))) => data,
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => return Err(retryable(segment_failure(
                     segment,
                     offset,
                     &format!("The connection failed while downloading: {e}"),
                 ))),
+                Err(_) => return Err(retryable(segment_failure(
+                    segment,
+                    offset,
+                    "Connection stalled: no data received for 60 seconds.",
+                ))),
             }
         };
-        if cancel.load(Ordering::SeqCst) {
+        if cancel_token.is_cancelled() {
             file.flush().await.map_err(|e| {
                 non_retryable(segment_failure(
                     segment,

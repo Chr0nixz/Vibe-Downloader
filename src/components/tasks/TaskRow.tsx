@@ -187,7 +187,7 @@ export const TaskRow = memo(function TaskRow({
       >
         <div className="flex min-w-0 gap-2.5">
           <label
-            className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded hover:bg-surface-raised md:h-7 md:w-7"
+            className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded hover:bg-surface-raised md:h-8 md:w-8"
             data-row-action
             onClick={(event) => event.stopPropagation()}
           >
@@ -360,7 +360,7 @@ export const TaskRow = memo(function TaskRow({
                   })}
                 />
                 <div className="md:col-span-2">
-                  <TaskRecoveryActions task={task} onResolve={onResolveAttention} compact />
+                  <TaskRecoveryActions task={task} onResolve={onResolveAttention} />
                 </div>
               </div>
             </motion.div>
@@ -416,12 +416,18 @@ function RowActions({
   const hideTransfer = task.status === "completed" || task.status === "needs_attention";
   const canFinishLiveRecording =
     task.protocol === "hls" && (task.status === "downloading" || task.status === "retrying");
+  // Hide RowActions retry button when InlineRecovery already shows "retry" as primary action,
+  // to avoid duplicate retry entry points on failed task rows.
+  const inlineRecoveryActions =
+    task.recoveryActions && task.recoveryActions.length > 0
+      ? task.recoveryActions
+      : recoveryActionsForError(task.errorMessage ?? "");
+  const hideRetryButton = task.status === "failed" && inlineRecoveryActions[0] === "retry";
 
   return (
     <div
       className={cn(
         "flex gap-1 [&_[data-row-icon-button]]:h-10 [&_[data-row-icon-button]]:w-10 md:[&_[data-row-icon-button]]:h-8 md:[&_[data-row-icon-button]]:w-8",
-        "opacity-70 transition-opacity duration-ui group-hover:opacity-100 group-focus-within:opacity-100",
         className,
       )}
       data-row-action
@@ -455,12 +461,12 @@ function RowActions({
           {showsStart ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
         </ActionButton>
       ) : null}
-      {task.status === "failed" ? (
+      {task.status === "failed" && !hideRetryButton ? (
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
               size="sm"
-              className="h-10 px-2 text-xs md:h-7 md:px-2"
+              className="h-11 px-2 text-xs md:h-8 md:px-2"
               aria-label={t("actions.retryFor", { name: task.fileName })}
               onClick={(event) => {
                 event.stopPropagation();
@@ -578,6 +584,12 @@ function InlineRecovery({
   return (
     <div className="col-span-full flex flex-wrap items-center gap-2 pt-1" data-row-action data-no-drag>
       <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-danger" aria-hidden />
+      <span
+        className="min-w-0 max-w-[200px] truncate text-xs text-status-danger"
+        title={localizedErrorMessage(task.errorMessage, t)}
+      >
+        {localizedErrorMessage(task.errorMessage, t)}
+      </span>
       <Button
         size="sm"
         className="h-8 px-2 text-xs"
@@ -598,7 +610,7 @@ function InlineRecovery({
             if (!expanded) onToggleExpanded();
           }}
         >
-          {t("actions.moreFixes")}
+          {t("actions.moreFixesCount", { count: recoveryActions.length - 1 })}
         </Button>
       ) : null}
     </div>

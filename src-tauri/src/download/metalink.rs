@@ -1,9 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -13,23 +10,26 @@ use sqlx::SqlitePool;
 use tauri::AppHandle;
 use tokio::{
     fs,
-    io::AsyncWriteExt,
+    io::{AsyncWriteExt, BufWriter},
 };
 
 use super::{
     engine::EngineFuture,
-    http::{build_client, file::finalize_download_file},
-    DownloadContext, DownloadEngine, ProbeOutput, ProbeRequest,
+    file_ops::finalize_download_file,
+    http::build_client,
+    DownloadContext, DownloadEngine, DownloadError, ProbeOutput, ProbeRequest,
 };
 use crate::{
     db,
     download::checksum::hash_file,
-    events::{emit_task_progress, emit_task_updated_record},
+    download::error::engine_error,
+    download::retry::RetryPolicy,
+    events::{emit_task_updated_record, TaskProgressEmitGate},
     logging::sanitize_url,
     models::{
         AppErrorPayload, ChecksumAlgorithm, EngineCapabilities, HashVerificationStatus,
         MetalinkChecksum, MetalinkFile, MetalinkProbeData, MetalinkResource, ProbedFile,
-        RequestDiagnosticRecord, TaskFileRecord, TaskKind, TaskProgressPayload, TaskRecord,
+        TaskFileRecord, TaskKind, TaskProgressPayload, TaskRecord,
         TaskStatus,
     },
     proxy::SharedProxyConfig,
@@ -61,7 +61,7 @@ impl MetalinkEngine {
     ) -> Result<MetalinkProbeData, String> {
         let bytes = fetch_manifest_bytes(&self.client().await?, url, request_headers).await?;
         let text = String::from_utf8(bytes).map_err(|_| {
-            metalink_error(
+            engine_error(
                 "metalink_invalid_manifest",
                 "Metalink manifest is not valid UTF-8.",
                 false,
@@ -80,11 +80,15 @@ impl DownloadEngine for MetalinkEngine {
         matches!(scheme, "http" | "https" | "file")
     }
 
-    fn probe<'a>(&'a self, request: ProbeRequest) -> EngineFuture<'a, Result<ProbeOutput, String>> {
+    fn probe<'a>(
+        &'a self,
+        request: ProbeRequest,
+    ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
             let data = self
                 .probe_metalink(&request.uri, &request.request_headers)
-                .await?;
+                .await
+                .map_err(DownloadError::Other)?;
             let files = data
                 .files
                 .iter()
@@ -104,7 +108,7 @@ impl DownloadEngine for MetalinkEngine {
                 source_key: format!("metalink:{}", data.manifest_url),
                 capabilities: EngineCapabilities {
                     supports_resume: true,
-                    supports_parallel: true,
+                    supports_parallel: false,
                     supports_multi_file: data.files.len() > 1,
                 },
                 files,
@@ -117,8 +121,15 @@ impl DownloadEngine for MetalinkEngine {
         })
     }
 
-    fn download<'a>(&'a self, context: DownloadContext) -> EngineFuture<'a, Result<(), String>> {
-        Box::pin(async move { run_metalink_download(self.clone(), context).await })
+    fn download<'a>(
+        &'a self,
+        context: DownloadContext,
+    ) -> EngineFuture<'a, Result<(), DownloadError>> {
+        Box::pin(async move {
+            run_metalink_download(self.clone(), context)
+                .await
+                .map_err(DownloadError::Other)
+        })
     }
 }
 
@@ -130,7 +141,7 @@ async fn run_metalink_download(
         app,
         pool,
         task,
-        cancel,
+        cancel_token,
         speed_limiter,
         request_headers,
         ..
@@ -142,7 +153,7 @@ async fn run_metalink_download(
         .filter(|file| file.selected)
         .collect::<Vec<_>>();
     if files.is_empty() {
-        return Err(metalink_error(
+        return Err(engine_error(
             "metalink_no_files",
             "No Metalink files were selected.",
             false,
@@ -155,7 +166,7 @@ async fn run_metalink_download(
         .sum::<i64>();
 
     for file in files {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel_token.is_cancelled() {
             pause_metalink_task(&app, &pool, &task, completed_total).await?;
             return Ok(());
         }
@@ -170,7 +181,7 @@ async fn run_metalink_download(
             &client,
             &request_headers,
             &speed_limiter,
-            &cancel,
+            &cancel_token,
             completed_total,
         )
         .await?;
@@ -189,12 +200,12 @@ async fn download_metalink_file(
     client: &Client,
     request_headers: &[(String, String)],
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
-    cancel: &Arc<AtomicBool>,
+    cancel_token: &tokio_util::sync::CancellationToken,
     completed_before_file: i64,
 ) -> Result<i64, String> {
     let resources = db::list_metalink_resources_for_file(pool, &file.id).await?;
     if resources.is_empty() {
-        return Err(metalink_error(
+        return Err(engine_error(
             "metalink_no_resources",
             format!(
                 "No usable HTTP mirror is available for {}.",
@@ -216,29 +227,51 @@ async fn download_metalink_file(
     let mut last_error = None;
 
     for resource in resources {
-        let result = download_from_resource(
-            DownloadFileContext {
-                app,
-                pool,
-                task,
-                file,
-                client,
-                request_headers,
-                speed_limiter,
-                cancel,
-                completed_before_file,
-                temp_path: &temp_path,
-                final_path: &final_path,
-            },
-            &resource,
-        )
-        .await;
+        let retry_policy = RetryPolicy::metalink_mirror();
+        let mut mirror_attempt = 0u32;
+        let result = loop {
+            let result = download_from_resource(
+                DownloadFileContext {
+                    app,
+                    pool,
+                    task,
+                    file,
+                    client,
+                    request_headers,
+                    speed_limiter,
+                    cancel_token,
+                    completed_before_file,
+                    temp_path: &temp_path,
+                    final_path: &final_path,
+                },
+                &resource,
+            )
+            .await;
+            match result {
+                Ok(bytes) => break Ok(bytes),
+                Err(error) if cancel_token.is_cancelled() => break Err(error),
+                Err(error) => {
+                    mirror_attempt += 1;
+                    if mirror_attempt < retry_policy.max_attempts {
+                        let delay = retry_policy.delay_for_attempt(mirror_attempt);
+                        if !delay.is_zero() {
+                            tokio::select! {
+                                _ = cancel_token.cancelled() => break Err(error),
+                                _ = tokio::time::sleep(delay) => {}
+                            }
+                        }
+                    } else {
+                        break Err(error);
+                    }
+                }
+            }
+        };
         match result {
             Ok(bytes) => {
                 db::mark_metalink_resource_completed(pool, &resource.id).await?;
                 return Ok(bytes);
             }
-            Err(error) if cancel.load(Ordering::SeqCst) => return Err(error),
+            Err(error) if cancel_token.is_cancelled() => return Err(error),
             Err(error) => {
                 db::mark_metalink_resource_failed(pool, &resource.id, &error).await?;
                 db::insert_task_event(
@@ -253,7 +286,7 @@ async fn download_metalink_file(
         }
     }
 
-    Err(metalink_error(
+    Err(engine_error(
         "metalink_all_mirrors_failed",
         format!(
             "All Metalink mirrors failed for {}. {}",
@@ -272,7 +305,7 @@ struct DownloadFileContext<'a> {
     client: &'a Client,
     request_headers: &'a [(String, String)],
     speed_limiter: &'a Arc<crate::download::GlobalSpeedLimiter>,
-    cancel: &'a Arc<AtomicBool>,
+    cancel_token: &'a tokio_util::sync::CancellationToken,
     completed_before_file: i64,
     temp_path: &'a Path,
     final_path: &'a Path,
@@ -290,11 +323,12 @@ async fn download_from_resource(
         client,
         request_headers,
         speed_limiter,
-        cancel,
+        cancel_token,
         completed_before_file,
         temp_path,
         final_path,
     } = context;
+    let mut progress_gate = TaskProgressEmitGate::default();
     if let Some(parent) = temp_path.parent() {
         fs::create_dir_all(parent).await.map_err(|e| {
             AppErrorPayload::disk_write_failed(format!(
@@ -319,14 +353,19 @@ async fn download_from_resource(
         .send()
         .await
         .map_err(|e| format!("Could not request Metalink mirror: {e}"))?;
-    persist_metalink_diagnostic(
-        pool,
-        task,
-        &resource.url,
-        (resume_from > 0).then(|| format!("bytes={resume_from}-")),
-        Some(response.status().as_u16()),
-        None,
-        started.elapsed(),
+    crate::download::diagnostics::persist_engine_diagnostic(
+        crate::download::diagnostics::EngineDiagnosticContext {
+            pool,
+            task_id: &task.id,
+            method: "GET",
+            url: &resource.url,
+            range_header: (resume_from > 0).then(|| format!("bytes={resume_from}-")),
+            status_code: Some(i32::from(response.status().as_u16())),
+            content_length: None,
+            error: None,
+            retry_count: 0,
+            duration: started.elapsed(),
+        },
     )
     .await;
 
@@ -348,7 +387,7 @@ async fn download_from_resource(
         return Err(format!("Metalink mirror returned {}", response.status()));
     }
 
-    let mut out = if resume_from > 0 {
+    let out = if resume_from > 0 {
         fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -361,6 +400,7 @@ async fn download_from_resource(
         AppErrorPayload::disk_write_failed(format!("Could not open Metalink temp file: {e}"))
             .command_error()
     })?;
+    let mut out = BufWriter::with_capacity(256 * 1024, out);
 
     let mut downloaded = resume_from;
     let mut last_emit = Instant::now();
@@ -370,10 +410,11 @@ async fn download_from_resource(
         .await
         .map_err(|e| format!("Metalink mirror connection failed: {e}"))?
     {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel_token.is_cancelled() {
             out.flush()
                 .await
                 .map_err(|e| format!("Could not flush Metalink temp file: {e}"))?;
+            progress_gate.flush(app);
             return Err("Download canceled.".to_string());
         }
         speed_limiter.throttle(chunk.len()).await;
@@ -383,8 +424,17 @@ async fn download_from_resource(
         })?;
         downloaded = downloaded.saturating_add(i64::try_from(chunk.len()).unwrap_or(0));
         if last_emit.elapsed() >= Duration::from_millis(300) {
-            emit_metalink_progress(app, pool, task, file, completed_before_file, downloaded)
-                .await?;
+            emit_metalink_progress(
+                app,
+                pool,
+                task,
+                file,
+                completed_before_file,
+                downloaded,
+                &mut progress_gate,
+                false,
+            )
+            .await?;
             last_emit = Instant::now();
         }
     }
@@ -400,7 +450,18 @@ async fn download_from_resource(
     verify_metalink_file(pool, file, temp_path).await?;
     finalize_download_file(temp_path, final_path).await?;
     db::update_task_file_progress(pool, &file.id, downloaded, TaskStatus::Completed).await?;
-    emit_metalink_progress(app, pool, task, file, completed_before_file, downloaded).await?;
+    emit_metalink_progress(
+        app,
+        pool,
+        task,
+        file,
+        completed_before_file,
+        downloaded,
+        &mut progress_gate,
+        true,
+    )
+    .await?;
+    progress_gate.flush(app);
     Ok(downloaded)
 }
 
@@ -448,6 +509,7 @@ async fn verify_metalink_file(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn emit_metalink_progress(
     app: &AppHandle,
     pool: &SqlitePool,
@@ -455,6 +517,8 @@ async fn emit_metalink_progress(
     file: &TaskFileRecord,
     completed_before_file: i64,
     file_downloaded: i64,
+    progress_gate: &mut TaskProgressEmitGate,
+    force: bool,
 ) -> Result<(), String> {
     let total_downloaded = completed_before_file.saturating_add(file_downloaded);
     db::update_task_file_progress(pool, &file.id, file_downloaded, TaskStatus::Downloading).await?;
@@ -468,9 +532,9 @@ async fn emit_metalink_progress(
         Some("Downloading Metalink file"),
     )
     .await?;
-    emit_task_progress(
+    progress_gate.emit_or_store(
         app,
-        &TaskProgressPayload {
+        TaskProgressPayload {
             task_id: task.id.clone(),
             downloaded_bytes: total_downloaded.to_string(),
             total_size: task.total_size.to_string(),
@@ -478,6 +542,7 @@ async fn emit_metalink_progress(
             connection_count: 1,
             status: TaskStatus::Downloading,
         },
+        force,
     );
     Ok(())
 }
@@ -676,7 +741,7 @@ fn parse_metalink_manifest(manifest_url: &str, text: &str) -> Result<MetalinkPro
             }
             Ok(Event::Eof) => break,
             Err(error) => {
-                return Err(metalink_error(
+                return Err(engine_error(
                     "metalink_invalid_manifest",
                     format!("Metalink manifest could not be parsed: {error}"),
                     false,
@@ -688,7 +753,7 @@ fn parse_metalink_manifest(manifest_url: &str, text: &str) -> Result<MetalinkPro
     }
 
     if files.is_empty() {
-        return Err(metalink_error(
+        return Err(engine_error(
             "metalink_invalid_manifest",
             "Metalink manifest does not contain any downloadable files.",
             false,
@@ -724,7 +789,7 @@ impl ParsedMetalinkFile {
     fn finalize(mut self) -> Result<MetalinkFile, String> {
         let relative_path = sanitize_metalink_path(&self.name)?;
         if self.resources.is_empty() {
-            return Err(metalink_error(
+            return Err(engine_error(
                 "metalink_no_resources",
                 format!("Metalink file {relative_path} has no usable HTTP mirror."),
                 false,
@@ -760,7 +825,7 @@ fn local_name(name: &[u8]) -> String {
 fn sanitize_metalink_path(value: &str) -> Result<String, String> {
     let trimmed = value.trim().replace('\\', "/");
     if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.contains(':') {
-        return Err(metalink_error(
+        return Err(engine_error(
             "metalink_invalid_manifest",
             "Metalink file name is not a safe relative path.",
             false,
@@ -770,7 +835,7 @@ fn sanitize_metalink_path(value: &str) -> Result<String, String> {
     for part in trimmed.split('/') {
         let part = part.trim();
         if part.is_empty() || part == "." || part == ".." {
-            return Err(metalink_error(
+            return Err(engine_error(
                 "metalink_invalid_manifest",
                 "Metalink file name contains an unsafe path segment.",
                 false,
@@ -806,34 +871,6 @@ impl ChecksumAlgorithm {
             "md5" => Some(Self::Md5),
             _ => None,
         }
-    }
-}
-
-async fn persist_metalink_diagnostic(
-    pool: &SqlitePool,
-    task: &TaskRecord,
-    url: &str,
-    range_header: Option<String>,
-    status_code: Option<u16>,
-    error: Option<&str>,
-    duration: Duration,
-) {
-    let record = RequestDiagnosticRecord {
-        task_id: task.id.clone(),
-        method: "GET".to_string(),
-        url: sanitize_url(url),
-        range_header,
-        if_range_header: None,
-        status_code: status_code.map(i32::from),
-        etag: None,
-        last_modified: None,
-        content_length: None,
-        error_message: error.map(str::to_string),
-        retry_count: 0,
-        duration_ms: i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
-    };
-    if let Err(error) = db::insert_request_diagnostic(pool, &record).await {
-        tracing::warn!(error = %error, "failed to persist metalink request diagnostic");
     }
 }
 
@@ -877,20 +914,6 @@ fn content_type_for_path(path: &str) -> Option<String> {
         _ => None,
     }
     .map(str::to_string)
-}
-
-fn metalink_error(code: &str, message: impl Into<String>, recoverable: bool) -> String {
-    AppErrorPayload::new(
-        code,
-        message,
-        recoverable,
-        if recoverable {
-            vec!["retry", "check_url"]
-        } else {
-            vec!["check_url"]
-        },
-    )
-    .command_error()
 }
 
 #[cfg(test)]

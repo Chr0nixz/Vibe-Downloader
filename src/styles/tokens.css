@@ -13,7 +13,7 @@
   --text-on-danger: oklch(0.98 0.004 255);
   --status-success: oklch(0.27 0.14 150);
   --status-warning: oklch(0.3 0.14 75);
-  --status-danger: oklch(0.45 0.18 25);
+  --status-danger: oklch(0.38 0.18 25);
   --shadow-idle-ball: 0 0 8px oklch(0.12 0.01 255 / 0.15);
   --titlebar-height: 2.25rem;
   --shell-nav-width-compact: 3.75rem;
@@ -22,18 +22,21 @@
   --traffic-lights-inset: 0px;
 
   /* Accent — blue (default) */
-  --accent-primary: oklch(0.48 0.18 235);
-  --accent-energy: oklch(0.44 0.15 165);
-  --accent-peak: oklch(0.62 0.18 305);
+  --accent-primary: oklch(0.4 0.18 235);
+  --accent-energy: oklch(0.38 0.15 165);
+  --accent-peak: oklch(0.55 0.18 305);
 
   /* Semantic borders — opacity-baked for consistent usage */
   --border-divider: oklch(0.84 0.01 255 / 0.7);
   --border-panel: oklch(0.84 0.01 255 / 0.75);
   --border-separator: oklch(0.84 0.01 255 / 0.6);
   --border-container: oklch(0.84 0.01 255 / 0.8);
-  --border-danger: oklch(0.45 0.18 25 / 0.3);
-  --border-danger-strong: oklch(0.45 0.18 25 / 0.45);
-  --border-danger-subtle: oklch(0.45 0.18 25 / 0.25);
+  --border-danger: oklch(0.38 0.18 25 / 0.3);
+  --border-danger-strong: oklch(0.38 0.18 25 / 0.45);
+  --border-danger-subtle: oklch(0.38 0.18 25 / 0.25);
+  --border-warning: oklch(0.3 0.14 75 / 0.3);
+  --border-warning-strong: oklch(0.3 0.14 75 / 0.45);
+  --border-warning-subtle: oklch(0.3 0.14 75 / 0.25);
   --border-success: oklch(0.27 0.14 150 / 0.25);
   --border-success-strong: oklch(0.27 0.14 150 / 0.35);
   --border-accent: color-mix(in oklch, var(--accent-primary) 30%, transparent);
@@ -44,51 +47,51 @@
 /* ── Light accent overrides ── */
 
 :root[data-accent="blue"] {
-  --accent-primary: oklch(0.48 0.18 235);
-  --accent-energy: oklch(0.44 0.15 165);
-  --accent-peak: oklch(0.62 0.18 305);
+  --accent-primary: oklch(0.4 0.18 235);
+  --accent-energy: oklch(0.38 0.15 165);
+  --accent-peak: oklch(0.55 0.18 305);
 }
 
 :root[data-accent="purple"] {
-  --accent-primary: oklch(0.48 0.18 290);
-  --accent-energy: oklch(0.44 0.15 210);
-  --accent-peak: oklch(0.62 0.18 330);
+  --accent-primary: oklch(0.4 0.18 290);
+  --accent-energy: oklch(0.38 0.15 210);
+  --accent-peak: oklch(0.55 0.18 330);
 }
 
 :root[data-accent="teal"] {
-  --accent-primary: oklch(0.48 0.15 190);
-  --accent-energy: oklch(0.44 0.13 165);
-  --accent-peak: oklch(0.62 0.15 235);
+  --accent-primary: oklch(0.4 0.15 190);
+  --accent-energy: oklch(0.38 0.13 165);
+  --accent-peak: oklch(0.55 0.15 235);
 }
 
 :root[data-accent="green"] {
-  --accent-primary: oklch(0.48 0.16 150);
-  --accent-energy: oklch(0.44 0.14 130);
-  --accent-peak: oklch(0.62 0.16 190);
+  --accent-primary: oklch(0.4 0.16 150);
+  --accent-energy: oklch(0.38 0.14 130);
+  --accent-peak: oklch(0.55 0.16 190);
 }
 
 :root[data-accent="orange"] {
-  --accent-primary: oklch(0.48 0.16 55);
-  --accent-energy: oklch(0.44 0.14 80);
-  --accent-peak: oklch(0.62 0.16 350);
+  --accent-primary: oklch(0.4 0.16 55);
+  --accent-energy: oklch(0.38 0.14 80);
+  --accent-peak: oklch(0.55 0.16 350);
 }
 
 :root[data-accent="rose"] {
-  --accent-primary: oklch(0.48 0.18 350);
-  --accent-energy: oklch(0.44 0.16 10);
-  --accent-peak: oklch(0.62 0.18 305);
+  --accent-primary: oklch(0.4 0.18 350);
+  --accent-energy: oklch(0.38 0.16 10);
+  --accent-peak: oklch(0.55 0.18 305);
 }
 
 :root[data-accent="indigo"] {
-  --accent-primary: oklch(0.48 0.18 265);
-  --accent-energy: oklch(0.44 0.16 210);
-  --accent-peak: oklch(0.62 0.18 310);
+  --accent-primary: oklch(0.4 0.18 265);
+  --accent-energy: oklch(0.38 0.16 210);
+  --accent-peak: oklch(0.55 0.18 310);
 }
 
 :root[data-accent="amber"] {
-  --accent-primary: oklch(0.48 0.16 80);
-  --accent-energy: oklch(0.44 0.14 55);
-  --accent-peak: oklch(0.62 0.16 45);
+  --accent-primary: oklch(0.4 0.16 80);
+  --accent-energy: oklch(0.38 0.14 55);
+  --accent-peak: oklch(0.55 0.16 45);
 }
 
 /* ── Dark mode ── */
@@ -118,6 +121,9 @@
   --border-danger: oklch(0.68 0.18 25 / 0.3);
   --border-danger-strong: oklch(0.68 0.18 25 / 0.45);
   --border-danger-subtle: oklch(0.68 0.18 25 / 0.25);
+  --border-warning: oklch(0.78 0.14 75 / 0.3);
+  --border-warning-strong: oklch(0.78 0.14 75 / 0.45);
+  --border-warning-subtle: oklch(0.78 0.14 75 / 0.25);
   --border-success: oklch(0.72 0.14 150 / 0.25);
   --border-success-strong: oklch(0.72 0.14 150 / 0.35);
   --border-accent: color-mix(in oklch, var(--accent-primary) 30%, transparent);

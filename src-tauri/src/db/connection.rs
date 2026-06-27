@@ -8,6 +8,7 @@ use sqlx::{migrate::MigrateError, sqlite::SqlitePoolOptions, SqlitePool};
 pub struct DbConnection {
     pub pool: SqlitePool,
     pub data_was_reset: bool,
+    pub backup_path: Option<PathBuf>,
 }
 
 pub async fn connect(db_path: &Path) -> Result<DbConnection, String> {
@@ -19,15 +20,22 @@ pub async fn connect(db_path: &Path) -> Result<DbConnection, String> {
             Ok(DbConnection {
                 pool,
                 data_was_reset: false,
+                backup_path: None,
             })
         }
         Err(error) if should_rebuild_database_after_migration_error(&error) => {
             tracing::warn!(
                 db_path = %db_path.display(),
                 error = %error,
-                "rebuilding development database after migration history reset"
+                "rebuilding database after recognized migration history reset"
             );
             pool.close().await;
+            let backup_path = backup_database_files(db_path)?;
+            tracing::info!(
+                db_path = %db_path.display(),
+                backup_path = %backup_path.display(),
+                "database backed up before rebuild"
+            );
             remove_database_files(db_path)?;
 
             let pool = open_pool(db_path).await?;
@@ -38,6 +46,7 @@ pub async fn connect(db_path: &Path) -> Result<DbConnection, String> {
             Ok(DbConnection {
                 pool,
                 data_was_reset: true,
+                backup_path: Some(backup_path),
             })
         }
         Err(error) => Err(format!("Migration failed: {error}")),
@@ -76,11 +85,28 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
 }
 
 fn should_rebuild_database_after_migration_error(error: &MigrateError) -> bool {
-    cfg!(debug_assertions)
-        && matches!(
-            error,
-            MigrateError::VersionMissing(_) | MigrateError::VersionMismatch(_)
-        )
+    matches!(error, MigrateError::VersionMissing(_) | MigrateError::VersionMismatch(_))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuilds_only_for_version_history_mismatch() {
+        assert!(should_rebuild_database_after_migration_error(
+            &MigrateError::VersionMissing(7)
+        ));
+        assert!(should_rebuild_database_after_migration_error(
+            &MigrateError::VersionMismatch(7)
+        ));
+        assert!(!should_rebuild_database_after_migration_error(
+            &MigrateError::Dirty(7)
+        ));
+        assert!(!should_rebuild_database_after_migration_error(
+            &MigrateError::VersionTooOld(3, 7)
+        ));
+    }
 }
 
 fn remove_database_files(db_path: &Path) -> Result<(), String> {
@@ -98,6 +124,39 @@ fn remove_database_files(db_path: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn backup_database_files(db_path: &Path) -> Result<PathBuf, String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup_path = db_path.with_extension(format!("db.bak-{timestamp}"));
+    std::fs::copy(db_path, &backup_path).map_err(|e| {
+        format!(
+            "Failed to backup database to {}: {e}",
+            backup_path.display()
+        )
+    })?;
+    let wal_path = sqlite_sidecar_path(db_path, "-wal");
+    if wal_path.exists() {
+        let wal_backup = sqlite_sidecar_path(&backup_path, "-wal");
+        let _ = std::fs::copy(&wal_path, &wal_backup);
+    }
+    Ok(backup_path)
+}
+
+pub async fn wal_checkpoint(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("WAL checkpoint failed: {e}"))?;
+    Ok(())
+}
+
+pub fn wal_file_size_bytes(db_path: &Path) -> u64 {
+    let wal_path = sqlite_sidecar_path(db_path, "-wal");
+    std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0)
 }
 
 fn sqlite_database_paths(db_path: &Path) -> [PathBuf; 4] {

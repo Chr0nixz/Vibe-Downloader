@@ -53,6 +53,40 @@ impl RetryPolicy {
         }
     }
 
+    /// FTP segment worker retry: 3 attempts, 500ms exponential backoff, 5s cap.
+    /// Aligns with SFTP connection retry for consistent transient-error handling.
+    pub fn ftp_worker() -> Self {
+        Self {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(500),
+            max_delay: Duration::from_secs(5),
+            backoff: Backoff::Exponential,
+        }
+    }
+
+    /// HLS segment retry: 3 attempts, 500ms exponential backoff.
+    /// Upgrades the previous 2-attempt/200ms-linear strategy for better
+    /// transient-error recovery while keeping the attempt count conservative.
+    pub fn hls_segment() -> Self {
+        Self {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(500),
+            max_delay: Duration::from_secs(5),
+            backoff: Backoff::Exponential,
+        }
+    }
+
+    /// Metalink per-mirror retry: 2 attempts, 1s fixed delay.
+    /// A single mirror gets one retry before failover to the next priority mirror.
+    pub fn metalink_mirror() -> Self {
+        Self {
+            max_attempts: 2,
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(0),
+            backoff: Backoff::Fixed,
+        }
+    }
+
     /// Compute the delay for a given 1-indexed attempt number.
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
         if attempt == 0 {
@@ -287,5 +321,31 @@ mod tests {
         assert_eq!(p.base_delay, Duration::from_millis(500));
         assert_eq!(p.max_delay, Duration::from_secs(5));
         assert_eq!(p.backoff, Backoff::Exponential);
+    }
+
+    #[test]
+    fn ftp_worker_preset() {
+        let p = RetryPolicy::ftp_worker();
+        assert_eq!(p.max_attempts, 3);
+        assert_eq!(p.base_delay, Duration::from_millis(500));
+        assert_eq!(p.max_delay, Duration::from_secs(5));
+        assert_eq!(p.backoff, Backoff::Exponential);
+    }
+
+    #[test]
+    fn hls_segment_preset() {
+        let p = RetryPolicy::hls_segment();
+        assert_eq!(p.max_attempts, 3);
+        assert_eq!(p.base_delay, Duration::from_millis(500));
+        assert_eq!(p.max_delay, Duration::from_secs(5));
+        assert_eq!(p.backoff, Backoff::Exponential);
+    }
+
+    #[test]
+    fn metalink_mirror_preset() {
+        let p = RetryPolicy::metalink_mirror();
+        assert_eq!(p.max_attempts, 2);
+        assert_eq!(p.base_delay, Duration::from_secs(1));
+        assert_eq!(p.backoff, Backoff::Fixed);
     }
 }

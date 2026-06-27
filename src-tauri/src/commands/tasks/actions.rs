@@ -21,9 +21,8 @@ use crate::{
 use super::{
     delete_path, emit_task_progress_snapshot, is_bt_protocol, queue_task_for_retry,
     queue_task_for_retry_at, require_task, restart_required_error_code,
-    restart_task_from_beginning, schedule_queued_tasks, spawn_schedule_queued_tasks_after,
-    task_error_code, task_from_record_with_files, task_payload, update_recovery_target,
-    ResolveTaskAttentionInput,
+    restart_task_from_beginning, task_error_code, task_from_record_with_files, task_payload,
+    update_recovery_target, ResolveTaskAttentionInput,
 };
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -102,7 +101,7 @@ pub async fn update_task_transfer_options(
     emit_task_updated_record(&app, &state.pool, &updated).await;
     emit_queue_changed(&app);
     if matches!(updated.status, TaskStatus::Queued) {
-        schedule_queued_tasks(app.clone(), state.inner()).await;
+        state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
     }
     task_payload(&state.pool, &input.id).await
 }
@@ -121,7 +120,6 @@ pub async fn pause_task(
         .is_some_and(|task| is_bt_protocol(&task.protocol))
     {
         if let Some(control) = state.downloads.lock().await.remove(&id) {
-            control.cancel.store(true, Ordering::SeqCst);
             control.cancel_token.cancel();
             control.handle.abort();
         }
@@ -130,20 +128,20 @@ pub async fn pause_task(
         }
         let _ = state.request_headers.lock().await.remove(&id);
     } else if let Some(control) = state.downloads.lock().await.get(&id) {
-        control.cancel.store(true, Ordering::SeqCst);
         control.cancel_token.cancel();
     }
-    db::update_task_status(
+    crate::state_machine::transition_task(
+        &app,
         &state.pool,
         &id,
         TaskStatus::Paused,
         0,
         0,
         Some("Paused"),
-        None,
+        Some("paused"),
     )
-    .await?;
-    db::insert_task_event(&state.pool, &id, "paused", None).await?;
+    .await
+    .map_err(String::from)?;
     db::update_segments_status_for_task(
         &state.pool,
         &id,
@@ -153,9 +151,8 @@ pub async fn pause_task(
     .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
-    emit_task_updated_record(&app, &state.pool, &task).await;
     emit_queue_changed(&app);
-    schedule_queued_tasks(app, state.inner()).await;
+    state.scheduler.clone().dispatch(app, state.pool.clone()).await;
     task_payload(&state.pool, &id).await
 }
 
@@ -196,7 +193,6 @@ pub async fn retry_task(
         return Err("This task must be restarted before it can continue safely.".to_string());
     }
     if let Some(control) = state.downloads.lock().await.remove(&id) {
-        control.cancel.store(true, Ordering::SeqCst);
         control.cancel_token.cancel();
         control.handle.abort();
     }
@@ -230,7 +226,6 @@ pub async fn retry_task_with_mirror(
         return Err("Mirror retry is only supported for Metalink tasks.".to_string());
     }
     if let Some(control) = state.downloads.lock().await.remove(&id) {
-        control.cancel.store(true, Ordering::SeqCst);
         control.cancel_token.cancel();
         control.handle.abort();
     }
@@ -295,7 +290,6 @@ pub async fn cancel_task(
         .is_some_and(|task| is_bt_protocol(&task.protocol))
     {
         if let Some(control) = state.downloads.lock().await.remove(&id) {
-            control.cancel.store(true, Ordering::SeqCst);
             control.cancel_token.cancel();
             control.handle.abort();
         }
@@ -304,20 +298,20 @@ pub async fn cancel_task(
         }
         let _ = state.request_headers.lock().await.remove(&id);
     } else if let Some(control) = state.downloads.lock().await.get(&id) {
-        control.cancel.store(true, Ordering::SeqCst);
         control.cancel_token.cancel();
     }
-    db::update_task_status(
+    crate::state_machine::transition_task(
+        &app,
         &state.pool,
         &id,
         TaskStatus::Failed,
         0,
         0,
-        Some("Canceled"),
         Some("Canceled by user."),
+        Some("failed"),
     )
-    .await?;
-    db::insert_task_event(&state.pool, &id, "failed", Some("Canceled by user.")).await?;
+    .await
+    .map_err(String::from)?;
     db::update_task_retry_after(&state.pool, &id, None).await?;
     db::update_segments_status_for_task(
         &state.pool,
@@ -328,9 +322,8 @@ pub async fn cancel_task(
     .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
-    emit_task_updated_record(&app, &state.pool, &task).await;
     emit_queue_changed(&app);
-    schedule_queued_tasks(app, state.inner()).await;
+    state.scheduler.clone().dispatch(app, state.pool.clone()).await;
     task_payload(&state.pool, &id).await
 }
 
@@ -345,7 +338,6 @@ pub async fn delete_task(
     tracing::info!(task_id = %id, delete_file, "deleting task");
     let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
     if let Some(control) = state.downloads.lock().await.remove(&id) {
-        control.cancel.store(true, Ordering::SeqCst);
         control.cancel_token.cancel();
         if task_for_runtime
             .as_ref()
@@ -396,7 +388,7 @@ pub async fn delete_task(
 
     db::delete_task_record(&state.pool, &id).await?;
     emit_queue_changed(&app);
-    schedule_queued_tasks(app, state.inner()).await;
+    state.scheduler.clone().dispatch(app, state.pool.clone()).await;
     Ok(())
 }
 
@@ -423,7 +415,6 @@ pub async fn bulk_delete_tasks(
     for id in &ids {
         let task_for_runtime = db::get_task_record(&state.pool, id).await?;
         if let Some(control) = state.downloads.lock().await.remove(id) {
-            control.cancel.store(true, Ordering::SeqCst);
             control.cancel_token.cancel();
             if task_for_runtime
                 .as_ref()
@@ -475,7 +466,7 @@ pub async fn bulk_delete_tasks(
     db::delete_task_records_batch(&state.pool, &ids).await?;
 
     emit_queue_changed(&app);
-    schedule_queued_tasks(app, state.inner()).await;
+    state.scheduler.clone().dispatch(app, state.pool.clone()).await;
     Ok(ids.len() as u32)
 }
 
@@ -565,9 +556,9 @@ pub async fn resolve_task_attention(
             .await?;
             let task =
                 queue_task_for_retry_at(&app, state.inner(), id, Some(&retry_after_at)).await?;
-            spawn_schedule_queued_tasks_after(
+            state.scheduler.clone().spawn_dispatch_after(
                 app.clone(),
-                state.inner(),
+                state.pool.clone(),
                 std::time::Duration::from_secs(300),
             );
             task_from_record_with_files(&state.pool, task).await

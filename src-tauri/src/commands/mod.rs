@@ -1,4 +1,5 @@
 pub mod browser;
+pub mod classification;
 pub mod floating;
 pub mod settings;
 pub mod system;

@@ -9,8 +9,9 @@ use tauri::AppHandle;
 
 use super::{
     BtEngine, DashEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine, MetalinkEngine,
-    SftpEngine, WebDavEngine,
+    SftpEngine, WebDavEngine, url_classify::{is_dash_url, is_hls_url, is_metalink_url, is_torrent_url},
 };
+use crate::db::TaskCredentials;
 use crate::models::{
     EngineCapabilities, HlsVariant, MetalinkProbeData, ProbedFile, TaskKind, TaskRecord,
 };
@@ -25,10 +26,7 @@ pub struct ProbeRequest {
     pub request_headers: Vec<(String, String)>,
     pub pool: Option<SqlitePool>,
     pub task_id: Option<String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
-    pub private_key_data: Option<String>,
-    pub private_key_passphrase: Option<String>,
+    pub credentials: Option<TaskCredentials>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +51,6 @@ pub struct DownloadContext {
     pub app: AppHandle,
     pub pool: SqlitePool,
     pub task: TaskRecord,
-    pub cancel: Arc<AtomicBool>,
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub finish: Arc<AtomicBool>,
     pub speed_limiter: Arc<GlobalSpeedLimiter>,
@@ -65,8 +62,14 @@ pub struct DownloadContext {
 pub trait DownloadEngine: Send + Sync {
     fn id(&self) -> &'static str;
     fn supports_scheme(&self, scheme: &str) -> bool;
-    fn probe<'a>(&'a self, request: ProbeRequest) -> EngineFuture<'a, Result<ProbeOutput, String>>;
-    fn download<'a>(&'a self, context: DownloadContext) -> EngineFuture<'a, Result<(), String>>;
+    fn probe<'a>(
+        &'a self,
+        request: ProbeRequest,
+    ) -> EngineFuture<'a, Result<ProbeOutput, super::error::DownloadError>>;
+    fn download<'a>(
+        &'a self,
+        context: DownloadContext,
+    ) -> EngineFuture<'a, Result<(), super::error::DownloadError>>;
 }
 
 #[derive(Clone)]
@@ -162,39 +165,4 @@ impl EngineRegistry {
                 .await;
         }
     }
-}
-
-fn is_torrent_url(url: &reqwest::Url) -> bool {
-    matches!(url.scheme(), "http" | "https" | "file")
-        && url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".torrent"))
-}
-
-fn is_metalink_url(url: &reqwest::Url) -> bool {
-    matches!(url.scheme(), "http" | "https" | "file")
-        && url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .is_some_and(|name| {
-                let name = name.to_ascii_lowercase();
-                name.ends_with(".meta4") || name.ends_with(".metalink")
-            })
-}
-
-fn is_hls_url(url: &reqwest::Url) -> bool {
-    matches!(url.scheme(), "http" | "https")
-        && url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".m3u8"))
-}
-
-fn is_dash_url(url: &reqwest::Url) -> bool {
-    matches!(url.scheme(), "http" | "https" | "file")
-        && url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".mpd"))
 }

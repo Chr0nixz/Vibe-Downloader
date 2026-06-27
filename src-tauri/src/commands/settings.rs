@@ -238,7 +238,7 @@ pub async fn update_settings(
     super::floating::sync_floating_status_window(&app, settings.floating_window_enabled)?;
     emit_settings_changed(&app);
     emit_queue_changed(&app);
-    super::tasks::schedule_queued_tasks(app.clone(), state.inner()).await;
+    state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
     if let Err(error) = super::tasks::check_schedule_preemption(app, state).await {
         tracing::warn!(error = %error, "schedule preemption check failed after settings update");
     }

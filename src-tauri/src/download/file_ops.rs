@@ -1,3 +1,8 @@
+//! 跨协议共享的文件操作工具：临时文件预分配、最终路径落定、完成路径持久化。
+//!
+//! 原位于 `download/http/file.rs`，因其被 FTP/SFTP/DASH/HLS/Metalink 等非
+//! HTTP 引擎复用，上移至协议中立位置。
+
 use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
@@ -11,6 +16,20 @@ pub(crate) async fn finalize_download_file(
 ) -> Result<PathBuf, String> {
     let final_path = available_final_path(preferred_final_path).await?;
     if fs::rename(temp_path, &final_path).await.is_ok() {
+        // E-11: fsync the final path after rename to ensure data is durable on
+        // disk. Without this, a crash/power loss after rename could leave the
+        // file system metadata committed but file data not yet flushed to the
+        // storage device. fsync failure is non-fatal (warn only) — same policy
+        // as the cross-drive copy path below.
+        if let Ok(file) = fs::File::open(&final_path).await {
+            if let Err(error) = file.sync_all().await {
+                tracing::warn!(
+                    final_path = %final_path.display(),
+                    error = %error,
+                    "fsync after finalize failed (data may not be durable)"
+                );
+            }
+        }
         return Ok(final_path);
     }
     // Cross-drive fallback: rename fails with EXDEV when source and dest are

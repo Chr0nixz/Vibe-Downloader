@@ -67,6 +67,7 @@ russh-sftp = "2.3.0"
 trash = "5.2.6"
 hickory-resolver = { version = "0.26.1", features = ["tokio"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
+thiserror = "2"
 
 [dev-dependencies]
 

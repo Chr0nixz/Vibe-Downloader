@@ -1,4 +1,4 @@
-import { BookOpen, Bug, Code, ExternalLink, Info } from "lucide-react";
+import { BookOpen, Bug, Code, ExternalLink, HelpCircle, Info } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -12,7 +12,7 @@ const LINKS = [
   { key: "linksIssues", href: `${REPO_URL}/issues`, icon: Bug },
 ] as const;
 
-export function AboutPage() {
+export function AboutPage({ onOpenOnboarding }: { onOpenOnboarding: () => void }) {
   const { t } = useTranslation();
   const [version, setVersion] = useState<string>("0.1.1");
 
@@ -59,6 +59,29 @@ export function AboutPage() {
             <dd className="text-sm font-medium text-text-primary">{t("about.licenseValue")}</dd>
           </div>
         </dl>
+
+        {/* ── Divider ── */}
+        <div className="h-px bg-border-subtle/60" />
+
+        {/* ── Help ── */}
+        <section className="flex flex-col gap-2">
+          <h2 className="text-[11px] font-medium tracking-wide text-text-muted uppercase">{t("about.help")}</h2>
+          <button
+            type="button"
+            onClick={onOpenOnboarding}
+            className={cn(
+              "group flex items-center gap-3 rounded-lg border border-transparent px-3 py-2.5 text-left",
+              "text-sm text-text-secondary transition-colors duration-[var(--motion-ui)]",
+              "hover:border-border-subtle hover:bg-surface-raised hover:text-text-primary",
+            )}
+          >
+            <HelpCircle
+              className="h-4 w-4 shrink-0 text-text-muted transition-colors group-hover:text-accent-primary"
+              aria-hidden
+            />
+            <span className="flex-1">{t("about.viewOnboarding")}</span>
+          </button>
+        </section>
 
         {/* ── Divider ── */}
         <div className="h-px bg-border-subtle/60" />
