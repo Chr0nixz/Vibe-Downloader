@@ -250,6 +250,18 @@ pub struct TaskStatsSnapshot {
     pub featured_task_id: Option<String>,
 }
 
+/// Parameter for the debug-only `seed_scale_tasks` command. Each field is the
+/// exact number of tasks to generate in that state. Uses `i32` (not `i64`) so
+/// Specta maps to TypeScript `number` instead of `bigint`.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleStateDistribution {
+    pub queued: i32,
+    pub downloading: i32,
+    pub completed: i32,
+    pub failed: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskRecord {
     pub id: String,
@@ -667,6 +679,10 @@ pub struct ProbeTaskPayload {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub hls_variants: Vec<HlsVariant>,
+    /// F-6: Audio renditions from `#EXT-X-MEDIA TYPE=AUDIO`.
+    pub hls_audio_tracks: Vec<HlsMediaTrack>,
+    /// F-6: Subtitle renditions from `#EXT-X-MEDIA TYPE=SUBTITLES`.
+    pub hls_subtitle_tracks: Vec<HlsMediaTrack>,
     pub probed_at: String,
 }
 
@@ -678,6 +694,29 @@ pub struct HlsVariant {
     pub resolution: Option<String>,
     pub codecs: Option<String>,
     pub selected: bool,
+}
+
+/// F-6: An `#EXT-X-MEDIA` rendition parsed from an HLS master playlist.
+/// Covers both `TYPE=AUDIO` and `TYPE=SUBTITLES` (and `TYPE=CLOSED-CAPTIONS`
+/// is ignored — we don't handle CEA-608/708 embedded in video segments).
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HlsMediaTrack {
+    /// `AUDIO` or `SUBTITLES`.
+    pub kind: String,
+    /// `GROUP-ID` — associates the track with one or more `#EXT-X-STREAM-INF` variants.
+    pub group_id: String,
+    /// Human-readable `NAME` (e.g. "English", "Spanish").
+    pub name: String,
+    /// `LANGUAGE` tag (BCP-47, e.g. "en", "es").
+    pub language: Option<String>,
+    /// `DEFAULT=YES` — the publisher's suggested default track.
+    pub default: bool,
+    /// `AUTOSELECT=YES` — may be auto-selected by the player.
+    pub auto_select: bool,
+    /// Rendition URI. `None` means the track is embedded in the video variant
+    /// (e.g. AAC audio muxed inside the video segment).
+    pub uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -1021,6 +1060,13 @@ pub struct AppSettings {
     pub completion_countdown_seconds: i32,
     pub completion_run_command: String,
     pub delete_to_trash: bool,
+    pub auto_update_check_enabled: bool,
+    /// Optional user-configured ffmpeg binary path. Resolution chain at use:
+    /// `VIBE_FFMPEG_PATH` env > this setting > PATH lookup.
+    pub ffmpeg_path: Option<String>,
+    /// F-7: Global BitTorrent upload speed limit in bytes/sec. `None` means
+    /// unlimited. Applied to every BT session at creation and synced on reuse.
+    pub bt_upload_limit_bps: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -1043,6 +1089,7 @@ pub enum RecoveryAction {
     OpenFolder,
     CheckUrl,
     FreeDiskSpace,
+    ConfigureFfmpeg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1102,6 +1149,7 @@ impl RecoveryAction {
             Self::OpenFolder => "open_folder",
             Self::CheckUrl => "check_url",
             Self::FreeDiskSpace => "free_disk_space",
+            Self::ConfigureFfmpeg => "configure_ffmpeg",
         }
     }
 }
@@ -1119,6 +1167,7 @@ impl std::str::FromStr for RecoveryAction {
             "open_folder" => Ok(Self::OpenFolder),
             "check_url" => Ok(Self::CheckUrl),
             "free_disk_space" => Ok(Self::FreeDiskSpace),
+            "configure_ffmpeg" => Ok(Self::ConfigureFfmpeg),
             _ => Err(()),
         }
     }

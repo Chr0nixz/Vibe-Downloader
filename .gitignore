@@ -17,9 +17,19 @@ browser/dist
 .vscode/*
 !.vscode/extensions.json
 .idea
-.trae/
 .DS_Store
+# Tool-generated directories
+.trae/
 .impeccable/
+.claude/
+.codebuddy/
+
+# Temporary working files
+.tmp_*
+_temp_*
+_*.ps1
+*.ps1
+hls_*.txt
 *.suo
 *.ntvs*
 *.njsproj

@@ -3,7 +3,11 @@ use uuid::Uuid;
 
 use crate::{
     db,
-    models::{task::now_iso, HashVerificationStatus, Task, TaskFileRecord, TaskRecord, TaskStatus},
+    models::{
+        task::now_iso, HashVerificationStatus, RequestDiagnosticRecord, ScaleStateDistribution,
+        SegmentStatus, Task, TaskFileRecord, TaskKind, TaskPriority, TaskRecord, TaskSegmentRecord,
+        TaskStatus,
+    },
     AppState,
 };
 
@@ -246,4 +250,289 @@ fn mock_task(input: MockTaskInput, now: &str) -> TaskRecord {
         updated_at: now.to_string(),
         files_version: 0,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Parameterized scale seeder (debug-only, for performance stress testing)
+// ---------------------------------------------------------------------------
+
+const SCALE_SEGMENT_COUNT: i64 = 4;
+const SCALE_BASE_SIZE: i64 = 100_000_000; // 100 MB
+
+#[cfg(debug_assertions)]
+pub async fn seed_scale_data(
+    pool: &sqlx::SqlitePool,
+    distribution: &ScaleStateDistribution,
+    clear_before: bool,
+) -> Result<u32, String> {
+    if clear_before {
+        db::clear_tasks(pool).await?;
+    }
+
+    // When appending, offset the index by existing task count so source_key
+    // stays unique across batches.
+    let mut index: i64 = if clear_before {
+        0
+    } else {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tasks")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let now = now_iso();
+    let mut total = 0u32;
+
+    for _ in 0..distribution.queued {
+        let task = build_scale_task(index, TaskStatus::Queued, &now);
+        insert_scale_task_with_children(pool, &task, TaskStatus::Queued).await?;
+        index += 1;
+        total += 1;
+    }
+    for _ in 0..distribution.downloading {
+        let task = build_scale_task(index, TaskStatus::Downloading, &now);
+        insert_scale_task_with_children(pool, &task, TaskStatus::Downloading).await?;
+        index += 1;
+        total += 1;
+    }
+    for _ in 0..distribution.completed {
+        let task = build_scale_task(index, TaskStatus::Completed, &now);
+        insert_scale_task_with_children(pool, &task, TaskStatus::Completed).await?;
+        index += 1;
+        total += 1;
+    }
+    for _ in 0..distribution.failed {
+        let task = build_scale_task(index, TaskStatus::Failed, &now);
+        insert_scale_task_with_children(pool, &task, TaskStatus::Failed).await?;
+        index += 1;
+        total += 1;
+    }
+
+    Ok(total)
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+#[specta::specta]
+pub async fn seed_scale_tasks(
+    state: State<'_, AppState>,
+    distribution: ScaleStateDistribution,
+    clear_before: Option<bool>,
+) -> Result<u32, String> {
+    seed_scale_data(&state.pool, &distribution, clear_before.unwrap_or(false)).await
+}
+
+#[cfg(debug_assertions)]
+fn build_scale_task(index: i64, status: TaskStatus, now: &str) -> TaskRecord {
+    // Vary size deterministically (50 MB – 500 MB) to avoid a uniform dataset.
+    let total_size = SCALE_BASE_SIZE + (index % 10) * 45_000_000;
+    let downloaded = match status {
+        TaskStatus::Queued => 0,
+        TaskStatus::Downloading => total_size / 2,
+        TaskStatus::Completed => total_size,
+        TaskStatus::Failed => total_size * 3 / 10,
+        _ => 0,
+    };
+    let (connection_count, speed_bps) = match status {
+        TaskStatus::Downloading => (4, 5_000_000),
+        _ => (0, 0),
+    };
+    let error_message = if matches!(status, TaskStatus::Failed) {
+        Some("Connection reset by peer".to_string())
+    } else {
+        None
+    };
+    let error_code = if matches!(status, TaskStatus::Failed) {
+        Some("http_request_failed".to_string())
+    } else {
+        None
+    };
+    let health_summary = match status {
+        TaskStatus::Downloading => Some("Downloading steadily".to_string()),
+        TaskStatus::Failed => Some("Connection reset".to_string()),
+        TaskStatus::Completed => Some("Completed".to_string()),
+        _ => None,
+    };
+
+    TaskRecord {
+        id: Uuid::new_v4().to_string(),
+        url: format!("https://scale-{index}.example.com/file.bin"),
+        final_url: Some(format!("https://scale-{index}.example.com/file.bin")),
+        protocol: "https".to_string(),
+        task_kind: TaskKind::SingleFile,
+        file_name: format!("scale-file-{index}.bin"),
+        save_dir: "~/Downloads".to_string(),
+        temp_path: None,
+        final_path: None,
+        total_size,
+        downloaded_bytes: downloaded,
+        status,
+        etag: None,
+        last_modified: None,
+        content_type: Some("application/octet-stream".to_string()),
+        supports_resume: true,
+        supports_parallel: true,
+        supports_multi_file: false,
+        source_key: format!("scale-{index}.example.com"),
+        connection_count,
+        speed_bps,
+        task_speed_limit_bps: None,
+        priority: TaskPriority::Normal,
+        queue_position: index,
+        category_key: None,
+        obey_schedule: true,
+        health_summary,
+        error_message,
+        error_code,
+        recovery_actions: Vec::new(),
+        retry_after_at: None,
+        expected_hash_sha256: None,
+        actual_hash_sha256: None,
+        hash_status: HashVerificationStatus::NotRequested,
+        hash_error: None,
+        hash_verified_at: None,
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+        files_version: 0,
+    }
+}
+
+#[cfg(debug_assertions)]
+async fn insert_scale_task_with_children(
+    pool: &sqlx::SqlitePool,
+    task: &TaskRecord,
+    status: TaskStatus,
+) -> Result<(), String> {
+    db::insert_task_record(pool, task).await?;
+
+    let file_id = Uuid::new_v4().to_string();
+    db::insert_task_file_record(
+        pool,
+        &TaskFileRecord {
+            id: file_id.clone(),
+            task_id: task.id.clone(),
+            relative_path: task.file_name.clone(),
+            file_name: task.file_name.clone(),
+            save_dir: task.save_dir.clone(),
+            temp_path: None,
+            final_path: None,
+            total_size: task.total_size,
+            downloaded_bytes: task.downloaded_bytes,
+            selected: true,
+            status: task.status,
+            content_type: task.content_type.clone(),
+        },
+    )
+    .await?;
+
+    // Segments: Queued → 0, otherwise 4 segments with state-appropriate progress.
+    if status != TaskStatus::Queued {
+        let segment_size = task.total_size / SCALE_SEGMENT_COUNT;
+        for i in 0..SCALE_SEGMENT_COUNT {
+            let range_start = i * segment_size;
+            let range_end = if i == SCALE_SEGMENT_COUNT - 1 {
+                task.total_size
+            } else {
+                (i + 1) * segment_size
+            };
+            let (seg_status, downloaded_until, last_error, speed) = match status {
+                TaskStatus::Completed => (
+                    SegmentStatus::Completed,
+                    range_end - range_start,
+                    None,
+                    0,
+                ),
+                TaskStatus::Failed if i >= 2 => (
+                    SegmentStatus::Failed,
+                    (range_end - range_start) / 2,
+                    Some("Connection reset by peer".to_string()),
+                    0,
+                ),
+                TaskStatus::Downloading if i >= 2 => (
+                    SegmentStatus::Downloading,
+                    (range_end - range_start) / 2,
+                    None,
+                    1_250_000,
+                ),
+                _ => (
+                    SegmentStatus::Completed,
+                    range_end - range_start,
+                    None,
+                    0,
+                ),
+            };
+            db::insert_segment_record(
+                pool,
+                &TaskSegmentRecord {
+                    id: Uuid::new_v4().to_string(),
+                    task_id: task.id.clone(),
+                    file_id: Some(file_id.clone()),
+                    unit_kind: "http_range".to_string(),
+                    range_start,
+                    range_end,
+                    downloaded_until,
+                    speed_bps: speed,
+                    status: seg_status,
+                    retry_count: if matches!(seg_status, SegmentStatus::Failed) { 2 } else { 0 },
+                    last_error,
+                },
+            )
+            .await?;
+        }
+    }
+
+    // Events: 1 for Queued, 2 for others.
+    db::insert_task_event(pool, &task.id, "task_created", None).await?;
+    match status {
+        TaskStatus::Downloading => {
+            db::insert_task_event(pool, &task.id, "download_started", None).await?;
+        }
+        TaskStatus::Completed => {
+            db::insert_task_event(pool, &task.id, "download_completed", None).await?;
+        }
+        TaskStatus::Failed => {
+            db::insert_task_event(
+                pool,
+                &task.id,
+                "download_failed",
+                Some("{\"code\":\"http_request_failed\"}"),
+            )
+            .await?;
+        }
+        _ => {}
+    }
+
+    // Request diagnostics: Queued → 0, otherwise 2 per task.
+    if status != TaskStatus::Queued {
+        for i in 0..2i64 {
+            let is_error = matches!(status, TaskStatus::Failed) && i == 1;
+            db::insert_request_diagnostic(
+                pool,
+                &RequestDiagnosticRecord {
+                    task_id: task.id.clone(),
+                    method: "GET".to_string(),
+                    url: task.url.clone(),
+                    range_header: Some(format!(
+                        "bytes={}-{}",
+                        i * (task.total_size / 2),
+                        (i + 1) * (task.total_size / 2) - 1
+                    )),
+                    if_range_header: None,
+                    status_code: if is_error { Some(500) } else { Some(206) },
+                    etag: if is_error { None } else { Some("\"abc123\"".to_string()) },
+                    last_modified: None,
+                    content_length: Some(task.total_size / 2),
+                    error_message: if is_error {
+                        Some("Internal Server Error".to_string())
+                    } else {
+                        None
+                    },
+                    retry_count: if is_error { 1 } else { 0 },
+                    duration_ms: if is_error { 5000 } else { 250 },
+                },
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
 }

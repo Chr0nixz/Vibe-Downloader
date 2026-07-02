@@ -114,14 +114,50 @@ GitHub Actions -> `Release` -> `Run workflow`，输入 tag，例如 `v0.2.0`，�
 
 ## 当前签名状态
 
-当前 Release workflow 已配置 updater 签名，但操作系统代码签名仍是预留状态。
+当前 Release workflow 已配置 **Tauri updater 签名**（用于应用内自动更新的完整性校验），但 **OS 代码签名仍处于预留状态**。已确认决策：短期内不申请 Apple Developer ID / Windows Authenticode 证书，走 unsigned 路径并在发布说明和 README 中明确告知用户风险。
+
+### Unsigned 风险与用户应对
 
 没有 Apple/Windows 代码签名时：
 
-- macOS 用户首次启动可能需要右键打开。
-- Windows SmartScreen 可能提示未知发布者。
+- **macOS**：首次启动可能被 Gatekeeper 拦截，提示"无法打开，因为来自身份不明的开发者"。
+  - 用户应对：Finder 中右键点击应用 → "打开" → 弹窗中再次点击"打开"。或在"系统设置 → 隐私与安全性"中点击"仍要打开"。
+- **Windows**：SmartScreen 可能提示"Windows 已保护你的电脑"。
+  - 用户应对：点击"更多信息" → "仍要运行"。
+- **Linux**：通常无系统级拦截，但 `.deb`/`.AppImage` 未签名，建议用户自行校验 GitHub Release 资产的 SHA-256。
 
-正式对外发布前应配置系统代码签名，或在发布说明中明确 unsigned 风险。
+### 发布说明模板（unsigned 版本）
+
+每次发布时在 Release Notes 中包含以下段落：
+
+```markdown
+## 关于未签名安装包的说明
+
+本版本未经操作系统代码签名。首次启动时：
+
+- macOS 用户：右键点击应用 → "打开" → 在弹窗中再次点击"打开"。
+- Windows 用户：SmartScreen 警告出现时点击"更多信息" → "仍要运行"。
+- Linux 用户：建议校验资产 SHA-256 后再安装。
+
+应用内自动更新已通过 Tauri updater 签名校验，无需手动验证。
+```
+
+### 后续切换到正式签名
+
+当后续决定启用 OS 代码签名时：
+
+1. 在 GitHub Settings → Secrets 中配置：
+   - `APPLE_CERTIFICATE`（macOS `.p12` Base64）
+   - `APPLE_CERTIFICATE_PASSWORD`
+   - `APPLE_SIGNING_IDENTITY`（如 `Developer ID Application: ...`）
+   - `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID`（用于 notarization）
+   - `WINDOWS_CERTIFICATE`（Windows `.pfx` Base64）
+   - `WINDOWS_CERTIFICATE_PASSWORD`
+2. 取消 [`.github/workflows/release.yml`](../.github/workflows/release.yml) 中第 75-84 行的对应 env 注释。
+3. 推送测试 tag 验证签名后的安装包在 macOS/Windows 上的 Gatekeeper / SmartScreen 表现。
+4. 更新本章节为"已配置正式签名"，并移除 README.md 的未签名提示段落。
+
+Tauri updater 签名独立于 OS 代码签名，始终生效，不受上述决策影响。
 
 ## 发布前本地验证
 

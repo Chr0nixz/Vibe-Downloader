@@ -87,6 +87,19 @@ impl RetryPolicy {
         }
     }
 
+    /// Metalink per-range-segment retry: 3 attempts, 500ms exponential backoff,
+    /// 5s cap. A range segment failing on one mirror fails over to the next
+    /// healthy mirror rather than aborting the whole download — this policy
+    /// covers retries WITHIN a single mirror before failover kicks in.
+    pub fn metalink_segment() -> Self {
+        Self {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(500),
+            max_delay: Duration::from_secs(5),
+            backoff: Backoff::Exponential,
+        }
+    }
+
     /// Compute the delay for a given 1-indexed attempt number.
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
         if attempt == 0 {
@@ -347,5 +360,14 @@ mod tests {
         assert_eq!(p.max_attempts, 2);
         assert_eq!(p.base_delay, Duration::from_secs(1));
         assert_eq!(p.backoff, Backoff::Fixed);
+    }
+
+    #[test]
+    fn metalink_segment_preset() {
+        let p = RetryPolicy::metalink_segment();
+        assert_eq!(p.max_attempts, 3);
+        assert_eq!(p.base_delay, Duration::from_millis(500));
+        assert_eq!(p.max_delay, Duration::from_secs(5));
+        assert_eq!(p.backoff, Backoff::Exponential);
     }
 }

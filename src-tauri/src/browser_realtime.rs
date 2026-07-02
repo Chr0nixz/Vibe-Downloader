@@ -201,9 +201,26 @@ async fn handle_socket(state: ServerState, socket: WebSocket) {
 
     loop {
         tokio::select! {
-            Ok(event) = rx.recv() => {
-                if send_json(&mut sender, &event).await.is_err() {
-                    break;
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        if send_json(&mut sender, &event).await.is_err() {
+                            break;
+                        }
+                    }
+                    // A-6: On Lagged (slow client fell behind > 256 events),
+                    // resync with a fresh TasksSnapshot instead of falling
+                    // through to `else => break` which silently dropped the
+                    // connection.
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(missed = n, "realtime client lagged, resyncing with snapshot");
+                        if let Ok(tasks) = current_tasks(&state.app).await {
+                            if send_json(&mut sender, &BrowserRealtimeEvent::TasksSnapshot { tasks }).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             Some(Ok(message)) = receiver.next() => {
@@ -259,8 +276,25 @@ async fn handle_client_message(app: &AppHandle, raw: &str) -> String {
             let state = app.state::<AppState>();
             let id = message.id;
             let input = match message.payload {
-                Some(payload) => serde_json::from_value::<BrowserCaptureSettingsInput>(payload)
-                    .map_err(|e| format!("Invalid settings payload: {e}")),
+                Some(payload) => {
+                    // S-1.1: 拒绝通过 WS 桥修改敏感字段。这些字段必须由用户
+                    // 在主窗口 UI 中显式操作（通过 Tauri 命令），不能由持有
+                    // WS bootstrap token 的本地进程直接修改。
+                    let conflicts = payload
+                        .as_object()
+                        .map(commands::browser::is_sensitive_settings_update)
+                        .unwrap_or_default();
+                    if !conflicts.is_empty() {
+                        Err(format!(
+                            "WS bridge cannot modify sensitive settings via updateSettings: {}. \
+                             Use the main window UI to change these fields.",
+                            conflicts.join(", ")
+                        ))
+                    } else {
+                        serde_json::from_value::<BrowserCaptureSettingsInput>(payload)
+                            .map_err(|e| format!("Invalid settings payload: {e}"))
+                    }
+                }
                 None => Err("Settings payload is required.".to_string()),
             };
             let result = async {

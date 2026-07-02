@@ -32,6 +32,12 @@ const toneGlow: Record<NonNullable<ProgressBarProps["tone"]>, string> = {
   neutral: "",
 };
 
+// Large active primary fills use the three-hue accent gradient (energy→primary→peak)
+// instead of a flat solid. The gradient is part of the product's visual signature;
+// slim row bars stay solid so the row doesn't get noisier at default density.
+const lgGradientFill =
+  "bg-[linear-gradient(to_top,var(--accent-energy)_0%,var(--accent-primary)_55%,var(--accent-peak)_100%)]";
+
 export function ProgressBar({
   value,
   label,
@@ -44,6 +50,7 @@ export function ProgressBar({
 }: ProgressBarProps) {
   const clamped = Math.min(1, Math.max(0, value));
   const percent = Math.round(clamped * 100);
+  const useGradient = active && tone === "primary" && size === "lg";
 
   return (
     <div
@@ -54,7 +61,9 @@ export function ProgressBar({
       aria-valuenow={percent}
       aria-valuetext={`${percent}%`}
       className={cn(
-        "relative overflow-hidden rounded-full bg-surface-root",
+        // Track now uses a dedicated --surface-track token so the bar is visible
+        // against the page background instead of disappearing into it.
+        "relative overflow-hidden rounded-full bg-surface-track",
         sizeClass[size],
         trackClassName,
         className,
@@ -67,9 +76,9 @@ export function ProgressBar({
           smooth
             ? "transition-transform duration-ui ease-out will-change-transform motion-reduce:transition-none"
             : "transition-none",
-          active ? toneFill[tone] : toneFill.neutral,
-          active && tone !== "neutral" && size === "lg" && toneGlow[tone],
-          "completion-flash-progress",
+          useGradient ? lgGradientFill : active ? toneFill[tone] : toneFill.neutral,
+          active && tone !== "neutral" && size === "lg" && !useGradient && toneGlow[tone],
+          useGradient && "shadow-[0_0_8px_color-mix(in_oklch,var(--accent-primary)_40%,transparent)]",
         )}
         style={{ transform: `scaleX(${clamped})` }}
       />

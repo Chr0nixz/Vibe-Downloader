@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use quick_xml::{events::Event, Reader};
 use reqwest::{
@@ -15,12 +17,15 @@ use crate::{
     models::{
         EngineCapabilities, ProbedFile, TaskKind, WebDavDirectoryEntry, WebDavDirectoryProbe,
     },
-    proxy::{ResolvedProxyConfig, SharedProxyConfig},
+    proxy::ResolvedProxyConfig,
 };
 
 #[derive(Debug, Clone)]
 pub struct WebDavEngine {
-    proxy_config: SharedProxyConfig,
+    /// E-4: 共享 `HttpEngine` 的客户端缓存与 probe/download 实现。WebDAV 把
+    /// webdav://webdavs:// 映射为 http://https:// 后委托给 HttpEngine，因此
+    /// 直接复用其缓存而非每次构造新实例。
+    http: Arc<HttpEngine>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,16 +54,16 @@ struct ParsedDavResponse {
 }
 
 impl WebDavEngine {
-    pub fn new(proxy_config: SharedProxyConfig) -> Self {
-        Self { proxy_config }
+    pub fn new(http: Arc<HttpEngine>) -> Self {
+        Self { http }
     }
 
     async fn probe_target(&self, request: &ProbeRequest) -> Result<ProbeOutput, String> {
         let target = WebDavTarget::parse_file(&request.uri)?;
         let credentials = resolve_probe_credentials(&target, request).await?;
         let headers = webdav_request_headers(&request.request_headers, credentials.as_ref());
-        let http = HttpEngine::with_proxy_config(self.proxy_config.clone())?;
-        let probe = http.probe_with_headers(&target.http_url, &headers).await?;
+        // E-4: 复用共享 HttpEngine 的客户端缓存，而非每次构造新实例。
+        let probe = self.http.probe_with_headers(&target.http_url, &headers).await?;
         let final_url = webdav_url_from_http(&probe.final_url, &target.protocol)?;
         Ok(ProbeOutput {
             protocol: target.protocol.clone(),
@@ -81,6 +86,8 @@ impl WebDavEngine {
             last_modified: probe.last_modified,
             content_type: probe.content_type,
             hls_variants: Vec::new(),
+            hls_audio_tracks: Vec::new(),
+            hls_subtitle_tracks: Vec::new(),
             metalink: None,
         })
     }
@@ -107,8 +114,8 @@ impl WebDavEngine {
         let mut task = context.task.clone();
         task.url = url_target.http_url;
         task.final_url = Some(final_target.http_url);
-        let http = HttpEngine::with_proxy_config(self.proxy_config.clone())?;
-        http.download(DownloadContext {
+        // E-4: 复用共享 HttpEngine 的客户端缓存与下载实现。
+        self.http.download(DownloadContext {
             task,
             request_headers,
             ..context
@@ -131,6 +138,12 @@ impl DownloadEngine for WebDavEngine {
         request: ProbeRequest,
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
+            crate::download::engine::emit_probe_phase(
+                &request.app,
+                &request.request_id,
+                "connecting",
+                Some("webdav"),
+            );
             self.probe_target(&request)
                 .await
                 .map_err(DownloadError::Other)

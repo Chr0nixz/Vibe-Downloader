@@ -229,6 +229,70 @@ pub async fn upsert_dash_segment(
     Ok(())
 }
 
+/// E-3: Bulk-insert DASH segment rows in a single transaction. Wraps the
+/// per-row INSERT...ON CONFLICT in `pool.begin()/commit()` so N segments
+/// produce one WAL commit instead of N. Callers passing 0 segments get a
+/// no-op (no transaction is started).
+pub async fn bulk_upsert_dash_segments(
+    pool: &SqlitePool,
+    segments: &[DashSegmentUpsert<'_>],
+) -> Result<(), String> {
+    if segments.is_empty() {
+        return Ok(());
+    }
+    let now = crate::models::task::now_iso();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Could not begin DASH segment transaction: {e}"))?;
+    for segment in segments {
+        sqlx::query(
+            r#"
+            INSERT INTO dash_segments (
+                id, task_id, track_kind, segment_index, uri, local_path,
+                byte_range_start, byte_range_length,
+                init_segment_uri, init_segment_local_path,
+                duration_ms, downloaded_bytes, status, retry_count, last_error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', 0, NULL, ?, ?)
+            ON CONFLICT(task_id, track_kind, segment_index) DO UPDATE SET
+                id = excluded.id,
+                uri = excluded.uri,
+                local_path = excluded.local_path,
+                byte_range_start = excluded.byte_range_start,
+                byte_range_length = excluded.byte_range_length,
+                init_segment_uri = excluded.init_segment_uri,
+                init_segment_local_path = excluded.init_segment_local_path,
+                duration_ms = excluded.duration_ms,
+                downloaded_bytes = 0,
+                status = 'pending',
+                retry_count = 0,
+                last_error = NULL,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(segment.id)
+        .bind(segment.task_id)
+        .bind(segment.track_kind)
+        .bind(segment.segment_index)
+        .bind(segment.uri)
+        .bind(segment.local_path)
+        .bind(segment.byte_range_start)
+        .bind(segment.byte_range_length)
+        .bind(segment.init_segment_uri)
+        .bind(segment.init_segment_local_path)
+        .bind(segment.duration_ms.max(0))
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("Could not commit DASH segment transaction: {e}"))?;
+    Ok(())
+}
+
 pub async fn list_dash_segments(
     pool: &SqlitePool,
     task_id: &str,

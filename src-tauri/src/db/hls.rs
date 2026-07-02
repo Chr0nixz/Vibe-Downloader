@@ -15,6 +15,10 @@ pub struct HlsTaskRecord {
     pub output_format: String,
     pub staging_dir: String,
     pub finish_requested: bool,
+    /// F-6: JSON array of selected audio track URIs, or NULL.
+    pub selected_audio_track_uris: Option<String>,
+    /// F-6: JSON array of selected subtitle track URIs, or NULL.
+    pub selected_subtitle_track_uris: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +33,10 @@ pub struct HlsTaskUpsert<'a> {
     pub last_media_sequence: Option<i64>,
     pub output_format: &'a str,
     pub staging_dir: &'a str,
+    /// F-6: JSON array of selected audio track URIs, or None.
+    pub selected_audio_track_uris: Option<&'a str>,
+    /// F-6: JSON array of selected subtitle track URIs, or None.
+    pub selected_subtitle_track_uris: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,8 +90,9 @@ pub async fn upsert_hls_task(pool: &SqlitePool, task: HlsTaskUpsert<'_>) -> Resu
         INSERT INTO hls_tasks (
             task_id, input_url, media_url, playlist_kind, selected_bandwidth,
             selected_resolution, target_duration, last_media_sequence, output_format,
-            staging_dir, finish_requested, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            staging_dir, selected_audio_track_uris, selected_subtitle_track_uris,
+            finish_requested, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
         ON CONFLICT(task_id) DO UPDATE SET
             media_url = excluded.media_url,
             playlist_kind = excluded.playlist_kind,
@@ -93,6 +102,8 @@ pub async fn upsert_hls_task(pool: &SqlitePool, task: HlsTaskUpsert<'_>) -> Resu
             last_media_sequence = COALESCE(excluded.last_media_sequence, hls_tasks.last_media_sequence),
             output_format = excluded.output_format,
             staging_dir = excluded.staging_dir,
+            selected_audio_track_uris = COALESCE(excluded.selected_audio_track_uris, hls_tasks.selected_audio_track_uris),
+            selected_subtitle_track_uris = COALESCE(excluded.selected_subtitle_track_uris, hls_tasks.selected_subtitle_track_uris),
             updated_at = excluded.updated_at
         "#,
     )
@@ -106,6 +117,8 @@ pub async fn upsert_hls_task(pool: &SqlitePool, task: HlsTaskUpsert<'_>) -> Resu
     .bind(task.last_media_sequence)
     .bind(task.output_format)
     .bind(task.staging_dir)
+    .bind(task.selected_audio_track_uris)
+    .bind(task.selected_subtitle_track_uris)
     .bind(&now)
     .bind(&now)
     .execute(pool)
@@ -122,7 +135,8 @@ pub async fn get_hls_task(
         r#"
         SELECT task_id, input_url, media_url, playlist_kind, selected_bandwidth,
                selected_resolution, target_duration, last_media_sequence, output_format,
-               staging_dir, finish_requested
+               staging_dir, finish_requested,
+               selected_audio_track_uris, selected_subtitle_track_uris
         FROM hls_tasks
         WHERE task_id = ?
         "#,
@@ -143,6 +157,8 @@ pub async fn get_hls_task(
         output_format: row.get("output_format"),
         staging_dir: row.get("staging_dir"),
         finish_requested: row.get::<i64, _>("finish_requested") != 0,
+        selected_audio_track_uris: row.get("selected_audio_track_uris"),
+        selected_subtitle_track_uris: row.get("selected_subtitle_track_uris"),
     }))
 }
 
@@ -254,6 +270,81 @@ pub async fn upsert_hls_segment(
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// E-3: Bulk-insert HLS segment rows in a single transaction. Wraps the
+/// per-row INSERT...ON CONFLICT in `pool.begin()/commit()` so N segments
+/// produce one WAL commit instead of N. Callers passing 0 segments get a
+/// no-op (no transaction is started).
+pub async fn bulk_upsert_hls_segments(
+    pool: &SqlitePool,
+    segments: &[HlsSegmentUpsert<'_>],
+) -> Result<(), String> {
+    if segments.is_empty() {
+        return Ok(());
+    }
+    let now = crate::models::task::now_iso();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Could not begin HLS segment transaction: {e}"))?;
+    for segment in segments {
+        sqlx::query(
+            r#"
+            INSERT INTO hls_segments (
+                id, task_id, media_sequence, discontinuity_sequence, uri, local_path,
+                duration_ms, byte_range_start, byte_range_length,
+                init_map_uri, init_map_local_path, init_map_byte_range_start, init_map_byte_range_length,
+                key_method, key_uri, key_iv,
+                downloaded_bytes, status, retry_count, last_error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', 0, NULL, ?, ?)
+            ON CONFLICT(task_id, media_sequence, discontinuity_sequence) DO UPDATE SET
+                id = excluded.id,
+                uri = excluded.uri,
+                local_path = excluded.local_path,
+                duration_ms = excluded.duration_ms,
+                byte_range_start = excluded.byte_range_start,
+                byte_range_length = excluded.byte_range_length,
+                init_map_uri = excluded.init_map_uri,
+                init_map_local_path = excluded.init_map_local_path,
+                init_map_byte_range_start = excluded.init_map_byte_range_start,
+                init_map_byte_range_length = excluded.init_map_byte_range_length,
+                key_method = excluded.key_method,
+                key_uri = excluded.key_uri,
+                key_iv = excluded.key_iv,
+                downloaded_bytes = 0,
+                status = 'pending',
+                retry_count = 0,
+                last_error = NULL,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(segment.id)
+        .bind(segment.task_id)
+        .bind(segment.media_sequence)
+        .bind(segment.discontinuity_sequence)
+        .bind(segment.uri)
+        .bind(segment.local_path)
+        .bind(segment.duration_ms.max(0))
+        .bind(segment.byte_range_start)
+        .bind(segment.byte_range_length)
+        .bind(segment.init_map_uri)
+        .bind(segment.init_map_local_path)
+        .bind(segment.init_map_byte_range_start)
+        .bind(segment.init_map_byte_range_length)
+        .bind(segment.key_method)
+        .bind(segment.key_uri)
+        .bind(segment.key_iv)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("Could not commit HLS segment transaction: {e}"))?;
     Ok(())
 }
 

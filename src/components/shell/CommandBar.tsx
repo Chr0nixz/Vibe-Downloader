@@ -1,5 +1,5 @@
-import { ArrowUpDown, Check, Command, Gauge, LoaderCircle, Pause, Play, Plus, Search, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ArrowUpDown, Check, Command, Gauge, LoaderCircle, Plus, Search } from "lucide-react";
+import { type RefObject, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -7,7 +7,6 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import type { Platform } from "@/lib/platform";
 import { applyGlobalSpeedLimit } from "@/lib/settings";
 import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput, speedLimitInputFromBytes } from "@/lib/speed-limit";
@@ -15,40 +14,30 @@ import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
 import { type TaskSortKey, useTaskUIStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
-import type { Task } from "@/types/task";
 
 interface CommandBarProps {
   platform: Platform;
   onOpenPalette: () => void;
-  selectedTask: Task | null;
   onNewDownload: () => void;
-  onStart: () => void;
-  onPause: () => void;
-  onDelete: () => void;
+  inputRef?: RefObject<HTMLInputElement | null>;
 }
 
-export function CommandBar({
-  platform,
-  onOpenPalette,
-  selectedTask,
-  onNewDownload,
-  onStart,
-  onPause,
-  onDelete,
-}: CommandBarProps) {
+export function CommandBar({ platform, onOpenPalette, onNewDownload, inputRef }: CommandBarProps) {
   const { t } = useTranslation();
   const search = useTaskUIStore((s) => s.search);
   const setSearch = useTaskUIStore((s) => s.setSearch);
   const [searchInput, setSearchInput] = useState(search);
-  const debouncedSearch = useDebouncedValue(searchInput, 200);
+  // UX-2: Write to store immediately on each keystroke. TaskList's 300ms
+  // useDebouncedValue is the single debounce layer — the previous serial
+  // 200ms + 300ms = 500ms delay is eliminated.
   useEffect(() => {
-    setSearch(debouncedSearch);
-  }, [debouncedSearch, setSearch]);
+    setSearch(searchInput);
+  }, [searchInput, setSearch]);
   useEffect(() => {
-    if (search !== debouncedSearch) {
+    if (search !== searchInput) {
       setSearchInput(search);
     }
-  }, [search, debouncedSearch]);
+  }, [search, searchInput]);
   const settings = useSettingsStore((s) => s.settings);
   const setSettings = useSettingsStore((s) => s.setSettings);
   const addToast = useToastStore((s) => s.addToast);
@@ -63,13 +52,6 @@ export function CommandBar({
   const [customUnit, setCustomUnit] = useState(initialLimit.unit);
   const [savingSpeed, setSavingSpeed] = useState(false);
   const speedTriggerRef = useRef<HTMLButtonElement>(null);
-  const canStart =
-    !!selectedTask &&
-    (selectedTask.status === "paused" || selectedTask.status === "failed" || selectedTask.status === "waiting_network");
-  const canPause =
-    !!selectedTask &&
-    (selectedTask.status === "downloading" || selectedTask.status === "retrying" || selectedTask.status === "queued");
-  const canDelete = !!selectedTask;
   const currentLimit = Number(settings?.globalSpeedLimitBps ?? 0);
 
   // First-run tooltip: auto-shows once per session to help new users discover the button
@@ -150,15 +132,6 @@ export function CommandBar({
       </Tooltip>
 
       <div className="hidden shrink-0 items-center gap-1 md:flex md:gap-2">
-        <ActionIcon label={t("commandBar.start")} icon={Play} onClick={onStart} disabled={!canStart} />
-        <ActionIcon label={t("commandBar.pause")} icon={Pause} onClick={onPause} disabled={!canPause} />
-        <ActionIcon
-          label={t("commandBar.delete")}
-          icon={Trash2}
-          onClick={onDelete}
-          disabled={!canDelete}
-          shortcutLabel={formatShortcut("Delete", platform)}
-        />
         <Popover open={speedPopoverOpen} onOpenChange={setSpeedPopoverOpen}>
           <PopoverTrigger asChild>
             <ActionIcon
@@ -264,6 +237,7 @@ export function CommandBar({
       <div className="relative min-w-0 flex-1">
         <Search className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
         <Input
+          ref={inputRef}
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
           placeholder={t("commandBar.searchPlaceholder")}

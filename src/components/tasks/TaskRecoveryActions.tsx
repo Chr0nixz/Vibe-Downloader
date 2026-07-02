@@ -1,9 +1,11 @@
-import { Clock, FilePenLine, FolderOpen, HardDrive, Link, RotateCcw } from "lucide-react";
+import { Clock, Copy, FilePenLine, FolderOpen, HardDrive, Link, RotateCcw, Wrench } from "lucide-react";
+import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import type { RecoveryAction } from "@/generated/bindings";
-import { localizedErrorMessage, recoveryActionsForError } from "@/lib/errors";
+import { formatErrorForReport, localizedErrorMessage, recoveryActionsForError } from "@/lib/errors";
+import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 
 export function TaskRecoveryActions({
@@ -14,8 +16,20 @@ export function TaskRecoveryActions({
   onResolve: (task: Task, action: RecoveryAction) => void;
 }) {
   const { t } = useTranslation();
+  const addToast = useToastStore((s) => s.addToast);
   const recoveryActions = task.recoveryActions ?? [];
   const actions = recoveryActions.length > 0 ? recoveryActions : recoveryActionsForError(task.errorMessage);
+
+  const handleCopy = useCallback(() => {
+    if (!task.errorMessage) return;
+    const text = formatErrorForReport(task.errorMessage, { taskId: task.id, url: task.url });
+    navigator.clipboard.writeText(text).catch(() => {});
+    addToast({
+      tone: "info",
+      title: t("recovery.errorCopied"),
+    });
+  }, [addToast, task.errorMessage, task.id, task.url, t]);
+
   if (!task.errorMessage || actions.length === 0) return null;
 
   return (
@@ -24,9 +38,25 @@ export function TaskRecoveryActions({
       role="group"
       aria-label={t("recovery.groupLabel")}
     >
-      <p role="alert" className="text-xs leading-5 text-status-danger">
-        {localizedErrorMessage(task.errorMessage, t)}
-      </p>
+      <div className="flex items-start justify-between gap-2">
+        <p role="alert" className="text-xs leading-5 text-status-danger">
+          {localizedErrorMessage(task.errorMessage, t)}
+        </p>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-6 shrink-0 px-1.5"
+          aria-label={t("recovery.copyError")}
+          title={t("recovery.copyError")}
+          onClick={(event) => {
+            event.stopPropagation();
+            handleCopy();
+          }}
+        >
+          <Copy className="h-3.5 w-3.5" aria-hidden />
+        </Button>
+      </div>
       <div className="mt-2 flex flex-wrap gap-2">
         {actions.map((action) => (
           <Button
@@ -59,6 +89,8 @@ function RecoveryIcon({ action }: { action: RecoveryAction }) {
       return <HardDrive className="h-4 w-4" aria-hidden />;
     case "check_url":
       return <Link className="h-4 w-4" aria-hidden />;
+    case "configure_ffmpeg":
+      return <Wrench className="h-4 w-4" aria-hidden />;
     case "retry_later":
       return <Clock className="h-4 w-4" aria-hidden />;
     default:

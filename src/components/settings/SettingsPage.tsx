@@ -9,6 +9,7 @@ import {
   Puzzle,
   RotateCcw,
   Search,
+  Sparkles,
   Trash2,
   X,
 } from "lucide-react";
@@ -34,6 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type {
   AppAccentColor,
@@ -44,6 +46,7 @@ import type {
   BrowserIntegrationStatus,
   CompletionAction,
 } from "@/generated/bindings";
+import { useAppUpdater } from "@/hooks/use-app-updater";
 import { LOCALE_LABEL_KEYS, type Locale, STABLE_LOCALES, SUPPORTED_LOCALES, setLocale } from "@/i18n";
 import { localizedErrorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
@@ -56,11 +59,13 @@ import {
   isTauriRuntime,
   onBrowserIntegrationChanged,
   openDirectoryPicker,
+  openFilePicker,
+  probeFfmpegVersion,
   uninstallBrowserIntegration,
   updateBrowserCaptureSettings,
   updateSettings,
 } from "@/lib/tauri";
-import { cn, formatSpeed } from "@/lib/utils";
+import { cn, formatBytes, formatSpeed } from "@/lib/utils";
 
 const log = createLogger("settings");
 
@@ -79,6 +84,8 @@ const SECTION_IDS = [
   "interface",
   "desktop-integration",
   "browser-integration",
+  "external-tools",
+  "about-updates",
 ] as const;
 
 type SettingsSectionId = (typeof SECTION_IDS)[number];
@@ -87,6 +94,7 @@ const DEFAULT_EXPANDED_SETTINGS_SECTIONS = new Set<SettingsSectionId>([
   "downloads",
   "interface",
   "desktop-integration",
+  "about-updates",
 ]);
 
 const ACCENT_SWATCHES: Record<string, { light: string; dark: string }> = {
@@ -121,6 +129,7 @@ export function SettingsPage() {
   const setLoading = useSettingsStore((s) => s.setLoading);
   const setError = useSettingsStore((s) => s.setError);
   const addToast = useToastStore((s) => s.addToast);
+  const updater = useAppUpdater();
   const [defaultSaveDir, setDefaultSaveDir] = useState("");
   const [maxActiveTasks, setMaxActiveTasks] = useState(2);
   const [globalSpeedLimitBps, setGlobalSpeedLimitBps] = useState("");
@@ -134,7 +143,7 @@ export function SettingsPage() {
   const [floatingWindowEnabled, setFloatingWindowEnabled] = useState(false);
   const [clipboardMonitorEnabled, setClipboardMonitorEnabled] = useState(true);
   const [accentColor, setAccentColor] = useState<AppAccentColor>("blue");
-  const [titlebarGradientEnabled, setTitlebarGradientEnabled] = useState(true);
+  const [titlebarGradientEnabled, setTitlebarGradientEnabled] = useState(false);
   const [proxyMode, setProxyMode] = useState<AppProxyMode>("off");
   const [proxyUrl, setProxyUrl] = useState("");
   const [proxyNoProxy, setProxyNoProxy] = useState("");
@@ -153,6 +162,13 @@ export function SettingsPage() {
   const [completionCountdownSeconds, setCompletionCountdownSeconds] = useState(30);
   const [completionRunCommand, setCompletionRunCommand] = useState("");
   const [deleteToTrash, setDeleteToTrash] = useState(true);
+  const [autoUpdateCheckEnabled, setAutoUpdateCheckEnabled] = useState(true);
+  const [ffmpegPath, setFfmpegPath] = useState("");
+  const [ffmpegVersion, setFfmpegVersion] = useState<string | null>(null);
+  const [ffmpegProbeError, setFfmpegProbeError] = useState<string | null>(null);
+  const [ffmpegProbing, setFfmpegProbing] = useState(false);
+  // F-7: Global BitTorrent upload speed limit (bytes/sec). Empty = unlimited.
+  const [btUploadLimitBps, setBtUploadLimitBps] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const [showResetDialog, setShowResetDialog] = useState(false);
@@ -350,11 +366,55 @@ export function SettingsPage() {
           ...(browserStatus?.browsers.map((browser) => browser.displayName) ?? []),
         ],
       },
+      {
+        id: "about-updates",
+        title: t("settings.aboutUpdates"),
+        description: t("settings.aboutUpdatesDescription"),
+        summary: updater.currentVersion
+          ? t("settings.aboutUpdatesSummary", { version: updater.currentVersion })
+          : undefined,
+        terms: [
+          t("settings.currentVersion"),
+          t("settings.autoUpdateCheck"),
+          t("settings.autoUpdateCheckDescription"),
+          t("settings.checkForUpdates"),
+          t("settings.upToDate"),
+          t("settings.installAndRestart"),
+        ],
+      },
+      {
+        id: "external-tools",
+        title: t("settings.externalTools"),
+        description: t("settings.externalToolsDescription"),
+        summary: ffmpegVersion
+          ? t("settings.externalToolsSummary", {
+              status: t("settings.ffmpegPath.detected", { version: ffmpegVersion }),
+            })
+          : ffmpegProbeError
+            ? t("settings.externalToolsSummary", {
+                status: t("settings.ffmpegPath.invalid", { error: ffmpegProbeError }),
+              })
+            : ffmpegPath.trim()
+              ? t("settings.externalToolsSummary", { status: t("settings.ffmpegPath.detect") })
+              : t("settings.externalToolsSummaryMissing"),
+        terms: [
+          t("settings.ffmpegPath.label"),
+          t("settings.ffmpegPath.description"),
+          t("settings.ffmpegPath.browse"),
+          t("settings.ffmpegPath.detect"),
+          t("settings.ffmpegPath.detected", { version: "" }),
+          t("settings.ffmpegPath.invalid", { error: "" }),
+          t("settings.ffmpegPath.notDetected"),
+        ],
+      },
     ],
     [
       browserStatus,
       enabledDesktopIntegrations,
       enabledSchedules,
+      ffmpegPath,
+      ffmpegProbeError,
+      ffmpegVersion,
       installedBrowserCount,
       localeLabel,
       maxActiveTasks,
@@ -364,6 +424,7 @@ export function SettingsPage() {
       speedLimitSummary,
       t,
       themeLabel,
+      updater.currentVersion,
     ],
   );
   const settingsSectionById = useMemo(
@@ -492,6 +553,13 @@ export function SettingsPage() {
     setCompletionCountdownSeconds(settings.completionCountdownSeconds);
     setCompletionRunCommand(settings.completionRunCommand ?? "");
     setDeleteToTrash(settings.deleteToTrash);
+    setAutoUpdateCheckEnabled(settings.autoUpdateCheckEnabled);
+    setFfmpegPath(settings.ffmpegPath ?? "");
+    setBtUploadLimitBps(settings.btUploadLimitBps ?? "");
+    // Reset detection state when the source setting changes; the user can
+    // re-probe by clicking the Detect button.
+    setFfmpegVersion(null);
+    setFfmpegProbeError(null);
     setSaveState("saved");
   }, [settings]);
 
@@ -527,6 +595,9 @@ export function SettingsPage() {
       completionCountdownSeconds === settings.completionCountdownSeconds &&
       completionRunCommand === (settings.completionRunCommand ?? "") &&
       deleteToTrash === settings.deleteToTrash &&
+      autoUpdateCheckEnabled === settings.autoUpdateCheckEnabled &&
+      ffmpegPath === (settings.ffmpegPath ?? "") &&
+      btUploadLimitBps === (settings.btUploadLimitBps ?? "") &&
       proxyPassword.trim() === "" &&
       !clearProxyPassword
     ) {
@@ -567,6 +638,9 @@ export function SettingsPage() {
         completionCountdownSeconds,
         completionRunCommand,
         deleteToTrash,
+        autoUpdateCheckEnabled,
+        ffmpegPath: ffmpegPath.trim() || null,
+        btUploadLimitBps: btUploadLimitBps.trim() || null,
       });
     }, AUTO_SAVE_DELAY_MS);
 
@@ -608,6 +682,9 @@ export function SettingsPage() {
     completionCountdownSeconds,
     completionRunCommand,
     deleteToTrash,
+    autoUpdateCheckEnabled,
+    ffmpegPath,
+    btUploadLimitBps,
   ]);
 
   useEffect(() => {
@@ -667,6 +744,9 @@ export function SettingsPage() {
         completionCountdownSeconds: nextSettings.completionCountdownSeconds,
         completionRunCommand: nextSettings.completionRunCommand ?? "",
         deleteToTrash: nextSettings.deleteToTrash,
+        autoUpdateCheckEnabled: nextSettings.autoUpdateCheckEnabled,
+        ffmpegPath: nextSettings.ffmpegPath,
+        btUploadLimitBps: nextSettings.btUploadLimitBps,
       });
       if (next.startOnBoot !== settings?.startOnBoot) {
         await syncAutostart(next.startOnBoot);
@@ -713,6 +793,34 @@ export function SettingsPage() {
     if (selected) setDefaultSaveDir(selected);
   }
 
+  async function handleBrowseFfmpegPath() {
+    const filters = navigator.platform.toLowerCase().includes("win")
+      ? [{ name: "ffmpeg", extensions: ["exe"] }]
+      : undefined;
+    const selected = await openFilePicker(filters);
+    if (selected?.path) {
+      setFfmpegPath(selected.path);
+      // Reset stale detection state when the path changes.
+      setFfmpegVersion(null);
+      setFfmpegProbeError(null);
+    }
+  }
+
+  async function handleDetectFfmpeg() {
+    setFfmpegProbing(true);
+    setFfmpegVersion(null);
+    setFfmpegProbeError(null);
+    try {
+      const trimmed = ffmpegPath.trim();
+      const version = await probeFfmpegVersion(trimmed || null);
+      setFfmpegVersion(version);
+    } catch (err) {
+      setFfmpegProbeError(localizedErrorMessage(err, t));
+    } finally {
+      setFfmpegProbing(false);
+    }
+  }
+
   async function handleResetDefaults() {
     setResetting(true);
     try {
@@ -730,7 +838,7 @@ export function SettingsPage() {
         floatingWindowEnabled: false,
         clipboardMonitorEnabled: true,
         accentColor: "blue",
-        titlebarGradientEnabled: true,
+        titlebarGradientEnabled: false,
         proxyMode: "off",
         proxyUrl: "",
         proxyNoProxy: "",
@@ -748,6 +856,9 @@ export function SettingsPage() {
         completionCountdownSeconds: 30,
         completionRunCommand: "",
         deleteToTrash: true,
+        autoUpdateCheckEnabled: true,
+        ffmpegPath: null,
+        btUploadLimitBps: null,
       });
       setSettings(updated);
       setDefaultSaveDir(updated.defaultSaveDir);
@@ -784,6 +895,11 @@ export function SettingsPage() {
       setCompletionCountdownSeconds(updated.completionCountdownSeconds);
       setCompletionRunCommand(updated.completionRunCommand ?? "");
       setDeleteToTrash(updated.deleteToTrash);
+      setAutoUpdateCheckEnabled(updated.autoUpdateCheckEnabled);
+      setFfmpegPath(updated.ffmpegPath ?? "");
+      setBtUploadLimitBps(updated.btUploadLimitBps ?? "");
+      setFfmpegVersion(null);
+      setFfmpegProbeError(null);
       addToast({
         title: t("settings.resetDefaults"),
         tone: "success",
@@ -936,9 +1052,11 @@ export function SettingsPage() {
                 <div className="relative flex items-center">
                   <Search className="pointer-events-none absolute left-3 h-4 w-4 text-text-muted" />
                   <Input
+                    type="search"
                     value={settingsSearch}
                     onChange={(e) => setSettingsSearch(e.target.value)}
                     placeholder={t("settings.searchSettings")}
+                    aria-label={t("settings.searchSettings")}
                     className="h-9 w-full rounded-md border border-border-subtle bg-surface-root pl-9 pr-8 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                   />
                   {settingsSearch ? (
@@ -1100,20 +1218,13 @@ export function SettingsPage() {
                   />
                 </SettingsRow>
 
-                <SettingsRow
+                <SettingsToggle
                   title={t("settings.deleteToTrash")}
-                  htmlFor="delete-to-trash"
-                  tip={t("settings.deleteToTrashTip")}
-                >
-                  <input
-                    id="delete-to-trash"
-                    type="checkbox"
-                    checked={deleteToTrash}
-                    onChange={(event) => setDeleteToTrash(event.target.checked)}
-                    disabled={controlsDisabled}
-                    className="h-4 w-4 shrink-0 rounded border-border-subtle accent-accent-primary"
-                  />
-                </SettingsRow>
+                  description={t("settings.deleteToTrashTip")}
+                  checked={deleteToTrash}
+                  disabled={controlsDisabled}
+                  onChange={setDeleteToTrash}
+                />
               </SettingsSection>
 
               <SettingsSection {...getSectionProps("advanced-downloads")}>
@@ -1161,6 +1272,29 @@ export function SettingsPage() {
                     }}
                     disabled={controlsDisabled}
                     className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
+                  />
+                </SettingsRow>
+
+                <SettingsRow
+                  title={t("settings.btUploadLimit")}
+                  htmlFor="bt-upload-limit"
+                  tip={t("settings.btUploadLimitTip")}
+                  searchKey="bt_upload_limit"
+                >
+                  <ByteUnitInput
+                    id="bt-upload-limit"
+                    valueBytes={btUploadLimitBps}
+                    onChange={setBtUploadLimitBps}
+                    placeholder={t("settings.globalSpeedLimitPlaceholder")}
+                    disabled={controlsDisabled}
+                    unitAriaLabel={t("settings.speedUnit")}
+                    units={[
+                      ["1", "B/s"],
+                      ["1024", "KB/s"],
+                      ["1048576", "MB/s"],
+                      ["1073741824", "GB/s"],
+                    ]}
+                    allowEmpty
                   />
                 </SettingsRow>
 
@@ -1671,6 +1805,158 @@ export function SettingsPage() {
                   </div>
                 ) : null}
               </SettingsSection>
+
+              <SettingsSection {...getSectionProps("external-tools")}>
+                <SettingsRow
+                  title={t("settings.ffmpegPath.label")}
+                  htmlFor="ffmpeg-path"
+                  tip={t("settings.ffmpegPath.description")}
+                  searchKey="ffmpeg"
+                >
+                  <div className="flex flex-col gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Input
+                        id="ffmpeg-path"
+                        type="text"
+                        value={ffmpegPath}
+                        onChange={(e) => setFfmpegPath(e.target.value)}
+                        placeholder={t("settings.ffmpegPath.placeholder")}
+                        className="h-11 flex-1 font-mono text-sm md:h-8"
+                        disabled={controlsDisabled || ffmpegProbing}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-11 md:h-8"
+                        disabled={controlsDisabled || ffmpegProbing}
+                        onClick={() => void handleBrowseFfmpegPath()}
+                      >
+                        <FolderOpen className="h-4 w-4" />
+                        {t("settings.ffmpegPath.browse")}
+                      </Button>
+                      <Button
+                        type="button"
+                        className="h-11 md:h-8"
+                        disabled={controlsDisabled || ffmpegProbing}
+                        onClick={() => void handleDetectFfmpeg()}
+                      >
+                        {ffmpegProbing ? (
+                          <LoaderCircle className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Sparkles className="h-4 w-4" />
+                        )}
+                        {ffmpegProbing ? t("settings.ffmpegPath.detecting") : t("settings.ffmpegPath.detect")}
+                      </Button>
+                    </div>
+                    {ffmpegVersion ? (
+                      <div className="flex items-center gap-2 text-sm text-text-secondary">
+                        <Check className="h-4 w-4 text-green-600 dark:text-green-400" />
+                        <span className="font-mono">{ffmpegVersion}</span>
+                      </div>
+                    ) : ffmpegProbeError ? (
+                      <div className="flex items-start gap-2 text-sm text-rose-600 dark:text-rose-400">
+                        <X className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span className="break-all">{ffmpegProbeError}</span>
+                      </div>
+                    ) : !ffmpegPath.trim() ? (
+                      <div className="flex items-center gap-2 text-sm text-text-muted">
+                        <Info className="h-4 w-4" />
+                        <span>{t("settings.ffmpegPath.notDetected")}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                </SettingsRow>
+              </SettingsSection>
+
+              <SettingsSection {...getSectionProps("about-updates")}>
+                <SettingsRow title={t("settings.currentVersion")} htmlFor="app-version">
+                  <span id="app-version" className="font-mono text-sm text-text-secondary">
+                    {updater.currentVersion ?? "—"}
+                  </span>
+                </SettingsRow>
+                <SettingsToggle
+                  title={t("settings.autoUpdateCheck")}
+                  description={t("settings.autoUpdateCheckDescription")}
+                  checked={autoUpdateCheckEnabled}
+                  disabled={controlsDisabled}
+                  onChange={setAutoUpdateCheckEnabled}
+                />
+                <div className="border-t border-border-divider px-4 py-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <UpdateStatusBadge updater={updater} />
+                    </div>
+                    <div className="flex shrink-0 flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-11 md:h-8"
+                        disabled={!updater.isTauri || updater.checking || updater.installing}
+                        onClick={() => void updater.checkForUpdate()}
+                      >
+                        {updater.checking ? (
+                          <LoaderCircle className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <RotateCcw className="h-4 w-4" />
+                        )}
+                        {updater.checking ? t("settings.checkingForUpdates") : t("settings.checkForUpdates")}
+                      </Button>
+                      {updater.status === "available" ? (
+                        <Button
+                          type="button"
+                          className="h-11 md:h-8"
+                          disabled={updater.installing}
+                          onClick={() => void updater.installUpdate()}
+                        >
+                          {updater.installing ? (
+                            <LoaderCircle className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Sparkles className="h-4 w-4" />
+                          )}
+                          {t("settings.installAndRestart")}
+                        </Button>
+                      ) : null}
+                      {updater.status === "error" ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="h-11 md:h-8"
+                          disabled={updater.checking}
+                          onClick={() => void updater.checkForUpdate()}
+                        >
+                          <RotateCcw className="h-4 w-4" />
+                          {t("settings.retryCheck")}
+                        </Button>
+                      ) : null}
+                      {updater.status === "available" && !updater.installing ? (
+                        <Button type="button" variant="ghost" className="h-11 md:h-8" onClick={updater.dismissUpdate}>
+                          <X className="h-4 w-4" />
+                          {t("settings.dismissUpdate")}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {updater.status === "downloading" && updater.progress ? (
+                    <UpdateProgressBar updater={updater} />
+                  ) : null}
+
+                  {updater.status === "available" && updater.releaseNotes ? (
+                    <div className="mt-3">
+                      <p className="mb-1 text-xs font-medium text-text-secondary">{t("settings.releaseNotes")}</p>
+                      <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-md border border-border-subtle bg-surface-root px-3 py-2 text-xs leading-5 text-text-secondary">
+                        {updater.releaseNotes}
+                      </pre>
+                    </div>
+                  ) : null}
+
+                  {updater.status === "available" && updater.updateDate ? (
+                    <p className="mt-2 text-xs text-text-muted">
+                      {t("settings.updateDate")}: {formatReleaseDate(updater.updateDate)}
+                    </p>
+                  ) : null}
+                </div>
+              </SettingsSection>
               <div className="flex justify-center pt-6 pb-2">
                 <button
                   type="button"
@@ -1783,7 +2069,7 @@ function SettingsSection({
       >
         <span className="grid min-w-0 gap-1">
           <span className="flex min-w-0 flex-wrap items-center gap-2">
-            <span className="text-sm font-semibold text-text-primary">{title}</span>
+            <h2 className="text-sm font-semibold text-text-primary">{title}</h2>
             {summary ? (
               <span className="min-w-0 truncate rounded-full bg-surface-raised px-2 py-0.5 text-[11px] font-medium text-text-muted">
                 {summary}
@@ -1933,13 +2219,7 @@ function SettingsToggle({
         <span className="block text-sm font-medium text-text-primary">{title}</span>
         <span className="mt-1 block text-xs leading-5 text-text-muted">{description}</span>
       </span>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
-        className="h-6 w-6 accent-accent-primary"
-      />
+      <Switch checked={checked} disabled={disabled} onCheckedChange={onChange} />
     </label>
   );
 }
@@ -2002,7 +2282,126 @@ function SettingsRow({
 function SettingsSubHeading({ title }: { title: string }) {
   return (
     <div className="border-t border-border-subtle bg-surface-root/40 px-4 py-2">
-      <h3 className="text-xs font-medium uppercase tracking-wide text-text-muted">{title}</h3>
+      <h3 className="text-xs font-medium text-text-secondary">{title}</h3>
     </div>
   );
+}
+
+type UpdaterSnapshot = ReturnType<typeof useAppUpdater>;
+
+function UpdateStatusBadge({ updater }: { updater: UpdaterSnapshot }) {
+  const { t } = useTranslation();
+
+  if (updater.status === "checking") {
+    return (
+      <span className="inline-flex items-center gap-2 text-sm text-text-secondary">
+        <LoaderCircle className="h-4 w-4 animate-spin text-accent-primary" />
+        {t("settings.checkingForUpdates")}
+      </span>
+    );
+  }
+  if (updater.status === "up-to-date") {
+    return (
+      <span className="inline-flex items-center gap-2 text-sm text-status-success">
+        <Check className="h-4 w-4" />
+        {t("settings.upToDate")}
+      </span>
+    );
+  }
+  if (updater.status === "available") {
+    return (
+      <span className="inline-flex flex-col gap-0.5">
+        <span className="inline-flex items-center gap-2 text-sm font-medium text-accent-primary">
+          <Sparkles className="h-4 w-4" />
+          {t("settings.updateAvailableTitle", { version: updater.updateVersion ?? "" })}
+        </span>
+        <span className="text-xs text-text-muted">{t("settings.updateAvailableDescription")}</span>
+      </span>
+    );
+  }
+  if (updater.status === "downloading") {
+    return (
+      <span className="inline-flex items-center gap-2 text-sm text-text-secondary">
+        <LoaderCircle className="h-4 w-4 animate-spin text-accent-primary" />
+        {t("settings.downloadingUpdate")}
+      </span>
+    );
+  }
+  if (updater.status === "installing") {
+    return (
+      <span className="inline-flex items-center gap-2 text-sm text-text-secondary">
+        <LoaderCircle className="h-4 w-4 animate-spin text-accent-primary" />
+        {t("settings.installingUpdate")}
+      </span>
+    );
+  }
+  if (updater.status === "error") {
+    return (
+      <span className="inline-flex flex-col gap-0.5">
+        <span className="inline-flex items-center gap-2 text-sm text-status-danger">
+          <X className="h-4 w-4" />
+          {t("settings.updateCheckFailed")}
+        </span>
+        {updater.error ? (
+          <span className="truncate text-xs text-text-muted" title={updater.error}>
+            {updater.error}
+          </span>
+        ) : null}
+      </span>
+    );
+  }
+  return <span className="text-sm text-text-muted">{t("settings.checkForUpdates")}</span>;
+}
+
+function UpdateProgressBar({ updater }: { updater: UpdaterSnapshot }) {
+  const { t } = useTranslation();
+  const progress = updater.progress;
+  if (!progress) return null;
+
+  const downloaded = progress.downloadedBytes;
+  const total = progress.totalBytes;
+  const percent = total && total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : null;
+
+  const label =
+    total && total > 0
+      ? t("settings.updateProgress", {
+          downloaded: formatBytes(downloaded),
+          total: formatBytes(total),
+        })
+      : t("settings.updateProgressUnknown", { downloaded: formatBytes(downloaded) });
+
+  return (
+    <div className="mt-3 flex flex-col gap-1.5">
+      <div className="flex items-center justify-between text-xs text-text-muted">
+        <span>{label}</span>
+        {percent !== null ? <span className="font-mono tabular-nums">{percent}%</span> : null}
+      </div>
+      <div
+        className="h-1.5 w-full overflow-hidden rounded-full bg-surface-root"
+        role="progressbar"
+        aria-valuenow={percent ?? 0}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        <div
+          className="h-full rounded-full bg-accent-primary transition-[width] duration-ui"
+          style={{ width: `${percent ?? 100}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function formatReleaseDate(isoDate: string): string {
+  try {
+    const date = new Date(isoDate);
+    if (Number.isNaN(date.getTime())) return isoDate;
+    return date.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return isoDate;
+  }
 }

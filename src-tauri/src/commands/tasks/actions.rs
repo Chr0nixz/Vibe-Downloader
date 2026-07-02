@@ -10,12 +10,12 @@ use tauri::{AppHandle, State};
 use crate::{
     db,
     download::checksum::hash_file,
-    events::{emit_queue_changed, emit_task_updated_record},
+    events::{emit_queue_changed, emit_queue_changed_with_ids, emit_task_updated_record},
     models::{
         task::now_iso, ChecksumAlgorithm, HashVerificationState, HashVerificationStatus,
         RecoveryAction, Task, TaskPriority, TaskStatus,
     },
-    platform, AppState,
+    platform, state_machine::TransitionError, AppState,
 };
 
 use super::{
@@ -99,11 +99,37 @@ pub async fn update_task_transfer_options(
     .await?;
     let updated = require_task(&state.pool, &input.id).await?;
     emit_task_updated_record(&app, &state.pool, &updated).await;
-    emit_queue_changed(&app);
+    emit_queue_changed_with_ids(&app, Some(vec![updated.id.clone()]));
     if matches!(updated.status, TaskStatus::Queued) {
         state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
     }
     task_payload(&state.pool, &input.id).await
+}
+
+/// Reassign `queue_position` for the given task ids based on their order in
+/// the input slice. Only `Queued` tasks should be included; the caller (UI)
+/// is responsible for filtering. The full set is rebalanced with a step of
+/// 1000 so future insertions still have room. Emits `task-updated` for each
+/// affected task and a single `queue-changed` event so the frontend refreshes.
+#[tauri::command]
+#[specta::specta]
+pub async fn reorder_queued_tasks(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    task_ids: Vec<String>,
+) -> Result<(), String> {
+    if task_ids.is_empty() {
+        return Ok(());
+    }
+    db::reorder_queued_tasks(&state.pool, &task_ids).await?;
+    for id in &task_ids {
+        if let Ok(Some(record)) = db::get_task_record(&state.pool, id).await {
+            emit_task_updated_record(&app, &state.pool, &record).await;
+        }
+    }
+    emit_queue_changed(&app);
+    state.scheduler.clone().dispatch(app, state.pool.clone()).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -113,6 +139,8 @@ pub async fn pause_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Task, String> {
+    // R-2.3: Serialize against start_task and other user actions on the same task.
+    let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, "pausing task");
     let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
     if task_for_runtime
@@ -121,7 +149,9 @@ pub async fn pause_task(
     {
         if let Some(control) = state.downloads.lock().await.remove(&id) {
             control.cancel_token.cancel();
-            control.handle.abort();
+            if let Some(h) = control.handle.as_ref() {
+                h.abort();
+            }
         }
         if let Some(task) = task_for_runtime.as_ref() {
             state.engine_registry.delete_runtime_task(task, false).await;
@@ -130,7 +160,7 @@ pub async fn pause_task(
     } else if let Some(control) = state.downloads.lock().await.get(&id) {
         control.cancel_token.cancel();
     }
-    crate::state_machine::transition_task(
+    match crate::state_machine::transition_task(
         &app,
         &state.pool,
         &id,
@@ -141,7 +171,13 @@ pub async fn pause_task(
         Some("paused"),
     )
     .await
-    .map_err(String::from)?;
+    {
+        Ok(_) => {}
+        Err(TransitionError::Conflict { .. }) => {
+            return Err("Task state changed concurrently, please refresh.".to_string());
+        }
+        Err(error) => return Err(error.into()),
+    }
     db::update_segments_status_for_task(
         &state.pool,
         &id,
@@ -151,7 +187,7 @@ pub async fn pause_task(
     .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
-    emit_queue_changed(&app);
+    emit_queue_changed_with_ids(&app, Some(vec![id.clone()]));
     state.scheduler.clone().dispatch(app, state.pool.clone()).await;
     task_payload(&state.pool, &id).await
 }
@@ -163,6 +199,8 @@ pub async fn resume_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Task, String> {
+    // R-2.3: Serialize against start_task and other user actions on the same task.
+    let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, "resuming task");
     let task = require_task(&state.pool, &id).await?;
     if matches!(task.status, TaskStatus::Completed) {
@@ -183,6 +221,8 @@ pub async fn retry_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Task, String> {
+    // R-2.3: Serialize against start_task and other user actions on the same task.
+    let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, "retrying task");
     let task = require_task(&state.pool, &id).await?;
     if task.status == TaskStatus::NeedsAttention
@@ -194,7 +234,9 @@ pub async fn retry_task(
     }
     if let Some(control) = state.downloads.lock().await.remove(&id) {
         control.cancel_token.cancel();
-        control.handle.abort();
+        if let Some(h) = control.handle.as_ref() {
+                h.abort();
+            }
     }
 
     db::insert_task_event(&state.pool, &id, "retrying", None).await?;
@@ -220,6 +262,8 @@ pub async fn retry_task_with_mirror(
     id: String,
     mirror_url: String,
 ) -> Result<Task, String> {
+    // R-2.3: Serialize against start_task and other user actions on the same task.
+    let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, mirror_url = %mirror_url, "retrying task with specific mirror");
     let task = require_task(&state.pool, &id).await?;
     if task.protocol != "metalink" {
@@ -227,7 +271,9 @@ pub async fn retry_task_with_mirror(
     }
     if let Some(control) = state.downloads.lock().await.remove(&id) {
         control.cancel_token.cancel();
-        control.handle.abort();
+        if let Some(h) = control.handle.as_ref() {
+                h.abort();
+            }
     }
 
     db::reset_metalink_resource_statuses(&state.pool, &id).await?;
@@ -283,6 +329,8 @@ pub async fn cancel_task(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Task, String> {
+    // R-2.3: Serialize against start_task and other user actions on the same task.
+    let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, "canceling task");
     let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
     if task_for_runtime
@@ -291,7 +339,9 @@ pub async fn cancel_task(
     {
         if let Some(control) = state.downloads.lock().await.remove(&id) {
             control.cancel_token.cancel();
-            control.handle.abort();
+            if let Some(h) = control.handle.as_ref() {
+                h.abort();
+            }
         }
         if let Some(task) = task_for_runtime.as_ref() {
             state.engine_registry.delete_runtime_task(task, false).await;
@@ -300,7 +350,7 @@ pub async fn cancel_task(
     } else if let Some(control) = state.downloads.lock().await.get(&id) {
         control.cancel_token.cancel();
     }
-    crate::state_machine::transition_task(
+    match crate::state_machine::transition_task(
         &app,
         &state.pool,
         &id,
@@ -311,7 +361,13 @@ pub async fn cancel_task(
         Some("failed"),
     )
     .await
-    .map_err(String::from)?;
+    {
+        Ok(_) => {}
+        Err(TransitionError::Conflict { .. }) => {
+            return Err("Task state changed concurrently, please refresh.".to_string());
+        }
+        Err(error) => return Err(error.into()),
+    }
     db::update_task_retry_after(&state.pool, &id, None).await?;
     db::update_segments_status_for_task(
         &state.pool,
@@ -322,7 +378,7 @@ pub async fn cancel_task(
     .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
-    emit_queue_changed(&app);
+    emit_queue_changed_with_ids(&app, Some(vec![id.clone()]));
     state.scheduler.clone().dispatch(app, state.pool.clone()).await;
     task_payload(&state.pool, &id).await
 }
@@ -335,6 +391,8 @@ pub async fn delete_task(
     id: String,
     delete_file: bool,
 ) -> Result<(), String> {
+    // R-2.3: Serialize against start_task and other user actions on the same task.
+    let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, delete_file, "deleting task");
     let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
     if let Some(control) = state.downloads.lock().await.remove(&id) {
@@ -343,7 +401,9 @@ pub async fn delete_task(
             .as_ref()
             .is_none_or(|task| !is_bt_protocol(&task.protocol))
         {
-            control.handle.abort();
+            if let Some(h) = control.handle.as_ref() {
+                h.abort();
+            }
         }
     }
     if let Some(task) = task_for_runtime.as_ref() {
@@ -389,6 +449,10 @@ pub async fn delete_task(
     db::delete_task_record(&state.pool, &id).await?;
     emit_queue_changed(&app);
     state.scheduler.clone().dispatch(app, state.pool.clone()).await;
+    // R-2.5: Evict the lock entry now that the task is deleted and the guard
+    // is about to drop. drop(_guard) first so evict sees Arc strong_count == 1.
+    drop(_guard);
+    state.task_runtime_locks.evict(&id).await;
     Ok(())
 }
 
@@ -413,6 +477,8 @@ pub async fn bulk_delete_tasks(
     // Phase 1: Cancel active downloads and clean up runtime state.
     let mut file_warnings: Vec<String> = Vec::new();
     for id in &ids {
+        // R-2.3: Per-task lock for the duration of this iteration.
+        let _guard = state.task_runtime_locks.lock(id).await;
         let task_for_runtime = db::get_task_record(&state.pool, id).await?;
         if let Some(control) = state.downloads.lock().await.remove(id) {
             control.cancel_token.cancel();
@@ -420,7 +486,9 @@ pub async fn bulk_delete_tasks(
                 .as_ref()
                 .is_none_or(|task| !is_bt_protocol(&task.protocol))
             {
-                control.handle.abort();
+                if let Some(h) = control.handle.as_ref() {
+                h.abort();
+            }
             }
         }
         if let Some(task) = task_for_runtime.as_ref() {
@@ -457,6 +525,9 @@ pub async fn bulk_delete_tasks(
                 }
             }
         }
+        // R-2.5: Evict the lock entry for this deleted task.
+        drop(_guard);
+        state.task_runtime_locks.evict(id).await;
     }
     for warning in &file_warnings {
         tracing::warn!(warning, "file deletion warning during bulk delete");
@@ -518,6 +589,8 @@ pub async fn resolve_task_attention(
     if id.is_empty() {
         return Err("Task id is required.".to_string());
     }
+    // R-2.3: Serialize against start_task and other user actions on the same task.
+    let _guard = state.task_runtime_locks.lock(id).await;
     let task = require_task(&state.pool, id).await?;
     let error_code = task_error_code(&task);
 
@@ -586,7 +659,10 @@ pub async fn resolve_task_attention(
             let task = restart_task_from_beginning(&app, state.inner(), &task).await?;
             task_from_record_with_files(&state.pool, task).await
         }
-        RecoveryAction::OpenFolder | RecoveryAction::CheckUrl | RecoveryAction::FreeDiskSpace => {
+        RecoveryAction::OpenFolder
+        | RecoveryAction::CheckUrl
+        | RecoveryAction::FreeDiskSpace
+        | RecoveryAction::ConfigureFfmpeg => {
             task_from_record_with_files(&state.pool, task).await
         }
     }

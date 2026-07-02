@@ -12,7 +12,8 @@
       "!**/src/generated",
       "!**/src-tauri",
       "!**/node_modules",
-      "!**/browser/extension-core/dist"
+      "!**/browser/extension-core/dist",
+      "!**/.claude"
     ]
   },
   "formatter": {

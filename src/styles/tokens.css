@@ -1,20 +1,56 @@
 :root {
+  /* Surface scale widened so elevation reads: base→raised now ~6% L delta (was ~3.5%).
+     Track is a dedicated token so progress bars aren't invisible against the page. */
   --surface-root: oklch(0.975 0.004 255);
   --surface-base: oklch(0.955 0.006 255);
-  --surface-raised: oklch(0.99 0.003 255);
-  --surface-overlay: oklch(0.99 0.003 255 / 0.92);
+  --surface-raised: oklch(1 0.002 255);
+  --surface-track: oklch(0.88 0.008 255);
+  --surface-overlay: oklch(1 0.002 255 / 0.94);
   --surface-scrim: oklch(0.975 0.004 255 / 0.72);
-  --surface-hover: oklch(0.92 0.006 255);
+  --surface-hover: oklch(0.93 0.007 255);
   --border-subtle: oklch(0.84 0.01 255);
   --text-primary: oklch(0.22 0.012 255);
   --text-secondary: oklch(0.28 0.015 255);
-  --text-muted: oklch(0.3 0.01 255);
+  --text-muted: oklch(0.43 0.012 255);
   --text-on-accent: oklch(0.98 0.004 255);
   --text-on-danger: oklch(0.98 0.004 255);
   --status-success: oklch(0.27 0.14 150);
   --status-warning: oklch(0.3 0.14 75);
   --status-danger: oklch(0.38 0.18 25);
   --shadow-idle-ball: 0 0 8px oklch(0.12 0.01 255 / 0.15);
+
+  /* Layered brand-tinted shadow scale.
+     Each level = 1px inset hairline + accent-tinted glow + neutral drop.
+     Inset hairline gives a crisp edge without a separate border; the accent
+     glow ties the shadow to the active accent theme; the drop provides depth. */
+  --shadow-raised:
+    inset 0 0 0 1px color-mix(in oklch, var(--accent-primary) 8%, transparent), 0 1px 2px oklch(0.15 0.01 255 / 0.08),
+    0 4px 10px -2px oklch(0.15 0.01 255 / 0.06);
+  --shadow-popover:
+    inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 65%, transparent),
+    0 0 0 1px color-mix(in oklch, var(--accent-primary) 4%, transparent),
+    0 4px 8px -2px oklch(0.15 0.01 255 / 0.12),
+    0 12px 24px -6px oklch(0.15 0.01 255 / 0.1);
+  --shadow-overlay:
+    inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 70%, transparent),
+    0 0 0 1px color-mix(in oklch, var(--accent-primary) 6%, transparent),
+    0 8px 16px -4px oklch(0.15 0.01 255 / 0.14),
+    0 24px 48px -12px oklch(0.15 0.01 255 / 0.12);
+  --shadow-toast:
+    inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent),
+    0 0 12px -2px color-mix(in oklch, var(--accent-primary) 18%, transparent),
+    0 8px 24px -6px oklch(0.15 0.01 255 / 0.16);
+
+  /* Three-hue accent gradient — energy (cool) → primary → peak (warm).
+     Vertical orientation for fills that grow upward (progress bars, docked bar);
+     the same three hues the titlebar 1px line already uses, now deployed wider. */
+  --accent-gradient-vertical: linear-gradient(
+    to top,
+    var(--accent-energy) 0%,
+    var(--accent-primary) 55%,
+    var(--accent-peak) 100%
+  );
+
   --titlebar-height: 2.25rem;
   --shell-nav-width-compact: 3.75rem;
   --shell-nav-width: 13rem;
@@ -97,12 +133,15 @@
 /* ── Dark mode ── */
 
 .dark {
+  /* Dark surface scale widened: base→raised now ~7% L delta (was ~5.5%).
+     Track token keeps progress bars visible against the dark root. */
   --surface-root: oklch(0.145 0.006 255);
   --surface-base: oklch(0.18 0.008 255);
-  --surface-raised: oklch(0.235 0.01 255);
-  --surface-overlay: oklch(0.245 0.012 255 / 0.78);
+  --surface-raised: oklch(0.25 0.011 255);
+  --surface-track: oklch(0.1 0.008 255);
+  --surface-overlay: oklch(0.255 0.013 255 / 0.82);
   --surface-scrim: oklch(0.145 0.006 255 / 0.72);
-  --surface-hover: oklch(0.28 0.01 255);
+  --surface-hover: oklch(0.3 0.012 255);
   --border-subtle: oklch(0.33 0.012 255);
   --text-primary: oklch(0.93 0.006 255);
   --text-secondary: oklch(0.84 0.008 255);
@@ -112,6 +151,24 @@
   --status-success: oklch(0.8 0.14 150);
   --status-warning: oklch(0.88 0.12 75);
   --status-danger: oklch(0.8 0.16 25);
+
+  /* Dark layered shadows: deeper drop, stronger accent glow (calm, not neon). */
+  --shadow-raised:
+    inset 0 0 0 1px color-mix(in oklch, var(--accent-primary) 14%, transparent), 0 1px 2px oklch(0 0 0 / 0.4),
+    0 4px 12px -2px oklch(0 0 0 / 0.45);
+  --shadow-popover:
+    inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent),
+    0 0 0 1px color-mix(in oklch, var(--accent-primary) 8%, transparent),
+    0 4px 10px -2px oklch(0 0 0 / 0.55),
+    0 16px 32px -8px oklch(0 0 0 / 0.5);
+  --shadow-overlay:
+    inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 65%, transparent),
+    0 0 0 1px color-mix(in oklch, var(--accent-primary) 10%, transparent),
+    0 8px 20px -4px oklch(0 0 0 / 0.6),
+    0 32px 64px -16px oklch(0 0 0 / 0.55);
+  --shadow-toast:
+    inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 55%, transparent),
+    0 0 14px -2px color-mix(in oklch, var(--accent-primary) 28%, transparent), 0 10px 28px -6px oklch(0 0 0 / 0.65);
 
   /* Semantic borders — dark mode */
   --border-divider: oklch(0.33 0.012 255 / 0.7);

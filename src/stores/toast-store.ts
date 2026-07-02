@@ -2,6 +2,11 @@ import { create } from "zustand";
 
 export type ToastTone = "success" | "error" | "info";
 
+/** Default auto-dismiss window for informational toasts (ms). */
+export const TOAST_TIMEOUT_MS = 4800;
+/** Extended window for undo toasts so the Undo action stays reachable (ms). */
+export const UNDO_TOAST_TIMEOUT_MS = 7000;
+
 export interface ToastAction {
   label: string;
   onClick: () => void;
@@ -16,6 +21,10 @@ export interface AppToast {
   /** Optional business key for deduplication. When set, addToast will update
    * an existing toast with the same key instead of creating a new one. */
   key?: string;
+  /** Optional per-toast duration in ms. When omitted, the default
+   * `TOAST_TIMEOUT_MS` is used. Undo toasts should set this so the Undo
+   * action stays reachable. */
+  durationMs?: number;
 }
 
 interface ToastStore {

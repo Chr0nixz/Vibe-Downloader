@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import type { ReactElement, ReactNode } from "react";
+import { cloneElement, isValidElement, useCallback, useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import type { ClassificationMatchKind, ClassificationRule, ClassificationRuleInput } from "@/generated/bindings";
 import { localizedErrorMessage } from "@/lib/errors";
 import {
@@ -326,13 +328,7 @@ function RuleEditForm({
         />
       </Field>
       <Field label={t("settings.ruleEnabled")}>
-        <input
-          type="checkbox"
-          checked={enabled}
-          disabled={disabled}
-          onChange={(e) => setEnabled(e.target.checked)}
-          className="h-5 w-5 accent-accent-primary"
-        />
+        <Switch checked={enabled} disabled={disabled} onCheckedChange={setEnabled} />
       </Field>
       <div className="flex justify-end gap-2">
         <button
@@ -356,11 +352,16 @@ function RuleEditForm({
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  const fieldId = useId();
   return (
     <div className="grid gap-1 sm:grid-cols-[minmax(8rem,12rem)_minmax(0,1fr)] sm:items-center">
-      <label className="text-xs text-text-secondary">{label}</label>
-      <div>{children}</div>
+      <label htmlFor={fieldId} className="text-xs text-text-secondary">
+        {label}
+      </label>
+      <div>
+        {isValidElement(children) ? cloneElement(children as ReactElement<{ id?: string }>, { id: fieldId }) : children}
+      </div>
     </div>
   );
 }

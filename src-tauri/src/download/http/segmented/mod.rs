@@ -27,7 +27,9 @@ use super::{error::format_http_status, request::send_get_with_retry, HTTP_CHUNK_
 use crate::{
     db,
     download::{file_ops::{finalize_download_file, persist_completed_path}, GlobalSpeedLimiter},
-    events::{emit_queue_changed, emit_task_updated_record, TaskProgressEmitGate},
+    events::{
+        emit_queue_changed_with_ids, emit_task_updated_record, TaskProgressEmitGate,
+    },
     models::{
         AppErrorPayload, RequestDiagnosticRecord, SegmentStatus, TaskRecord,
         TaskSegmentRecord, TaskStatus,
@@ -164,6 +166,7 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
         &pool,
         &task.id,
         TaskStatus::Downloading,
+        None,
         0,
         1,
         Some("Downloading"),
@@ -361,6 +364,6 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
         ),
         true,
     );
-    emit_queue_changed(&app);
+    emit_queue_changed_with_ids(&app, Some(vec![task.id.clone()]));
     Ok(())
 }

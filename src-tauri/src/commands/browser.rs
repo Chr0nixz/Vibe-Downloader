@@ -44,7 +44,7 @@ const DEFAULT_BROWSER_EXTENSIONS: &[&str] = &[
     "zip", "7z", "rar", "exe", "msi", "dmg", "pkg", "iso", "tar", "gz", "bz2", "xz", "pdf", "mp4",
     "mkv", "mp3", "flac", "m3u8", "meta4", "metalink",
 ];
-const FORWARDED_HEADER_ALLOWLIST: &[&str] = &[
+pub const FORWARDED_HEADER_ALLOWLIST: &[&str] = &[
     "cookie",
     "user-agent",
     "referer",
@@ -225,11 +225,14 @@ pub async fn create_browser_handoff_task_with_state(
         &state.engine_registry,
         capture_settings.allow_intranet_handoff,
     )
+    .await
     .map(|url| CreateTaskInput {
         url,
         save_dir: None,
         file_name: sanitize_suggested_file_name(input.suggested_file_name.as_deref()),
         expected_hash_sha256: None,
+        expected_hash: None,
+        expected_hash_algorithm: None,
         task_speed_limit_bps: None,
         priority: None,
         category_key: None,
@@ -241,6 +244,8 @@ pub async fn create_browser_handoff_task_with_state(
         private_key_data: None,
         private_key_passphrase: None,
         selected_hls_variant_uri: None,
+        selected_hls_audio_track_uris: None,
+        selected_hls_subtitle_track_uris: None,
     });
 
     let create_input = match task_result {
@@ -322,8 +327,90 @@ pub async fn create_browser_handoff_task_with_state(
     }
 }
 
+/// S-2.1: handoff 文件最大 1 MiB（审计建议值）。native host 写入的 JSON 载荷
+/// 远小于此值，1 MiB 足以容纳任何合法 handoff，同时防止大文件内存压力。
+const HANDOFF_MAX_BYTES: u64 = 1024 * 1024;
+
+/// S-2.1: handoff 文件名最大长度（与 native host `safe_file_stem` 输出一致）。
+const HANDOFF_FILE_NAME_MAX_LEN: usize = 128;
+
+/// S-2.1: 解析 handoff 目录。优先读取与 native host 一致的环境变量
+/// `VIBE_DOWNLOADER_HANDOFF_DIR`，缺省回退到 `temp_dir/vibe-downloader-handoff`。
+/// 测试通过设置该环境变量指向临时目录隔离。
+fn resolve_handoff_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("VIBE_DOWNLOADER_HANDOFF_DIR") {
+        return PathBuf::from(dir);
+    }
+    std::env::temp_dir().join("vibe-downloader-handoff")
+}
+
+/// S-2.1: 校验 handoff 文件路径必须位于 `handoff_dir` 内、文件名符合
+/// `safe_file_stem` 规则（字母数字 + `-` + `_`，非空，`.json` 扩展名）、
+/// 大小不超过 `HANDOFF_MAX_BYTES`。
+///
+/// 返回 canonicalize 后的路径，供调用方在删除前再次校验（TOCTOU 防护）。
+pub fn validate_handoff_file_path(path: &Path) -> Result<PathBuf, String> {
+    let handoff_dir = resolve_handoff_dir();
+    let handoff_dir_canon = handoff_dir
+        .canonicalize()
+        .map_err(|e| format!("handoff dir canonicalize failed: {e}"))?;
+
+    let path_canon = path
+        .canonicalize()
+        .map_err(|e| format!("handoff file canonicalize failed: {e}"))?;
+
+    if !path_canon.starts_with(&handoff_dir_canon) {
+        return Err(format!(
+            "handoff file path must be inside {}, got {}",
+            handoff_dir_canon.display(),
+            path_canon.display()
+        ));
+    }
+
+    let file_name = path_canon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "handoff file name is not valid UTF-8".to_string())?;
+    if !file_name.ends_with(".json") {
+        return Err(format!(
+            "handoff file name must end with '.json', got '{}'",
+            file_name
+        ));
+    }
+    let stem = &file_name[..file_name.len() - ".json".len()];
+    if stem.is_empty() || stem.len() > HANDOFF_FILE_NAME_MAX_LEN {
+        return Err(format!(
+            "handoff file name stem is empty or exceeds {} chars, got '{}'",
+            HANDOFF_FILE_NAME_MAX_LEN, stem
+        ));
+    }
+    // 与 native host `safe_file_stem` 一致：仅允许字母数字 + `-` + `_`。
+    if !stem
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(format!(
+            "handoff file name stem contains invalid characters, got '{}'",
+            stem
+        ));
+    }
+
+    let metadata = fs::metadata(&path_canon)
+        .map_err(|e| format!("handoff file metadata failed: {e}"))?;
+    let size = metadata.len();
+    if size > HANDOFF_MAX_BYTES {
+        return Err(format!(
+            "handoff file size {} bytes exceeds max {} bytes",
+            size, HANDOFF_MAX_BYTES
+        ));
+    }
+
+    Ok(path_canon)
+}
+
 pub fn read_handoff_file(path: &Path) -> Result<BrowserHandoffInput, String> {
-    let raw = fs::read_to_string(path)
+    let canon = validate_handoff_file_path(path)?;
+    let raw = fs::read_to_string(&canon)
         .map_err(|e| format!("Could not read browser handoff file: {e}"))?;
     serde_json::from_str(&raw).map_err(|e| format!("Invalid browser handoff payload: {e}"))
 }
@@ -388,6 +475,35 @@ pub fn enforce_browser_capture_settings_policy(
     // No more environment variable gating — experimental capture is controlled
     // by the `experimental_capture_enabled` field in BrowserCaptureSettings.
     settings
+}
+
+/// S-1.1: WS 浏览器实时桥不允许通过 `updateSettings` 修改的敏感字段。
+///
+/// 这些字段影响浏览器捕获的安全边界（Cookie/header 转发、内网 handoff、
+/// 实验性捕获），必须由用户在主窗口 UI 中显式操作（通过 Tauri 命令），
+/// 而不能由持有 WS bootstrap token 的本地进程直接修改。
+///
+/// 字段名为 `BrowserCaptureSettingsInput` 的 JSON (camelCase) 序列化名，
+/// 与浏览器扩展发送的 payload key 一致。
+pub const SENSITIVE_BROWSER_SETTINGS: &[&str] = &[
+    "forwardHeaders",          // Cookie/header 转发开关
+    "forwardHeadersMode",      // 转发模式（enabled/disabled）
+    "experimentalCaptureEnabled", // 实验性捕获
+    "allowIntranetHandoff",    // 内网 handoff（最高风险）
+];
+
+/// S-1.1: 检查 `updateSettings` 载荷是否包含敏感字段。
+/// 返回冲突字段列表（空表示无冲突）。调用方应在反序列化为
+/// `BrowserCaptureSettingsInput` 之前先调用此函数，以便在载荷中
+/// 出现敏感字段时直接拒绝，不进入后续 merge/upsert 流程。
+pub fn is_sensitive_settings_update(
+    payload: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    payload
+        .keys()
+        .filter(|k| SENSITIVE_BROWSER_SETTINGS.contains(&k.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn parse_browser_capture_settings(raw: &str) -> BrowserCaptureSettings {
@@ -602,7 +718,7 @@ async fn integration_status(
     })
 }
 
-fn validate_handoff(
+async fn validate_handoff(
     input: &BrowserHandoffInput,
     registry: &EngineRegistry,
     allow_intranet: bool,
@@ -626,6 +742,30 @@ fn validate_handoff(
                 .to_string(),
         );
     }
+    // A-2: DNS rebinding defense — if the host is a hostname (not a literal
+    // IP), resolve it and reject if any resolved IP is private/reserved.
+    // The literal-IP check above only catches IP addresses embedded in the
+    // URL; a public hostname that rebinds to 127.0.0.1 / 169.254.169.254
+    // would bypass the guard without this pre-flight lookup.
+    if !allow_intranet {
+        if let Some(host) = parsed.host_str() {
+            let host = host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(host);
+            // Only do DNS lookup for non-IP hostnames (literal IPs are
+            // already handled by is_private_or_reserved_url above).
+            if host.parse::<std::net::IpAddr>().is_err()
+                && crate::download::ssrf::is_hostname_private_via_dns(host).await
+            {
+                return Err(
+                    "Browser handoff URL resolves to a private or reserved IP address. \
+                     Enable \"Allow intranet handoff\" in settings to override."
+                        .to_string(),
+                );
+            }
+        }
+    }
     registry.engine_for_uri(parsed.as_str())?;
     if parsed.username() != "" || parsed.password().is_some() {
         return Err("Browser handoff URLs must not contain embedded credentials.".to_string());
@@ -634,34 +774,11 @@ fn validate_handoff(
 }
 
 pub fn is_private_or_reserved_url(url: &Url) -> bool {
-    let Some(host) = url.host_str() else {
-        return true;
-    };
-    if host == "localhost" {
-        return true;
-    }
-    // url::host_str() serializes IPv6 hosts inside brackets (e.g. "[::1]").
-    // Strip them so parse::<IpAddr>() succeeds and loopback/private IPv6
-    // addresses are caught by the SSRF guard.
-    let host = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return is_private_ip(&ip);
-    }
-    false
+    crate::download::ssrf::is_private_or_reserved_url(url)
 }
 
 pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback() || v6.is_unspecified() || v6.is_multicast()
-        }
-    }
+    crate::download::ssrf::is_private_ip(ip)
 }
 
 fn sanitize_forwarded_headers(headers: Option<&[BrowserForwardedHeader]>) -> Vec<(String, String)> {

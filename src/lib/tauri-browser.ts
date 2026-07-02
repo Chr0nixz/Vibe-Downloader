@@ -16,8 +16,10 @@ import type {
   ListTasksCursorInput,
   ListTasksCursorResult,
   ListTasksInput,
+  ProbePhasePayload,
   ProbeTaskInput,
   ProbeTaskPayload,
+  QueueChangedPayload,
   RecoveryAction,
   RequestDiagnostic,
   ResolveTaskAttentionInput,
@@ -84,7 +86,7 @@ let settings: AppSettings = loadStoredSettings() ?? {
   floatingWindowEnabled: false,
   clipboardMonitorEnabled: true,
   accentColor: "blue",
-  titlebarGradientEnabled: true,
+  titlebarGradientEnabled: false,
   proxyMode: "off",
   proxyUrl: "",
   proxyNoProxy: "",
@@ -101,12 +103,15 @@ let settings: AppSettings = loadStoredSettings() ?? {
   completionCountdownSeconds: 30,
   completionRunCommand: "",
   deleteToTrash: true,
+  autoUpdateCheckEnabled: true,
+  ffmpegPath: null,
+  btUploadLimitBps: null,
 };
 const taskProxySettings = new Map<string, TaskProxySettings>();
 let progressTimer: ReturnType<typeof setInterval> | undefined;
 const progressListeners = new Set<BrowserListener>();
 const taskUpdatedListeners = new Set<TaskUpdatedListener>();
-const queueListeners = new Set<() => void>();
+const queueListeners = new Set<(payload: QueueChangedPayload | null) => void>();
 const settingsListeners = new Set<() => void>();
 const browserIntegrationListeners = new Set<() => void>();
 const completionActionListeners = new Set<(payload: CompletionActionRequestedPayload) => void>();
@@ -255,7 +260,7 @@ function loadStoredSettings(): AppSettings | null {
           parsed.accentColor === "amber"
             ? parsed.accentColor
             : "blue",
-        titlebarGradientEnabled: Boolean(parsed.titlebarGradientEnabled ?? true),
+        titlebarGradientEnabled: Boolean(parsed.titlebarGradientEnabled ?? false),
         proxyMode: parsed.proxyMode === "system" || parsed.proxyMode === "custom" ? parsed.proxyMode : "off",
         proxyUrl: typeof parsed.proxyUrl === "string" ? parsed.proxyUrl : "",
         proxyNoProxy: typeof parsed.proxyNoProxy === "string" ? parsed.proxyNoProxy : "",
@@ -357,8 +362,8 @@ function persistBrowserCaptureSettings() {
   localStorage.setItem(BROWSER_CAPTURE_SETTINGS_KEY, JSON.stringify(browserCaptureSettings));
 }
 
-function emitQueueChanged(): void {
-  for (const handler of queueListeners) handler();
+function emitQueueChanged(payload: QueueChangedPayload | null = null): void {
+  for (const handler of queueListeners) handler(payload);
 }
 
 function emitSettingsChanged(): void {
@@ -753,6 +758,11 @@ export async function getTask(id: string): Promise<Task | null> {
   return tasks.find((task) => task.id === id) ?? null;
 }
 
+export async function listTasksByIds(ids: string[]): Promise<Task[]> {
+  const idSet = new Set(ids);
+  return (await listTasks()).filter((task) => idSet.has(task.id));
+}
+
 export async function getTaskStats(): Promise<TaskStatsSnapshot> {
   const activeTasks = tasks.filter((task) => task.status === "downloading" || task.status === "retrying");
   const fallback = tasks.find((task) =>
@@ -1142,6 +1152,9 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
     ),
     completionRunCommand: input.completionRunCommand ?? settings.completionRunCommand,
     deleteToTrash: input.deleteToTrash ?? settings.deleteToTrash,
+    autoUpdateCheckEnabled: input.autoUpdateCheckEnabled ?? settings.autoUpdateCheckEnabled,
+    ffmpegPath: input.ffmpegPath,
+    btUploadLimitBps: input.btUploadLimitBps,
   };
   persistSettings();
   emitSettingsChanged();
@@ -1280,6 +1293,7 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
           password: null,
           privateKeyData: null,
           privateKeyPassphrase: null,
+          requestId: null,
         });
   const duplicate = duplicateTaskForProbe(normalizedUrl, probe);
   if (duplicate && !input.allowDuplicate) {
@@ -1407,6 +1421,7 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
           password: null,
           privateKeyData: null,
           privateKeyPassphrase: null,
+          requestId: null,
         });
     const existingTask = !duplicate && probe ? duplicateTaskForProbe(normalized, probe) : null;
     const isDuplicate = duplicate || Boolean(existingTask);
@@ -1417,6 +1432,8 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
             saveDir: input.saveDir,
             fileName: probe?.fileName ?? null,
             expectedHashSha256: null,
+            expectedHash: null,
+            expectedHashAlgorithm: null,
             taskSpeedLimitBps: null,
             priority: null,
             categoryKey: null,
@@ -1428,6 +1445,8 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
             privateKeyData: null,
             privateKeyPassphrase: null,
             selectedHlsVariantUri: null,
+            selectedHlsAudioTrackUris: null,
+            selectedHlsSubtitleTrackUris: null,
           })
         : null;
     items.push({
@@ -1500,6 +1519,8 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       etag: null,
       lastModified: null,
       hlsVariants: [],
+      hlsAudioTracks: [],
+      hlsSubtitleTracks: [],
       probedAt: nowIso(),
     };
   }
@@ -1539,6 +1560,8 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       etag: null,
       lastModified: null,
       hlsVariants: [],
+      hlsAudioTracks: [],
+      hlsSubtitleTracks: [],
       probedAt: nowIso(),
     };
   }
@@ -1577,6 +1600,8 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
           selected: true,
         },
       ],
+      hlsAudioTracks: [],
+      hlsSubtitleTracks: [],
       probedAt: nowIso(),
     };
   }
@@ -1607,6 +1632,8 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       etag: null,
       lastModified: null,
       hlsVariants: [],
+      hlsAudioTracks: [],
+      hlsSubtitleTracks: [],
       probedAt: nowIso(),
     };
   }
@@ -1637,6 +1664,8 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
     etag: isSftp ? null : '"mock-etag"',
     lastModified: nowIso(),
     hlsVariants: [],
+    hlsAudioTracks: [],
+    hlsSubtitleTracks: [],
     probedAt: nowIso(),
   };
 }
@@ -1768,7 +1797,7 @@ export function onTaskUpdated(handler: (task: Task) => void): Promise<() => void
   });
 }
 
-export function onQueueChanged(handler: () => void): Promise<() => void> {
+export function onQueueChanged(handler: (payload: QueueChangedPayload | null) => void): Promise<() => void> {
   queueListeners.add(handler);
   return Promise.resolve(() => {
     queueListeners.delete(handler);
@@ -1802,6 +1831,11 @@ export function onCompletionActionRequested(
   return Promise.resolve(() => {
     completionActionListeners.delete(handler);
   });
+}
+
+/** UX-6: No-op mock for browser preview — probe-phase events only exist in Tauri. */
+export function onProbePhase(_handler: (payload: ProbePhasePayload) => void): Promise<() => void> {
+  return Promise.resolve(() => {});
 }
 
 /**

@@ -22,20 +22,21 @@ use uuid::Uuid;
 use super::{
     engine::EngineFuture,
     file_ops::{finalize_download_file, persist_completed_path},
-    http::build_client,
-    DownloadContext, DownloadEngine, DownloadError, ProbeOutput, ProbeRequest,
+    http::HttpEngine,
+    url_classify::is_dash_url,
+    DownloadContext, DownloadEngine, DownloadError, IdleReadOutcome, ProbeOutput, ProbeRequest,
+    READ_IDLE_TIMEOUT, read_with_idle_timeout,
 };
 use crate::download::error::engine_error;
 use crate::download::retry::RetryPolicy;
 use crate::{
     db,
-    events::{emit_task_updated_record, TaskProgressEmitGate},
+    events::{emit_task_updated_record, DbWriteGate, TaskProgressEmitGate},
     logging::sanitize_url,
     models::{
         AppErrorPayload, EngineCapabilities, ProbedFile, SegmentStatus,
         TaskKind, TaskProgressPayload, TaskRecord, TaskStatus,
     },
-    proxy::SharedProxyConfig,
 };
 
 const PROTOCOL_DASH: &str = "dash";
@@ -46,27 +47,38 @@ const TRACK_KIND_AUDIO: &str = "audio";
 
 #[derive(Debug, Clone)]
 pub struct DashEngine {
-    proxy_config: SharedProxyConfig,
+    /// E-4: 共享 `HttpEngine` 的客户端缓存，避免每次 probe/download 新建 Client。
+    http: Arc<HttpEngine>,
 }
 
 impl DashEngine {
-    pub fn new(proxy_config: SharedProxyConfig) -> Self {
-        Self { proxy_config }
+    pub fn new(http: Arc<HttpEngine>) -> Self {
+        Self { http }
     }
 
     async fn client(&self) -> Result<Client, String> {
-        let config = self.proxy_config.read().await;
-        build_client(&config)
+        self.http.client().await
     }
 
     async fn probe_dash(
         &self,
         url: &str,
         request_headers: &[(String, String)],
+        pool: Option<&SqlitePool>,
+        app: &Option<tauri::AppHandle>,
+        request_id: &Option<String>,
     ) -> Result<DashManifestSummary, String> {
-        ensure_ffmpeg_available()?;
+        crate::download::engine::emit_probe_phase(app, request_id, "checking_ffmpeg", Some("dash"));
+        super::ffmpeg::ensure_ffmpeg_available(
+            pool,
+            "dash_ffmpeg_missing",
+            "ffmpeg was not found. Install ffmpeg, configure a path in Settings → External tools, or set VIBE_FFMPEG_PATH before creating MPEG-DASH tasks.",
+        )
+        .await?;
         let client = self.client().await?;
+        crate::download::engine::emit_probe_phase(app, request_id, "fetching_manifest", Some("dash"));
         let body = fetch_mpd_text(&client, url, request_headers).await?;
+        crate::download::engine::emit_probe_phase(app, request_id, "parsing_manifest", Some("dash"));
         let parsed = parse_dash_manifest(url, &body)?;
         let (_video, _audio) = select_tracks(&parsed)?;
         Ok(DashManifestSummary {
@@ -80,8 +92,19 @@ impl DownloadEngine for DashEngine {
         PROTOCOL_DASH
     }
 
-    fn supports_scheme(&self, scheme: &str) -> bool {
-        matches!(scheme, "http" | "https" | "file")
+    /// R-3: DASH 仅靠 `matches_url`（`.mpd` 后缀）路由，不参与 scheme 兜底，
+    /// 避免普通 https URL 被误路由到 DASH。
+    fn supports_scheme(&self, _scheme: &str) -> bool {
+        false
+    }
+
+    /// R-3: `.mpd` 路径路由到 DASH 引擎。优先级 70。
+    fn matches_url(&self, url: &reqwest::Url) -> bool {
+        is_dash_url(url)
+    }
+
+    fn priority(&self) -> i32 {
+        70
     }
 
     fn probe<'a>(
@@ -89,8 +112,15 @@ impl DownloadEngine for DashEngine {
         request: ProbeRequest,
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
+            let pool = request.pool.as_ref();
             let summary = self
-                .probe_dash(&request.uri, &request.request_headers)
+                .probe_dash(
+                    &request.uri,
+                    &request.request_headers,
+                    pool,
+                    &request.app,
+                    &request.request_id,
+                )
                 .await
                 .map_err(DownloadError::Other)?;
             let source_key = reqwest::Url::parse(&request.uri)
@@ -124,6 +154,8 @@ impl DownloadEngine for DashEngine {
                 last_modified: None,
                 content_type: Some(DASH_CONTENT_TYPE.to_string()),
                 hls_variants: Vec::new(),
+                hls_audio_tracks: Vec::new(),
+                hls_subtitle_tracks: Vec::new(),
                 metalink: None,
             })
         })
@@ -134,7 +166,7 @@ impl DownloadEngine for DashEngine {
         context: DownloadContext,
     ) -> EngineFuture<'a, Result<(), DownloadError>> {
         Box::pin(async move {
-            run_dash_download(context)
+            run_dash_download(self.clone(), context)
                 .await
                 .map_err(DownloadError::Other)
         })
@@ -547,6 +579,14 @@ fn build_segment_plans(
     track_kind: &str,
     rep: &ParsedRepresentation,
 ) -> Result<Vec<DashSegmentPlan>, String> {
+    // E-5b: Parse the manifest base URL once. The previous `resolve_url`
+    // helper re-parsed `manifest_url` on every call (up to 5 per
+    // representation: init + N segments for Template/List, or the BaseURL
+    // for SegmentBase). With thousands of segments this dominated parse
+    // cost; we now reuse the parsed `Url` and call `.join()` per segment.
+    let parsed_base = reqwest::Url::parse(manifest_url).map_err(|e| {
+        format!("Could not parse DASH manifest URL '{manifest_url}': {e}")
+    })?;
     match &rep.segment_source {
         SegmentSource::Template {
             media_template,
@@ -573,7 +613,7 @@ fn build_segment_plans(
             let mut plans = Vec::new();
             // Optional initialization segment.
             if let Some(init_rel) = initialization {
-                let init_uri = resolve_url(manifest_url, init_rel)?;
+                let init_uri = resolve_url_with_base(&parsed_base, init_rel)?;
                 let init_local = staging_dir.join(format!("init_{track_kind}.mp4"));
                 plans.push(DashSegmentPlan {
                     id: Uuid::new_v4().to_string(),
@@ -590,7 +630,7 @@ fn build_segment_plans(
             for i in 0..*segment_count {
                 let number = start_number + i;
                 let media_url = media_template.replace("$Number$", &number.to_string());
-                let resolved = resolve_url(manifest_url, &media_url)?;
+                let resolved = resolve_url_with_base(&parsed_base, &media_url)?;
                 let local_path = staging_dir.join(format!("seg_{track_kind}_{i}.m4s"));
                 plans.push(DashSegmentPlan {
                     id: Uuid::new_v4().to_string(),
@@ -612,7 +652,7 @@ fn build_segment_plans(
         } => {
             let mut plans = Vec::new();
             if let Some(init_rel) = initialization {
-                let init_uri = resolve_url(manifest_url, init_rel)?;
+                let init_uri = resolve_url_with_base(&parsed_base, init_rel)?;
                 let init_local = staging_dir.join(format!("init_{track_kind}.mp4"));
                 plans.push(DashSegmentPlan {
                     id: Uuid::new_v4().to_string(),
@@ -627,7 +667,7 @@ fn build_segment_plans(
                 });
             }
             for (i, seg) in segments.iter().enumerate() {
-                let resolved = resolve_url(manifest_url, &seg.uri)?;
+                let resolved = resolve_url_with_base(&parsed_base, &seg.uri)?;
                 let local_path = staging_dir.join(format!("seg_{track_kind}_{i}.m4s"));
                 plans.push(DashSegmentPlan {
                     id: Uuid::new_v4().to_string(),
@@ -648,7 +688,7 @@ fn build_segment_plans(
             initialization_range,
             media_range,
         } => {
-            let resolved_base = resolve_url(manifest_url, base_url)?;
+            let resolved_base = resolve_url_with_base(&parsed_base, base_url)?;
             let mut plans = Vec::new();
             if let Some(init_range) = initialization_range {
                 let init_local = staging_dir.join(format!("init_{track_kind}.mp4"));
@@ -704,7 +744,7 @@ struct DashSegmentDownloadResult {
     result: Result<(), String>,
 }
 
-async fn run_dash_download(context: DownloadContext) -> Result<(), String> {
+async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Result<(), String> {
     let DownloadContext {
         app,
         pool,
@@ -713,17 +753,16 @@ async fn run_dash_download(context: DownloadContext) -> Result<(), String> {
         speed_limiter,
         connection_limit,
         request_headers,
-        proxy_config,
+        proxy_config: _proxy_config,
         ..
     } = context;
 
-    let ffmpeg = ffmpeg_path().ok_or_else(|| {
-        engine_error(
-            "dash_ffmpeg_missing",
-            "ffmpeg was not found. Install ffmpeg or set VIBE_FFMPEG_PATH before creating MPEG-DASH tasks.",
-            true,
-        )
-    })?;
+    let ffmpeg = super::ffmpeg::ensure_ffmpeg_available(
+        Some(&pool),
+        "dash_ffmpeg_missing",
+        "ffmpeg was not found. Install ffmpeg, configure a path in Settings → External tools, or set VIBE_FFMPEG_PATH before creating MPEG-DASH tasks.",
+    )
+    .await?;
     let manifest_url = task.final_url.clone().unwrap_or_else(|| task.url.clone());
     let temp_path = task
         .temp_path
@@ -752,7 +791,7 @@ async fn run_dash_download(context: DownloadContext) -> Result<(), String> {
         })?;
     }
 
-    let client = build_client(&proxy_config)?;
+    let client = engine.client().await?;
     let mpd_text = fetch_mpd_text(&client, &manifest_url, &request_headers).await?;
     let parsed = parse_dash_manifest(&manifest_url, &mpd_text)?;
     let (video_rep, audio_rep) = select_tracks(&parsed)?;
@@ -807,26 +846,24 @@ async fn run_dash_download(context: DownloadContext) -> Result<(), String> {
     db::insert_task_event(&pool, &task.id, "dash_manifest_resolved", Some(&sanitize_url(&manifest_url)))
         .await?;
 
-    // Persist segment rows (upsert preserves completed segments for resume).
-    for plan in &all_plans {
-        db::upsert_dash_segment(
-            &pool,
-            db::DashSegmentUpsert {
-                id: &plan.id,
-                task_id: &plan.task_id,
-                track_kind: &plan.track_kind,
-                segment_index: plan.segment_index,
-                uri: &plan.uri,
-                local_path: &plan.local_path,
-                byte_range_start: plan.byte_range.as_ref().map(|r| r.start),
-                byte_range_length: plan.byte_range.as_ref().map(|r| r.length),
-                init_segment_uri: plan.init_segment_uri.as_deref(),
-                init_segment_local_path: plan.init_segment_local_path.as_deref(),
-                duration_ms: 0,
-            },
-        )
-        .await?;
-    }
+    // E-3: Persist all segment rows in a single transaction.
+    let upserts: Vec<db::DashSegmentUpsert<'_>> = all_plans
+        .iter()
+        .map(|plan| db::DashSegmentUpsert {
+            id: &plan.id,
+            task_id: &plan.task_id,
+            track_kind: &plan.track_kind,
+            segment_index: plan.segment_index,
+            uri: &plan.uri,
+            local_path: &plan.local_path,
+            byte_range_start: plan.byte_range.as_ref().map(|r| r.start),
+            byte_range_length: plan.byte_range.as_ref().map(|r| r.length),
+            init_segment_uri: plan.init_segment_uri.as_deref(),
+            init_segment_local_path: plan.init_segment_local_path.as_deref(),
+            duration_ms: 0,
+        })
+        .collect();
+    db::bulk_upsert_dash_segments(&pool, &upserts).await?;
 
     // Resume: skip completed segments.
     let seen = db::existing_dash_segment_keys(&pool, &task.id).await?;
@@ -837,6 +874,11 @@ async fn run_dash_download(context: DownloadContext) -> Result<(), String> {
         .collect();
 
     let mut progress_gate = TaskProgressEmitGate::default();
+    // E-4: Cache first segment ID once and throttle per-segment DB writes.
+    let first_segment_id: Option<String> = db::get_first_segment_record(&pool, &task.id)
+        .await?
+        .map(|segment| segment.id);
+    let mut db_write_gate = DbWriteGate::default();
 
     if cancel_token.is_cancelled() {
         pause_dash_task(&app, &pool, &task, downloaded_total).await?;
@@ -857,6 +899,8 @@ async fn run_dash_download(context: DownloadContext) -> Result<(), String> {
             downloaded_total,
             pending_plans,
             &mut progress_gate,
+            first_segment_id.as_deref(),
+            &mut db_write_gate,
         )
         .await?;
         downloaded_total = downloaded;
@@ -886,6 +930,8 @@ async fn download_dash_segments(
     initial_downloaded: i64,
     plans: Vec<DashSegmentPlan>,
     progress_gate: &mut TaskProgressEmitGate,
+    first_segment_id: Option<&str>,
+    db_write_gate: &mut DbWriteGate,
 ) -> Result<i64, String> {
     let mut pending = plans.into_iter();
     let mut workers = JoinSet::new();
@@ -935,6 +981,8 @@ async fn download_dash_segments(
                     downloaded_total,
                     active + 1,
                     progress_gate,
+                    first_segment_id,
+                    db_write_gate,
                     false,
                 )
                 .await?;
@@ -1104,16 +1152,30 @@ async fn download_dash_segment_once(
     let mut downloaded: i64 = 0;
 
     loop {
-        if cancel_token.is_cancelled() {
-            writer.flush().await.ok();
-            return Err("Download canceled.".to_string());
-        }
-        let chunk = response
-            .chunk()
-            .await
-            .map_err(|e| format!("DASH segment connection failed: {e}"))?;
-        let Some(chunk) = chunk else {
-            break;
+        // E-1: wrap the chunk read with an idle timeout so a stalled server
+        // cannot hold the worker, connection slot, and queue slot forever.
+        // The cancel token is raced alongside so a user-initiated pause/cancel
+        // interrupts an in-flight (and potentially stalled) read immediately.
+        let outcome = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                writer.flush().await.ok();
+                return Err("Download canceled.".to_string());
+            }
+            outcome = read_with_idle_timeout(response.chunk(), READ_IDLE_TIMEOUT) => outcome,
+        };
+        let chunk = match outcome {
+            IdleReadOutcome::Data(chunk) => chunk,
+            IdleReadOutcome::End => break,
+            IdleReadOutcome::Error(e) => {
+                return Err(format!("DASH segment connection failed: {e}"));
+            }
+            IdleReadOutcome::IdleTimeout => {
+                return Err(engine_error(
+                    "dash_segment_stalled",
+                    "DASH segment stalled: no data received for 60 seconds.",
+                    true,
+                ));
+            }
         };
         speed_limiter.throttle(chunk.len()).await;
         writer.write_all(&chunk).await.map_err(|e| {
@@ -1135,27 +1197,32 @@ async fn emit_dash_progress(
     downloaded: i64,
     connection_count: usize,
     progress_gate: &mut TaskProgressEmitGate,
+    first_segment_id: Option<&str>,
+    db_write_gate: &mut DbWriteGate,
     force: bool,
 ) -> Result<(), String> {
     let connection_count_i32 = i32::try_from(connection_count).unwrap_or(i32::MAX);
-    db::update_task_progress(
-        pool,
-        &task.id,
-        downloaded,
-        0,
-        connection_count_i32,
-        TaskStatus::Downloading,
-    )
-    .await?;
-    if let Some(segment) = db::get_first_segment_record(pool, &task.id).await? {
-        db::update_segment_runtime_progress(
+    // E-4: Throttle DB writes to the same cadence as IPC events.
+    if db_write_gate.should_write(force) {
+        db::update_task_progress(
             pool,
-            &segment.id,
+            &task.id,
             downloaded,
             0,
-            SegmentStatus::Downloading,
+            connection_count_i32,
+            TaskStatus::Downloading,
         )
         .await?;
+        if let Some(segment_id) = first_segment_id {
+            db::update_segment_runtime_progress(
+                pool,
+                segment_id,
+                downloaded,
+                0,
+                SegmentStatus::Downloading,
+            )
+            .await?;
+        }
     }
     progress_gate.emit_or_store(
         app,
@@ -1408,9 +1475,14 @@ fn byte_range_header(range: &ByteRange) -> String {
     format!("bytes={}-{}", range.start, end)
 }
 
-fn resolve_url(base: &str, relative: &str) -> Result<String, String> {
-    reqwest::Url::parse(base)
-        .and_then(|base_url| base_url.join(relative))
+/// E-5b: Resolve a segment URL against an already-parsed manifest base.
+/// The previous `resolve_url(base: &str, ...)` re-parsed the base URL on
+/// every call (up to N+1 times per representation inside
+/// `build_segment_plans`). `build_segment_plans` now parses `manifest_url`
+/// once and passes the `&Url` here so segment loops only pay the cost of
+/// `Url::join`.
+fn resolve_url_with_base(base: &reqwest::Url, relative: &str) -> Result<String, String> {
+    base.join(relative)
         .map(|url| url.to_string())
         .map_err(|e| format!("Could not resolve DASH segment URL '{relative}': {e}"))
 }
@@ -1461,43 +1533,6 @@ fn dash_output_name(url: &str) -> String {
         .and_then(|value| value.to_str())
         .unwrap_or(&sanitized);
     format!("{final_stem}.mp4")
-}
-
-fn ensure_ffmpeg_available() -> Result<(), String> {
-    if ffmpeg_path().is_some() {
-        Ok(())
-    } else {
-        Err(engine_error(
-            "dash_ffmpeg_missing",
-            "ffmpeg was not found. Install ffmpeg or set VIBE_FFMPEG_PATH before creating MPEG-DASH tasks.",
-            true,
-        ))
-    }
-}
-
-fn ffmpeg_path() -> Option<PathBuf> {
-    std::env::var_os("VIBE_FFMPEG_PATH")
-        .map(PathBuf::from)
-        .filter(|path| path.exists())
-        .or_else(|| executable_in_path("ffmpeg"))
-}
-
-fn executable_in_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let candidate = dir.join(format!("{name}.exe"));
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------

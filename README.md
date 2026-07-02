@@ -84,6 +84,16 @@ Vibe Downloader 是一款现代桌面下载管理器，目标是让大文件下�
 - 操作系统代码签名的生产安装包。
 - BT/FTP/SFTP/Metalink/HLS/DASH/WebDAV 的可靠性和诊断成熟度仍低于 HTTP/HTTPS。
 
+## 关于未签名安装包的重要提示
+
+当前发布版本**未经操作系统代码签名**（未配置 Apple Developer ID 与 Windows Authenticode 证书）。这意味着：
+
+- **macOS**：首次启动可能被 Gatekeeper 拦截，提示"无法打开，因为来自身份不明的开发者"。解决方法：在 Finder 中右键点击应用 → 选择"打开" → 在弹窗中再次点击"打开"。也可在"系统设置 → 隐私与安全性"中点击"仍要打开"。
+- **Windows**：首次运行时 SmartScreen 可能提示"Windows 已保护你的电脑"。解决方法：点击"更多信息" → 选择"仍要运行"。
+- **Linux**：通常无系统级拦截，但 `.deb`/`.AppImage` 同样未签名，请自行校验 GitHub Release 资产的 SHA-256。
+
+Tauri updater 签名（区别于 OS 代码签名）已配置并启用，应用内自动更新包经过签名校验，可放心使用。正式 OS 代码签名将在后续版本中配置，参见 [docs/RELEASE.md](docs/RELEASE.md) 的"当前签名状态"章节。
+
 ## 界面和体验方向
 
 Vibe Downloader 不是营销页，也不是大卡片仪表盘。它的主界面面向真实下载任务：

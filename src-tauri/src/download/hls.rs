@@ -18,23 +18,22 @@ use reqwest::{
 };
 use sqlx::SqlitePool;
 use tauri::AppHandle;
-use tokio::{fs, io::AsyncWriteExt, process::Command, task::JoinSet};
+use tokio::{fs, io::{AsyncWriteExt, BufWriter}, process::Command, task::JoinSet};
 use uuid::Uuid;
 
 use super::{
-    engine::EngineFuture, http::build_client, DownloadContext, DownloadEngine, DownloadError,
-    ProbeOutput, ProbeRequest,
+    engine::EngineFuture, http::HttpEngine, DownloadContext, DownloadEngine, DownloadError,
+    IdleReadOutcome, ProbeOutput, ProbeRequest, READ_IDLE_TIMEOUT, read_with_idle_timeout,
 };
 use crate::download::error::engine_error;
 use crate::download::retry::RetryPolicy;
 use crate::{
     db,
-    events::{emit_task_updated_record, TaskProgressEmitGate},
+    events::{emit_task_updated_record, DbWriteGate, TaskProgressEmitGate},
     models::{
-        AppErrorPayload, EngineCapabilities, HlsVariant, ProbedFile,
+        AppErrorPayload, EngineCapabilities, HlsMediaTrack, HlsVariant, ProbedFile,
         SegmentStatus, TaskKind, TaskProgressPayload, TaskRecord, TaskStatus,
     },
-    proxy::SharedProxyConfig,
 };
 
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
@@ -43,10 +42,19 @@ const PROTOCOL_HLS: &str = "hls";
 const HLS_CONTENT_TYPE: &str = "application/vnd.apple.mpegurl";
 const HLS_SEGMENT_RETRIES: i32 = 2;
 const HLS_LIVE_MAX_IDLE_POLLS: usize = 6;
+/// E-2: Maximum allowed size for a single HLS segment. Protects against
+/// malicious or malformed playlists that would otherwise buffer an unbounded
+/// segment into memory.
+const HLS_SEGMENT_MAX_BYTES: usize = 512 * 1024 * 1024;
+/// E-2: Maximum allowed size for HLS init maps, keys, and playlists fetched
+/// via `fetch_bytes`. These are small control-plane resources; a 64 MiB cap
+/// is generous while preventing unbounded reads.
+const HLS_INIT_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct HlsEngine {
-    proxy_config: SharedProxyConfig,
+    /// E-4: 共享 `HttpEngine` 的客户端缓存，避免每次 probe/download 新建 Client。
+    http: Arc<HttpEngine>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +133,8 @@ struct ProbePlan {
     selected_bandwidth: Option<i64>,
     selected_resolution: Option<String>,
     variants: Vec<HlsVariant>,
+    audio_tracks: Vec<HlsMediaTrack>,
+    subtitle_tracks: Vec<HlsMediaTrack>,
     display_name: String,
 }
 
@@ -155,24 +165,29 @@ struct SegmentDownloadResult {
 }
 
 impl HlsEngine {
-    pub fn new(proxy_config: SharedProxyConfig) -> Self {
-        Self { proxy_config }
+    pub fn new(http: Arc<HttpEngine>) -> Self {
+        Self { http }
     }
 
     async fn client(&self) -> Result<Client, String> {
-        let config = self.proxy_config.read().await;
-        build_client(&config)
+        self.http.client().await
     }
 
     async fn probe_hls(
         &self,
         url: &str,
         request_headers: &[(String, String)],
+        app: &Option<tauri::AppHandle>,
+        request_id: &Option<String>,
     ) -> Result<ProbePlan, String> {
+        crate::download::engine::emit_probe_phase(app, request_id, "checking_ffmpeg", Some("hls"));
         ensure_ffmpeg_available()?;
         let client = self.client().await?;
+        crate::download::engine::emit_probe_phase(app, request_id, "fetching_manifest", Some("hls"));
         let body = fetch_text(&client, url, request_headers).await?;
         validate_playlist_syntax(&body)?;
+        crate::download::engine::emit_probe_phase(app, request_id, "parsing_manifest", Some("hls"));
+        let media_tracks = parse_ext_x_media(&body);
         let (media_url, selected_bandwidth, selected_resolution, variants, media_body) =
             if is_master_playlist(&body) {
                 let variant = choose_master_variant(&body)?;
@@ -191,10 +206,20 @@ impl HlsEngine {
                     media_body,
                 )
             } else {
-                (url.to_string(), None, None, Vec::new(), body)
+                (url.to_string(), None, None, Vec::new(), body.clone())
             };
         let media = parse_media_playlist(&media_body)?;
         reject_unsupported_media_playlist(&media_body)?;
+        let audio_tracks = media_tracks
+            .iter()
+            .filter(|t| t.kind == "AUDIO")
+            .cloned()
+            .collect::<Vec<_>>();
+        let subtitle_tracks = media_tracks
+            .iter()
+            .filter(|t| t.kind == "SUBTITLES")
+            .cloned()
+            .collect::<Vec<_>>();
         Ok(ProbePlan {
             media_url,
             kind: media.kind,
@@ -202,6 +227,8 @@ impl HlsEngine {
             selected_bandwidth,
             selected_resolution,
             variants,
+            audio_tracks,
+            subtitle_tracks,
             display_name: hls_output_name(url),
         })
     }
@@ -222,7 +249,12 @@ impl DownloadEngine for HlsEngine {
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
             let plan = self
-                .probe_hls(&request.uri, &request.request_headers)
+                .probe_hls(
+                    &request.uri,
+                    &request.request_headers,
+                    &request.app,
+                    &request.request_id,
+                )
                 .await
                 .map_err(DownloadError::Other)?;
             let source_key = reqwest::Url::parse(&plan.media_url)
@@ -250,6 +282,8 @@ impl DownloadEngine for HlsEngine {
                 last_modified: None,
                 content_type: Some(HLS_CONTENT_TYPE.to_string()),
                 hls_variants: plan.variants.clone(),
+                hls_audio_tracks: plan.audio_tracks.clone(),
+                hls_subtitle_tracks: plan.subtitle_tracks.clone(),
                 metalink: None,
             })
         })
@@ -277,7 +311,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         speed_limiter,
         connection_limit,
         request_headers,
-        proxy_config,
+        proxy_config: _proxy_config,
     } = context;
     ensure_ffmpeg_available()?;
     // Capture ffmpeg path once before any awaits to avoid TOCTOU:
@@ -290,7 +324,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
             true,
         )
     })?;
-    let client = build_client(&proxy_config)?;
+    let client = engine.client().await?;
     let staging_dir = task
         .temp_path
         .as_deref()
@@ -301,7 +335,9 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
             .command_error()
     })?;
 
-    let plan = engine.probe_hls(&task.url, &request_headers).await?;
+    let plan = engine
+        .probe_hls(&task.url, &request_headers, &None, &None)
+        .await?;
     db::upsert_hls_task(
         &pool,
         db::HlsTaskUpsert {
@@ -315,6 +351,8 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
             last_media_sequence: None,
             output_format: "mp4",
             staging_dir: &staging_dir.to_string_lossy(),
+            selected_audio_track_uris: None,
+            selected_subtitle_track_uris: None,
         },
     )
     .await?;
@@ -326,10 +364,76 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     )
     .await?;
 
-    let mut downloaded_total = existing_hls_downloaded_bytes(&pool, &task.id).await?;
-    let mut seen = existing_hls_sequences(&pool, &task.id).await?;
+    // F-6: Read selected audio/subtitle track URIs from DB (stored by create_task)
+    // and download them into staging subdirs for ffmpeg muxing.
+    let mut extra_inputs: Vec<PathBuf> = Vec::new();
+    if let Ok(Some(hls_task)) = db::get_hls_task(&pool, &task.id).await {
+        if let Some(audio_json) = hls_task.selected_audio_track_uris.as_deref() {
+            if let Ok(uris) = serde_json::from_str::<Vec<String>>(audio_json) {
+                for uri in &uris {
+                    if cancel_token.is_cancelled() {
+                        break;
+                    }
+                    match download_external_track(
+                        &client,
+                        uri,
+                        &request_headers,
+                        &staging_dir,
+                        "audio",
+                        uri.rsplit('/').next().unwrap_or("track"),
+                        &cancel_token,
+                    )
+                    .await
+                    {
+                        Ok(Some(path)) => extra_inputs.push(path),
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!(task_id = %task.id, error = %e, "Failed to download audio track");
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(subtitle_json) = hls_task.selected_subtitle_track_uris.as_deref() {
+            if let Ok(uris) = serde_json::from_str::<Vec<String>>(subtitle_json) {
+                for uri in &uris {
+                    if cancel_token.is_cancelled() {
+                        break;
+                    }
+                    match download_external_track(
+                        &client,
+                        uri,
+                        &request_headers,
+                        &staging_dir,
+                        "subtitle",
+                        uri.rsplit('/').next().unwrap_or("track"),
+                        &cancel_token,
+                    )
+                    .await
+                    {
+                        Ok(Some(path)) => extra_inputs.push(path),
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!(task_id = %task.id, error = %e, "Failed to download subtitle track");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // E-5a: Single scan of completed HLS segments — derive both the
+    // cumulative downloaded byte count and the (disc_seq, media_seq) set
+    // from one `list_hls_segments` round-trip instead of two.
+    let (mut downloaded_total, mut seen) =
+        existing_hls_progress(&pool, &task.id).await?;
     let mut idle_polls = 0_usize;
     let mut progress_gate = TaskProgressEmitGate::default();
+    // E-4: Cache first segment ID once and throttle per-segment DB writes.
+    let first_segment_id: Option<String> = db::get_first_segment_record(&pool, &task.id)
+        .await?
+        .map(|segment| segment.id);
+    let mut db_write_gate = DbWriteGate::default();
 
     loop {
         if cancel_token.is_cancelled() {
@@ -376,6 +480,8 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                 downloaded_total,
                 plans,
                 &mut progress_gate,
+                first_segment_id.as_deref(),
+                &mut db_write_gate,
             )
             .await?;
             downloaded_total = downloaded;
@@ -399,7 +505,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     }
 
     progress_gate.flush(&app);
-    finalize_hls_task(&app, &pool, &task, &staging_dir, downloaded_total, &ffmpeg).await
+    finalize_hls_task(&app, &pool, &task, &staging_dir, downloaded_total, &ffmpeg, &extra_inputs).await
 }
 
 async fn persist_hls_segment_plans(
@@ -410,6 +516,26 @@ async fn persist_hls_segment_plans(
     segments: Vec<HlsSegment>,
 ) -> Result<Vec<SegmentDownloadPlan>, String> {
     let mut plans = Vec::new();
+    // E-3: Collect upsert rows and persist in a single transaction at the end,
+    // avoiding N independent WAL commits for N segments.
+    let mut upserts: Vec<db::HlsSegmentUpsert<'_>> = Vec::with_capacity(segments.len());
+    // Owned strings that back the `&str` borrows in `upserts`. We keep them
+    // alive until the bulk insert completes.
+    let mut owned_ids: Vec<String> = Vec::with_capacity(segments.len());
+    let mut owned_uris: Vec<String> = Vec::with_capacity(segments.len());
+    let mut owned_local_paths: Vec<String> = Vec::with_capacity(segments.len());
+    let mut owned_init_map_uris: Vec<Option<String>> = Vec::with_capacity(segments.len());
+    let mut owned_init_map_local_paths: Vec<Option<String>> = Vec::with_capacity(segments.len());
+    let mut owned_key_methods: Vec<Option<String>> = Vec::with_capacity(segments.len());
+    let mut owned_key_uris: Vec<Option<String>> = Vec::with_capacity(segments.len());
+    let mut owned_key_ivs: Vec<Option<String>> = Vec::with_capacity(segments.len());
+    let mut meta_media_sequence: Vec<i64> = Vec::with_capacity(segments.len());
+    let mut meta_discontinuity_sequence: Vec<i64> = Vec::with_capacity(segments.len());
+    let mut meta_duration_ms: Vec<i64> = Vec::with_capacity(segments.len());
+    let mut meta_byte_range_start: Vec<Option<i64>> = Vec::with_capacity(segments.len());
+    let mut meta_byte_range_length: Vec<Option<i64>> = Vec::with_capacity(segments.len());
+    let mut meta_init_map_byte_range_start: Vec<Option<i64>> = Vec::with_capacity(segments.len());
+    let mut meta_init_map_byte_range_length: Vec<Option<i64>> = Vec::with_capacity(segments.len());
     for segment in segments {
         let id = Uuid::new_v4().to_string();
         let local_name = format!(
@@ -445,34 +571,33 @@ async fn persist_hls_segment_plans(
         let init_map_local_path = init_map
             .as_ref()
             .map(|map| map.local_path.to_string_lossy().to_string());
-        db::upsert_hls_segment(
-            pool,
-            db::HlsSegmentUpsert {
-                id: &id,
-                task_id: &task.id,
-                media_sequence: segment.media_sequence,
-                discontinuity_sequence: segment.discontinuity_sequence,
-                uri: &uri,
-                local_path: &local_path.to_string_lossy(),
-                duration_ms: segment.duration_ms,
-                byte_range_start: segment.byte_range.as_ref().and_then(|range| range.start),
-                byte_range_length: segment.byte_range.as_ref().map(|range| range.length),
-                init_map_uri: init_map.as_ref().map(|map| map.uri.as_str()),
-                init_map_local_path: init_map_local_path.as_deref(),
-                init_map_byte_range_start: init_map
-                    .as_ref()
-                    .and_then(|map| map.byte_range.as_ref())
-                    .and_then(|range| range.start),
-                init_map_byte_range_length: init_map
-                    .as_ref()
-                    .and_then(|map| map.byte_range.as_ref())
-                    .map(|range| range.length),
-                key_method: key.as_ref().map(|key| key.method.as_str()),
-                key_uri: key.as_ref().and_then(|key| key.uri.as_deref()),
-                key_iv: key.as_ref().and_then(|key| key.iv.as_deref()),
-            },
-        )
-        .await?;
+        meta_media_sequence.push(segment.media_sequence);
+        meta_discontinuity_sequence.push(segment.discontinuity_sequence);
+        meta_duration_ms.push(segment.duration_ms);
+        meta_byte_range_start
+            .push(segment.byte_range.as_ref().and_then(|range| range.start));
+        meta_byte_range_length
+            .push(segment.byte_range.as_ref().map(|range| range.length));
+        meta_init_map_byte_range_start.push(
+            init_map
+                .as_ref()
+                .and_then(|map| map.byte_range.as_ref())
+                .and_then(|range| range.start),
+        );
+        meta_init_map_byte_range_length.push(
+            init_map
+                .as_ref()
+                .and_then(|map| map.byte_range.as_ref())
+                .map(|range| range.length),
+        );
+        owned_ids.push(id.clone());
+        owned_uris.push(uri.clone());
+        owned_local_paths.push(local_path.to_string_lossy().to_string());
+        owned_init_map_uris.push(init_map.as_ref().map(|map| map.uri.clone()));
+        owned_init_map_local_paths.push(init_map_local_path.clone());
+        owned_key_methods.push(key.as_ref().map(|key| key.method.clone()));
+        owned_key_uris.push(key.as_ref().and_then(|key| key.uri.clone()));
+        owned_key_ivs.push(key.as_ref().and_then(|key| key.iv.clone()));
         plans.push(SegmentDownloadPlan {
             task_id: task.id.clone(),
             id,
@@ -484,6 +609,28 @@ async fn persist_hls_segment_plans(
             key,
         });
     }
+    for idx in 0..owned_ids.len() {
+        upserts.push(db::HlsSegmentUpsert {
+            id: &owned_ids[idx],
+            task_id: &task.id,
+            media_sequence: meta_media_sequence[idx],
+            discontinuity_sequence: meta_discontinuity_sequence[idx],
+            uri: &owned_uris[idx],
+            local_path: &owned_local_paths[idx],
+            duration_ms: meta_duration_ms[idx],
+            byte_range_start: meta_byte_range_start[idx],
+            byte_range_length: meta_byte_range_length[idx],
+            init_map_uri: owned_init_map_uris[idx].as_deref(),
+            init_map_local_path: owned_init_map_local_paths[idx].as_deref(),
+            init_map_byte_range_start: meta_init_map_byte_range_start[idx],
+            init_map_byte_range_length: meta_init_map_byte_range_length[idx],
+            key_method: owned_key_methods[idx].as_deref(),
+            key_uri: owned_key_uris[idx].as_deref(),
+            key_iv: owned_key_ivs[idx].as_deref(),
+        });
+    }
+    // E-3: Single transaction for all segments in this batch.
+    db::bulk_upsert_hls_segments(pool, &upserts).await?;
     Ok(plans)
 }
 
@@ -500,6 +647,8 @@ async fn download_hls_segments(
     initial_downloaded: i64,
     plans: Vec<SegmentDownloadPlan>,
     progress_gate: &mut TaskProgressEmitGate,
+    first_segment_id: Option<&str>,
+    db_write_gate: &mut DbWriteGate,
 ) -> Result<i64, String> {
     let mut pending = plans.into_iter();
     let mut workers = JoinSet::new();
@@ -543,6 +692,8 @@ async fn download_hls_segments(
                     downloaded_total,
                     active + 1,
                     progress_gate,
+                    first_segment_id,
+                    db_write_gate,
                     false,
                 )
                 .await?;
@@ -711,38 +862,121 @@ async fn download_hls_segment_once(
         return Err("server did not honor HLS byte range request".to_string());
     }
 
-    let mut data = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("HLS segment connection failed: {e}"))?
-    {
-        if cancel_token.is_cancelled() {
-            return Err("Download canceled.".to_string());
+    let key = plan.key.as_ref();
+    if let Some(key) = key {
+        // E-1 + E-2: Encrypted segment — buffer the ciphertext with a safety
+        // size limit and idle timeout, then decrypt the full buffer and write
+        // to disk. A streaming AES-128-CBC decryptor would avoid the double
+        // buffer but requires manual block-alignment and PKCS7 tail handling;
+        // the size cap already removes the unbounded-growth risk.
+        let mut data: Vec<u8> = Vec::new();
+        loop {
+            let outcome = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return Err("Download canceled.".to_string());
+                }
+                outcome = read_with_idle_timeout(response.chunk(), READ_IDLE_TIMEOUT) => outcome,
+            };
+            let chunk = match outcome {
+                IdleReadOutcome::Data(chunk) => chunk,
+                IdleReadOutcome::End => break,
+                IdleReadOutcome::Error(e) => {
+                    return Err(format!("HLS segment connection failed: {e}"));
+                }
+                IdleReadOutcome::IdleTimeout => {
+                    return Err(engine_error(
+                        "hls_segment_stalled",
+                        "HLS segment stalled: no data received for 60 seconds.",
+                        true,
+                    ));
+                }
+            };
+            speed_limiter.throttle(chunk.len()).await;
+            data.extend_from_slice(&chunk);
+            if data.len() > HLS_SEGMENT_MAX_BYTES {
+                return Err(engine_error(
+                    "hls_segment_too_large",
+                    format!(
+                        "HLS segment exceeds the {HLS_SEGMENT_MAX_BYTES} byte safety limit."
+                    ),
+                    false,
+                ));
+            }
         }
-        speed_limiter.throttle(chunk.len()).await;
-        data.extend_from_slice(&chunk);
-    }
-
-    let data = if let Some(key) = &plan.key {
-        decrypt_hls_segment(client, request_headers, key, plan.media_sequence, data).await?
+        let decrypted =
+            decrypt_hls_segment(client, request_headers, key, plan.media_sequence, data).await?;
+        let bytes = i64::try_from(decrypted.len()).unwrap_or(i64::MAX);
+        let mut file = fs::File::create(&plan.local_path).await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not create HLS segment file: {e}"))
+                .command_error()
+        })?;
+        file.write_all(&decrypted).await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not write HLS segment: {e}"))
+                .command_error()
+        })?;
+        file.flush().await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not flush HLS segment: {e}"))
+                .command_error()
+        })?;
+        Ok(bytes)
     } else {
-        data
-    };
-    let bytes = i64::try_from(data.len()).unwrap_or(i64::MAX);
-    let mut file = fs::File::create(&plan.local_path).await.map_err(|e| {
-        AppErrorPayload::disk_write_failed(format!("Could not create HLS segment file: {e}"))
-            .command_error()
-    })?;
-    file.write_all(&data).await.map_err(|e| {
-        AppErrorPayload::disk_write_failed(format!("Could not write HLS segment: {e}"))
-            .command_error()
-    })?;
-    file.flush().await.map_err(|e| {
-        AppErrorPayload::disk_write_failed(format!("Could not flush HLS segment: {e}"))
-            .command_error()
-    })?;
-    Ok(bytes)
+        // E-1 + E-2: Unencrypted segment — stream directly to disk with an
+        // idle timeout (prevents stalled servers from holding a worker) and a
+        // safety size limit (prevents malicious/malformed playlists from
+        // causing unbounded memory growth).
+        let file = fs::File::create(&plan.local_path).await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not create HLS segment file: {e}"))
+                .command_error()
+        })?;
+        let mut writer = BufWriter::with_capacity(256 * 1024, file);
+        let mut downloaded: usize = 0;
+        loop {
+            let outcome = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    writer.flush().await.ok();
+                    return Err("Download canceled.".to_string());
+                }
+                outcome = read_with_idle_timeout(response.chunk(), READ_IDLE_TIMEOUT) => outcome,
+            };
+            let chunk = match outcome {
+                IdleReadOutcome::Data(chunk) => chunk,
+                IdleReadOutcome::End => break,
+                IdleReadOutcome::Error(e) => {
+                    writer.flush().await.ok();
+                    return Err(format!("HLS segment connection failed: {e}"));
+                }
+                IdleReadOutcome::IdleTimeout => {
+                    writer.flush().await.ok();
+                    return Err(engine_error(
+                        "hls_segment_stalled",
+                        "HLS segment stalled: no data received for 60 seconds.",
+                        true,
+                    ));
+                }
+            };
+            speed_limiter.throttle(chunk.len()).await;
+            downloaded = downloaded.saturating_add(chunk.len());
+            if downloaded > HLS_SEGMENT_MAX_BYTES {
+                writer.flush().await.ok();
+                return Err(engine_error(
+                    "hls_segment_too_large",
+                    format!(
+                        "HLS segment exceeds the {HLS_SEGMENT_MAX_BYTES} byte safety limit."
+                    ),
+                    false,
+                ));
+            }
+            writer.write_all(&chunk).await.map_err(|e| {
+                AppErrorPayload::disk_write_failed(format!("Could not write HLS segment: {e}"))
+                    .command_error()
+            })?;
+        }
+        writer.flush().await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not flush HLS segment: {e}"))
+                .command_error()
+        })?;
+        Ok(i64::try_from(downloaded).unwrap_or(i64::MAX))
+    }
 }
 
 async fn ensure_hls_init_map(
@@ -833,6 +1067,67 @@ async fn decrypt_hls_segment(
     Ok(decrypted)
 }
 
+/// F-6: Download an external HLS audio/subtitle track into a staging subdir.
+/// Returns the path to a local playlist file that can be passed to ffmpeg as
+/// an additional `-i` input for `-map` muxing.
+async fn download_external_track(
+    client: &Client,
+    track_url: &str,
+    request_headers: &[(String, String)],
+    staging_dir: &Path,
+    track_kind: &str,
+    track_name: &str,
+    cancel_token: &tokio_util::sync::CancellationToken,
+) -> Result<Option<PathBuf>, String> {
+    let body = fetch_text(client, track_url, request_headers).await?;
+    validate_playlist_syntax(&body)?;
+    let media = parse_media_playlist(&body)?;
+    if media.kind == PlaylistKind::Live {
+        return Ok(None);
+    }
+    let track_dir = staging_dir.join(format!("{track_kind}_{track_name}"));
+    fs::create_dir_all(&track_dir).await.map_err(|e| {
+        AppErrorPayload::disk_write_failed(format!("Could not create {track_kind} track folder: {e}"))
+            .command_error()
+    })?;
+    let mut local_segments: Vec<(String, i64)> = Vec::new();
+    for segment in &media.segments {
+        if cancel_token.is_cancelled() {
+            return Ok(None);
+        }
+        let uri = resolve_url(track_url, &segment.uri)?;
+        let local_name = format!("seg-{}.bin", segment.media_sequence);
+        let local_path = track_dir.join(&local_name);
+        let bytes = fetch_bytes(client, &uri, request_headers, None).await?;
+        fs::write(&local_path, &bytes).await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not write {track_kind} segment: {e}"))
+                .command_error()
+        })?;
+        local_segments.push((local_name, segment.duration_ms));
+    }
+    if local_segments.is_empty() {
+        return Ok(None);
+    }
+    let mut text = String::from("#EXTM3U\n#EXT-X-VERSION:3\n");
+    let target = local_segments
+        .iter()
+        .map(|(_, ms)| (ms + 999) / 1000)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    text.push_str(&format!("#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n"));
+    for (name, ms) in &local_segments {
+        let duration = (*ms as f64) / 1000.0;
+        text.push_str(&format!("#EXTINF:{duration:.3},\n{name}\n"));
+    }
+    text.push_str("#EXT-X-ENDLIST\n");
+    let playlist_path = track_dir.join("local.m3u8");
+    fs::write(&playlist_path, text)
+        .await
+        .map_err(|e| format!("Could not write {track_kind} track playlist: {e}"))?;
+    Ok(Some(playlist_path))
+}
+
 async fn finalize_hls_task(
     app: &AppHandle,
     pool: &SqlitePool,
@@ -840,11 +1135,12 @@ async fn finalize_hls_task(
     staging_dir: &Path,
     downloaded_total: i64,
     ffmpeg: &Path,
+    extra_inputs: &[PathBuf],
 ) -> Result<(), String> {
     db::update_task_health_summary(pool, &task.id, Some("Converting HLS stream to MP4")).await?;
     let local_playlist = write_local_hls_playlist(pool, &task.id, staging_dir).await?;
     let mp4_temp = staging_dir.join("output.mp4");
-    run_ffmpeg(&local_playlist, &mp4_temp, ffmpeg).await?;
+    run_ffmpeg(&local_playlist, &mp4_temp, ffmpeg, extra_inputs).await?;
     let final_path = task
         .final_path
         .as_deref()
@@ -936,26 +1232,41 @@ async fn write_local_hls_playlist(
     Ok(path)
 }
 
-async fn run_ffmpeg(input: &Path, output: &Path, ffmpeg: &Path) -> Result<(), String> {
+async fn run_ffmpeg(
+    input: &Path,
+    output: &Path,
+    ffmpeg: &Path,
+    extra_inputs: &[PathBuf],
+) -> Result<(), String> {
     if fs::try_exists(output).await.unwrap_or(false) {
         fs::remove_file(output)
             .await
             .map_err(|e| format!("Could not reset HLS MP4 output: {e}"))?;
     }
-    let status = Command::new(ffmpeg)
-        .arg("-y")
+    let mut cmd = Command::new(ffmpeg);
+    cmd.arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
         .arg("-allowed_extensions")
         .arg("ALL")
         .arg("-i")
-        .arg(input)
-        .arg("-c")
+        .arg(input);
+    // F-6: Add extra audio/subtitle track inputs.
+    for extra in extra_inputs {
+        cmd.arg("-i").arg(extra);
+    }
+    cmd.arg("-c")
         .arg("copy")
         .arg("-movflags")
-        .arg("+faststart")
-        .arg(output)
+        .arg("+faststart");
+    // F-6: Map all streams from all inputs so audio/subtitle tracks are muxed.
+    if !extra_inputs.is_empty() {
+        for i in 0..=extra_inputs.len() {
+            cmd.arg("-map").arg(format!("{i}"));
+        }
+    }
+    let status = cmd
         .status()
         .await
         .map_err(|e| format!("Could not start ffmpeg: {e}"))?;
@@ -988,6 +1299,7 @@ async fn pause_hls_task(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn emit_hls_progress(
     app: &AppHandle,
     pool: &SqlitePool,
@@ -995,27 +1307,34 @@ async fn emit_hls_progress(
     downloaded: i64,
     connection_count: usize,
     progress_gate: &mut TaskProgressEmitGate,
+    first_segment_id: Option<&str>,
+    db_write_gate: &mut DbWriteGate,
     force: bool,
 ) -> Result<(), String> {
     let connection_count_i32 = i32::try_from(connection_count).unwrap_or(i32::MAX);
-    db::update_task_progress(
-        pool,
-        &task.id,
-        downloaded,
-        0,
-        connection_count_i32,
-        TaskStatus::Downloading,
-    )
-    .await?;
-    if let Some(segment) = db::get_first_segment_record(pool, &task.id).await? {
-        db::update_segment_runtime_progress(
+    // E-4: Throttle DB writes to the same cadence as IPC events. The `force`
+    // path (pause/cancel/finalize) always writes. The last pending state is
+    // flushed by the caller via `db_write_gate.flush_pending()`.
+    if db_write_gate.should_write(force) {
+        db::update_task_progress(
             pool,
-            &segment.id,
+            &task.id,
             downloaded,
             0,
-            SegmentStatus::Downloading,
+            connection_count_i32,
+            TaskStatus::Downloading,
         )
         .await?;
+        if let Some(segment_id) = first_segment_id {
+            db::update_segment_runtime_progress(
+                pool,
+                segment_id,
+                downloaded,
+                0,
+                SegmentStatus::Downloading,
+            )
+            .await?;
+        }
     }
     progress_gate.emit_or_store(
         app,
@@ -1032,25 +1351,25 @@ async fn emit_hls_progress(
     Ok(())
 }
 
-async fn existing_hls_downloaded_bytes(pool: &SqlitePool, task_id: &str) -> Result<i64, String> {
-    Ok(db::list_hls_segments(pool, task_id)
-        .await?
-        .into_iter()
-        .filter(|segment| segment.status == SegmentStatus::Completed)
-        .map(|segment| segment.downloaded_bytes)
-        .sum())
-}
-
-async fn existing_hls_sequences(
+/// E-5a: Replaces the previous `existing_hls_downloaded_bytes` +
+/// `existing_hls_sequences` pair. Both called `db::list_hls_segments`
+/// independently and each materialized the full segment Vec; this version
+/// fetches the list once and derives both the cumulative completed-byte
+/// total and the `(discontinuity_sequence, media_sequence)` set from the
+/// same Vec.
+async fn existing_hls_progress(
     pool: &SqlitePool,
     task_id: &str,
-) -> Result<HashSet<(i64, i64)>, String> {
-    Ok(db::list_hls_segments(pool, task_id)
-        .await?
-        .into_iter()
-        .filter(|segment| segment.status == SegmentStatus::Completed)
-        .map(|segment| (segment.discontinuity_sequence, segment.media_sequence))
-        .collect())
+) -> Result<(i64, HashSet<(i64, i64)>), String> {
+    let mut downloaded_total = 0_i64;
+    let mut seen = HashSet::new();
+    for segment in db::list_hls_segments(pool, task_id).await? {
+        if segment.status == SegmentStatus::Completed {
+            downloaded_total += segment.downloaded_bytes;
+            seen.insert((segment.discontinuity_sequence, segment.media_sequence));
+        }
+    }
+    Ok((downloaded_total, seen))
 }
 
 async fn fetch_text(
@@ -1085,11 +1404,30 @@ async fn fetch_bytes(
     if !response.status().is_success() {
         return Err(format!("HLS resource returned {}", response.status()));
     }
-    response
+    // E-2: Pre-check Content-Length against HLS_INIT_MAX_BYTES so a malicious
+    // or malformed server cannot trigger an unbounded memory read.
+    if let Some(content_length) = response.content_length() {
+        if content_length as usize > HLS_INIT_MAX_BYTES {
+            return Err(engine_error(
+                "hls_init_too_large",
+                format!("HLS resource exceeds the {HLS_INIT_MAX_BYTES} byte safety limit."),
+                false,
+            ));
+        }
+    }
+    let bytes = response
         .bytes()
         .await
-        .map(|bytes| bytes.to_vec())
-        .map_err(|e| format!("Could not read HLS resource: {e}"))
+        .map_err(|e| format!("Could not read HLS resource: {e}"))?;
+    // E-2: Post-read guard — chunked-encoding responses omit Content-Length.
+    if bytes.len() > HLS_INIT_MAX_BYTES {
+        return Err(engine_error(
+            "hls_init_too_large",
+            format!("HLS resource exceeds the {HLS_INIT_MAX_BYTES} byte safety limit."),
+            false,
+        ));
+    }
+    Ok(bytes.to_vec())
 }
 
 fn apply_forwarded_headers(
@@ -1356,6 +1694,34 @@ fn parse_init_map(value: &str) -> Result<HlsInitMap, String> {
     })
 }
 
+fn parse_ext_x_media(body: &str) -> Vec<HlsMediaTrack> {
+    body.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix("#EXT-X-MEDIA:")?;
+            let attrs = parse_attributes(rest);
+            let kind = attrs.get("TYPE").cloned()?;
+            // Skip CLOSED-CAPTIONS — we don't handle CEA-608/708 embedded in video.
+            if kind.eq_ignore_ascii_case("CLOSED-CAPTIONS") {
+                return None;
+            }
+            Some(HlsMediaTrack {
+                kind,
+                group_id: attrs.get("GROUP-ID").cloned().unwrap_or_default(),
+                name: attrs.get("NAME").cloned().unwrap_or_default(),
+                language: attrs.get("LANGUAGE").cloned(),
+                default: attrs
+                    .get("DEFAULT")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("YES")),
+                auto_select: attrs
+                    .get("AUTOSELECT")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("YES")),
+                uri: attrs.get("URI").cloned(),
+            })
+        })
+        .collect()
+}
+
 fn parse_attributes(value: &str) -> HashMap<String, String> {
     let mut attrs = HashMap::new();
     let mut key = String::new();
@@ -1601,5 +1967,75 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("hls_unsupported_encryption"));
+    }
+
+    // E-2: Safety-limit constants must stay pinned at their documented values.
+    // Accidentally raising or removing these caps would reintroduce the
+    // unbounded-memory-growth risk the caps are meant to prevent.
+
+    #[test]
+    fn hls_segment_max_bytes_is_512_mib() {
+        assert_eq!(HLS_SEGMENT_MAX_BYTES, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn hls_init_max_bytes_is_64_mib() {
+        assert_eq!(HLS_INIT_MAX_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_ext_x_media_extracts_audio_and_subtitle_tracks() {
+        let master = "#EXTM3U\n\
+#EXT-X-VERSION:3\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud1\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,URI=\"en.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud1\",NAME=\"Spanish\",LANGUAGE=\"es\",DEFAULT=NO,AUTOSELECT=YES,URI=\"es.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"sub1\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,URI=\"en-subs.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"cc1\",NAME=\"CC\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES\n\
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"aud1\",SUBTITLES=\"sub1\"\n\
+video.m3u8\n";
+        let tracks = parse_ext_x_media(master);
+        assert_eq!(tracks.len(), 3, "should parse 3 tracks (2 audio + 1 subtitle, skip CLOSED-CAPTIONS)");
+        let audio: Vec<_> = tracks.iter().filter(|t| t.kind == "AUDIO").collect();
+        let subs: Vec<_> = tracks.iter().filter(|t| t.kind == "SUBTITLES").collect();
+        assert_eq!(audio.len(), 2);
+        assert_eq!(subs.len(), 1);
+        // English audio (default)
+        assert_eq!(audio[0].group_id, "aud1");
+        assert_eq!(audio[0].name, "English");
+        assert_eq!(audio[0].language.as_deref(), Some("en"));
+        assert!(audio[0].default);
+        assert!(audio[0].auto_select);
+        assert_eq!(audio[0].uri.as_deref(), Some("en.m3u8"));
+        // Spanish audio (not default)
+        assert_eq!(audio[1].name, "Spanish");
+        assert!(!audio[1].default);
+        // Subtitles
+        assert_eq!(subs[0].kind, "SUBTITLES");
+        assert_eq!(subs[0].uri.as_deref(), Some("en-subs.m3u8"));
+        assert!(subs[0].default);
+    }
+
+    #[test]
+    fn parse_ext_x_media_handles_embedded_tracks_with_null_uri() {
+        let master = "#EXTM3U\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud1\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES\n\
+#EXT-X-STREAM-INF:BANDWIDTH=500000,AUDIO=\"aud1\"\n\
+video.m3u8\n";
+        let tracks = parse_ext_x_media(master);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].kind, "AUDIO");
+        assert!(tracks[0].uri.is_none(), "embedded track should have null URI");
+    }
+
+    #[test]
+    fn parse_ext_x_media_returns_empty_for_media_playlist() {
+        let media = "#EXTM3U\n\
+#EXT-X-VERSION:3\n\
+#EXT-X-TARGETDURATION:6\n\
+#EXTINF:6.0,\n\
+seg1.ts\n\
+#EXT-X-ENDLIST\n";
+        let tracks = parse_ext_x_media(media);
+        assert!(tracks.is_empty());
     }
 }

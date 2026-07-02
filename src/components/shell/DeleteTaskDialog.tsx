@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +12,14 @@ import {
 } from "@/components/ui/dialog";
 import type { Task } from "@/types/task";
 
+/**
+ * Hard confirm for deleting a task together with its downloaded files.
+ *
+ * Metadata-only removal is handled by an undoable soft-delete flow (see
+ * AppShell `softDelete`); this dialog is only shown when the user explicitly
+ * chooses to delete files from disk, which is irreversible and therefore
+ * still warrants a confirm.
+ */
 export function DeleteTaskDialog({
   task,
   open,
@@ -22,44 +29,29 @@ export function DeleteTaskDialog({
   task: Task | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onDelete: (deleteFile: boolean) => void;
+  onDelete: () => void;
 }) {
   const { t } = useTranslation();
-  const [deleteFiles, setDeleteFiles] = useState(false);
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) setDeleteFiles(false);
-        onOpenChange(nextOpen);
-      }}
-    >
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("deleteDialog.title")}</DialogTitle>
+          <DialogTitle>{t("deleteDialog.filesTitle")}</DialogTitle>
         </DialogHeader>
-        <DialogBody className="space-y-3 py-4">
+        <DialogBody className="py-4">
           <DialogDescription className="text-sm text-text-secondary">
-            {task ? t("deleteDialog.messageWithName", { name: task.fileName }) : t("deleteDialog.messageGeneric")}
+            {task
+              ? t("deleteDialog.filesMessageWithName", { name: task.fileName })
+              : t("deleteDialog.filesMessageGeneric")}
           </DialogDescription>
-
-          <label className="flex cursor-pointer items-center gap-2.5 rounded-md px-1 py-1 text-sm text-text-secondary transition-colors hover:text-text-primary">
-            <input
-              type="checkbox"
-              checked={deleteFiles}
-              onChange={(event) => setDeleteFiles(event.target.checked)}
-              className="h-4 w-4 shrink-0 rounded border-border-subtle accent-accent-primary"
-            />
-            <span>{t("deleteDialog.alsoDeleteFiles")}</span>
-          </label>
         </DialogBody>
         <DialogFooter>
           <Button type="button" variant="ghost" className="w-full sm:w-auto" onClick={() => onOpenChange(false)}>
             {t("deleteDialog.cancel")}
           </Button>
-          <Button type="button" variant="danger" className="w-full sm:w-auto" onClick={() => onDelete(deleteFiles)}>
-            {t("deleteDialog.confirm")}
+          <Button type="button" variant="danger" className="w-full sm:w-auto" onClick={onDelete}>
+            {t("deleteDialog.filesConfirm")}
           </Button>
         </DialogFooter>
       </DialogContent>

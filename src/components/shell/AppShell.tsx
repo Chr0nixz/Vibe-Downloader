@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { CommandBar } from "@/components/shell/CommandBar";
@@ -7,6 +7,7 @@ import { ShutdownOverlay } from "@/components/shell/ShutdownOverlay";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { StatusBar } from "@/components/shell/StatusBar";
 import { TitleBar } from "@/components/shell/TitleBar";
+import type { ReorderAction } from "@/components/tasks/TaskContextMenu";
 import { TaskList } from "@/components/tasks/TaskList";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,7 +25,7 @@ import { useTaskEvents } from "@/hooks/use-task-events";
 import { localizedErrorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import { getPlatform, type Platform, trafficLightsInsetPx } from "@/lib/platform";
-import { sanitizeUrlForDisplay } from "@/lib/utils";
+import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
 
 const log = createLogger("app-shell");
 
@@ -47,6 +48,8 @@ import {
   openTaskFile,
   openTaskFolder,
   pauseTask,
+  queryDiskSpace,
+  reorderQueuedTasks,
   requestLockScreen,
   requestSystemHibernate,
   requestSystemShutdown,
@@ -58,7 +61,7 @@ import {
 } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settings-store";
 import { taskCursorInput, useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
-import { useToastStore } from "@/stores/toast-store";
+import { UNDO_TOAST_TIMEOUT_MS, useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 
 interface NewDownloadInitialState {
@@ -124,18 +127,28 @@ export function AppShell() {
   const { t } = useTranslation();
   const [platform, setPlatform] = useState<Platform>("unknown");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // UX-3: Ref for mod+f / "/" to focus the search input in CommandBar.
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
   const [newDownloadInitialState, setNewDownloadInitialState] = useState<NewDownloadInitialState | null>(null);
   const [newDownloadDraftDirty, setNewDownloadDraftDirty] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
-  const [bulkDeleteTargets, setBulkDeleteTargets] = useState<Task[]>([]);
+  // Hard-confirm dialogs are only used for "delete files too" (irreversible).
+  // Metadata-only removal goes through an undoable soft-delete flow.
+  const [deleteFilesTarget, setDeleteFilesTarget] = useState<Task | null>(null);
+  const [bulkDeleteFilesTargets, setBulkDeleteFilesTargets] = useState<Task[]>([]);
   const [attentionRequest, setAttentionRequest] = useState<AttentionDialogRequest | null>(null);
   const [completionActionRequest, setCompletionActionRequest] = useState<CompletionActionRequestedPayload | null>(null);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
 
   const selectedId = useTaskUIStore((s) => s.selectedId);
   const taskIds = useTaskDataStore((s) => s.taskIds);
+  const totalTasks = useTaskDataStore((s) => s.total);
+  const hasMoreTasks = useTaskDataStore((s) => s.hasMore);
+  const pendingDeleteIds = useTaskUIStore((s) => s.pendingDeleteIds);
+  const addPendingDelete = useTaskUIStore((s) => s.addPendingDelete);
+  const addPendingDeletes = useTaskUIStore((s) => s.addPendingDeletes);
+  const removePendingDelete = useTaskUIStore((s) => s.removePendingDelete);
   const selected = useTaskDataStore((s) => (selectedId ? (s.taskById[selectedId] ?? null) : null));
   const nav = useTaskUIStore((s) => s.nav);
   const detailOpen = useTaskUIStore((s) => s.detailOpen);
@@ -226,6 +239,54 @@ export function AppShell() {
     [runTaskAction],
   );
 
+  const handleReorder = useCallback(
+    async (task: Task, action: ReorderAction) => {
+      // Only same-priority Queued tasks participate in reordering. We read
+      // from store.getState() to always see the latest filtered/sorted list
+      // without re-creating the callback on every store change.
+      const state = useTaskDataStore.getState();
+      const samePriorityQueued = state.taskIds
+        .map((id) => state.taskById[id])
+        .filter((t): t is Task => Boolean(t) && t.status === "queued" && t.priority === task.priority);
+      if (samePriorityQueued.length === 0) return;
+      const currentIndex = samePriorityQueued.findIndex((t) => t.id === task.id);
+      if (currentIndex === -1) return;
+      const next = [...samePriorityQueued];
+      const [moved] = next.splice(currentIndex, 1);
+      switch (action) {
+        case "move_to_top":
+          next.unshift(moved);
+          break;
+        case "move_up":
+          next.splice(Math.max(0, currentIndex - 1), 0, moved);
+          break;
+        case "move_down":
+          next.splice(Math.min(next.length, currentIndex + 1), 0, moved);
+          break;
+        case "move_to_bottom":
+          next.push(moved);
+          break;
+      }
+      const orderedIds = next.map((t) => t.id);
+      // UX-5: Optimistic update — reorder the store immediately so the user
+      // sees instant feedback. On failure, reload from server to revert.
+      useTaskDataStore.getState().reorderTasksLocally(orderedIds);
+      try {
+        await reorderQueuedTasks(orderedIds);
+      } catch (err) {
+        log.error("reorder_queued_tasks failed, reverting", err);
+        addToast({
+          tone: "error",
+          title: t("toast.actionFailed"),
+          description: localizedErrorMessage(err, t),
+        });
+        // Revert: trigger a refresh to reload the correct order from the server.
+        useTaskDataStore.getState().setLoading(true);
+      }
+    },
+    [addToast, t],
+  );
+
   const finishRecording = useCallback(
     (task: Task) => {
       void runTaskAction(() => finishLiveRecording(task.id), task.id);
@@ -246,6 +307,45 @@ export function AppShell() {
     },
     [runTaskAction],
   );
+
+  const copyTaskUrl = useCallback(
+    async (task: Task) => {
+      try {
+        await navigator.clipboard?.writeText(task.url);
+        addToast({ tone: "success", title: t("contextmenu.task.urlCopied") });
+      } catch (err) {
+        log.warn("copy url failed", err);
+        addToast({ tone: "error", title: t("contextmenu.task.copyFailed") });
+      }
+    },
+    [addToast, t],
+  );
+
+  const copyTaskLocalPath = useCallback(
+    async (task: Task) => {
+      const path = task.finalPath ?? `${task.saveDir}/${task.fileName}`;
+      try {
+        await navigator.clipboard?.writeText(path);
+        addToast({ tone: "success", title: t("contextmenu.task.pathCopied") });
+      } catch (err) {
+        log.warn("copy path failed", err);
+        addToast({ tone: "error", title: t("contextmenu.task.copyFailed") });
+      }
+    },
+    [addToast, t],
+  );
+
+  const showTaskDetails = useCallback(
+    (task: Task) => {
+      selectTask(task.id);
+      setDetailOpen(true);
+    },
+    [selectTask, setDetailOpen],
+  );
+
+  const refreshTaskList = useCallback(() => {
+    void refreshTasks();
+  }, [refreshTasks]);
 
   // Single-IPC bulk transfer action (pause/resume/retry) via bulk_task_action.
   // Replaces N serial IPC calls with one aggregated call + one refresh.
@@ -342,40 +442,138 @@ export function AppShell() {
     [addToast, t],
   );
 
-  const bulkDelete = useCallback((selectedTasks: Task[]) => {
+  // ── Soft-delete (metadata only) with undo ──
+  // Hides the task immediately via pendingDeleteIds, shows an undo toast, and
+  // commits the hard delete after the undo window elapses. Undo restores the
+  // task before the commit fires.
+  const softDelete = useCallback(
+    (task: Task) => {
+      const id = task.id;
+      if (useTaskUIStore.getState().pendingDeleteIds.includes(id)) return;
+      addPendingDelete(id);
+      const commitTimer = window.setTimeout(() => {
+        void (async () => {
+          try {
+            await deleteTask(id, false);
+          } catch (err) {
+            log.error("soft-delete commit failed", err);
+            removePendingDelete(id);
+            addToast({
+              tone: "error",
+              title: t("toast.actionFailed"),
+              description: localizedErrorMessage(err, t),
+            });
+          }
+        })();
+      }, UNDO_TOAST_TIMEOUT_MS);
+      addToast({
+        tone: "info",
+        title: t("toast.taskDeleted", { name: task.fileName }),
+        description: t("toast.undoHint"),
+        durationMs: UNDO_TOAST_TIMEOUT_MS,
+        key: `soft-delete-${id}`,
+        action: {
+          label: t("toast.undo"),
+          onClick: () => {
+            window.clearTimeout(commitTimer);
+            removePendingDelete(id);
+          },
+        },
+      });
+    },
+    [addPendingDelete, addToast, removePendingDelete, t],
+  );
+
+  const softDeleteBulk = useCallback(
+    (selectedTasks: Task[]) => {
+      if (selectedTasks.length === 0) return;
+      const alreadyPending = new Set(useTaskUIStore.getState().pendingDeleteIds);
+      const fresh = selectedTasks.filter((task) => !alreadyPending.has(task.id));
+      if (fresh.length === 0) return;
+      const freshIds = fresh.map((task) => task.id);
+      addPendingDeletes(freshIds);
+      const label = t("taskList.bulkDelete", { count: fresh.length });
+      const commitTimer = window.setTimeout(() => {
+        void (async () => {
+          try {
+            await bulkDeleteTasks(freshIds, false);
+            addToast({
+              tone: "success",
+              title: t("toast.bulkComplete", { action: label, done: freshIds.length, total: freshIds.length }),
+              key: "bulk-delete",
+            });
+          } catch (err) {
+            log.error("soft-delete bulk commit failed", err);
+            // Delete failed — unhide the tasks so the user can retry.
+            for (const id of freshIds) removePendingDelete(id);
+            addToast({
+              tone: "error",
+              title: t("toast.bulkFailed", { action: label }),
+              description: localizedErrorMessage(err, t),
+              key: "bulk-delete",
+            });
+          }
+        })();
+      }, UNDO_TOAST_TIMEOUT_MS);
+      addToast({
+        tone: "info",
+        title: t("toast.tasksDeleted", { count: fresh.length }),
+        description: t("toast.undoHint"),
+        durationMs: UNDO_TOAST_TIMEOUT_MS,
+        key: "bulk-soft-delete",
+        action: {
+          label: t("toast.undo"),
+          onClick: () => {
+            window.clearTimeout(commitTimer);
+            // Restore each freshly-hidden task.
+            for (const id of freshIds) removePendingDelete(id);
+          },
+        },
+      });
+    },
+    [addPendingDeletes, addToast, removePendingDelete, t],
+  );
+
+  const bulkDelete = useCallback(
+    (selectedTasks: Task[]) => {
+      // Default bulk delete is undoable (metadata only).
+      softDeleteBulk(selectedTasks);
+      clearSelectedIds();
+    },
+    [clearSelectedIds, softDeleteBulk],
+  );
+
+  const bulkDeleteFiles = useCallback((selectedTasks: Task[]) => {
     if (selectedTasks.length === 0) return;
-    setBulkDeleteTargets(selectedTasks);
+    setBulkDeleteFilesTargets(selectedTasks);
   }, []);
 
-  const confirmBulkDelete = useCallback(
-    (deleteFile: boolean) => {
-      const targets = bulkDeleteTargets;
-      setBulkDeleteTargets([]);
-      if (targets.length === 0) return;
-      void (async () => {
-        const total = targets.length;
-        const label = t("taskList.bulkDelete", { count: total });
-        const ids = targets.map((task) => task.id);
-        try {
-          const done = await bulkDeleteTasks(ids, deleteFile);
-          addToast({
-            tone: "success",
-            title: t("toast.bulkComplete", { action: label, done, total }),
-            key: "bulk-delete",
-          });
-        } catch (error) {
-          addToast({
-            tone: "error",
-            title: t("toast.bulkFailed", { action: label }),
-            description: error instanceof Error ? error.message : String(error),
-            key: "bulk-delete",
-          });
-        }
-        clearSelectedIds();
-      })();
-    },
-    [addToast, bulkDeleteTargets, clearSelectedIds, t],
-  );
+  const confirmBulkDeleteFiles = useCallback(() => {
+    const targets = bulkDeleteFilesTargets;
+    setBulkDeleteFilesTargets([]);
+    if (targets.length === 0) return;
+    void (async () => {
+      const total = targets.length;
+      const label = t("taskList.bulkDelete", { count: total });
+      const ids = targets.map((task) => task.id);
+      try {
+        const done = await bulkDeleteTasks(ids, true);
+        addToast({
+          tone: "success",
+          title: t("toast.bulkComplete", { action: label, done, total }),
+          key: "bulk-delete-files",
+        });
+      } catch (error) {
+        addToast({
+          tone: "error",
+          title: t("toast.bulkFailed", { action: label }),
+          description: error instanceof Error ? error.message : String(error),
+          key: "bulk-delete-files",
+        });
+      }
+      clearSelectedIds();
+    })();
+  }, [addToast, bulkDeleteFilesTargets, clearSelectedIds, t]);
 
   const openNewDownload = useCallback((initialState?: NewDownloadInitialState) => {
     if (initialState) {
@@ -395,6 +593,21 @@ export function AppShell() {
     });
     setNewDownloadOpen(true);
   }, []);
+
+  const pasteAndCreate = useCallback(() => {
+    void (async () => {
+      const text = await navigator.clipboard?.readText().catch(() => null);
+      if (text?.trim()) {
+        const urls = text
+          .split(/\s+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        applyClipboardDownload("clipboard", urls);
+      } else {
+        openNewDownload();
+      }
+    })();
+  }, [applyClipboardDownload, openNewDownload]);
 
   const submitAttentionResolution = useCallback(
     (
@@ -447,10 +660,40 @@ export function AppShell() {
       if (action === "open_folder" || action === "free_disk_space") {
         openFolder(task);
         if (action === "free_disk_space") {
+          // Query disk space and surface the available bytes + shortfall so
+          // the user knows how much to free before retrying.
+          let description = task.saveDir;
+          try {
+            const info = await queryDiskSpace(task.saveDir);
+            const availableBytes = Number(info.available_bytes);
+            const availableLabel = formatBytes(availableBytes);
+            const totalSize = task.totalSize ? Number(task.totalSize) : 0;
+            if (totalSize > 0) {
+              const downloaded = task.downloadedBytes ? Number(task.downloadedBytes) : 0;
+              const remainingNeeded = Math.max(0, totalSize - downloaded);
+              const shortfall = Math.max(0, remainingNeeded - availableBytes);
+              if (shortfall > 0) {
+                description = t("recovery.diskSpaceShortfall", {
+                  available: availableLabel,
+                  needed: formatBytes(remainingNeeded),
+                  shortfall: formatBytes(shortfall),
+                });
+              } else {
+                description = t("recovery.diskSpaceAvailable", {
+                  available: availableLabel,
+                  needed: formatBytes(remainingNeeded),
+                });
+              }
+            } else {
+              description = t("recovery.diskSpaceUnknown", { available: availableLabel });
+            }
+          } catch (err) {
+            log.warn("query_disk_space failed", err);
+          }
           addToast({
             tone: "info",
             title: t("recovery.freeDiskSpaceToast"),
-            description: task.saveDir,
+            description,
           });
         }
         return;
@@ -462,6 +705,18 @@ export function AppShell() {
           tone: "info",
           title: t("recovery.checkUrlToast"),
           description: sanitizeUrlForDisplay(task.url),
+        });
+        return;
+      }
+
+      if (action === "configure_ffmpeg") {
+        // Open Settings → External tools. The user can configure or detect
+        // ffmpeg, then retry the task from its row context menu.
+        setNav("settings");
+        addToast({
+          tone: "info",
+          title: t("settings.ffmpegPath.label"),
+          description: t("settings.ffmpegPath.notDetected"),
         });
         return;
       }
@@ -485,7 +740,7 @@ export function AppShell() {
 
       submitAttentionResolution(task, action);
     },
-    [addToast, openFolder, selectTask, setDetailOpen, submitAttentionResolution, t],
+    [addToast, openFolder, selectTask, setDetailOpen, setNav, submitAttentionResolution, t],
   );
 
   useEffect(() => {
@@ -728,6 +983,14 @@ export function AppShell() {
         return;
       }
 
+      // UX-3: mod+f focuses the search input for keyboard-first users.
+      if (matchesShortcut(event, "mod+f", platform)) {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+
       if (matchesShortcut(event, "mod+/", platform)) {
         event.preventDefault();
         setShortcutPanelOpen((prev) => !prev);
@@ -811,17 +1074,48 @@ export function AppShell() {
           return;
         }
 
-        // Delete: Del
-        if (event.key === "Delete" && selected) {
+        // Delete (metadata only, undoable): Del
+        if (event.key === "Delete" && event.shiftKey === false && selected) {
           event.preventDefault();
-          setDeleteTarget(selected);
+          softDelete(selected);
           return;
         }
 
-        // Select all: Mod+A
+        // UX-5: Queue reorder via keyboard: Alt+Up/Down (only for queued tasks)
+        if (
+          event.altKey &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          selected &&
+          selected.status === "queued" &&
+          (event.key === "ArrowUp" || event.key === "ArrowDown")
+        ) {
+          event.preventDefault();
+          handleReorder(selected, event.key === "ArrowUp" ? "move_up" : "move_down");
+          return;
+        }
+
+        // Delete task and files (irreversible, hard confirm): Shift+Del
+        if (event.key === "Delete" && event.shiftKey === true && selected) {
+          event.preventDefault();
+          setDeleteFilesTarget(selected);
+          return;
+        }
+
+        // Select all loaded: Mod+A
         if (matchesShortcut(event, "mod+a", platform)) {
           event.preventDefault();
-          setSelectedIds(taskIds);
+          // taskIds is the cursor-paginated loaded subset, not the full
+          // filtered result. Select what's loaded and, when more pages
+          // remain, honestly tell the user so the scope is clear.
+          const loaded = taskIds.filter((id) => !pendingDeleteIds.includes(id));
+          setSelectedIds(loaded);
+          if (hasMoreTasks && loaded.length < totalTasks) {
+            addToast({
+              tone: "info",
+              title: t("toast.selectedLoadedOnly", { loaded: loaded.length, total: totalTasks }),
+            });
+          }
           return;
         }
 
@@ -836,11 +1130,15 @@ export function AppShell() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    addToast,
     clearSelectedIds,
     detailOpen,
+    handleReorder,
+    hasMoreTasks,
     openFile,
     openFolder,
     openNewDownload,
+    pendingDeleteIds,
     platform,
     retry,
     selectTask,
@@ -848,30 +1146,47 @@ export function AppShell() {
     selectedId,
     setSelectedIds,
     setDetailOpen,
+    setDeleteFilesTarget,
     setNav,
+    softDelete,
     taskIds,
+    t,
+    totalTasks,
   ]);
+
+  // ── Global native context-menu suppression ──
+  // WebView2/WebKit ship a default context menu (Inspect, Properties, Copy,
+  // etc.) on any element that doesn't preventDefault. Radix-owned triggers
+  // already call preventDefault when they open our custom menu; for every
+  // other surface (sidebar, status bar, title bar, settings, about, blank
+  // gaps) we suppress the native menu here. Custom region menus added in
+  // later phases will still work because they render via Radix, which calls
+  // preventDefault on the trigger before this listener runs.
+  useEffect(() => {
+    const onContextMenu = (event: MouseEvent) => {
+      if (event.defaultPrevented) return;
+      event.preventDefault();
+    };
+    window.addEventListener("contextmenu", onContextMenu, { capture: true });
+    return () => window.removeEventListener("contextmenu", onContextMenu, { capture: true } as AddEventListenerOptions);
+  }, []);
 
   return (
     <div className="flex h-full flex-col">
-      <TitleBar platform={platform} />
-      <CommandBar
+      <TitleBar
         platform={platform}
-        selectedTask={taskSurfaceActive ? selected : null}
         onOpenPalette={() => setPaletteOpen(true)}
         onNewDownload={() => openNewDownload()}
-        onStart={() => {
-          if (selected) void runTaskAction(() => resumeTask(selected.id), selected.id);
-        }}
-        onPause={() => {
-          if (selected) void runTaskAction(() => pauseTask(selected.id), selected.id);
-        }}
-        onDelete={() => {
-          if (selected) setDeleteTarget(selected);
-        }}
+        onOpenShortcuts={() => setShortcutPanelOpen(true)}
+      />
+      <CommandBar
+        platform={platform}
+        onOpenPalette={() => setPaletteOpen(true)}
+        onNewDownload={() => openNewDownload()}
+        inputRef={searchInputRef}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
-        <Sidebar />
+        <Sidebar onNewDownload={() => openNewDownload()} />
         <main className="order-1 flex min-h-0 min-w-0 flex-1 md:order-none">
           <h1 className="sr-only">{t("app.name")}</h1>
           <TaskList
@@ -881,15 +1196,23 @@ export function AppShell() {
             onOpenFile={openFile}
             onOpenFolder={openFolder}
             onResolveAttention={resolveAttention}
-            onDelete={(task) => setDeleteTarget(task)}
+            onDelete={(task) => softDelete(task)}
+            onDeleteFiles={(task) => setDeleteFilesTarget(task)}
             onNewDownload={() => openNewDownload()}
             onBulkPause={bulkPause}
             onBulkResume={bulkResume}
             onBulkRetry={bulkRetry}
             onBulkDelete={bulkDelete}
+            onBulkDeleteFiles={bulkDeleteFiles}
             onBulkOpenFolder={bulkOpenFolder}
             onBulkExport={bulkExport}
             onOpenOnboarding={() => setOnboardingOpen(true)}
+            onCopyUrl={copyTaskUrl}
+            onCopyLocalPath={copyTaskLocalPath}
+            onShowDetails={showTaskDetails}
+            onPasteAndCreate={pasteAndCreate}
+            onRefresh={refreshTaskList}
+            onReorder={handleReorder}
           />
           <Suspense fallback={null}>
             <TaskDetails
@@ -909,7 +1232,12 @@ export function AppShell() {
           </Suspense>
         </main>
       </div>
-      <StatusBar className="flex" platform={platform} onOpenShortcuts={() => setShortcutPanelOpen(true)} />
+      <StatusBar
+        className="flex"
+        platform={platform}
+        onOpenShortcuts={() => setShortcutPanelOpen(true)}
+        onOpenAbout={() => setNav("about")}
+      />
       <ToastViewport />
       {paletteOpen ? (
         <Suspense fallback={null}>
@@ -926,7 +1254,7 @@ export function AppShell() {
               if (selected) void runTaskAction(() => pauseTask(selected.id), selected.id);
             }}
             onDelete={() => {
-              if (selected) setDeleteTarget(selected);
+              if (selected) softDelete(selected);
             }}
             onRetry={() => {
               if (selected) retry(selected);
@@ -970,33 +1298,33 @@ export function AppShell() {
           />
         </Suspense>
       ) : null}
-      {deleteTarget ? (
+      {deleteFilesTarget ? (
         <Suspense fallback={null}>
           <DeleteTaskDialog
-            task={deleteTarget}
-            open={!!deleteTarget}
+            task={deleteFilesTarget}
+            open={!!deleteFilesTarget}
             onOpenChange={(open) => {
-              if (!open) setDeleteTarget(null);
+              if (!open) setDeleteFilesTarget(null);
             }}
-            onDelete={(deleteFile) => {
-              const target = deleteTarget;
-              setDeleteTarget(null);
+            onDelete={() => {
+              const target = deleteFilesTarget;
+              setDeleteFilesTarget(null);
               if (target) {
-                void runTaskAction(() => deleteTask(target.id, deleteFile));
+                void runTaskAction(() => deleteTask(target.id, true));
               }
             }}
           />
         </Suspense>
       ) : null}
-      {bulkDeleteTargets.length > 0 ? (
+      {bulkDeleteFilesTargets.length > 0 ? (
         <Suspense fallback={null}>
           <BulkDeleteDialog
-            tasks={bulkDeleteTargets}
-            open={bulkDeleteTargets.length > 0}
+            tasks={bulkDeleteFilesTargets}
+            open={bulkDeleteFilesTargets.length > 0}
             onOpenChange={(open) => {
-              if (!open) setBulkDeleteTargets([]);
+              if (!open) setBulkDeleteFilesTargets([]);
             }}
-            onDelete={confirmBulkDelete}
+            onDelete={confirmBulkDeleteFiles}
           />
         </Suspense>
       ) : null}

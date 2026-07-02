@@ -127,6 +127,9 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         completion_countdown_seconds: 30,
         completion_run_command: String::new(),
         delete_to_trash: true,
+        auto_update_check_enabled: true,
+        ffmpeg_path: None,
+        bt_upload_limit_bps: None,
     };
 
     let segments = db::ensure_task_segments_with_settings(&pool, &task, &settings)
@@ -188,6 +191,9 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
         completion_countdown_seconds: 30,
         completion_run_command: String::new(),
         delete_to_trash: true,
+        auto_update_check_enabled: true,
+        ffmpeg_path: None,
+        bt_upload_limit_bps: None,
     };
 
     let planned_slots = db::planned_segment_count_with_plan(
@@ -234,6 +240,67 @@ async fn sftp_task_creates_single_file_work_unit() {
     assert_eq!(segments[0].unit_kind, "sftp_file");
     assert_eq!(segments[0].range_start, 0);
     assert_eq!(segments[0].range_end, total_size - 1);
+}
+
+#[tokio::test]
+async fn sftp_parallel_task_creates_two_range_segments() {
+    let pool = test_pool("sftp-parallel-planning").await;
+    let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES * 4;
+    let mut task = sample_task("task-sftp-parallel", total_size);
+    task.url = "sftp://example.com/remote/large.bin".to_string();
+    task.final_url = Some(task.url.clone());
+    task.protocol = "sftp".to_string();
+    task.source_key = "sftp://example.com:22".to_string();
+    task.supports_parallel = true;
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert sftp parallel task");
+
+    let planned_slots = db::planned_segment_count_with_plan(
+        &task,
+        db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
+        db::MAX_SEGMENT_COUNT,
+    );
+    let segments = db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("sftp parallel segments");
+
+    // SFTP is capped at SFTP_MAX_DYNAMIC_CONNECTIONS = 2.
+    assert_eq!(planned_slots, 2);
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].unit_kind, "sftp_range");
+    assert_eq!(segments[1].unit_kind, "sftp_range");
+    assert_eq!(segments[0].range_start, 0);
+    assert_eq!(segments[0].range_end + 1, segments[1].range_start);
+    assert_eq!(segments[1].range_end, total_size - 1);
+}
+
+#[tokio::test]
+async fn sftp_parallel_task_below_threshold_keeps_single_segment() {
+    let pool = test_pool("sftp-below-threshold").await;
+    let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES / 2;
+    let mut task = sample_task("task-sftp-small", total_size);
+    task.url = "sftp://example.com/remote/small.bin".to_string();
+    task.final_url = Some(task.url.clone());
+    task.protocol = "sftp".to_string();
+    task.source_key = "sftp://example.com:22".to_string();
+    task.supports_parallel = true;
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert sftp small task");
+
+    let planned_slots = db::planned_segment_count_with_plan(
+        &task,
+        db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES,
+        db::MAX_SEGMENT_COUNT,
+    );
+    let segments = db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("sftp small segments");
+
+    assert_eq!(planned_slots, 1);
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].unit_kind, "sftp_file");
 }
 
 #[tokio::test]
@@ -409,6 +476,9 @@ async fn settings_upsert_and_clamp_active_task_count() {
             completion_countdown_seconds: 30,
             completion_run_command: String::new(),
         delete_to_trash: true,
+        auto_update_check_enabled: true,
+        ffmpeg_path: None,
+        bt_upload_limit_bps: None,
         },
     )
     .await
@@ -457,6 +527,9 @@ async fn settings_upsert_and_clamp_active_task_count() {
             completion_countdown_seconds: 45,
             completion_run_command: String::new(),
         delete_to_trash: true,
+        auto_update_check_enabled: true,
+        ffmpeg_path: None,
+        bt_upload_limit_bps: None,
         },
     )
     .await

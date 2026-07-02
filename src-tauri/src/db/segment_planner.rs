@@ -18,11 +18,7 @@ pub fn planned_segment_count_with_plan(
     multi_connection_threshold_bytes: i64,
     segment_count: i32,
 ) -> usize {
-    if is_bt_protocol(&task.protocol)
-        || is_metalink_protocol(&task.protocol)
-        || is_sftp_protocol(&task.protocol)
-        || is_dash_protocol(&task.protocol)
-    {
+    if is_bt_protocol(&task.protocol) || is_dash_protocol(&task.protocol) {
         return 1;
     }
     if is_hls_protocol(&task.protocol) {
@@ -32,6 +28,19 @@ pub fn planned_segment_count_with_plan(
     let segment_count = segment_count.clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT) as usize;
     let segment_count = if is_ftp_protocol(&task.protocol) {
         segment_count.min(4)
+    } else if is_sftp_protocol(&task.protocol) {
+        // Conservative cap matching SFTP_MAX_DYNAMIC_CONNECTIONS so the
+        // initial plan never exceeds the per-task parallelism ceiling.
+        segment_count.min(2)
+    } else if is_metalink_protocol(&task.protocol) {
+        // Cap parallel mirrors per file at METALINK_MAX_PARALLEL_MIRRORS.
+        // SFTP/FTP use independent TCP/SSH connections per worker, but
+        // Metalink workers target DIFFERENT HTTP mirrors, so each mirror
+        // only sees one connection — the cap is about local resource use
+        // (file handles, throughput accounting) rather than per-mirror
+        // load. 3 mirrors aligns with industry conventions (aria2 default
+        // is 3-5, lftp default is 3).
+        segment_count.min(3)
     } else {
         segment_count
     };
@@ -67,6 +76,20 @@ pub fn planned_segments_for_task_with_plan(
     }
 
     if is_metalink_protocol(&task.protocol) {
+        // Metalink tasks above the multi-connection threshold use parallel
+        // range segments (one per mirror); smaller tasks fall back to a
+        // single full-file unit so the serial mirror failover path handles
+        // them. Note that this plan is per-task; the engine downloads each
+        // selected file in turn, so the per-file threshold check happens in
+        // `download_metalink_file`'s parallel-vs-serial dispatch.
+        let count = planned_segment_count_with_plan(
+            task,
+            multi_connection_threshold_bytes,
+            segment_count,
+        );
+        if count > 1 && task.total_size > 0 {
+            return parallel_range_segments(task, "metalink_range", count);
+        }
         return vec![single_segment_for_task(task, "metalink_file")];
     }
 
@@ -74,13 +97,23 @@ pub fn planned_segments_for_task_with_plan(
         return vec![single_segment_for_task(task, "dash_media")];
     }
 
-    if is_sftp_protocol(&task.protocol) {
-        return vec![single_segment_for_task(task, "sftp_file")];
-    }
-
     if is_ftp_protocol(&task.protocol) {
         return vec![single_segment_for_task(task, "ftp_rest")];
     }
+
+    // SFTP falls through to the HTTP-style multi-range generator below when
+    // the task supports parallelism and meets the threshold; otherwise it
+    // uses a single-segment plan, matching the FTP fallback behaviour.
+    let unit_kind = if is_sftp_protocol(&task.protocol) {
+        "sftp_range"
+    } else {
+        "http_range"
+    };
+    let single_unit_kind = if is_sftp_protocol(&task.protocol) {
+        "sftp_file"
+    } else {
+        "http_range"
+    };
 
     let count =
         planned_segment_count_with_plan(task, multi_connection_threshold_bytes, segment_count);
@@ -88,9 +121,28 @@ pub fn planned_segments_for_task_with_plan(
     let completed = task.downloaded_bytes >= total_size && total_size > 0;
 
     if count == 1 || total_size == 0 {
-        return vec![single_segment_for_task(task, "http_range")];
+        return vec![single_segment_for_task(task, single_unit_kind)];
     }
 
+    parallel_range_segments_with_completion(task, unit_kind, count, completed)
+}
+
+/// Build `count` non-overlapping range segments covering [0, total_size)
+/// with the given `unit_kind`. Each segment is marked `Pending`.
+/// Used by SFTP and Metalink parallel paths.
+fn parallel_range_segments(task: &TaskRecord, unit_kind: &str, count: usize) -> Vec<TaskSegmentRecord> {
+    let total_size = task.total_size.max(0);
+    let completed = task.downloaded_bytes >= total_size && total_size > 0;
+    parallel_range_segments_with_completion(task, unit_kind, count, completed)
+}
+
+fn parallel_range_segments_with_completion(
+    task: &TaskRecord,
+    unit_kind: &str,
+    count: usize,
+    completed: bool,
+) -> Vec<TaskSegmentRecord> {
+    let total_size = task.total_size.max(0);
     let count_i64 = i64::try_from(count).unwrap_or(1);
     let base = total_size / count_i64;
     let remainder = total_size % count_i64;
@@ -110,7 +162,7 @@ pub fn planned_segments_for_task_with_plan(
                 id: uuid::Uuid::new_v4().to_string(),
                 task_id: task.id.clone(),
                 file_id: None,
-                unit_kind: "http_range".to_string(),
+                unit_kind: unit_kind.to_string(),
                 range_start: start,
                 range_end: end,
                 downloaded_until,

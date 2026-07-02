@@ -1,6 +1,6 @@
 # Vibe Downloader Roadmap
 
-Last updated: 2026-06-25
+Last updated: 2026-06-28
 
 This roadmap reflects the current repository state. Product and design constraints live in [PRODUCT.md](../PRODUCT.md) and [DESIGN.md](../DESIGN.md). Error and browser header-forwarding details live in [error-codes.md](error-codes.md) and [browser-header-forwarding.md](browser-header-forwarding.md).
 
@@ -81,6 +81,32 @@ The app now includes a working HTTP/HTTPS desktop download manager, plus lower-m
 - HLS and DASH downloads require `ffmpeg` on the system PATH (or `VIBE_FFMPEG_PATH`); the app reports a structured error if missing.
 - Task list uses backend cursor pagination plus frontend windowing for large histories; browser realtime snapshots send active tasks plus a bounded recent history, and the extension caps its live task cache. Future work should benchmark production-scale databases on each target OS.
 - BT/FTP/SFTP/Metalink/HLS/DASH/WebDAV hardening and any future plugin protocol work should use mature engines/adapters when scheduled.
+- OS code signing is intentionally not configured for the current release cycle. Releases are unsigned and ship with explicit risk notes in README and Release Notes. See [RELEASE.md](RELEASE.md) for the unsigned policy and the path to enable signing later.
+
+## Mid-term Targets
+
+The following items are deferred to the mid-term horizon (post-0.2.x). They are tracked here so the codebase keeps the extension points open and avoids design decisions that would block them later.
+
+### Safari WebExtension Wrapper
+
+Safari is not supported in the current release because Safari WebExtensions must be packaged inside a macOS app container and distributed through the Mac App Store (or via Developer ID signed `.app` with notarization). This requires:
+
+- An active Apple Developer Program membership (currently out of scope; see unsigned policy in [RELEASE.md](RELEASE.md)).
+- Xcode project that wraps `browser/extension-core` source as a Safari Web Extension.
+- `manifest_v2`/`manifest_v3` parity review against Safari's subset of WebExtension APIs (Safari does not implement `webRequest` blocking for MV3 on all versions; Cookie/header forwarding may need fallback paths).
+- Mac App Store review preparation: privacy policy, sandbox entitlements, hardened runtime entitlements, and screenshots.
+
+Implementation plan (when prioritized):
+
+1. Create `browser/safari/` Xcode project scaffold that references `browser/extension-core/src` as the shared source set.
+2. Adapt `scripts/build-browser-extensions.mjs` to emit a Safari variant manifest that mirrors the Chromium package, with `browser_specific_settings.safari` populated.
+3. Verify `nativeMessaging` works through Safari's Native Messaging host registration on macOS (`~/Library/Application Support/Mozilla/NativeMessagingHosts` and Safari's own registry).
+4. Decide between Mac App Store distribution (sandboxed, requires review) and direct download (Developer ID signed, notarized).
+5. Update `BrowserKind::Safari` in `src-tauri/src/commands/browser.rs` to return a real extension id and install manifest, and remove the `=> None` placeholder.
+6. Update [docs/browser-integration.md](browser-integration.md) and README.md to remove the "Safari not supported" note.
+7. Add Safari to the CI extension build matrix in `release.yml` (macOS runner only).
+
+Until this is done, the Safari entry remains `BrowserKind::Safari => None` and Safari users should use the clipboard monitoring path or the manual New Download flow.
 
 ## Verification Baseline
 

@@ -1,151 +1,115 @@
 # 项目改进审计
 
-最后更新：2026-06-25
+最后更新：2026-06-28
 
-本审计基于当前仓库代码、配置、测试和文档状态。它不替代 [ROADMAP.md](ROADMAP.md)，而是按风险和用户影响列出仍需处理的问题。
+本审计基于当前仓库代码、配置、测试和文档状态，按风险和用户影响列出仍需处理的问题。它不替代 [ROADMAP.md](ROADMAP.md)；路线图描述方向，本文件描述优先级、风险和验证重点。
 
-> 另见 [architecture-audit.md](architecture-audit.md)：从用户交互便捷性、功能完整性、架构鲁棒性、运行效率四个维度出发的架构与工程审计，含分阶段修复计划。
+> 详细四维复核见 [architecture-audit.md](architecture-audit.md)：从用户交互便捷性、功能完整性、架构鲁棒性、运行效率四个维度展开，并包含旧结论修正清单。
 
 ## 总体结论
 
-Vibe Downloader 已经远超最早 HTTP MVP：HTTP/HTTPS 下载核心（含自动加速分段）、SQLite 持久化（12 个迁移）、FTP/FTPS 动态并行、SFTP (TOFU)、BitTorrent (运行时快照)、HLS (AES-128-CBC)、DASH (ffmpeg)、WebDAV (PROPFIND)、Metalink (镜像故障转移 + 校验和)、加密凭据存储、逐任务代理、定时调度、浮动状态窗口、8 色主题、设置搜索、store 分解、虚拟无限滚动、浏览器 Native Messaging、WebSocket 实时桥、剪贴板监控、批量导入、命令面板和 CI 验证都已经落地。
+Vibe Downloader `0.2.0` 已经远超最早 HTTP MVP：HTTP/HTTPS 下载核心、SQLite 持久化、队列调度、限速、浏览器 Native Messaging、WebSocket 实时桥、剪贴板监控、设置页、命令面板、任务详情诊断、虚拟滚动、浮动状态窗口、多协议入口和 CI 验证都已经落地。
 
-当前主要风险集中在四类：
+当前主要风险不再是基础能力缺失，而是发布级成熟度不足：
 
-1. 发布前信任链路：README、路线图、审计和发布说明必须持续与代码一致。
-2. 非 HTTP 协议成熟度：FTP/FTPS、SFTP、BitTorrent、HLS、DASH、WebDAV 和 Metalink 已可用，但可靠性、诊断和恢复能力仍低于 HTTP/HTTPS。HLS 和 DASH 依赖外部 ffmpeg。
-3. 发布级安全和分发：浏览器商店身份、扩展签名、Safari wrapper、权限文案、OS 代码签名和 updater 端到端演练仍未完成。
-4. 规模化性能：任务列表已 store 分解 + 虚拟化 + 游标分页，详情诊断已节流，但仍需要生产规模数据库和多任务压测。
+1. **发布信任链未闭环**：浏览器商店身份、扩展签名、Safari wrapper、OS 代码签名、权限文案和 updater 端到端演练仍是公开发布阻断。
+2. **非 HTTP 协议成熟度不均**：FTP/FTPS、SFTP、BitTorrent、HLS、DASH、WebDAV、Metalink 已接入，但可靠性、诊断、恢复能力和测试覆盖仍低于 HTTP/HTTPS。
+3. **关键交互闭环仍可补强**：URL 探测阶段反馈、错误详情复制、磁盘空间不足恢复、队列重排、每任务计划窗口开关、多文件筛选还不够顺手。
+4. **规模化性能缺少实测基线**：任务列表已有 store 分解、游标分页和虚拟滚动，但 1k/10k/50k 历史任务、100 活跃任务、多协议混合下载、长诊断历史等场景仍缺少可追踪指标。
 
 ## 已确认优势
 
 - HTTP probe 支持 HEAD 与 Range GET fallback，并识别文件名、大小、content type、Range 能力和来源 host。
-- HTTP 下载引擎支持未知大小单连接、Range 分段、自动加速（动态分裂，最多 8 段）、分段 retry、断点续传校验、checkpoint 进度持久化和全局 token bucket 限速。
-- FTP/FTPS 支持动态并行分段（最多 4 连接）、SOCKS5 代理、加密凭据存储和目录探测。
-- SFTP 支持密码认证、加密凭据、本地临时文件断点续传、目录探测、SOCKS5 代理和 TOFU 主机密钥验证。
-- BitTorrent 支持 magnet、HTTP/HTTPS `.torrent` URL 和本地 `file://*.torrent`，含多文件选择、运行时快照、SOCKS5 代理、可配置做种和全局限速。
-- HLS/m3u8 支持主播放列表变体选择、AES-128-CBC 解密、并发分段、直播轮询和 ffmpeg MP4 封装。
-- DASH/MPD 支持清单解析（拒绝 live）、ffmpeg 下载和 MP4 封装。
+- HTTP 下载引擎支持未知大小单连接、Range 分段、自动加速、分段 retry、断点续传校验、checkpoint 进度持久化、最终文件自动重命名和全局 token bucket 限速。
+- FTP/FTPS 支持动态并行分段、SOCKS5 代理、加密凭据存储和目录探测。
+- SFTP 支持密码凭据、加密存储、本地临时文件续传、目录探测、SOCKS5 代理和 TOFU 主机密钥验证。
+- BitTorrent 支持 magnet、HTTP/HTTPS `.torrent` URL、本地 `file://*.torrent`、多文件选择、运行时快照、SOCKS5 代理和可配置做种。
+- HLS 支持 master variant、AES-128-CBC、init map、byte range、并发分段、直播轮询和 ffmpeg MP4 remux。
+- DASH 支持静态/VOD MPD 解析、ffmpeg 下载和 MP4 remux，并明确拒绝 dynamic/live。
 - WebDAV/WebDAVS 支持 Basic Auth、PROPFIND 目录探测和 HTTP 引擎委托。
-- Metalink4 支持多文件选择、HTTP/HTTPS 镜像故障转移和校验和验证（按可用算法优先级取最强一项验证）。
-- 加密凭据存储使用 ChaCha20-Poly1305，覆盖 FTP/FTPS、SFTP 和 WebDAV，启动时自动迁移旧明文。
-- 逐任务代理覆盖（继承/关闭/自定义），按协议验证兼容性。
-- 定时下载窗口、定时限速窗口、完成动作（可取消退出 + 确认关机）。
-- UI 具备 store 分解（data/ui/speed-history）、虚拟无限滚动、游标分页、8 色 OKLCH 主题、浮动状态窗口（球/条形）、可折叠侧边栏（三档响应式）、设置页 7 分区 + 搜索、命令面板、详情面板、Chunks/Connections/Requests/Logs、toast、删除确认和恢复动作。
-- 浏览器集成已具备 Native Messaging、实时桥、manifest 安装诊断、下载接管、显式 Cookie/header 转发和 request id 去重。
-- CI 覆盖前端 typecheck/build、Rust check/clippy/test、Specta 绑定漂移和三平台 Tauri build。
+- Metalink4 支持多文件选择、HTTP/HTTPS 镜像 failover 和按最强可用算法校验。
+- 加密凭据存储使用 ChaCha20-Poly1305，覆盖 FTP/FTPS、SFTP、WebDAV，并支持旧明文迁移。
+- 逐任务代理覆盖支持继承/关闭/自定义，并按协议验证兼容性。
+- UI 已具备 data/ui/speed-history store 分解、虚拟无限滚动、游标分页、状态筛选、搜索、排序、多选、批量动作、命令面板、设置搜索、任务详情、Chunks/Connections/Requests/Logs、toast、删除确认和恢复动作。
+- 浏览器集成已有 Native Messaging host、本地 WebSocket bridge、manifest 安装诊断、下载接管、重复请求处理、单实例转发和显式 Cookie/header 转发。
+- 多项旧高风险问题已经修复或缓解：browser handoff SSRF 防护（含 DNS rebinding/重定向每跳复验，A-2 已修复）、BT session 释放、WAL checkpoint、状态机事务化、`files_version` 缓存、HTTP client pool 参数、完成后 `sync_all`、单一 StatusBar、`Mod+R` 重试、onboarding 扩展引导、i18n 检查和 toast hidden count。
+- 2026-06-30 修复批次：A-1 调度器槽位泄漏、A-2 SSRF 纵深、A-5 DNS resolver panic、E-1 queue-changed 增量刷新、E-2 统计快照节流、F-1 BT 种子率执行、F-2/F-3 Metalink 并行续传与进度聚合、F-4 Metalink 端到端测试、UX-1 i18n 自动检测限制到稳定语言。
+- 2026-06-30 Batch 1 修复：A-3 退出 flush 并发 join_all、A-4 worker 完成路径 evict 运行时锁、A-6 Realtime 广播 lag 重发 snapshot、UX-2 搜索去除双防抖、UX-3 mod+f 聚焦搜索、UX-4 空列表区分筛选/无下载、UX-5 队列重排键盘快捷键 + 乐观更新。
+- 2026-06-30 Batch 2 已完成 F-5：手动校验输入扩展到 SHA-256/SHA-512/SHA-1/MD5 四算法，`CreateTaskInput` 新增 `expected_hash` + `expected_hash_algorithm`，`normalize_expected_hash` 校验长度与 hex，UI 提供算法下拉，弱算法标注 weak；5 个 Rust 单元测试覆盖。F-7（BT 上传限速）与 F-6（HLS 多音轨/字幕）已完成（已修复 2026-06-30）。
+- 2026-06-30 Batch 3 已完成 F-6/F-7：F-6 HLS 多音轨/字幕选择、F-7 BitTorrent 上传限速（已修复 2026-06-30）。
 
-## P0：发布前必须处理
+## P0：发布前阻断
 
-### 1. 发布链路端到端演练
+### 1. 发布信任链端到端闭环
 
-配置已经存在，但正式发布前仍需要实际验证。
-
-- 用测试 tag 触发 Release workflow。
-- 确认 `latest.json`、`.sig`、安装包和版本号一致。
-- 验证打包应用能检查更新、安装并 relaunch。
-- 在 Windows/macOS 未配置代码签名前，发布说明明确 unsigned 风险。
-
-### 2. 浏览器扩展发布身份
-
-开发包和本地集成已经可用，但商店版仍缺少发布身份。
+公开发布前必须完成或明确取舍，否则安装可信度和升级体验都会受影响。
 
 - 替换 Chrome/Edge/Firefox release placeholder ID。
-- 完成正式扩展签名和权限文案。
-- 建立 Chrome/Edge/Firefox 的安装、接管、回退、卸载验证矩阵。
-- Safari wrapper 继续标记为未实现。
+- 完成正式扩展签名、Firefox signed XPI、权限说明和 store review copy。
+- 明确 Safari wrapper 是本版本不支持还是进入发布范围。
+- 配置 macOS Developer ID / Windows signing；如果短期不签名，release notes 必须明确 unsigned 风险。
+- 用测试 tag 完整演练 updater：旧版安装、检查更新、下载、relaunch、版本校验。
 
-### 3. 非 HTTP 协议可靠性
+## P1：核心体验、可靠性和性能风险
 
-FTP/FTPS、SFTP、BitTorrent、HLS、DASH、WebDAV 和 Metalink 已接入，但都不能按 HTTP 路径宣传为成熟。
+### 1. 非 HTTP 协议可靠性补齐
 
-- 为 FTP/FTPS 增加匿名、带凭据、显式 FTPS、隐式 FTPS、代理失败、断点恢复测试。
-- 为 SFTP 增加密码认证失败、TOFU 主机密钥不匹配、代理连接失败、断点续传测试。
-- 为 BT 增加限速、暂停、恢复、文件选择和元数据超时测试。
-- 为 HLS 增加 AES 解密失败、直播轮询超时、ffmpeg 缺失/失败测试。
-- 为 DASH 增加 ffmpeg 缺失、空输出、live 拒绝测试。
-- 为 WebDAV 增加认证失败、PROPFIND 解析、大目录测试。
-- 为 Metalink 增加镜像全部失败、校验和不匹配、路径安全测试。
-- 统一协议错误分类和恢复动作（已有 `TaskFailureCategory` 15 类和 `RecoveryAction` 8 种），继续减少裸字符串错误。
-- 验证 ffmpeg 在不同 OS 上的可用性（PATH 查找 vs `VIBE_FFMPEG_PATH`），确保缺失时给出明确诊断。
+HTTP/HTTPS 是当前最成熟路径，其他协议不能按同等成熟度宣传。
 
-## P1：核心体验完善
+- SFTP 仍为单流下载，known-size 大文件需要评估多 channel 或多连接并行读取。
+- Metalink 并行镜像 range 加速路径已修复续传与进度聚合（F-2/F-3），并补齐端到端测试（F-4）。
+- HLS/DASH 依赖外部 ffmpeg，缺少路径设置 UI、版本诊断和跨平台安装引导。
+- FTP/FTPS、SFTP、WebDAV、HLS 需要补齐 fake server 集成测试（Metalink 已于 2026-06-30 补齐）。
+- 每个协议至少覆盖创建、暂停、恢复、凭据失败、代理失败、校验失败和错误恢复动作。
 
-### 1. 重复任务防护
+### 2. 用户交互闭环
 
-已增加跨已有任务的重复判断：手动新建、批量导入和浏览器交接共享后端判重策略，按脱敏 URL、final URL 和 BT info hash 防止误建重复任务。
+基础 UI 已经完整，但一些高频失败和高级控制仍需要更直接的入口。
 
-- 手动新建遇到重复任务时会提示，并允许用户明确选择“仍然创建副本”。
-- 批量导入会把已有任务计入 duplicate，而不是 failed。
-- 后续仍可补充浏览器 request id 与剪贴板来源的更细粒度提示文案。
+- 新建下载增加阶段化 `probePhase`：识别协议、读取清单、解析分片、检查运行时、完成、失败。
+- 失败详情增加“一键复制错误详情”，包含 task id、URL、错误码、恢复动作和最近请求诊断。
+- 磁盘空间不足时显示当前剩余、任务所需、差额和建议动作。
+- 任务列表增加队列置顶、上移、下移、移到底部；中期支持拖拽重排。
+- TaskDetails 增加“遵守计划下载窗口”开关，暴露已有 `obey_schedule` 能力。
+- BT/Metalink 多文件选择增加搜索、类型筛选、按扩展名筛选、只选最大文件、全选当前筛选结果。
 
-### 2. 设置和新建任务继续降噪
+### 3. 架构恢复和安全审计
 
-设置页已全面重构为 7 个可折叠分区 + 搜索栏 + 自动保存（1000ms 防抖）；连续调整时成功反馈收敛到页内保存状态，不再产生连续成功 toast。
+系统已有关键保护，但发布级恢复体验和审计清单仍不足。
 
-- 保持合并保存节流，避免连续 toast。
-- 新建下载继续强化批量入口和错误文案。
-- 加密凭据存储已覆盖 FTP/FTPS、SFTP 和 WebDAV，旧明文会在启动时自动迁移；对迁移失败的任务仍需提供明确重试或重新创建提示。
+- 数据库迁移失败时提供恢复对话框：备份路径、错误类型、重建/退出选择。
+- CI 增加旧版本数据库快照迁移测试，覆盖 `Dirty`、版本缺失、版本不匹配等场景。
+- 浏览器 handoff/header forwarding 做发布前权限审计：manifest 权限、host permissions、header allowlist、Authorization 拒绝、过期策略、卸载回滚、dev/release ID 差异。
+- 关闭流程增加慢盘/高并发压测，验证 3 秒等待是否足够 flush checkpoint 和收敛子任务。
 
-### 3. 启动恢复策略
+### 4. 性能热路径和规模基线
 
-设置页已增加“启动后续传中断任务”开关。默认继续保守关闭；开启后，启动时会把上次关闭时处于 downloading/retrying 的任务重新排队。
+已有虚拟滚动、游标分页、事件节流和 store 分解，但仍需要生产规模数据验证。
 
-- 重新排队后仍走现有续传校验，不绕过本地临时文件与远端元数据检查。
-- 手动暂停的任务不会被自动恢复。
-- 后续可补充启动恢复摘要和失败原因统计。
+- HLS 大分片改为流式写盘；AES-128-CBC 中期实现 block streaming 解密，避免完整 `Vec` 峰值。
+- 剪贴板监控增加文本 hash 短路，避免重复文本每秒重新扫描。
+- 窗口不可见时降低 progress flush 频率到 250-500ms，并合并每 task 最新 payload。
+- `queue-changed` 事件已携带变更 task ids 做增量 upsert（E-1 已修复 2026-06-30）；后续可继续优化后端按批合并发射。
+- 建立 `docs/performance-baseline.md`，记录 1k/10k/50k 任务库的启动首屏、滚动 FPS、筛选响应、详情页打开耗时和内存峰值。
 
-## P2：可靠性和诊断
+## P2：功能完整性和中期增强
 
-### 1. 重试策略集中化
-
-HTTP（最多 5 段重试）、FTP（最多 2 worker 重试）、SFTP、BT（90s 元数据超时）、HLS（2 段重试 + 指数退避）、DASH、WebDAV 和 Metalink 当前各有重试/超时策略。
-
-- 建立共享 retry policy 和错误分类。
-- 记录 retry-after、退避原因、最终失败阶段。
-- 在 UI 诊断中展示协议、阶段、重试次数和下一步建议。
-
-### 2. 数据库迁移规范
-
-项目已累积到 012 号迁移，包括一个涉及表重建的 `009_metalink.sql`（task_checksums 新增 file_id 列）和一个 `012_dedup_unique.sql` 去重约束。
-
-- 后续只新增 additive migration，不重写历史 migration。
-- 复杂迁移必须有旧数据升级测试。
-- 发布前准备备份、失败提示和恢复文档。
-
-### 3. 端到端覆盖
-
-Rust 单元/集成测试较强，前端和桌面/浏览器 E2E 仍偏弱。
-
-- 补设置页、新建下载、命令面板、详情诊断的组件或集成测试。
+- DASH 增加 `SegmentTimeline` 支持；live DASH 排在核心可靠性之后。
+- HLS 支持字幕/多音轨选择，并在文档中明确 DRM 不支持。
+- 新建下载校验区支持 SHA-256/SHA-512/SHA-1/MD5 多算法输入，并标注弱校验。
+- 增加本地 JSON-RPC 或 REST API，服务脚本、NAS、自动化和其他工具控制下载。
+- 增加 PAC 代理支持，明确脚本执行沙箱。
+- 增加完成后整理规则，支持按 `{category}`、`{host}`、`{date}`、`{name}` 等模板移动或重命名。
+- 补设置页、新建下载、命令面板、详情诊断的前端组件或集成测试。
 - 补 Native Messaging、WebSocket bridge、单实例转发和剪贴板捕获的端到端验证。
-- 保留发布前手动验证清单，直到自动化覆盖足够。
 
-## P3：性能
+## 建议修复顺序
 
-### 1. 详情诊断推送化
-
-详情页诊断轮询已降频，但本质仍是定时拉取。
-
-- 优先用事件更新摘要。
-- 仅在 tab 可见时拉取分页数据。
-- 对大 segment/request 历史保留分页，避免一次返回过多。
-
-### 2. 浏览器实时桥规模化
-
-实时桥初始同步已限制为活跃任务加最近历史，扩展侧 live task map 已设置最大容量并优先保留活跃任务；WebSocket pending request 也会在响应、超时或断线时清理，但仍需要压测。
-
-- 用 1k、10k 历史任务测试扩展启动速度。
-- 如果仍慢，增加专用 active/recent 查询而不是从完整列表过滤。
-- 继续观察 popup 打开耗时和长时间运行后的内存占用。
-
-### 3. 构建体积审计
-
-目前只维护 English 和 简体中文，其他语言资源暂不暴露。
-
-- 跑 `pnpm build` 后记录前端 bundle 体积。
-- 检查字体、图标、语言资源和扩展包输出大小。
-- 对非必要资源做懒加载或移出默认包。
+1. **发布可信度**：扩展 ID/签名、权限文案、OS signing 或 unsigned 策略、updater 演练。
+2. **交互闭环**：probe 阶段反馈、复制错误详情、磁盘空间恢复、队列重排。
+3. **协议成熟度**：SFTP 并行、Metalink 并行镜像、ffmpeg 管理、跨协议 fake server 测试。
+4. **恢复和安全**：数据库恢复 UI、迁移快照测试、浏览器权限审计、关闭压测。
+5. **性能基线**：HLS 内存峰值优化、剪贴板短路、后台 progress 降频、queue-changed 增量刷新、规模化基准文档。
 
 ## 建议验证命令
 

@@ -44,6 +44,10 @@ const SETTING_COMPLETION_ACTION: &str = "completion_action";
 const SETTING_COMPLETION_COUNTDOWN_SECONDS: &str = "completion_countdown_seconds";
 const SETTING_COMPLETION_RUN_COMMAND: &str = "completion_run_command";
 const SETTING_DELETE_TO_TRASH: &str = "delete_to_trash";
+const SETTING_AUTO_UPDATE_CHECK_ENABLED: &str = "auto_update_check_enabled";
+const SETTING_FFMPEG_PATH: &str = "ffmpeg_path";
+/// F-7: Global BitTorrent upload speed limit (bytes/sec). Empty/0 = unlimited.
+const SETTING_BT_UPLOAD_LIMIT_BPS: &str = "bt_upload_limit_bps";
 
 pub async fn get_settings(
     pool: &SqlitePool,
@@ -129,7 +133,7 @@ pub async fn get_settings(
     .unwrap_or_else(|| "23:00".to_string());
     let schedule_speed_limit_bps =
         normalize_speed_limit_bps(kv.get(SETTING_SCHEDULE_SPEED_LIMIT_BPS).map(String::as_str).unwrap_or(""));
-    let titlebar_gradient_enabled = parse_bool_setting(&kv, SETTING_TITLEBAR_GRADIENT_ENABLED, true)?;
+    let titlebar_gradient_enabled = parse_bool_setting(&kv, SETTING_TITLEBAR_GRADIENT_ENABLED, false)?;
     let completion_action = kv
         .get(SETTING_COMPLETION_ACTION)
         .map(|v| CompletionAction::from_db_str(v))
@@ -145,6 +149,15 @@ pub async fn get_settings(
         .cloned()
         .unwrap_or_default();
     let delete_to_trash = parse_bool_setting(&kv, SETTING_DELETE_TO_TRASH, true)?;
+    let auto_update_check_enabled =
+        parse_bool_setting(&kv, SETTING_AUTO_UPDATE_CHECK_ENABLED, true)?;
+    let ffmpeg_path = kv
+        .get(SETTING_FFMPEG_PATH)
+        .and_then(|v| normalize_ffmpeg_path(v));
+    // F-7: BT upload limit, persisted as a speed-limit string (same shape as
+    // global_speed_limit_bps). Empty/invalid/0 means unlimited.
+    let bt_upload_limit_bps =
+        normalize_speed_limit_bps(kv.get(SETTING_BT_UPLOAD_LIMIT_BPS).map(String::as_str).unwrap_or(""));
 
     Ok(AppSettings {
         max_active_tasks,
@@ -177,6 +190,9 @@ pub async fn get_settings(
         completion_countdown_seconds,
         completion_run_command,
         delete_to_trash,
+        auto_update_check_enabled,
+        ffmpeg_path,
+        bt_upload_limit_bps,
     })
 }
 
@@ -343,7 +359,52 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         SETTING_DELETE_TO_TRASH,
         bool_setting_value(settings.delete_to_trash),
     )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_AUTO_UPDATE_CHECK_ENABLED,
+        bool_setting_value(settings.auto_update_check_enabled),
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_FFMPEG_PATH,
+        settings.ffmpeg_path.as_deref().unwrap_or(""),
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_BT_UPLOAD_LIMIT_BPS,
+        settings.bt_upload_limit_bps.as_deref().unwrap_or(""),
+    )
     .await
+}
+
+/// Read the persisted `ffmpeg_path` setting without loading the full AppSettings.
+/// Used by the download layer to resolve the ffmpeg binary location.
+pub async fn get_ffmpeg_path_setting(pool: &SqlitePool) -> Option<String> {
+    let kv = load_all_settings(pool).await.ok()?;
+    kv.get(SETTING_FFMPEG_PATH).and_then(|v| normalize_ffmpeg_path(v))
+}
+
+/// F-7: Read the persisted BT upload limit (bytes/sec) without loading the
+/// full AppSettings. Used by the BT engine to apply the limit at session
+/// creation and on reuse. Returns `None` when unset/invalid/0 (unlimited).
+pub async fn get_bt_upload_limit_bps_setting(pool: &SqlitePool) -> Option<i64> {
+    let kv = load_all_settings(pool).await.ok()?;
+    parse_speed_limit_bps(kv.get(SETTING_BT_UPLOAD_LIMIT_BPS).map(String::as_str))
+}
+
+/// Normalize a user-provided ffmpeg path: trim whitespace and reject empty
+/// strings. Does not check filesystem existence to avoid cross-platform
+/// path-canonicalization issues during settings updates.
+pub fn normalize_ffmpeg_path(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 pub async fn clipboard_monitor_enabled(pool: &SqlitePool) -> Result<bool, String> {
@@ -429,6 +490,46 @@ pub fn local_time_window_active(start: &str, end: &str) -> bool {
     } else {
         current >= start_minutes || current < end_minutes
     }
+}
+
+/// E-5: Returns the duration until the next schedule window boundary
+/// (either start or end, whichever comes first). Used by the schedule
+/// monitor to sleep until the exact boundary instead of polling every 60s,
+/// eliminating up to 60s latency at boundary crossings.
+///
+/// Returns a 60s fallback if the window strings are unparseable, and a 1h
+/// cap for safety (settings changes, clock adjustments, DST transitions).
+pub fn duration_until_next_window_boundary(start: &str, end: &str) -> std::time::Duration {
+    let Some(start_minutes) = local_minutes(start) else {
+        return std::time::Duration::from_secs(60);
+    };
+    let Some(end_minutes) = local_minutes(end) else {
+        return std::time::Duration::from_secs(60);
+    };
+    if start_minutes == end_minutes {
+        // Window is always active — no boundary to wait for.
+        return std::time::Duration::from_secs(3600);
+    }
+    let now = chrono::Local::now();
+    let current_secs = (now.hour() * 60 + now.minute()) * 60 + now.second();
+    let start_secs = start_minutes * 60;
+    let end_secs = end_minutes * 60;
+
+    // Seconds until next start (wraps around midnight).
+    let until_start = if current_secs < start_secs {
+        start_secs - current_secs
+    } else {
+        86400 - current_secs + start_secs
+    };
+    // Seconds until next end (wraps around midnight).
+    let until_end = if current_secs < end_secs {
+        end_secs - current_secs
+    } else {
+        86400 - current_secs + end_secs
+    };
+
+    let next = until_start.min(until_end).min(3600); // cap at 1h
+    std::time::Duration::from_secs(next as u64)
 }
 
 fn local_minutes(value: &str) -> Option<u32> {
@@ -598,5 +699,42 @@ mod tests {
         .await
         .expect("settings table");
         pool
+    }
+
+    // E-5: duration_until_next_window_boundary tests
+
+    #[test]
+    fn duration_until_next_window_boundary_is_bounded() {
+        // Any valid window should return a duration between 1s and 3600s.
+        let dur = duration_until_next_window_boundary("09:00", "17:00");
+        assert!(dur.as_secs() > 0, "duration must be positive");
+        assert!(
+            dur.as_secs() <= 3600,
+            "duration must be capped at 1h, got {}s",
+            dur.as_secs()
+        );
+    }
+
+    #[test]
+    fn duration_until_next_window_boundary_always_active() {
+        // start == end means the window is always active — no boundary.
+        let dur = duration_until_next_window_boundary("00:00", "00:00");
+        assert_eq!(dur.as_secs(), 3600);
+    }
+
+    #[test]
+    fn duration_until_next_window_boundary_wrap_around() {
+        // Window crossing midnight (22:00-06:00) — should still return
+        // a bounded duration.
+        let dur = duration_until_next_window_boundary("22:00", "06:00");
+        assert!(dur.as_secs() > 0);
+        assert!(dur.as_secs() <= 3600);
+    }
+
+    #[test]
+    fn duration_until_next_window_boundary_invalid_input() {
+        // Unparseable window strings — should return 60s fallback.
+        assert_eq!(duration_until_next_window_boundary("invalid", "17:00").as_secs(), 60);
+        assert_eq!(duration_until_next_window_boundary("09:00", "broken").as_secs(), 60);
     }
 }

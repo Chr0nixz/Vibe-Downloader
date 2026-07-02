@@ -10,13 +10,13 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use librqbit::{
     api::{Api, ApiAddTorrentResponse, TorrentDetailsResponse, TorrentIdOrHash},
     limits::LimitsConfig,
-    AddTorrent, AddTorrentOptions, ConnectionOptions, Session, SessionOptions,
+    AddTorrent, AddTorrentOptions, ConnectionOptions, Magnet, Session, SessionOptions,
 };
-use magnet_url::Magnet;
 use reqwest::Url;
 use tokio::sync::Mutex;
 
 use super::engine::{DownloadContext, DownloadEngine, EngineFuture, ProbeOutput, ProbeRequest};
+use super::url_classify::is_torrent_url;
 use super::DownloadError;
 use crate::{
     db,
@@ -32,6 +32,17 @@ const PROTOCOL_BT: &str = "bt";
 const SOURCE_BT_PREFIX: &str = "bt:";
 const BT_METADATA_STATUS_INTERVAL: Duration = Duration::from_secs(10);
 const BT_METADATA_TIMEOUT: Duration = Duration::from_secs(90);
+/// F-1: Interval between seed-ratio limit checks during the seeding phase.
+/// Matches the BT metadata/progress cadence (10s).
+const BT_SEEDING_TICK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// E-3: Maximum .torrent file size we are willing to buffer in memory for
+/// private-flag pre-parsing. 32 MiB is generous (a typical .torrent is under
+/// 1 MiB; even multi-track packs rarely exceed 10 MiB) while capping the
+/// memory impact of a malicious or misconfigured URL. When this limit is
+/// exceeded, the caller falls back to `AddTorrent::from_url`, letting
+/// librqbit stream the torrent directly without buffering in our process.
+const TORRENT_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct BtEngine {
@@ -158,6 +169,7 @@ impl BtEngine {
         &self,
         output_folder: &str,
         download_limit_bps: Option<i64>,
+        upload_limit_bps: Option<i64>,
         task_proxy_config: &ResolvedProxyConfig,
     ) -> Result<(Arc<Api>, String), String> {
         let key = Self::compute_session_key(output_folder, task_proxy_config);
@@ -166,6 +178,9 @@ impl BtEngine {
         if let Some(entry) = sessions.get_mut(&key) {
             entry.active_task_count += 1;
             sync_session_download_limit(&entry.api, download_limit_bps);
+            // F-7: Re-apply the global upload limit on session reuse so settings
+            // changes take effect for the next task without a restart.
+            sync_session_upload_limit(&entry.api, upload_limit_bps);
             return Ok((entry.api.clone(), key));
         }
 
@@ -180,7 +195,8 @@ impl BtEngine {
             });
         }
         options.ratelimits = LimitsConfig {
-            upload_bps: None,
+            // F-7: Apply the global BT upload limit at session creation.
+            upload_bps: non_zero_u32(upload_limit_bps),
             download_bps: non_zero_u32(download_limit_bps),
         };
         let session = Session::new_with_opts(PathBuf::from(&output_path), options)
@@ -207,12 +223,22 @@ impl DownloadEngine for BtEngine {
         matches!(scheme, "magnet" | "file")
     }
 
+    /// R-3: magnet 链接或 `.torrent` 文件（含 http/https/file scheme）路由到 BT。
+    /// 优先级最高（100），确保在 Metalink/HLS/DASH 等也支持 http scheme 的引擎之前命中。
+    fn matches_url(&self, url: &Url) -> bool {
+        url.scheme() == "magnet" || is_torrent_url(url)
+    }
+
+    fn priority(&self) -> i32 {
+        100
+    }
+
     fn probe<'a>(
         &'a self,
         request: ProbeRequest,
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
-            probe_torrent(&request.uri)
+            probe_torrent(&request.uri, &request.app, &request.request_id)
                 .await
                 .map_err(DownloadError::Other)
         })
@@ -230,12 +256,19 @@ impl DownloadEngine for BtEngine {
     }
 }
 
-async fn probe_torrent(uri: &str) -> Result<ProbeOutput, String> {
+async fn probe_torrent(
+    uri: &str,
+    app: &Option<tauri::AppHandle>,
+    request_id: &Option<String>,
+) -> Result<ProbeOutput, String> {
     if uri.trim_start().starts_with("magnet:") {
+        crate::download::engine::emit_probe_phase(app, request_id, "parsing_magnet", Some("bt"));
         return probe_magnet(uri);
     }
 
+    crate::download::engine::emit_probe_phase(app, request_id, "fetching_torrent", Some("bt"));
     let (add, _) = add_torrent_source(uri, &ResolvedProxyConfig::default()).await?;
+    crate::download::engine::emit_probe_phase(app, request_id, "inspecting_metadata", Some("bt"));
     let probe_dir = std::env::temp_dir().join("vibe-downloader-bt-probe");
     std::fs::create_dir_all(&probe_dir)
         .map_err(|e| format!("Could not create the torrent probe directory: {e}"))?;
@@ -259,15 +292,19 @@ async fn probe_torrent(uri: &str) -> Result<ProbeOutput, String> {
 }
 
 fn probe_magnet(uri: &str) -> Result<ProbeOutput, String> {
-    let magnet = Magnet::new(uri).map_err(|_| "Magnet link is invalid.".to_string())?;
+    let magnet = Magnet::parse(uri).map_err(|_| "Magnet link is invalid.".to_string())?;
+    // `as_string()` returns lowercase hex (40 chars for v1 btih, 64 for v2 btmh).
+    // librqbit accepts both hex and base32 on parse, but normalizes to hex here.
     let hash = magnet
-        .hash()
-        .map(str::to_ascii_lowercase)
-        .filter(|hash| hash.len() == 40 || hash.len() == 32)
+        .as_id20()
+        .map(|id| id.as_string())
+        .or_else(|| magnet.as_id32().map(|id| id.as_string()))
         .ok_or_else(|| "Magnet link must include a BitTorrent info hash.".to_string())?;
+    // librqbit's `name` field is already percent-decoded via `url::Url::query_pairs()`.
+    // `xl` (exact length) is not exposed by librqbit; magnet total size is usually
+    // unknown before metadata, so we fall back to 0.
     let display_name = magnet
-        .display_name()
-        .map(percent_decode_lossy)
+        .name
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| format!("magnet-{hash}"));
 
@@ -276,10 +313,7 @@ fn probe_magnet(uri: &str) -> Result<ProbeOutput, String> {
         task_kind: TaskKind::MultiFile,
         resolved_uri: uri.to_string(),
         display_name,
-        total_size: magnet
-            .length()
-            .and_then(|value| i64::try_from(value).ok())
-            .unwrap_or(0),
+        total_size: 0,
         source_key: format!("{SOURCE_BT_PREFIX}{hash}"),
         capabilities: bt_capabilities(),
         files: Vec::new(),
@@ -287,6 +321,8 @@ fn probe_magnet(uri: &str) -> Result<ProbeOutput, String> {
         last_modified: None,
         content_type: Some("application/x-bittorrent".to_string()),
         hls_variants: Vec::new(),
+        hls_audio_tracks: Vec::new(),
+        hls_subtitle_tracks: Vec::new(),
         metalink: None,
     })
 }
@@ -324,6 +360,8 @@ fn probe_from_torrent_details(uri: &str, details: &TorrentDetailsResponse) -> Pr
             .to_string(),
         ),
         hls_variants: Vec::new(),
+        hls_audio_tracks: Vec::new(),
+        hls_subtitle_tracks: Vec::new(),
         metalink: None,
     }
 }
@@ -341,10 +379,17 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
 
     let mut progress_gate = TaskProgressEmitGate::default();
 
+    // F-7: Read the global BT upload limit from settings. Fetched per-task at
+    // session acquisition so settings changes apply to the next task without
+    // a restart. The download limit still comes from the task speed limiter
+    // (per-task + global min).
+    let bt_upload_limit_bps = db::get_bt_upload_limit_bps_setting(&pool).await;
+
     let (api, session_key) = engine
         .api_for_output_folder(
             &task.save_dir,
             speed_limiter.current_limit_bps(),
+            bt_upload_limit_bps,
             &proxy_config,
         )
         .await?;
@@ -433,6 +478,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             &pool,
             &task.id,
             TaskStatus::NeedsAttention,
+            None,
             0,
             0,
             Some("Torrent metadata is ready. Choose files before downloading."),
@@ -619,10 +665,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 db::complete_segment(&pool, &segment.id).await?;
             }
             db::complete_task(&pool, &task.id).await?;
-            if db::torrent_seeding_enabled(&pool, &task.id)
-                .await
-                .unwrap_or(false)
-            {
+            if seeding_enabled {
                 db::upsert_torrent_runtime_snapshot(
                     &pool,
                     &task.id,
@@ -646,6 +689,97 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                     },
                 )
                 .await?;
+                if let Some(current) = db::get_task_record(&pool, &task.id).await? {
+                    emit_task_updated_record(&app, &pool, &current).await;
+                }
+                progress_gate.flush(&app);
+
+                // F-1: Seeding monitoring loop — re-check seed ratio limit
+                // periodically. When the limit is reached, forget the torrent
+                // and mark seeding as completed. If no limit is set, seed
+                // indefinitely until cancelled.
+                loop {
+                    tokio::time::sleep(BT_SEEDING_TICK_INTERVAL).await;
+                    if cancel_token.is_cancelled() {
+                        break;
+                    }
+                    let seed_stats = api
+                        .api_stats_v1(torrent_id)
+                        .map_err(|e| format!("Could not read torrent stats during seeding: {e:#}"))?;
+                    let seed_uploaded =
+                        i64::try_from(seed_stats.uploaded_bytes).unwrap_or(i64::MAX);
+                    let seed_ratio = if downloaded > 0 {
+                        seed_uploaded as f64 / downloaded as f64
+                    } else {
+                        0.0
+                    };
+                    let seed_upload_speed = seed_stats
+                        .live
+                        .as_ref()
+                        .map(|live| {
+                            i64::try_from(live.upload_speed.as_bytes()).unwrap_or(i64::MAX)
+                        })
+                        .unwrap_or(0);
+
+                    let seed_ratio_limit =
+                        db::torrent_seed_ratio_limit(&pool, &task.id).await.unwrap_or(None);
+                    let limit_reached = seed_ratio_limit
+                        .map(|limit| seed_ratio >= limit)
+                        .unwrap_or(false);
+
+                    if limit_reached {
+                        let _ = api.api_torrent_action_forget(torrent_id).await;
+                        db::upsert_torrent_runtime_snapshot(
+                            &pool,
+                            &task.id,
+                            db::TorrentRuntimeSnapshotUpsert {
+                                metadata_status: "completed",
+                                completed_pieces,
+                                verified_pieces: completed_pieces,
+                                piece_count,
+                                piece_bitfield_base64: piece_bitfield_base64.as_deref(),
+                                peer_count,
+                                seed_count: 0,
+                                dht_status: dht_status.as_deref(),
+                                trackers_json: trackers_json.as_deref(),
+                                upload_bytes: seed_uploaded,
+                                upload_speed_bps: seed_upload_speed,
+                                ratio: seed_ratio,
+                                seeding_enabled: true,
+                                seeding_state: "completed",
+                                last_error_code: None,
+                                last_error_message: None,
+                            },
+                        )
+                        .await?;
+                        break;
+                    }
+
+                    // Still seeding — update snapshot with current ratio/upload.
+                    db::upsert_torrent_runtime_snapshot(
+                        &pool,
+                        &task.id,
+                        db::TorrentRuntimeSnapshotUpsert {
+                            metadata_status: "seeding",
+                            completed_pieces,
+                            verified_pieces: completed_pieces,
+                            piece_count,
+                            piece_bitfield_base64: piece_bitfield_base64.as_deref(),
+                            peer_count,
+                            seed_count: 0,
+                            dht_status: dht_status.as_deref(),
+                            trackers_json: trackers_json.as_deref(),
+                            upload_bytes: seed_uploaded,
+                            upload_speed_bps: seed_upload_speed,
+                            ratio: seed_ratio,
+                            seeding_enabled: true,
+                            seeding_state: "seeding",
+                            last_error_code: None,
+                            last_error_message: None,
+                        },
+                    )
+                    .await?;
+                }
             } else {
                 let _ = api.api_torrent_action_forget(torrent_id).await;
             }
@@ -666,6 +800,15 @@ fn sync_session_download_limit(api: &Api, limit_bps: Option<i64>) {
     api.session()
         .ratelimits
         .set_download_bps(non_zero_u32(limit_bps));
+}
+
+/// F-7: Apply the global BT upload limit to an existing session. `None` clears
+/// the limit (unlimited). Called on session reuse so settings changes take
+/// effect without restarting the session.
+fn sync_session_upload_limit(api: &Api, limit_bps: Option<i64>) {
+    api.session()
+        .ratelimits
+        .set_upload_bps(non_zero_u32(limit_bps));
 }
 
 fn non_zero_u32(limit_bps: Option<i64>) -> Option<NonZeroU32> {
@@ -947,14 +1090,15 @@ fn torrent_tracker_status_json(uri: &str) -> Option<String> {
 }
 
 fn tracker_statuses_from_uri(uri: &str) -> Vec<TorrentTrackerStatus> {
-    let Ok(magnet) = Magnet::new(uri) else {
+    let Ok(magnet) = Magnet::parse(uri) else {
         return Vec::new();
     };
+    // librqbit's `trackers` field is already percent-decoded via `url::Url::query_pairs()`.
     magnet
-        .trackers()
+        .trackers
         .iter()
         .map(|url| TorrentTrackerStatus {
-            url: percent_decode_lossy(url),
+            url: url.clone(),
             status: "configured".to_string(),
             last_error: None,
         })
@@ -1184,8 +1328,34 @@ async fn download_torrent_bytes(
         .map_err(|e| e.to_string())?
         .error_for_status()
         .map_err(|e| e.to_string())?;
-    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-    Ok(bytes.to_vec())
+    // E-3: Pre-check Content-Length if the server provided it.
+    if let Some(content_length) = response.content_length() {
+        if content_length as usize > TORRENT_MAX_BYTES {
+            return Err(format!(
+                "torrent_too_large: Content-Length {} exceeds max {} bytes",
+                content_length, TORRENT_MAX_BYTES
+            ));
+        }
+    }
+    // E-3: Stream and accumulate, aborting if running total crosses ceiling.
+    let mut accumulated: Vec<u8> = Vec::new();
+    let mut stream = response.bytes_stream();
+    use futures_util::StreamExt;
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| e.to_string())?;
+        let new_len = accumulated
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| "torrent_too_large: size overflow".to_string())?;
+        if new_len > TORRENT_MAX_BYTES {
+            return Err(format!(
+                "torrent_too_large: body exceeded max {} bytes",
+                TORRENT_MAX_BYTES
+            ));
+        }
+        accumulated.extend_from_slice(&chunk);
+    }
+    Ok(accumulated)
 }
 
 /// Parse the `info.private` flag from a .torrent file's bencoded bytes.
@@ -1223,24 +1393,6 @@ fn info_hash_from_source_key(source_key: &str) -> Option<&str> {
 
 fn parse_i64(value: &str) -> i64 {
     value.parse::<i64>().unwrap_or(0)
-}
-
-fn percent_decode_lossy(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(hex) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                out.push(hex as char);
-                index += 3;
-                continue;
-            }
-        }
-        out.push(bytes[index] as char);
-        index += 1;
-    }
-    out.replace('+', " ")
 }
 
 fn sanitize_relative_path(value: &str) -> PathBuf {
@@ -1316,6 +1468,7 @@ mod tests {
             .api_for_output_folder(
                 temp_dir.to_str().unwrap(),
                 None,
+                None,
                 &crate::proxy::ResolvedProxyConfig::default(),
             )
             .await
@@ -1325,6 +1478,7 @@ mod tests {
         let (_api2, _key2) = engine
             .api_for_output_folder(
                 temp_dir.to_str().unwrap(),
+                None,
                 None,
                 &crate::proxy::ResolvedProxyConfig::default(),
             )

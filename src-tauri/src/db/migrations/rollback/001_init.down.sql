@@ -1,0 +1,45 @@
+-- Rollback for migration 001: baseline schema
+--
+-- This is a consolidated baseline that combines the original 14 incremental
+-- migrations (001_init.sql .. 014_task_files_version.sql). Rolling back to a
+-- pre-baseline state is not meaningful — there is no "previous" schema to
+-- return to. This file exists as documentation only; `sqlx::migrate!` does
+-- NOT auto-execute files in `migrations/rollback/`.
+--
+-- If you need to recover from a botched baseline upgrade:
+--
+-- 1. Stop the app.
+-- 2. Restore the most recent backup from `<db_path>.db.bak-<timestamp>` in the
+--    app data directory. The startup flow automatically backs up the file
+--    before rebuilding on `VersionMissing` / `VersionMismatch` / `Dirty`
+--    migration errors (see `src-tauri/src/db/connection.rs`).
+-- 3. If no backup exists and you must reset entirely, take the database
+--    offline and run:
+--
+--        DROP TABLE IF EXISTS tasks;
+--        DROP TABLE IF EXISTS task_files;
+--        DROP TABLE IF EXISTS task_work_units;
+--        DROP TABLE IF EXISTS task_events;
+--        DROP TABLE IF EXISTS task_requests;
+--        DROP TABLE IF EXISTS task_request_headers;
+--        DROP TABLE IF EXISTS browser_messages;
+--        DROP TABLE IF EXISTS task_credentials;
+--        DROP TABLE IF EXISTS task_proxy_settings;
+--        DROP TABLE IF EXISTS task_checksums;
+--        DROP TABLE IF EXISTS classification_rules;
+--        DROP TABLE IF EXISTS torrent_tasks;
+--        DROP TABLE IF EXISTS torrent_runtime_snapshots;
+--        DROP TABLE IF EXISTS hls_tasks;
+--        DROP TABLE IF EXISTS hls_segments;
+--        DROP TABLE IF EXISTS dash_tasks;
+--        DROP TABLE IF EXISTS dash_segments;
+--        DROP TABLE IF EXISTS metalink_tasks;
+--        DROP TABLE IF EXISTS metalink_resources;
+--        DROP TABLE IF EXISTS sftp_known_hosts;
+--        DROP TABLE IF EXISTS settings;
+--        DELETE FROM _sqlx_migrations;
+--
+--    The next app launch will re-create the schema from `001_init.sql`.
+--
+-- This file intentionally contains only comments; do not run it as-is.
+SELECT 1;

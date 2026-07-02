@@ -5,6 +5,7 @@ import { createLogger } from "@/lib/logger";
 import {
   getTaskStats,
   isTauriRuntime,
+  listTasksByIds,
   listTasksCursor,
   onQueueChanged,
   onTaskProgress,
@@ -167,7 +168,6 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
       useTaskDataStore.getState().patchTasksBatch(payloads);
       notifyTaskStatusChanges(previous, useTaskDataStore.getState().tasks);
       scheduleRecalculateStats(250);
-      scheduleStatsRefresh(1_000);
     }
 
     function scheduleProgressFlush() {
@@ -216,26 +216,38 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
           useTaskDataStore.getState().upsertTask(task);
           notifyTaskStatusChanges(previous, useTaskDataStore.getState().tasks);
           scheduleRecalculateStats(150);
-          scheduleStatsRefresh(150);
         }),
-        onQueueChanged(async () => {
+        onQueueChanged(async (payload) => {
           if (cancelled) return;
           flushProgressBatch();
           if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
           queueRefreshTimer = setTimeout(() => {
             void (async () => {
               try {
-                const previous = useTaskDataStore.getState().tasks;
-                const page = await listTasksCursor(taskCursorInput(null));
-                const fresh = page.items;
-                if (cancelled) return;
-                const merged = mergeTasksFromServer(previous, fresh);
-                useTaskDataStore
-                  .getState()
-                  .setTaskCursorPage(merged, page.totalEstimate, page.nextCursor, page.filterOptions);
-                notifyTaskStatusChanges(previous, merged);
-                scheduleRecalculateStats(150);
-                scheduleStatsRefresh(150);
+                const ids = payload?.changed_task_ids ?? null;
+                if (ids && ids.length > 0 && ids.length <= 50) {
+                  // E-1: 增量 — 只拉变更的 task
+                  const changed = await listTasksByIds(ids);
+                  if (cancelled) return;
+                  const previous = useTaskDataStore.getState().tasks;
+                  useTaskDataStore.getState().upsertTasksBatch(changed);
+                  notifyTaskStatusChanges(previous, useTaskDataStore.getState().tasks);
+                  scheduleRecalculateStats(150);
+                  scheduleStatsRefresh(150);
+                } else {
+                  // 全量回退（None 或 >50）
+                  const previous = useTaskDataStore.getState().tasks;
+                  const page = await listTasksCursor(taskCursorInput(null));
+                  if (cancelled) return;
+                  const fresh = page.items;
+                  const merged = mergeTasksFromServer(previous, fresh);
+                  useTaskDataStore
+                    .getState()
+                    .setTaskCursorPage(merged, page.totalEstimate, page.nextCursor, page.filterOptions);
+                  notifyTaskStatusChanges(previous, merged);
+                  scheduleRecalculateStats(150);
+                  scheduleStatsRefresh(150);
+                }
               } catch (error) {
                 log.warn("queue refresh failed", error);
               }

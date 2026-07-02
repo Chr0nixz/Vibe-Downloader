@@ -84,9 +84,12 @@ async fn socks5_connect_supports_username_password() {
     let proxy_addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept");
-        let mut greeting = [0_u8; 3];
+        // tokio-socks offers both no-auth (0x00) and user/pass (0x02) when
+        // credentials are supplied, so the greeting is 4 bytes: [5, 2, 0, 2].
+        let mut greeting = [0_u8; 4];
         stream.read_exact(&mut greeting).await.expect("greeting");
-        assert_eq!(greeting, [0x05, 0x01, 0x02]);
+        assert_eq!(greeting, [0x05, 0x02, 0x00, 0x02]);
+        // Server picks user/pass authentication.
         stream.write_all(&[0x05, 0x02]).await.expect("method");
 
         let mut auth = [0_u8; 12];
@@ -117,6 +120,64 @@ async fn socks5_connect_supports_username_password() {
     .await
     .expect("socks connect");
     drop(stream);
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn socks5_connect_surfaces_auth_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let proxy_addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut greeting = [0_u8; 4];
+        stream.read_exact(&mut greeting).await.expect("greeting");
+        stream.write_all(&[0x05, 0x02]).await.expect("method");
+        let mut auth = [0_u8; 12];
+        stream.read_exact(&mut auth).await.expect("auth");
+        // Server rejects credentials (status != 0x00).
+        stream.write_all(&[0x01, 0x01]).await.expect("auth reject");
+    });
+
+    let error = socks5_connect(
+        &format!("socks5://{proxy_addr}"),
+        Some("user"),
+        Some("wrong"),
+        "example.com",
+        443,
+    )
+    .await
+    .expect_err("auth should fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn socks5_connect_surfaces_proxy_failure_status() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let proxy_addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut greeting = [0_u8; 3];
+        stream.read_exact(&mut greeting).await.expect("greeting");
+        stream.write_all(&[0x05, 0x00]).await.expect("method");
+        assert_connect_request(&mut stream, "unreachable.example.com", 443).await;
+        // Server replies with 0x05 (connection refused by target).
+        stream
+            .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .expect("connect failure response");
+    });
+
+    let error = socks5_connect(
+        &format!("socks5://{proxy_addr}"),
+        None,
+        None,
+        "unreachable.example.com",
+        443,
+    )
+    .await
+    .expect_err("proxy should report failure");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
     server.await.expect("server");
 }
 

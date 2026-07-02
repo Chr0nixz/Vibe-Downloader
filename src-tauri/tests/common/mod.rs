@@ -1,3 +1,6 @@
+pub mod http;
+pub mod sftp_server;
+
 use std::{
     net::{TcpListener, TcpStream},
     path::PathBuf,
@@ -16,11 +19,13 @@ use std::{
 /// satisfy this) so it can be cloned per connection.
 ///
 /// The server runs on a random port (`127.0.0.1:0`) and is stopped on drop.
+#[allow(dead_code)]
 pub struct TestServer {
     pub base_url: String,
     stop: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 impl TestServer {
     pub fn start<F>(handler: F) -> Self
     where
@@ -56,6 +61,15 @@ impl TestServer {
             base_url: format!("http://{addr}"),
             stop,
         }
+    }
+
+    /// Returns the `host:port` portion of the server's URL, suitable for
+    /// constructing non-HTTP URLs (e.g. `ftp://host:port/...`,
+    /// `webdav://host:port/...`).
+    #[allow(dead_code)]
+    pub fn authority(&self) -> &str {
+        self.base_url
+            .trim_start_matches("http://")
     }
 }
 

@@ -17,7 +17,7 @@ const AboutPage = lazy(() =>
   })),
 );
 
-import { ListContextMenu } from "@/components/tasks/TaskContextMenu";
+import { ListContextMenu, type ReorderAction } from "@/components/tasks/TaskContextMenu";
 import { TaskRow } from "@/components/tasks/TaskRow";
 import { TASK_ROW_ESTIMATED_SIZE } from "@/components/tasks/task-layout";
 import { Button } from "@/components/ui/button";
@@ -43,15 +43,23 @@ export function TaskList({
   onOpenFile,
   onOpenFolder,
   onResolveAttention,
+  onReorder,
   onDelete,
+  onDeleteFiles,
   onNewDownload,
   onBulkPause,
   onBulkResume,
   onBulkRetry,
   onBulkDelete,
+  onBulkDeleteFiles,
   onBulkOpenFolder,
   onBulkExport,
   onOpenOnboarding,
+  onCopyUrl,
+  onCopyLocalPath,
+  onShowDetails,
+  onPasteAndCreate,
+  onRefresh,
 }: {
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
@@ -59,15 +67,23 @@ export function TaskList({
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
+  onReorder?: (task: Task, action: ReorderAction) => void;
   onDelete: (task: Task) => void;
+  onDeleteFiles?: (task: Task) => void;
   onNewDownload: () => void;
   onBulkPause: (tasks: Task[]) => void;
   onBulkResume: (tasks: Task[]) => void;
   onBulkRetry: (tasks: Task[]) => void;
   onBulkDelete: (tasks: Task[]) => void;
+  onBulkDeleteFiles?: (tasks: Task[]) => void;
   onBulkOpenFolder: (tasks: Task[]) => void;
   onBulkExport: (tasks: Task[], format: "json" | "csv") => void;
   onOpenOnboarding: () => void;
+  onCopyUrl?: (task: Task) => void;
+  onCopyLocalPath?: (task: Task) => void;
+  onShowDetails?: (task: Task) => void;
+  onPasteAndCreate?: () => void;
+  onRefresh?: () => void;
 }) {
   const { t } = useTranslation();
   const reduceMotion = !!useReducedMotion();
@@ -91,9 +107,11 @@ export function TaskList({
   const debouncedSearch = useDebouncedValue(search, 300);
   const selectedId = useTaskUIStore((s) => s.selectedId);
   const selectedIds = useTaskUIStore((s) => s.selectedIds);
+  const selectionAnchorId = useTaskUIStore((s) => s.selectionAnchorId);
   const sortKey = useTaskUIStore((s) => s.sortKey);
   const sortDirection = useTaskUIStore((s) => s.sortDirection);
   const filters = useTaskUIStore((s) => s.filters);
+  const pendingDeleteIds = useTaskUIStore((s) => s.pendingDeleteIds);
   const selectTask = useTaskUIStore((s) => s.selectTask);
   const setSelectedIds = useTaskUIStore((s) => s.setSelectedIds);
   const setTaskSelected = useTaskUIStore((s) => s.setTaskSelected);
@@ -115,26 +133,42 @@ export function TaskList({
     return n;
   }, [filters]);
 
-  const filtered = taskIds;
+  // Hide tasks that are in the soft-delete undo window so the list reflects
+  // the deletion immediately while the undo toast is reachable.
+  const pendingDeleteSet = useMemo(() => new Set(pendingDeleteIds), [pendingDeleteIds]);
+  const filtered = useMemo(
+    () => (pendingDeleteSet.size === 0 ? taskIds : taskIds.filter((id) => !pendingDeleteSet.has(id))),
+    [pendingDeleteSet, taskIds],
+  );
   const filteredRef = useRef(filtered);
   filteredRef.current = filtered;
 
-  // Announce task status changes for screen readers
+  // Announce task status changes for screen readers.
+  // Optimization: Zustand's bare `subscribe(listener)` fires on every state
+  // change, including the ~4 Hz `patchTasksBatch` progress ticks that don't
+  // touch `task.status`. Do a single O(n) diff pass that breaks early when
+  // a status change is found; skip the per-tick Record allocation entirely
+  // when nothing changed.
   useEffect(() => {
     return useTaskDataStore.subscribe((state) => {
       const prev = prevTaskStatusesRef.current;
+      let changedTask: { name: string; status: string } | null = null;
       for (const taskId of state.taskIds) {
         const task = state.taskById[taskId];
-        if (task && prev[task.id] && prev[task.id] !== task.status) {
-          setStatusAnnouncement(
-            t("taskList.statusChanged", {
-              name: task.fileName,
-              status: t(`task.status.${task.status}`),
-            }),
-          );
+        if (!task) continue;
+        if (prev[task.id] && prev[task.id] !== task.status) {
+          changedTask = { name: task.fileName, status: task.status };
           break;
         }
       }
+      if (!changedTask) return;
+      setStatusAnnouncement(
+        t("taskList.statusChanged", {
+          name: changedTask.name,
+          status: t(`task.status.${changedTask.status}`),
+        }),
+      );
+      // Rebuild the snapshot only after we know something changed.
       const next: Record<string, string> = {};
       for (const taskId of state.taskIds) {
         const task = state.taskById[taskId];
@@ -356,13 +390,13 @@ export function TaskList({
             type="button"
             variant="ghost"
             size="sm"
-            className="h-9 text-xs md:h-7"
+            className="h-9 text-xs md:h-8"
             onClick={() => setSelectedIds(filtered)}
             disabled={allVisibleSelected}
           >
             {t("taskList.selectVisible", { count: filtered.length })}
           </Button>
-          <Button type="button" variant="ghost" size="sm" className="h-9 text-xs md:h-7" onClick={clearSelectedIds}>
+          <Button type="button" variant="ghost" size="sm" className="h-9 text-xs md:h-8" onClick={clearSelectedIds}>
             <X className="mr-1 h-3 w-3" aria-hidden />
             {t("taskList.clearSelection")}
           </Button>
@@ -409,6 +443,16 @@ export function TaskList({
                 />
                 <BulkMenuItem label={t("taskList.exportJson")} onClick={() => onBulkExport(selectedTasks(), "json")} />
                 <BulkMenuItem label={t("taskList.exportCsv")} onClick={() => onBulkExport(selectedTasks(), "csv")} />
+                {onBulkDeleteFiles ? (
+                  <>
+                    <div className="my-1 h-px bg-border-subtle" aria-hidden />
+                    <BulkMenuItem
+                      label={t("deleteDialog.deleteFilesToo")}
+                      onClick={() => onBulkDeleteFiles(selectedTasks())}
+                      destructive
+                    />
+                  </>
+                ) : null}
               </div>
             </PopoverContent>
           </Popover>
@@ -467,7 +511,7 @@ export function TaskList({
             type="button"
             variant="ghost"
             size="sm"
-            className="h-6 px-1.5 text-[10px] text-text-muted"
+            className="h-6 px-1.5 text-[11px] text-text-muted"
             onClick={() => setFilters({ fileType: "all", source: "all", failure: "all", resume: "all" })}
           >
             {t("taskList.clearAllFilters")}
@@ -491,14 +535,6 @@ export function TaskList({
           className="text-text-muted"
         >
           <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
-          {!toolPanelOpen && activeFilterCount > 0 ? (
-            <span
-              className="flex h-4 min-w-4 items-center justify-center rounded-full bg-accent-primary px-1 text-[10px] font-bold leading-none text-text-on-accent"
-              aria-hidden="true"
-            >
-              {activeFilterCount}
-            </span>
-          ) : null}
           {t("taskList.toolPanel")}
           <ChevronDown
             className={`h-4 w-4 transition-transform duration-ui ${toolPanelOpen ? "rotate-180" : ""}`}
@@ -552,14 +588,22 @@ export function TaskList({
         ) : null}
       </div>
 
-      <ListContextMenu onNewDownload={onNewDownload}>
+      <ListContextMenu
+        onNewDownload={onNewDownload}
+        onPasteAndCreate={onPasteAndCreate}
+        onSelectAll={() => setSelectedIds(filtered)}
+        onClearSelection={selectedIds.length > 0 ? clearSelectedIds : undefined}
+        onRefresh={onRefresh}
+        onExport={selectedIds.length > 0 ? (format) => onBulkExport(selectedTasks(), format) : undefined}
+        hasSelection={selectedIds.length > 0}
+      >
         <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto">
           {loading && !initialLoadDoneRef.current ? (
             <TaskListLoadingSkeleton label={t("taskList.loading")} />
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-4 px-6 py-20 text-center">
               <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-accent-primary/8">
-                {search ? (
+                {search || activeFilterCount > 0 ? (
                   <Search className="h-7 w-7 text-text-muted" />
                 ) : (
                   <Plus className="h-7 w-7 text-accent-primary/70" />
@@ -567,12 +611,21 @@ export function TaskList({
               </div>
               <div className="space-y-1.5">
                 <p className="text-sm font-medium text-text-primary">
-                  {search ? t("taskList.emptySearch") : t("taskList.empty")}
+                  {search || activeFilterCount > 0 ? t("taskList.emptySearch") : t("taskList.empty")}
                 </p>
-                {!search ? (
+                {!(search || activeFilterCount > 0) ? (
                   <p className="max-w-xs text-xs leading-relaxed text-text-muted">{t("taskList.emptyHint")}</p>
                 ) : null}
               </div>
+              {activeFilterCount > 0 ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setFilters({ fileType: "all", source: "all", failure: "all", resume: "all" })}
+                >
+                  {t("taskList.clearFilters")}
+                </Button>
+              ) : null}
             </div>
           ) : (
             <>
@@ -580,7 +633,7 @@ export function TaskList({
                 role="listbox"
                 aria-label={t("taskList.aria")}
                 onKeyDown={handleListboxKeyDown}
-                className="relative [--lp:10px] sm:[--lp:12px] md:[--lp:16px] p-2.5 sm:p-3 md:p-4 pt-[var(--lp)]! pb-[var(--lp)]!"
+                className="relative [--lp:10px] sm:[--lp:12px] md:[--lp:16px] px-2.5 pt-[var(--lp)] pb-[var(--lp)] sm:px-3 md:px-4"
                 style={{ height: `calc(${virtualizer.getTotalSize()}px + var(--lp, 16px) * 2)` }}
               >
                 {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -601,6 +654,7 @@ export function TaskList({
                         taskId={taskId}
                         selected={taskId === selectedId}
                         multiSelected={selectedIdSet.has(taskId)}
+                        isShiftAnchor={selectedIds.length > 1 && taskId === selectionAnchorId}
                         isFirstFocusable={!selectedId && virtualRow.index === 0}
                         reduceMotion={reduceMotion}
                         position={virtualRow.index + 1}
@@ -615,7 +669,12 @@ export function TaskList({
                         onOpenFile={onOpenFile}
                         onOpenFolder={onOpenFolder}
                         onDelete={onDelete}
+                        onDeleteFiles={onDeleteFiles}
                         onResolveAttention={onResolveAttention}
+                        onReorder={onReorder}
+                        onCopyUrl={onCopyUrl}
+                        onCopyLocalPath={onCopyLocalPath}
+                        onShowDetails={onShowDetails}
                       />
                     </div>
                   );
@@ -738,7 +797,17 @@ function FilterChip({
   );
 }
 
-function BulkMenuItem({ label, onClick, disabled }: { label: string; onClick: () => void; disabled?: boolean }) {
+function BulkMenuItem({
+  label,
+  onClick,
+  disabled,
+  destructive,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  destructive?: boolean;
+}) {
   return (
     <button
       type="button"
@@ -746,11 +815,13 @@ function BulkMenuItem({ label, onClick, disabled }: { label: string; onClick: ()
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "flex h-9 w-full items-center rounded-md px-2 text-left text-sm text-text-secondary md:h-8",
+        "flex h-9 w-full items-center rounded-md px-2 text-left text-sm md:h-8",
         "transition-[background-color,color] duration-[var(--motion-ui)] ease-out",
-        "hover:bg-surface-raised hover:text-text-primary",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
         "disabled:pointer-events-none disabled:opacity-40",
+        destructive
+          ? "text-status-danger hover:bg-status-danger/10 hover:text-status-danger"
+          : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
       )}
     >
       {label}

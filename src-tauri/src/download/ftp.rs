@@ -35,7 +35,8 @@ use uuid::Uuid;
 use super::{
     engine::EngineFuture,
     file_ops::{finalize_download_file, persist_completed_path},
-    DownloadContext, DownloadEngine, DownloadError, GlobalSpeedLimiter, ProbeOutput, ProbeRequest,
+    DownloadContext, DownloadEngine, DownloadError, GlobalSpeedLimiter, IdleReadOutcome,
+    ProbeOutput, ProbeRequest, READ_IDLE_TIMEOUT, read_with_idle_timeout,
 };
 use crate::download::error::engine_error;
 use crate::{
@@ -140,11 +141,22 @@ impl FtpEngine {
         Self { proxy_config }
     }
 
-    async fn probe_target(&self, target: FtpTarget) -> Result<ProbeOutput, String> {
+    async fn probe_target(
+        &self,
+        target: FtpTarget,
+        app: &Option<tauri::AppHandle>,
+        request_id: &Option<String>,
+    ) -> Result<ProbeOutput, String> {
         let proxy_config = self.proxy_config.read().await.clone();
         let mut session = connect_session(&target, &proxy_config).await?;
         session.transfer_type(FileType::Binary).await?;
         session.set_mode(Mode::Passive);
+        crate::download::engine::emit_probe_phase(
+            app,
+            request_id,
+            "querying_metadata",
+            Some("ftp"),
+        );
 
         let total_size = session
             .size(&target.path)
@@ -182,6 +194,8 @@ impl FtpEngine {
             last_modified,
             content_type: None,
             hls_variants: Vec::new(),
+            hls_audio_tracks: Vec::new(),
+            hls_subtitle_tracks: Vec::new(),
             metalink: None,
         })
     }
@@ -267,9 +281,15 @@ impl DownloadEngine for FtpEngine {
         request: ProbeRequest,
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
+            crate::download::engine::emit_probe_phase(
+                &request.app,
+                &request.request_id,
+                "connecting",
+                Some("ftp"),
+            );
             let target = FtpTarget::parse(&request.uri).map_err(DownloadError::Other)?;
             tracing::debug!(url = %target.sanitized_uri, "probing ftp url");
-            self.probe_target(target)
+            self.probe_target(target, &request.app, &request.request_id)
                 .await
                 .map_err(DownloadError::Other)
         })
@@ -466,6 +486,7 @@ async fn run_ftp_download(
                                 &pool,
                                 &task.id,
                                 TaskStatus::Downloading,
+                                None,
                                 0,
                                 1,
                                 Some("FTP acceleration disabled; continuing with one connection."),
@@ -758,16 +779,49 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
         } else {
             FTP_READ_BUFFER_SIZE
         };
-        let read = remote_stream
-            .read(&mut buffer[..read_len])
-            .await
-            .map_err(|e| format!("The FTP connection failed while downloading: {e}"))?;
-        if read == 0 {
-            if request.total_size > 0 && offset <= current_end {
-                return Err("The FTP download ended before all bytes were received.".to_string());
+        // E-1: wrap the read with an idle timeout so a stalled FTP data
+        // channel cannot hold the worker, connection slot, and queue slot
+        // forever. The cancel token is raced alongside so a user-initiated
+        // pause/cancel interrupts an in-flight (and potentially stalled)
+        // read immediately. AsyncRead::read returns Result<usize, io::Error>;
+        // map 0 → None (EOF) so the shared helper's Option<T> contract holds.
+        let read_future = async {
+            remote_stream
+                .read(&mut buffer[..read_len])
+                .await
+                .map(|n| if n == 0 { None } else { Some(n) })
+        };
+        let outcome = tokio::select! {
+            _ = request.cancel_token.cancelled() => {
+                let _ = session.abort(remote_stream).await;
+                return Err("Download canceled.".to_string());
             }
-            break;
-        }
+            outcome = read_with_idle_timeout(read_future, READ_IDLE_TIMEOUT) => outcome,
+        };
+        let read = match outcome {
+            IdleReadOutcome::Data(n) => n,
+            IdleReadOutcome::End => {
+                if request.total_size > 0 && offset <= current_end {
+                    return Err("The FTP download ended before all bytes were received.".to_string());
+                }
+                break;
+            }
+            IdleReadOutcome::Error(e) => {
+                return Err(engine_error(
+                    "ftp_read_failed",
+                    format!("The FTP connection failed while downloading: {e}"),
+                    true,
+                ));
+            }
+            IdleReadOutcome::IdleTimeout => {
+                let _ = session.abort(remote_stream).await;
+                return Err(engine_error(
+                    "ftp_read_timeout",
+                    "FTP connection stalled: no data received for 60 seconds.",
+                    true,
+                ));
+            }
+        };
 
         request.speed_limiter.throttle(read).await;
         file.write_all(&buffer[..read])

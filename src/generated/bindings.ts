@@ -7,6 +7,13 @@ export const commands = {
 	listTasks: () => typedError<Task[], string>(__TAURI_INVOKE("list_tasks")),
 	listTasksPage: (input: ListTasksInput) => typedError<ListTasksResult, string>(__TAURI_INVOKE("list_tasks_page", { input })),
 	listTasksCursor: (input: ListTasksCursorInput) => typedError<ListTasksCursorResult, string>(__TAURI_INVOKE("list_tasks_cursor", { input })),
+	/**
+	 *  E-1: Fetch multiple tasks by ID in a single query. Used by the frontend's
+	 *  `onQueueChanged` handler to upsert only the changed tasks instead of
+	 *  re-querying the entire first page when the backend emits
+	 *  `QueueChangedPayload { changed_task_ids: Some(ids) }`.
+	 */
+	listTasksByIds: (ids: string[]) => typedError<Task[], string>(__TAURI_INVOKE("list_tasks_by_ids", { ids })),
 	getTask: (id: string) => typedError<{
 	id: string,
 	url: string,
@@ -79,6 +86,16 @@ export const commands = {
 	listTaskRequestsPage: (input: CursorPageInput) => typedError<TaskRequestsPageResult, string>(__TAURI_INVOKE("list_task_requests_page", { input })),
 	getSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("get_settings")),
 	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
+	/**
+	 *  Probe the ffmpeg binary version.
+	 * 
+	 *  Accepts an optional path string. When omitted, resolves the path from
+	 *  app state using the full resolution chain
+	 *  (`VIBE_FFMPEG_PATH` > `ffmpeg_path` setting > PATH lookup).
+	 * 
+	 *  Returns the first line of `ffmpeg -version` output on success.
+	 */
+	probeFfmpegVersion: (path: string | null) => typedError<string, string>(__TAURI_INVOKE("probe_ffmpeg_version", { path })),
 	getBrowserIntegrationStatus: () => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("get_browser_integration_status")),
 	installBrowserIntegration: (input: BrowserIntegrationUpdateInput) => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("install_browser_integration", { input })),
 	uninstallBrowserIntegration: (input: BrowserIntegrationUpdateInput) => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("uninstall_browser_integration", { input })),
@@ -101,6 +118,12 @@ export const commands = {
 	requestSystemSleep: () => typedError<null, string>(__TAURI_INVOKE("request_system_sleep")),
 	requestSystemHibernate: () => typedError<null, string>(__TAURI_INVOKE("request_system_hibernate")),
 	requestLockScreen: () => typedError<null, string>(__TAURI_INVOKE("request_lock_screen")),
+	/**
+	 *  Query total and available disk space for the volume that contains `path`.
+	 *  Returns a clear error string when the path does not exist or the underlying
+	 *  OS call fails, so the frontend can render a helpful toast.
+	 */
+	queryDiskSpace: (path: string) => typedError<DiskSpaceInfo, string>(__TAURI_INVOKE("query_disk_space", { path })),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
 	probeFtpDirectory: (url: string) => typedError<FtpDirectoryProbe, string>(__TAURI_INVOKE("probe_ftp_directory", { url })),
 	probeSftpDirectory: (url: string) => typedError<SftpDirectoryProbe, string>(__TAURI_INVOKE("probe_sftp_directory", { url })),
@@ -108,6 +131,14 @@ export const commands = {
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
 	importUrls: (input: ImportUrlsInput) => typedError<BatchImportResult, string>(__TAURI_INVOKE("import_urls", { input })),
 	updateTaskTransferOptions: (input: UpdateTaskTransferOptionsInput) => typedError<Task, string>(__TAURI_INVOKE("update_task_transfer_options", { input })),
+	/**
+	 *  Reassign `queue_position` for the given task ids based on their order in
+	 *  the input slice. Only `Queued` tasks should be included; the caller (UI)
+	 *  is responsible for filtering. The full set is rebalanced with a step of
+	 *  1000 so future insertions still have room. Emits `task-updated` for each
+	 *  affected task and a single `queue-changed` event so the frontend refreshes.
+	 */
+	reorderQueuedTasks: (taskIds: string[]) => typedError<null, string>(__TAURI_INVOKE("reorder_queued_tasks", { taskIds })),
 	updateTorrentFileSelection: (input: UpdateTorrentFileSelectionInput) => typedError<Task, string>(__TAURI_INVOKE("update_torrent_file_selection", { input })),
 	updateTorrentSeeding: (input: UpdateTorrentSeedingInput) => typedError<Task, string>(__TAURI_INVOKE("update_torrent_seeding", { input })),
 	updateTaskProxySettings: (input: TaskProxySettingsInput) => typedError<TaskProxySettings, string>(__TAURI_INVOKE("update_task_proxy_settings", { input })),
@@ -133,6 +164,7 @@ export const commands = {
 	openTaskFile: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_file", { id })),
 	openTaskFolder: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_folder", { id })),
 	seedMockTasks: () => typedError<Task[], string>(__TAURI_INVOKE("seed_mock_tasks")),
+	seedScaleTasks: (distribution: ScaleStateDistribution, clearBefore: boolean | null) => typedError<number, string>(__TAURI_INVOKE("seed_scale_tasks", { distribution, clearBefore })),
 };
 
 /* Types */
@@ -178,6 +210,17 @@ export type AppSettings = {
 	completionCountdownSeconds: number,
 	completionRunCommand: string,
 	deleteToTrash: boolean,
+	autoUpdateCheckEnabled: boolean,
+	/**
+	 *  Optional user-configured ffmpeg binary path. Resolution chain at use:
+	 *  `VIBE_FFMPEG_PATH` env > this setting > PATH lookup.
+	 */
+	ffmpegPath: string | null,
+	/**
+	 *  F-7: Global BitTorrent upload speed limit in bytes/sec. `None` means
+	 *  unlimited. Applied to every BT session at creation and synced on reuse.
+	 */
+	btUploadLimitBps: string | null,
 };
 
 export type BatchImportItem = {
@@ -363,7 +406,19 @@ export type CreateTaskInput = {
 	url: string,
 	saveDir: string | null,
 	fileName: string | null,
+	/**
+	 *  Legacy SHA-256-only field. Prefer `expected_hash` + `expected_hash_algorithm`
+	 *  for multi-algorithm manual verification (F-5). Kept for backward compatibility
+	 *  with older callers and browser handoff payloads.
+	 */
 	expectedHashSha256: string | null,
+	/**
+	 *  New (F-5): expected hash digest in any supported algorithm. When provided,
+	 *  takes precedence over `expected_hash_sha256`. `expected_hash_algorithm`
+	 *  defaults to Sha256 when None.
+	 */
+	expectedHash: string | null,
+	expectedHashAlgorithm: ChecksumAlgorithm | null,
 	taskSpeedLimitBps: string | null,
 	priority: TaskPriority | null,
 	categoryKey: string | null,
@@ -375,12 +430,26 @@ export type CreateTaskInput = {
 	privateKeyData: string | null,
 	privateKeyPassphrase: string | null,
 	selectedHlsVariantUri: string | null,
+	/**
+	 *  F-6: Selected audio track URIs from `#EXT-X-MEDIA TYPE=AUDIO`.
+	 *  When non-empty, the HLS engine downloads these alongside the video variant
+	 *  and muxes them into the final output via ffmpeg `-map`.
+	 */
+	selectedHlsAudioTrackUris: string[] | null,
+	/**  F-6: Selected subtitle track URIs from `#EXT-X-MEDIA TYPE=SUBTITLES`. */
+	selectedHlsSubtitleTrackUris: string[] | null,
 };
 
 export type CursorPageInput = {
 	taskId: string,
 	cursor: string | null,
 	pageSize: number | null,
+};
+
+export type DiskSpaceInfo = {
+	path: string,
+	total_bytes: string,
+	available_bytes: string,
 };
 
 export type EngineCapabilities = {
@@ -413,6 +482,31 @@ export type HashVerificationState = {
 };
 
 export type HashVerificationStatus = "not_requested" | "pending" | "verified" | "failed";
+
+/**
+ *  F-6: An `#EXT-X-MEDIA` rendition parsed from an HLS master playlist.
+ *  Covers both `TYPE=AUDIO` and `TYPE=SUBTITLES` (and `TYPE=CLOSED-CAPTIONS`
+ *  is ignored — we don't handle CEA-608/708 embedded in video segments).
+ */
+export type HlsMediaTrack = {
+	/**  `AUDIO` or `SUBTITLES`. */
+	kind: string,
+	/**  `GROUP-ID` — associates the track with one or more `#EXT-X-STREAM-INF` variants. */
+	groupId: string,
+	/**  Human-readable `NAME` (e.g. "English", "Spanish"). */
+	name: string,
+	/**  `LANGUAGE` tag (BCP-47, e.g. "en", "es"). */
+	language: string | null,
+	/**  `DEFAULT=YES` — the publisher's suggested default track. */
+	default: boolean,
+	/**  `AUTOSELECT=YES` — may be auto-selected by the player. */
+	autoSelect: boolean,
+	/**
+	 *  Rendition URI. `None` means the track is embedded in the video variant
+	 *  (e.g. AAC audio muxed inside the video segment).
+	 */
+	uri: string | null,
+};
 
 export type HlsVariant = {
 	uri: string,
@@ -485,12 +579,30 @@ export type MetalinkMirrorView = {
 	lastError: string | null,
 };
 
+/**
+ *  UX-6: Payload for the `probe-phase` event. Emitted by download engines
+ *  during `probe()` to give the NewDownloadDialog real, stage-aware feedback
+ *  instead of the old URL-regex static guess. `request_id` correlates events
+ *  to a specific probe invocation (passed by the frontend via `ProbeTaskInput`).
+ *  Not broadcast to `browser_realtime` — probe phases are ephemeral UI feedback.
+ */
+export type ProbePhasePayload = {
+	requestId: string,
+	kind: string,
+	protocol: string | null,
+};
+
 export type ProbeTaskInput = {
 	url: string,
 	username: string | null,
 	password: string | null,
 	privateKeyData: string | null,
 	privateKeyPassphrase: string | null,
+	/**
+	 *  UX-6: Frontend-generated correlation ID for probe-phase events.
+	 *  When `Some`, engines emit `probe-phase` events keyed by this ID.
+	 */
+	requestId: string | null,
 };
 
 export type ProbeTaskPayload = {
@@ -507,6 +619,10 @@ export type ProbeTaskPayload = {
 	etag: string | null,
 	lastModified: string | null,
 	hlsVariants: HlsVariant[],
+	/**  F-6: Audio renditions from `#EXT-X-MEDIA TYPE=AUDIO`. */
+	hlsAudioTracks: HlsMediaTrack[],
+	/**  F-6: Subtitle renditions from `#EXT-X-MEDIA TYPE=SUBTITLES`. */
+	hlsSubtitleTracks: HlsMediaTrack[],
 	probedAt: string,
 };
 
@@ -516,7 +632,17 @@ export type ProbedFile = {
 	contentType: string | null,
 };
 
-export type RecoveryAction = "retry" | "retry_later" | "choose_another_name" | "choose_another_folder" | "restart" | "open_folder" | "check_url" | "free_disk_space";
+/**
+ *  E-1: Payload for the `queue-changed` event. `changed_task_ids` is `None`
+ *  when the change is batch/global (caller should do a full refresh), or
+ *  `Some(ids)` when a small set of tasks changed (caller can fetch just those
+ *  via `list_tasks_by_ids` for an incremental upsert).
+ */
+export type QueueChangedPayload = {
+	changed_task_ids: string[] | null,
+};
+
+export type RecoveryAction = "retry" | "retry_later" | "choose_another_name" | "choose_another_folder" | "restart" | "open_folder" | "check_url" | "free_disk_space" | "configure_ffmpeg";
 
 export type RequestDiagnostic = {
 	id: string,
@@ -540,6 +666,18 @@ export type ResolveTaskAttentionInput = {
 	action: RecoveryAction,
 	fileName: string | null,
 	saveDir: string | null,
+};
+
+/**
+ *  Parameter for the debug-only `seed_scale_tasks` command. Each field is the
+ *  exact number of tasks to generate in that state. Uses `i32` (not `i64`) so
+ *  Specta maps to TypeScript `number` instead of `bigint`.
+ */
+export type ScaleStateDistribution = {
+	queued: number,
+	downloading: number,
+	completed: number,
+	failed: number,
 };
 
 export type SegmentStatus = "pending" | "downloading" | "completed" | "failed";
@@ -804,6 +942,17 @@ export type UpdateSettingsInput = {
 	completionCountdownSeconds: number | null,
 	completionRunCommand: string | null,
 	deleteToTrash: boolean | null,
+	autoUpdateCheckEnabled: boolean | null,
+	/**
+	 *  Custom ffmpeg binary path. `None` leaves the value unchanged; `Some(None)`
+	 *  clears the setting (falls back to env/PATH lookup).
+	 */
+	ffmpegPath: string | null,
+	/**
+	 *  F-7: Global BitTorrent upload speed limit (bytes/sec). `None` leaves
+	 *  the value unchanged; `Some(None)` clears the limit (unlimited).
+	 */
+	btUploadLimitBps: string | null,
 };
 
 export type UpdateTaskTransferOptionsInput = {

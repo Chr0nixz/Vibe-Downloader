@@ -1,11 +1,25 @@
-import { Activity, AlertTriangle, ChevronDown, File, FolderOpen, Pause, Play, RotateCcw, Square } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  Clock,
+  File,
+  FolderOpen,
+  Loader2,
+  Pause,
+  Play,
+  RotateCcw,
+  Square,
+} from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type MouseEventHandler, memo, type ReactNode, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { describeSpeedTrend, SpeedSparkline } from "@/components/tasks/SpeedSparkline";
-import { TaskContextMenu } from "@/components/tasks/TaskContextMenu";
+import { type ReorderAction, TaskContextMenu } from "@/components/tasks/TaskContextMenu";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { RecoveryAction } from "@/generated/bindings";
@@ -21,6 +35,7 @@ interface TaskRowProps {
   taskId: string;
   selected: boolean;
   multiSelected: boolean;
+  isShiftAnchor?: boolean;
   isFirstFocusable: boolean;
   reduceMotion: boolean;
   position: number;
@@ -35,7 +50,12 @@ interface TaskRowProps {
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
   onDelete: (task: Task) => void;
+  onDeleteFiles?: (task: Task) => void;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
+  onReorder?: (task: Task, action: ReorderAction) => void;
+  onCopyUrl?: (task: Task) => void;
+  onCopyLocalPath?: (task: Task) => void;
+  onShowDetails?: (task: Task) => void;
 }
 
 const EMPTY_SPEED_HISTORY: SpeedSample[] = [];
@@ -46,24 +66,67 @@ function statusBadge(status: Task["status"]): string {
     case "retrying":
       return "bg-accent-primary/15 text-accent-primary";
     case "completed":
-      return "bg-status-success/12 text-status-success";
+      return "bg-status-success/15 text-status-success";
     case "failed":
     case "needs_attention":
-      return "bg-status-danger/12 text-status-danger";
+      return "bg-status-danger/15 text-status-danger";
     case "paused":
-      return "bg-surface-raised text-text-muted";
+      return "bg-surface-raised text-text-muted ring-1 ring-border-subtle/60";
     case "queued":
     case "waiting_network":
-      return "bg-surface-raised text-text-secondary";
+      return "bg-surface-raised text-text-secondary ring-1 ring-border-subtle/60";
     default:
-      return "bg-surface-raised text-text-secondary";
+      return "bg-surface-raised text-text-secondary ring-1 ring-border-subtle/60";
   }
+}
+
+// Per-status icon: shape differentiation on top of color, so badges read at a glance
+// even when the hue is similar (paused vs. queued were previously identical pills).
+// `spin` is only true for active transfer states.
+function statusBadgeIcon(
+  status: Task["status"],
+): { Icon: React.ComponentType<{ className?: string }>; spin: boolean } | null {
+  switch (status) {
+    case "downloading":
+    case "retrying":
+      return { Icon: Loader2, spin: true };
+    case "completed":
+      return { Icon: Check, spin: false };
+    case "failed":
+    case "needs_attention":
+      return { Icon: AlertTriangle, spin: false };
+    case "paused":
+      return { Icon: Pause, spin: false };
+    case "queued":
+    case "waiting_network":
+      return { Icon: Clock, spin: false };
+    default:
+      return null;
+  }
+}
+
+// Two-letter protocol monogram for the row's leading identity marker.
+// Dense, geek-chic, and answers "what kind of download is this?" at a glance —
+// a download manager's core affordance that was previously missing.
+function protocolMonogram(protocol: string): string {
+  const p = protocol.toLowerCase();
+  if (p === "http" || p === "https") return "HT";
+  if (p === "ftp" || p === "ftps") return "FP";
+  if (p === "sftp") return "SF";
+  if (p === "bt" || p === "magnet") return "BT";
+  if (p === "hls") return "HL";
+  if (p === "dash") return "DS";
+  if (p === "webdav" || p === "webdavs") return "WD";
+  if (p === "metalink") return "ML";
+  if (p.length >= 2) return p.slice(0, 2).toUpperCase();
+  return "•";
 }
 
 export const TaskRow = memo(function TaskRow({
   taskId,
   selected,
   multiSelected,
+  isShiftAnchor,
   isFirstFocusable,
   reduceMotion,
   position,
@@ -78,7 +141,12 @@ export const TaskRow = memo(function TaskRow({
   onOpenFile,
   onOpenFolder,
   onDelete,
+  onDeleteFiles,
   onResolveAttention,
+  onReorder,
+  onCopyUrl,
+  onCopyLocalPath,
+  onShowDetails,
 }: TaskRowProps) {
   const { t } = useTranslation();
   const shellLayout = useShellLayout();
@@ -129,7 +197,12 @@ export const TaskRow = memo(function TaskRow({
       onOpenFile={onOpenFile}
       onOpenFolder={onOpenFolder}
       onDelete={onDelete}
+      onDeleteFiles={onDeleteFiles}
       onResolveAttention={onResolveAttention}
+      onReorder={onReorder}
+      onCopyUrl={onCopyUrl}
+      onCopyLocalPath={onCopyLocalPath}
+      onShowDetails={onShowDetails}
     >
       <div
         id={`task-option-${task.id}`}
@@ -176,12 +249,19 @@ export const TaskRow = memo(function TaskRow({
           }
         }}
         className={cn(
-          "group relative overflow-hidden rounded-md border border-transparent bg-surface-base/60 px-2.5 py-2 transition-[background-color,border-color,box-shadow] duration-ui ease-out hover:bg-surface-raised/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary sm:px-3 md:px-3 md:py-1.5",
+          // Row surface: bg-surface-base over list root gives a clearer row↔list delta now
+          // that the surface scale is widened. Hover bumps to surface-raised (was /70 opacity,
+          // now solid) and adds an inset lift so the row feels responsive without a stripe.
+          "group relative overflow-hidden rounded-md border border-transparent bg-surface-base px-2.5 py-2 transition-[background-color,border-color,box-shadow] duration-ui ease-out hover:bg-surface-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary sm:px-3 md:px-3 md:py-1.5",
           "grid gap-x-3 gap-y-2 md:grid-cols-[minmax(0,1fr)_minmax(12rem,14rem)]",
           completionFlash && "completion-flash",
-          selected && "border-border-accent bg-accent-primary/[0.04]",
-          multiSelected && !selected && "border-border-accent-subtle bg-accent-primary/[0.04]",
-          task.status === "completed" && !selected && "border-border-success",
+          // Selected: stronger accent fill (was 4%) + inset accent ring so the row anchors.
+          selected &&
+            "border-border-accent bg-accent-primary/10 shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_20%,transparent)]",
+          multiSelected && !selected && "border-border-accent-subtle bg-accent-primary/[0.06]",
+          // Shift-select anchor: bump the tint so users can see the range origin.
+          isShiftAnchor && (selected || multiSelected) && "bg-accent-primary/[0.14]",
+          task.status === "completed" && !selected && "border-border-success/60",
           (task.status === "failed" || task.status === "needs_attention") && !selected && "border-border-danger-subtle",
         )}
       >
@@ -192,13 +272,19 @@ export const TaskRow = memo(function TaskRow({
             onClick={(event) => event.stopPropagation()}
           >
             <span className="sr-only">{t("taskList.selectTask", { name: task.fileName })}</span>
-            <input
-              type="checkbox"
-              checked={multiSelected}
-              onChange={(event) => onToggleSelected(task.id, event.target.checked)}
-              className="h-4 w-4 accent-accent-primary"
-            />
+            <Checkbox checked={multiSelected} onChange={(event) => onToggleSelected(task.id, event.target.checked)} />
           </label>
+          {/* Protocol monogram — leading identity marker.
+              A small tinted chip with a 2-letter code (HT/FP/SF/BT/HL/DS/WD/ML).
+              Tone follows the accent so it stays calm; size is fixed so the row
+              height doesn't jitter across protocols. */}
+          <span
+            aria-hidden
+            title={task.protocol}
+            className="mt-0.5 flex h-6 w-7 shrink-0 select-none items-center justify-center rounded border border-border-subtle/60 bg-surface-raised font-mono text-[9px] font-bold leading-none tracking-tight text-text-secondary transition-colors duration-ui group-hover:text-text-primary md:h-5 md:w-6 md:text-[8px]"
+          >
+            {protocolMonogram(task.protocol)}
+          </span>
           <div className="min-w-0 flex-1 space-y-1.5 md:space-y-1">
             <div className="flex min-w-0 items-start justify-between gap-2 md:block">
               <div className="min-w-0 flex-1">
@@ -206,19 +292,29 @@ export const TaskRow = memo(function TaskRow({
                   <div id={nameId} className="truncate text-sm font-semibold leading-snug text-text-primary">
                     {task.fileName}
                   </div>
-                  <motion.span
-                    id={statusId}
-                    key={task.status}
-                    initial={reduceMotion ? false : { opacity: 0, scale: 0.96 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-                    className={cn(
-                      "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold leading-none tracking-wide",
-                      statusBadge(task.status),
-                    )}
-                  >
-                    {t(`task.status.${task.status}`)}
-                  </motion.span>
+                  {(() => {
+                    const badgeIcon = statusBadgeIcon(task.status);
+                    return (
+                      <motion.span
+                        id={statusId}
+                        initial={reduceMotion ? false : { opacity: 0, scale: 0.96 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                        className={cn(
+                          "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold leading-none tracking-wide",
+                          statusBadge(task.status),
+                        )}
+                      >
+                        {badgeIcon ? (
+                          <badgeIcon.Icon
+                            className={cn("h-3 w-3 shrink-0", badgeIcon.spin && !reduceMotion && "animate-spin")}
+                            aria-hidden
+                          />
+                        ) : null}
+                        {t(`task.status.${task.status}`)}
+                      </motion.span>
+                    );
+                  })()}
                 </div>
                 <p id={hostId} className="truncate text-xs text-text-muted">
                   {task.sourceKey}
@@ -232,9 +328,7 @@ export const TaskRow = memo(function TaskRow({
                 "truncate text-xs",
                 speedTrend.tone === "warning" && !task.healthSummary
                   ? "font-medium text-status-warning"
-                  : speedTrend.tone === "stable" && !task.healthSummary
-                    ? "font-medium text-accent-energy"
-                    : "text-text-secondary",
+                  : "text-text-secondary",
               )}
             >
               {diagnosticLabel}
@@ -249,48 +343,13 @@ export const TaskRow = memo(function TaskRow({
               className={completionFlash ? "completion-flash-progress" : undefined}
             />
 
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-text-muted md:hidden">
-              <span className={cn("text-text-primary", isActive && "text-xs font-semibold text-accent-primary")}>
-                {formatSpeed(task.speedBps)}
-              </span>
-              <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
-                {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
-              </span>
-              <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
-                {formatPercent(task.downloadedBytes, task.totalSize)} · {t("task.eta")}{" "}
-                {formatEta(task.downloadedBytes, task.totalSize, task.speedBps)}
-              </span>
-              {task.connectionCount > 0 ? (
-                <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
-                  {t("task.connections", { count: task.connectionCount })}
-                </span>
-              ) : null}
-            </div>
+            <TaskMeta task={task} isActive={isActive} layout="inline" />
           </div>
         </div>
 
         {!shellCompact ? (
-          <div className="hidden min-w-52 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-right font-mono text-xs md:grid md:[&>span:nth-of-type(3)]:col-span-2 md:[&>span:nth-of-type(3)]:min-w-0 md:[&>span:nth-of-type(3)]:truncate md:[&>span:nth-of-type(4)]:hidden">
-            <span
-              className={cn(
-                "min-w-0 truncate text-sm text-text-primary",
-                isActive && "font-semibold text-accent-primary",
-              )}
-            >
-              {formatSpeed(task.speedBps)}
-            </span>
-            <span className="min-w-0 truncate text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
-              {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
-            </span>
-            <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
-              {formatPercent(task.downloadedBytes, task.totalSize)} · {t("task.eta")}{" "}
-              {formatEta(task.downloadedBytes, task.totalSize, task.speedBps)}
-            </span>
-            {task.connectionCount > 0 ? (
-              <span className="text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary">
-                {t("task.connections", { count: task.connectionCount })}
-              </span>
-            ) : null}
+          <div className="hidden min-w-52 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-right font-mono text-xs md:grid">
+            <TaskMeta task={task} isActive={isActive} layout="rail" />
             <RowActions
               task={task}
               expanded={expanded}
@@ -377,7 +436,69 @@ function formatRetryTime(value: string): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function DetailLine({ label, value }: { label: string; value: string }) {
+// Shared meta row for speed / bytes / progress+ETA / connections.
+// - `inline`: mobile single-row wrap (md:hidden).
+// - `rail`: desktop right rail. Returns a fragment so the spans become direct
+//   children of the parent CSS grid (placement via data-slot + col-* utilities,
+//   not nth-of-type hacks).
+const META_MUTED =
+  "text-text-muted transition-colors duration-200 group-hover:text-text-secondary group-focus-within:text-text-secondary";
+
+const TaskMeta = memo(function TaskMeta({
+  task,
+  isActive,
+  layout,
+}: {
+  task: Task;
+  isActive: boolean;
+  layout: "inline" | "rail";
+}) {
+  const { t } = useTranslation();
+  const speed = formatSpeed(task.speedBps);
+  const bytes = `${formatBytes(task.downloadedBytes)} / ${formatBytes(task.totalSize)}`;
+  const progress = `${formatPercent(task.downloadedBytes, task.totalSize)} · ${t("task.eta")} ${formatEta(task.downloadedBytes, task.totalSize, task.speedBps)}`;
+  const connections = task.connectionCount > 0 ? t("task.connections", { count: task.connectionCount }) : null;
+
+  if (layout === "inline") {
+    return (
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-text-muted md:hidden">
+        <span className={cn("text-text-primary", isActive && "text-xs font-semibold text-accent-primary")}>
+          {speed}
+        </span>
+        <span className={META_MUTED}>{bytes}</span>
+        <span className={META_MUTED}>{progress}</span>
+        {connections ? <span className={META_MUTED}>{connections}</span> : null}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <span
+        data-slot="speed"
+        className={cn(
+          "col-start-1 min-w-0 truncate text-sm",
+          isActive ? "font-semibold text-accent-primary" : "text-text-primary",
+        )}
+      >
+        {speed}
+      </span>
+      <span data-slot="bytes" className={cn("col-start-2 min-w-0 truncate", META_MUTED)}>
+        {bytes}
+      </span>
+      <span data-slot="progress" className={cn("col-span-2 min-w-0 truncate", META_MUTED)}>
+        {progress}
+      </span>
+      {connections ? (
+        <span data-slot="connections" className={cn("col-span-2", META_MUTED)}>
+          {connections}
+        </span>
+      ) : null}
+    </>
+  );
+});
+
+const DetailLine = memo(function DetailLine({ label, value }: { label: string; value: string }) {
   return (
     <p className="flex min-w-0 gap-2">
       <span className="shrink-0 text-text-muted">{label}</span>
@@ -386,7 +507,7 @@ function DetailLine({ label, value }: { label: string; value: string }) {
       </span>
     </p>
   );
-}
+});
 
 function RowActions({
   task,
@@ -518,7 +639,7 @@ function RowActions({
   );
 }
 
-function ActionButton({
+const ActionButton = memo(function ActionButton({
   label,
   ariaLabel,
   disabled,
@@ -554,9 +675,9 @@ function ActionButton({
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
   );
-}
+});
 
-function InlineRecovery({
+const InlineRecovery = memo(function InlineRecovery({
   task,
   expanded,
   onToggleExpanded,
@@ -582,37 +703,46 @@ function InlineRecovery({
   const hasMoreActions = recoveryActions.length > 1;
 
   return (
-    <div className="col-span-full flex flex-wrap items-center gap-2 pt-1" data-row-action data-no-drag>
+    // Alert container: a real callout box instead of loose inline elements.
+    // Tinted bg + danger border + padding give the error its own visual unit,
+    // so a failed row's recovery path reads as an alert, not as row text.
+    <div
+      className="col-span-full mt-1 flex flex-wrap items-center gap-2 rounded-md border border-border-danger-subtle bg-status-danger/[0.06] px-2.5 py-2"
+      data-row-action
+      data-no-drag
+    >
       <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-danger" aria-hidden />
       <span
-        className="min-w-0 max-w-[200px] truncate text-xs text-status-danger"
+        className="min-w-0 line-clamp-2 text-xs leading-snug text-status-danger"
         title={localizedErrorMessage(task.errorMessage, t)}
       >
         {localizedErrorMessage(task.errorMessage, t)}
       </span>
-      <Button
-        size="sm"
-        className="h-8 px-2 text-xs"
-        onClick={(event) => {
-          event.stopPropagation();
-          onResolve(task, primaryAction);
-        }}
-      >
-        {t(`recovery.${primaryAction}`)}
-      </Button>
-      {hasMoreActions ? (
+      <div className="ml-auto flex shrink-0 items-center gap-1">
         <Button
-          variant="ghost"
           size="sm"
-          className="h-8 px-2 text-xs"
+          className="h-7 px-2 text-xs"
           onClick={(event) => {
             event.stopPropagation();
-            if (!expanded) onToggleExpanded();
+            onResolve(task, primaryAction);
           }}
         >
-          {t("actions.moreFixesCount", { count: recoveryActions.length - 1 })}
+          {t(`recovery.${primaryAction}`)}
         </Button>
-      ) : null}
+        {hasMoreActions ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!expanded) onToggleExpanded();
+            }}
+          >
+            {t("actions.moreFixesCount", { count: recoveryActions.length - 1 })}
+          </Button>
+        ) : null}
+      </div>
     </div>
   );
-}
+});

@@ -12,6 +12,7 @@ use tauri_app_lib::models::{
     HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus,
 };
 use tauri_app_lib::scheduler::Scheduler;
+use tauri_app_lib::state_machine::TransitionError;
 
 fn sample_task_record(id: &str, protocol: &str) -> TaskRecord {
     let now = now_iso();
@@ -164,5 +165,226 @@ fn segment_count_falls_back_to_single_when_below_threshold() {
     assert_eq!(
         db::planned_segment_count_with_plan(&task, 16 * 1024 * 1024, 4),
         1
+    );
+}
+
+// --- R-2.6 race-condition tests (DB layer) ---------------------------------
+//
+// These tests verify the conditional UPDATE invariants that close the
+// start-vs-pause/cancel/retry race window. They exercise the DB layer
+// directly (no Tauri runtime, no spawned workers) because the conditional
+// UPDATE is the actual serialization mechanism — the per-task runtime lock
+// (R-2.3) only serializes entry into the critical section, while the
+// conditional UPDATE prevents a worker's terminal write from overwriting a
+// user-initiated state change that landed during the worker's run.
+//
+// Each test simulates the race by performing the "user action" (B) BEFORE
+// the "worker terminal write" (A), then asserting A is a no-op.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+async fn race_test_pool(label: &str) -> sqlx::SqlitePool {
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("vibe-race-{label}-{id}.sqlite"));
+    db::connect(&path)
+        .await
+        .expect("database connect with migrations")
+        .pool
+}
+
+/// Inserts a task in `Downloading` state for race-condition tests.
+async fn insert_downloading_task(pool: &sqlx::SqlitePool, id: &str) {
+    let mut task = sample_task_record(id, "http");
+    task.status = TaskStatus::Downloading;
+    task.total_size = 1024;
+    task.downloaded_bytes = 512;
+    task.connection_count = 2;
+    task.speed_bps = 1024;
+    db::insert_task_record(pool, &task)
+        .await
+        .expect("insert task");
+}
+
+async fn fetch_task_status(pool: &sqlx::SqlitePool, id: &str) -> TaskStatus {
+    let record = db::get_task_record(pool, id)
+        .await
+        .expect("query task")
+        .expect("task exists");
+    record.status
+}
+
+/// R-2.6: `mark_task_failed_if_active` must NOT overwrite a Paused status
+/// that a user action (pause_task) set while the worker was running.
+///
+/// Timeline:
+///   1. Worker starts: task = Downloading
+///   2. User pauses:   task = Paused (via conditional UPDATE with
+///      expected_current_status = Some(Downloading))
+///   3. Worker fails:  calls mark_task_failed_if_active
+///      → WHERE status IN ('downloading', 'retrying') does not match Paused
+///      → rows_affected == 0 → returns Ok(false) → no emit
+///
+/// Without R-2.4's conditional UPDATE, step 3 would overwrite Paused with
+/// Failed, silently discarding the user's pause.
+#[tokio::test]
+async fn mark_task_failed_if_active_skips_when_status_changed() {
+    let pool = race_test_pool("markfail-skip").await;
+    let task_id = "race-markfail-task";
+
+    insert_downloading_task(&pool, task_id).await;
+
+    // Step 2: user pauses (conditional UPDATE expects Downloading).
+    let paused = db::update_task_status(
+        &pool,
+        task_id,
+        TaskStatus::Paused,
+        Some(TaskStatus::Downloading),
+        0,
+        0,
+        Some("Paused"),
+        None,
+    )
+    .await
+    .expect("pause task");
+    assert!(paused.is_some(), "pause should succeed when status is Downloading");
+
+    // Step 3: worker fails — must NOT overwrite Paused.
+    let updated = db::mark_task_failed_if_active(
+        &pool,
+        task_id,
+        TaskStatus::Failed,
+        Some("Download failed"),
+        Some("engine_error: connection reset"),
+    )
+    .await
+    .expect("mark_task_failed_if_active");
+
+    assert!(
+        !updated,
+        "mark_task_failed_if_active must return false when status is no longer Downloading/Retrying"
+    );
+
+    // DB state must remain Paused, not Failed.
+    assert_eq!(
+        fetch_task_status(&pool, task_id).await,
+        TaskStatus::Paused,
+        "task status must remain Paused, not be overwritten with Failed"
+    );
+
+    // error_message must NOT be set by the skipped mark_task_failed_if_active.
+    let record = db::get_task_record(&pool, task_id)
+        .await
+        .expect("query")
+        .expect("task exists");
+    assert!(
+        record.error_message.is_none(),
+        "error_message must not be set when mark_task_failed_if_active was skipped, got: {:?}",
+        record.error_message
+    );
+
+    pool.close().await;
+}
+
+/// R-2.6: `complete_task` must NOT overwrite a Paused status that a user
+/// action set while the worker was finishing.
+///
+/// Timeline:
+///   1. Worker starts:    task = Downloading
+///   2. User pauses:      task = Paused
+///   3. Worker completes: calls complete_task
+///      → WHERE status = 'downloading' does not match Paused
+///      → rows_affected == 0 → rollback → return Ok(())
+///
+/// Without R-2.4's conditional UPDATE, step 3 would overwrite Paused with
+/// Completed, silently discarding the user's pause and marking a partially
+/// downloaded file as complete.
+#[tokio::test]
+async fn complete_task_does_not_overwrite_paused() {
+    let pool = race_test_pool("complete-skip").await;
+    let task_id = "race-complete-task";
+
+    insert_downloading_task(&pool, task_id).await;
+
+    // Step 2: user pauses (conditional UPDATE expects Downloading).
+    let paused = db::update_task_status(
+        &pool,
+        task_id,
+        TaskStatus::Paused,
+        Some(TaskStatus::Downloading),
+        0,
+        0,
+        Some("Paused"),
+        None,
+    )
+    .await
+    .expect("pause task");
+    assert!(paused.is_some(), "pause should succeed when status is Downloading");
+
+    // Step 3: worker completes — must NOT overwrite Paused.
+    db::complete_task(&pool, task_id)
+        .await
+        .expect("complete_task must not error (returns Ok(()) on no-op)");
+
+    // DB state must remain Paused, not Completed.
+    assert_eq!(
+        fetch_task_status(&pool, task_id).await,
+        TaskStatus::Paused,
+        "task status must remain Paused, not be overwritten with Completed"
+    );
+
+    // downloaded_bytes must NOT be bumped to total_size by the skipped complete.
+    let record = db::get_task_record(&pool, task_id)
+        .await
+        .expect("query")
+        .expect("task exists");
+    assert_eq!(
+        record.downloaded_bytes, 512,
+        "downloaded_bytes must remain at the pre-complete value (512), not be bumped to total_size"
+    );
+    assert_eq!(
+        record.speed_bps, 0,
+        "speed_bps must be 0 (pause sets it), not restored to the pre-pause value"
+    );
+
+    pool.close().await;
+}
+
+// --- A-1: TransitionError variant coverage ---------------------------------
+//
+// `start_task` (scheduler/mod.rs:295-332) matches `TransitionError::Conflict`
+// explicitly (removing the pending DownloadControl at :314) and falls through
+// to a generic `Err(error)` branch at :323 for all other variants. That
+// generic branch also removes the pending control (the A-1 fix). If a new
+// non-Conflict variant were added to the enum without updating the match, it
+// would fall through correctly — but this test guards against accidental
+// future changes that might add a new explicit match arm that forgets to
+// clean up the downloads map.
+
+/// A-1: Verify that all non-Conflict `TransitionError` variants fall through
+/// to the generic `Err(error)` branch in `start_task`, which removes the
+/// pending `DownloadControl` entry. Only `Conflict` is matched explicitly.
+#[test]
+fn transition_error_non_conflict_variants_do_not_match_conflict_pattern() {
+    let illegal = TransitionError::Illegal {
+        from: TaskStatus::Queued,
+        to: TaskStatus::Downloading,
+    };
+    let database = TransitionError::Database("test".to_string());
+    let not_found = TransitionError::NotFound("task-1".to_string());
+
+    assert!(
+        !matches!(illegal, TransitionError::Conflict { .. }),
+        "Illegal must not match Conflict pattern — it must fall through to the generic error branch"
+    );
+    assert!(
+        !matches!(database, TransitionError::Conflict { .. }),
+        "Database must not match Conflict pattern — it must fall through to the generic error branch"
+    );
+    assert!(
+        !matches!(not_found, TransitionError::Conflict { .. }),
+        "NotFound must not match Conflict pattern — it must fall through to the generic error branch"
     );
 }

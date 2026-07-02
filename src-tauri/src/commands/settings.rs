@@ -46,6 +46,13 @@ pub struct UpdateSettingsInput {
     pub completion_countdown_seconds: Option<i32>,
     pub completion_run_command: Option<String>,
     pub delete_to_trash: Option<bool>,
+    pub auto_update_check_enabled: Option<bool>,
+    /// Custom ffmpeg binary path. `None` leaves the value unchanged; `Some(None)`
+    /// clears the setting (falls back to env/PATH lookup).
+    pub ffmpeg_path: Option<Option<String>>,
+    /// F-7: Global BitTorrent upload speed limit (bytes/sec). `None` leaves
+    /// the value unchanged; `Some(None)` clears the limit (unlimited).
+    pub bt_upload_limit_bps: Option<Option<String>>,
 }
 
 #[tauri::command]
@@ -193,7 +200,30 @@ pub async fn update_settings(
     let completion_run_command = input
         .completion_run_command
         .unwrap_or_else(|| current.completion_run_command.clone());
+    // S-4: Audit-log changes to the completion run command — this is the
+    // field that drives local command execution on task completion.
+    if completion_run_command != current.completion_run_command {
+        tracing::info!(
+            setting = "completion_run_command",
+            old_value = %truncate_for_audit(&current.completion_run_command),
+            new_value = %truncate_for_audit(&completion_run_command),
+            "sensitive setting changed"
+        );
+    }
     let delete_to_trash = input.delete_to_trash.unwrap_or(current.delete_to_trash);
+    let auto_update_check_enabled = input
+        .auto_update_check_enabled
+        .unwrap_or(current.auto_update_check_enabled);
+    let ffmpeg_path = match input.ffmpeg_path {
+        Some(value) => value.and_then(|v| db::normalize_ffmpeg_path(&v)),
+        None => current.ffmpeg_path.clone(),
+    };
+    // F-7: BT upload limit. `None` = unchanged; `Some(None)` = clear (unlimited);
+    // `Some(Some(v))` = set to normalized value (0/invalid → None).
+    let bt_upload_limit_bps = match input.bt_upload_limit_bps {
+        Some(value) => value.and_then(|v| db::normalize_speed_limit_bps(&v)),
+        None => current.bt_upload_limit_bps.clone(),
+    };
     let settings = AppSettings {
         max_active_tasks,
         default_save_dir,
@@ -225,6 +255,9 @@ pub async fn update_settings(
         completion_countdown_seconds,
         completion_run_command,
         delete_to_trash,
+        auto_update_check_enabled,
+        ffmpeg_path,
+        bt_upload_limit_bps,
     };
 
     db::upsert_settings(&state.pool, &settings).await?;
@@ -267,4 +300,15 @@ fn resolve_save_dir(
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create the download directory: {e}"))?;
     Ok(dir.to_string_lossy().to_string())
+}
+
+/// Truncate a sensitive setting value for audit logging. Keeps the first
+/// 100 characters so long commands are still identifiable without flooding
+/// logs with potentially sensitive arguments.
+fn truncate_for_audit(value: &str) -> &str {
+    if value.len() <= 100 {
+        value
+    } else {
+        &value[..100]
+    }
 }

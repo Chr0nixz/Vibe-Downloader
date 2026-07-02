@@ -1,6 +1,9 @@
+import type { ReactElement, ReactNode } from "react";
+import { cloneElement, isValidElement, useId } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import type { BrowserCaptureSettings, BrowserForwardHeadersMode } from "@/generated/bindings";
 
 import { SiteRulesEditor } from "./SiteRulesEditor";
@@ -131,21 +134,23 @@ function bytesToMiB(value: string): number {
   return bytes / (1024 * 1024);
 }
 
-function CaptureField({
-  label,
-  description,
-  children,
-}: {
-  label: string;
-  description: string;
-  children: React.ReactNode;
-}) {
+function CaptureField({ label, description, children }: { label: string; description: string; children: ReactNode }) {
+  const fieldId = useId();
   return (
     <div className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 md:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)] md:items-center">
-      <label className="text-sm font-medium text-text-secondary">{label}</label>
+      <label htmlFor={fieldId} className="text-sm font-medium text-text-secondary">
+        {label}
+      </label>
       <div className="grid gap-1">
-        {children}
-        <p className="max-w-xl text-xs leading-5 text-text-muted">{description}</p>
+        {isValidElement(children)
+          ? cloneElement(children as ReactElement<{ id?: string; "aria-describedby"?: string }>, {
+              id: fieldId,
+              "aria-describedby": `${fieldId}-desc`,
+            })
+          : children}
+        <p id={`${fieldId}-desc`} className="max-w-xl text-xs leading-5 text-text-muted">
+          {description}
+        </p>
       </div>
     </div>
   );
@@ -170,13 +175,7 @@ function CaptureToggle({
         <span className="block text-sm font-medium text-text-primary">{title}</span>
         <span className="mt-1 block text-xs leading-5 text-text-muted">{description}</span>
       </span>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
-        className="h-6 w-6 accent-accent-primary md:h-5 md:w-5"
-      />
+      <Switch checked={checked} disabled={disabled} onCheckedChange={onChange} />
     </label>
   );
 }

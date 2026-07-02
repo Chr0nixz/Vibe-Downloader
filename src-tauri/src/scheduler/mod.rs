@@ -12,13 +12,16 @@ use crate::{
     commands::settings::default_download_dir,
     db,
     download::{DownloadContext, EngineRegistry, GlobalSpeedLimiter},
-    events::{emit_completion_action_requested, emit_queue_changed, emit_task_updated_record},
+    events::{
+        emit_completion_action_requested, emit_queue_changed, emit_queue_changed_with_ids,
+        emit_task_updated_record,
+    },
     logging::sanitize_url,
     models::{
         CompletionAction, CompletionActionRequestedPayload, HashVerificationStatus, TaskStatus,
         TaskRecord,
     },
-    platform, DownloadControl, TaskRequestHeaders,
+    platform, state_machine::TransitionError, DownloadControl, TaskRequestHeaders,
 };
 
 /// 下载调度器，封装活跃下载映射、请求头缓存、全局限速器、引擎注册表等共享状态。
@@ -36,6 +39,8 @@ pub struct Scheduler {
     speed_limiter: Arc<GlobalSpeedLimiter>,
     /// 引擎注册表（与 AppState.engine_registry 共享同一 Arc）
     engine_registry: Arc<EngineRegistry>,
+    /// R-2: per-task 运行时锁（与 AppState.task_runtime_locks 共享同一 Arc）
+    task_runtime_locks: Arc<crate::TaskRuntimeLocks>,
 }
 
 impl Scheduler {
@@ -44,6 +49,7 @@ impl Scheduler {
         request_headers: TaskRequestHeaders,
         speed_limiter: Arc<GlobalSpeedLimiter>,
         engine_registry: Arc<EngineRegistry>,
+        task_runtime_locks: Arc<crate::TaskRuntimeLocks>,
     ) -> Self {
         Self {
             lock: Mutex::new(()),
@@ -51,6 +57,7 @@ impl Scheduler {
             request_headers,
             speed_limiter,
             engine_registry,
+            task_runtime_locks,
         }
     }
 
@@ -211,9 +218,11 @@ impl Scheduler {
                     *host_slot_map.entry(source_key).or_insert(0) += planned_slots;
                 }
                 Err(error) => {
-                    // start_task failed before (or during) insert; the
-                    // spawned task (if any) will clean up the downloads entry.
-                    // Do NOT increment active_count — the task is not consuming a slot.
+                    // start_task failed before spawning a worker; it has
+                    // already removed its pending DownloadControl entry on
+                    // all error paths (Conflict at the transition_task match,
+                    // non-Conflict at the same match). Do NOT increment
+                    // active_count — the task is not consuming a slot.
                     match db::get_task_record(&pool, &task_id).await {
                         Ok(Some(current)) if current.status == TaskStatus::Queued => {
                             mark_download_failed(&app, &pool, &task_id, error).await;
@@ -239,6 +248,11 @@ impl Scheduler {
         task: TaskRecord,
         connection_limit: usize,
     ) -> Result<(), String> {
+        // R-2.3: Per-task runtime lock serializes start vs pause/cancel/delete/retry.
+        // Worker (download engine) does NOT hold this lock — it relies on R-1's
+        // conditional DB update to avoid overwriting user-initiated state changes.
+        let _runtime_guard = self.task_runtime_locks.lock(&task.id).await;
+
         let task_request_headers =
             resolve_task_request_headers(&pool, self.request_headers.clone(), &task.id).await?;
         let global_proxy_config = self.engine_registry.proxy_config().await;
@@ -261,7 +275,29 @@ impl Scheduler {
         );
 
         let connection_count = i32::try_from(connection_limit.max(1)).unwrap_or(1);
-        crate::state_machine::transition_task(
+
+        // R-2.3: Create cancel_token + finish BEFORE transition_task so a pending
+        // DownloadControl can be inserted with the same token instance the worker
+        // will listen on. This closes the race window where pause/cancel sees
+        // status=Downloading in DB but no control entry to cancel the worker.
+        let finish = Arc::new(AtomicBool::new(false));
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let source_key = task.source_key.clone();
+        {
+            let mut downloads = self.downloads.lock().await;
+            downloads.insert(
+                task.id.clone(),
+                DownloadControl {
+                    cancel_token: cancel_token.clone(),
+                    finish: finish.clone(),
+                    handle: None, // pending — updated to Some(handle) after spawn
+                    source_key: source_key.clone(),
+                    connection_slots: connection_limit.max(1),
+                },
+            );
+        }
+
+        match crate::state_machine::transition_task(
             &app,
             &pool,
             &task.id,
@@ -272,14 +308,37 @@ impl Scheduler {
             Some("started"),
         )
         .await
-        .map_err(String::from)?;
+        {
+            Ok(_) => {}
+            Err(TransitionError::Conflict {
+                task_id,
+                current,
+                attempted,
+            }) => {
+                // R-2.3: Remove the pending control — no worker will be spawned.
+                self.downloads.lock().await.remove(&task.id);
+                tracing::warn!(
+                    task_id = %task_id,
+                    current = ?current,
+                    attempted = ?attempted,
+                    "start_task: task state changed concurrently, skipping"
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                // R-2.3: Non-Conflict transition failure (e.g. Database, Illegal,
+                // NotFound). No worker will be spawned, so remove the pending
+                // control to avoid leaking a slot that would silently starve the
+                // scheduler (active_count and per-host slots are derived from
+                // downloads.len()).
+                self.downloads.lock().await.remove(&task.id);
+                return Err(error.into());
+            }
+        }
 
-        let finish = Arc::new(AtomicBool::new(false));
-        let cancel_token = tokio_util::sync::CancellationToken::new();
         let downloads_map = self.downloads.clone();
         let task_id = task.id.clone();
         let map_task_id = task.id.clone();
-        let source_key = task.source_key.clone();
         let task_app = app.clone();
         let task_cancel_token = cancel_token.clone();
         let task_finish = finish.clone();
@@ -404,21 +463,33 @@ impl Scheduler {
                 scheduler.maybe_emit_completion_action(&task_app, &task_pool).await;
             }
 
+            // A-4: Evict the runtime lock entry now that the worker has finished
+            // and the downloads_map/request_headers entries are removed. If a user
+            // action (pause/cancel/delete/retry) is concurrently holding the lock,
+            // strong_count > 1 and evict is a safe no-op. This prevents completed/
+            // failed/paused task entries from accumulating indefinitely in the
+            // registry (only delete_* previously evicted).
+            scheduler.task_runtime_locks.evict(&task_id).await;
+
             scheduler.clone().spawn_dispatch(task_app, task_pool);
         });
 
-        self.downloads.lock().await.insert(
-            map_task_id,
-            DownloadControl {
-                cancel_token,
-                finish,
-                handle,
-                source_key,
-                connection_slots: connection_limit.max(1),
-            },
-        );
+        // R-2.3: Update the pending control's handle now that the worker is spawned.
+        // If the control was removed (e.g. by a concurrent cancel), the worker is
+        // already self-cleaning via downloads_map.lock().await.remove(&task_id).
+        {
+            let mut downloads = self.downloads.lock().await;
+            if let Some(control) = downloads.get_mut(&map_task_id) {
+                control.handle = Some(handle);
+            } else {
+                tracing::warn!(
+                    task_id = %map_task_id,
+                    "pending control removed before handle update — task was likely cancelled"
+                );
+            }
+        }
 
-        emit_queue_changed(&app);
+        emit_queue_changed_with_ids(&app, Some(vec![map_task_id.clone()]));
         Ok(())
     }
 
@@ -516,14 +587,34 @@ async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str,
         }
         _ => TaskStatus::Failed,
     };
-    if let Err(db_error) =
-        db::update_task_status(pool, task_id, status, 0, 0, Some(&error), Some(&error)).await
+    // R-2.4: Conditional UPDATE — only mark failed if still Downloading/Retrying.
+    // If the user paused/canceled/deleted while the worker was erroring out,
+    // skip the failure write to avoid overwriting their action.
+    let updated = match db::mark_task_failed_if_active(
+        pool,
+        task_id,
+        status,
+        Some(&error),
+        Some(&error),
+    )
+    .await
     {
+        Ok(updated) => updated,
+        Err(db_error) => {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %db_error,
+                "failed to persist task failure status"
+            );
+            return;
+        }
+    };
+    if !updated {
         tracing::warn!(
             task_id = %task_id,
-            error = %db_error,
-            "failed to persist task failure status"
+            "mark_download_failed: task state changed concurrently, skipping emit"
         );
+        return;
     }
     if let Err(db_error) = db::insert_task_event(pool, task_id, "failed", Some(&error)).await {
         tracing::warn!(
@@ -550,7 +641,7 @@ async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str,
         emit_task_progress_snapshot(app, &task);
         emit_task_updated_record(app, pool, &task).await;
     }
-    emit_queue_changed(app);
+    emit_queue_changed_with_ids(app, Some(vec![task_id.to_string()]));
 }
 
 fn min_optional_limit(left: Option<i64>, right: Option<i64>) -> Option<i64> {

@@ -101,7 +101,10 @@ impl HttpEngine {
     /// Returns a cached `Client` for the current proxy configuration, building
     /// one on first use. Reusing the client avoids repeated TCP/TLS handshakes
     /// when multiple downloads target the same host.
-    async fn client(&self) -> Result<Client, String> {
+    ///
+    /// E-4: 公开给 HLS / DASH / Metalink / WebDAV 等派系引擎共享同一缓存，
+    /// 避免各引擎调用 `build_client()` 绕过缓存。
+    pub async fn client(&self) -> Result<Client, String> {
         let config = self.proxy_config.read().await;
         let fingerprint = proxy_fingerprint(&config);
         {
@@ -116,6 +119,12 @@ impl HttpEngine {
             .await
             .insert(fingerprint, client.clone());
         Ok(client)
+    }
+
+    /// E-4: 返回当前客户端缓存条目数。用于集成测试验证 `set_proxy_config`
+    /// 后共享缓存被正确清空（四个 HTTP 派生引擎共享同一 `Arc<HttpEngine>`）。
+    pub async fn client_cache_len(&self) -> usize {
+        self.clients.read().await.len()
     }
 
     /// Clear the client cache. Called when proxy configuration changes so
@@ -251,16 +260,19 @@ fn proxy_fingerprint(config: &ResolvedProxyConfig) -> String {
 struct HickoryResolver(TokioResolver);
 
 impl HickoryResolver {
-    fn new() -> Self {
-        Self(
-            TokioResolver::builder_with_config(
-                ResolverConfig::default(),
-                hickory_resolver::net::runtime::TokioRuntimeProvider::new(),
-            )
-            .with_options(ResolverOpts::default())
-            .build()
-            .expect("failed to create DNS resolver"),
+    /// A-5: Returns `Result` instead of `.expect()` — system DNS configuration
+    /// can be missing/corrupted (containers, chroot, minimal images), and a
+    /// panic here would crash the worker or the synchronous `set_proxy_config`
+    /// path. The caller (`build_client`) propagates the error as a string.
+    fn new() -> Result<Self, String> {
+        let resolver = TokioResolver::builder_with_config(
+            ResolverConfig::default(),
+            hickory_resolver::net::runtime::TokioRuntimeProvider::new(),
         )
+        .with_options(ResolverOpts::default())
+        .build()
+        .map_err(|e| format!("DNS resolver unavailable: {e}"))?;
+        Ok(Self(resolver))
     }
 }
 
@@ -275,20 +287,68 @@ impl reqwest::dns::Resolve for HickoryResolver {
                     Box::new(std::io::Error::other(e.to_string()))
                         as Box<dyn std::error::Error + Send + Sync>
                 })?;
-            let addrs: Vec<SocketAddr> = lookup.iter().map(|ip| SocketAddr::new(ip, 0)).collect();
+            // A-2: SSRF connection-time guard — filter out any resolved IP
+            // that is private or reserved. If ALL resolved IPs are filtered,
+            // return an error so the connection fails rather than falling
+            // back to a private address. This is the second layer of defense
+            // after the handoff pre-flight DNS check; it also protects
+            // non-handoff paths (direct UI/clipboard task creation) where
+            // the pre-flight check does not run.
+            let addrs: Vec<SocketAddr> = lookup
+                .iter()
+                .filter(|ip| !crate::download::ssrf::is_private_ip(ip))
+                .map(|ip| SocketAddr::new(ip, 0))
+                .collect();
+            if addrs.is_empty() {
+                return Err(Box::new(std::io::Error::other(
+                    "SSRF guard: all resolved IPs are private or reserved",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
             Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
         })
     }
 }
 
+/// A-2: Custom reqwest redirect policy that re-checks each redirect hop's
+/// target URL against the SSRF guard. Without this, a public URL could 302
+/// to an internal address (`http://127.0.0.1/...`, `http://169.254.169.254/...`)
+/// and reqwest would follow it without question.
+///
+/// Combined with the connection-time resolver filter (`HickoryResolver::resolve`),
+/// this provides defense in depth: even if a redirect slips through to a
+/// hostname that resolves to a private IP, the resolver will refuse to
+/// connect.
+fn ssrf_safe_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        // Limit to 10 hops (matches the prior `Policy::limited(10)` behavior).
+        // `previous()` includes the initial URL as the first entry, so
+        // `len() > 10` means 10 redirects have already been followed.
+        if attempt.previous().len() > 10 {
+            return attempt.error(std::io::Error::other("too many redirects"));
+        }
+        if crate::download::ssrf::is_private_or_reserved_url(attempt.url()) {
+            // `stop` returns the 3xx response to the caller rather than
+            // following the redirect to a private address. The caller will
+            // see the redirect status and handle it as a non-2xx response.
+            // The connection-time resolver guard is the authoritative layer;
+            // stopping the redirect is sufficient to prevent the request from
+            // reaching the internal target.
+            return attempt.stop();
+        }
+        attempt.follow()
+    })
+}
+
 pub(crate) fn build_client(config: &ResolvedProxyConfig) -> Result<Client, String> {
+    let resolver = HickoryResolver::new()?;
     let mut builder = Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(ssrf_safe_redirect_policy())
         .user_agent(concat!(
             "VibeDownloader/",
             env!("CARGO_PKG_VERSION")
         ))
-        .dns_resolver(Arc::new(HickoryResolver::new()))
+        .dns_resolver(Arc::new(resolver))
         // 仅设置连接建立阶段超时；流式下载不应受整体 timeout 限制，
         // 否则大文件下载会在 60s 后被中断。应用层超时由各引擎在 Response
         // 上按需设置。
@@ -348,6 +408,12 @@ impl DownloadEngine for HttpEngine {
         request: ProbeRequest,
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
+            crate::download::engine::emit_probe_phase(
+                &request.app,
+                &request.request_id,
+                "connecting",
+                Some("http"),
+            );
             let probe =
                 HttpEngine::probe_with_headers(self, &request.uri, &request.request_headers)
                     .await
@@ -375,6 +441,8 @@ impl DownloadEngine for HttpEngine {
                 last_modified: probe.last_modified,
                 content_type: probe.content_type,
                 hls_variants: Vec::new(),
+                hls_audio_tracks: Vec::new(),
+                hls_subtitle_tracks: Vec::new(),
                 metalink: None,
             })
         })

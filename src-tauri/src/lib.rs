@@ -19,10 +19,14 @@ use std::{
 
 use sqlx::SqlitePool;
 use tauri::{
+    generate_handler,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard},
+    task::JoinHandle,
+};
 
 pub(crate) const TRAY_MENU_WINDOW_LABEL: &str = "tray-menu";
 const TRAY_MENU_WIDTH: f64 = 232.0;
@@ -32,9 +36,50 @@ const TRAY_MENU_SCREEN_MARGIN: f64 = 10.0;
 pub struct DownloadControl {
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub finish: Arc<AtomicBool>,
-    pub handle: JoinHandle<()>,
+    pub handle: Option<JoinHandle<()>>,
     pub source_key: String,
     pub connection_slots: usize,
+}
+
+/// R-2: Per-task runtime lock registry that serializes user-initiated control
+/// operations (pause/cancel/delete/retry) against task startup and against each
+/// other for the same task id.
+///
+/// Workers (download engines) intentionally do **not** take this lock — they
+/// rely on R-1's conditional DB update to avoid overwriting a status change
+/// made by a lock-holding user action. This avoids deadlock between a worker
+/// holding the lock and a user action waiting for it.
+///
+/// `evict` should be called after task deletion (once the guard is dropped) to
+/// prevent the HashMap from growing unbounded over long-running sessions.
+#[derive(Default)]
+pub struct TaskRuntimeLocks(Mutex<HashMap<String, Arc<Mutex<()>>>>);
+
+impl TaskRuntimeLocks {
+    /// Acquires an owned guard for `task_id`. The guard can be held across
+    /// `.await` points and is released on drop. Inserts a new `Arc<Mutex<()>>`
+    /// on first use of a given task id.
+    pub async fn lock(&self, task_id: &str) -> OwnedMutexGuard<()> {
+        let arc = {
+            let mut map = self.0.lock().await;
+            map.entry(task_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        arc.lock_owned().await
+    }
+
+    /// Removes the entry for `task_id` when no other path holds a reference to
+    /// its `Arc<Mutex<()>>` (i.e. `strong_count == 1`, meaning only the
+    /// registry itself holds it). Call this **after** dropping the guard.
+    pub async fn evict(&self, task_id: &str) {
+        let mut map = self.0.lock().await;
+        if let Some(arc) = map.get(task_id) {
+            if Arc::strong_count(arc) == 1 {
+                map.remove(task_id);
+            }
+        }
+    }
 }
 
 pub type RequestHeaders = Vec<(String, String)>;
@@ -49,6 +94,7 @@ pub struct AppState {
     pub speed_limiter: Arc<download::GlobalSpeedLimiter>,
     pub engine_registry: Arc<download::EngineRegistry>,
     pub quit_requested: Arc<AtomicBool>,
+    pub task_runtime_locks: Arc<TaskRuntimeLocks>,
 }
 
 /// Cancel all active downloads and wait for checkpoint flush (up to `timeout`).
@@ -67,173 +113,151 @@ pub async fn shutdown_active_downloads(state: &AppState, timeout: std::time::Dur
     }
     drop(downloads);
 
-    let deadline = tokio::time::Instant::now() + timeout;
     let mut remaining = state.downloads.lock().await;
     let mut handles: Vec<(String, JoinHandle<()>)> = Vec::new();
     for (task_id, control) in remaining.drain() {
-        handles.push((task_id, control.handle));
+        if let Some(handle) = control.handle {
+            handles.push((task_id, handle));
+        } else {
+            // R-2: pending control (worker not yet spawned) — cancel_token was
+            // already cancelled above; nothing to await.
+            tracing::debug!(task_id, "pending download control had no join handle");
+        }
     }
     drop(remaining);
 
-    for (task_id, mut handle) in handles {
-        let remaining_time = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining_time.is_zero() {
-            tracing::warn!(task_id, "shutdown timeout reached, aborting remaining task");
-            handle.abort();
-            continue;
-        }
-        tokio::select! {
-            result = &mut handle => {
-                match result {
-                    Ok(()) => tracing::debug!(task_id, "download task exited cleanly"),
-                    Err(e) => tracing::warn!(task_id, error = %e, "download task exited with error"),
+    // A-3: Wait for all workers concurrently under a single shared timeout.
+    // The previous serial loop let the first slow task exhaust the entire
+    // deadline, leaving later tasks zero budget and immediate abort() which
+    // skipped their inner download_handle cleanup. join_all gives every task
+    // a fair share of the total budget.
+    let join_all = futures_util::future::join_all(handles.into_iter().map(
+        |(task_id, mut handle)| async move {
+            tokio::select! {
+                result = &mut handle => {
+                    match result {
+                        Ok(()) => tracing::debug!(task_id, "download task exited cleanly"),
+                        Err(e) => tracing::warn!(task_id, error = %e, "download task exited with error"),
+                    }
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    tracing::warn!(task_id, "download task did not exit in time, aborting");
+                    handle.abort();
                 }
             }
-            _ = tokio::time::sleep(remaining_time) => {
-                tracing::warn!(task_id, "download task did not exit in time, aborting");
-                handle.abort();
-            }
-        }
-    }
+        },
+    ));
+    let _ = tokio::time::timeout(timeout, join_all).await;
     tracing::info!("shutdown_active_downloads complete");
+}
+
+/// R-4: Single source of truth for the command list shared between
+/// `tauri_specta::collect_commands!` (Specta bindings) and
+/// `tauri::generate_handler!` (runtime invoke handler). Both macros have
+/// overwrite-not-append semantics, so we cannot call them twice to add
+/// debug-only commands; instead the optional `$extra` arm appends the
+/// debug-only `seed_*` commands to the same list.
+///
+/// `$apply` is a single identifier resolved at the expansion site —
+/// `collect_commands` is imported via `use tauri_specta::{collect_commands, Builder};`
+/// inside `specta_builder()`, and `generate_handler` is imported at module
+/// scope via `use tauri::{generate_handler, ...}`. Adding a new public
+/// command only requires editing the base list in the second arm below.
+macro_rules! vibe_commands_base {
+    // No extra commands: delegate to the second arm with an empty extra.
+    ($apply:ident) => {
+        vibe_commands_base!($apply,)
+    };
+    // Base command list (defined once) + optional extra commands appended
+    // by debug-only builds (e.g. `seed_mock_tasks`).
+    ($apply:ident, $($extra:tt)*) => {
+        $apply![
+            commands::tasks::list_tasks,
+            commands::tasks::list_tasks_page,
+            commands::tasks::list_tasks_cursor,
+            commands::tasks::list_tasks_by_ids,
+            commands::tasks::get_task,
+            commands::tasks::get_task_stats,
+            commands::tasks::list_segments,
+            commands::tasks::list_segments_page,
+            commands::tasks::get_segment_summary,
+            commands::tasks::get_torrent_runtime_snapshot,
+            commands::tasks::get_task_proxy_settings,
+            commands::tasks::list_task_events_page,
+            commands::tasks::list_task_requests_page,
+            commands::settings::get_settings,
+            commands::settings::update_settings,
+            commands::ffmpeg::probe_ffmpeg_version,
+            commands::browser::get_browser_integration_status,
+            commands::browser::install_browser_integration,
+            commands::browser::uninstall_browser_integration,
+            commands::browser::export_browser_extension_packages,
+            commands::browser::get_browser_capture_settings,
+            commands::browser::update_browser_capture_settings,
+            commands::browser::create_browser_handoff_task,
+            commands::classification::list_classification_rules,
+            commands::classification::create_classification_rule,
+            commands::classification::update_classification_rule,
+            commands::classification::delete_classification_rule,
+            commands::classification::reorder_classification_rules,
+            commands::floating::show_floating_status_window,
+            commands::floating::hide_floating_status_window,
+            commands::floating::toggle_floating_status_window,
+            commands::floating::focus_main_window_from_floating,
+            commands::floating::show_tray_menu_at,
+            commands::tray::run_tray_menu_action,
+            commands::system::request_system_shutdown,
+            commands::system::request_system_sleep,
+            commands::system::request_system_hibernate,
+            commands::system::request_lock_screen,
+            commands::system::query_disk_space,
+            commands::tasks::probe_task,
+            commands::tasks::probe_ftp_directory,
+            commands::tasks::probe_sftp_directory,
+            commands::tasks::probe_webdav_directory,
+            commands::tasks::create_task,
+            commands::tasks::import_urls,
+            commands::tasks::update_task_transfer_options,
+            commands::tasks::reorder_queued_tasks,
+            commands::tasks::update_torrent_file_selection,
+            commands::tasks::update_torrent_seeding,
+            commands::tasks::update_task_proxy_settings,
+            commands::tasks::verify_task_hash,
+            commands::tasks::compute_file_hash,
+            commands::tasks::pause_task,
+            commands::tasks::resume_task,
+            commands::tasks::retry_task,
+            commands::tasks::list_metalink_mirrors,
+            commands::tasks::retry_task_with_mirror,
+            commands::tasks::finish_live_recording,
+            commands::tasks::resolve_task_attention,
+            commands::tasks::cancel_task,
+            commands::tasks::delete_task,
+            commands::tasks::bulk_delete_tasks,
+            commands::tasks::bulk_task_action,
+            commands::tasks::open_task_file,
+            commands::tasks::open_task_folder,
+            $($extra)*
+        ]
+    };
 }
 
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     use tauri_specta::{collect_commands, Builder};
 
-    // 注意：tauri-specta 的 `Builder::commands()` 会覆盖而非追加命令列表，
-    // 因此无法用二次调用追加 debug-only 命令。这里保留 debug/release 两段
-    // 列表，仅在末尾差异处（seed_mock_tasks / bulk_task_action）分支。
+    // R-4: tauri-specta 的 `Builder::commands()` 与 Tauri 的 `invoke_handler()`
+    // 均为覆盖语义，无法追加。命令列表由 `vibe_commands_base!` 宏单点定义；
+    // debug 构建通过 `extra` 参数追加 `seed_mock_tasks` / `seed_scale_tasks`。
     #[cfg(debug_assertions)]
-    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
-        commands::tasks::list_tasks,
-        commands::tasks::list_tasks_page,
-        commands::tasks::list_tasks_cursor,
-        commands::tasks::get_task,
-        commands::tasks::get_task_stats,
-        commands::tasks::list_segments,
-        commands::tasks::list_segments_page,
-        commands::tasks::get_segment_summary,
-        commands::tasks::get_torrent_runtime_snapshot,
-        commands::tasks::get_task_proxy_settings,
-        commands::tasks::list_task_events_page,
-        commands::tasks::list_task_requests_page,
-        commands::settings::get_settings,
-        commands::settings::update_settings,
-        commands::browser::get_browser_integration_status,
-        commands::browser::install_browser_integration,
-        commands::browser::uninstall_browser_integration,
-        commands::browser::export_browser_extension_packages,
-        commands::browser::get_browser_capture_settings,
-        commands::browser::update_browser_capture_settings,
-        commands::browser::create_browser_handoff_task,
-        commands::classification::list_classification_rules,
-        commands::classification::create_classification_rule,
-        commands::classification::update_classification_rule,
-        commands::classification::delete_classification_rule,
-        commands::classification::reorder_classification_rules,
-        commands::floating::show_floating_status_window,
-        commands::floating::hide_floating_status_window,
-        commands::floating::toggle_floating_status_window,
-        commands::floating::focus_main_window_from_floating,
-        commands::floating::show_tray_menu_at,
-        commands::tray::run_tray_menu_action,
-        commands::system::request_system_shutdown,
-        commands::system::request_system_sleep,
-        commands::system::request_system_hibernate,
-        commands::system::request_lock_screen,
-        commands::tasks::probe_task,
-        commands::tasks::probe_ftp_directory,
-        commands::tasks::probe_sftp_directory,
-        commands::tasks::probe_webdav_directory,
-        commands::tasks::create_task,
-        commands::tasks::import_urls,
-        commands::tasks::update_task_transfer_options,
-        commands::tasks::update_torrent_file_selection,
-        commands::tasks::update_torrent_seeding,
-        commands::tasks::update_task_proxy_settings,
-        commands::tasks::verify_task_hash,
-        commands::tasks::compute_file_hash,
-        commands::tasks::pause_task,
-        commands::tasks::resume_task,
-        commands::tasks::retry_task,
-        commands::tasks::list_metalink_mirrors,
-        commands::tasks::retry_task_with_mirror,
-        commands::tasks::finish_live_recording,
-        commands::tasks::resolve_task_attention,
-        commands::tasks::cancel_task,
-        commands::tasks::delete_task,
-        commands::tasks::bulk_delete_tasks,
-        commands::tasks::bulk_task_action,
-        commands::tasks::open_task_file,
-        commands::tasks::open_task_folder,
+    let builder = Builder::<tauri::Wry>::new().commands(vibe_commands_base!(
+        collect_commands,
         commands::tasks::seed_mock_tasks,
-    ]);
+        commands::tasks::seed_scale_tasks
+    ));
 
     #[cfg(not(debug_assertions))]
-    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
-        commands::tasks::list_tasks,
-        commands::tasks::list_tasks_page,
-        commands::tasks::list_tasks_cursor,
-        commands::tasks::get_task,
-        commands::tasks::get_task_stats,
-        commands::tasks::list_segments,
-        commands::tasks::list_segments_page,
-        commands::tasks::get_segment_summary,
-        commands::tasks::get_torrent_runtime_snapshot,
-        commands::tasks::get_task_proxy_settings,
-        commands::tasks::list_task_events_page,
-        commands::tasks::list_task_requests_page,
-        commands::settings::get_settings,
-        commands::settings::update_settings,
-        commands::browser::get_browser_integration_status,
-        commands::browser::install_browser_integration,
-        commands::browser::uninstall_browser_integration,
-        commands::browser::export_browser_extension_packages,
-        commands::browser::get_browser_capture_settings,
-        commands::browser::update_browser_capture_settings,
-        commands::browser::create_browser_handoff_task,
-        commands::classification::list_classification_rules,
-        commands::classification::create_classification_rule,
-        commands::classification::update_classification_rule,
-        commands::classification::delete_classification_rule,
-        commands::classification::reorder_classification_rules,
-        commands::floating::show_floating_status_window,
-        commands::floating::hide_floating_status_window,
-        commands::floating::toggle_floating_status_window,
-        commands::floating::focus_main_window_from_floating,
-        commands::floating::show_tray_menu_at,
-        commands::tray::run_tray_menu_action,
-        commands::system::request_system_shutdown,
-        commands::system::request_system_sleep,
-        commands::system::request_system_hibernate,
-        commands::system::request_lock_screen,
-        commands::tasks::probe_task,
-        commands::tasks::probe_ftp_directory,
-        commands::tasks::probe_sftp_directory,
-        commands::tasks::probe_webdav_directory,
-        commands::tasks::create_task,
-        commands::tasks::import_urls,
-        commands::tasks::update_task_transfer_options,
-        commands::tasks::update_torrent_file_selection,
-        commands::tasks::update_torrent_seeding,
-        commands::tasks::update_task_proxy_settings,
-        commands::tasks::verify_task_hash,
-        commands::tasks::compute_file_hash,
-        commands::tasks::pause_task,
-        commands::tasks::resume_task,
-        commands::tasks::retry_task,
-        commands::tasks::list_metalink_mirrors,
-        commands::tasks::retry_task_with_mirror,
-        commands::tasks::finish_live_recording,
-        commands::tasks::resolve_task_attention,
-        commands::tasks::cancel_task,
-        commands::tasks::delete_task,
-        commands::tasks::bulk_delete_tasks,
-        commands::tasks::bulk_task_action,
-        commands::tasks::open_task_file,
-        commands::tasks::open_task_folder,
-    ]);
+    let builder =
+        Builder::<tauri::Wry>::new().commands(vibe_commands_base!(collect_commands));
 
     builder
         .typ::<models::AppErrorPayload>()
@@ -242,6 +266,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<proxy::AppProxyMode>()
         .typ::<models::TaskUpdatedPayload>()
         .typ::<models::TaskProgressPayload>()
+        .typ::<events::QueueChangedPayload>()
+        .typ::<events::ProbePhasePayload>()
         .typ::<models::TaskStatsSnapshot>()
         .typ::<models::TaskFailureCategory>()
         .typ::<models::TorrentRuntimeSnapshot>()
@@ -267,6 +293,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::SegmentSummary>()
         .typ::<models::HashVerificationState>()
         .typ::<models::BatchImportResult>()
+        .typ::<models::ScaleStateDistribution>()
         .typ::<models::BrowserIntegrationStatus>()
         .typ::<models::BrowserCaptureSettings>()
         .typ::<models::BrowserCaptureSettingsInput>()
@@ -398,137 +425,16 @@ pub fn run() {
             }
         });
 
-    // 注意：Tauri 的 `invoke_handler()` 也会覆盖而非追加，同样需要两段式。
+    // R-4: invoke_handler 同样覆盖语义；复用 vibe_commands_base! 宏保持命令列表单点。
     #[cfg(debug_assertions)]
-    let builder = builder.invoke_handler(tauri::generate_handler![
-        commands::tasks::list_tasks,
-        commands::tasks::list_tasks_page,
-        commands::tasks::list_tasks_cursor,
-        commands::tasks::get_task,
-        commands::tasks::get_task_stats,
-        commands::tasks::list_segments,
-        commands::tasks::list_segments_page,
-        commands::tasks::get_segment_summary,
-        commands::tasks::get_torrent_runtime_snapshot,
-        commands::tasks::get_task_proxy_settings,
-        commands::tasks::list_task_events_page,
-        commands::tasks::list_task_requests_page,
-        commands::settings::get_settings,
-        commands::settings::update_settings,
-        commands::browser::get_browser_integration_status,
-        commands::browser::install_browser_integration,
-        commands::browser::uninstall_browser_integration,
-        commands::browser::export_browser_extension_packages,
-        commands::browser::get_browser_capture_settings,
-        commands::browser::update_browser_capture_settings,
-        commands::browser::create_browser_handoff_task,
-        commands::classification::list_classification_rules,
-        commands::classification::create_classification_rule,
-        commands::classification::update_classification_rule,
-        commands::classification::delete_classification_rule,
-        commands::classification::reorder_classification_rules,
-        commands::floating::show_floating_status_window,
-        commands::floating::hide_floating_status_window,
-        commands::floating::toggle_floating_status_window,
-        commands::floating::focus_main_window_from_floating,
-        commands::floating::show_tray_menu_at,
-        commands::tray::run_tray_menu_action,
-        commands::system::request_system_shutdown,
-        commands::system::request_system_sleep,
-        commands::system::request_system_hibernate,
-        commands::system::request_lock_screen,
-        commands::tasks::probe_task,
-        commands::tasks::probe_ftp_directory,
-        commands::tasks::probe_sftp_directory,
-        commands::tasks::probe_webdav_directory,
-        commands::tasks::create_task,
-        commands::tasks::import_urls,
-        commands::tasks::update_task_transfer_options,
-        commands::tasks::update_torrent_file_selection,
-        commands::tasks::update_torrent_seeding,
-        commands::tasks::update_task_proxy_settings,
-        commands::tasks::verify_task_hash,
-        commands::tasks::compute_file_hash,
-        commands::tasks::pause_task,
-        commands::tasks::resume_task,
-        commands::tasks::retry_task,
-        commands::tasks::list_metalink_mirrors,
-        commands::tasks::retry_task_with_mirror,
-        commands::tasks::finish_live_recording,
-        commands::tasks::resolve_task_attention,
-        commands::tasks::cancel_task,
-        commands::tasks::delete_task,
-        commands::tasks::bulk_delete_tasks,
-        commands::tasks::bulk_task_action,
-        commands::tasks::open_task_file,
-        commands::tasks::open_task_folder,
+    let builder = builder.invoke_handler(vibe_commands_base!(
+        generate_handler,
         commands::tasks::seed_mock_tasks,
-    ]);
+        commands::tasks::seed_scale_tasks
+    ));
 
     #[cfg(not(debug_assertions))]
-    let builder = builder.invoke_handler(tauri::generate_handler![
-        commands::tasks::list_tasks,
-        commands::tasks::list_tasks_page,
-        commands::tasks::list_tasks_cursor,
-        commands::tasks::get_task,
-        commands::tasks::get_task_stats,
-        commands::tasks::list_segments,
-        commands::tasks::list_segments_page,
-        commands::tasks::get_segment_summary,
-        commands::tasks::get_torrent_runtime_snapshot,
-        commands::tasks::get_task_proxy_settings,
-        commands::tasks::list_task_events_page,
-        commands::tasks::list_task_requests_page,
-        commands::settings::get_settings,
-        commands::settings::update_settings,
-        commands::browser::get_browser_integration_status,
-        commands::browser::install_browser_integration,
-        commands::browser::uninstall_browser_integration,
-        commands::browser::export_browser_extension_packages,
-        commands::browser::get_browser_capture_settings,
-        commands::browser::update_browser_capture_settings,
-        commands::browser::create_browser_handoff_task,
-        commands::classification::list_classification_rules,
-        commands::classification::create_classification_rule,
-        commands::classification::update_classification_rule,
-        commands::classification::delete_classification_rule,
-        commands::classification::reorder_classification_rules,
-        commands::floating::show_floating_status_window,
-        commands::floating::hide_floating_status_window,
-        commands::floating::toggle_floating_status_window,
-        commands::floating::focus_main_window_from_floating,
-        commands::floating::show_tray_menu_at,
-        commands::tray::run_tray_menu_action,
-        commands::system::request_system_shutdown,
-        commands::system::request_system_sleep,
-        commands::system::request_system_hibernate,
-        commands::system::request_lock_screen,
-        commands::tasks::probe_task,
-        commands::tasks::probe_ftp_directory,
-        commands::tasks::probe_sftp_directory,
-        commands::tasks::probe_webdav_directory,
-        commands::tasks::create_task,
-        commands::tasks::import_urls,
-        commands::tasks::update_task_transfer_options,
-        commands::tasks::update_torrent_file_selection,
-        commands::tasks::update_torrent_seeding,
-        commands::tasks::update_task_proxy_settings,
-        commands::tasks::verify_task_hash,
-        commands::tasks::compute_file_hash,
-        commands::tasks::pause_task,
-        commands::tasks::resume_task,
-        commands::tasks::retry_task,
-        commands::tasks::list_metalink_mirrors,
-        commands::tasks::retry_task_with_mirror,
-        commands::tasks::finish_live_recording,
-        commands::tasks::resolve_task_attention,
-        commands::tasks::cancel_task,
-        commands::tasks::delete_task,
-        commands::tasks::bulk_delete_tasks,
-        commands::tasks::bulk_task_action,
-        commands::tasks::open_task_file,
-        commands::tasks::open_task_folder,
-    ]);
+    let builder = builder.invoke_handler(vibe_commands_base!(generate_handler));
 
     builder
         .setup(|app| {
@@ -601,11 +507,13 @@ pub fn run() {
             let browser_realtime = browser_realtime::BrowserRealtimeState::new();
             let downloads = Arc::new(Mutex::new(HashMap::new()));
             let request_headers: TaskRequestHeaders = Arc::new(Mutex::new(HashMap::new()));
+            let task_runtime_locks = Arc::new(TaskRuntimeLocks::default());
             let scheduler = Arc::new(scheduler::Scheduler::new(
                 downloads.clone(),
                 request_headers.clone(),
                 speed_limiter.clone(),
                 engine_registry.clone(),
+                task_runtime_locks.clone(),
             ));
 
             app.manage(AppState {
@@ -617,6 +525,7 @@ pub fn run() {
                 speed_limiter,
                 engine_registry,
                 quit_requested: Arc::new(AtomicBool::new(false)),
+                task_runtime_locks,
             });
             clipboard::start(handle.clone());
             tauri::async_runtime::block_on(async {
@@ -666,20 +575,56 @@ pub fn run() {
 fn show_database_reset_dialog(app: &tauri::AppHandle, backup_path: Option<&std::path::Path>) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
-    let message = match backup_path {
-        Some(path) => format!(
-            "数据库迁移失败，已自动备份旧数据库并重建。\n\n备份路径：{}\n\nVibe Downloader 已删除并重建数据库，原有下载任务和设置已清空。如需恢复旧数据，请从备份文件手动还原。",
-            path.display()
-        ),
-        None => "数据库迁移失败，已重建数据库。原有下载任务和设置已清空。".to_string(),
-    };
-
-    app.dialog()
-        .message(message)
-        .title("Database reset")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::Ok)
-        .show(|_| {});
+    // Two-state UX: if we have a backup path, offer the user the choice to
+    // reveal it in their file manager before continuing. If we don't (the
+    // rebuild path couldn't capture a backup, e.g. the file vanished between
+    // the failed migration and the rebuild), just acknowledge with Ok.
+    match backup_path {
+        Some(path) => {
+            let display = path.display().to_string();
+            let message = format!(
+                "数据库迁移失败（迁移历史不匹配或迁移被中断），已自动备份旧数据库并重建。\n\n\
+                 备份路径：{display}\n\n\
+                 Vibe Downloader 已删除并重建数据库，原有下载任务和设置已清空。\n\n\
+                 点击「是」打开备份所在目录后再继续；点击「否」直接继续使用。"
+            );
+            let backup_path = path.to_path_buf();
+            app.dialog()
+                .message(message)
+                .title("Database reset")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::YesNo)
+                .show(move |confirmed| {
+                    if confirmed {
+                        // Reveal the backup file's parent directory in the
+                        // platform file manager. We open the parent rather than
+                        // the .bak file itself because most file managers won't
+                        // open a binary blob usefully; the user just needs to
+                        // see where the backup lives.
+                        if let Some(parent) = backup_path.parent() {
+                            if let Err(error) = crate::platform::open_path(parent) {
+                                tracing::warn!(
+                                    path = %parent.display(),
+                                    error = %error,
+                                    "could not open backup folder for user"
+                                );
+                            }
+                        }
+                    }
+                });
+        }
+        None => {
+            app.dialog()
+                .message(
+                    "数据库迁移失败，已重建数据库。原有下载任务和设置已清空。\n\n\
+                     （未生成备份文件 — 请检查磁盘空间或文件权限后重启应用。）",
+                )
+                .title("Database reset")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::Ok)
+                .show(|_| {});
+        }
+    }
 }
 
 fn process_browser_handoff_files_from_args(
@@ -724,14 +669,28 @@ fn process_browser_handoff_files_from_args(
                             error = %error,
                             "browser handoff task creation failed"
                         );
-                    } else if let Err(error) = std::fs::remove_file(&path) {
-                        tracing::warn!(
-                            request_id = %request_id,
-                            path = %path.display(),
-                            source,
-                            error = %error,
-                            "browser handoff file cleanup failed"
-                        );
+                    } else {
+                        // S-2.2: 删除前再次校验路径仍在 handoff_dir 内（TOCTOU 防护）。
+                        // 防止文件在读取后被替换为符号链接指向任意路径。
+                        if let Err(reason) =
+                            commands::browser::validate_handoff_file_path(&path)
+                        {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                path = %path.display(),
+                                source,
+                                reason = %reason,
+                                "skip deleting handoff file: path validation failed"
+                            );
+                        } else if let Err(error) = std::fs::remove_file(&path) {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                path = %path.display(),
+                                source,
+                                error = %error,
+                                "browser handoff file cleanup failed"
+                            );
+                        }
                     }
                 }
                 Err(error) => {
@@ -741,7 +700,15 @@ fn process_browser_handoff_files_from_args(
                         error = %error,
                         "browser handoff file read failed"
                     );
-                    if let Err(cleanup_error) = std::fs::remove_file(&path) {
+                    // S-2.2: 即使读取失败也只在路径仍合法时删除，避免删除被替换的任意文件。
+                    if let Err(reason) = commands::browser::validate_handoff_file_path(&path) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            source,
+                            reason = %reason,
+                            "skip deleting handoff file after read failure: path validation failed"
+                        );
+                    } else if let Err(cleanup_error) = std::fs::remove_file(&path) {
                         tracing::warn!(
                             path = %path.display(),
                             source,

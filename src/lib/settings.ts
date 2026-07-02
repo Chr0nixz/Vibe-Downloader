@@ -34,5 +34,8 @@ export async function applyGlobalSpeedLimit(settings: AppSettings, limit: number
     completionCountdownSeconds: settings.completionCountdownSeconds,
     completionRunCommand: settings.completionRunCommand,
     deleteToTrash: settings.deleteToTrash,
+    autoUpdateCheckEnabled: settings.autoUpdateCheckEnabled,
+    ffmpegPath: settings.ffmpegPath,
+    btUploadLimitBps: settings.btUploadLimitBps,
   });
 }

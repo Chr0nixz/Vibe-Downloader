@@ -3,11 +3,8 @@ use std::{io, sync::Arc};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-    sync::RwLock,
-};
+use tokio::{net::TcpStream, sync::RwLock};
+use tokio_socks::tcp::Socks5Stream;
 
 use crate::models::AppSettings;
 
@@ -213,98 +210,39 @@ pub async fn socks5_connect(
         .ok_or_else(|| invalid_input("Proxy URL is missing a port."))?;
     let username = username.filter(|value| !value.is_empty());
     let password = password.filter(|value| !value.is_empty());
-    let mut stream = TcpStream::connect((proxy_host, proxy_port)).await?;
+    let target = format!("{target_host}:{target_port}");
 
-    if username.is_some() || password.is_some() {
-        stream.write_all(&[0x05, 0x01, 0x02]).await?;
-    } else {
-        stream.write_all(&[0x05, 0x01, 0x00]).await?;
-    }
-    let mut method = [0_u8; 2];
-    stream.read_exact(&mut method).await?;
-    if method[0] != 0x05 {
-        return Err(invalid_input("SOCKS5 proxy returned an invalid greeting."));
-    }
-    match method[1] {
-        0x00 => {}
-        0x02 => {
-            authenticate_socks5(&mut stream, username.unwrap_or(""), password.unwrap_or("")).await?
+    let stream = match (username, password) {
+        (Some(user), Some(pass)) => {
+            Socks5Stream::connect_with_password(
+                (proxy_host, proxy_port),
+                target.as_str(),
+                user,
+                pass,
+            )
+            .await
         }
-        0xff => {
-            return Err(invalid_input(
-                "SOCKS5 proxy did not accept the offered authentication method.",
-            ));
-        }
-        _ => {
-            return Err(invalid_input(
-                "SOCKS5 proxy selected an unsupported method.",
-            ))
-        }
+        _ => Socks5Stream::connect((proxy_host, proxy_port), target.as_str()).await,
     }
+    .map_err(map_socks5_error)?;
 
-    let host_bytes = target_host.as_bytes();
-    if host_bytes.is_empty() || host_bytes.len() > u8::MAX as usize {
-        return Err(invalid_input("SOCKS5 target host is invalid."));
-    }
-    let mut request = Vec::with_capacity(host_bytes.len() + 7);
-    request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host_bytes.len() as u8]);
-    request.extend_from_slice(host_bytes);
-    request.extend_from_slice(&target_port.to_be_bytes());
-    stream.write_all(&request).await?;
-
-    let mut header = [0_u8; 4];
-    stream.read_exact(&mut header).await?;
-    if header[0] != 0x05 || header[1] != 0x00 {
-        return Err(invalid_input(format!(
-            "SOCKS5 proxy connection failed with status 0x{:02x}.",
-            header[1]
-        )));
-    }
-    match header[3] {
-        0x01 => {
-            let mut skip = [0_u8; 6];
-            stream.read_exact(&mut skip).await?;
-        }
-        0x03 => {
-            let mut len = [0_u8; 1];
-            stream.read_exact(&mut len).await?;
-            let mut skip = vec![0_u8; len[0] as usize + 2];
-            stream.read_exact(&mut skip).await?;
-        }
-        0x04 => {
-            let mut skip = [0_u8; 18];
-            stream.read_exact(&mut skip).await?;
-        }
-        _ => {
-            return Err(invalid_input(
-                "SOCKS5 proxy returned an invalid address type.",
-            ))
-        }
-    }
-    Ok(stream)
+    Ok(stream.into_inner())
 }
 
-async fn authenticate_socks5(
-    stream: &mut TcpStream,
-    username: &str,
-    password: &str,
-) -> io::Result<()> {
-    if username.len() > u8::MAX as usize || password.len() > u8::MAX as usize {
-        return Err(invalid_input("SOCKS5 username or password is too long."));
-    }
-    let mut request = Vec::with_capacity(username.len() + password.len() + 3);
-    request.push(0x01);
-    request.push(username.len() as u8);
-    request.extend_from_slice(username.as_bytes());
-    request.push(password.len() as u8);
-    request.extend_from_slice(password.as_bytes());
-    stream.write_all(&request).await?;
-    let mut response = [0_u8; 2];
-    stream.read_exact(&mut response).await?;
-    if response != [0x01, 0x00] {
-        return Err(invalid_input("SOCKS5 proxy authentication failed."));
-    }
-    Ok(())
+fn map_socks5_error(error: tokio_socks::Error) -> io::Error {
+    use tokio_socks::Error as SocksError;
+    let kind = match &error {
+        SocksError::AuthorizationRequired
+        | SocksError::NoAcceptableAuthMethods
+        | SocksError::PasswordAuthFailure(_) => io::ErrorKind::PermissionDenied,
+        SocksError::ConnectionRefused
+        | SocksError::ConnectionNotAllowedByRuleset
+        | SocksError::NetworkUnreachable
+        | SocksError::HostUnreachable
+        | SocksError::TtlExpired => io::ErrorKind::ConnectionRefused,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, error.to_string())
 }
 
 fn invalid_input(error: impl ToString) -> io::Error {

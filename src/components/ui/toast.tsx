@@ -1,13 +1,11 @@
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { type AppToast, useToastStore } from "@/stores/toast-store";
-
-const TOAST_TIMEOUT_MS = 4800;
+import { type AppToast, TOAST_TIMEOUT_MS, useToastStore } from "@/stores/toast-store";
 
 export function ToastViewport() {
   const { t } = useTranslation();
@@ -61,7 +59,8 @@ function ToastItem({
   onDismiss: () => void;
 }) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const remainingRef = useRef(TOAST_TIMEOUT_MS);
+  const duration = toast.durationMs ?? TOAST_TIMEOUT_MS;
+  const remainingRef = useRef(duration);
   const startedAtRef = useRef(Date.now());
   const pausedRef = useRef(false);
 
@@ -94,6 +93,28 @@ function ToastItem({
 
   const Icon = toast.tone === "success" ? CheckCircle2 : toast.tone === "error" ? AlertTriangle : Info;
 
+  // Countdown progress: 1 → 0 across the toast lifetime. Drives the bottom
+  // edge bar width so users can see how long is left at a glance. Frozen while
+  // hovered/focused (the bar's transition is paused alongside the timer).
+  const [progress, setProgress] = useState(1);
+  useEffect(() => {
+    if (reduceMotion) return;
+    const start = Date.now();
+    const total = remainingRef.current;
+    let raf = 0;
+    const tick = () => {
+      const elapsed = Date.now() - start;
+      const remaining = Math.max(0, total - elapsed);
+      setProgress(remaining / total);
+      if (remaining > 0 && !pausedRef.current) {
+        raf = requestAnimationFrame(tick);
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <motion.div
       layout={!reduceMotion}
@@ -102,7 +123,8 @@ function ToastItem({
       exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.98 }}
       transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
       className={cn(
-        "pointer-events-auto grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3 rounded-lg border bg-surface-overlay px-3 py-3 shadow-md backdrop-blur-sm",
+        // Layered brand-tinted shadow (was generic shadow-md) + relative for the countdown bar.
+        "pointer-events-auto relative grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-lg border bg-surface-overlay px-3 py-3 shadow-[var(--shadow-toast)] backdrop-blur-sm",
         toast.tone === "success" && "border-border-success-strong",
         toast.tone === "error" && "border-border-danger-strong",
         toast.tone === "info" && "border-border-subtle",
@@ -152,6 +174,15 @@ function ToastItem({
       >
         <X className="h-3.5 w-3.5" />
       </Button>
+      {/* Countdown bar — bottom edge, accent-tinted, shrinks 1 → 0.
+          Hidden under reduced-motion (the timer still runs; we just skip the viz). */}
+      {!reduceMotion && (
+        <span
+          aria-hidden
+          className="toast-countdown-bar pointer-events-none absolute inset-x-0 bottom-0 h-px origin-left bg-accent-primary/40"
+          style={{ transform: `scaleX(${progress})` }}
+        />
+      )}
     </motion.div>
   );
 }

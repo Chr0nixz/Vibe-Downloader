@@ -76,6 +76,31 @@ export function localizedErrorMessage(error: unknown, t: TFunction): string {
   return localizedMessage(errorMessage(error), t) ?? "";
 }
 
+/**
+ * Format an error (structured payload, plain string, or unknown) into a
+ * multi-line plain-text report suitable for copying to the clipboard when
+ * the user wants to share diagnostics. Optional context (task id, url) is
+ * included when available so the report is actionable for developers.
+ */
+export function formatErrorForReport(error: unknown, context?: { taskId?: string; url?: string }): string {
+  const lines: string[] = [];
+  if (context?.taskId) lines.push(`Task ID: ${context.taskId}`);
+  if (context?.url) lines.push(`URL: ${context.url}`);
+  const payload = parseAppError(error);
+  if (payload) {
+    lines.push(`Code: ${payload.code}`);
+    lines.push(`Message: ${payload.message}`);
+    lines.push(`Recoverable: ${payload.recoverable ? "true" : "false"}`);
+    if (payload.actions.length > 0) {
+      lines.push(`Actions: ${payload.actions.join(", ")}`);
+    }
+  } else {
+    const message = errorMessage(error);
+    lines.push(`Message: ${message}`);
+  }
+  return lines.join("\n");
+}
+
 export function recoveryActionsForError(error: unknown): RecoveryAction[] {
   const payload = parseAppError(error);
   if (!payload) return [];

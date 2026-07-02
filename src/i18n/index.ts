@@ -73,13 +73,16 @@ function normalizeLocale(value: string | null | undefined): Locale {
   return "en";
 }
 
-function detectInitialLocale(): Locale {
+export function detectInitialLocale(): Locale {
   const stored = readStoredLocale();
-  const locale = normalizeLocale(stored ?? readNavigatorLanguage());
+  if (stored) {
+    // UX-1: 用户显式选择（含设置页选的 beta 语言）经 localStorage 持久化，信任
+    return normalizeLocale(stored);
+  }
+  // UX-1: 自动检测仅选稳定语言，beta 需用户显式选
+  const locale = normalizeLocale(readNavigatorLanguage());
   if (!STABLE_LOCALES.includes(locale)) {
-    console.warn(
-      `[i18n] Locale "${locale}" is in beta (unstable translation). Visit Settings to switch to a stable locale.`,
-    );
+    return "en";
   }
   return locale;
 }

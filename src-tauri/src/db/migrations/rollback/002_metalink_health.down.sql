@@ -1,0 +1,19 @@
+-- Rollback for migration 002: Metalink mirror health tracking
+--
+-- SQLite does not support DROP COLUMN before 3.35.0 and the application
+-- bundles its own SQLite build, but rolling back in production would also
+-- lose the mirror health data collected since the upgrade. This file is
+-- kept as documentation for manual recovery only — `sqlx::migrate!` does
+-- NOT auto-execute files in `migrations/rollback/`.
+--
+-- To roll back manually, take the database offline and run:
+--
+--     ALTER TABLE metalink_resources DROP COLUMN avg_speed_bps;
+--     ALTER TABLE metalink_resources DROP COLUMN supports_range;
+--     ALTER TABLE metalink_resources DROP COLUMN cooldown_until;
+--     ALTER TABLE metalink_resources DROP COLUMN last_attempt_at;
+--
+-- Then update `_sqlx_migrations` to remove the row for `002_metalink_health`.
+--
+-- This file intentionally contains only comments; do not run it as-is.
+SELECT 1;

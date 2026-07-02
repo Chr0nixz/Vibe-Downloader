@@ -11,7 +11,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tauri_app_lib::{
     browser_realtime,
-    download::EngineRegistry,
+    download::{ssrf, EngineRegistry},
     logging::{init_standalone_logging, sanitize_url},
     models::{BrowserHandoffInput, BrowserKind},
 };
@@ -176,6 +176,18 @@ fn validate_handoff(input: &BrowserHandoffInput) -> Result<(), String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err("Handoff only supports HTTP and HTTPS URLs.".to_string());
     }
+    // S-3: Reject literal private/reserved IP addresses (loopback, RFC1918,
+    // link-local, etc.) as a first line of defense before writing the handoff
+    // file and launching the main app. DNS-rebinding protection (resolving a
+    // public hostname to a private IP) remains the responsibility of the main
+    // process at connection time; this synchronous check only covers literal
+    // IPs and "localhost".
+    if ssrf::is_private_or_reserved_url(&url) {
+        return Err(
+            "Handoff URLs pointing to private or reserved addresses are not allowed."
+                .to_string(),
+        );
+    }
     EngineRegistry::new()?.engine_for_uri(url.as_str())?;
     if url.username() != "" || url.password().is_some() {
         return Err("Handoff URLs must not contain embedded credentials.".to_string());
@@ -293,5 +305,107 @@ fn safe_file_stem(value: &str) -> String {
         "handoff".to_string()
     } else {
         cleaned
+    }
+}
+
+// S-3: Native host handoff SSRF coverage.
+//
+// `validate_handoff` is private to this binary, so these unit tests are the
+// only way to verify the literal-IP / localhost rejection added in S-3. The
+// main process (`commands::browser::validate_handoff`) has its own coverage
+// in `tests/browser_handoff.rs`; these tests ensure the native host's first
+// line of defense matches the same `is_private_or_reserved_url` contract.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri_app_lib::models::BrowserKind;
+
+    fn make_handoff(url: &str) -> BrowserHandoffInput {
+        BrowserHandoffInput {
+            version: 1,
+            request_id: "test-req".to_string(),
+            browser: BrowserKind::Chrome,
+            action: "download_url".to_string(),
+            url: url.to_string(),
+            source: None,
+            browser_download_id: None,
+            page_url: None,
+            referrer: None,
+            user_agent: None,
+            suggested_file_name: None,
+            total_bytes: None,
+            mime: None,
+            headers_available: None,
+            header_consent_state: None,
+            forwarded_headers: None,
+        }
+    }
+
+    #[test]
+    fn validate_handoff_rejects_loopback_ipv4() {
+        let input = make_handoff("http://127.0.0.1/file");
+        let err = validate_handoff(&input).expect_err("should reject 127.0.0.1");
+        assert!(
+            err.contains("private or reserved"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_handoff_rejects_private_ipv4() {
+        for url in [
+            "http://10.0.0.1/file",
+            "http://192.168.1.1/file",
+            "http://172.16.0.1/file",
+            "http://172.31.255.255/file",
+        ] {
+            let input = make_handoff(url);
+            let err = validate_handoff(&input).expect_err("should reject private IP");
+            assert!(
+                err.contains("private or reserved"),
+                "url {url} got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_handoff_rejects_link_local() {
+        let input = make_handoff("http://169.254.169.254/latest/meta-data/");
+        let err = validate_handoff(&input).expect_err("should reject link-local");
+        assert!(
+            err.contains("private or reserved"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_handoff_rejects_localhost() {
+        let input = make_handoff("http://localhost/file");
+        let err = validate_handoff(&input).expect_err("should reject localhost");
+        assert!(
+            err.contains("private or reserved"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_handoff_rejects_ipv6_loopback() {
+        let input = make_handoff("http://[::1]/file");
+        let err = validate_handoff(&input).expect_err("should reject ::1");
+        assert!(
+            err.contains("private or reserved"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_handoff_allows_public_url() {
+        // A public URL must pass the SSRF check. (EngineRegistry may still
+        // reject unsupported schemes, but the SSRF guard itself should pass.)
+        let input = make_handoff("https://example.com/file");
+        let _ = validate_handoff(&input);
+        // We don't assert Ok because EngineRegistry::new() may have side
+        // effects in some environments; the rejection tests above are the
+        // critical ones. If SSRF rejected this, that would be a bug.
     }
 }

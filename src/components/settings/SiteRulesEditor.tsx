@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import type { BrowserSiteRule, BrowserSiteRuleMode } from "@/generated/bindings";
 
 interface SiteRulesEditorProps {
@@ -153,12 +154,10 @@ function RuleEditForm({
         />
       </Field>
       <Field label={t("settings.ruleIncludeSubdomains")}>
-        <input
-          type="checkbox"
+        <Switch
           checked={rule.includeSubdomains}
           disabled={disabled}
-          onChange={(e) => onChange({ includeSubdomains: e.target.checked })}
-          className="h-5 w-5 accent-accent-primary"
+          onCheckedChange={(checked) => onChange({ includeSubdomains: checked })}
         />
       </Field>
       <Field label={t("settings.ruleMode")}>

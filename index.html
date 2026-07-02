@@ -77,11 +77,6 @@
         width: 56px;
         height: 56px;
         border-radius: 14px;
-        background: linear-gradient(
-          160deg,
-          color-mix(in oklch, var(--vibe-splash-accent, oklch(0.4 0.18 235)) 75%, white 25%),
-          var(--vibe-splash-accent, oklch(0.4 0.18 235))
-        );
         display: flex;
         align-items: center;
         justify-content: center;
@@ -91,10 +86,13 @@
         animation: vibe-splash-breathe 1.8s ease-in-out infinite;
       }
 
-      #vibe-splash__logo svg {
-        width: 28px;
-        height: 28px;
-        color: oklch(0.98 0.004 255);
+      #vibe-splash__logo img {
+        width: 56px;
+        height: 56px;
+        border-radius: 14px;
+        object-fit: contain;
+        -webkit-user-drag: none;
+        user-select: none;
       }
 
       #vibe-splash__title {
@@ -173,11 +171,7 @@
       <div id="vibe-splash" aria-hidden="true">
         <div id="vibe-splash__brand">
           <div id="vibe-splash__logo">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M12 3v11" />
-              <path d="m7 10 5 5 5-5" />
-              <path d="M5 19h14" />
-            </svg>
+            <img src="/logo-64.png" alt="" />
           </div>
           <div id="vibe-splash__title">Vibe Downloader</div>
         </div>

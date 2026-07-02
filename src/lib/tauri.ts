@@ -13,6 +13,7 @@ import type {
   CompletionActionRequestedPayload,
   CreateTaskInput,
   CursorPageInput,
+  DiskSpaceInfo,
   FtpDirectoryProbe,
   HashVerificationState,
   ImportUrlsInput,
@@ -21,8 +22,10 @@ import type {
   ListTasksInput,
   ListTasksResult,
   MetalinkMirrorView,
+  ProbePhasePayload,
   ProbeTaskInput,
   ProbeTaskPayload,
+  QueueChangedPayload,
   RequestDiagnostic,
   ResolveTaskAttentionInput,
   SegmentSummary,
@@ -58,6 +61,7 @@ export const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED = "tray-new-download-requested";
 export const EVENT_TRAY_SETTINGS_REQUESTED = "tray-settings-requested";
 export const EVENT_CLIPBOARD_LINK_DETECTED = "clipboard-link-detected";
 export const EVENT_COMPLETION_ACTION_REQUESTED = "completion-action-requested";
+export const EVENT_PROBE_PHASE = "probe-phase";
 export const EVENT_SHUTTING_DOWN = "app://shutting-down";
 export const canSeedMockTasks = !isTauriRuntime() || import.meta.env.DEV;
 
@@ -107,6 +111,15 @@ export async function getTask(id: string): Promise<Task | null> {
   const commands = await loadNativeCommands();
   const task = await runCommand("getTask", () => commands.getTask(id));
   return task ? normalizeTask(task) : null;
+}
+
+export async function listTasksByIds(ids: string[]): Promise<Task[]> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listTasksByIds(ids);
+  }
+  const commands = await loadNativeCommands();
+  const tasks = await runCommand("listTasksByIds", () => commands.listTasksByIds(ids));
+  return tasks.map(normalizeTask);
 }
 
 export async function getTaskStats(): Promise<TaskStatsSnapshot> {
@@ -279,6 +292,15 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
   return runCommand("updateSettings", () => commands.updateSettings(input));
 }
 
+export async function probeFfmpegVersion(path?: string | null): Promise<string> {
+  if (!isTauriRuntime()) {
+    // Browser preview: report missing so the Settings UI shows the "not detected" badge.
+    throw new Error("ffmpeg is not available in browser preview mode.");
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("probeFfmpegVersion", () => commands.probeFfmpegVersion(path ?? null));
+}
+
 export async function probeFtpDirectory(url: string): Promise<FtpDirectoryProbe> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).probeFtpDirectory(url);
@@ -421,6 +443,20 @@ export async function requestLockScreen(): Promise<void> {
   await runCommand("requestLockScreen", () => commands.requestLockScreen());
 }
 
+export async function queryDiskSpace(path: string): Promise<DiskSpaceInfo> {
+  if (!isTauriRuntime()) {
+    // Browser preview mock: report a generous virtual disk so the disk-space
+    // recovery action shows something useful in dev.
+    return {
+      path,
+      total_bytes: String(1024 * 1024 * 1024 * 500),
+      available_bytes: String(1024 * 1024 * 1024 * 100),
+    };
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("queryDiskSpace", () => commands.queryDiskSpace(path));
+}
+
 export async function showFloatingStatusWindow(): Promise<void> {
   if (!isTauriRuntime()) {
     log.debug("mock show floating status window");
@@ -526,6 +562,15 @@ export async function updateTaskTransferOptions(input: UpdateTaskTransferOptions
   }
   const commands = await loadNativeCommands();
   return normalizeTask(await runCommand("updateTaskTransferOptions", () => commands.updateTaskTransferOptions(input)));
+}
+
+export async function reorderQueuedTasks(taskIds: string[]): Promise<void> {
+  if (!isTauriRuntime()) {
+    log.debug("mock reorder queued tasks", taskIds);
+    return;
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("reorderQueuedTasks", () => commands.reorderQueuedTasks(taskIds));
 }
 
 export async function importUrls(input: ImportUrlsInput): Promise<BatchImportResult> {
@@ -703,13 +748,13 @@ export function onTaskUpdated(handler: (task: Task) => void): Promise<() => void
   );
 }
 
-export function onQueueChanged(handler: () => void): Promise<() => void> {
+export function onQueueChanged(handler: (payload: QueueChangedPayload | null) => void): Promise<() => void> {
   if (!isTauriRuntime()) {
     return import("@/lib/tauri-browser").then((adapter) => adapter.onQueueChanged(handler));
   }
   return import("@tauri-apps/api/event").then(({ listen }) =>
-    listen(EVENT_QUEUE_CHANGED, () => {
-      handler();
+    listen<QueueChangedPayload>(EVENT_QUEUE_CHANGED, (event) => {
+      handler(event.payload);
     }).then((unlisten) => unlisten),
   );
 }
@@ -777,6 +822,22 @@ export function onCompletionActionRequested(
   }
   return import("@tauri-apps/api/event").then(({ listen }) =>
     listen<CompletionActionRequestedPayload>(EVENT_COMPLETION_ACTION_REQUESTED, (event) => {
+      handler(event.payload);
+    }).then((unlisten) => unlisten),
+  );
+}
+
+/**
+ * UX-6: Real probe-phase events from Rust engines. The NewDownloadDialog
+ * subscribes to this to show stage-aware feedback (connecting, fetching
+ * manifest, parsing, etc.) instead of the old URL-regex static guess.
+ */
+export function onProbePhase(handler: (payload: ProbePhasePayload) => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return import("@/lib/tauri-browser").then((adapter) => adapter.onProbePhase(handler));
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<ProbePhasePayload>(EVENT_PROBE_PHASE, (event) => {
       handler(event.payload);
     }).then((unlisten) => unlisten),
   );

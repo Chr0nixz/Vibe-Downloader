@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     db,
     download::{probe_error::ensure_structured_error, ProbeOutput, ProbeRequest},
-    events::{emit_queue_changed, emit_task_updated},
+    events::{emit_queue_changed_with_ids, emit_task_updated},
     logging::sanitize_url,
     models::{
         task::now_iso, AppErrorPayload, BatchImportItem, BatchImportResult, BrowserKind,
@@ -21,8 +21,8 @@ use crate::{
 };
 
 use crate::commands::task_file_planning::{
-    normalize_sha256, normalized_probe_files, sanitize_probe_relative_path,
-    task_file_records_from_probe, unique_final_path,
+    normalize_expected_hash, normalize_sha256, normalized_probe_files,
+    sanitize_probe_relative_path, task_file_records_from_probe, unique_final_path,
 };
 
 use super::{
@@ -35,7 +35,15 @@ pub struct CreateTaskInput {
     pub url: String,
     pub save_dir: Option<String>,
     pub file_name: Option<String>,
+    /// Legacy SHA-256-only field. Prefer `expected_hash` + `expected_hash_algorithm`
+    /// for multi-algorithm manual verification (F-5). Kept for backward compatibility
+    /// with older callers and browser handoff payloads.
     pub expected_hash_sha256: Option<String>,
+    /// New (F-5): expected hash digest in any supported algorithm. When provided,
+    /// takes precedence over `expected_hash_sha256`. `expected_hash_algorithm`
+    /// defaults to Sha256 when None.
+    pub expected_hash: Option<String>,
+    pub expected_hash_algorithm: Option<ChecksumAlgorithm>,
     pub task_speed_limit_bps: Option<String>,
     pub priority: Option<TaskPriority>,
     pub category_key: Option<String>,
@@ -47,6 +55,12 @@ pub struct CreateTaskInput {
     pub private_key_data: Option<String>,
     pub private_key_passphrase: Option<String>,
     pub selected_hls_variant_uri: Option<String>,
+    /// F-6: Selected audio track URIs from `#EXT-X-MEDIA TYPE=AUDIO`.
+    /// When non-empty, the HLS engine downloads these alongside the video variant
+    /// and muxes them into the final output via ffmpeg `-map`.
+    pub selected_hls_audio_track_uris: Option<Vec<String>>,
+    /// F-6: Selected subtitle track URIs from `#EXT-X-MEDIA TYPE=SUBTITLES`.
+    pub selected_hls_subtitle_track_uris: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -57,6 +71,9 @@ pub struct ProbeTaskInput {
     pub password: Option<String>,
     pub private_key_data: Option<String>,
     pub private_key_passphrase: Option<String>,
+    /// UX-6: Frontend-generated correlation ID for probe-phase events.
+    /// When `Some`, engines emit `probe-phase` events keyed by this ID.
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -72,6 +89,7 @@ pub struct ImportUrlsInput {
 #[specta::specta]
 pub async fn probe_task(
     state: State<'_, AppState>,
+    app: AppHandle,
     input: ProbeTaskInput,
 ) -> Result<ProbeTaskPayload, String> {
     let url = input.url.trim();
@@ -105,6 +123,8 @@ pub async fn probe_task(
             pool: Some(state.pool.clone()),
             task_id: None,
             credentials,
+            app: Some(app),
+            request_id: input.request_id,
         })
         .await
         .map_err(|e| ensure_structured_error(e.to_string()))?;
@@ -137,6 +157,8 @@ async fn resolve_create_probe(
             pool: Some(state.pool.clone()),
             task_id: None,
             credentials: None,
+            app: None,
+            request_id: None,
         })
         .await
         .map_err(|e| ensure_structured_error(e.to_string()))
@@ -157,6 +179,8 @@ fn probe_payload_from_output(input_url: &str, probe: ProbeOutput) -> ProbeTaskPa
         etag: probe.etag,
         last_modified: probe.last_modified,
         hls_variants: probe.hls_variants,
+        hls_audio_tracks: probe.hls_audio_tracks,
+        hls_subtitle_tracks: probe.hls_subtitle_tracks,
         probed_at: now_iso(),
     }
 }
@@ -190,6 +214,8 @@ fn probe_output_from_snapshot(url: &str, snapshot: &ProbeTaskPayload) -> Option<
         last_modified: snapshot.last_modified.clone(),
         content_type: snapshot.content_type.clone(),
         hls_variants: snapshot.hls_variants.clone(),
+        hls_audio_tracks: snapshot.hls_audio_tracks.clone(),
+        hls_subtitle_tracks: snapshot.hls_subtitle_tracks.clone(),
         metalink: None,
     })
 }
@@ -423,6 +449,8 @@ pub async fn import_urls(
                             pool: Some(state.pool.clone()),
                             task_id: None,
                             credentials: None,
+                            app: None,
+                            request_id: None,
                         })
                         .await
                         .map_err(|e| ensure_structured_error(e.to_string()))
@@ -474,6 +502,8 @@ pub async fn import_urls(
                     save_dir: input.save_dir.clone(),
                     file_name: item.file_name.clone(),
                     expected_hash_sha256: None,
+                    expected_hash: None,
+                    expected_hash_algorithm: None,
                     task_speed_limit_bps: None,
                     priority: None,
                     category_key: None,
@@ -485,6 +515,8 @@ pub async fn import_urls(
                     private_key_data: None,
                     private_key_passphrase: None,
                     selected_hls_variant_uri: None,
+                    selected_hls_audio_track_uris: None,
+                    selected_hls_subtitle_track_uris: None,
                 },
             )
             .await
@@ -602,16 +634,35 @@ pub(crate) async fn create_task_with_state_and_headers(
         .filter(|_| uses_single_output_file)
         .unwrap_or(&probe.display_name);
     let now = now_iso();
-    let expected_hash_sha256 = if is_bt_protocol(&probe.protocol)
+    // F-5: Multi-algorithm manual hash verification. `expected_hash` (new) takes
+    // precedence over legacy `expected_hash_sha256`. The chosen algorithm flows
+    // into the `task_checksums` row below; `tasks.expected_hash_sha256` is only
+    // populated for Sha256 to preserve the legacy verify path and UI columns.
+    let manual_hash_algorithm = input.expected_hash_algorithm.unwrap_or(ChecksumAlgorithm::Sha256);
+    let manual_hash: Option<(ChecksumAlgorithm, String)> = if is_bt_protocol(&probe.protocol)
         || probe.protocol == "hls"
         || probe.protocol == "dash"
         || is_metalink_protocol(&probe.protocol)
     {
         None
+    } else if let Some(normalized) = normalize_expected_hash(
+        input.expected_hash.as_deref(),
+        manual_hash_algorithm,
+    )? {
+        Some((manual_hash_algorithm, normalized))
     } else {
+        // Fall back to legacy SHA-256-only field for backward compat with older
+        // callers (browser handoff, CLI, older UI builds).
         normalize_sha256(input.expected_hash_sha256.as_deref())?
+            .map(|hash| (ChecksumAlgorithm::Sha256, hash))
     };
-    let hash_status = if expected_hash_sha256.is_some() {
+    // Legacy column: only populated when algorithm is Sha256 (preserves the
+    // existing verify_task_hash_with_pool fast path and TaskRecord UI fields).
+    let expected_hash_sha256 = match &manual_hash {
+        Some((ChecksumAlgorithm::Sha256, hash)) => Some(hash.clone()),
+        _ => None,
+    };
+    let hash_status = if manual_hash.is_some() {
         HashVerificationStatus::Pending
     } else {
         HashVerificationStatus::NotRequested
@@ -754,20 +805,58 @@ pub(crate) async fn create_task_with_state_and_headers(
         db::insert_task_record_in_tx(&mut tx, &record).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
     }
-    if let Some(expected_hash) = record.expected_hash_sha256.clone() {
+    // F-6: Store the user's selected HLS audio/subtitle track URIs. Uses
+    // `upsert_hls_task` with placeholder values for fields that will be
+    // filled in by `run_hls_download` when it probes the media playlist.
+    // The COALESCE in the ON CONFLICT clause preserves these values when
+    // `run_hls_download` passes `None`.
+    if probe.protocol == "hls" {
+        let audio_json = input
+            .selected_hls_audio_track_uris
+            .as_ref()
+            .filter(|uris| !uris.is_empty())
+            .and_then(|uris| serde_json::to_string(uris).ok());
+        let subtitle_json = input
+            .selected_hls_subtitle_track_uris
+            .as_ref()
+            .filter(|uris| !uris.is_empty())
+            .and_then(|uris| serde_json::to_string(uris).ok());
+        if audio_json.is_some() || subtitle_json.is_some() {
+            let staging = temp_path.to_string_lossy();
+            db::upsert_hls_task(
+                &state.pool,
+                db::HlsTaskUpsert {
+                    task_id: &record.id,
+                    input_url: &record.url,
+                    media_url: &probe.resolved_uri,
+                    playlist_kind: "vod",
+                    selected_bandwidth: None,
+                    selected_resolution: None,
+                    target_duration: 0,
+                    last_media_sequence: None,
+                    output_format: "mp4",
+                    staging_dir: &staging,
+                    selected_audio_track_uris: audio_json.as_deref(),
+                    selected_subtitle_track_uris: subtitle_json.as_deref(),
+                },
+            )
+            .await?;
+        }
+    }
+    if let Some((algorithm, expected_hash)) = manual_hash.as_ref() {
         let checksum = TaskChecksumRecord {
             id: Uuid::new_v4().to_string(),
             task_id: record.id.clone(),
             file_id: None,
-            algorithm: ChecksumAlgorithm::Sha256,
-            expected_hash,
+            algorithm: *algorithm,
+            expected_hash: expected_hash.clone(),
             actual_hash: None,
             status: HashVerificationStatus::Pending,
             source_kind: "manual".to_string(),
             source_url: None,
             source_label: None,
             is_primary: true,
-            weak: false,
+            weak: algorithm.is_weak(),
             error_message: None,
             discovered_at: None,
             verified_at: None,
@@ -886,7 +975,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         total_size = record.total_size,
         "task created"
     );
-    emit_queue_changed(&app);
+    emit_queue_changed_with_ids(&app, Some(vec![record.id.clone()]));
     state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
 
     let task = task_payload(&state.pool, &record.id).await?;
@@ -1262,6 +1351,8 @@ mod tests {
             etag: Some("\"strong\"".to_string()),
             last_modified: Some("Tue, 02 Jan 2024 00:00:00 GMT".to_string()),
             hls_variants: Vec::new(),
+            hls_audio_tracks: Vec::new(),
+            hls_subtitle_tracks: Vec::new(),
             probed_at: probed_at.to_rfc3339(),
         }
     }
@@ -1288,6 +1379,8 @@ mod tests {
             last_modified: None,
             content_type: Some("application/octet-stream".to_string()),
             hls_variants: Vec::new(),
+            hls_audio_tracks: Vec::new(),
+            hls_subtitle_tracks: Vec::new(),
             metalink: None,
         }
     }

@@ -220,6 +220,8 @@ interface TaskDataStore {
     append?: boolean,
   ) => void;
   upsertTask: (task: Task) => void;
+  upsertTasksBatch: (tasks: Task[]) => void;
+  reorderTasksLocally: (orderedIds: string[]) => void;
   patchTask: (payload: TaskProgressPayload | unknown) => void;
   patchTasksBatch: (payloads: Array<TaskProgressPayload | unknown>) => void;
   setGlobalTaskStats: (stats: TaskStats | TaskStatsSnapshot | null) => void;
@@ -379,6 +381,67 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
         taskIds: state.taskIds,
         taskIndexById: state.taskIndexById,
         failureOptions: statusChanged ? computeFailureOptions(tasks) : state.failureOptions,
+      };
+    }),
+
+  upsertTasksBatch: (incoming) =>
+    set((state) => {
+      if (incoming.length === 0) return {};
+      const byId = new Map<string, Task>(Object.entries(state.taskById));
+      let statusChangedAny = false;
+      const newTasks: Task[] = [];
+      for (const task of incoming) {
+        const existingIndex = state.taskIndexById[task.id];
+        if (existingIndex === undefined) {
+          newTasks.push(task);
+          byId.set(task.id, task);
+        } else {
+          const existing = state.tasks[existingIndex];
+          const mergedFiles = (task.files?.length ?? 0) > 0 ? task.files : existing.files;
+          const merged = { ...existing, ...task, files: mergedFiles };
+          byId.set(task.id, merged);
+          if (
+            existing.status !== merged.status ||
+            existing.failureCategory !== merged.failureCategory ||
+            existing.errorCode !== merged.errorCode ||
+            existing.errorMessage !== merged.errorMessage
+          ) {
+            statusChangedAny = true;
+          }
+        }
+      }
+      // Prepend new tasks (newest first), keep existing order for the rest.
+      const tasks: Task[] =
+        newTasks.length > 0
+          ? [...newTasks, ...state.tasks.map((t) => byId.get(t.id) ?? t)]
+          : state.tasks.map((t) => byId.get(t.id) ?? t);
+      return {
+        ...taskCollections(tasks),
+        total: Math.max(state.total, tasks.length),
+        failureOptions: statusChangedAny || newTasks.length > 0 ? computeFailureOptions(tasks) : state.failureOptions,
+      };
+    }),
+
+  // UX-5: Optimistic local reorder of queued tasks. Replaces the affected
+  // tasks in-place within the `tasks` array to match `orderedIds`, keeping
+  // all non-affected tasks in their current positions. Used by handleReorder
+  // to give immediate visual feedback before the backend confirms.
+  reorderTasksLocally: (orderedIds) =>
+    set((state) => {
+      if (orderedIds.length === 0) return {};
+      const affectedSet = new Set(orderedIds);
+      const queue = [...orderedIds];
+      const tasks = state.tasks.map((t) => {
+        if (affectedSet.has(t.id)) {
+          const nextId = queue.shift();
+          return nextId ? (state.taskById[nextId] ?? t) : t;
+        }
+        return t;
+      });
+      return {
+        tasks,
+        taskIds: tasks.map((t) => t.id),
+        taskIndexById: indexTasks(tasks),
       };
     }),
 

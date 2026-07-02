@@ -1,7 +1,26 @@
 import * as ContextMenu from "@radix-ui/react-context-menu";
-import { File, FolderOpen, Pause, Play, RotateCcw, Square, Trash2 } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronsDown,
+  ChevronsUp,
+  Clipboard,
+  ClipboardCopy,
+  ExternalLink,
+  File,
+  FileDown,
+  FileText,
+  FolderOpen,
+  Pause,
+  Play,
+  RotateCcw,
+  Square,
+  Trash2,
+} from "lucide-react";
+import { memo } from "react";
 import { useTranslation } from "react-i18next";
 
+import { MenuContent, MenuItem, MenuLabel, MenuSeparator } from "@/components/ui/menu-item";
 import type { RecoveryAction } from "@/generated/bindings";
 import type { Task } from "@/types/task";
 
@@ -13,16 +32,23 @@ interface TaskContextMenuProps {
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
   onDelete: (task: Task) => void;
+  onDeleteFiles?: (task: Task) => void;
   onResolveAttention?: (task: Task, action: RecoveryAction) => void;
+  onReorder?: (task: Task, action: ReorderAction) => void;
+  onCopyUrl?: (task: Task) => void;
+  onCopyLocalPath?: (task: Task) => void;
+  onShowDetails?: (task: Task) => void;
   children: React.ReactNode;
 }
+
+export type ReorderAction = "move_to_top" | "move_up" | "move_down" | "move_to_bottom";
 
 const showsResume = (status: Task["status"]) =>
   status === "paused" || status === "failed" || status === "waiting_network";
 
 const hidesTransfer = (status: Task["status"]) => status === "completed" || status === "needs_attention";
 
-export function TaskContextMenu({
+export const TaskContextMenu = memo(function TaskContextMenu({
   task,
   onToggleTransfer,
   onRetry,
@@ -30,98 +56,177 @@ export function TaskContextMenu({
   onOpenFile,
   onOpenFolder,
   onDelete,
+  onDeleteFiles,
+  onReorder,
+  onCopyUrl,
+  onCopyLocalPath,
+  onShowDetails,
   children,
 }: TaskContextMenuProps) {
   const { t } = useTranslation();
   const { status, protocol } = task;
   const canFinishRecording = protocol === "hls" && (status === "downloading" || status === "retrying");
+  const canReorder = status === "queued" && onReorder;
 
   return (
     <ContextMenu.Root>
       <ContextMenu.Trigger asChild>{children}</ContextMenu.Trigger>
       <ContextMenu.Portal>
-        <ContextMenu.Content
-          className="min-w-44 overflow-hidden rounded-lg border border-border-panel bg-surface-overlay p-1 shadow-lg"
-          alignOffset={4}
-        >
+        <MenuContent>
           {!hidesTransfer(status) && (
-            <Item
+            <MenuItem
               icon={showsResume(status) ? Play : Pause}
               label={t(showsResume(status) ? "actions.resume" : "actions.pause")}
               onSelect={() => onToggleTransfer(task)}
             />
           )}
 
-          {status === "failed" && <Item icon={RotateCcw} label={t("actions.retry")} onSelect={() => onRetry(task)} />}
+          {status === "failed" && (
+            <MenuItem icon={RotateCcw} label={t("actions.retry")} onSelect={() => onRetry(task)} />
+          )}
 
           {canFinishRecording && (
-            <Item icon={Square} label={t("actions.finishRecording")} onSelect={() => onFinishLiveRecording(task)} />
+            <MenuItem icon={Square} label={t("actions.finishRecording")} onSelect={() => onFinishLiveRecording(task)} />
           )}
 
           {status === "completed" && (
-            <Item icon={File} label={t("actions.openFile")} onSelect={() => onOpenFile(task)} />
+            <MenuItem icon={File} label={t("actions.openFile")} onSelect={() => onOpenFile(task)} />
           )}
 
-          <Item icon={FolderOpen} label={t("actions.openFolder")} onSelect={() => onOpenFolder(task)} />
+          <MenuItem icon={FolderOpen} label={t("actions.openFolder")} onSelect={() => onOpenFolder(task)} />
 
-          <ContextMenu.Separator className="my-1 h-px bg-border-divider" />
+          {(onCopyUrl || onCopyLocalPath || onShowDetails) && (
+            <>
+              <MenuSeparator />
+              <MenuLabel>{t("contextmenu.task.section.copy")}</MenuLabel>
+            </>
+          )}
 
-          <Item icon={Trash2} label={t("deleteDialog.confirm")} destructive onSelect={() => onDelete(task)} />
-        </ContextMenu.Content>
+          {onCopyUrl && (
+            <MenuItem icon={ClipboardCopy} label={t("contextmenu.task.copyUrl")} onSelect={() => onCopyUrl(task)} />
+          )}
+          {onCopyLocalPath && (
+            <MenuItem
+              icon={Clipboard}
+              label={t("contextmenu.task.copyLocalPath")}
+              onSelect={() => onCopyLocalPath(task)}
+            />
+          )}
+          {onShowDetails && (
+            <MenuItem
+              icon={ExternalLink}
+              label={t("contextmenu.task.showDetails")}
+              onSelect={() => onShowDetails(task)}
+            />
+          )}
+
+          {canReorder && (
+            <>
+              <MenuSeparator />
+              <MenuLabel>{t("contextmenu.task.section.queue")}</MenuLabel>
+              <MenuItem
+                icon={ChevronsUp}
+                label={t("actions.moveToTop")}
+                onSelect={() => onReorder?.(task, "move_to_top")}
+              />
+              <MenuItem icon={ArrowUp} label={t("actions.moveUp")} onSelect={() => onReorder?.(task, "move_up")} />
+              <MenuItem
+                icon={ArrowDown}
+                label={t("actions.moveDown")}
+                onSelect={() => onReorder?.(task, "move_down")}
+              />
+              <MenuItem
+                icon={ChevronsDown}
+                label={t("actions.moveToBottom")}
+                onSelect={() => onReorder?.(task, "move_to_bottom")}
+              />
+            </>
+          )}
+
+          <MenuSeparator />
+
+          <MenuItem
+            icon={Trash2}
+            label={t("deleteDialog.confirm")}
+            shortcut="Del"
+            destructive
+            onSelect={() => onDelete(task)}
+          />
+          {onDeleteFiles ? (
+            <MenuItem
+              icon={Trash2}
+              label={t("deleteDialog.deleteFilesToo")}
+              shortcut="Shift+Del"
+              destructive
+              onSelect={() => onDeleteFiles(task)}
+            />
+          ) : null}
+        </MenuContent>
       </ContextMenu.Portal>
     </ContextMenu.Root>
   );
-}
+});
 
 /* ── List-area context menu (blank space) ── */
 
 interface ListContextMenuProps {
   onNewDownload: () => void;
+  onPasteAndCreate?: () => void;
+  onSelectAll?: () => void;
+  onClearSelection?: () => void;
+  onRefresh?: () => void;
+  onExport?: (format: "json" | "csv") => void;
+  hasSelection?: boolean;
   children: React.ReactNode;
 }
 
-export function ListContextMenu({ onNewDownload, children }: ListContextMenuProps) {
+export function ListContextMenu({
+  onNewDownload,
+  onPasteAndCreate,
+  onSelectAll,
+  onClearSelection,
+  onRefresh,
+  onExport,
+  hasSelection,
+  children,
+}: ListContextMenuProps) {
   const { t } = useTranslation();
 
   return (
     <ContextMenu.Root>
       <ContextMenu.Trigger asChild>{children}</ContextMenu.Trigger>
       <ContextMenu.Portal>
-        <ContextMenu.Content className="min-w-44 overflow-hidden rounded-lg border border-border-panel bg-surface-overlay p-1 shadow-lg">
-          <Item label={t("palette.newDownload")} onSelect={onNewDownload} />
-        </ContextMenu.Content>
+        <MenuContent>
+          <MenuItem label={t("palette.newDownload")} onSelect={onNewDownload} />
+          {onPasteAndCreate && <MenuItem label={t("contextmenu.list.pasteAndCreate")} onSelect={onPasteAndCreate} />}
+
+          {(onSelectAll || onClearSelection) && <MenuSeparator />}
+
+          {onSelectAll && <MenuItem label={t("contextmenu.list.selectAll")} onSelect={onSelectAll} />}
+          {onClearSelection && (
+            <MenuItem
+              label={t("contextmenu.list.clearSelection")}
+              disabled={!hasSelection}
+              onSelect={onClearSelection}
+            />
+          )}
+
+          {onRefresh && (
+            <>
+              <MenuSeparator />
+              <MenuItem label={t("contextmenu.list.refresh")} onSelect={onRefresh} />
+            </>
+          )}
+
+          {onExport && (
+            <>
+              <MenuSeparator />
+              <MenuItem icon={FileDown} label={t("taskList.exportJson")} onSelect={() => onExport("json")} />
+              <MenuItem icon={FileText} label={t("taskList.exportCsv")} onSelect={() => onExport("csv")} />
+            </>
+          )}
+        </MenuContent>
       </ContextMenu.Portal>
     </ContextMenu.Root>
-  );
-}
-
-/* ── Internal item component ── */
-
-function Item({
-  icon: Icon,
-  label,
-  destructive,
-  onSelect,
-}: {
-  icon?: React.ComponentType<{ className?: string }>;
-  label: string;
-  destructive?: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <ContextMenu.Item
-      className={[
-        "flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none",
-        "transition-colors duration-[var(--motion-ui)] ease-out",
-        "data-[highlighted]:bg-surface-raised",
-        destructive
-          ? "text-status-danger data-[highlighted]:text-status-danger"
-          : "text-text-secondary data-[highlighted]:text-text-primary",
-      ].join(" ")}
-      onSelect={onSelect}
-    >
-      {Icon && <Icon className="h-4 w-4 shrink-0" />}
-      <span className="truncate">{label}</span>
-    </ContextMenu.Item>
   );
 }

@@ -277,6 +277,21 @@ pub async fn torrent_seeding_enabled(pool: &SqlitePool, task_id: &str) -> Result
     Ok(value.unwrap_or(0) != 0)
 }
 
+/// F-1: Reads the configured seed ratio limit for a torrent task.
+/// Returns `None` when no limit is set or the task has no torrent row.
+pub async fn torrent_seed_ratio_limit(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Option<f64>, String> {
+    let value: Option<Option<f64>> =
+        sqlx::query_scalar("SELECT seed_ratio_limit FROM torrent_tasks WHERE task_id = ?")
+            .bind(task_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(value.flatten())
+}
+
 pub async fn update_torrent_seeding(
     pool: &SqlitePool,
     task_id: &str,

@@ -4,11 +4,12 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::PathBuf,
+    sync::Arc,
 };
 
 use common::TestServer;
 use tauri_app_lib::{
-    download::{DashEngine, DownloadEngine, ProbeRequest},
+    download::{DashEngine, DownloadEngine, HttpEngine, ProbeRequest},
     proxy::ResolvedProxyConfig,
 };
 
@@ -136,7 +137,10 @@ fn handle_connection(mut stream: TcpStream) {
 }
 
 fn new_engine() -> DashEngine {
-    DashEngine::new(ResolvedProxyConfig::shared_default())
+    DashEngine::new(Arc::new(
+        HttpEngine::with_proxy_config(ResolvedProxyConfig::shared_default())
+            .expect("HTTP engine init"),
+    ))
 }
 
 fn new_probe_request(uri: String) -> ProbeRequest {
@@ -147,6 +151,8 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         pool: None,
         task_id: None,
         credentials: None,
+        app: None,
+        request_id: None,
     }
 }
 

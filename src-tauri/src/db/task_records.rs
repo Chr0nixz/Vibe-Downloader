@@ -78,6 +78,46 @@ pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, Str
     rows.iter().map(row_to_task).collect()
 }
 
+/// E-1: Fetch multiple task records by ID in a single query. Used by the
+/// `list_tasks_by_ids` command to support incremental queue-changed upsert
+/// — when the backend emits `QueueChangedPayload { changed_task_ids: Some(ids) }`,
+/// the frontend fetches only the changed tasks rather than re-querying the
+/// entire first page.
+///
+/// Returns rows in arbitrary order (callers sort on the frontend). Empty input
+/// returns an empty vec without hitting the DB.
+pub async fn list_task_records_by_ids(
+    pool: &SqlitePool,
+    ids: &[String],
+) -> Result<Vec<TaskRecord>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut query_builder = QueryBuilder::<Sqlite>::new(
+        r#"SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
+               total_size, downloaded_bytes, status, etag, last_modified, content_type,
+               supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
+               health_summary, error_message, error_code, recovery_actions, retry_after_at,
+               expected_hash_sha256, actual_hash_sha256,
+               hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
+        FROM tasks WHERE id IN ("#,
+    );
+    for (i, id) in ids.iter().enumerate() {
+        if i > 0 {
+            query_builder.push(",");
+        }
+        query_builder.push_bind(id);
+    }
+    query_builder.push(")");
+    let rows = query_builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    rows.iter().map(row_to_task).collect()
+}
+
 pub async fn task_stats_snapshot(pool: &SqlitePool) -> Result<TaskStatsSnapshot, String> {
     let row = sqlx::query(
         r#"
@@ -499,6 +539,33 @@ pub async fn get_task_record(pool: &SqlitePool, id: &str) -> Result<Option<TaskR
     row.as_ref().map(row_to_task).transpose()
 }
 
+/// R-1: Transaction-scoped variant of `get_task_record`. Used by
+/// `transition_task` to read the current status within the same transaction
+/// as the conditional UPDATE, ensuring atomic read-validate-write.
+pub async fn get_task_record_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+) -> Result<Option<TaskRecord>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
+               total_size, downloaded_bytes, status, etag, last_modified, content_type,
+               supports_resume, supports_parallel, supports_multi_file, source_key, connection_count, speed_bps,
+               task_speed_limit_bps, priority, queue_position, category_key, obey_schedule,
+               health_summary, error_message, error_code, recovery_actions, retry_after_at,
+               expected_hash_sha256, actual_hash_sha256,
+               hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
+        FROM tasks WHERE id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    row.as_ref().map(row_to_task).transpose()
+}
+
 pub async fn find_duplicate_task_record<'e, E>(
     executor: E,
     url: &str,
@@ -616,6 +683,31 @@ pub async fn next_queue_position(pool: &SqlitePool) -> Result<i64, String> {
     Ok(current_max.unwrap_or(0).saturating_add(1000))
 }
 
+/// Reassign `queue_position` for the given task ids based on their order in
+/// the input slice. The full set is rebalanced with a step of 1000 so that
+/// future insertions still have room. Tasks not present in `ids` keep their
+/// current `queue_position`. Only `Queued` tasks should be passed in; the
+/// caller is responsible for filtering.
+pub async fn reorder_queued_tasks(pool: &SqlitePool, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let now = crate::models::task::now_iso();
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    for (index, id) in ids.iter().enumerate() {
+        let position = (index as i64).saturating_mul(1000);
+        sqlx::query("UPDATE tasks SET queue_position = ?, updated_at = ? WHERE id = ?")
+            .bind(position)
+            .bind(&now)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub async fn update_task_transfer_options(
     pool: &SqlitePool,
     task_id: &str,
@@ -646,6 +738,9 @@ pub async fn update_task_transfer_options(
 }
 
 pub(super) fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, String> {
+    // E-5c: Single `AppErrorPayload` deserialization shared between the
+    // `error_code` and `recovery_actions` fallbacks.
+    let (error_code, recovery_actions) = task_error_fields_from_row(row);
     Ok(TaskRecord {
         id: row.get("id"),
         url: row.get("url"),
@@ -675,8 +770,8 @@ pub(super) fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, S
         obey_schedule: row.get::<i64, _>("obey_schedule") != 0,
         health_summary: row.get("health_summary"),
         error_message: row.get("error_message"),
-        error_code: task_error_code_from_row(row),
-        recovery_actions: task_recovery_actions_from_row(row),
+        error_code,
+        recovery_actions,
         retry_after_at: row.get("retry_after_at"),
         expected_hash_sha256: row.get("expected_hash_sha256"),
         actual_hash_sha256: row.get("actual_hash_sha256"),
@@ -691,20 +786,27 @@ pub(super) fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<TaskRecord, S
     })
 }
 
-fn task_error_code_from_row(row: &sqlx::sqlite::SqliteRow) -> Option<String> {
-    row.try_get::<Option<String>, _>("error_code")
+/// E-5c: Consolidated replacement for the previous `task_error_code_from_row`
+/// and `task_recovery_actions_from_row` pair. Both helpers independently fell
+/// back to deserializing the `error_message` JSON column as `AppErrorPayload`
+/// when their dedicated column was missing/empty, so a single row could
+/// trigger two `serde_json::from_str` passes over the same payload. This
+/// version deserializes `error_message` at most once and shares the result
+/// between both fallbacks, preserving the original precedence:
+///   - `error_code` column wins; otherwise `payload.code` from `error_message`.
+///   - `recovery_actions` column wins if it yields >=1 parseable action;
+///     otherwise `payload.actions` from `error_message`.
+fn task_error_fields_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> (Option<String>, Vec<RecoveryAction>) {
+    // 1. Dedicated columns first.
+    let mut error_code = row
+        .try_get::<Option<String>, _>("error_code")
         .ok()
-        .flatten()
-        .or_else(|| {
-            row.try_get::<Option<String>, _>("error_message")
-                .ok()
-                .flatten()
-                .and_then(|error| serde_json::from_str::<AppErrorPayload>(&error).ok())
-                .map(|payload| payload.code)
-        })
-}
+        .flatten();
 
-fn task_recovery_actions_from_row(row: &sqlx::sqlite::SqliteRow) -> Vec<RecoveryAction> {
+    let mut recovery_actions: Vec<RecoveryAction> = Vec::new();
+    let mut recovery_actions_resolved = false;
     if let Some(raw) = row
         .try_get::<Option<String>, _>("recovery_actions")
         .ok()
@@ -716,23 +818,38 @@ fn task_recovery_actions_from_row(row: &sqlx::sqlite::SqliteRow) -> Vec<Recovery
                 .filter_map(|value| value.parse().ok())
                 .collect::<Vec<_>>();
             if !actions.is_empty() {
-                return actions;
+                recovery_actions = actions;
+                recovery_actions_resolved = true;
             }
         }
     }
 
-    row.try_get::<Option<String>, _>("error_message")
-        .ok()
-        .flatten()
-        .and_then(|error| serde_json::from_str::<AppErrorPayload>(&error).ok())
-        .map(|payload| {
-            payload
-                .actions
-                .iter()
-                .filter_map(|value| value.parse().ok())
-                .collect()
-        })
-        .unwrap_or_default()
+    // 2. Fall back to `error_message` (deserialized at most once) only if
+    //    either field is still missing. The previous implementation called
+    //    `serde_json::from_str::<AppErrorPayload>` independently in each
+    //    helper, so a single row could pay the cost twice. Partial moves
+    //    let us take `payload.code` and still borrow `payload.actions`.
+    if error_code.is_none() || !recovery_actions_resolved {
+        if let Some(payload) = row
+            .try_get::<Option<String>, _>("error_message")
+            .ok()
+            .flatten()
+            .and_then(|error| serde_json::from_str::<AppErrorPayload>(&error).ok())
+        {
+            if error_code.is_none() {
+                error_code = Some(payload.code);
+            }
+            if !recovery_actions_resolved {
+                recovery_actions = payload
+                    .actions
+                    .iter()
+                    .filter_map(|value| value.parse().ok())
+                    .collect();
+            }
+        }
+    }
+
+    (error_code, recovery_actions)
 }
 
 pub(super) fn recovery_actions_json(actions: &[RecoveryAction]) -> Result<String, String> {

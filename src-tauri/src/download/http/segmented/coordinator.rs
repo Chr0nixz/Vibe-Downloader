@@ -32,7 +32,9 @@ use crate::{
         file_ops::{finalize_download_file, persist_completed_path, preallocate_temp_file},
         GlobalSpeedLimiter,
     },
-    events::{emit_queue_changed, emit_task_updated_record, TaskProgressEmitGate},
+    events::{
+        emit_queue_changed_with_ids, emit_task_updated_record, TaskProgressEmitGate,
+    },
     logging::sanitize_url,
     models::{SegmentStatus, TaskRecord, TaskSegmentRecord, TaskStatus},
 };
@@ -149,6 +151,7 @@ impl<'a> SegmentCoordinator<'a> {
             &self.pool,
             &self.task.id,
             TaskStatus::Downloading,
+            None,
             0,
             active_connection_count,
             Some("Downloading"),
@@ -324,7 +327,7 @@ impl<'a> SegmentCoordinator<'a> {
                             )
                             .await
                             .map_err(String::from)?;
-                            emit_queue_changed(&self.app);
+                            emit_queue_changed_with_ids(&self.app, Some(vec![self.task.id.clone()]));
                             return Err(failure.error);
                         }
                         Err(error) => {
@@ -357,7 +360,7 @@ impl<'a> SegmentCoordinator<'a> {
                             )
                             .await
                             .map_err(String::from)?;
-                            emit_queue_changed(&self.app);
+                            emit_queue_changed_with_ids(&self.app, Some(vec![self.task.id.clone()]));
                             return Err(message);
                         }
                     }
@@ -489,7 +492,7 @@ impl<'a> SegmentCoordinator<'a> {
             ),
             true,
         );
-        emit_queue_changed(&self.app);
+        emit_queue_changed_with_ids(&self.app, Some(vec![self.task.id.clone()]));
 
         Ok(())
     }

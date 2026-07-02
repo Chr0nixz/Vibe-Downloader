@@ -31,8 +31,8 @@ export default defineConfig(async () => ({
           if (id.includes("lucide-react")) {
             return "lucide";
           }
-          if (id.includes("framer-motion")) {
-            return "framer-motion";
+          if (id.includes("/motion/")) {
+            return "motion";
           }
         },
       },

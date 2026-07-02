@@ -15,13 +15,16 @@ pub use super::task_resume::{
 use crate::{
     db,
     download::{EngineRegistry, ProbeRequest},
-    events::{emit_queue_changed, emit_task_progress, emit_task_updated_record},
+    events::{
+        emit_queue_changed, emit_queue_changed_with_ids, emit_task_progress,
+        emit_task_updated_record,
+    },
     models::{
         AppErrorPayload, FtpDirectoryProbe, RecoveryAction, SftpDirectoryProbe, Task,
         TaskChecksumRecord, TaskFileRecord, TaskProxySettings, TaskProxySettingsInput, TaskRecord,
         TaskStatus, WebDavDirectoryProbe,
     },
-    AppState, TaskRequestHeaders,
+    state_machine::TransitionError, AppState, TaskRequestHeaders,
 };
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -112,7 +115,7 @@ pub async fn update_torrent_file_selection(
     )
     .await
     .map_err(String::from)?;
-    emit_queue_changed(&app);
+    emit_queue_changed_with_ids(&app, Some(vec![task.id.clone()]));
     state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
     task_payload(&state.pool, &task.id).await
 }
@@ -312,17 +315,46 @@ pub(crate) async fn check_schedule_preemption(
     Ok(())
 }
 
-/// Spawns a background task that checks the schedule window every 60 seconds
-/// and preempts running tasks or resumes paused tasks as needed.
+/// Spawns a background task that checks the schedule window at boundary
+/// crossings and preempts running tasks or resumes paused tasks as needed.
+///
+/// E-5: Instead of polling every 60s, the monitor sleeps until the next
+/// window boundary (start or end, whichever comes first). This eliminates
+/// up to 60s latency at boundary crossings. When the schedule is disabled,
+/// it re-checks every 5 minutes for settings changes.
 pub(crate) fn spawn_schedule_window_monitor(app: AppHandle, _state: &AppState) {
     tauri::async_runtime::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        // First tick fires immediately; skip it.
-        interval.tick().await;
+        // The initial check runs synchronously in `lib.rs` setup() before
+        // this spawns, so we start with a sleep.
         loop {
-            interval.tick().await;
-            // Exit gracefully when the app is shutting down so we don't
-            // access dropped state.
+            // Calculate sleep duration based on current schedule settings.
+            let sleep = {
+                let state_ref = app.state::<AppState>();
+                if state_ref.quit_requested.load(Ordering::SeqCst) {
+                    tracing::debug!("schedule window monitor exiting (shutdown requested)");
+                    return;
+                }
+                let default_dir =
+                    super::settings::default_download_dir(&app).unwrap_or_default();
+                match db::get_settings(&state_ref.pool, default_dir).await {
+                    Ok(settings) if settings.schedule_download_window_enabled => {
+                        db::duration_until_next_window_boundary(
+                            &settings.schedule_download_window_start,
+                            &settings.schedule_download_window_end,
+                        )
+                    }
+                    Ok(_) => {
+                        // Schedule disabled — re-check periodically for changes.
+                        std::time::Duration::from_secs(300)
+                    }
+                    Err(_) => {
+                        // Settings read failed — retry in 1 minute.
+                        std::time::Duration::from_secs(60)
+                    }
+                }
+            };
+            tokio::time::sleep(sleep).await;
+
             let state_ref = app.state::<AppState>();
             if state_ref.quit_requested.load(Ordering::SeqCst) {
                 tracing::debug!("schedule window monitor exiting (shutdown requested)");
@@ -374,18 +406,44 @@ pub(crate) fn spawn_request_diagnostics_cleanup(app: AppHandle) {
     });
 }
 
-/// Interval between background WAL checkpoint passes.
+/// Interval between background WAL checkpoint passes when downloads are
+/// active. Long enough that it never contends with hot download paths.
 const WAL_CHECKPOINT_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+/// E-5: Shorter WAL checkpoint interval when no downloads are active.
+/// Allows WAL to be checkpointed sooner during idle periods, bounding
+/// `-wal` file growth without waiting up to 6 hours.
+const WAL_CHECKPOINT_IDLE_INTERVAL_SECS: u64 = 30 * 60;
 
 /// Spawns a background task that periodically runs `PRAGMA wal_checkpoint(TRUNCATE)`
 /// to bound `-wal` file growth for long-running sessions.
+///
+/// E-5: Uses a shorter interval (30 min) when there are no active downloads,
+/// so WAL gets checkpointed sooner during idle periods. When downloads are
+/// active, keeps the conservative 6-hour interval to avoid interfering with I/O.
 pub(crate) fn spawn_wal_checkpoint_monitor(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(WAL_CHECKPOINT_INTERVAL_SECS));
-        interval.tick().await;
+        // First pass: wait a short grace period after startup so the initial
+        // download burst doesn't trigger an immediate checkpoint.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         loop {
-            interval.tick().await;
+            let state_ref = app.state::<AppState>();
+            if state_ref.quit_requested.load(Ordering::SeqCst) {
+                tracing::debug!("wal checkpoint monitor exiting (shutdown requested)");
+                break;
+            }
+            // E-5: Choose interval based on whether downloads are active.
+            let is_idle = {
+                let downloads = state_ref.downloads.lock().await;
+                downloads.is_empty()
+            };
+            let interval_secs = if is_idle {
+                WAL_CHECKPOINT_IDLE_INTERVAL_SECS
+            } else {
+                WAL_CHECKPOINT_INTERVAL_SECS
+            };
+            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+
             let state_ref = app.state::<AppState>();
             if state_ref.quit_requested.load(Ordering::SeqCst) {
                 tracing::debug!("wal checkpoint monitor exiting (shutdown requested)");
@@ -430,7 +488,7 @@ async fn queue_task_for_retry_at(
     id: &str,
     retry_after_at: Option<&str>,
 ) -> Result<TaskRecord, String> {
-    crate::state_machine::transition_task(
+    match crate::state_machine::transition_task(
         app,
         &state.pool,
         id,
@@ -441,7 +499,13 @@ async fn queue_task_for_retry_at(
         None,
     )
     .await
-    .map_err(String::from)?;
+    {
+        Ok(_) => {}
+        Err(TransitionError::Conflict { .. }) => {
+            return Err("Task state changed concurrently, please refresh.".to_string());
+        }
+        Err(error) => return Err(error.into()),
+    }
     db::update_task_retry_after(&state.pool, id, retry_after_at).await?;
     db::update_segments_status_for_task(
         &state.pool,
@@ -452,9 +516,19 @@ async fn queue_task_for_retry_at(
     .await?;
     let task = require_task(&state.pool, id).await?;
     emit_task_progress_snapshot(app, &task);
-    emit_queue_changed(app);
+    emit_queue_changed_with_ids(app, Some(vec![id.to_string()]));
     if retry_after_at.is_none() {
-        state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
+        // R-2.3: Spawn dispatch in background to avoid deadlock with the
+        // per-task runtime lock held by the caller (retry_task/resume_task/
+        // resolve_task_attention). dispatch → start_task will acquire the
+        // per-task lock, which is still held by the caller until it returns.
+        // Spawning lets the caller unwind and release the lock first.
+        let dispatch_app = app.clone();
+        let dispatch_pool = state.pool.clone();
+        let dispatch_scheduler = state.scheduler.clone();
+        tauri::async_runtime::spawn(async move {
+            dispatch_scheduler.dispatch(dispatch_app, dispatch_pool).await;
+        });
     }
     require_task(&state.pool, id).await
 }
@@ -507,9 +581,14 @@ async fn restart_task_from_beginning(
     state: &AppState,
     task: &TaskRecord,
 ) -> Result<TaskRecord, String> {
+    // R-2.3: Caller (resolve_task_attention) must already hold the per-task
+    // runtime lock. tokio::sync::Mutex is not re-entrant, so we do not
+    // re-acquire here.
     if let Some(control) = state.downloads.lock().await.remove(&task.id) {
         control.cancel_token.cancel();
-        control.handle.abort();
+        if let Some(h) = control.handle.as_ref() {
+            h.abort();
+        }
     }
     if let Some(temp_path) = task.temp_path.as_deref() {
         remove_task_path(temp_path)?;
@@ -526,6 +605,8 @@ async fn restart_task_from_beginning(
             pool: Some(state.pool.clone()),
             task_id: Some(task.id.clone()),
             credentials: None,
+            app: None,
+            request_id: None,
         })
         .await?;
     db::update_task_remote_metadata(
@@ -558,7 +639,7 @@ async fn restart_task_from_beginning(
     db::ensure_task_segments_with_settings(&state.pool, &task, &settings).await?;
     emit_task_progress_snapshot(app, &task);
     emit_task_updated_record(app, &state.pool, &task).await;
-    emit_queue_changed(app);
+    emit_queue_changed_with_ids(app, Some(vec![task.id.clone()]));
     state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
     require_task(&state.pool, &task.id).await
 }
@@ -651,6 +732,8 @@ pub(crate) async fn prepare_task_for_download(
                 pool: Some(pool.clone()),
                 task_id: Some(task.id.clone()),
                 credentials: None,
+                app: None,
+                request_id: None,
             })
             .await?;
         if let Some(message) = resume_mismatch_message(&task, &probe) {

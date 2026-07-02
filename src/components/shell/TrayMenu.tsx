@@ -121,7 +121,7 @@ export function TrayMenu() {
             <span className="h-2 w-2 rounded-full bg-accent-energy" />
           </div>
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-[0.82rem] font-semibold leading-5 text-text-primary">{t("trayMenu.title")}</h1>
+            <h2 className="truncate text-[0.82rem] font-semibold leading-5 text-text-primary">{t("trayMenu.title")}</h2>
           </div>
           <button
             type="button"

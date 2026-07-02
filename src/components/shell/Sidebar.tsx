@@ -4,8 +4,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  Filter,
   Info,
   LayoutGrid,
+  PanelLeftClose,
+  PanelLeftOpen,
   PauseCircle,
   Settings,
 } from "lucide-react";
@@ -13,6 +16,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { MenuItem, RegionContextMenu } from "@/components/ui/menu-item";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { type NavFilter, useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
@@ -45,11 +49,19 @@ const aboutItem: NavItemDef = {
   icon: Info,
 };
 
-export function Sidebar() {
+export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
   const { t } = useTranslation();
   const nav = useTaskUIStore((s) => s.nav);
   const setNav = useTaskUIStore((s) => s.setNav);
-  const taskStats = useTaskDataStore((s) => s.globalTaskStats ?? s.taskStats);
+  // Subscribe to the two slices separately so React only re-renders this
+  // subtree when `globalTaskStats` is null AND `taskStats` actually changed.
+  // Without this split, `s => s.globalTaskStats ?? s.taskStats` re-runs on
+  // every 250ms progress tick (which always produces a new taskStats ref),
+  // re-rendering the whole sidebar even when the global stats snapshot is
+  // being used.
+  const globalTaskStats = useTaskDataStore((s) => s.globalTaskStats);
+  const localTaskStats = useTaskDataStore((s) => s.taskStats);
+  const taskStats = globalTaskStats ?? localTaskStats;
 
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -78,108 +90,129 @@ export function Sidebar() {
   };
 
   return (
-    <nav
-      className={cn(
-        // ── Mobile: horizontal bottom bar ──
-        "order-3 flex h-12 w-full shrink-0 flex-row items-center gap-1 border-t px-1 py-0.5",
-        // ── Mica surface ──
-        "bg-surface-base/60",
-        "[backdrop-filter:blur(12px)]",
-        "border-border-subtle/60",
-        // ── Tablet: vertical compact column (always compact width) ──
-        "md:order-none md:h-auto md:w-[var(--shell-nav-width-compact)]",
-        "md:flex-col md:items-stretch md:justify-between md:gap-1",
-        "md:border-r md:border-t-0 md:p-1.5",
-        // ── Desktop: expand only when not collapsed ──
-        !collapsed && "lg:w-[var(--shell-nav-width)] lg:p-2",
-        // ── Width transition ──
-        "transition-[width,padding] duration-[var(--motion-ui)] ease-out",
-      )}
-      aria-label={t("app.navAria")}
-    >
-      {/* ── Filter group (top on md+) ── */}
-      <div className="flex flex-1 flex-row items-center justify-around gap-1 md:flex-col md:items-stretch md:justify-start md:gap-0.5 lg:justify-start">
-        {/* Group label — only when expanded (wide) */}
-        <span
-          className={cn(
-            "hidden px-3 py-1 text-[11px] font-medium tracking-[0.08em] text-text-muted uppercase lg:block",
-            collapsed && "lg:hidden",
-          )}
-        >
-          {t("nav.filters")}
-        </span>
-
-        {filterItems.map((item) => (
-          <NavItem
-            key={item.id}
-            item={item}
-            active={nav === item.id}
-            label={t(item.labelKey)}
-            count={counts[item.id] ?? 0}
-            compact={collapsed}
-            onClick={() => setNav(item.id)}
+    <RegionContextMenu
+      items={
+        <>
+          {onNewDownload && <MenuItem icon={Download} label={t("palette.newDownload")} onSelect={onNewDownload} />}
+          <MenuItem
+            icon={collapsed ? PanelLeftOpen : PanelLeftClose}
+            label={collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
+            onSelect={toggleCollapse}
           />
-        ))}
-      </div>
-
-      {/* ── Separator + Settings + Collapse toggle (bottom on md+) ── */}
-      <div className="flex flex-none flex-row items-center gap-1 md:flex-col md:items-stretch md:gap-0.5">
-        <div className="hidden md:mx-2 md:mb-1 md:block lg:mx-3">
-          <div className="h-px bg-border-subtle/50" />
-        </div>
-        <NavItem
-          item={settingsItem}
-          active={nav === "settings"}
-          label={t(settingsItem.labelKey)}
-          count={0}
-          compact={collapsed}
-          onClick={() => setNav("settings")}
-        />
-        <NavItem
-          item={aboutItem}
-          active={nav === "about"}
-          label={t(aboutItem.labelKey)}
-          count={0}
-          compact={collapsed}
-          onClick={() => setNav("about")}
-        />
-
-        {/* Collapse / expand toggle */}
-        <div className="hidden md:mx-1.5 md:mt-0.5 md:block lg:mx-2.5">
-          <div className="h-px bg-border-subtle/40" />
-        </div>
-        <Button
-          type="button"
-          variant="ghost"
-          onClick={toggleCollapse}
-          aria-label={collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
-          className={cn(
-            "group hidden h-8 w-8 flex-none justify-center p-0 md:flex",
-            "text-text-muted",
-            "hover:bg-accent-primary/10 hover:text-accent-primary",
-            "md:mt-1 md:h-10 md:w-full md:flex-row md:gap-2",
-            "transition-all duration-[var(--motion-ui)]",
-          )}
-        >
+        </>
+      }
+    >
+      <nav
+        className={cn(
+          // ── Mobile: horizontal bottom bar ──
+          "order-3 flex h-12 w-full shrink-0 flex-row items-center gap-1 border-t px-1 py-0.5",
+          // ── Mica surface ──
+          "bg-surface-base/60",
+          "[backdrop-filter:blur(12px)]",
+          "border-border-subtle/60",
+          // ── Tablet: vertical compact column (always compact width) ──
+          "md:order-none md:h-auto md:w-[var(--shell-nav-width-compact)]",
+          "md:flex-col md:items-stretch md:justify-between md:gap-1",
+          "md:border-r md:border-t-0 md:p-1.5",
+          // ── Desktop: expand only when not collapsed ──
+          !collapsed && "lg:w-[var(--shell-nav-width)] lg:p-2",
+          // ── Width transition ──
+          "transition-[width,padding] duration-[var(--motion-ui)] ease-out",
+        )}
+        aria-label={t("app.navAria")}
+      >
+        {/* ── Filter group (top on md+) ── */}
+        <div className="flex flex-1 flex-row items-center justify-around gap-1 md:flex-col md:items-stretch md:justify-start md:gap-0.5 lg:justify-start">
+          {/* Group label — only when expanded (wide) */}
           <span
             className={cn(
-              "flex h-5 w-5 items-center justify-center rounded-full",
-              "bg-surface-raised/80 group-hover:bg-accent-primary/15",
-              "transition-colors duration-[var(--motion-ui)]",
+              "hidden px-3 py-1 text-[11px] font-medium text-text-muted lg:block",
+              collapsed && "lg:hidden",
             )}
           >
-            {collapsed ? (
-              <ChevronRight className="h-3.5 w-3.5" aria-hidden />
-            ) : (
-              <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+            {t("nav.filters")}
+          </span>
+
+          {filterItems.map((item) => (
+            <NavItem
+              key={item.id}
+              item={item}
+              active={nav === item.id}
+              label={t(item.labelKey)}
+              count={counts[item.id] ?? 0}
+              compact={collapsed}
+              onClick={() => setNav(item.id)}
+              contextMenuItems={
+                <MenuItem
+                  icon={Filter}
+                  label={t("contextmenu.sidebar.showOnly", { name: t(item.labelKey) })}
+                  disabled={nav === item.id}
+                  onSelect={() => setNav(item.id)}
+                />
+              }
+            />
+          ))}
+        </div>
+
+        {/* ── Separator + Settings + Collapse toggle (bottom on md+) ── */}
+        <div className="flex flex-none flex-row items-center gap-1 md:flex-col md:items-stretch md:gap-0.5">
+          <div className="hidden md:mx-2 md:mb-1 md:block lg:mx-3">
+            <div className="h-px bg-border-subtle/50" />
+          </div>
+          <NavItem
+            item={settingsItem}
+            active={nav === "settings"}
+            label={t(settingsItem.labelKey)}
+            count={0}
+            compact={collapsed}
+            onClick={() => setNav("settings")}
+          />
+          <NavItem
+            item={aboutItem}
+            active={nav === "about"}
+            label={t(aboutItem.labelKey)}
+            count={0}
+            compact={collapsed}
+            onClick={() => setNav("about")}
+          />
+
+          {/* Collapse / expand toggle */}
+          <div className="hidden md:mx-1.5 md:mt-0.5 md:block lg:mx-2.5">
+            <div className="h-px bg-border-subtle/40" />
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={toggleCollapse}
+            aria-label={collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
+            className={cn(
+              "group hidden h-8 w-8 flex-none justify-center p-0 md:flex",
+              "text-text-muted",
+              "hover:bg-accent-primary/10 hover:text-accent-primary",
+              "md:mt-1 md:h-10 md:w-full md:flex-row md:gap-2",
+              "transition-[color,background-color] duration-[var(--motion-ui)]",
             )}
-          </span>
-          <span className={cn("hidden text-xs font-medium md:inline lg:hidden", collapsed && "lg:hidden")}>
-            {collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
-          </span>
-        </Button>
-      </div>
-    </nav>
+          >
+            <span
+              className={cn(
+                "flex h-5 w-5 items-center justify-center rounded-full",
+                "bg-surface-raised/80 group-hover:bg-accent-primary/15",
+                "transition-colors duration-[var(--motion-ui)]",
+              )}
+            >
+              {collapsed ? (
+                <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+              ) : (
+                <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+              )}
+            </span>
+            <span className={cn("hidden text-xs font-medium md:inline lg:hidden", collapsed && "lg:hidden")}>
+              {collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
+            </span>
+          </Button>
+        </div>
+      </nav>
+    </RegionContextMenu>
   );
 }
 
@@ -194,6 +227,7 @@ function NavItem({
   count,
   compact,
   onClick,
+  contextMenuItems,
 }: {
   item: NavItemDef;
   active: boolean;
@@ -201,13 +235,15 @@ function NavItem({
   count: number;
   compact: boolean;
   onClick: () => void;
+  /** Optional context-menu items for this nav entry (filter items only). */
+  contextMenuItems?: React.ReactNode;
 }) {
   const Icon = item.icon;
   const showBadge = item.id !== "settings" && item.id !== "all" && count > 0;
   const showActivityDot =
     item.id !== "settings" && item.id !== "all" && count > 0 && (item.id === "downloading" || item.id === "failed");
 
-  return (
+  const button = (
     <Tooltip>
       <TooltipTrigger asChild>
         <Button
@@ -222,15 +258,15 @@ function NavItem({
             "md:h-10 md:w-full md:flex-none md:flex-col md:items-start md:justify-start md:gap-1 md:px-1",
             "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
             // ── Override button transition ──
-            "transition-all duration-[var(--motion-ui)] ease-out",
-            // ── Active: two-layer indicator ──
+            "transition-[color,background-color,box-shadow,border-color] duration-[var(--motion-ui)] ease-out",
+            // ── Active: anchored indicator (no side-stripe; uses inset ring + stronger tint) ──
             active && [
-              // Layer 1 — accent background fill
-              "bg-accent-primary/10",
-              // Layer 2 — accent text + medium weight
+              // Layer 1 — stronger accent fill (15%, was 10%) so the active item reads
+              "bg-accent-primary/15 dark:bg-accent-primary/20",
+              // Layer 2 — inset accent ring anchors the item (replaces the prior invisible 6% overlay)
+              "shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
+              // Layer 3 — accent text + medium weight
               "font-medium text-accent-primary",
-              // Subtle glass overlay on active
-              "dark:bg-surface-raised/6",
             ],
             // ── Inactive ──
             !active && ["text-text-secondary", "hover:bg-surface-raised hover:text-text-primary"],
@@ -279,12 +315,7 @@ function NavItem({
               aria-hidden
             >
               {item.id === "downloading" && (
-                <span
-                  className="nav-dot-pulse absolute inset-0 rounded-full bg-accent-primary"
-                  style={{
-                    animation: "nav-dot-pulse 2s ease-in-out infinite",
-                  }}
-                />
+                <span className="nav-dot-pulse absolute inset-0 rounded-full bg-accent-primary" />
               )}
             </span>
           )}
@@ -297,4 +328,9 @@ function NavItem({
       </TooltipContent>
     </Tooltip>
   );
+
+  // Filter nav items get a local context menu with "Show only this category";
+  // settings/about fall through to the outer <nav> context menu.
+  if (!contextMenuItems) return button;
+  return <RegionContextMenu items={contextMenuItems}>{button}</RegionContextMenu>;
 }

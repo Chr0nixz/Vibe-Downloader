@@ -14,6 +14,9 @@ interface TaskUIStore {
   sortDirection: TaskSortDirection;
   filters: TaskFilters;
   detailOpen: boolean;
+  /** Tasks hidden from the list while a soft-delete undo toast is active.
+   * Cleared on commit (hard delete) or undo (restore). */
+  pendingDeleteIds: string[];
   selectTask: (id: string | null) => void;
   toggleTaskSelected: (id: string) => void;
   setTaskSelected: (id: string, selected: boolean) => void;
@@ -25,6 +28,10 @@ interface TaskUIStore {
   setSort: (key: TaskSortKey, direction?: TaskSortDirection) => void;
   setFilters: (filters: Partial<TaskFilters>) => void;
   setDetailOpen: (open: boolean) => void;
+  addPendingDelete: (id: string) => void;
+  addPendingDeletes: (ids: string[]) => void;
+  removePendingDelete: (id: string) => void;
+  clearPendingDeletes: () => void;
 }
 
 /* ── Store ── */
@@ -44,6 +51,7 @@ export const useTaskUIStore = create<TaskUIStore>((set) => ({
     resume: "all",
   },
   detailOpen: false,
+  pendingDeleteIds: [],
 
   selectTask: (id) => set({ selectedId: id, selectionAnchorId: id }),
 
@@ -80,4 +88,29 @@ export const useTaskUIStore = create<TaskUIStore>((set) => ({
   setFilters: (filters) => set((state) => ({ filters: { ...state.filters, ...filters } })),
 
   setDetailOpen: (open) => set({ detailOpen: open }),
+
+  addPendingDelete: (id) =>
+    set((state) =>
+      state.pendingDeleteIds.includes(id) ? state : { pendingDeleteIds: [...state.pendingDeleteIds, id] },
+    ),
+
+  addPendingDeletes: (ids) =>
+    set((state) => {
+      const existing = new Set(state.pendingDeleteIds);
+      const next = [...state.pendingDeleteIds];
+      for (const id of ids) {
+        if (!existing.has(id)) {
+          next.push(id);
+          existing.add(id);
+        }
+      }
+      return next.length === state.pendingDeleteIds.length ? state : { pendingDeleteIds: next };
+    }),
+
+  removePendingDelete: (id) =>
+    set((state) => ({
+      pendingDeleteIds: state.pendingDeleteIds.filter((taskId) => taskId !== id),
+    })),
+
+  clearPendingDeletes: () => set({ pendingDeleteIds: [] }),
 }));

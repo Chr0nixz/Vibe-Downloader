@@ -195,6 +195,7 @@ pub(super) async fn handle_segment_message(
                     pool,
                     task_id,
                     TaskStatus::Retrying,
+                    None,
                     0,
                     connection_count,
                     Some("Network fluctuation, retrying"),

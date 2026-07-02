@@ -98,6 +98,30 @@ pub fn normalize_sha256(value: Option<&str>) -> Result<Option<String>, String> {
     Ok(Some(normalized))
 }
 
+/// F-5: Normalize an expected hash digest for any supported algorithm.
+/// Validates hex length per algorithm: MD5=32, SHA-1=40, SHA-256=64, SHA-512=128.
+/// Returns lowercase hex digest. Empty/whitespace input returns Ok(None).
+pub fn normalize_expected_hash(
+    value: Option<&str>,
+    algorithm: crate::models::ChecksumAlgorithm,
+) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let normalized = value.to_ascii_lowercase();
+    let expected_len = match algorithm {
+        crate::models::ChecksumAlgorithm::Md5 => 32,
+        crate::models::ChecksumAlgorithm::Sha1 => 40,
+        crate::models::ChecksumAlgorithm::Sha256 => 64,
+        crate::models::ChecksumAlgorithm::Sha512 => 128,
+    };
+    let label = algorithm.as_str().to_ascii_uppercase();
+    if normalized.len() != expected_len || !normalized.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(format!("{label} must be {expected_len} hexadecimal characters."));
+    }
+    Ok(Some(normalized))
+}
+
 pub fn unique_final_path(save_dir: &Path, requested_file_name: &str) -> PathBuf {
     let sanitized = sanitize_file_name(requested_file_name);
     let candidate = save_dir.join(&sanitized);
@@ -169,5 +193,72 @@ fn sanitize_file_name(value: &str) -> String {
         format!("download-{}", chrono::Utc::now().timestamp())
     } else {
         trimmed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ChecksumAlgorithm;
+
+    #[test]
+    fn normalize_expected_hash_accepts_valid_digest_per_algorithm() {
+        let md5 = "d41d8cd98f00b204e9800998ecf8427e";
+        let sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        let sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let sha512 = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
+
+        assert_eq!(
+            normalize_expected_hash(Some(md5), ChecksumAlgorithm::Md5).unwrap(),
+            Some(md5.to_string())
+        );
+        assert_eq!(
+            normalize_expected_hash(Some(sha1), ChecksumAlgorithm::Sha1).unwrap(),
+            Some(sha1.to_string())
+        );
+        assert_eq!(
+            normalize_expected_hash(Some(sha256), ChecksumAlgorithm::Sha256).unwrap(),
+            Some(sha256.to_string())
+        );
+        assert_eq!(
+            normalize_expected_hash(Some(sha512), ChecksumAlgorithm::Sha512).unwrap(),
+            Some(sha512.to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_expected_hash_lowercases_and_trims() {
+        let upper = "D41D8CD98F00B204E9800998ECF8427E";
+        let expected = "d41d8cd98f00b204e9800998ecf8427e";
+        assert_eq!(
+            normalize_expected_hash(Some(&format!("  {upper}  ")), ChecksumAlgorithm::Md5).unwrap(),
+            Some(expected.to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_expected_hash_rejects_wrong_length() {
+        // MD5 digest passed as SHA-256 → length mismatch.
+        let md5 = "d41d8cd98f00b204e9800998ecf8427e";
+        assert!(normalize_expected_hash(Some(md5), ChecksumAlgorithm::Sha256).is_err());
+    }
+
+    #[test]
+    fn normalize_expected_hash_rejects_non_hex() {
+        // Right length but contains non-hex chars.
+        let bad = "z".repeat(64);
+        assert!(normalize_expected_hash(Some(&bad), ChecksumAlgorithm::Sha256).is_err());
+    }
+
+    #[test]
+    fn normalize_expected_hash_none_for_empty_input() {
+        assert_eq!(
+            normalize_expected_hash(None, ChecksumAlgorithm::Sha256).unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_expected_hash(Some("   "), ChecksumAlgorithm::Sha256).unwrap(),
+            None
+        );
     }
 }

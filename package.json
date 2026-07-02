@@ -22,6 +22,8 @@
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "check:bindings": "pnpm specta && git diff --exit-code src/generated/bindings.ts",
     "build:extensions": "node scripts/build-browser-extensions.mjs",
+    "verify:manifest": "node scripts/verify-extension-manifest.mjs",
+    "verify:extensions": "pnpm build:extensions && pnpm verify:manifest",
     "sync-version": "node scripts/sync-version.mjs",
     "tauri": "tauri",
     "dev:tauri": "cross-env RUST_LOG=vibe_downloader=debug,tauri=warn,sqlx=debug tauri dev",
@@ -74,11 +76,6 @@
     "typescript": "~6.0.3",
     "vite": "^8.1.0",
     "vitest": "^4.1.9"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
   },
   "lint-staged": {
     "*.{ts,tsx,js,jsx,json,css,md}": "biome check --fix --no-errors-on-unmatched"

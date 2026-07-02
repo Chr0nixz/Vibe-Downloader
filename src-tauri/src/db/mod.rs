@@ -30,26 +30,28 @@ pub use self::classification_rules::{
 };
 pub use self::connection::{connect, wal_checkpoint, wal_file_size_bytes, DbConnection};
 pub use self::dash::{
-    dash_finish_requested, existing_dash_downloaded_bytes, existing_dash_segment_keys,
-    get_dash_task, list_dash_segments, request_dash_finish, reset_dash_segments_for_task,
-    update_dash_segment_status, upsert_dash_segment, upsert_dash_task, DashSegmentRecord,
-    DashSegmentUpsert, DashTaskRecord, DashTaskUpsert,
+    bulk_upsert_dash_segments, dash_finish_requested, existing_dash_downloaded_bytes,
+    existing_dash_segment_keys, get_dash_task, list_dash_segments, request_dash_finish,
+    reset_dash_segments_for_task, update_dash_segment_status, upsert_dash_segment,
+    upsert_dash_task, DashSegmentRecord, DashSegmentUpsert, DashTaskRecord, DashTaskUpsert,
 };
 pub use self::events::{
     get_latest_pause_event_type, insert_task_event, insert_task_event_in_tx, list_task_events_page,
 };
 pub use self::hash::update_hash_verification;
 pub use self::hls::{
-    get_hls_task, hls_finish_requested, list_hls_segments, request_hls_finish,
-    reset_hls_segments_for_task, update_hls_last_media_sequence, update_hls_segment_status,
-    upsert_hls_segment, upsert_hls_task, HlsSegmentRecord, HlsSegmentUpsert, HlsTaskRecord,
-    HlsTaskUpsert,
+    bulk_upsert_hls_segments, get_hls_task, hls_finish_requested, list_hls_segments,
+    request_hls_finish, reset_hls_segments_for_task, update_hls_last_media_sequence,
+    update_hls_segment_status, upsert_hls_segment, upsert_hls_task, HlsSegmentRecord,
+    HlsSegmentUpsert, HlsTaskRecord, HlsTaskUpsert,
 };
 pub use self::metalink::{
-    insert_metalink_resource, list_metalink_resources_for_file, list_metalink_resources_for_task,
-    mark_metalink_resource_completed, mark_metalink_resource_failed,
+    insert_metalink_resource, list_healthy_mirrors_for_file, list_metalink_resources_for_file,
+    list_metalink_resources_for_task, mark_metalink_resource_attempted,
+    mark_metalink_resource_completed, mark_metalink_resource_failed, mark_mirror_unsupported_range,
     promote_metalink_resource_for_retry, reset_metalink_resource_statuses,
-    upsert_metalink_task, MetalinkResourceInsert, MetalinkResourceRecord, MetalinkTaskUpsert,
+    set_metalink_mirror_cooldown, update_mirror_speed, upsert_metalink_task,
+    MetalinkResourceInsert, MetalinkResourceRecord, MetalinkTaskUpsert,
 };
 pub use self::request_diagnostics::{
     insert_request_diagnostic, list_request_diagnostics_page, prune_request_diagnostics,
@@ -74,8 +76,10 @@ pub use self::segments::{
     update_segments_status_for_task, SegmentSplit,
 };
 pub use self::settings::{
-    clipboard_monitor_enabled, delete_to_trash_enabled, get_settings, local_time_window_active,
-    normalize_accent_color, normalize_local_time, normalize_multi_connection_threshold_bytes,
+    clipboard_monitor_enabled, delete_to_trash_enabled,
+    duration_until_next_window_boundary, get_bt_upload_limit_bps_setting,
+    get_ffmpeg_path_setting, get_settings, local_time_window_active, normalize_accent_color,
+    normalize_ffmpeg_path, normalize_local_time, normalize_multi_connection_threshold_bytes,
     normalize_proxy_mode, normalize_proxy_no_proxy, normalize_proxy_optional, normalize_proxy_url,
     normalize_speed_limit_bps, parse_multi_connection_threshold_bytes, parse_speed_limit_bps,
     upsert_settings,
@@ -99,25 +103,27 @@ pub use self::task_proxy::{
     validate_task_proxy_protocol,
 };
 pub use self::task_records::{
-    find_duplicate_task_record, get_task_record, insert_task_record,
+    find_duplicate_task_record, get_task_record, get_task_record_in_tx, insert_task_record,
     insert_task_record_in_tx,
     list_browser_realtime_task_records, list_paused_schedulable_tasks, list_queued_task_records,
-    list_task_records, list_task_records_cursor, list_task_records_page, next_queue_position,
-    next_retry_after_at, task_filter_options, task_stats_snapshot, update_task_transfer_options,
-    TaskFilterOptions, TaskListPage, TaskListQuery, TaskTransferOptionsUpdate,
+    list_task_records, list_task_records_by_ids, list_task_records_cursor, list_task_records_page,
+    next_queue_position, next_retry_after_at, reorder_queued_tasks, task_filter_options,
+    task_stats_snapshot, update_task_transfer_options, TaskFilterOptions, TaskListPage,
+    TaskListQuery, TaskTransferOptionsUpdate,
 };
 pub use self::task_state::{
     checkpoint_task_progress, clear_tasks, complete_segment, complete_task,
     complete_task_segment, complete_unknown_size_task, delete_segments_for_task,
     delete_task_files_for_task, delete_task_record, delete_task_records_batch,
-    reset_interrupted_tasks, reset_task_download_state, update_task_and_segment_progress,
-    update_task_final_path, update_task_health_summary, update_task_progress,
-    update_task_retry_after, update_task_runtime_progress, update_task_save_target,
-    update_task_status, update_task_status_in_tx, TaskProgressCheckpoint,
+    mark_task_failed_if_active, reset_interrupted_tasks, reset_task_download_state,
+    update_task_and_segment_progress, update_task_final_path, update_task_health_summary,
+    update_task_progress, update_task_retry_after, update_task_runtime_progress,
+    update_task_save_target, update_task_status, update_task_status_in_tx,
+    TaskProgressCheckpoint,
 };
 pub use self::torrent::{
-    get_torrent_runtime_snapshot, torrent_seeding_enabled, update_task_remote_metadata,
-    update_task_torrent_metadata, update_torrent_seeding,
+    get_torrent_runtime_snapshot, torrent_seeding_enabled, torrent_seed_ratio_limit,
+    update_task_remote_metadata, update_task_torrent_metadata, update_torrent_seeding,
     upsert_torrent_runtime_snapshot, upsert_torrent_task, TaskRemoteMetadataUpdate,
     TaskTorrentMetadataUpdate, TorrentRuntimeSnapshotUpsert, TorrentTaskUpsert,
 };

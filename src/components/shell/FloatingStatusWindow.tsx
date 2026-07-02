@@ -257,14 +257,16 @@ export function FloatingStatusWindow() {
 
         {/* Vertical progress track */}
         <div className="relative h-[calc(100%-8px)] w-2.5 overflow-hidden rounded-full">
-          <div className="absolute inset-0 rounded-full bg-border-subtle/40" />
+          <div className="absolute inset-0 rounded-full bg-surface-track" />
           {!idle && percent > 0 && (
             <div
               className="absolute bottom-0 left-0 w-full rounded-full transition-[height] duration-500 ease-out"
               style={{
                 height: `${percent}%`,
-                background: "var(--accent-primary)",
-                boxShadow: "0 0 10px color-mix(in oklch, var(--accent-primary) 60%, transparent)",
+                // Three-hue accent gradient — the product's visual signature.
+                // energy (cool) at the base → primary mid → peak (warm) at top.
+                background: "var(--accent-gradient-vertical)",
+                boxShadow: "0 0 10px color-mix(in oklch, var(--accent-primary) 55%, transparent)",
               }}
             />
           )}
@@ -305,6 +307,16 @@ export function FloatingStatusWindow() {
                 <feMergeNode in="SourceGraphic" />
               </feMerge>
             </filter>
+            {/* Three-hue accent gradient for the ring stroke.
+                Vertical in object space: peak (warm) at top → primary mid → energy (cool) at bottom.
+                The -rotate-90 on the svg maps this to a left→right sweep on screen,
+                so the ring hue rotates as progress fills — same energy→primary→peak
+                semantic as the docked bar fill. */}
+            <linearGradient id="ring-stroke-gradient" gradientUnits="objectBoundingBox" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="var(--accent-peak)" />
+              <stop offset="50%" stopColor="var(--accent-primary)" />
+              <stop offset="100%" stopColor="var(--accent-energy)" />
+            </linearGradient>
           </defs>
           <circle
             cx="32"
@@ -312,7 +324,7 @@ export function FloatingStatusWindow() {
             r={RING_R}
             fill="none"
             strokeWidth="2.5"
-            className="stroke-border-subtle opacity-25"
+            className="stroke-surface-track opacity-60"
           />
           {!idle && percent > 0 && (
             <>
@@ -325,7 +337,7 @@ export function FloatingStatusWindow() {
                 strokeLinecap="round"
                 strokeDasharray={RING_C}
                 strokeDashoffset={dashoffset}
-                stroke="var(--accent-primary)"
+                stroke="url(#ring-stroke-gradient)"
                 className="transition-[stroke-dashoffset] duration-500 ease-out"
               />
               <circle

@@ -262,6 +262,20 @@ pub async fn get_task(state: State<'_, AppState>, id: String) -> Result<Option<T
     ))
 }
 
+/// E-1: Fetch multiple tasks by ID in a single query. Used by the frontend's
+/// `onQueueChanged` handler to upsert only the changed tasks instead of
+/// re-querying the entire first page when the backend emits
+/// `QueueChangedPayload { changed_task_ids: Some(ids) }`.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_tasks_by_ids(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<Task>, String> {
+    let records = db::list_task_records_by_ids(&state.pool, &ids).await?;
+    tasks_from_records_with_files(&state.pool, records).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn get_task_stats(state: State<'_, AppState>) -> Result<TaskStatsSnapshot, String> {

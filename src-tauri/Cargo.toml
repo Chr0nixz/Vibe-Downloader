@@ -44,6 +44,7 @@ tauri-plugin-fs = "2"
 tauri-plugin-clipboard-manager = "2.3.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
+shlex = "1"
 tracing-appender = "0.2"
 log = "0.4"
 tauri-plugin-log = "2"
@@ -60,7 +61,6 @@ base64 = "0.22.1"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 keyring = "4"
 librqbit = { version = "9.0.0-rc.0", default-features = false, features = ["rust-tls"] }
-magnet-url = "3.0.0"
 quick-xml = "0.40.1"
 russh = "0.61.2"
 russh-sftp = "2.3.0"
@@ -68,8 +68,12 @@ trash = "5.2.6"
 hickory-resolver = { version = "0.26.1", features = ["tokio"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 thiserror = "2"
+fs4 = "1"
+tokio-socks = "0.5"
 
 [dev-dependencies]
+serial_test = "3"
+rand = "0.10"
 
 [profile.release]
 # Optimize for smaller binaries and better runtime throughput on a desktop

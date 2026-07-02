@@ -307,18 +307,27 @@ pub async fn update_task_and_segment_progress(
 /// return the updated TaskRecord in the same round trip, eliminating the need
 /// for a follow-up get_task_record SELECT. Callers that need to combine this
 /// with other writes (e.g. insert_task_event_in_tx) can pass the same tx.
+///
+/// **R-1**: `expected_current_status` enables conditional updates. When
+/// `Some(s)`, the WHERE clause adds `AND status = ?` so the update only
+/// matches if the current DB status is still `s`. If the condition does not
+/// match (another path changed the status concurrently), returns `Ok(None)`.
+/// When `None`, behaves as an unconditional update (backward compatible).
+#[allow(clippy::too_many_arguments)]
 pub async fn update_task_status_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     task_id: &str,
     status: TaskStatus,
+    expected_current_status: Option<TaskStatus>,
     speed_bps: i64,
     connection_count: i32,
     health_summary: Option<&str>,
     error_message: Option<&str>,
-) -> Result<TaskRecord, String> {
+) -> Result<Option<TaskRecord>, String> {
     let updated_at = crate::models::task::now_iso();
     let (error_code, recovery_actions) = error_state_from_message(error_message);
     let recovery_actions = recovery_actions_json(&recovery_actions)?;
+    let expected_status_str = expected_current_status.map(|s| s.as_str());
 
     let row = sqlx::query(
         r#"
@@ -327,7 +336,7 @@ pub async fn update_task_status_in_tx(
             health_summary = ?, error_message = ?, error_code = ?, recovery_actions = ?,
             retry_after_at = CASE WHEN ? IS NULL THEN NULL ELSE retry_after_at END,
             updated_at = ?
-        WHERE id = ?
+        WHERE id = ? AND (? IS NULL OR status = ?)
         RETURNING *
         "#,
     )
@@ -341,9 +350,15 @@ pub async fn update_task_status_in_tx(
     .bind(error_message)
     .bind(&updated_at)
     .bind(task_id)
-    .fetch_one(&mut **tx)
+    .bind(expected_status_str)
+    .bind(expected_status_str)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
 
     let record = row_to_task(&row)?;
 
@@ -360,20 +375,22 @@ pub async fn update_task_status_in_tx(
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(record)
+    Ok(Some(record))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_task_status(
     pool: &SqlitePool,
     task_id: &str,
     status: TaskStatus,
+    expected_current_status: Option<TaskStatus>,
     speed_bps: i64,
     connection_count: i32,
     health_summary: Option<&str>,
     error_message: Option<&str>,
-) -> Result<TaskRecord, String> {
+) -> Result<Option<TaskRecord>, String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    let record = update_task_status_in_tx(&mut tx, task_id, status, speed_bps, connection_count, health_summary, error_message).await?;
+    let record = update_task_status_in_tx(&mut tx, task_id, status, expected_current_status, speed_bps, connection_count, health_summary, error_message).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(record)
 }
@@ -555,14 +572,17 @@ pub async fn complete_task(pool: &SqlitePool, task_id: &str) -> Result<(), Strin
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let updated_at = crate::models::task::now_iso();
 
-    sqlx::query(
+    // R-2.4: Conditional UPDATE — only complete if still Downloading.
+    // If the user paused/canceled/deleted while the worker was finishing,
+    // rows_affected == 0 and we roll back without overwriting their state.
+    let result = sqlx::query(
         r#"
         UPDATE tasks
         SET status = 'completed', downloaded_bytes = total_size, speed_bps = 0,
             connection_count = 0, health_summary = 'Completed',
             error_message = NULL, error_code = NULL, recovery_actions = NULL,
             retry_after_at = NULL, updated_at = ?
-        WHERE id = ?
+        WHERE id = ? AND status = 'downloading'
         "#,
     )
     .bind(&updated_at)
@@ -570,6 +590,11 @@ pub async fn complete_task(pool: &SqlitePool, task_id: &str) -> Result<(), Strin
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    if result.rows_affected() == 0 {
+        tx.rollback().await.ok();
+        return Ok(());
+    }
 
     sqlx::query(
         r#"
@@ -597,14 +622,15 @@ pub async fn complete_task_segment(
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let updated_at = crate::models::task::now_iso();
 
-    sqlx::query(
+    // R-2.4: Conditional UPDATE — only complete if still Downloading.
+    let result = sqlx::query(
         r#"
         UPDATE tasks
         SET status = 'completed', downloaded_bytes = total_size, speed_bps = 0,
             connection_count = 0, health_summary = 'Completed',
             error_message = NULL, error_code = NULL, recovery_actions = NULL,
             retry_after_at = NULL, updated_at = ?
-        WHERE id = ?
+        WHERE id = ? AND status = 'downloading'
         "#,
     )
     .bind(&updated_at)
@@ -612,6 +638,11 @@ pub async fn complete_task_segment(
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    if result.rows_affected() == 0 {
+        tx.rollback().await.ok();
+        return Ok(());
+    }
 
     sqlx::query(
         r#"
@@ -658,14 +689,15 @@ pub async fn complete_unknown_size_task(
     let updated_at = crate::models::task::now_iso();
     let final_size = downloaded_bytes.max(0);
 
-    sqlx::query(
+    // R-2.4: Conditional UPDATE — only complete if still Downloading.
+    let result = sqlx::query(
         r#"
         UPDATE tasks
         SET status = 'completed', total_size = ?, downloaded_bytes = ?, speed_bps = 0,
             connection_count = 0, health_summary = 'Completed',
             error_message = NULL, error_code = NULL, recovery_actions = NULL,
             retry_after_at = NULL, updated_at = ?
-        WHERE id = ?
+        WHERE id = ? AND status = 'downloading'
         "#,
     )
     .bind(final_size)
@@ -675,6 +707,11 @@ pub async fn complete_unknown_size_task(
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    if result.rows_affected() == 0 {
+        tx.rollback().await.ok();
+        return Ok(());
+    }
 
     sqlx::query(
         r#"
@@ -709,6 +746,47 @@ pub async fn complete_unknown_size_task(
 
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// R-2.4: Only marks the task as failed if it is currently in an active state
+/// (`Downloading` or `Retrying`). Returns `true` if the row was updated,
+/// `false` if the state had already changed (e.g. user paused/canceled) and
+/// the failure was intentionally skipped to avoid overwriting their action.
+///
+/// `status` should be `TaskStatus::Failed` (worker error),
+/// `TaskStatus::Canceled` (runtime cancellation), or
+/// `TaskStatus::NeedsAttention` (recoverable error requiring user action).
+pub async fn mark_task_failed_if_active(
+    pool: &SqlitePool,
+    task_id: &str,
+    status: TaskStatus,
+    health_summary: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<bool, String> {
+    let updated_at = crate::models::task::now_iso();
+    let (error_code, recovery_actions) = error_state_from_message(error_message);
+    let recovery_actions = recovery_actions_json(&recovery_actions)?;
+
+    let result = sqlx::query(
+        r#"
+        UPDATE tasks
+        SET status = ?, speed_bps = 0, connection_count = 0,
+            health_summary = ?, error_message = ?, error_code = ?, recovery_actions = ?,
+            retry_after_at = NULL, updated_at = ?
+        WHERE id = ? AND status IN ('downloading', 'retrying')
+        "#,
+    )
+    .bind(status.as_str())
+    .bind(health_summary)
+    .bind(error_message)
+    .bind(error_code)
+    .bind(recovery_actions)
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Bundles the task-header progress fields written by `checkpoint_task_progress`.

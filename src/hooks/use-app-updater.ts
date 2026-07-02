@@ -1,59 +1,40 @@
-import { relaunch } from "@tauri-apps/plugin-process";
-import { check } from "@tauri-apps/plugin-updater";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect } from "react";
 
-import { createLogger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
+import { useSettingsStore } from "@/stores/settings-store";
+import { useUpdaterStore } from "@/stores/updater-store";
 
-const log = createLogger("updater");
-
-const UPDATE_CHECK_DELAY_MS = 3000;
-
+/**
+ * Thin React wrapper around the shared updater Zustand store. Both the
+ * StatusBar badge and the Settings "About & Updates" section use this so they
+ * observe the same update state. The first mount initializes version reading
+ * and schedules the auto-check (when enabled); subsequent mounts are no-ops.
+ */
 export function useAppUpdater() {
-  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
-  const [installing, setInstalling] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const store = useUpdaterStore();
+  const settings = useSettingsStore((s) => s.settings);
+  const autoCheckEnabled = settings?.autoUpdateCheckEnabled ?? true;
 
   useEffect(() => {
-    if (!isTauriRuntime() || import.meta.env.DEV) return;
+    store.init(autoCheckEnabled);
+  }, [store, autoCheckEnabled]);
 
-    const timer = window.setTimeout(async () => {
-      try {
-        const update = await check();
-        if (update) {
-          setUpdateVersion(update.version);
-        }
-      } catch (err) {
-        log.warn("update check failed", err);
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    }, UPDATE_CHECK_DELAY_MS);
+  const installing = store.status === "downloading" || store.status === "installing";
+  const checking = store.status === "checking";
 
-    return () => window.clearTimeout(timer);
-  }, []);
-
-  const installUpdate = useCallback(async () => {
-    if (!isTauriRuntime() || import.meta.env.DEV) return;
-
-    setInstalling(true);
-    setError(null);
-
-    try {
-      const update = await check();
-      if (!update) {
-        setUpdateVersion(null);
-        setInstalling(false);
-        return;
-      }
-
-      await update.downloadAndInstall();
-      await relaunch();
-    } catch (err) {
-      log.error("update install failed", err);
-      setError(err instanceof Error ? err.message : String(err));
-      setInstalling(false);
-    }
-  }, []);
-
-  return { updateVersion, installing, error, installUpdate };
+  return {
+    currentVersion: store.currentVersion,
+    updateVersion: store.updateVersion,
+    releaseNotes: store.releaseNotes,
+    updateDate: store.updateDate,
+    status: store.status,
+    progress: store.progress,
+    error: store.error,
+    checking,
+    installing,
+    isTauri: isTauriRuntime(),
+    checkForUpdate: store.checkForUpdate,
+    installUpdate: store.installUpdate,
+    dismissUpdate: store.dismissUpdate,
+  };
 }

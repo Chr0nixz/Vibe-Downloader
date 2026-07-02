@@ -10,6 +10,7 @@
   --color-surface-root: var(--surface-root);
   --color-surface-base: var(--surface-base);
   --color-surface-raised: var(--surface-raised);
+  --color-surface-track: var(--surface-track);
   --color-surface-overlay: var(--surface-overlay);
   --color-surface-scrim: var(--surface-scrim);
   --color-surface-hover: var(--surface-hover);
@@ -40,6 +41,10 @@
   --color-status-success: var(--status-success);
   --color-status-warning: var(--status-warning);
   --color-status-danger: var(--status-danger);
+  --shadow-raised: var(--shadow-raised);
+  --shadow-popover: var(--shadow-popover);
+  --shadow-overlay: var(--shadow-overlay);
+  --shadow-toast: var(--shadow-toast);
   --duration-ui: var(--motion-ui);
   --ease-ui: ease-out;
   --font-sans: var(--vibe-font-sans);
@@ -81,14 +86,20 @@
     cursor: pointer;
   }
 
+  /* Light-mode radix surfaces use the layered brand-tinted shadow scale. */
+  [data-radix-popper-content-wrapper] > *,
+  [data-radix-dialog-content],
+  [data-radix-select-content],
+  [data-radix-popover-content] {
+    box-shadow: var(--shadow-popover);
+  }
+
+  /* Dark-mode radix surfaces inherit the same scale; dark tokens carry deeper drops. */
   .dark [data-radix-popper-content-wrapper] > *,
   .dark [data-radix-dialog-content],
   .dark [data-radix-select-content],
   .dark [data-radix-popover-content] {
-    box-shadow:
-      0 4px 6px -1px oklch(0 0 0 / 0.4),
-      0 2px 4px -2px oklch(0 0 0 / 0.35),
-      0 0 0 1px oklch(0.33 0.012 255 / 0.5);
+    box-shadow: var(--shadow-popover);
   }
 }
 
@@ -180,20 +191,76 @@
 
   .nav-dot-pulse {
     animation: none;
+    background-color: var(--accent-primary);
+  }
+
+  .skeleton-shimmer {
+    animation: none;
+    background-image: none;
+  }
+
+  .toast-countdown-bar {
+    animation: none;
+    transition: none;
   }
 }
 
 /* ── Sidebar navigation ── */
 
+/* Nav dot: opacity+scale breath, plus a slow hue cycle between
+   accent-primary (rest) and accent-energy (active download).
+   The hue shift is the "vivid" cue — same 3-hue system, deployed subtly. */
 @keyframes nav-dot-pulse {
   0%,
   100% {
-    opacity: 0.5;
+    opacity: 0.55;
     transform: scale(0.85);
+    background-color: var(--accent-primary);
   }
   50% {
     opacity: 1;
     transform: scale(1);
+    background-color: var(--accent-energy);
+  }
+}
+
+/* ── Skeleton shimmer ──
+   Replaces generic animate-pulse. A soft highlight sweeps left→right
+   across each skeleton row, staggered per-row via inline animation-delay.
+   Reduced-motion falls back to a static pulse. */
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: -150% 0;
+  }
+  100% {
+    background-position: 250% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklch, var(--text-primary) 6%, transparent) 45%,
+    color-mix(in oklch, var(--text-primary) 9%, transparent) 50%,
+    color-mix(in oklch, var(--text-primary) 6%, transparent) 55%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+
+/* ── Toast countdown bar ──
+   A 1px progress indicator at the toast bottom edge.
+   Width is driven by an inline CSS var --toast-progress (1 → 0).
+   Paused state (hover/focus) freezes the transition. */
+@keyframes toast-countdown {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
   }
 }
 
@@ -327,5 +394,68 @@
   to {
     opacity: 1;
     transform: translateX(0);
+  }
+}
+
+/* ── Checkbox primitive ──
+   Native <input type="checkbox"> styled with appearance:none + a ::after
+   pseudo-element that paints the check glyph. accent-color stays set on the
+   element so forced-colors / user stylesheets that bypass appearance still
+   render with the brand accent. */
+.ui-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  position: relative;
+  display: inline-block;
+  flex: none;
+}
+
+.ui-checkbox::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-color: var(--text-on-accent);
+  /* Check glyph: a single SVG polyline so the mask is crisp at any DPR. */
+  -webkit-mask:
+    url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E")
+    center / 78% no-repeat;
+  mask:
+    url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E")
+    center / 78% no-repeat;
+  opacity: 0;
+  transition: opacity 80ms ease-out;
+}
+
+.ui-checkbox:checked::after,
+.ui-checkbox:indeterminate::after {
+  opacity: 1;
+}
+
+/* Box fill for the indeterminate state — explicit so we don't depend on the
+   Tailwind `indeterminate:` variant being available. */
+.ui-checkbox:indeterminate {
+  border-color: var(--accent-primary);
+  background-color: var(--accent-primary);
+}
+
+/* Indeterminate renders a dash instead of the check. */
+.ui-checkbox:indeterminate::after {
+  -webkit-mask:
+    url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3.5' stroke-linecap='round'%3E%3Cline x1='5' y1='12' x2='19' y2='12'/%3E%3C/svg%3E")
+    center / 78% no-repeat;
+  mask:
+    url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3.5' stroke-linecap='round'%3E%3Cline x1='5' y1='12' x2='19' y2='12'/%3E%3C/svg%3E")
+    center / 78% no-repeat;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-checkbox::after {
+    transition: none;
+  }
+
+  .ui-switch,
+  .ui-switch > span {
+    transition: none;
   }
 }

@@ -1,14 +1,18 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { ChevronDown, X } from "lucide-react";
-import { Component, type ErrorInfo, type ReactNode, useEffect, useRef, useState } from "react";
+import { ChevronDown, Clipboard, ClipboardCopy, Hash, RefreshCw, X } from "lucide-react";
+import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { MenuItem, MenuSeparator, RegionContextMenu } from "@/components/ui/menu-item";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type {
   ChecksumAlgorithm,
   HashVerificationState,
@@ -63,26 +67,88 @@ interface TaskDetailsProps {
 
 export function TaskDetails({ task, open, onClose, onResolveAttention }: TaskDetailsProps) {
   const compact = useIsCompactShell();
+  const [refreshTick, setRefreshTick] = useState(0);
+  const onRefresh = useCallback(() => setRefreshTick((prev) => prev + 1), []);
+  const { t } = useTranslation();
+  const addToast = useToastStore((s) => s.addToast);
+
+  const copyToClipboard = useCallback(
+    async (text: string, successKey: string) => {
+      try {
+        await navigator.clipboard?.writeText(text);
+        addToast({ tone: "success", title: t(successKey) });
+      } catch {
+        addToast({ tone: "error", title: t("contextmenu.task.copyFailed") });
+      }
+    },
+    [addToast, t],
+  );
 
   if (!open || !task) return null;
 
   if (compact) {
-    return <TaskDetailsDrawer task={task} open={open} onClose={onClose} onResolveAttention={onResolveAttention} />;
+    return (
+      <TaskDetailsDrawer
+        task={task}
+        open={open}
+        onClose={onClose}
+        onResolveAttention={onResolveAttention}
+        refreshTick={refreshTick}
+        onRefresh={onRefresh}
+      />
+    );
   }
 
-  return (
-    <aside
-      className={cn(
-        "flex w-80 shrink-0 flex-col border-l border-border-subtle bg-surface-base xl:w-96",
-        "motion-safe:animate-[detail-enter_220ms_cubic-bezier(0.16,1,0.3,1)_both]",
+  const items = (
+    <>
+      <MenuItem
+        icon={Hash}
+        label={t("contextmenu.task.copyId")}
+        onSelect={() => void copyToClipboard(task.id, "contextmenu.task.idCopied")}
+      />
+      <MenuItem
+        icon={ClipboardCopy}
+        label={t("contextmenu.task.copyUrl")}
+        onSelect={() => void copyToClipboard(task.url, "contextmenu.task.urlCopied")}
+      />
+      <MenuItem
+        icon={Clipboard}
+        label={t("contextmenu.task.copyLocalPath")}
+        onSelect={() =>
+          void copyToClipboard(task.finalPath ?? `${task.saveDir}/${task.fileName}`, "contextmenu.task.pathCopied")
+        }
+      />
+      <MenuSeparator />
+      <MenuItem icon={RefreshCw} label={t("taskDetails.refresh")} onSelect={onRefresh} />
+      {onClose && (
+        <>
+          <MenuSeparator />
+          <MenuItem icon={X} label={t("taskDetails.close")} onSelect={onClose} />
+        </>
       )}
-      aria-labelledby="task-details-heading"
-    >
-      <TaskDetailsHeader task={task} />
-      <TaskDetailsErrorBoundary taskId={task.id} onClose={onClose}>
-        <TaskDetailsPanel task={task} onResolveAttention={onResolveAttention} />
-      </TaskDetailsErrorBoundary>
-    </aside>
+    </>
+  );
+
+  return (
+    <RegionContextMenu items={items}>
+      <aside
+        className={cn(
+          "flex w-80 shrink-0 flex-col border-l border-border-subtle bg-surface-base xl:w-96",
+          "motion-safe:animate-[detail-enter_220ms_cubic-bezier(0.16,1,0.3,1)_both]",
+        )}
+        aria-labelledby="task-details-heading"
+      >
+        <TaskDetailsHeader task={task} />
+        <TaskDetailsErrorBoundary taskId={task.id} onClose={onClose}>
+          <TaskDetailsPanel
+            task={task}
+            onResolveAttention={onResolveAttention}
+            refreshTick={refreshTick}
+            onRefresh={onRefresh}
+          />
+        </TaskDetailsErrorBoundary>
+      </aside>
+    </RegionContextMenu>
   );
 }
 
@@ -149,11 +215,15 @@ function TaskDetailsDrawer({
   open,
   onClose,
   onResolveAttention,
+  refreshTick,
+  onRefresh,
 }: {
   task: Task;
   open: boolean;
   onClose?: () => void;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
+  refreshTick: number;
+  onRefresh: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -200,7 +270,12 @@ function TaskDetailsDrawer({
             {t("taskDetails.drawerDescription", { name: task.fileName })}
           </Dialog.Description>
           <TaskDetailsErrorBoundary taskId={task.id} onClose={onClose}>
-            <TaskDetailsPanel task={task} onResolveAttention={onResolveAttention} />
+            <TaskDetailsPanel
+              task={task}
+              onResolveAttention={onResolveAttention}
+              refreshTick={refreshTick}
+              onRefresh={onRefresh}
+            />
           </TaskDetailsErrorBoundary>
         </Dialog.Content>
       </Dialog.Portal>
@@ -224,13 +299,18 @@ function TaskDetailsHeader({ task }: { task: Task }) {
 function TaskDetailsPanel({
   task,
   onResolveAttention,
+  refreshTick,
+  onRefresh,
 }: {
   task: Task;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
+  refreshTick: number;
+  onRefresh: () => void;
 }) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("overview");
-  const [diagSubTab, setDiagSubTab] = useState<"chunks" | "connections" | "requests">("chunks");
+  const [diagSubTab, setDiagSubTab] = useState<"segments" | "requests">("segments");
+  const [segmentViewMode, setSegmentViewMode] = useState<"ranges" | "connections">("ranges");
   const [segments, setSegments] = useState<TaskSegment[]>([]);
   const [segmentsCursor, setSegmentsCursor] = useState<string | null>(null);
   const [segmentError, setSegmentError] = useState<string | null>(null);
@@ -251,8 +331,9 @@ function TaskDetailsPanel({
   const isMetalinkTask = task.protocol === "metalink";
 
   useEffect(() => {
-    setActiveTab(task.status === "failed" || task.status === "needs_attention" ? "chunks" : "overview");
-    setDiagSubTab("chunks");
+    setActiveTab(task.status === "failed" || task.status === "needs_attention" ? "diagnostics" : "overview");
+    setDiagSubTab("segments");
+    setSegmentViewMode("ranges");
     setHashState(null);
     setChecksumResults({});
     setVerifyingChecksums(new Set());
@@ -271,7 +352,6 @@ function TaskDetailsPanel({
   // instead of relying solely on polling. Uses a tick counter that polling effects
   // depend on, so they re-run immediately when an event arrives.
   // Debounced 300ms to avoid flooding when many progress events arrive in quick succession.
-  const [refreshTick, setRefreshTick] = useState(0);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -282,7 +362,7 @@ function TaskDetailsPanel({
       if (updatedTask.id === task.id) {
         if (refreshTimer.current) clearTimeout(refreshTimer.current);
         refreshTimer.current = setTimeout(() => {
-          setRefreshTick((prev) => prev + 1);
+          onRefresh();
         }, 300);
       }
     }).then((fn) => {
@@ -301,7 +381,7 @@ function TaskDetailsPanel({
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
 
-    if (activeTab !== "chunks") {
+    if (activeTab !== "diagnostics") {
       setSegments([]);
       setSegmentError(null);
       return;
@@ -352,7 +432,7 @@ function TaskDetailsPanel({
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
 
-    if (activeTab !== "chunks" || diagSubTab !== "requests") {
+    if (activeTab !== "diagnostics" || diagSubTab !== "requests") {
       setRequests([]);
       setRequestsError(null);
       return;
@@ -589,14 +669,14 @@ function TaskDetailsPanel({
     <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col px-4 py-3">
       <TabsList className="w-full justify-start overflow-x-auto">
         <TabsTrigger value="overview">{t("taskDetails.overview")}</TabsTrigger>
-        <TabsTrigger value="chunks">{t("taskDetails.chunks")}</TabsTrigger>
+        <TabsTrigger value="diagnostics">{t("taskDetails.diagnostics")}</TabsTrigger>
         <TabsTrigger value="logs">{t("taskDetails.logs")}</TabsTrigger>
       </TabsList>
 
-      <TabsContent value="chunks" className="flex min-h-0 flex-1 flex-col">
-        <Tabs value={diagSubTab} onValueChange={(v) => setDiagSubTab(v as "chunks" | "connections" | "requests")}>
+      <TabsContent value="diagnostics" className="flex min-h-0 flex-1 flex-col">
+        <Tabs value={diagSubTab} onValueChange={(v) => setDiagSubTab(v as "segments" | "requests")}>
           <TabsList aria-label={t("taskDetails.diagnostics")} className="mb-2 flex h-auto gap-1 bg-transparent p-0">
-            {(["chunks", "connections", "requests"] as const).map((key) => (
+            {(["segments", "requests"] as const).map((key) => (
               <TabsTrigger
                 key={key}
                 value={key}
@@ -612,33 +692,41 @@ function TaskDetailsPanel({
           </TabsList>
 
           <ScrollArea className="min-h-0 flex-1">
-            <TabsContent value="chunks" id="panel-chunks">
-              <ChunkList
-                segments={segments}
-                error={segmentError}
-                emptyLabel={t("taskDetails.noChunks")}
-                rangeLabel={t("taskDetails.chunkRange")}
-                progressLabel={t("taskDetails.chunkProgress")}
-                retryLabel={t("taskDetails.chunkRetries")}
-                hasMore={Boolean(segmentsCursor)}
-                loadMoreLabel={t("taskDetails.loadMore")}
-                onLoadMore={() => void loadMoreSegments()}
+            <TabsContent value="segments" id="panel-segments">
+              <SegmentViewToggle
+                value={segmentViewMode}
+                onChange={(mode) => setSegmentViewMode(mode)}
+                rangesLabel={t("taskDetails.segmentViewRanges")}
+                connectionsLabel={t("taskDetails.segmentViewConnections")}
+                ariaLabel={t("taskDetails.segmentViewAria")}
               />
-            </TabsContent>
-            <TabsContent value="connections" id="panel-connections">
-              <ConnectionList
-                segments={segments}
-                taskSpeedBps={task.speedBps}
-                error={segmentError}
-                emptyLabel={t("taskDetails.noConnections")}
-                connectionLabel={t("taskDetails.connection")}
-                rangeLabel={t("taskDetails.connectionRange")}
-                progressLabel={t("taskDetails.connectionProgress")}
-                speedLabel={t("taskDetails.connectionSpeed")}
-                hasMore={Boolean(segmentsCursor)}
-                loadMoreLabel={t("taskDetails.loadMore")}
-                onLoadMore={() => void loadMoreSegments()}
-              />
+              {segmentViewMode === "ranges" ? (
+                <ChunkList
+                  segments={segments}
+                  error={segmentError}
+                  emptyLabel={t("taskDetails.noChunks")}
+                  rangeLabel={t("taskDetails.chunkRange")}
+                  progressLabel={t("taskDetails.chunkProgress")}
+                  retryLabel={t("taskDetails.chunkRetries")}
+                  hasMore={Boolean(segmentsCursor)}
+                  loadMoreLabel={t("taskDetails.loadMore")}
+                  onLoadMore={() => void loadMoreSegments()}
+                />
+              ) : (
+                <ConnectionList
+                  segments={segments}
+                  taskSpeedBps={task.speedBps}
+                  error={segmentError}
+                  emptyLabel={t("taskDetails.noConnections")}
+                  connectionLabel={t("taskDetails.connection")}
+                  rangeLabel={t("taskDetails.connectionRange")}
+                  progressLabel={t("taskDetails.connectionProgress")}
+                  speedLabel={t("taskDetails.connectionSpeed")}
+                  hasMore={Boolean(segmentsCursor)}
+                  loadMoreLabel={t("taskDetails.loadMore")}
+                  onLoadMore={() => void loadMoreSegments()}
+                />
+              )}
             </TabsContent>
             <TabsContent value="requests" id="panel-requests">
               <RequestList
@@ -675,11 +763,6 @@ function TaskDetailsPanel({
             <Row label={t("taskDetails.speed")} value={formatSpeed(task.speedBps)} />
             <Row label={t("taskDetails.eta")} value={formatEta(task.downloadedBytes, task.totalSize, task.speedBps)} />
           </div>
-          {task.protocol === "dash" ? (
-            <div className="rounded-md border border-border-warning bg-status-warning/10 px-3 py-2 text-[11px] leading-4 text-status-warning">
-              <p>{t("taskDetails.dashLimitationsNote")}</p>
-            </div>
-          ) : null}
           {/* Status-priority panel: failed → recovery first; completed → hash first */}
           {isFailedOrAttention ? recoveryActions : null}
           {isCompleted && !isFailedOrAttention ? hashPanel : null}
@@ -711,10 +794,21 @@ function TaskDetailsPanel({
   );
 }
 
-function Row({ label, value, mono = true }: { label: string; value: string; mono?: boolean }) {
+function Row({ label, value, mono = true, hint }: { label: string; value: string; mono?: boolean; hint?: string }) {
   return (
     <div className="flex items-baseline justify-between gap-3 rounded-md bg-surface-root/50 px-3 py-2">
-      <div className="text-xs text-text-muted">{label}</div>
+      {hint ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="cursor-help rounded-sm text-xs text-text-muted underline decoration-dotted decoration-border-subtle underline-offset-2">
+              {label}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-64 text-balance">{hint}</TooltipContent>
+        </Tooltip>
+      ) : (
+        <div className="text-xs text-text-muted">{label}</div>
+      )}
       <div className={cn("text-sm font-semibold text-text-primary", mono && "font-mono tabular-nums")}>{value}</div>
     </div>
   );
@@ -1070,9 +1164,22 @@ function TorrentRuntimePanel({
         </span>
       </div>
       <div className="space-y-0.5">
-        <Row label={t("taskDetails.btMetadataStatus")} value={snapshot.metadataStatus} mono={false} />
-        <Row label={t("taskDetails.btPeers")} value={`${snapshot.peerCount} / ${snapshot.seedCount}`} />
-        <Row label={t("taskDetails.btPieces")} value={`${snapshot.completedPieces} / ${snapshot.pieceCount}`} />
+        <Row
+          label={t("taskDetails.btMetadataStatus")}
+          value={snapshot.metadataStatus}
+          mono={false}
+          hint={t("taskDetails.btMetadataStatusHint")}
+        />
+        <Row
+          label={t("taskDetails.btPeers")}
+          value={`${snapshot.peerCount} / ${snapshot.seedCount}`}
+          hint={t("taskDetails.btPeersHint")}
+        />
+        <Row
+          label={t("taskDetails.btPieces")}
+          value={`${snapshot.completedPieces} / ${snapshot.pieceCount}`}
+          hint={t("taskDetails.btPiecesHint")}
+        />
         <div
           className="grid gap-0.5 rounded-md bg-surface-root/50 px-3 py-2"
           style={{ gridTemplateColumns: "repeat(20, minmax(0, 1fr))" }}
@@ -1088,12 +1195,18 @@ function TorrentRuntimePanel({
         <Row
           label={t("taskDetails.btUpload")}
           value={`${formatBytes(parseSnapshotNumber(snapshot.uploadBytes))} / ${formatSpeed(parseSnapshotNumber(snapshot.uploadSpeedBps))}`}
+          hint={t("taskDetails.btUploadHint")}
         />
-        <Row label={t("taskDetails.btRatio")} value={snapshot.ratio == null ? "-" : snapshot.ratio.toFixed(3)} />
+        <Row
+          label={t("taskDetails.btRatio")}
+          value={snapshot.ratio == null ? "-" : snapshot.ratio.toFixed(3)}
+          hint={t("taskDetails.btRatioHint")}
+        />
         <Row
           label={t("taskDetails.btDht")}
           value={snapshot.dhtStatus ? t("taskDetails.btDhtActive") : t("taskDetails.btDhtUnknown")}
           mono={false}
+          hint={t("taskDetails.btDhtHint")}
         />
         {(snapshot.trackers ?? []).length > 0 ? (
           <div className="rounded-md bg-surface-root/50 px-3 py-2 text-xs">
@@ -1117,16 +1230,22 @@ function TorrentRuntimePanel({
           </p>
         ) : null}
         <div className="flex items-center justify-between gap-3 rounded-md bg-surface-root/50 px-3 py-2">
-          <label htmlFor="bt-seeding-toggle" className="text-xs text-text-muted">
-            {t("taskDetails.btSeeding")}
-          </label>
-          <input
-            id="bt-seeding-toggle"
-            type="checkbox"
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                id="bt-seeding-label"
+                className="cursor-help rounded-sm text-xs text-text-muted underline decoration-dotted decoration-border-subtle underline-offset-2"
+              >
+                {t("taskDetails.btSeeding")}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-64 text-balance">{t("taskDetails.btSeedingHint")}</TooltipContent>
+          </Tooltip>
+          <Switch
             checked={snapshot.seedingEnabled}
             disabled={saving}
-            onChange={(event) => void toggleSeeding(event.target.checked)}
-            className="h-5 w-5 accent-accent-primary"
+            onCheckedChange={(checked) => void toggleSeeding(checked)}
+            aria-labelledby="bt-seeding-label"
           />
         </div>
         {taskFiles.length > 1 ? (
@@ -1146,8 +1265,7 @@ function TorrentRuntimePanel({
             <div className="max-h-40 space-y-1 overflow-auto pr-1">
               {taskFiles.map((file) => (
                 <label key={file.id} className="flex items-center gap-2 text-xs text-text-secondary">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={selectedFiles.has(file.relativePath)}
                     disabled={!canEditFiles || saving}
                     onChange={(event) => {
@@ -1156,7 +1274,6 @@ function TorrentRuntimePanel({
                       else next.delete(file.relativePath);
                       setSelectedFiles(next);
                     }}
-                    className="h-4 w-4 accent-accent-primary"
                   />
                   <span className="truncate">{file.relativePath}</span>
                   <span className="ml-auto shrink-0 font-mono text-text-muted">{formatBytes(file.totalSize)}</span>
@@ -1484,6 +1601,56 @@ function TaskProxyPanel({ task }: { task: Task }) {
           {t("taskDetails.saveProxy")}
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Mode toggle for the single Segments view. Switches the same segment data
+ * between two presentations: by byte range ("ranges") and by connection
+ * ("connections"). Replaces the former chunks/connections parallel sub-tabs.
+ */
+function SegmentViewToggle({
+  value,
+  onChange,
+  rangesLabel,
+  connectionsLabel,
+  ariaLabel,
+}: {
+  value: "ranges" | "connections";
+  onChange: (mode: "ranges" | "connections") => void;
+  rangesLabel: string;
+  connectionsLabel: string;
+  ariaLabel: string;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className="mb-2 inline-flex items-center gap-0.5 rounded-md border border-border-subtle bg-surface-root/50 p-0.5"
+    >
+      {(
+        [
+          { mode: "ranges", label: rangesLabel },
+          { mode: "connections", label: connectionsLabel },
+        ] as const
+      ).map((option) => (
+        <button
+          key={option.mode}
+          type="button"
+          aria-pressed={value === option.mode}
+          onClick={() => onChange(option.mode)}
+          className={cn(
+            "rounded px-2 py-0.5 text-[11px] font-medium transition-[background-color,color] duration-[var(--motion-ui)] ease-out",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
+            value === option.mode
+              ? "bg-accent-primary/12 text-accent-primary"
+              : "text-text-muted hover:bg-surface-raised/60 hover:text-text-secondary",
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
     </div>
   );
 }

@@ -240,7 +240,10 @@ pub fn run_user_command(command: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("No command configured for the Run command completion action.".to_string());
     }
-    // Reject shell metacharacters to prevent command injection via IPC.
+    // S-4: Reject shell metacharacters as an early, user-facing defense.
+    // Even though we now exec directly (not via shell), the blacklist stays
+    // because: (1) it gives a clear error message for unsupported shell
+    // features (pipes, redirects), and (2) defense-in-depth.
     if let Some(ch) = trimmed.chars().find(|c| SHELL_METACHARACTERS.contains(c)) {
         tracing::warn!(
             command = %trimmed,
@@ -252,30 +255,121 @@ pub fn run_user_command(command: &str) -> Result<(), String> {
              Remove shell metacharacters (&, |, ;, <, >, etc.) and try again."
         ));
     }
-    tracing::warn!(command = %trimmed, "user command requested by confirmed completion action");
+    // S-4: Tokenize the command string with shlex, then exec the first token
+    // directly with the remaining tokens as args. This eliminates shell
+    // injection risk — no `cmd /C` or `sh -c` intermediary is involved.
+    let parts = shlex::split(trimmed).ok_or_else(|| {
+        tracing::warn!(command = %trimmed, "user command rejected: invalid quoting syntax");
+        "The configured command has invalid quoting syntax (unclosed quote?).".to_string()
+    })?;
+    if parts.is_empty() {
+        return Err("No command configured for the Run command completion action.".to_string());
+    }
+    tracing::info!(
+        executable = %parts[0],
+        arg_count = parts.len() - 1,
+        "user command requested by confirmed completion action"
+    );
 
-    let shell = if cfg!(target_os = "windows") {
-        "cmd"
-    } else {
-        "sh"
-    };
-    let shell_flag = if cfg!(target_os = "windows") {
-        "/C"
-    } else {
-        "-c"
-    };
-
-    let status = Command::new(shell)
-        .args([shell_flag, command])
+    let mut cmd = Command::new(&parts[0]);
+    cmd.args(&parts[1..]);
+    let status = cmd
         .status()
         .map_err(|e| format!("Failed to execute command: {e}"))?;
 
     if status.success() {
+        tracing::info!(
+            executable = %parts[0],
+            exit_code = status.code().unwrap_or(-1),
+            "user command completed successfully"
+        );
         Ok(())
     } else {
-        Err(format!(
-            "Command exited with status {}.",
-            status.code().unwrap_or(-1)
-        ))
+        let code = status.code().unwrap_or(-1);
+        tracing::warn!(
+            executable = %parts[0],
+            exit_code = code,
+            "user command exited with non-zero status"
+        );
+        Err(format!("Command exited with status {code}."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_user_command_rejects_empty_string() {
+        let err = run_user_command("").unwrap_err();
+        assert!(err.contains("No command configured"));
+    }
+
+    #[test]
+    fn run_user_command_rejects_whitespace_only() {
+        let err = run_user_command("   ").unwrap_err();
+        assert!(err.contains("No command configured"));
+    }
+
+    #[test]
+    fn run_user_command_rejects_shell_metacharacters() {
+        let err = run_user_command("echo hello & rm -rf /").unwrap_err();
+        assert!(err.contains("disallowed character"));
+    }
+
+    #[test]
+    fn run_user_command_rejects_pipe() {
+        let err = run_user_command("echo hello | cat").unwrap_err();
+        assert!(err.contains("disallowed character"));
+    }
+
+    #[test]
+    fn run_user_command_rejects_redirect() {
+        let err = run_user_command("echo hello > /tmp/file").unwrap_err();
+        assert!(err.contains("disallowed character"));
+    }
+
+    #[test]
+    fn run_user_command_rejects_unclosed_quote() {
+        // shlex::split returns None for unclosed quotes.
+        let err = run_user_command("echo \"unclosed").unwrap_err();
+        assert!(err.contains("invalid quoting syntax"));
+    }
+
+    #[test]
+    fn run_user_command_executes_simple_command() {
+        // Use a cross-platform no-op command. `cmd /c verify` on Windows
+        // is not suitable (we no longer use shell). Instead, use the
+        // platform-specific exit-zero command directly.
+        //
+        // On Windows: `where where` (finds the `where` command, exits 0)
+        // On Unix: `true` (always exits 0)
+        //
+        // We only verify that run_user_command returns Ok — the actual
+        // command output is irrelevant.
+        let cmd = if cfg!(target_os = "windows") {
+            "where where"
+        } else {
+            "true"
+        };
+        // These commands contain no metacharacters and should succeed.
+        let result = run_user_command(cmd);
+        assert!(
+            result.is_ok(),
+            "expected simple command to succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn run_user_command_reports_non_zero_exit() {
+        // A command that exits with non-zero status. No metacharacters.
+        let cmd = if cfg!(target_os = "windows") {
+            "where nonexistent-program-xyz-12345"
+        } else {
+            "false"
+        };
+        let err = run_user_command(cmd).unwrap_err();
+        assert!(err.contains("exited with status"));
     }
 }

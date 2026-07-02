@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -15,6 +14,13 @@ import type { Task } from "@/types/task";
 
 const MAX_VISIBLE_NAMES = 6;
 
+/**
+ * Hard confirm for bulk-deleting tasks together with their downloaded files.
+ *
+ * Bulk metadata-only removal is handled by an undoable soft-delete flow (see
+ * AppShell `softDeleteBulk`); this dialog is only shown when the user
+ * explicitly chooses to delete files from disk for the whole selection.
+ */
 export function BulkDeleteDialog({
   tasks,
   open,
@@ -24,29 +30,22 @@ export function BulkDeleteDialog({
   tasks: Task[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onDelete: (deleteFile: boolean) => void;
+  onDelete: () => void;
 }) {
   const { t } = useTranslation();
-  const [deleteFiles, setDeleteFiles] = useState(false);
 
   const visibleNames = tasks.slice(0, MAX_VISIBLE_NAMES);
   const remainingCount = tasks.length - MAX_VISIBLE_NAMES;
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) setDeleteFiles(false);
-        onOpenChange(nextOpen);
-      }}
-    >
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("deleteDialog.bulkTitle", { count: tasks.length })}</DialogTitle>
+          <DialogTitle>{t("deleteDialog.bulkFilesTitle", { count: tasks.length })}</DialogTitle>
         </DialogHeader>
         <DialogBody className="space-y-3 py-4">
           <DialogDescription className="text-sm text-text-secondary">
-            {t("deleteDialog.bulkDescription", { count: tasks.length })}
+            {t("deleteDialog.bulkFilesDescription", { count: tasks.length })}
           </DialogDescription>
 
           {tasks.length > 0 ? (
@@ -63,23 +62,13 @@ export function BulkDeleteDialog({
               ) : null}
             </ul>
           ) : null}
-
-          <label className="flex cursor-pointer items-center gap-2.5 rounded-md px-1 py-1 text-sm text-text-secondary transition-colors hover:text-text-primary">
-            <input
-              type="checkbox"
-              checked={deleteFiles}
-              onChange={(event) => setDeleteFiles(event.target.checked)}
-              className="h-4 w-4 shrink-0 rounded border-border-subtle accent-accent-primary"
-            />
-            <span>{t("deleteDialog.bulkDeleteFiles")}</span>
-          </label>
         </DialogBody>
         <DialogFooter>
           <Button type="button" variant="ghost" className="w-full sm:w-auto" onClick={() => onOpenChange(false)}>
             {t("deleteDialog.cancel")}
           </Button>
-          <Button type="button" variant="danger" className="w-full sm:w-auto" onClick={() => onDelete(deleteFiles)}>
-            {t("deleteDialog.bulkConfirm", { count: tasks.length })}
+          <Button type="button" variant="danger" className="w-full sm:w-auto" onClick={onDelete}>
+            {t("deleteDialog.bulkFilesConfirm", { count: tasks.length })}
           </Button>
         </DialogFooter>
       </DialogContent>

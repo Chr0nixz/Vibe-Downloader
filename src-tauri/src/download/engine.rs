@@ -9,7 +9,7 @@ use tauri::AppHandle;
 
 use super::{
     BtEngine, DashEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine, MetalinkEngine,
-    SftpEngine, WebDavEngine, url_classify::{is_dash_url, is_hls_url, is_metalink_url, is_torrent_url},
+    SftpEngine, WebDavEngine,
 };
 use crate::db::TaskCredentials;
 use crate::models::{
@@ -27,6 +27,34 @@ pub struct ProbeRequest {
     pub pool: Option<SqlitePool>,
     pub task_id: Option<String>,
     pub credentials: Option<TaskCredentials>,
+    /// UX-6: When `Some`, engines emit `probe-phase` events for real-time
+    /// stage feedback in the NewDownloadDialog. `None` for internal callers
+    /// (create_task, import_urls, resume validation) that don't need UI feedback.
+    pub app: Option<AppHandle>,
+    /// UX-6: Correlates phase events to a specific probe invocation.
+    /// The frontend passes this via `ProbeTaskInput.request_id`.
+    pub request_id: Option<String>,
+}
+
+/// UX-6: Emit a probe-phase event if `app` and `request_id` are both `Some`.
+/// Engines call this at real stage transitions during `probe()`.
+/// No-ops silently for internal callers that pass `None`.
+pub(crate) fn emit_probe_phase(
+    app: &Option<AppHandle>,
+    request_id: &Option<String>,
+    kind: &str,
+    protocol: Option<&str>,
+) {
+    let Some(app) = app else { return };
+    let Some(request_id) = request_id else { return };
+    crate::events::emit_probe_phase(
+        app,
+        &crate::events::ProbePhasePayload {
+            request_id: request_id.clone(),
+            kind: kind.to_string(),
+            protocol: protocol.map(|p| p.to_string()),
+        },
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +71,10 @@ pub struct ProbeOutput {
     pub last_modified: Option<String>,
     pub content_type: Option<String>,
     pub hls_variants: Vec<HlsVariant>,
+    /// F-6: Audio renditions from `#EXT-X-MEDIA TYPE=AUDIO`.
+    pub hls_audio_tracks: Vec<crate::models::HlsMediaTrack>,
+    /// F-6: Subtitle renditions from `#EXT-X-MEDIA TYPE=SUBTITLES`.
+    pub hls_subtitle_tracks: Vec<crate::models::HlsMediaTrack>,
     pub metalink: Option<MetalinkProbeData>,
 }
 
@@ -62,6 +94,21 @@ pub struct DownloadContext {
 pub trait DownloadEngine: Send + Sync {
     fn id(&self) -> &'static str;
     fn supports_scheme(&self, scheme: &str) -> bool;
+    /// R-3: URL 内容级匹配（如 `is_hls_url` / `is_metalink_url`）。
+    ///
+    /// 默认返回 `false`，表示该引擎仅靠 `supports_scheme` 兜底。需要按 URL
+    /// 路径后缀或 scheme 精确匹配的引擎应覆盖此方法，并相应提升 `priority`，
+    /// 以便在 `supports_scheme` 兜底之前被 `engine_for_uri` 选中。
+    fn matches_url(&self, _url: &reqwest::Url) -> bool {
+        false
+    }
+    /// R-3: 路由优先级，数值越大越优先。默认 `0`。
+    ///
+    /// URL 内容匹配型引擎（BT/HLS/DASH/Metalink）应返回正数，确保在
+    /// `supports_scheme` 兜底之前被检查。同优先级引擎按注册顺序遍历。
+    fn priority(&self) -> i32 {
+        0
+    }
     fn probe<'a>(
         &'a self,
         request: ProbeRequest,
@@ -94,10 +141,12 @@ impl EngineRegistry {
         Ok(Self {
             engines: vec![
                 bt_engine.clone(),
-                Arc::new(MetalinkEngine::new(proxy_config.clone())),
-                Arc::new(HlsEngine::new(proxy_config.clone())),
-                Arc::new(DashEngine::new(proxy_config.clone())),
-                Arc::new(WebDavEngine::new(proxy_config.clone())),
+                // E-4: HLS/DASH/Metalink/WebDAV 共享同一 `Arc<HttpEngine>`，
+                // 复用其客户端缓存与 `invalidate_clients` 失效路径。
+                Arc::new(MetalinkEngine::new(http_engine.clone())),
+                Arc::new(HlsEngine::new(http_engine.clone())),
+                Arc::new(DashEngine::new(http_engine.clone())),
+                Arc::new(WebDavEngine::new(http_engine.clone())),
                 http_engine.clone(),
                 Arc::new(FtpEngine::new(proxy_config.clone())),
                 Arc::new(SftpEngine::new(proxy_config.clone())),
@@ -113,6 +162,11 @@ impl EngineRegistry {
         self.http_engine.invalidate_clients().await;
     }
 
+    /// E-4: 暴露共享 HTTP 引擎引用，供集成测试验证客户端缓存共享与失效。
+    pub fn http_engine(&self) -> &Arc<HttpEngine> {
+        &self.http_engine
+    }
+
     pub async fn proxy_config(&self) -> ResolvedProxyConfig {
         self.proxy_config.read().await.clone()
     }
@@ -121,40 +175,21 @@ impl EngineRegistry {
         let parsed =
             reqwest::Url::parse(uri.trim()).map_err(|_| "Download URL is invalid.".to_string())?;
         let scheme = parsed.scheme();
-        if scheme == "magnet"
-            || (scheme == "file" && is_torrent_url(&parsed))
-            || is_torrent_url(&parsed)
-        {
-            return Ok(self.bt_engine.clone());
+        // R-3: 引擎自描述 matches_url + priority，按优先级降序遍历，命中即返回。
+        // sort_by_key 是稳定排序，同优先级引擎保持注册顺序。
+        // Clone the Vec (bumps Arc refcounts) so iteration yields owned `Arc<dyn>`
+        // and `.clone()` resolves to `<Arc<dyn> as Clone>::clone` returning `Arc<dyn>`.
+        let mut sorted = self.engines.clone();
+        sorted.sort_by_key(|e| std::cmp::Reverse(e.priority()));
+        for engine in &sorted {
+            if engine.matches_url(&parsed) {
+                return Ok(Arc::clone(engine));
+            }
         }
-        if is_metalink_url(&parsed) {
-            return self
-                .engines
-                .iter()
-                .find(|engine| engine.id() == "metalink")
-                .cloned()
-                .ok_or_else(|| "Metalink engine is not available.".to_string());
-        }
-        if is_hls_url(&parsed) {
-            return self
-                .engines
-                .iter()
-                .find(|engine| engine.id() == "hls")
-                .cloned()
-                .ok_or_else(|| "HLS engine is not available.".to_string());
-        }
-        if is_dash_url(&parsed) {
-            return self
-                .engines
-                .iter()
-                .find(|engine| engine.id() == "dash")
-                .cloned()
-                .ok_or_else(|| "MPEG-DASH engine is not available.".to_string());
-        }
-        self.engines
-            .iter()
+        // 兜底：supports_scheme（HTTP/FTP/SFTP/WebDAV 等仅按 scheme 匹配的引擎）
+        sorted
+            .into_iter()
             .find(|engine| engine.supports_scheme(scheme))
-            .cloned()
             .ok_or_else(|| format!("The {scheme} protocol is not supported yet."))
     }
 

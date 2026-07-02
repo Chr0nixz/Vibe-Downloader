@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 
 import { cn, formatSpeed } from "@/lib/utils";
 import type { SpeedSample } from "@/stores/speed-history-store";
@@ -28,7 +28,7 @@ export function describeSpeedTrend(samples: SpeedSample[], currentSpeedBps: numb
   return { label: t("taskDiagnostics.stable"), tone: "stable" };
 }
 
-export function SpeedSparkline({
+export const SpeedSparkline = memo(function SpeedSparkline({
   samples,
   currentSpeedBps,
   label,
@@ -68,7 +68,7 @@ export function SpeedSparkline({
       <span className="shrink-0 font-mono text-xs text-text-primary">{formatSpeed(currentSpeedBps)}</span>
     </div>
   );
-}
+});
 
 function average(values: number[]): number {
   if (values.length === 0) return 0;

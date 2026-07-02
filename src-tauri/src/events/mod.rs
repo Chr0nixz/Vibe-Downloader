@@ -25,6 +25,7 @@ pub const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED: &str = "tray-new-download-requested
 pub const EVENT_TRAY_SETTINGS_REQUESTED: &str = "tray-settings-requested";
 pub const EVENT_CLIPBOARD_LINK_DETECTED: &str = "clipboard-link-detected";
 pub const EVENT_COMPLETION_ACTION_REQUESTED: &str = "completion-action-requested";
+pub const EVENT_PROBE_PHASE: &str = "probe-phase";
 
 const DEFAULT_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -68,6 +69,67 @@ impl TaskProgressEmitGate {
         };
         emit_task_progress(app, &payload);
         self.last_emit = Some(Instant::now());
+    }
+}
+
+/// E-4: Throttles per-segment DB writes (task progress + segment runtime
+/// progress) to the same cadence as IPC event emission. The last `force`d
+/// write and the final state are always flushed by the caller via `flush`.
+#[derive(Debug)]
+pub struct DbWriteGate {
+    min_interval: Duration,
+    last_write: Option<Instant>,
+    pending: bool,
+}
+
+impl Default for DbWriteGate {
+    fn default() -> Self {
+        Self::new(DEFAULT_PROGRESS_EMIT_INTERVAL)
+    }
+}
+
+impl DbWriteGate {
+    pub fn new(min_interval: Duration) -> Self {
+        Self {
+            min_interval,
+            last_write: None,
+            pending: false,
+        }
+    }
+
+    /// Returns `true` if a DB write should be performed now, `false` if it
+    /// should be skipped (the caller will retry on the next segment). A
+    /// `force=true` always returns `true` and resets the timer.
+    pub fn should_write(&mut self, force: bool) -> bool {
+        if force {
+            self.last_write = Some(Instant::now());
+            self.pending = false;
+            return true;
+        }
+        let due = self
+            .last_write
+            .is_none_or(|last_write| last_write.elapsed() >= self.min_interval);
+        if due {
+            self.last_write = Some(Instant::now());
+            self.pending = false;
+            true
+        } else {
+            self.pending = true;
+            false
+        }
+    }
+
+    /// Returns `true` if there is a pending write that was skipped since the
+    /// last `should_write` returned `true`. Callers check this at the end of
+    /// the download loop (or on pause/cancel) to flush the final state.
+    pub fn flush_pending(&mut self) -> bool {
+        if self.pending {
+            self.pending = false;
+            self.last_write = Some(Instant::now());
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -137,12 +199,47 @@ pub async fn emit_task_updated_record(app: &AppHandle, pool: &SqlitePool, task: 
 }
 
 pub fn emit_queue_changed(app: &AppHandle) {
-    emit_empty(app, EVENT_QUEUE_CHANGED);
+    emit_queue_changed_with_ids(app, None);
+}
+
+/// E-1: Emit a queue-changed event carrying the IDs of the tasks that changed.
+/// The frontend uses this to fetch only the changed tasks via `list_tasks_by_ids`
+/// instead of re-querying the entire first page. Pass `None` to signal a full
+/// refresh (batch operations, settings changes that affect all tasks).
+pub fn emit_queue_changed_with_ids(app: &AppHandle, ids: Option<Vec<String>>) {
+    let _ = app.emit(
+        EVENT_QUEUE_CHANGED,
+        QueueChangedPayload {
+            changed_task_ids: ids,
+        },
+    );
     if let Some(state) = app.try_state::<crate::AppState>() {
         state
             .browser_realtime
             .broadcast(BrowserRealtimeEvent::QueueChanged);
     }
+}
+
+/// E-1: Payload for the `queue-changed` event. `changed_task_ids` is `None`
+/// when the change is batch/global (caller should do a full refresh), or
+/// `Some(ids)` when a small set of tasks changed (caller can fetch just those
+/// via `list_tasks_by_ids` for an incremental upsert).
+#[derive(Clone, serde::Serialize, specta::Type)]
+pub struct QueueChangedPayload {
+    pub changed_task_ids: Option<Vec<String>>,
+}
+
+/// UX-6: Payload for the `probe-phase` event. Emitted by download engines
+/// during `probe()` to give the NewDownloadDialog real, stage-aware feedback
+/// instead of the old URL-regex static guess. `request_id` correlates events
+/// to a specific probe invocation (passed by the frontend via `ProbeTaskInput`).
+/// Not broadcast to `browser_realtime` — probe phases are ephemeral UI feedback.
+#[derive(Clone, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbePhasePayload {
+    pub request_id: String,
+    pub kind: String,
+    pub protocol: Option<String>,
 }
 
 pub fn emit_settings_changed(app: &AppHandle) {
@@ -178,6 +275,11 @@ pub fn emit_completion_action_requested(
     payload: &CompletionActionRequestedPayload,
 ) {
     emit_payload(app, EVENT_COMPLETION_ACTION_REQUESTED, payload);
+}
+
+/// UX-6: Emit a probe-phase event. Not broadcast to browser_realtime.
+pub fn emit_probe_phase(app: &AppHandle, payload: &ProbePhasePayload) {
+    emit_payload(app, EVENT_PROBE_PHASE, payload);
 }
 
 fn emit_empty(app: &AppHandle, event: &str) {
