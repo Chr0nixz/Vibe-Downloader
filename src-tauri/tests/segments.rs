@@ -475,10 +475,10 @@ async fn settings_upsert_and_clamp_active_task_count() {
             completion_action: CompletionAction::None,
             completion_countdown_seconds: 30,
             completion_run_command: String::new(),
-        delete_to_trash: true,
-        auto_update_check_enabled: true,
-        ffmpeg_path: None,
-        bt_upload_limit_bps: None,
+            delete_to_trash: true,
+            auto_update_check_enabled: true,
+            ffmpeg_path: None,
+            bt_upload_limit_bps: None,
         },
     )
     .await
@@ -526,10 +526,10 @@ async fn settings_upsert_and_clamp_active_task_count() {
             completion_action: CompletionAction::ExitApp,
             completion_countdown_seconds: 45,
             completion_run_command: String::new(),
-        delete_to_trash: true,
-        auto_update_check_enabled: true,
-        ffmpeg_path: None,
-        bt_upload_limit_bps: None,
+            delete_to_trash: true,
+            auto_update_check_enabled: true,
+            ffmpeg_path: None,
+            bt_upload_limit_bps: None,
         },
     )
     .await

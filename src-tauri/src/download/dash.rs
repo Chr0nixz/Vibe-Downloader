@@ -23,9 +23,10 @@ use super::{
     engine::EngineFuture,
     file_ops::{finalize_download_file, persist_completed_path},
     http::HttpEngine,
+    read_with_idle_timeout,
     url_classify::is_dash_url,
     DownloadContext, DownloadEngine, DownloadError, IdleReadOutcome, ProbeOutput, ProbeRequest,
-    READ_IDLE_TIMEOUT, read_with_idle_timeout,
+    READ_IDLE_TIMEOUT,
 };
 use crate::download::error::engine_error;
 use crate::download::retry::RetryPolicy;
@@ -34,8 +35,8 @@ use crate::{
     events::{emit_task_updated_record, DbWriteGate, TaskProgressEmitGate},
     logging::sanitize_url,
     models::{
-        AppErrorPayload, EngineCapabilities, ProbedFile, SegmentStatus,
-        TaskKind, TaskProgressPayload, TaskRecord, TaskStatus,
+        AppErrorPayload, EngineCapabilities, ProbedFile, SegmentStatus, TaskKind,
+        TaskProgressPayload, TaskRecord, TaskStatus,
     },
 };
 
@@ -76,9 +77,19 @@ impl DashEngine {
         )
         .await?;
         let client = self.client().await?;
-        crate::download::engine::emit_probe_phase(app, request_id, "fetching_manifest", Some("dash"));
+        crate::download::engine::emit_probe_phase(
+            app,
+            request_id,
+            "fetching_manifest",
+            Some("dash"),
+        );
         let body = fetch_mpd_text(&client, url, request_headers).await?;
-        crate::download::engine::emit_probe_phase(app, request_id, "parsing_manifest", Some("dash"));
+        crate::download::engine::emit_probe_phase(
+            app,
+            request_id,
+            "parsing_manifest",
+            Some("dash"),
+        );
         let parsed = parse_dash_manifest(url, &body)?;
         let (_video, _audio) = select_tracks(&parsed)?;
         Ok(DashManifestSummary {
@@ -321,8 +332,7 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                         current_base_url = None;
                     }
                     "segmenttemplate" => {
-                        let media_template =
-                            attr_value(&event, "media").unwrap_or_default();
+                        let media_template = attr_value(&event, "media").unwrap_or_default();
                         let initialization = attr_value(&event, "initialization");
                         let start_number = attr_value(&event, "startNumber")
                             .and_then(|v| v.parse::<i64>().ok())
@@ -330,12 +340,12 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                         let timescale = attr_value(&event, "timescale")
                             .and_then(|v| v.parse::<i64>().ok())
                             .unwrap_or(1);
-                        let duration = attr_value(&event, "duration")
-                            .and_then(|v| v.parse::<i64>().ok());
+                        let duration =
+                            attr_value(&event, "duration").and_then(|v| v.parse::<i64>().ok());
                         if let Some(rep) = current_representation.as_mut() {
                             // Compute segment count from period duration.
-                            let period_seconds = current_period_duration_seconds
-                                .or(mpd_duration_seconds);
+                            let period_seconds =
+                                current_period_duration_seconds.or(mpd_duration_seconds);
                             let segment_count = match (duration, period_seconds) {
                                 (Some(d), Some(secs)) if d > 0 && timescale > 0 => {
                                     let total = (secs * timescale as f64 / d as f64).ceil() as i64;
@@ -371,7 +381,8 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                             let br = parse_byte_range(&range);
                             if let Some(rep) = current_representation.as_mut() {
                                 if let SegmentSource::Base {
-                                    initialization_range, ..
+                                    initialization_range,
+                                    ..
                                 } = &mut rep.segment_source
                                 {
                                     *initialization_range = br;
@@ -399,7 +410,8 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                             let br = parse_byte_range(&range);
                             if let Some(rep) = current_representation.as_mut() {
                                 if let SegmentSource::Base {
-                                    initialization_range, ..
+                                    initialization_range,
+                                    ..
                                 } = &mut rep.segment_source
                                 {
                                     *initialization_range = br;
@@ -416,15 +428,14 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                         let timescale = attr_value(&event, "timescale")
                             .and_then(|v| v.parse::<i64>().ok())
                             .unwrap_or(1);
-                        let duration = attr_value(&event, "duration")
-                            .and_then(|v| v.parse::<i64>().ok());
+                        let duration =
+                            attr_value(&event, "duration").and_then(|v| v.parse::<i64>().ok());
                         if let Some(rep) = current_representation.as_mut() {
                             let period_seconds =
                                 current_period_duration_seconds.or(mpd_duration_seconds);
                             let segment_count = match (duration, period_seconds) {
                                 (Some(d), Some(secs)) if d > 0 && timescale > 0 => {
-                                    let total =
-                                        (secs * timescale as f64 / d as f64).ceil() as i64;
+                                    let total = (secs * timescale as f64 / d as f64).ceil() as i64;
                                     total.max(0)
                                 }
                                 _ => 0,
@@ -441,10 +452,7 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                     _ => {}
                 }
             }
-            Ok(Event::Text(text)) if element_stack
-                .last()
-                .is_some_and(|name| name == "baseurl") =>
-            {
+            Ok(Event::Text(text)) if element_stack.last().is_some_and(|name| name == "baseurl") => {
                 if let Ok(value) = text.decode().map(|value| value.into_owned()) {
                     current_base_url = Some(value);
                 }
@@ -553,7 +561,11 @@ fn select_tracks(
             if !is_video && !is_audio {
                 continue;
             }
-            let best = adapt.representations.iter().max_by_key(|r| r.bandwidth).cloned();
+            let best = adapt
+                .representations
+                .iter()
+                .max_by_key(|r| r.bandwidth)
+                .cloned();
             if is_video {
                 best_video = best.or(best_video);
             } else if is_audio {
@@ -584,9 +596,8 @@ fn build_segment_plans(
     // representation: init + N segments for Template/List, or the BaseURL
     // for SegmentBase). With thousands of segments this dominated parse
     // cost; we now reuse the parsed `Url` and call `.join()` per segment.
-    let parsed_base = reqwest::Url::parse(manifest_url).map_err(|e| {
-        format!("Could not parse DASH manifest URL '{manifest_url}': {e}")
-    })?;
+    let parsed_base = reqwest::Url::parse(manifest_url)
+        .map_err(|e| format!("Could not parse DASH manifest URL '{manifest_url}': {e}"))?;
     match &rep.segment_source {
         SegmentSource::Template {
             media_template,
@@ -843,8 +854,13 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
         },
     )
     .await?;
-    db::insert_task_event(&pool, &task.id, "dash_manifest_resolved", Some(&sanitize_url(&manifest_url)))
-        .await?;
+    db::insert_task_event(
+        &pool,
+        &task.id,
+        "dash_manifest_resolved",
+        Some(&sanitize_url(&manifest_url)),
+    )
+    .await?;
 
     // E-3: Persist all segment rows in a single transaction.
     let upserts: Vec<db::DashSegmentUpsert<'_>> = all_plans
@@ -913,8 +929,17 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
     }
 
     progress_gate.flush(&app);
-    finalize_dash_task(&app, &pool, &task, &staging_dir, &temp_path, &final_path, downloaded_total, &ffmpeg)
-        .await
+    finalize_dash_task(
+        &app,
+        &pool,
+        &task,
+        &staging_dir,
+        &temp_path,
+        &final_path,
+        downloaded_total,
+        &ffmpeg,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1079,8 +1104,7 @@ async fn download_dash_segment(
                     Some(&error),
                 )
                 .await;
-                let delay =
-                    retry_policy.delay_for_attempt(u32::try_from(retry_count).unwrap_or(1));
+                let delay = retry_policy.delay_for_attempt(u32::try_from(retry_count).unwrap_or(1));
                 if !delay.is_zero() {
                     tokio::select! {
                         _ = cancel_token.cancelled() => {
@@ -1178,14 +1202,16 @@ async fn download_dash_segment_once(
             }
         };
         speed_limiter.throttle(chunk.len()).await;
-        writer.write_all(&chunk).await.map_err(|e| {
-            format!("Could not write DASH segment to disk: {e}")
-        })?;
+        writer
+            .write_all(&chunk)
+            .await
+            .map_err(|e| format!("Could not write DASH segment to disk: {e}"))?;
         downloaded = downloaded.saturating_add(i64::try_from(chunk.len()).unwrap_or(0));
     }
-    writer.flush().await.map_err(|e| {
-        format!("Could not flush DASH segment to disk: {e}")
-    })?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| format!("Could not flush DASH segment to disk: {e}"))?;
     Ok(downloaded)
 }
 
@@ -1303,7 +1329,13 @@ async fn finalize_dash_task(
         ));
     }
 
-    run_ffmpeg_remux(ffmpeg, video_concat.as_deref(), audio_concat.as_deref(), temp_path).await?;
+    run_ffmpeg_remux(
+        ffmpeg,
+        video_concat.as_deref(),
+        audio_concat.as_deref(),
+        temp_path,
+    )
+    .await?;
 
     let downloaded = fs::metadata(temp_path)
         .await
@@ -1358,17 +1390,25 @@ async fn run_ffmpeg_remux(
             .map_err(|e| format!("Could not reset DASH MP4 output: {e}"))?;
     }
     let mut command = Command::new(ffmpeg);
-    command.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
+    command
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error");
     command.arg("-allowed_extensions").arg("ALL");
     // Working directory = staging dir so ffconcat relative paths resolve.
     if let Some(video) = video_concat {
         if let Some(dir) = video.parent() {
             command.current_dir(dir);
         }
-        command.arg("-i").arg(video.file_name().unwrap_or(video.as_os_str()));
+        command
+            .arg("-i")
+            .arg(video.file_name().unwrap_or(video.as_os_str()));
     }
     if let Some(audio) = audio_concat {
-        command.arg("-i").arg(audio.file_name().unwrap_or(audio.as_os_str()));
+        command
+            .arg("-i")
+            .arg(audio.file_name().unwrap_or(audio.as_os_str()));
     }
     match (video_concat, audio_concat) {
         (Some(_), Some(_)) => {
@@ -1378,7 +1418,12 @@ async fn run_ffmpeg_remux(
             command.arg("-map").arg("0");
         }
     }
-    command.arg("-c").arg("copy").arg("-movflags").arg("+faststart").arg(output);
+    command
+        .arg("-c")
+        .arg("copy")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg(output);
     let status = command
         .status()
         .await
@@ -1627,8 +1672,7 @@ mod tests {
               </Period>
             </MPD>
         "#;
-        let error = parse_dash_manifest("https://example.com/video.mpd", mpd)
-            .unwrap_err();
+        let error = parse_dash_manifest("https://example.com/video.mpd", mpd).unwrap_err();
         assert!(error.contains("dash_segment_timeline_unsupported"));
     }
 
@@ -1653,9 +1697,8 @@ mod tests {
 
     #[test]
     fn computes_segment_urls_resolves_relative() {
-        let parsed =
-            parse_dash_manifest("https://example.com/path/video.mpd", TEMPLATE_MPD)
-                .expect("manifest parses");
+        let parsed = parse_dash_manifest("https://example.com/path/video.mpd", TEMPLATE_MPD)
+            .expect("manifest parses");
         let (video, _) = select_tracks(&parsed).expect("tracks selected");
         let video = video.expect("video track");
         let staging = Path::new("/tmp/staging");
@@ -1670,19 +1713,10 @@ mod tests {
         // 1 init + 30 media segments
         assert_eq!(plans.len(), 31);
         assert_eq!(plans[0].segment_index, -1);
-        assert_eq!(
-            plans[0].uri,
-            "https://example.com/path/init.m4s"
-        );
+        assert_eq!(plans[0].uri, "https://example.com/path/init.m4s");
         assert_eq!(plans[1].segment_index, 0);
-        assert_eq!(
-            plans[1].uri,
-            "https://example.com/path/seg-1.m4s"
-        );
-        assert_eq!(
-            plans[2].uri,
-            "https://example.com/path/seg-2.m4s"
-        );
+        assert_eq!(plans[1].uri, "https://example.com/path/seg-1.m4s");
+        assert_eq!(plans[2].uri, "https://example.com/path/seg-2.m4s");
     }
 
     #[test]
@@ -1702,8 +1736,8 @@ mod tests {
               </Period>
             </MPD>
         "#;
-        let parsed = parse_dash_manifest("https://example.com/video.mpd", mpd)
-            .expect("manifest parses");
+        let parsed =
+            parse_dash_manifest("https://example.com/video.mpd", mpd).expect("manifest parses");
         let (video, audio) = select_tracks(&parsed).expect("tracks selected");
         assert!(audio.is_none());
         let video = video.expect("video track");
@@ -1733,8 +1767,8 @@ mod tests {
               </Period>
             </MPD>
         "#;
-        let parsed = parse_dash_manifest("https://example.com/video.mpd", mpd)
-            .expect("manifest parses");
+        let parsed =
+            parse_dash_manifest("https://example.com/video.mpd", mpd).expect("manifest parses");
         let (video, _) = select_tracks(&parsed).expect("tracks selected");
         let video = video.expect("video track");
         match &video.segment_source {
@@ -1766,8 +1800,8 @@ mod tests {
               </Period>
             </MPD>
         "#;
-        let parsed = parse_dash_manifest("https://example.com/video.mpd", mpd)
-            .expect("manifest parses");
+        let parsed =
+            parse_dash_manifest("https://example.com/video.mpd", mpd).expect("manifest parses");
         let (video, _) = select_tracks(&parsed).expect("tracks selected");
         let video = video.expect("video track");
         let staging = Path::new("/tmp/staging");

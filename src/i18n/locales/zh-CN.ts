@@ -37,6 +37,19 @@ const zhCN = {
       resumeUnavailable: "\u5355\u8fde\u63a5",
       speedHistoryAria: "{{name}} \u901f\u5ea6\u5386\u53f2",
     },
+    fileType: {
+      video: "\u89c6\u9891",
+      audio: "\u97f3\u9891",
+      image: "\u56fe\u7247",
+      archive: "\u538b\u7f29\u5305",
+      document: "\u6587\u6863",
+      spreadsheet: "\u8868\u683c",
+      code: "\u4ee3\u7801",
+      app: "\u5e94\u7528\u7a0b\u5e8f",
+      manifest: "\u6e05\u5355\u6587\u4ef6",
+      torrent: "BitTorrent",
+      file: "\u6587\u4ef6",
+    },
   },
   taskDiagnostics: {
     idle: "\u7b49\u5f85\u6d3b\u52a8",
@@ -206,6 +219,8 @@ const zhCN = {
     bulkPause: "\u6682\u505c",
     bulkResume: "\u7eed\u4f20",
     bulkRetry: "\u91cd\u8bd5",
+    pauseAll: "\u5168\u90e8\u6682\u505c",
+    resumeAll: "\u5168\u90e8\u5f00\u59cb",
     bulkOpenFolder: "打开文件夹",
     exportJson: "导出为 JSON",
     exportCsv: "导出为 CSV",
@@ -418,6 +433,9 @@ const zhCN = {
     browserExperimentalCapture: "\u5b9e\u9a8c\u6027\u6355\u83b7",
     browserExperimentalCaptureDescription:
       "\u542f\u7528\u5a92\u4f53\u55c5\u63a2\u548c\u9ad8\u7ea7\u6355\u83b7\u63a7\u4ef6\u3002\u66f4\u6539\u6743\u9650\u540e\u9700\u91cd\u65b0\u5bfc\u51fa\u5e76\u91cd\u88c5\u6d4f\u89c8\u5668\u6269\u5c55\u3002",
+    browserCaptureUnavailableTitle: "\u6700\u5c0f\u6743\u9650\u6269\u5c55\u7248\u672c",
+    browserCaptureUnavailableDescription:
+      "\u5f53\u524d\u5019\u9009\u7248\u6216\u5546\u5e97\u7248\u4ec5\u652f\u6301\u624b\u52a8\u4ea4\u63a5\u3002\u81ea\u52a8\u63a5\u7ba1\u548c Cookie/header \u8f6c\u53d1\u4ec5\u5728\u660e\u786e\u6807\u8bb0\u7684\u5f00\u53d1\u7248\u4e2d\u53ef\u7528\u3002",
     browserMinSize: "\u6700\u5c0f\u5927\u5c0f (MiB)",
     browserMinSizeHint:
       "\u4ec5\u6355\u83b7\u5927\u4e8e\u6b64\u5927\u5c0f\u7684\u4e0b\u8f7d\u3002\u8bbe\u4e3a 0 \u5219\u4e0d\u9650\u5236\u5927\u5c0f\u3002",
@@ -483,6 +501,8 @@ const zhCN = {
     browserUninstall: "\u5378\u8f7d",
     browserLoading: "\u6b63\u5728\u52a0\u8f7d\u6d4f\u89c8\u5668\u96c6\u6210\u72b6\u6001\u2026",
     browserHostName: "Native \u4e3b\u673a",
+    browserHostUnavailable:
+      "\u6253\u5305\u7684 Native Messaging \u4e3b\u673a\u4e0d\u53ef\u7528\u3002\u8bf7\u91cd\u65b0\u5b89\u88c5\u684c\u9762\u5e94\u7528\u540e\u518d\u5b89\u88c5\u6d4f\u89c8\u5668\u96c6\u6210\u3002",
     browserNativeHostPath: "Native \u4e3b\u673a\u8def\u5f84",
     browserExtensionPath: "\u6269\u5c55\u6e90\u7801",
     browserBuildExtensions: "\u8fd0\u884c pnpm build:extensions",

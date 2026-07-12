@@ -184,10 +184,7 @@ pub async fn update_task_file_progress(
     Ok(())
 }
 
-pub async fn bump_task_files_version(
-    pool: &SqlitePool,
-    task_id: &str,
-) -> Result<(), String> {
+pub async fn bump_task_files_version(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
     sqlx::query("UPDATE tasks SET files_version = files_version + 1 WHERE id = ?")
         .bind(task_id)
         .execute(pool)
@@ -354,8 +351,18 @@ mod tests {
             task_kind: TaskKind::SingleFile,
             file_name: "file.bin".to_string(),
             save_dir: std::env::temp_dir().to_string_lossy().to_string(),
-            temp_path: Some(std::env::temp_dir().join("file.bin.vibe-downloading").to_string_lossy().to_string()),
-            final_path: Some(std::env::temp_dir().join("file.bin").to_string_lossy().to_string()),
+            temp_path: Some(
+                std::env::temp_dir()
+                    .join("file.bin.vibe-downloading")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            final_path: Some(
+                std::env::temp_dir()
+                    .join("file.bin")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             total_size: 100,
             downloaded_bytes: 0,
             status: TaskStatus::Queued,

@@ -61,7 +61,8 @@ impl GlobalSpeedLimiter {
         let limit = limit_bps.unwrap_or(0).max(0);
         self.limit_bps.store(limit, Ordering::Relaxed);
         self.tokens_milli.store(limit * 1000, Ordering::Relaxed);
-        self.last_refill_millis.store(now_millis(), Ordering::Relaxed);
+        self.last_refill_millis
+            .store(now_millis(), Ordering::Relaxed);
     }
 
     pub fn current_limit_bps(&self) -> Option<i64> {
@@ -174,7 +175,7 @@ mod tests {
     #[tokio::test]
     async fn test_throttle_with_limit() {
         let limiter = GlobalSpeedLimiter::new(Some(1_000_000)); // 1 MB/s
-        // Should be able to consume up to the limit immediately (tokens pre-filled).
+                                                                // Should be able to consume up to the limit immediately (tokens pre-filled).
         limiter.throttle(500_000).await;
         // Remaining tokens should be ~500_000.
         let tokens = limiter.tokens_milli.load(Ordering::Relaxed);

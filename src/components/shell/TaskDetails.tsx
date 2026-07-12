@@ -54,7 +54,7 @@ import type { TaskSegment } from "@/types/task-segment";
 
 const log = createLogger("task-details");
 
-const SEGMENT_REFRESH_MS = 30_000;
+const SEGMENT_REFRESH_MS = 2_000;
 const DETAIL_REFRESH_MS = 30_000;
 const EMPTY_TASK_FILES: Task["files"] = [];
 

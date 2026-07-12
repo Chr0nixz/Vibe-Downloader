@@ -68,8 +68,7 @@ impl TestServer {
     /// `webdav://host:port/...`).
     #[allow(dead_code)]
     pub fn authority(&self) -> &str {
-        self.base_url
-            .trim_start_matches("http://")
+        self.base_url.trim_start_matches("http://")
     }
 }
 

@@ -35,22 +35,21 @@ use uuid::Uuid;
 use super::{
     engine::EngineFuture,
     file_ops::{finalize_download_file, persist_completed_path},
-    DownloadContext, DownloadEngine, DownloadError, GlobalSpeedLimiter, IdleReadOutcome,
-    ProbeOutput, ProbeRequest, READ_IDLE_TIMEOUT, read_with_idle_timeout,
+    read_with_idle_timeout, DownloadContext, DownloadEngine, DownloadError, GlobalSpeedLimiter,
+    IdleReadOutcome, ProbeOutput, ProbeRequest, READ_IDLE_TIMEOUT,
 };
 use crate::download::error::engine_error;
+use crate::download::retry::RetryPolicy;
 use crate::{
     db,
     events::{emit_task_updated_record, TaskProgressEmitGate},
     logging::sanitize_url,
     models::{
-        EngineCapabilities, FtpDirectoryEntry, FtpDirectoryProbe, ProbedFile,
-        SegmentStatus, TaskKind, TaskProgressPayload, TaskRecord,
-        TaskSegmentRecord, TaskStatus,
+        EngineCapabilities, FtpDirectoryEntry, FtpDirectoryProbe, ProbedFile, SegmentStatus,
+        TaskKind, TaskProgressPayload, TaskRecord, TaskSegmentRecord, TaskStatus,
     },
     proxy::{socks5_connect, ResolvedProxyConfig, SharedProxyConfig},
 };
-use crate::download::retry::RetryPolicy;
 
 const FTP_MAX_DYNAMIC_CONNECTIONS: usize = 4;
 const FTP_DYNAMIC_WARMUP: Duration = Duration::from_secs(8);
@@ -786,10 +785,13 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
         // read immediately. AsyncRead::read returns Result<usize, io::Error>;
         // map 0 → None (EOF) so the shared helper's Option<T> contract holds.
         let read_future = async {
-            remote_stream
-                .read(&mut buffer[..read_len])
-                .await
-                .map(|n| if n == 0 { None } else { Some(n) })
+            remote_stream.read(&mut buffer[..read_len]).await.map(|n| {
+                if n == 0 {
+                    None
+                } else {
+                    Some(n)
+                }
+            })
         };
         let outcome = tokio::select! {
             _ = request.cancel_token.cancelled() => {
@@ -802,7 +804,9 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
             IdleReadOutcome::Data(n) => n,
             IdleReadOutcome::End => {
                 if request.total_size > 0 && offset <= current_end {
-                    return Err("The FTP download ended before all bytes were received.".to_string());
+                    return Err(
+                        "The FTP download ended before all bytes were received.".to_string()
+                    );
                 }
                 break;
             }

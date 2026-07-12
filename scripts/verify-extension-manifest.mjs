@@ -1,222 +1,190 @@
-// Verifies the built browser extension manifests and source-level header
-// allowlist against the security boundary enforced in
-// `src-tauri/src/commands/browser.rs`. Run after `pnpm build:extensions`:
-//
-//   pnpm build:extensions && pnpm verify:manifest
-//
-// Assertions (all must pass for a release-ready build):
-//   1. The dev profile manifest MUST NOT contain `downloads`, `cookies`,
-//      `webRequest`, or `host_permissions` — those are gated behind the
-//      experimental-capture build flag (`VIBE_BROWSER_EXPERIMENTAL_CAPTURE=1`)
-//      and must never ship in a regular dev/release build.
-//   2. The release profile Firefox `gecko.id` MUST NOT be the placeholder
-//      `vibe-downloader@example.invalid`.
-//   3. The release profile Chromium/Edge/Opera extension IDs MUST NOT start
-//      with `replace-with-`.
-//   4. The `FORWARDED_HEADER_ALLOWLIST` constant in
-//      `src-tauri/src/commands/browser.rs` MUST be set-equal to the
-//      `ALLOWED_HEADER_NAMES` constant in
-//      `browser/extension-core/src/background.js`. Drift between the two
-//      would silently drop or leak headers across the IPC boundary.
-//
-// Exit code is non-zero on any failure so the script can be wired into CI.
-
+import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { unzipSync } from "fflate";
+
+import {
+  CANDIDATE_CHROMIUM_EXTENSION_ID,
+  extensionIdFromPublicKey,
+  resolveExtensionIdentity,
+} from "./release-config.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = path.join(root, "browser", "dist");
+const packagesDir = path.join(distDir, "packages");
 const browserRustPath = path.join(root, "src-tauri", "src", "commands", "browser.rs");
+const buildRsPath = path.join(root, "src-tauri", "build.rs");
 const backgroundJsPath = path.join(root, "browser", "extension-core", "src", "background.js");
-
-const FORBIDDEN_PERMISSIONS = ["downloads", "cookies", "webRequest"];
-const FORBIDDEN_HOST_PERMISSIONS = ["http://*/*", "https://*/*"];
-
-const PLACEHOLDER_FIREFOX_ID = "vibe-downloader@example.invalid";
-const PLACEHOLDER_ID_PREFIX = "replace-with-";
-
+const identity = resolveExtensionIdentity(process.env, "dev");
 const failures = [];
+
+const SENSITIVE_PERMISSIONS = ["downloads", "cookies", "webRequest"];
+const SENSITIVE_HOST_PERMISSIONS = ["http://*/*", "https://*/*"];
 
 function fail(message) {
   failures.push(message);
 }
 
 async function readJson(filePath) {
-  const text = await readFile(filePath, "utf8");
-  return JSON.parse(text);
+  return JSON.parse(await readFile(filePath, "utf8"));
 }
 
-// --- Assertion 1: forbidden permissions / host_permissions ------------------
-
-async function assertManifestsContainNoForbiddenPermissions() {
-  let entries;
-  try {
-    entries = await readdir(distDir, { withFileTypes: true });
-  } catch (error) {
-    fail(
-      `Could not read ${path.relative(root, distDir)}: ${error.message}. Did you run \`pnpm build:extensions\` first?`,
-    );
-    return;
+async function verifyVariantSetAndManifests() {
+  const entries = await readdir(distDir, { withFileTypes: true });
+  const actual = entries
+    .filter((entry) => entry.isDirectory() && entry.name !== "packages")
+    .map((entry) => entry.name)
+    .sort();
+  const expected = [...identity.variants].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    fail(`Expected extension variants ${expected.join(", ")}; found ${actual.join(", ") || "none"}.`);
   }
 
-  const variantDirs = entries.filter((entry) => entry.isDirectory());
-  if (variantDirs.length === 0) {
-    fail(`No variant directories under ${path.relative(root, distDir)}. Run \`pnpm build:extensions\` first.`);
-    return;
-  }
-
-  for (const entry of variantDirs) {
-    const manifestPath = path.join(distDir, entry.name, "manifest.json");
+  for (const variant of expected) {
+    const manifestPath = path.join(distDir, variant, "manifest.json");
     let manifest;
     try {
       manifest = await readJson(manifestPath);
     } catch (error) {
-      fail(`[${entry.name}] could not read manifest.json: ${error.message}`);
+      fail(`[${variant}] could not read manifest.json: ${error.message}`);
       continue;
     }
 
     const permissions = manifest.permissions ?? [];
-    const leaked = permissions.filter((permission) => FORBIDDEN_PERMISSIONS.includes(permission));
-    if (leaked.length > 0) {
-      fail(
-        `[${entry.name}] manifest.json contains forbidden permissions: ${leaked.join(", ")}. ` +
-          "These are experimental-capture-only and must not ship in default builds.",
-      );
-    }
-
     const hostPermissions = manifest.host_permissions ?? [];
-    const leakedHost = hostPermissions.filter((host) => FORBIDDEN_HOST_PERMISSIONS.includes(host));
-    if (leakedHost.length > 0) {
+    if (identity.captureAvailable) {
+      for (const permission of SENSITIVE_PERMISSIONS) {
+        if (!permissions.includes(permission)) fail(`[${variant}] dev capture build is missing ${permission}.`);
+      }
+      for (const host of SENSITIVE_HOST_PERMISSIONS) {
+        if (!hostPermissions.includes(host)) fail(`[${variant}] dev capture build is missing ${host}.`);
+      }
+    } else {
+      const leaked = permissions.filter((permission) => SENSITIVE_PERMISSIONS.includes(permission));
+      const leakedHosts = hostPermissions.filter((host) => SENSITIVE_HOST_PERMISSIONS.includes(host));
+      if (leaked.length > 0) fail(`[${variant}] contains forbidden permissions: ${leaked.join(", ")}.`);
+      if (leakedHosts.length > 0) fail(`[${variant}] contains forbidden host permissions: ${leakedHosts.join(", ")}.`);
+    }
+
+    if (variant === "firefox") {
+      const firefoxId = manifest.browser_specific_settings?.gecko?.id;
+      if (firefoxId !== identity.firefoxId) {
+        fail(`[firefox] gecko.id=${firefoxId ?? "missing"} does not match ${identity.firefoxId}.`);
+      }
+      if (manifest.key) fail("[firefox] Chromium manifest key must not be present.");
+    } else if (identity.chromiumPublicKey) {
+      if (manifest.key !== identity.chromiumPublicKey)
+        fail(`[${variant}] candidate manifest key is missing or incorrect.`);
+      if (extensionIdFromPublicKey(manifest.key) !== identity.chromeId) {
+        fail(`[${variant}] manifest key does not derive the candidate extension ID.`);
+      }
+    } else if (manifest.key) {
+      fail(`[${variant}] release store package must not contain the candidate manifest key.`);
+    }
+  }
+}
+
+function parseStringSet(source, pattern, label) {
+  const match = source.match(pattern);
+  if (!match?.groups?.items) throw new Error(`Could not locate ${label}.`);
+  return new Set(
+    match.groups.items
+      .split(",")
+      .map((item) =>
+        item
+          .trim()
+          .replace(/(^")|("$)/g, "")
+          .toLowerCase(),
+      )
+      .filter(Boolean),
+  );
+}
+
+async function verifyHeaderAllowlist() {
+  const [rustSource, jsSource] = await Promise.all([
+    readFile(browserRustPath, "utf8"),
+    readFile(backgroundJsPath, "utf8"),
+  ]);
+  try {
+    const rustSet = parseStringSet(
+      rustSource,
+      /const\s+FORWARDED_HEADER_ALLOWLIST[^=]*=\s*&\[(?<items>[^\]]*)\]/s,
+      "FORWARDED_HEADER_ALLOWLIST",
+    );
+    const jsSet = parseStringSet(
+      jsSource,
+      /const\s+ALLOWED_HEADER_NAMES\s*=\s*new\s+Set\(\[(?<items>[^\]]*)\]\)/s,
+      "ALLOWED_HEADER_NAMES",
+    );
+    const rustOnly = [...rustSet].filter((name) => !jsSet.has(name));
+    const jsOnly = [...jsSet].filter((name) => !rustSet.has(name));
+    if (rustOnly.length || jsOnly.length) {
       fail(
-        `[${entry.name}] manifest.json contains forbidden host_permissions: ${leakedHost.join(", ")}. ` +
-          "Host permissions are experimental-capture-only.",
+        `Header allowlists differ (Rust only: ${rustOnly.join(", ") || "none"}; JS only: ${jsOnly.join(", ") || "none"}).`,
       );
     }
-  }
-}
-
-// --- Assertion 2 + 3: release-only ID placeholders --------------------------
-//
-// The release profile is opt-in via `VIBE_BROWSER_PROFILE=release`. When it
-// is NOT set, we skip the release assertions (the dev build intentionally
-// uses placeholder IDs). When it IS set, the environment must supply real
-// IDs via `VIBE_CHROME_EXTENSION_ID` / `VIBE_EDGE_EXTENSION_ID` /
-// `VIBE_FIREFOX_EXTENSION_ID`.
-
-async function assertReleaseIdsAreNotPlaceholders() {
-  const profile = process.env.VIBE_BROWSER_PROFILE === "release" ? "release" : "dev";
-  if (profile !== "release") {
-    // Dev build: placeholders are expected. Skip release assertions.
-    return;
-  }
-
-  const chromeId = process.env.VIBE_CHROME_EXTENSION_ID;
-  const edgeId = process.env.VIBE_EDGE_EXTENSION_ID;
-  const firefoxId = process.env.VIBE_FIREFOX_EXTENSION_ID;
-
-  for (const [label, id] of [
-    ["VIBE_CHROME_EXTENSION_ID", chromeId],
-    ["VIBE_EDGE_EXTENSION_ID", edgeId],
-    ["VIBE_FIREFOX_EXTENSION_ID", firefoxId],
-  ]) {
-    if (!id) {
-      fail(`[release] ${label} is not set. Release builds require real extension IDs.`);
-      continue;
-    }
-    if (id.startsWith(PLACEHOLDER_ID_PREFIX)) {
-      fail(`[release] ${label}=${id} is still a placeholder (must not start with "${PLACEHOLDER_ID_PREFIX}").`);
-    }
-    if (label === "VIBE_FIREFOX_EXTENSION_ID" && id === PLACEHOLDER_FIREFOX_ID) {
-      fail(`[release] VIBE_FIREFOX_EXTENSION_ID=${id} is the placeholder (must be the real addons.mozilla.org ID).`);
-    }
-  }
-}
-
-// --- Assertion 4: Rust ↔ JS header allowlist set equality ------------------
-
-function parseRustAllowlist(source) {
-  // Match `const FORWARDED_HEADER_ALLOWLIST: &[&str] = &[ ... ];`
-  const match = source.match(/const\s+FORWARDED_HEADER_ALLOWLIST[^=]*=\s*&\[(?<items>[^\]]*)\]/s);
-  if (!match) {
-    throw new Error("Could not locate FORWARDED_HEADER_ALLOWLIST in browser.rs");
-  }
-  const items = match.groups.items
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
-    .map((item) => item.replace(/(^")|("$)/g, ""))
-    .map((item) => item.toLowerCase());
-  return new Set(items);
-}
-
-function parseJsAllowlist(source) {
-  // Match `const ALLOWED_HEADER_NAMES = new Set([ ... ]);`
-  const match = source.match(/const\s+ALLOWED_HEADER_NAMES\s*=\s*new\s+Set\(\[(?<items>[^\]]*)\]\)/s);
-  if (!match) {
-    throw new Error("Could not locate ALLOWED_HEADER_NAMES in background.js");
-  }
-  const items = match.groups.items
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
-    .map((item) => item.replace(/(^")|("$)/g, ""))
-    .map((item) => item.toLowerCase());
-  return new Set(items);
-}
-
-async function assertHeaderAllowlistMatchesBetweenRustAndJs() {
-  const rustSource = await readFile(browserRustPath, "utf8");
-  const jsSource = await readFile(backgroundJsPath, "utf8");
-
-  let rustSet;
-  let jsSet;
-  try {
-    rustSet = parseRustAllowlist(rustSource);
   } catch (error) {
     fail(error.message);
-    return;
-  }
-  try {
-    jsSet = parseJsAllowlist(jsSource);
-  } catch (error) {
-    fail(error.message);
-    return;
-  }
-
-  const rustOnly = [...rustSet].filter((name) => !jsSet.has(name));
-  const jsOnly = [...jsSet].filter((name) => !rustSet.has(name));
-
-  if (rustOnly.length > 0) {
-    fail(
-      `Rust FORWARDED_HEADER_ALLOWLIST has entries not present in JS ALLOWED_HEADER_NAMES: ${rustOnly.join(", ")}. ` +
-        "Headers allowed by Rust but not by JS would be silently dropped before reaching the desktop app.",
-    );
-  }
-  if (jsOnly.length > 0) {
-    fail(
-      `JS ALLOWED_HEADER_NAMES has entries not present in Rust FORWARDED_HEADER_ALLOWLIST: ${jsOnly.join(", ")}. ` +
-        "Headers allowed by JS but not by Rust would be rejected at the handoff boundary and never forwarded to the download engine.",
-    );
   }
 }
 
-// --- Runner ----------------------------------------------------------------
+async function verifyCompiledCandidateIdentity() {
+  const buildSource = await readFile(buildRsPath, "utf8");
+  const match = buildSource.match(/CANDIDATE_CHROMIUM_EXTENSION_ID:\s*&str\s*=\s*"([a-p]{32})"/);
+  if (!match) {
+    fail("Could not locate the Rust candidate Chromium extension ID in build.rs.");
+  } else if (match[1] !== CANDIDATE_CHROMIUM_EXTENSION_ID) {
+    fail(`Rust candidate ID ${match[1]} differs from Node candidate ID ${CANDIDATE_CHROMIUM_EXTENSION_ID}.`);
+  }
+}
+
+async function verifyArtifacts() {
+  let metadata;
+  try {
+    metadata = await readJson(path.join(packagesDir, "extension-artifacts.json"));
+  } catch (error) {
+    fail(`Could not read extension artifact metadata: ${error.message}`);
+    return;
+  }
+  if (metadata.profile !== identity.profile || metadata.captureAvailable !== identity.captureAvailable) {
+    fail("Extension artifact metadata does not match the requested build profile.");
+  }
+  if (metadata.artifacts?.length !== identity.variants.length) {
+    fail(`Expected ${identity.variants.length} packaged extensions; found ${metadata.artifacts?.length ?? 0}.`);
+    return;
+  }
+
+  for (const artifact of metadata.artifacts) {
+    const filePath = path.join(packagesDir, artifact.file);
+    try {
+      const archive = await readFile(filePath);
+      const digest = createHash("sha256").update(archive).digest("hex");
+      if (digest !== artifact.sha256) fail(`${artifact.file} SHA-256 does not match metadata.`);
+      const entries = unzipSync(new Uint8Array(archive));
+      if (!entries["manifest.json"] || !entries["background.js"]) {
+        fail(`${artifact.file} is missing manifest.json or background.js.`);
+      }
+    } catch (error) {
+      fail(`Could not verify ${artifact.file}: ${error.message}`);
+    }
+  }
+}
 
 async function main() {
-  await assertManifestsContainNoForbiddenPermissions();
-  await assertReleaseIdsAreNotPlaceholders();
-  await assertHeaderAllowlistMatchesBetweenRustAndJs();
+  await verifyVariantSetAndManifests();
+  await verifyHeaderAllowlist();
+  await verifyCompiledCandidateIdentity();
+  await verifyArtifacts();
 
   if (failures.length > 0) {
-    console.error(`\nExtension manifest verification failed (${failures.length} issue(s)):`);
-    for (const message of failures) {
-      console.error(`  - ${message}`);
-    }
+    console.error(`\nExtension verification failed (${failures.length} issue(s)):`);
+    for (const message of failures) console.error(`  - ${message}`);
     process.exit(1);
   }
-
-  console.log("Extension manifest verification passed.");
+  console.log(
+    `Extension verification passed for ${identity.profile} (${identity.variants.length} variants, capture=${identity.captureAvailable}).`,
+  );
 }
 
 await main();

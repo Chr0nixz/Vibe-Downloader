@@ -4,13 +4,7 @@ mod probe;
 mod request;
 mod segmented;
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use hickory_resolver::{config::*, TokioResolver};
 use reqwest::{Client, NoProxy, Proxy, StatusCode};
@@ -219,7 +213,13 @@ impl HttpEngine {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<i64, String> {
         let client = self.client().await?;
-        run_direct_download(&client, request, cancel_token, GlobalSpeedLimiter::disabled()).await
+        run_direct_download(
+            &client,
+            request,
+            cancel_token,
+            GlobalSpeedLimiter::disabled(),
+        )
+        .await
     }
 
     pub async fn download_direct_with_limiter(
@@ -238,8 +238,13 @@ impl HttpEngine {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<i64, String> {
         let client = self.client().await?;
-        run_direct_segmented_download(&client, request, cancel_token, GlobalSpeedLimiter::disabled())
-            .await
+        run_direct_segmented_download(
+            &client,
+            request,
+            cancel_token,
+            GlobalSpeedLimiter::disabled(),
+        )
+        .await
     }
 }
 
@@ -264,13 +269,26 @@ impl HickoryResolver {
     /// can be missing/corrupted (containers, chroot, minimal images), and a
     /// panic here would crash the worker or the synchronous `set_proxy_config`
     /// path. The caller (`build_client`) propagates the error as a string.
+    ///
+    /// Uses `TokioResolver::builder_tokio()` to read the OS DNS configuration
+    /// (Windows registry / `/etc/resolv.conf`). In hickory-resolver 0.26,
+    /// `ResolverConfig::default()` produces an **empty** config with zero name
+    /// servers, so every DNS lookup fails with "error sending request for url".
+    /// Reading the system config populates real upstream DNS servers.
     fn new() -> Result<Self, String> {
-        let resolver = TokioResolver::builder_with_config(
-            ResolverConfig::default(),
-            hickory_resolver::net::runtime::TokioRuntimeProvider::new(),
-        )
-        .with_options(ResolverOpts::default())
-        .build()
+        let resolver = match TokioResolver::builder_tokio() {
+            Ok(builder) => builder.build(),
+            Err(_) => {
+                // Fallback for environments where system DNS config is
+                // unavailable (containers, chroot, minimal images).
+                TokioResolver::builder_with_config(
+                    ResolverConfig::default(),
+                    hickory_resolver::net::runtime::TokioRuntimeProvider::new(),
+                )
+                .with_options(ResolverOpts::default())
+                .build()
+            }
+        }
         .map_err(|e| format!("DNS resolver unavailable: {e}"))?;
         Ok(Self(resolver))
     }
@@ -280,13 +298,10 @@ impl reqwest::dns::Resolve for HickoryResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let resolver = self.0.clone();
         Box::pin(async move {
-            let lookup = resolver
-                .lookup_ip(name.as_str())
-                .await
-                .map_err(|e| {
-                    Box::new(std::io::Error::other(e.to_string()))
-                        as Box<dyn std::error::Error + Send + Sync>
-                })?;
+            let lookup = resolver.lookup_ip(name.as_str()).await.map_err(|e| {
+                Box::new(std::io::Error::other(e.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?;
             // A-2: SSRF connection-time guard — filter out any resolved IP
             // that is private or reserved. If ALL resolved IPs are filtered,
             // return an error so the connection fails rather than falling
@@ -344,10 +359,7 @@ pub(crate) fn build_client(config: &ResolvedProxyConfig) -> Result<Client, Strin
     let resolver = HickoryResolver::new()?;
     let mut builder = Client::builder()
         .redirect(ssrf_safe_redirect_policy())
-        .user_agent(concat!(
-            "VibeDownloader/",
-            env!("CARGO_PKG_VERSION")
-        ))
+        .user_agent(concat!("VibeDownloader/", env!("CARGO_PKG_VERSION")))
         .dns_resolver(Arc::new(resolver))
         // 仅设置连接建立阶段超时；流式下载不应受整体 timeout 限制，
         // 否则大文件下载会在 60s 后被中断。应用层超时由各引擎在 Response

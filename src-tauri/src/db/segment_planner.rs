@@ -82,11 +82,8 @@ pub fn planned_segments_for_task_with_plan(
         // them. Note that this plan is per-task; the engine downloads each
         // selected file in turn, so the per-file threshold check happens in
         // `download_metalink_file`'s parallel-vs-serial dispatch.
-        let count = planned_segment_count_with_plan(
-            task,
-            multi_connection_threshold_bytes,
-            segment_count,
-        );
+        let count =
+            planned_segment_count_with_plan(task, multi_connection_threshold_bytes, segment_count);
         if count > 1 && task.total_size > 0 {
             return parallel_range_segments(task, "metalink_range", count);
         }
@@ -130,7 +127,11 @@ pub fn planned_segments_for_task_with_plan(
 /// Build `count` non-overlapping range segments covering [0, total_size)
 /// with the given `unit_kind`. Each segment is marked `Pending`.
 /// Used by SFTP and Metalink parallel paths.
-fn parallel_range_segments(task: &TaskRecord, unit_kind: &str, count: usize) -> Vec<TaskSegmentRecord> {
+fn parallel_range_segments(
+    task: &TaskRecord,
+    unit_kind: &str,
+    count: usize,
+) -> Vec<TaskSegmentRecord> {
     let total_size = task.total_size.max(0);
     let completed = task.downloaded_bytes >= total_size && total_size > 0;
     parallel_range_segments_with_completion(task, unit_kind, count, completed)

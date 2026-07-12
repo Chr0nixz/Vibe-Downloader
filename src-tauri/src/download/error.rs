@@ -111,11 +111,7 @@ impl From<DownloadError> for String {
 /// - `recoverable = false` → `actions: ["check_url"]`
 ///
 /// Engines that need custom actions can construct `AppErrorPayload` directly.
-pub(crate) fn engine_error(
-    code: &str,
-    message: impl Into<String>,
-    recoverable: bool,
-) -> String {
+pub(crate) fn engine_error(code: &str, message: impl Into<String>, recoverable: bool) -> String {
     crate::models::AppErrorPayload::new(
         code,
         message,

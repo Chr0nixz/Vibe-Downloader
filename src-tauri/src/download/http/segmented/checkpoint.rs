@@ -32,9 +32,8 @@ pub(super) async fn checkpoint_runtime_progress(
 
     let downloaded = runtime_progress.total_downloaded();
     let speed_bps = runtime_progress.total_speed();
-    let task_header_changed =
-        downloaded != runtime_progress.last_written_downloaded
-            || speed_bps != runtime_progress.last_written_speed_bps;
+    let task_header_changed = downloaded != runtime_progress.last_written_downloaded
+        || speed_bps != runtime_progress.last_written_speed_bps;
 
     // Fast path: nothing to write at all.
     if !task_header_changed && !has_dirty_segments {

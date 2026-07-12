@@ -211,6 +211,7 @@ macro_rules! vibe_commands_base {
             commands::system::request_system_hibernate,
             commands::system::request_lock_screen,
             commands::system::query_disk_space,
+            commands::system::extract_system_file_icon,
             commands::tasks::probe_task,
             commands::tasks::probe_ftp_directory,
             commands::tasks::probe_sftp_directory,
@@ -256,8 +257,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     ));
 
     #[cfg(not(debug_assertions))]
-    let builder =
-        Builder::<tauri::Wry>::new().commands(vibe_commands_base!(collect_commands));
+    let builder = Builder::<tauri::Wry>::new().commands(vibe_commands_base!(collect_commands));
 
     builder
         .typ::<models::AppErrorPayload>()
@@ -414,11 +414,8 @@ pub fn run() {
                     let app_handle = app.clone();
                     tauri::async_runtime::spawn(async move {
                         let state = app_handle.state::<AppState>();
-                        shutdown_active_downloads(
-                            state.inner(),
-                            std::time::Duration::from_secs(3),
-                        )
-                        .await;
+                        shutdown_active_downloads(state.inner(), std::time::Duration::from_secs(3))
+                            .await;
                         app_handle.exit(0);
                     });
                 }
@@ -538,8 +535,13 @@ pub fn run() {
                 let scheduler = state.scheduler.clone();
                 let pool_clone = state.pool.clone();
                 tauri::async_runtime::spawn(async move {
-                    scheduler.clone().dispatch(handle_clone.clone(), pool_clone.clone()).await;
-                    scheduler.schedule_retry_after_wakeup(handle_clone, pool_clone).await;
+                    scheduler
+                        .clone()
+                        .dispatch(handle_clone.clone(), pool_clone.clone())
+                        .await;
+                    scheduler
+                        .schedule_retry_after_wakeup(handle_clone, pool_clone)
+                        .await;
                 });
             }
             // Background schedule-window monitor: pauses/resumes tasks every 60s.
@@ -672,9 +674,7 @@ fn process_browser_handoff_files_from_args(
                     } else {
                         // S-2.2: 删除前再次校验路径仍在 handoff_dir 内（TOCTOU 防护）。
                         // 防止文件在读取后被替换为符号链接指向任意路径。
-                        if let Err(reason) =
-                            commands::browser::validate_handoff_file_path(&path)
-                        {
+                        if let Err(reason) = commands::browser::validate_handoff_file_path(&path) {
                             tracing::warn!(
                                 request_id = %request_id,
                                 path = %path.display(),

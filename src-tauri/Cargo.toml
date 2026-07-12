@@ -71,6 +71,28 @@ thiserror = "2"
 fs4 = "1"
 tokio-socks = "0.5"
 
+# System file icon extraction. Target-specific so each platform only pulls
+# in what it needs.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSData", "NSDictionary", "NSObject"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSWorkspace", "NSImage", "NSBitmapImageRep"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+freedesktop = { version = "0.0.3", default-features = false, features = ["icon"] }
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+
+
 [dev-dependencies]
 serial_test = "3"
 rand = "0.10"

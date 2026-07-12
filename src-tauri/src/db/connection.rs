@@ -123,9 +123,7 @@ fn should_rebuild_database_after_migration_error(error: &MigrateError) -> bool {
     // a clear error so the user knows to upgrade the app, not reset the DB.
     matches!(
         error,
-        MigrateError::VersionMissing(_)
-            | MigrateError::VersionMismatch(_)
-            | MigrateError::Dirty(_)
+        MigrateError::VersionMissing(_) | MigrateError::VersionMismatch(_) | MigrateError::Dirty(_)
     )
 }
 

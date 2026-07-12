@@ -24,17 +24,17 @@ impl TaskStatus {
         use TaskStatus::*;
         matches!(
             (self, target),
-            (Queued, Downloading | Paused | Failed | NeedsAttention | WaitingNetwork)
-                | (
-                    Downloading,
-                    Paused | Completed | Failed | Retrying | NeedsAttention | WaitingNetwork
-                )
-                | (Paused, Queued | Downloading | Failed)
+            (
+                Queued,
+                Downloading | Paused | Failed | NeedsAttention | WaitingNetwork
+            ) | (
+                Downloading,
+                Paused | Completed | Failed | Retrying | NeedsAttention | WaitingNetwork
+            ) | (Paused, Queued | Downloading | Failed)
                 | (Retrying, Downloading | Paused | Failed | NeedsAttention)
                 | (WaitingNetwork, Queued | Downloading | Failed)
                 | (NeedsAttention, Queued | Failed)
-                | (Failed, Queued | Retrying | NeedsAttention)
-                // Completed 是终态，不允许转出（重新下载走 delete + create）
+                | (Failed, Queued | Retrying | NeedsAttention) // Completed 是终态，不允许转出（重新下载走 delete + create）
         )
     }
 }

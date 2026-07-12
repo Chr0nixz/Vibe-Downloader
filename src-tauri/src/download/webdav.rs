@@ -63,7 +63,10 @@ impl WebDavEngine {
         let credentials = resolve_probe_credentials(&target, request).await?;
         let headers = webdav_request_headers(&request.request_headers, credentials.as_ref());
         // E-4: 复用共享 HttpEngine 的客户端缓存，而非每次构造新实例。
-        let probe = self.http.probe_with_headers(&target.http_url, &headers).await?;
+        let probe = self
+            .http
+            .probe_with_headers(&target.http_url, &headers)
+            .await?;
         let final_url = webdav_url_from_http(&probe.final_url, &target.protocol)?;
         Ok(ProbeOutput {
             protocol: target.protocol.clone(),
@@ -115,12 +118,13 @@ impl WebDavEngine {
         task.url = url_target.http_url;
         task.final_url = Some(final_target.http_url);
         // E-4: 复用共享 HttpEngine 的客户端缓存与下载实现。
-        self.http.download(DownloadContext {
-            task,
-            request_headers,
-            ..context
-        })
-        .await
+        self.http
+            .download(DownloadContext {
+                task,
+                request_headers,
+                ..context
+            })
+            .await
     }
 }
 
@@ -411,9 +415,7 @@ fn parse_webdav_multistatus(
                     _ => {}
                 }
             }
-            Ok(Event::Empty(event))
-                if local_name(event.name().as_ref()) == "collection" =>
-            {
+            Ok(Event::Empty(event)) if local_name(event.name().as_ref()) == "collection" => {
                 if let Some(current) = current.as_mut() {
                     current.is_collection = true;
                 }

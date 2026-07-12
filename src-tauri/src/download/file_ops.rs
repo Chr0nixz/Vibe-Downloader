@@ -34,15 +34,13 @@ pub(crate) async fn finalize_download_file(
     }
     // Cross-drive fallback: rename fails with EXDEV when source and dest are
     // on different volumes (e.g. C: → D: on Windows). Copy, fsync, then delete.
-    fs::copy(temp_path, &final_path)
-        .await
-        .map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!(
-                "Could not copy downloaded file to {dest}: {e}",
-                dest = final_path.display()
-            ))
-            .command_error()
-        })?;
+    fs::copy(temp_path, &final_path).await.map_err(|e| {
+        AppErrorPayload::disk_write_failed(format!(
+            "Could not copy downloaded file to {dest}: {e}",
+            dest = final_path.display()
+        ))
+        .command_error()
+    })?;
     // fsync the destination to ensure data is on disk before removing the source.
     // If sync fails, keep the temp file as a safety net — deleting the source
     // without confirmed persistence risks data loss on network/unreliable drives.

@@ -2,9 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri_app_lib::{
     db,
-    models::{
-        HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus,
-    },
+    models::{HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus},
 };
 
 async fn test_pool(label: &str) -> sqlx::SqlitePool {
@@ -91,9 +89,16 @@ async fn reorder_queued_tasks_reorders_correctly() {
     db::insert_task_record(&pool, &t3).await.expect("insert t3");
 
     // Reorder to [t3, t1, t2]. Step is 1000, so expected positions are 0/1000/2000.
-    db::reorder_queued_tasks(&pool, &["task-3".to_string(), "task-1".to_string(), "task-2".to_string()])
-        .await
-        .expect("reorder");
+    db::reorder_queued_tasks(
+        &pool,
+        &[
+            "task-3".to_string(),
+            "task-1".to_string(),
+            "task-2".to_string(),
+        ],
+    )
+    .await
+    .expect("reorder");
 
     assert_eq!(queue_position_of(&pool, "task-3").await, 0);
     assert_eq!(queue_position_of(&pool, "task-1").await, 1000);

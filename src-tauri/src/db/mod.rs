@@ -76,13 +76,12 @@ pub use self::segments::{
     update_segments_status_for_task, SegmentSplit,
 };
 pub use self::settings::{
-    clipboard_monitor_enabled, delete_to_trash_enabled,
-    duration_until_next_window_boundary, get_bt_upload_limit_bps_setting,
-    get_ffmpeg_path_setting, get_settings, local_time_window_active, normalize_accent_color,
-    normalize_ffmpeg_path, normalize_local_time, normalize_multi_connection_threshold_bytes,
-    normalize_proxy_mode, normalize_proxy_no_proxy, normalize_proxy_optional, normalize_proxy_url,
-    normalize_speed_limit_bps, parse_multi_connection_threshold_bytes, parse_speed_limit_bps,
-    upsert_settings,
+    clipboard_monitor_enabled, delete_to_trash_enabled, duration_until_next_window_boundary,
+    get_bt_upload_limit_bps_setting, get_ffmpeg_path_setting, get_settings,
+    local_time_window_active, normalize_accent_color, normalize_ffmpeg_path, normalize_local_time,
+    normalize_multi_connection_threshold_bytes, normalize_proxy_mode, normalize_proxy_no_proxy,
+    normalize_proxy_optional, normalize_proxy_url, normalize_speed_limit_bps,
+    parse_multi_connection_threshold_bytes, parse_speed_limit_bps, upsert_settings,
 };
 pub use self::sftp::verify_or_record_sftp_host_key;
 pub use self::task_checksums::{
@@ -104,25 +103,23 @@ pub use self::task_proxy::{
 };
 pub use self::task_records::{
     find_duplicate_task_record, get_task_record, get_task_record_in_tx, insert_task_record,
-    insert_task_record_in_tx,
-    list_browser_realtime_task_records, list_paused_schedulable_tasks, list_queued_task_records,
-    list_task_records, list_task_records_by_ids, list_task_records_cursor, list_task_records_page,
-    next_queue_position, next_retry_after_at, reorder_queued_tasks, task_filter_options,
-    task_stats_snapshot, update_task_transfer_options, TaskFilterOptions, TaskListPage,
-    TaskListQuery, TaskTransferOptionsUpdate,
+    insert_task_record_in_tx, list_browser_realtime_task_records, list_paused_schedulable_tasks,
+    list_queued_task_records, list_task_records, list_task_records_by_ids,
+    list_task_records_cursor, list_task_records_page, next_queue_position, next_retry_after_at,
+    reorder_queued_tasks, task_filter_options, task_stats_snapshot, update_task_transfer_options,
+    TaskFilterOptions, TaskListPage, TaskListQuery, TaskTransferOptionsUpdate,
 };
 pub use self::task_state::{
-    checkpoint_task_progress, clear_tasks, complete_segment, complete_task,
-    complete_task_segment, complete_unknown_size_task, delete_segments_for_task,
-    delete_task_files_for_task, delete_task_record, delete_task_records_batch,
-    mark_task_failed_if_active, reset_interrupted_tasks, reset_task_download_state,
-    update_task_and_segment_progress, update_task_final_path, update_task_health_summary,
-    update_task_progress, update_task_retry_after, update_task_runtime_progress,
-    update_task_save_target, update_task_status, update_task_status_in_tx,
-    TaskProgressCheckpoint,
+    checkpoint_task_progress, clear_tasks, complete_segment, complete_task, complete_task_segment,
+    complete_unknown_size_task, delete_segments_for_task, delete_task_files_for_task,
+    delete_task_record, delete_task_records_batch, mark_task_failed_if_active,
+    reset_interrupted_tasks, reset_task_download_state, update_task_and_segment_progress,
+    update_task_final_path, update_task_health_summary, update_task_progress,
+    update_task_retry_after, update_task_runtime_progress, update_task_save_target,
+    update_task_status, update_task_status_in_tx, TaskProgressCheckpoint,
 };
 pub use self::torrent::{
-    get_torrent_runtime_snapshot, torrent_seeding_enabled, torrent_seed_ratio_limit,
+    get_torrent_runtime_snapshot, torrent_seed_ratio_limit, torrent_seeding_enabled,
     update_task_remote_metadata, update_task_torrent_metadata, update_torrent_seeding,
     upsert_torrent_runtime_snapshot, upsert_torrent_task, TaskRemoteMetadataUpdate,
     TaskTorrentMetadataUpdate, TorrentRuntimeSnapshotUpsert, TorrentTaskUpsert,

@@ -100,7 +100,10 @@ pub(crate) fn classify_error_message(message: &str) -> Option<String> {
         return None;
     };
 
-    let recoverable = matches!(code, "timeout" | "connection_refused" | "network_unreachable");
+    let recoverable = matches!(
+        code,
+        "timeout" | "connection_refused" | "network_unreachable"
+    );
     let actions: Vec<&str> = if recoverable {
         vec!["retry", "check_url"]
     } else {
@@ -116,9 +119,7 @@ pub(crate) fn classify_error_message(message: &str) -> Option<String> {
 /// wrap in a generic `"unknown_error"` payload.
 pub(crate) fn ensure_structured_error(error: String) -> String {
     // Already structured JSON?
-    if error.starts_with('{')
-        && serde_json::from_str::<AppErrorPayload>(&error).is_ok()
-    {
+    if error.starts_with('{') && serde_json::from_str::<AppErrorPayload>(&error).is_ok() {
         return error;
     }
     // Try to classify by message patterns
@@ -177,8 +178,8 @@ mod tests {
 
     #[test]
     fn ensure_structured_preserves_json() {
-        let original = AppErrorPayload::new("http_denied", "denied", false, vec!["check_url"])
-            .command_error();
+        let original =
+            AppErrorPayload::new("http_denied", "denied", false, vec!["check_url"]).command_error();
         let result = ensure_structured_error(original.clone());
         assert_eq!(result, original);
     }

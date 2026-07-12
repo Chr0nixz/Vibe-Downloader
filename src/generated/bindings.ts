@@ -124,6 +124,20 @@ export const commands = {
 	 *  OS call fails, so the frontend can render a helpful toast.
 	 */
 	queryDiskSpace: (path: string) => typedError<DiskSpaceInfo, string>(__TAURI_INVOKE("query_disk_space", { path })),
+	/**
+	 *  Extract the OS-associated file-type icon for a file name.
+	 * 
+	 *  The file does **not** need to exist on disk — the icon is resolved purely
+	 *  from the extension's system association:
+	 * 
+	 *  - **Windows**: `SHGetFileInfo` with `SHGFI_USEFILEATTRIBUTES`
+	 *  - **macOS**: `NSWorkspace.iconForFileType:`
+	 *  - **Linux**: freedesktop icon theme lookup via the `freedesktop` crate
+	 * 
+	 *  Returns a PNG-encoded base64 data URL suitable for `<img>`, or `None`
+	 *  when extraction fails so the frontend can fall back to a generic icon.
+	 */
+	extractSystemFileIcon: (fileName: string) => typedError<SystemFileIcon, string>(__TAURI_INVOKE("extract_system_file_icon", { fileName })),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
 	probeFtpDirectory: (url: string) => typedError<FtpDirectoryProbe, string>(__TAURI_INVOKE("probe_ftp_directory", { url })),
 	probeSftpDirectory: (url: string) => typedError<SftpDirectoryProbe, string>(__TAURI_INVOKE("probe_sftp_directory", { url })),
@@ -327,7 +341,10 @@ export type BrowserIntegrationEntry = {
 export type BrowserIntegrationStatus = {
 	nativeHostName: string,
 	nativeHostPath: string | null,
+	nativeHostReady: boolean,
+	nativeHostError: string | null,
 	extensionCorePath: string | null,
+	captureAvailable: boolean,
 	experimentalCaptureEnabled: boolean,
 	realtime: BrowserRealtimeStatus,
 	capture: BrowserCaptureSettings,
@@ -703,6 +720,19 @@ export type SftpDirectoryProbe = {
 	currentDirectory: string | null,
 	entries: SftpDirectoryEntry[],
 	diagnostics: string[],
+};
+
+export type SystemFileIcon = {
+	/**
+	 *  PNG-encoded icon as a base64 data URL (`data:image/png;base64,...`).
+	 *  `None` when the OS has no associated icon for the extension.
+	 */
+	data_url: string | null,
+	/**
+	 *  Best-effort MIME-type hint for the extension (e.g. `video/mp4`).
+	 *  Useful as a fallback label when no icon is available.
+	 */
+	mime_hint: string | null,
 };
 
 export type Task = {

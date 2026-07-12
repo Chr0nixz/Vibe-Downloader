@@ -5,6 +5,15 @@ import {
   ChevronDown,
   Clock,
   File,
+  FileArchive,
+  FileAudio,
+  FileCode,
+  FileCog,
+  FileImage,
+  FileSpreadsheet,
+  FileStack,
+  FileText,
+  FileVideo,
   FolderOpen,
   Loader2,
   Pause,
@@ -24,6 +33,7 @@ import { ProgressBar } from "@/components/ui/progress-bar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { RecoveryAction } from "@/generated/bindings";
 import { useShellLayout } from "@/hooks/use-shell-layout";
+import { useSystemFileIcon } from "@/hooks/use-system-file-icon";
 import { localizedErrorMessage, localizedMessage, recoveryActionsForError } from "@/lib/errors";
 import { cn, formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
 import type { SpeedSample } from "@/stores/speed-history-store";
@@ -105,21 +115,191 @@ function statusBadgeIcon(
   }
 }
 
-// Two-letter protocol monogram for the row's leading identity marker.
-// Dense, geek-chic, and answers "what kind of download is this?" at a glance —
-// a download manager's core affordance that was previously missing.
-function protocolMonogram(protocol: string): string {
+// Leading file-type icon for the row's identity marker.
+// Replaces the old 2-letter protocol monogram with an icon that answers
+// "what kind of file is this?" at a glance — a download manager's core
+// affordance. Protocol is preserved in the chip tooltip.
+// Shape carries the categorization; color stays neutral to keep the row calm
+// and to avoid clashing with the 8 user-selectable accent themes.
+type IconComponent = React.ComponentType<{ className?: string }>;
+
+const VIDEO_EXTS = new Set([
+  "mp4",
+  "mkv",
+  "avi",
+  "mov",
+  "wmv",
+  "flv",
+  "webm",
+  "m4v",
+  "mpg",
+  "mpeg",
+  "ts",
+  "m2ts",
+  "vob",
+  "3gp",
+  "rm",
+  "rmvb",
+  "ogv",
+]);
+const AUDIO_EXTS = new Set([
+  "mp3",
+  "wav",
+  "flac",
+  "aac",
+  "ogg",
+  "opus",
+  "m4a",
+  "wma",
+  "aiff",
+  "alac",
+  "ape",
+  "mka",
+  "ac3",
+  "amr",
+]);
+const IMAGE_EXTS = new Set([
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "webp",
+  "bmp",
+  "svg",
+  "tiff",
+  "tif",
+  "ico",
+  "heic",
+  "heif",
+  "raw",
+  "psd",
+  "ai",
+  "avif",
+  "jfif",
+]);
+const ARCHIVE_EXTS = new Set([
+  "zip",
+  "rar",
+  "7z",
+  "tar",
+  "gz",
+  "bz2",
+  "xz",
+  "zst",
+  "lz",
+  "sit",
+  "cab",
+  "tgz",
+  "tbz2",
+  "txz",
+]);
+const DOC_EXTS = new Set([
+  "pdf",
+  "doc",
+  "docx",
+  "txt",
+  "rtf",
+  "odt",
+  "pages",
+  "md",
+  "markdown",
+  "epub",
+  "mobi",
+  "azw",
+  "azw3",
+  "djvu",
+  "tex",
+]);
+const SHEET_EXTS = new Set(["xls", "xlsx", "csv", "ods", "tsv", "numbers"]);
+const CODE_EXTS = new Set([
+  "js",
+  "ts",
+  "jsx",
+  "tsx",
+  "py",
+  "rs",
+  "go",
+  "java",
+  "c",
+  "cpp",
+  "cc",
+  "h",
+  "hpp",
+  "cs",
+  "rb",
+  "php",
+  "swift",
+  "kt",
+  "kts",
+  "sh",
+  "bash",
+  "zsh",
+  "json",
+  "xml",
+  "yaml",
+  "yml",
+  "html",
+  "htm",
+  "css",
+  "scss",
+  "sass",
+  "less",
+  "sql",
+  "lua",
+  "pl",
+  "r",
+  "dart",
+  "vue",
+  "svelte",
+  "toml",
+  "ini",
+  "cfg",
+  "conf",
+]);
+const APP_EXTS = new Set([
+  "exe",
+  "msi",
+  "app",
+  "apk",
+  "deb",
+  "rpm",
+  "pkg",
+  "appimage",
+  "dmg",
+  "xpi",
+  "crx",
+  "jar",
+  "war",
+  "bin",
+  "iso",
+  "img",
+  "vhd",
+  "vhdx",
+  "qcow2",
+]);
+const MANIFEST_EXTS = new Set(["torrent", "meta4", "metalink", "mpd", "m3u", "m3u8"]);
+
+function fileTypeIconFor(fileName: string, protocol: string): { Icon: IconComponent; labelKey: string } {
   const p = protocol.toLowerCase();
-  if (p === "http" || p === "https") return "HT";
-  if (p === "ftp" || p === "ftps") return "FP";
-  if (p === "sftp") return "SF";
-  if (p === "bt" || p === "magnet") return "BT";
-  if (p === "hls") return "HL";
-  if (p === "dash") return "DS";
-  if (p === "webdav" || p === "webdavs") return "WD";
-  if (p === "metalink") return "ML";
-  if (p.length >= 2) return p.slice(0, 2).toUpperCase();
-  return "•";
+  // Protocol-based shortcuts: streaming media and P2P have no single extension.
+  if (p === "bt" || p === "magnet") return { Icon: FileStack, labelKey: "task.fileType.torrent" };
+  if (p === "hls" || p === "dash") return { Icon: FileVideo, labelKey: "task.fileType.video" };
+  if (p === "metalink") return { Icon: FileText, labelKey: "task.fileType.manifest" };
+
+  const dot = fileName.lastIndexOf(".");
+  const ext = dot >= 0 ? fileName.slice(dot + 1).toLowerCase() : "";
+
+  if (MANIFEST_EXTS.has(ext)) return { Icon: FileText, labelKey: "task.fileType.manifest" };
+  if (VIDEO_EXTS.has(ext)) return { Icon: FileVideo, labelKey: "task.fileType.video" };
+  if (AUDIO_EXTS.has(ext)) return { Icon: FileAudio, labelKey: "task.fileType.audio" };
+  if (IMAGE_EXTS.has(ext)) return { Icon: FileImage, labelKey: "task.fileType.image" };
+  if (ARCHIVE_EXTS.has(ext)) return { Icon: FileArchive, labelKey: "task.fileType.archive" };
+  if (SHEET_EXTS.has(ext)) return { Icon: FileSpreadsheet, labelKey: "task.fileType.spreadsheet" };
+  if (CODE_EXTS.has(ext)) return { Icon: FileCode, labelKey: "task.fileType.code" };
+  if (DOC_EXTS.has(ext)) return { Icon: FileText, labelKey: "task.fileType.document" };
+  if (APP_EXTS.has(ext)) return { Icon: FileCog, labelKey: "task.fileType.app" };
+
+  return { Icon: File, labelKey: "task.fileType.file" };
 }
 
 export const TaskRow = memo(function TaskRow({
@@ -156,6 +336,10 @@ export const TaskRow = memo(function TaskRow({
   const completionFlash = useTaskDataStore((s) => s.completionFlashIds.includes(taskId));
   const speedHistory = useSpeedHistoryStore((s) => s.history[taskId] ?? EMPTY_SPEED_HISTORY);
   const toggleTaskExpanded = useTaskDataStore((s) => s.toggleTaskExpanded);
+  // System file icon — resolved from the OS file association via IPC.
+  // Called before the `if (!task)` guard would violate the Rules of Hooks,
+  // so we pass the file name defensively (empty string yields null safely).
+  const systemIcon = useSystemFileIcon(task?.fileName ?? "");
   const onSelect = useCallback(() => {
     onSelectTask(taskId);
   }, [onSelectTask, taskId]);
@@ -274,17 +458,29 @@ export const TaskRow = memo(function TaskRow({
             <span className="sr-only">{t("taskList.selectTask", { name: task.fileName })}</span>
             <Checkbox checked={multiSelected} onChange={(event) => onToggleSelected(task.id, event.target.checked)} />
           </label>
-          {/* Protocol monogram — leading identity marker.
-              A small tinted chip with a 2-letter code (HT/FP/SF/BT/HL/DS/WD/ML).
-              Tone follows the accent so it stays calm; size is fixed so the row
-              height doesn't jitter across protocols. */}
-          <span
-            aria-hidden
-            title={task.protocol}
-            className="mt-0.5 flex h-6 w-7 shrink-0 select-none items-center justify-center rounded border border-border-subtle/60 bg-surface-raised font-mono text-[9px] font-bold leading-none tracking-tight text-text-secondary transition-colors duration-ui group-hover:text-text-primary md:h-5 md:w-6 md:text-[8px]"
-          >
-            {protocolMonogram(task.protocol)}
-          </span>
+          {/* File-type icon — leading identity marker.
+              Shows the OS-associated icon for the file's extension (e.g. the
+              PDF reader's icon for .pdf, the video player's icon for .mp4),
+              extracted via Windows SHGetFileInfo. Falls back to a lucide
+              file-type icon when the system icon is unavailable (non-Windows,
+              extraction failure, or still loading). Protocol is preserved in
+              the tooltip. */}
+          {(() => {
+            const { Icon, labelKey } = fileTypeIconFor(task.fileName, task.protocol);
+            return (
+              <span
+                aria-hidden
+                title={`${t(labelKey)} · ${task.protocol.toUpperCase()}`}
+                className="flex shrink-0 select-none items-center justify-center text-text-secondary transition-colors duration-ui group-hover:text-text-primary"
+              >
+                {systemIcon ? (
+                  <img src={systemIcon} alt="" className="h-11 w-11 object-contain md:h-8 md:w-8" draggable={false} />
+                ) : (
+                  <Icon className="h-10 w-10 md:h-7 md:w-7" />
+                )}
+              </span>
+            );
+          })()}
           <div className="min-w-0 flex-1 space-y-1.5 md:space-y-1">
             <div className="flex min-w-0 items-start justify-between gap-2 md:block">
               <div className="min-w-0 flex-1">

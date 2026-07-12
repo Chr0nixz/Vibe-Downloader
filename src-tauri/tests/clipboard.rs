@@ -65,7 +65,8 @@ fn short_circuits_plain_text_without_url_scheme() {
 #[test]
 fn short_circuit_still_extracts_magnet_lowercase() {
     // magnet: 无 "://"，短路逻辑须单独检查 "magnet:"
-    let urls = extract_download_urls("magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10");
+    let urls =
+        extract_download_urls("magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10");
     assert_eq!(
         urls,
         vec!["magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string()]
@@ -76,7 +77,8 @@ fn short_circuit_still_extracts_magnet_lowercase() {
 fn short_circuit_falls_back_for_uppercase_magnet() {
     // 大写 MAGNET: 不命中 case-sensitive "magnet:" 快路径，
     // 但后续 to_ascii_lowercase + 前缀匹配应兜底提取
-    let urls = extract_download_urls("MAGNET:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10");
+    let urls =
+        extract_download_urls("MAGNET:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10");
     assert_eq!(
         urls,
         vec!["magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string()]

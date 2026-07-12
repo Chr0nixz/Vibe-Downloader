@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use common::{TestServer, TestPaths};
+use common::{TestPaths, TestServer};
 use sha2::{Digest, Sha256};
 use tauri_app_lib::{
     download::GlobalSpeedLimiter,
@@ -682,10 +682,7 @@ async fn probe_maps_401_as_denied() {
 
     let value: serde_json::Value = serde_json::from_str(&error).expect("401 payload");
     assert_eq!(value["code"], "http_denied");
-    assert_eq!(
-        value["message"],
-        "The server denied access to this file."
-    );
+    assert_eq!(value["message"], "The server denied access to this file.");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -708,11 +705,8 @@ async fn direct_download_cancel_mid_stream_returns_partial() {
         last_modified: None,
     };
 
-    let handle = tokio::spawn(async move {
-        engine_clone
-            .download_direct(request, cancel_clone)
-            .await
-    });
+    let handle =
+        tokio::spawn(async move { engine_clone.download_direct(request, cancel_clone).await });
 
     // Let some data flow, then cancel
     tokio::time::sleep(Duration::from_millis(100)).await;

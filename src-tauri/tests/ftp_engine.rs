@@ -118,7 +118,9 @@ fn handle_ftp_session(mut stream: TcpStream, config: FtpServerConfig) {
     let mut rest_offset: u64 = 0;
 
     loop {
-        let Ok(read) = stream.read(&mut buf) else { return };
+        let Ok(read) = stream.read(&mut buf) else {
+            return;
+        };
         if read == 0 {
             return;
         }
@@ -366,14 +368,8 @@ async fn probe_strips_embedded_credentials_from_url() {
     let server = FtpTestServer::start(config_with_file("/file.bin", 1024));
     let engine = new_engine();
 
-    let url = format!(
-        "ftp://alice:s3cret@{}/file.bin",
-        server.addr
-    );
-    let output = engine
-        .probe(new_probe_request(url))
-        .await
-        .expect("probe");
+    let url = format!("ftp://alice:s3cret@{}/file.bin", server.addr);
+    let output = engine.probe(new_probe_request(url)).await.expect("probe");
 
     assert!(
         !output.resolved_uri.contains("s3cret"),

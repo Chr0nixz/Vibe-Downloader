@@ -54,11 +54,8 @@ pub async fn run_tray_menu_action(
             let app_handle = app.clone();
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
-                crate::shutdown_active_downloads(
-                    state.inner(),
-                    std::time::Duration::from_secs(3),
-                )
-                .await;
+                crate::shutdown_active_downloads(state.inner(), std::time::Duration::from_secs(3))
+                    .await;
                 app_handle.exit(0);
             });
         }

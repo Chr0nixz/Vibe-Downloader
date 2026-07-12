@@ -27,13 +27,14 @@ async fn full_migration_on_fresh_database() {
 
     // Baseline consolidation: the original 14 incremental migrations were
     // merged into a single `001_init.sql`, followed by `002_metalink_health.sql`
-    // (Phase 6 parallel-mirror health tracking). A fresh install records
-    // exactly two migration rows.
+    // (Phase 6 parallel-mirror health tracking), and `003_hls_track_selection.sql`
+    // (F-6 HLS audio/subtitle track selection). A fresh install records
+    // exactly three migration rows.
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await
         .expect("count migrations");
-    assert_eq!(count, 2, "expected exactly 2 migrations (baseline + metalink health), got {count}");
+    assert_eq!(count, 3, "expected exactly 3 migrations (baseline + metalink health + hls track selection), got {count}");
 
     pool.close().await;
 }
@@ -68,10 +69,7 @@ async fn key_tables_exist_after_migration() {
         .fetch_one(&pool)
         .await
         .unwrap_or(false);
-        assert!(
-            exists,
-            "table '{table}' should exist after migration"
-        );
+        assert!(exists, "table '{table}' should exist after migration");
     }
 
     pool.close().await;
@@ -190,12 +188,11 @@ async fn baseline_contains_all_evolved_columns() {
 async fn dedup_unique_index_exists() {
     let pool = test_pool("dedup").await;
 
-    let indexes = sqlx::query(
-        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks'",
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("list task indexes");
+    let indexes =
+        sqlx::query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks'")
+            .fetch_all(&pool)
+            .await
+            .expect("list task indexes");
     let index_names: Vec<String> = indexes
         .iter()
         .map(|row| row.get::<String, _>("name"))
@@ -225,8 +222,16 @@ async fn migration_002_adds_metalink_health_columns() {
         .fetch_all(&pool)
         .await
         .expect("pragma table_info(metalink_resources)");
-    let columns: Vec<String> = rows.iter().map(|row| row.get::<String, _>("name")).collect();
-    for expected in ["last_attempt_at", "cooldown_until", "avg_speed_bps", "supports_range"] {
+    let columns: Vec<String> = rows
+        .iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect();
+    for expected in [
+        "last_attempt_at",
+        "cooldown_until",
+        "avg_speed_bps",
+        "supports_range",
+    ] {
         assert!(
             columns.iter().any(|c| c == expected),
             "metalink_resources.{expected} missing after migration, actual: {columns:?}"
@@ -327,17 +332,27 @@ async fn migration_002_adds_metalink_health_columns() {
     .await
     .expect("insert metalink_resource");
 
-    let (supports_range, avg_speed, last_attempt, cooldown): (i64, i64, Option<String>, Option<String>) =
-        sqlx::query_as(
-            "SELECT supports_range, avg_speed_bps, last_attempt_at, cooldown_until \
+    let (supports_range, avg_speed, last_attempt, cooldown): (
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT supports_range, avg_speed_bps, last_attempt_at, cooldown_until \
              FROM metalink_resources WHERE id = 'metalink-health-resource'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("fetch defaults");
-    assert_eq!(supports_range, 1, "supports_range default should be 1 (true)");
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("fetch defaults");
+    assert_eq!(
+        supports_range, 1,
+        "supports_range default should be 1 (true)"
+    );
     assert_eq!(avg_speed, 0, "avg_speed_bps default should be 0");
-    assert!(last_attempt.is_none(), "last_attempt_at default should be NULL");
+    assert!(
+        last_attempt.is_none(),
+        "last_attempt_at default should be NULL"
+    );
     assert!(cooldown.is_none(), "cooldown_until default should be NULL");
 
     pool.close().await;
@@ -360,8 +375,8 @@ async fn migration_idempotent_on_reconnect() {
         .await
         .expect("count");
     assert_eq!(
-        count, 2,
-        "expected exactly 2 migrations on reconnect (baseline + metalink health), got {count}"
+        count, 3,
+        "expected exactly 3 migrations on reconnect (baseline + metalink health + hls track selection), got {count}"
     );
     pool2.close().await;
 
@@ -418,7 +433,7 @@ async fn rebuilds_for_dirty_migration() {
         backup_path.display()
     );
 
-    // The rebuilt database must have a clean migration history (both rows
+    // The rebuilt database must have a clean migration history (all rows
     // marked success=1).
     let dirty_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = 0")
@@ -455,8 +470,7 @@ async fn rebuilds_for_version_missing_after_downgrade() {
         .duration_since(UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let path = std::env::temp_dir()
-        .join(format!("vibe-migration-downgrade-{id}.sqlite"));
+    let path = std::env::temp_dir().join(format!("vibe-migration-downgrade-{id}.sqlite"));
 
     // First connect: applies both real migrations cleanly.
     let pool = db::connect(&path).await.expect("first connect").pool;
@@ -478,9 +492,9 @@ async fn rebuilds_for_version_missing_after_downgrade() {
     // `Ok` variant manually rather than using `expect`.
     let connection = match db::connect(&path).await {
         Ok(connection) => connection,
-        Err(message) => panic!(
-            "VersionMissing should trigger a rebuild, not surface an error. Got: {message}"
-        ),
+        Err(message) => {
+            panic!("VersionMissing should trigger a rebuild, not surface an error. Got: {message}")
+        }
     };
     assert!(
         connection.data_was_reset,
@@ -497,7 +511,7 @@ async fn rebuilds_for_version_missing_after_downgrade() {
     );
 
     // The rebuilt database must have a clean migration history: only the
-    // two real migrations (versions 1 and 2), no orphaned version 999 row.
+    // three real migrations (versions 1, 2, and 3), no orphaned version 999 row.
     let migrations: Vec<i64> =
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
             .fetch_all(&connection.pool)
@@ -505,7 +519,7 @@ async fn rebuilds_for_version_missing_after_downgrade() {
             .expect("list migrations");
     assert_eq!(
         migrations,
-        vec![1, 2],
+        vec![1, 2, 3],
         "rebuilt database should only contain the embedded migration versions, got: {migrations:?}"
     );
 
@@ -525,8 +539,7 @@ async fn rebuild_after_dirty_produces_clean_schema() {
         .duration_since(UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let path = std::env::temp_dir()
-        .join(format!("vibe-migration-rebuild-schema-{id}.sqlite"));
+    let path = std::env::temp_dir().join(format!("vibe-migration-rebuild-schema-{id}.sqlite"));
 
     let pool = db::connect(&path).await.expect("first connect").pool;
     sqlx::query("UPDATE _sqlx_migrations SET success = 0")
@@ -578,13 +591,21 @@ async fn rebuild_after_dirty_produces_clean_schema() {
     }
 
     // The Phase 6 columns added by 002_metalink_health must also be present
-    // on the rebuilt database, proving both migrations ran.
+    // on the rebuilt database, proving all migrations ran.
     let rows = sqlx::query("PRAGMA table_info(metalink_resources)")
         .fetch_all(&connection.pool)
         .await
         .expect("pragma");
-    let columns: Vec<String> = rows.iter().map(|row| row.get::<String, _>("name")).collect();
-    for expected in ["last_attempt_at", "cooldown_until", "avg_speed_bps", "supports_range"] {
+    let columns: Vec<String> = rows
+        .iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect();
+    for expected in [
+        "last_attempt_at",
+        "cooldown_until",
+        "avg_speed_bps",
+        "supports_range",
+    ] {
         assert!(
             columns.iter().any(|c| c == expected),
             "metalink_resources.{expected} missing after rebuild, actual: {columns:?}"
@@ -595,4 +616,119 @@ async fn rebuild_after_dirty_produces_clean_schema() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
+
+// --- Migration 003: HLS track selection columns -------------------------------
+
+/// Validates the two columns added by migration 003_hls_track_selection
+/// are present on a fresh database and default to NULL:
+///  - selected_audio_track_uris (TEXT, NULL on new rows)
+///  - selected_subtitle_track_uris (TEXT, NULL on new rows)
+///
+/// Both columns store a JSON array of URI strings. NULL means "no selection"
+/// (backwards-compatible with tasks created before F-6).
+#[tokio::test]
+async fn migration_003_adds_hls_track_selection_columns() {
+    let pool = test_pool("hls-track-selection").await;
+
+    let rows = sqlx::query("PRAGMA table_info(hls_tasks)")
+        .fetch_all(&pool)
+        .await
+        .expect("pragma table_info(hls_tasks)");
+    let columns: Vec<String> = rows
+        .iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect();
+    for expected in ["selected_audio_track_uris", "selected_subtitle_track_uris"] {
+        assert!(
+            columns.iter().any(|c| c == expected),
+            "hls_tasks.{expected} missing after migration, actual: {columns:?}"
+        );
+    }
+
+    // Insert a task record, then an hls_tasks row, and read the new columns
+    // back to verify their NULL default behaviour.
+    let now = now_iso();
+    let task_id = "hls-track-selection-task".to_string();
+    let task = TaskRecord {
+        id: task_id.clone(),
+        url: "https://example.com/stream.m3u8".to_string(),
+        final_url: Some("https://example.com/stream.m3u8".to_string()),
+        protocol: "hls".to_string(),
+        task_kind: TaskKind::Manifest,
+        file_name: "stream.mp4".to_string(),
+        save_dir: std::env::temp_dir().to_string_lossy().to_string(),
+        temp_path: None,
+        final_path: None,
+        total_size: 0,
+        downloaded_bytes: 0,
+        status: TaskStatus::Queued,
+        etag: None,
+        last_modified: None,
+        content_type: None,
+        supports_resume: false,
+        supports_parallel: false,
+        supports_multi_file: false,
+        source_key: "hls-track-selection".to_string(),
+        connection_count: 0,
+        speed_bps: 0,
+        task_speed_limit_bps: None,
+        priority: TaskPriority::Normal,
+        queue_position: 0,
+        category_key: None,
+        obey_schedule: true,
+        health_summary: Some("Queued".to_string()),
+        error_message: None,
+        error_code: None,
+        recovery_actions: Vec::new(),
+        retry_after_at: None,
+        expected_hash_sha256: None,
+        actual_hash_sha256: None,
+        hash_status: HashVerificationStatus::NotRequested,
+        hash_error: None,
+        hash_verified_at: None,
+        created_at: now.clone(),
+        updated_at: now,
+        files_version: 0,
+    };
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+
+    let staging_dir = std::env::temp_dir()
+        .join("hls-staging")
+        .to_string_lossy()
+        .to_string();
+    let stamp = now_iso();
+    sqlx::query(
+        r#"INSERT INTO hls_tasks (task_id, input_url, media_url, staging_dir, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)"#,
+    )
+    .bind(&task_id)
+    .bind("https://example.com/stream.m3u8")
+    .bind("https://example.com/stream.m3u8")
+    .bind(&staging_dir)
+    .bind(&stamp)
+    .bind(&stamp)
+    .execute(&pool)
+    .await
+    .expect("insert hls_task");
+
+    let (audio_uris, subtitle_uris): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT selected_audio_track_uris, selected_subtitle_track_uris FROM hls_tasks WHERE task_id = ?",
+    )
+    .bind(&task_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch hls_task");
+    assert!(
+        audio_uris.is_none(),
+        "selected_audio_track_uris default should be NULL"
+    );
+    assert!(
+        subtitle_uris.is_none(),
+        "selected_subtitle_track_uris default should be NULL"
+    );
+
+    pool.close().await;
 }

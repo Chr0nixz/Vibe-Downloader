@@ -10,11 +10,7 @@ use std::time::Duration;
 
 use sqlx::SqlitePool;
 
-use crate::{
-    db,
-    logging::sanitize_url,
-    models::RequestDiagnosticRecord,
-};
+use crate::{db, logging::sanitize_url, models::RequestDiagnosticRecord};
 
 /// Context for persisting an engine-level request diagnostic.
 ///

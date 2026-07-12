@@ -21,12 +21,7 @@
 // `TestServer` / `TestPaths` in `common/mod.rs`.
 #![allow(dead_code)]
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use russh::{
     client::{self, AuthResult, Config as ClientConfig, Handler},
@@ -39,9 +34,7 @@ use russh::{
 };
 use russh_sftp::{
     client::SftpSession as ClientSftpSession,
-    protocol::{
-        Attrs, Data, FileAttributes, FileMode, Handle, Name, Status, StatusCode, Version,
-    },
+    protocol::{Attrs, Data, FileAttributes, FileMode, Handle, Name, Status, StatusCode, Version},
     server::{self as sftp_server, Handler as SftpHandler},
 };
 use tokio::{net::TcpListener, sync::Mutex};
@@ -119,9 +112,7 @@ pub async fn start_sftp_server(config: SftpServerConfig) -> TestSftpServer {
 
 /// Convenience wrapper: start a server that accepts any password and
 /// serves the given files.
-pub async fn start_sftp_server_with_files(
-    files: HashMap<String, Vec<u8>>,
-) -> TestSftpServer {
+pub async fn start_sftp_server_with_files(files: HashMap<String, Vec<u8>>) -> TestSftpServer {
     start_sftp_server(SftpServerConfig {
         files,
         reject_auth: false,
@@ -143,7 +134,10 @@ pub async fn connect_sftp(addr: SocketAddr, user: &str, password: &str) -> Clien
     .expect("connect");
     assert!(
         matches!(
-            handle.authenticate_password(user, password).await.expect("auth"),
+            handle
+                .authenticate_password(user, password)
+                .await
+                .expect("auth"),
             AuthResult::Success
         ),
         "auth should succeed"
@@ -250,11 +244,7 @@ impl SftpHandler for InMemFs {
         })
     }
 
-    async fn stat(
-        &mut self,
-        id: u32,
-        path: String,
-    ) -> Result<Attrs, Self::Error> {
+    async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         let data = self.files.get(&path).ok_or(StatusCode::NoSuchFile)?;
         // Construct permissions directly rather than via `FileAttributes::default()`,
         // whose `Default` impl pre-sets the DIR bit (Some(0o777 | DIR)) — that

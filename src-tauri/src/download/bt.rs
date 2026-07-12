@@ -152,10 +152,7 @@ impl BtEngine {
         }
     }
 
-    fn compute_session_key(
-        output_folder: &str,
-        task_proxy_config: &ResolvedProxyConfig,
-    ) -> String {
+    fn compute_session_key(output_folder: &str, task_proxy_config: &ResolvedProxyConfig) -> String {
         let proxy_fingerprint = task_proxy_config.fingerprint();
         let key = PathBuf::from(output_folder)
             .canonicalize()
@@ -443,7 +440,14 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         }
     }
 
-    persist_torrent_details(&pool, &task, &response, selected_paths.as_ref(), private_flag).await?;
+    persist_torrent_details(
+        &pool,
+        &task,
+        &response,
+        selected_paths.as_ref(),
+        private_flag,
+    )
+    .await?;
 
     // For magnet sources, the private flag cannot be parsed before metadata is
     // fetched, and TorrentDetailsResponse does not expose it. librqbit handles
@@ -703,9 +707,9 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                     if cancel_token.is_cancelled() {
                         break;
                     }
-                    let seed_stats = api
-                        .api_stats_v1(torrent_id)
-                        .map_err(|e| format!("Could not read torrent stats during seeding: {e:#}"))?;
+                    let seed_stats = api.api_stats_v1(torrent_id).map_err(|e| {
+                        format!("Could not read torrent stats during seeding: {e:#}")
+                    })?;
                     let seed_uploaded =
                         i64::try_from(seed_stats.uploaded_bytes).unwrap_or(i64::MAX);
                     let seed_ratio = if downloaded > 0 {
@@ -716,13 +720,12 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                     let seed_upload_speed = seed_stats
                         .live
                         .as_ref()
-                        .map(|live| {
-                            i64::try_from(live.upload_speed.as_bytes()).unwrap_or(i64::MAX)
-                        })
+                        .map(|live| i64::try_from(live.upload_speed.as_bytes()).unwrap_or(i64::MAX))
                         .unwrap_or(0);
 
-                    let seed_ratio_limit =
-                        db::torrent_seed_ratio_limit(&pool, &task.id).await.unwrap_or(None);
+                    let seed_ratio_limit = db::torrent_seed_ratio_limit(&pool, &task.id)
+                        .await
+                        .unwrap_or(None);
                     let limit_reached = seed_ratio_limit
                         .map(|limit| seed_ratio >= limit)
                         .unwrap_or(false);
@@ -1317,8 +1320,7 @@ async fn download_torrent_bytes(
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(60));
     if let Some(proxy_url) = proxy_config.custom_socks5_url_with_auth() {
-        builder = builder
-            .proxy(reqwest::Proxy::all(&proxy_url).map_err(|e| e.to_string())?);
+        builder = builder.proxy(reqwest::Proxy::all(&proxy_url).map_err(|e| e.to_string())?);
     }
     let client = builder.build().map_err(|e| e.to_string())?;
     let response = client
@@ -1453,10 +1455,8 @@ mod tests {
     async fn session_evicted_when_ref_count_reaches_zero() {
         let _guard = BT_TEST_LOCK.lock().await;
         let engine = BtEngine::new(crate::proxy::ResolvedProxyConfig::shared_default());
-        let temp_dir = std::env::temp_dir().join(format!(
-            "vibe-bt-session-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("vibe-bt-session-{}", uuid::Uuid::new_v4()));
         // Create the directory BEFORE calling api_for_output_folder so that
         // compute_session_key's canonicalize() succeeds consistently. Without
         // this, the first call caches with the raw path (canonicalize fails)
@@ -1593,7 +1593,8 @@ mod tests {
 
         // Same torrent but with private=1 in the info dict.
         // b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1e7:privatei1eee"
-        let private = b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1e7:privatei1eee";
+        let private =
+            b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1e7:privatei1eee";
         assert_eq!(parse_torrent_private_flag(private), Some(true));
     }
 

@@ -66,8 +66,11 @@ pub async fn get_settings(
         .filter(|v| !v.trim().is_empty())
         .cloned()
         .unwrap_or(default_save_dir);
-    let global_speed_limit_bps =
-        normalize_speed_limit_bps(kv.get(SETTING_GLOBAL_SPEED_LIMIT_BPS).map(String::as_str).unwrap_or(""));
+    let global_speed_limit_bps = normalize_speed_limit_bps(
+        kv.get(SETTING_GLOBAL_SPEED_LIMIT_BPS)
+            .map(String::as_str)
+            .unwrap_or(""),
+    );
     let multi_connection_threshold_bytes = kv
         .get(SETTING_MULTI_CONNECTION_THRESHOLD_BYTES)
         .and_then(|v| normalize_multi_connection_threshold_bytes(v))
@@ -89,7 +92,8 @@ pub async fn get_settings(
     let start_on_boot = parse_bool_setting(&kv, SETTING_START_ON_BOOT, false)?;
     let auto_resume_on_startup = parse_bool_setting(&kv, SETTING_AUTO_RESUME_ON_STARTUP, false)?;
     let floating_window_enabled = parse_bool_setting(&kv, SETTING_FLOATING_WINDOW_ENABLED, false)?;
-    let clipboard_monitor_enabled = parse_bool_setting(&kv, SETTING_CLIPBOARD_MONITOR_ENABLED, true)?;
+    let clipboard_monitor_enabled =
+        parse_bool_setting(&kv, SETTING_CLIPBOARD_MONITOR_ENABLED, true)?;
     let accent_color = kv
         .get(SETTING_ACCENT_COLOR)
         .map(|v| normalize_accent_color(v))
@@ -114,32 +118,45 @@ pub async fn get_settings(
     let schedule_download_window_enabled =
         parse_bool_setting(&kv, SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED, false)?;
     let schedule_download_window_start = normalize_local_time(
-        kv.get(SETTING_SCHEDULE_DOWNLOAD_WINDOW_START).map(String::as_str).unwrap_or(""),
+        kv.get(SETTING_SCHEDULE_DOWNLOAD_WINDOW_START)
+            .map(String::as_str)
+            .unwrap_or(""),
     )
     .unwrap_or_else(|| "00:00".to_string());
     let schedule_download_window_end = normalize_local_time(
-        kv.get(SETTING_SCHEDULE_DOWNLOAD_WINDOW_END).map(String::as_str).unwrap_or(""),
+        kv.get(SETTING_SCHEDULE_DOWNLOAD_WINDOW_END)
+            .map(String::as_str)
+            .unwrap_or(""),
     )
     .unwrap_or_else(|| "06:00".to_string());
     let schedule_speed_limit_window_enabled =
         parse_bool_setting(&kv, SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED, false)?;
     let schedule_speed_limit_window_start = normalize_local_time(
-        kv.get(SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START).map(String::as_str).unwrap_or(""),
+        kv.get(SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START)
+            .map(String::as_str)
+            .unwrap_or(""),
     )
     .unwrap_or_else(|| "18:00".to_string());
     let schedule_speed_limit_window_end = normalize_local_time(
-        kv.get(SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END).map(String::as_str).unwrap_or(""),
+        kv.get(SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END)
+            .map(String::as_str)
+            .unwrap_or(""),
     )
     .unwrap_or_else(|| "23:00".to_string());
-    let schedule_speed_limit_bps =
-        normalize_speed_limit_bps(kv.get(SETTING_SCHEDULE_SPEED_LIMIT_BPS).map(String::as_str).unwrap_or(""));
-    let titlebar_gradient_enabled = parse_bool_setting(&kv, SETTING_TITLEBAR_GRADIENT_ENABLED, false)?;
+    let schedule_speed_limit_bps = normalize_speed_limit_bps(
+        kv.get(SETTING_SCHEDULE_SPEED_LIMIT_BPS)
+            .map(String::as_str)
+            .unwrap_or(""),
+    );
+    let titlebar_gradient_enabled =
+        parse_bool_setting(&kv, SETTING_TITLEBAR_GRADIENT_ENABLED, false)?;
     let completion_action = kv
         .get(SETTING_COMPLETION_ACTION)
         .map(|v| CompletionAction::from_db_str(v))
         .unwrap_or(CompletionAction::None);
     let completion_countdown_seconds = parse_i32_or_default(
-        kv.get(SETTING_COMPLETION_COUNTDOWN_SECONDS).map(String::as_str),
+        kv.get(SETTING_COMPLETION_COUNTDOWN_SECONDS)
+            .map(String::as_str),
         30,
         5,
         300,
@@ -156,8 +173,11 @@ pub async fn get_settings(
         .and_then(|v| normalize_ffmpeg_path(v));
     // F-7: BT upload limit, persisted as a speed-limit string (same shape as
     // global_speed_limit_bps). Empty/invalid/0 means unlimited.
-    let bt_upload_limit_bps =
-        normalize_speed_limit_bps(kv.get(SETTING_BT_UPLOAD_LIMIT_BPS).map(String::as_str).unwrap_or(""));
+    let bt_upload_limit_bps = normalize_speed_limit_bps(
+        kv.get(SETTING_BT_UPLOAD_LIMIT_BPS)
+            .map(String::as_str)
+            .unwrap_or(""),
+    );
 
     Ok(AppSettings {
         max_active_tasks,
@@ -204,10 +224,9 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         segment_count: settings
             .segment_count
             .clamp(MIN_SEGMENT_COUNT, MAX_SEGMENT_COUNT),
-        max_connections_per_host: settings.max_connections_per_host.clamp(
-            MIN_MAX_CONNECTIONS_PER_HOST,
-            MAX_MAX_CONNECTIONS_PER_HOST,
-        ),
+        max_connections_per_host: settings
+            .max_connections_per_host
+            .clamp(MIN_MAX_CONNECTIONS_PER_HOST, MAX_MAX_CONNECTIONS_PER_HOST),
         ..settings.clone()
     };
     upsert_setting_value(
@@ -384,7 +403,8 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
 /// Used by the download layer to resolve the ffmpeg binary location.
 pub async fn get_ffmpeg_path_setting(pool: &SqlitePool) -> Option<String> {
     let kv = load_all_settings(pool).await.ok()?;
-    kv.get(SETTING_FFMPEG_PATH).and_then(|v| normalize_ffmpeg_path(v))
+    kv.get(SETTING_FFMPEG_PATH)
+        .and_then(|v| normalize_ffmpeg_path(v))
 }
 
 /// F-7: Read the persisted BT upload limit (bytes/sec) without loading the
@@ -575,7 +595,12 @@ async fn load_all_settings(pool: &SqlitePool) -> Result<HashMap<String, String>,
 
 fn kv_bool(kv: &HashMap<String, String>, key: &str, default: bool) -> bool {
     kv.get(key)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(default)
 }
 
@@ -613,7 +638,9 @@ fn parse_bool_setting(
         None => Ok(default),
         Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => Ok(true),
         Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => Ok(false),
-        Some(value) => Err(format!("Invalid boolean value for setting '{key}': {value}")),
+        Some(value) => Err(format!(
+            "Invalid boolean value for setting '{key}': {value}"
+        )),
     }
 }
 
@@ -734,7 +761,13 @@ mod tests {
     #[test]
     fn duration_until_next_window_boundary_invalid_input() {
         // Unparseable window strings — should return 60s fallback.
-        assert_eq!(duration_until_next_window_boundary("invalid", "17:00").as_secs(), 60);
-        assert_eq!(duration_until_next_window_boundary("09:00", "broken").as_secs(), 60);
+        assert_eq!(
+            duration_until_next_window_boundary("invalid", "17:00").as_secs(),
+            60
+        );
+        assert_eq!(
+            duration_until_next_window_boundary("09:00", "broken").as_secs(),
+            60
+        );
     }
 }

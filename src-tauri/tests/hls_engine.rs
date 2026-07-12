@@ -96,13 +96,14 @@ fn handle_connection(mut stream: TcpStream) {
 
     let request = String::from_utf8_lossy(&buffer[..read]);
     let request_line = request.lines().next().unwrap_or_default();
-    let path = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/");
+    let path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
     let (status, content_type, body): (u16, &str, &[u8]) = match path {
-        "/vod.m3u8" => (200, "application/vnd.apple.mpegurl", VOD_MEDIA_PLAYLIST.as_bytes()),
+        "/vod.m3u8" => (
+            200,
+            "application/vnd.apple.mpegurl",
+            VOD_MEDIA_PLAYLIST.as_bytes(),
+        ),
         "/vod-aes.m3u8" => (
             200,
             "application/vnd.apple.mpegurl",
@@ -113,10 +114,26 @@ fn handle_connection(mut stream: TcpStream) {
             "application/vnd.apple.mpegurl",
             VOD_MEDIA_PLAYLIST_WITH_BYTE_RANGE.as_bytes(),
         ),
-        "/master.m3u8" => (200, "application/vnd.apple.mpegurl", MASTER_PLAYLIST.as_bytes()),
-        "/mid.m3u8" => (200, "application/vnd.apple.mpegurl", VOD_MEDIA_PLAYLIST.as_bytes()),
-        "/hi.m3u8" => (200, "application/vnd.apple.mpegurl", VOD_MEDIA_PLAYLIST.as_bytes()),
-        "/sample-aes.m3u8" => (200, "application/vnd.apple.mpegurl", SAMPLE_AES_PLAYLIST.as_bytes()),
+        "/master.m3u8" => (
+            200,
+            "application/vnd.apple.mpegurl",
+            MASTER_PLAYLIST.as_bytes(),
+        ),
+        "/mid.m3u8" => (
+            200,
+            "application/vnd.apple.mpegurl",
+            VOD_MEDIA_PLAYLIST.as_bytes(),
+        ),
+        "/hi.m3u8" => (
+            200,
+            "application/vnd.apple.mpegurl",
+            VOD_MEDIA_PLAYLIST.as_bytes(),
+        ),
+        "/sample-aes.m3u8" => (
+            200,
+            "application/vnd.apple.mpegurl",
+            SAMPLE_AES_PLAYLIST.as_bytes(),
+        ),
         "/key.bin" => (200, "application/octet-stream", &AES_KEY),
         _ => (404, "text/plain", b"not found"),
     };
@@ -192,7 +209,10 @@ async fn probe_succeeds_on_aes128_playlist() {
     let engine = new_engine();
 
     let output = engine
-        .probe(new_probe_request(format!("{}/vod-aes.m3u8", server.base_url)))
+        .probe(new_probe_request(format!(
+            "{}/vod-aes.m3u8",
+            server.base_url
+        )))
         .await
         .expect("probe should succeed on AES-128 playlist");
 
@@ -216,7 +236,10 @@ async fn probe_succeeds_on_byte_range_playlist() {
     let engine = new_engine();
 
     let output = engine
-        .probe(new_probe_request(format!("{}/vod-range.m3u8", server.base_url)))
+        .probe(new_probe_request(format!(
+            "{}/vod-range.m3u8",
+            server.base_url
+        )))
         .await
         .expect("probe should succeed on byte-range playlist");
 
@@ -234,7 +257,10 @@ async fn probe_picks_highest_bandwidth_variant_from_master() {
     let engine = new_engine();
 
     let output = engine
-        .probe(new_probe_request(format!("{}/master.m3u8", server.base_url)))
+        .probe(new_probe_request(format!(
+            "{}/master.m3u8",
+            server.base_url
+        )))
         .await
         .expect("probe should succeed on master playlist");
 
@@ -260,7 +286,10 @@ async fn probe_rejects_sample_aes_encryption() {
     let engine = new_engine();
 
     let error = engine
-        .probe(new_probe_request(format!("{}/sample-aes.m3u8", server.base_url)))
+        .probe(new_probe_request(format!(
+            "{}/sample-aes.m3u8",
+            server.base_url
+        )))
         .await
         .expect_err("SAMPLE-AES playlist should be rejected");
 
@@ -306,7 +335,9 @@ async fn probe_fails_when_playlist_url_returns_500() {
     }
     let server = TestServer::start(|mut stream| {
         let mut buffer = [0_u8; 4096];
-        let Ok(read) = stream.read(&mut buffer) else { return };
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
         if read == 0 {
             return;
         }

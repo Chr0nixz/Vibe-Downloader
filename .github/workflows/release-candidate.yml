@@ -1,0 +1,163 @@
+name: Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Candidate tag (for example v0.2.0-rc.1)"
+        required: true
+        type: string
+      release_draft:
+        description: "Keep the prerelease as a draft"
+        required: false
+        type: boolean
+        default: true
+      updater_target_tag:
+        description: "Optional prerelease tag this candidate should update to"
+        required: false
+        type: string
+
+concurrency:
+  group: release-candidate-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      VIBE_BROWSER_PROFILE: candidate
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/sync-version.mjs "${{ inputs.tag }}"
+      - run: pnpm release:preflight -- --tag "${{ inputs.tag }}" --profile candidate
+
+  publish:
+    needs: preflight
+    permissions:
+      contents: write
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            args: --target x86_64-unknown-linux-gnu
+          - platform: windows-latest
+            args: --target x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.platform }}
+    env:
+      VIBE_BROWSER_PROFILE: candidate
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/sync-version.mjs "${{ inputs.tag }}"
+      - name: Configure tag-specific updater rehearsal endpoint
+        if: inputs.updater_target_tag != ''
+        run: pnpm prepare:updater-rehearsal -- --tag "${{ inputs.updater_target_tag }}"
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ inputs.tag }}
+          releaseName: Vibe Downloader ${{ inputs.tag }}
+          releaseBody: |
+            ## Release candidate
+
+            This candidate uses deterministic test browser-extension identities and must not be promoted as a stable store release.
+
+            The OS installers are unsigned. Tauri updater artifacts are signed independently.
+          releaseDraft: ${{ inputs.release_draft }}
+          prerelease: true
+          includeUpdaterJson: true
+          args: ${{ matrix.args }} --config ${{ inputs.updater_target_tag != '' && 'src-tauri/tauri.updater-rehearsal.generated.json' || 'src-tauri/tauri.bundle.conf.json' }}
+
+  build-extensions:
+    needs: publish
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      VIBE_BROWSER_PROFILE: candidate
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/sync-version.mjs "${{ inputs.tag }}"
+      - run: pnpm verify:extensions
+      - uses: actions/upload-artifact@v7
+        with:
+          name: candidate-browser-packages
+          path: browser/dist/packages/
+          if-no-files-found: error
+      - name: Attach candidate extensions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ inputs.tag }}" browser/dist/packages/* --clobber
+
+  verify-release:
+    needs: [publish, build-extensions]
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download candidate assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "${{ inputs.tag }}" --dir .release-assets
+      - run: pnpm verify:release-assets -- --dir .release-assets --version "${{ inputs.tag }}"
+      - name: Attach unified checksum file
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ inputs.tag }}" .release-assets/SHA256SUMS.txt --clobber

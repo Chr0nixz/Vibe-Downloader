@@ -131,13 +131,15 @@ pub async fn resolve_task_proxy_config(
                 .ok_or_else(|| proxy_protocol_error(protocol, "Custom proxy URL is invalid."))?;
             validate_task_proxy_protocol(protocol, &url)?;
             let password = match (&record.proxy_password_ciphertext, &record.nonce) {
-                (Some(ciphertext), Some(nonce)) => Some(crate::secure_headers::decrypt_secret(
-                    ciphertext,
-                    nonce,
-                    "task proxy password",
-                    task_id.as_bytes(),
-                )
-                .map_err(proxy_secret_decrypt_error)?),
+                (Some(ciphertext), Some(nonce)) => Some(
+                    crate::secure_headers::decrypt_secret(
+                        ciphertext,
+                        nonce,
+                        "task proxy password",
+                        task_id.as_bytes(),
+                    )
+                    .map_err(proxy_secret_decrypt_error)?,
+                ),
                 _ => None,
             };
             Ok(ResolvedProxyConfig {

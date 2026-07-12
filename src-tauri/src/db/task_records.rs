@@ -909,10 +909,7 @@ fn legacy_error_code(error: &str) -> Option<String> {
     None
 }
 
-pub async fn insert_task_record<'e, E>(
-    executor: E,
-    task: &TaskRecord,
-) -> Result<(), String>
+pub async fn insert_task_record<'e, E>(executor: E, task: &TaskRecord) -> Result<(), String>
 where
     E: Executor<'e, Database = Sqlite>,
 {

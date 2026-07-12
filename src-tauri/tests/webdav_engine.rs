@@ -39,10 +39,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use common::http::{extract_byte_range, extract_header, respond_file, write_response, ByteRange};
 use common::TestServer;
-use common::http::{
-    extract_byte_range, extract_header, respond_file, write_response, ByteRange,
-};
 use tauri_app_lib::{
     download::{DownloadEngine, HttpEngine, ProbeRequest, WebDavEngine},
     proxy::ResolvedProxyConfig,
@@ -168,7 +166,15 @@ fn respond_large_file(stream: &mut TcpStream, method: &str, byte_range: Option<B
     // Generate the same repeating-pattern payload the FTP tests use so any
     // future checksum assertion can reuse a known digest.
     let payload: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
-    respond_file(stream, method, &payload, byte_range, true, "large.bin", false);
+    respond_file(
+        stream,
+        method,
+        &payload,
+        byte_range,
+        true,
+        "large.bin",
+        false,
+    );
 }
 
 /// Minimal Base64 encoder (the standard `base64` crate is not available in
@@ -307,7 +313,10 @@ async fn probe_fails_when_server_returns_401_without_credentials() {
         .probe(new_probe_request(webdav_url(&server, "/file")))
         .await;
 
-    assert!(result.is_err(), "probe should fail on 401 without credentials");
+    assert!(
+        result.is_err(),
+        "probe should fail on 401 without credentials"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -320,10 +329,7 @@ async fn probe_succeeds_with_embedded_credentials() {
     let server = start_test_server(state);
     let engine = new_engine();
 
-    let url = format!(
-        "webdav://alice:s3cret@{}/file",
-        server.authority()
-    );
+    let url = format!("webdav://alice:s3cret@{}/file", server.authority());
     let output = engine.probe(new_probe_request(url)).await.expect("probe");
 
     assert_eq!(output.protocol, "webdav");
@@ -350,10 +356,7 @@ async fn probe_strips_credentials_from_resolved_uri() {
     let server = start_test_server(WebDavHandlerState::new());
     let engine = new_engine();
 
-    let url = format!(
-        "webdav://alice:s3cret@{}/file",
-        server.authority()
-    );
+    let url = format!("webdav://alice:s3cret@{}/file", server.authority());
     let output = engine.probe(new_probe_request(url)).await.expect("probe");
 
     assert!(

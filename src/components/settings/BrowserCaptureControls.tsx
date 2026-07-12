@@ -1,3 +1,4 @@
+import { ShieldCheck } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
 import { cloneElement, isValidElement, useId } from "react";
 import { useTranslation } from "react-i18next";
@@ -10,13 +11,28 @@ import { SiteRulesEditor } from "./SiteRulesEditor";
 
 interface BrowserCaptureControlsProps {
   settings: BrowserCaptureSettings;
+  available: boolean;
   disabled?: boolean;
   onUpdate: (patch: Partial<BrowserCaptureSettings>) => void;
 }
 
-export function BrowserCaptureControls({ settings, disabled, onUpdate }: BrowserCaptureControlsProps) {
+export function BrowserCaptureControls({ settings, available, disabled, onUpdate }: BrowserCaptureControlsProps) {
   const { t } = useTranslation();
   const experimental = settings.experimentalCaptureEnabled;
+
+  if (!available) {
+    return (
+      <div role="status" className="flex gap-3 border-b border-border-divider px-4 py-4">
+        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-status-success" aria-hidden="true" />
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-text-primary">{t("settings.browserCaptureUnavailableTitle")}</p>
+          <p className="mt-1 max-w-2xl text-xs leading-5 text-text-muted">
+            {t("settings.browserCaptureUnavailableDescription")}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="grid border-b border-border-divider">

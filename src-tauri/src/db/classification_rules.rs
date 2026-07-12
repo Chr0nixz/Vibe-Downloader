@@ -28,11 +28,18 @@ pub async fn create_classification_rule(
 ) -> Result<ClassificationRule, String> {
     let id = Uuid::new_v4().to_string();
     let now = now_iso();
-    let name = input.name.as_deref().map(str::trim).unwrap_or("").to_string();
+    let name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
     if name.is_empty() {
         return Err("Classification rule name is required.".to_string());
     }
-    let match_kind = input.match_kind.unwrap_or(ClassificationMatchKind::Extension);
+    let match_kind = input
+        .match_kind
+        .unwrap_or(ClassificationMatchKind::Extension);
     let pattern = input
         .pattern
         .as_deref()
@@ -232,10 +239,11 @@ pub fn apply_classification_rules(
 }
 
 async fn next_position(pool: &SqlitePool) -> Result<i32, String> {
-    let row = sqlx::query("SELECT COALESCE(MAX(position), -1) AS max_position FROM classification_rules")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let row =
+        sqlx::query("SELECT COALESCE(MAX(position), -1) AS max_position FROM classification_rules")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
     Ok(row.get::<i64, _>("max_position") as i32 + 1)
 }
 
@@ -293,12 +301,7 @@ mod tests {
             "videos",
         )];
         assert_eq!(
-            apply_classification_rules(
-                "https://example.com/file.MP4",
-                "file.MP4",
-                "",
-                &rules
-            ),
+            apply_classification_rules("https://example.com/file.MP4", "file.MP4", "", &rules),
             Some("videos".to_string())
         );
     }
@@ -346,12 +349,7 @@ mod tests {
             "videos",
         )];
         assert_eq!(
-            apply_classification_rules(
-                "https://example.com/stream",
-                "stream",
-                "video/mp4",
-                &rules
-            ),
+            apply_classification_rules("https://example.com/stream", "stream", "video/mp4", &rules),
             Some("videos".to_string())
         );
     }
@@ -426,12 +424,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            apply_classification_rules(
-                "https://example.com/file.mp4",
-                "file.mp4",
-                "",
-                &rules
-            ),
+            apply_classification_rules("https://example.com/file.mp4", "file.mp4", "", &rules),
             Some("site-early".to_string())
         );
     }

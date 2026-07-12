@@ -168,10 +168,7 @@ pub async fn mark_metalink_resource_failed(
 /// flagging a failure. The engine calls this just before sending a Range
 /// request so that subsequent worker iterations see the mirror as
 /// "in flight" and prefer alternatives.
-pub async fn mark_metalink_resource_attempted(
-    pool: &SqlitePool,
-    id: &str,
-) -> Result<(), String> {
+pub async fn mark_metalink_resource_attempted(pool: &SqlitePool, id: &str) -> Result<(), String> {
     let now = now_iso();
     sqlx::query(
         r#"
@@ -246,10 +243,7 @@ pub async fn update_mirror_speed(
 /// this mirror from the parallel-eligible pool, but the serial
 /// fallback path (`list_metalink_resources_for_file`) still returns it
 /// so a full-file GET can succeed.
-pub async fn mark_mirror_unsupported_range(
-    pool: &SqlitePool,
-    id: &str,
-) -> Result<(), String> {
+pub async fn mark_mirror_unsupported_range(pool: &SqlitePool, id: &str) -> Result<(), String> {
     let now = now_iso();
     sqlx::query(
         r#"
@@ -362,7 +356,10 @@ pub async fn list_metalink_resources_for_task(
     Ok(rows.into_iter().map(row_to_resource).collect())
 }
 
-pub async fn reset_metalink_resource_statuses(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
+pub async fn reset_metalink_resource_statuses(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<(), String> {
     let now = now_iso();
     sqlx::query(
         r#"

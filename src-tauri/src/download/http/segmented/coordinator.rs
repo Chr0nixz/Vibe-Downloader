@@ -32,9 +32,7 @@ use crate::{
         file_ops::{finalize_download_file, persist_completed_path, preallocate_temp_file},
         GlobalSpeedLimiter,
     },
-    events::{
-        emit_queue_changed_with_ids, emit_task_updated_record, TaskProgressEmitGate,
-    },
+    events::{emit_queue_changed_with_ids, emit_task_updated_record, TaskProgressEmitGate},
     logging::sanitize_url,
     models::{SegmentStatus, TaskRecord, TaskSegmentRecord, TaskStatus},
 };
@@ -101,8 +99,10 @@ impl<'a> SegmentCoordinator<'a> {
         let total_size = task.total_size;
         let supports_parallel = task.supports_parallel;
         let segment_count = segments.len();
-        let max_worker_count = connection_limit
-            .clamp(1, AUTO_ACCELERATION_MAX_SEGMENTS.min(db::MAX_AUTO_SEGMENT_COUNT));
+        let max_worker_count = connection_limit.clamp(
+            1,
+            AUTO_ACCELERATION_MAX_SEGMENTS.min(db::MAX_AUTO_SEGMENT_COUNT),
+        );
 
         Self {
             client,
@@ -144,7 +144,9 @@ impl<'a> SegmentCoordinator<'a> {
         let initial_downloaded = db::total_segment_downloaded_bytes(&self.segments);
 
         if initial_downloaded > 0 && !self.task.supports_resume {
-            return Err("Resume unavailable. Restart this download from the beginning.".to_string());
+            return Err(
+                "Resume unavailable. Restart this download from the beginning.".to_string(),
+            );
         }
 
         db::update_task_status(
@@ -237,7 +239,8 @@ impl<'a> SegmentCoordinator<'a> {
         .await?;
 
         let mut last_emit = Instant::now();
-        let mut active_connection_count = i32::try_from(worker_pool.active_workers.max(1)).unwrap_or(1);
+        let mut active_connection_count =
+            i32::try_from(worker_pool.active_workers.max(1)).unwrap_or(1);
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         let mut acceleration = AccelerationContext {
             runtime: AccelerationRuntime::default(),
@@ -527,22 +530,24 @@ impl<'a> SegmentCoordinator<'a> {
                 .clone();
             range_end.store(segment.range_end, Ordering::SeqCst);
             worker_pool.active_workers += 1;
-            worker_pool.workers.spawn(download_segment_worker(SegmentWorkerRequest {
-                client: self.client.clone(),
-                task_id: segment.task_id.clone(),
-                url: self.url.clone(),
-                temp_path: self.temp_path.clone(),
-                segment,
-                total_size: self.total_size,
-                segment_count: self.segment_count,
-                supports_parallel: self.supports_parallel,
-                cancel_token: self.cancel_token.clone(),
-                progress_tx: progress_tx.clone(),
-                range_end,
-                speed_limiter: self.speed_limiter.clone(),
-                request_headers: self.request_headers.clone(),
-                if_range: self.if_range.clone(),
-            }));
+            worker_pool
+                .workers
+                .spawn(download_segment_worker(SegmentWorkerRequest {
+                    client: self.client.clone(),
+                    task_id: segment.task_id.clone(),
+                    url: self.url.clone(),
+                    temp_path: self.temp_path.clone(),
+                    segment,
+                    total_size: self.total_size,
+                    segment_count: self.segment_count,
+                    supports_parallel: self.supports_parallel,
+                    cancel_token: self.cancel_token.clone(),
+                    progress_tx: progress_tx.clone(),
+                    range_end,
+                    speed_limiter: self.speed_limiter.clone(),
+                    request_headers: self.request_headers.clone(),
+                    if_range: self.if_range.clone(),
+                }));
         }
 
         Ok(())
@@ -557,7 +562,10 @@ impl<'a> SegmentCoordinator<'a> {
         runtime_progress: &mut RuntimeProgress,
         progress_gate: &mut TaskProgressEmitGate,
     ) -> Result<(), String> {
-        if acceleration.runtime.disabled || self.cancel_token.is_cancelled() || !self.task.supports_parallel {
+        if acceleration.runtime.disabled
+            || self.cancel_token.is_cancelled()
+            || !self.task.supports_parallel
+        {
             return Ok(());
         }
         if acceleration
@@ -571,8 +579,9 @@ impl<'a> SegmentCoordinator<'a> {
         let current_speed = runtime_progress.total_speed().max(0);
         if let Some(check) = acceleration.runtime.pending.take() {
             if check.started_at.elapsed() >= AUTO_ACCELERATION_EVALUATION {
-                let connection_growth =
-                    (*active_connection_count as f64 / check.before_connections.max(1) as f64) - 1.0;
+                let connection_growth = (*active_connection_count as f64
+                    / check.before_connections.max(1) as f64)
+                    - 1.0;
                 let required_speed =
                     check.before_speed_bps as f64 * (1.0 + (connection_growth.max(0.0) * 0.8));
                 if check.before_speed_bps > 0 && (current_speed as f64) < required_speed {
@@ -646,22 +655,24 @@ impl<'a> SegmentCoordinator<'a> {
         )
         .unwrap_or(*active_connection_count);
         let tail_segment_id = split.tail_segment.id.clone();
-        worker_pool.workers.spawn(download_segment_worker(SegmentWorkerRequest {
-            client: self.client.clone(),
-            task_id: split.tail_segment.task_id.clone(),
-            url: self.url.clone(),
-            temp_path: self.temp_path.clone(),
-            segment: split.tail_segment,
-            total_size: self.total_size,
-            segment_count: *active_connection_count as usize,
-            supports_parallel: self.supports_parallel,
-            cancel_token: self.cancel_token.clone(),
-            progress_tx: progress_tx.clone(),
-            range_end: tail_range_end,
-            speed_limiter: self.speed_limiter.clone(),
-            request_headers: self.request_headers.clone(),
-            if_range: self.if_range.clone(),
-        }));
+        worker_pool
+            .workers
+            .spawn(download_segment_worker(SegmentWorkerRequest {
+                client: self.client.clone(),
+                task_id: split.tail_segment.task_id.clone(),
+                url: self.url.clone(),
+                temp_path: self.temp_path.clone(),
+                segment: split.tail_segment,
+                total_size: self.total_size,
+                segment_count: *active_connection_count as usize,
+                supports_parallel: self.supports_parallel,
+                cancel_token: self.cancel_token.clone(),
+                progress_tx: progress_tx.clone(),
+                range_end: tail_range_end,
+                speed_limiter: self.speed_limiter.clone(),
+                request_headers: self.request_headers.clone(),
+                if_range: self.if_range.clone(),
+            }));
 
         acceleration.runtime.split_count += 1;
         let event_payload = format!(

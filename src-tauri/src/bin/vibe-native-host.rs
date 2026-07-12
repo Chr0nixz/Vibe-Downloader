@@ -17,6 +17,17 @@ use tauri_app_lib::{
 };
 
 const MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
+const NATIVE_MESSAGE_PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SelfCheckOutput {
+    ok: bool,
+    version: &'static str,
+    protocol_version: u32,
+    native_host_path: String,
+    app_path: String,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +48,23 @@ struct NativeHostAction {
 }
 
 fn main() {
+    if env::args().nth(1).as_deref() == Some("--self-check") {
+        match self_check() {
+            Ok(output) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output)
+                        .expect("self-check output should serialize")
+                );
+            }
+            Err(error) => {
+                eprintln!("vibe-native-host self-check failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if let Err(error) = init_standalone_logging() {
         let _ = writeln!(
             io::stderr(),
@@ -63,6 +91,26 @@ fn main() {
     if let Err(error) = write_native_message(&response) {
         tracing::error!(error = %error, "failed to write native host response");
     }
+}
+
+fn self_check() -> Result<SelfCheckOutput, String> {
+    let native_host_path = env::current_exe()
+        .map_err(|e| format!("Could not resolve native host executable: {e}"))?
+        .canonicalize()
+        .map_err(|e| format!("Could not canonicalize native host executable: {e}"))?;
+    let app_path = app_executable_path()
+        .ok_or_else(|| {
+            "The Vibe Downloader executable is not next to the native host.".to_string()
+        })?
+        .canonicalize()
+        .map_err(|e| format!("Could not canonicalize Vibe Downloader executable: {e}"))?;
+    Ok(SelfCheckOutput {
+        ok: true,
+        version: env!("CARGO_PKG_VERSION"),
+        protocol_version: NATIVE_MESSAGE_PROTOCOL_VERSION,
+        native_host_path: native_host_path.to_string_lossy().to_string(),
+        app_path: app_path.to_string_lossy().to_string(),
+    })
 }
 
 const NATIVE_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -184,8 +232,7 @@ fn validate_handoff(input: &BrowserHandoffInput) -> Result<(), String> {
     // IPs and "localhost".
     if ssrf::is_private_or_reserved_url(&url) {
         return Err(
-            "Handoff URLs pointing to private or reserved addresses are not allowed."
-                .to_string(),
+            "Handoff URLs pointing to private or reserved addresses are not allowed.".to_string(),
         );
     }
     EngineRegistry::new()?.engine_for_uri(url.as_str())?;
@@ -268,7 +315,10 @@ fn app_executable_path() -> Option<PathBuf> {
         }
     }
 
-    let current = env::current_exe().ok()?;
+    app_executable_path_next_to(&env::current_exe().ok()?)
+}
+
+fn app_executable_path_next_to(current: &Path) -> Option<PathBuf> {
     let app_name = if cfg!(target_os = "windows") {
         "vibe-downloader.exe"
     } else {
@@ -342,13 +392,35 @@ mod tests {
     }
 
     #[test]
+    fn app_executable_path_next_to_requires_existing_sibling() {
+        let dir = std::env::temp_dir().join(format!(
+            "vibe-native-host-self-check-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let host = dir.join(if cfg!(target_os = "windows") {
+            "vibe-native-host.exe"
+        } else {
+            "vibe-native-host"
+        });
+        std::fs::write(&host, b"host").expect("write host fixture");
+        assert!(app_executable_path_next_to(&host).is_none());
+
+        let app = dir.join(if cfg!(target_os = "windows") {
+            "vibe-downloader.exe"
+        } else {
+            "vibe-downloader"
+        });
+        std::fs::write(&app, b"app").expect("write app fixture");
+        assert_eq!(app_executable_path_next_to(&host), Some(app));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn validate_handoff_rejects_loopback_ipv4() {
         let input = make_handoff("http://127.0.0.1/file");
         let err = validate_handoff(&input).expect_err("should reject 127.0.0.1");
-        assert!(
-            err.contains("private or reserved"),
-            "got: {err}"
-        );
+        assert!(err.contains("private or reserved"), "got: {err}");
     }
 
     #[test]
@@ -361,10 +433,7 @@ mod tests {
         ] {
             let input = make_handoff(url);
             let err = validate_handoff(&input).expect_err("should reject private IP");
-            assert!(
-                err.contains("private or reserved"),
-                "url {url} got: {err}"
-            );
+            assert!(err.contains("private or reserved"), "url {url} got: {err}");
         }
     }
 
@@ -372,30 +441,21 @@ mod tests {
     fn validate_handoff_rejects_link_local() {
         let input = make_handoff("http://169.254.169.254/latest/meta-data/");
         let err = validate_handoff(&input).expect_err("should reject link-local");
-        assert!(
-            err.contains("private or reserved"),
-            "got: {err}"
-        );
+        assert!(err.contains("private or reserved"), "got: {err}");
     }
 
     #[test]
     fn validate_handoff_rejects_localhost() {
         let input = make_handoff("http://localhost/file");
         let err = validate_handoff(&input).expect_err("should reject localhost");
-        assert!(
-            err.contains("private or reserved"),
-            "got: {err}"
-        );
+        assert!(err.contains("private or reserved"), "got: {err}");
     }
 
     #[test]
     fn validate_handoff_rejects_ipv6_loopback() {
         let input = make_handoff("http://[::1]/file");
         let err = validate_handoff(&input).expect_err("should reject ::1");
-        assert!(
-            err.contains("private or reserved"),
-            "got: {err}"
-        );
+        assert!(err.contains("private or reserved"), "got: {err}");
     }
 
     #[test]

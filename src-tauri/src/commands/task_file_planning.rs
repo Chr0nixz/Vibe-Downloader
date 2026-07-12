@@ -117,7 +117,9 @@ pub fn normalize_expected_hash(
     };
     let label = algorithm.as_str().to_ascii_uppercase();
     if normalized.len() != expected_len || !normalized.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err(format!("{label} must be {expected_len} hexadecimal characters."));
+        return Err(format!(
+            "{label} must be {expected_len} hexadecimal characters."
+        ));
     }
     Ok(Some(normalized))
 }

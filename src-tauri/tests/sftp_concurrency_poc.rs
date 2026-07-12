@@ -31,13 +31,7 @@
 //! See `download::sftp` for the Path A implementation and
 //! `tests/sftp_engine.rs` for end-to-end coverage.
 
-use std::{
-    collections::HashMap,
-    io::SeekFrom,
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, io::SeekFrom, net::SocketAddr, sync::Arc, time::Duration};
 
 use russh::{
     client::{self, AuthResult, Config as ClientConfig, Handler},
@@ -88,7 +82,10 @@ impl SftpHandler for InMemFs {
             // Use the filename itself as the opaque handle: `read()` will
             // look it up directly. Real servers return a small token, but
             // for the PoC the filename is sufficient.
-            Ok(Handle { id, handle: filename })
+            Ok(Handle {
+                id,
+                handle: filename,
+            })
         } else {
             Err(StatusCode::NoSuchFile)
         }

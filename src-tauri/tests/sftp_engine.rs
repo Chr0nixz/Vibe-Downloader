@@ -124,7 +124,10 @@ async fn probe_succeeds_and_reports_supports_parallel() {
     let engine = new_engine();
 
     let output = engine
-        .probe(probe_request(sftp_url(server.addr, "file.bin"), pool.clone()))
+        .probe(probe_request(
+            sftp_url(server.addr, "file.bin"),
+            pool.clone(),
+        ))
         .await
         .expect("probe should succeed");
 
@@ -182,7 +185,10 @@ async fn probe_tofu_first_connection_records_host_key() {
             .fetch_one(&pool)
             .await
             .expect("count+max");
-    assert_eq!(recorded_count, 1, "repeat connection should update, not insert");
+    assert_eq!(
+        recorded_count, 1,
+        "repeat connection should update, not insert"
+    );
     assert_eq!(
         recorded_fingerprint, server.host_key_fingerprint,
         "fingerprint must be unchanged on repeat connection"
@@ -206,7 +212,10 @@ async fn probe_fails_on_authentication_failure() {
     let engine = new_engine();
 
     let error = engine
-        .probe(probe_request(sftp_url(server.addr, "file.bin"), pool.clone()))
+        .probe(probe_request(
+            sftp_url(server.addr, "file.bin"),
+            pool.clone(),
+        ))
         .await
         .expect_err("probe should fail on auth rejection");
 
@@ -227,7 +236,10 @@ async fn probe_fails_on_host_key_mismatch() {
     let engine = new_engine();
 
     let error = engine
-        .probe(probe_request(sftp_url(server.addr, "file.bin"), pool.clone()))
+        .probe(probe_request(
+            sftp_url(server.addr, "file.bin"),
+            pool.clone(),
+        ))
         .await
         .expect_err("probe should fail on host key mismatch");
 
@@ -238,7 +250,10 @@ async fn probe_fails_on_host_key_mismatch() {
         .fetch_one(&pool)
         .await
         .expect("count");
-    assert_eq!(still_present, 1, "mismatched record must remain for user review");
+    assert_eq!(
+        still_present, 1,
+        "mismatched record must remain for user review"
+    );
     pool.close().await;
 }
 
@@ -252,7 +267,11 @@ async fn probe_directory_url_returns_error() {
 
     let error = engine
         .probe(probe_request(
-            format!("sftp://u:p@{}:{}/dir/", server.addr.ip(), server.addr.port()),
+            format!(
+                "sftp://u:p@{}:{}/dir/",
+                server.addr.ip(),
+                server.addr.port()
+            ),
             pool.clone(),
         ))
         .await
@@ -479,11 +498,8 @@ async fn sftp_stalled_read_is_detectable_via_idle_timeout() {
 
     let mut buf = vec![0u8; 1024];
     // The read should hang because the server never responds.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        file.read(&mut buf),
-    )
-    .await;
+    let result =
+        tokio::time::timeout(std::time::Duration::from_millis(500), file.read(&mut buf)).await;
 
     assert!(
         result.is_err(),

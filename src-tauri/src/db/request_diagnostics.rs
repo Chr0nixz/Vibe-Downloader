@@ -106,8 +106,7 @@ pub async fn list_request_diagnostics_page(
 pub async fn prune_request_diagnostics(pool: &SqlitePool) -> Result<u64, String> {
     // Step 1: age-based deletion. RFC 3339 lexical ordering matches SQLite
     // TEXT comparison because `now_iso()` emits a fixed-offset UTC string.
-    let cutoff =
-        chrono::Utc::now() - chrono::Duration::days(REQUEST_DIAGNOSTICS_MAX_AGE_DAYS);
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(REQUEST_DIAGNOSTICS_MAX_AGE_DAYS);
     let cutoff_iso = cutoff.to_rfc3339();
     let age_result = sqlx::query("DELETE FROM task_requests WHERE created_at < ?")
         .bind(&cutoff_iso)

@@ -23,7 +23,12 @@ async fn test_pool(label: &str) -> sqlx::SqlitePool {
     db::connect(&path).await.expect("connect").pool
 }
 
-fn distribution(queued: i32, downloading: i32, completed: i32, failed: i32) -> ScaleStateDistribution {
+fn distribution(
+    queued: i32,
+    downloading: i32,
+    completed: i32,
+    failed: i32,
+) -> ScaleStateDistribution {
     ScaleStateDistribution {
         queued,
         downloading,
@@ -36,9 +41,7 @@ fn distribution(queued: i32, downloading: i32, completed: i32, failed: i32) -> S
 async fn generates_correct_total_count() {
     let pool = test_pool("total-count").await;
     let dist = distribution(10, 20, 30, 40);
-    let count = seed_scale_data(&pool, &dist, true)
-        .await
-        .expect("seed");
+    let count = seed_scale_data(&pool, &dist, true).await.expect("seed");
     assert_eq!(count, 100);
 }
 
@@ -46,15 +49,25 @@ async fn generates_correct_total_count() {
 async fn generates_correct_state_distribution() {
     let pool = test_pool("state-dist").await;
     let dist = distribution(5, 8, 12, 3);
-    seed_scale_data(&pool, &dist, true)
-        .await
-        .expect("seed");
+    seed_scale_data(&pool, &dist, true).await.expect("seed");
 
     let records = db::list_task_records(&pool).await.expect("list");
-    let queued = records.iter().filter(|t| t.status == TaskStatus::Queued).count();
-    let downloading = records.iter().filter(|t| t.status == TaskStatus::Downloading).count();
-    let completed = records.iter().filter(|t| t.status == TaskStatus::Completed).count();
-    let failed = records.iter().filter(|t| t.status == TaskStatus::Failed).count();
+    let queued = records
+        .iter()
+        .filter(|t| t.status == TaskStatus::Queued)
+        .count();
+    let downloading = records
+        .iter()
+        .filter(|t| t.status == TaskStatus::Downloading)
+        .count();
+    let completed = records
+        .iter()
+        .filter(|t| t.status == TaskStatus::Completed)
+        .count();
+    let failed = records
+        .iter()
+        .filter(|t| t.status == TaskStatus::Failed)
+        .count();
 
     assert_eq!(queued, 5);
     assert_eq!(downloading, 8);
@@ -93,11 +106,17 @@ async fn append_mode_preserves_existing_tasks() {
     let records = db::list_task_records(&pool).await.unwrap();
     assert_eq!(records.len(), 10);
     assert_eq!(
-        records.iter().filter(|t| t.status == TaskStatus::Queued).count(),
+        records
+            .iter()
+            .filter(|t| t.status == TaskStatus::Queued)
+            .count(),
         3
     );
     assert_eq!(
-        records.iter().filter(|t| t.status == TaskStatus::Downloading).count(),
+        records
+            .iter()
+            .filter(|t| t.status == TaskStatus::Downloading)
+            .count(),
         4
     );
 }
@@ -155,7 +174,12 @@ async fn generates_events_for_all_tasks() {
             }
             _ => {
                 // Others: 2 events (task_created + state-specific)
-                assert_eq!(events.len(), 2, "Task {:?} should have 2 events", record.status);
+                assert_eq!(
+                    events.len(),
+                    2,
+                    "Task {:?} should have 2 events",
+                    record.status
+                );
             }
         }
     }
@@ -204,8 +228,14 @@ async fn failed_tasks_have_error_metadata() {
     assert_eq!(records.len(), 5);
     for record in &records {
         assert_eq!(record.status, TaskStatus::Failed);
-        assert!(record.error_message.is_some(), "Failed task should have error_message");
-        assert!(record.error_code.is_some(), "Failed task should have error_code");
+        assert!(
+            record.error_message.is_some(),
+            "Failed task should have error_message"
+        );
+        assert!(
+            record.error_code.is_some(),
+            "Failed task should have error_code"
+        );
         assert_eq!(record.error_code.as_deref(), Some("http_request_failed"));
     }
 }

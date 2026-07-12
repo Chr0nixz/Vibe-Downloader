@@ -265,13 +265,20 @@ pub async fn update_settings(
         .engine_registry
         .set_proxy_config(proxy::ResolvedProxyConfig::from_settings(&settings))
         .await;
-    state.speed_limiter.set_limit(db::parse_speed_limit_bps(
-        settings.global_speed_limit_bps.as_deref(),
-    )).await;
+    state
+        .speed_limiter
+        .set_limit(db::parse_speed_limit_bps(
+            settings.global_speed_limit_bps.as_deref(),
+        ))
+        .await;
     super::floating::sync_floating_status_window(&app, settings.floating_window_enabled)?;
     emit_settings_changed(&app);
     emit_queue_changed(&app);
-    state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
+    state
+        .scheduler
+        .clone()
+        .dispatch(app.clone(), state.pool.clone())
+        .await;
     if let Err(error) = super::tasks::check_schedule_preemption(app, state).await {
         tracing::warn!(error = %error, "schedule preemption check failed after settings update");
     }

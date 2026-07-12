@@ -41,8 +41,8 @@ pub(super) async fn send_get_with_retry(
     let range = range.clone();
     let if_range = if_range.map(str::to_owned);
     with_retry(&RetryPolicy::http_request(), |_attempt| {
-        let mut request = apply_forwarded_headers(client.get(&url), &headers)
-            .header(ACCEPT_ENCODING, "identity");
+        let mut request =
+            apply_forwarded_headers(client.get(&url), &headers).header(ACCEPT_ENCODING, "identity");
         if let Some(ref range) = range {
             request = request.header(RANGE, range.as_str());
             if let Some(ref ifr) = if_range {

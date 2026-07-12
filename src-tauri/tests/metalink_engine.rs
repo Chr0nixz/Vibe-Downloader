@@ -44,7 +44,7 @@ use tauri_app_lib::{
     download::{
         testing::{
             assemble_metalink_part_files, download_metalink_range_from_mirror, part_file_path,
-            MetalinkWorkerProgress,
+            run_metalink_range_worker_with_failover, MetalinkWorkerProgress,
         },
         DownloadEngine, GlobalSpeedLimiter, HttpEngine, MetalinkEngine, ProbeRequest,
     },
@@ -126,7 +126,9 @@ fn start_counting_server() -> (TestServer, Arc<Mutex<Vec<String>>>) {
     let hits_clone = hits.clone();
     let server = TestServer::start(move |mut stream| {
         let mut buffer = [0_u8; 4096];
-        let Ok(read) = stream.read(&mut buffer) else { return };
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
         if read == 0 {
             return;
         }
@@ -138,7 +140,11 @@ fn start_counting_server() -> (TestServer, Arc<Mutex<Vec<String>>>) {
             guard.push(path.to_string());
         }
         let (status, content_type, body): (u16, &str, &[u8]) = match path {
-            "/manifest.meta4" => (200, "application/metalink4+xml", MULTI_MIRROR_META4.as_bytes()),
+            "/manifest.meta4" => (
+                200,
+                "application/metalink4+xml",
+                MULTI_MIRROR_META4.as_bytes(),
+            ),
             p if p.starts_with("/mirror1/") || p.starts_with("/mirror2/") => {
                 (200, "application/octet-stream", b"payload bytes")
             }
@@ -156,7 +162,9 @@ fn start_counting_server() -> (TestServer, Arc<Mutex<Vec<String>>>) {
 
 fn handle_manifest_connection(mut stream: TcpStream) {
     let mut buffer = [0_u8; 4096];
-    let Ok(read) = stream.read(&mut buffer) else { return };
+    let Ok(read) = stream.read(&mut buffer) else {
+        return;
+    };
     if read == 0 {
         return;
     }
@@ -165,9 +173,21 @@ fn handle_manifest_connection(mut stream: TcpStream) {
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
     let (status, content_type, body): (u16, &str, &[u8]) = match path {
-        "/multi-mirror.meta4" => (200, "application/metalink4+xml", MULTI_MIRROR_META4.as_bytes()),
-        "/unknown-size.meta4" => (200, "application/metalink4+xml", UNKNOWN_SIZE_META4.as_bytes()),
-        "/multi-file.meta4" => (200, "application/metalink4+xml", MULTI_FILE_META4.as_bytes()),
+        "/multi-mirror.meta4" => (
+            200,
+            "application/metalink4+xml",
+            MULTI_MIRROR_META4.as_bytes(),
+        ),
+        "/unknown-size.meta4" => (
+            200,
+            "application/metalink4+xml",
+            UNKNOWN_SIZE_META4.as_bytes(),
+        ),
+        "/multi-file.meta4" => (
+            200,
+            "application/metalink4+xml",
+            MULTI_FILE_META4.as_bytes(),
+        ),
         "/checksum.meta4" => (200, "application/metalink4+xml", CHECKSUM_META4.as_bytes()),
         _ => (404, "text/plain", b"not found"),
     };
@@ -214,7 +234,10 @@ async fn probe_parses_metalink4_manifest_with_multiple_mirrors() {
 
     assert_eq!(output.protocol, "metalink");
     assert_eq!(output.task_kind, TaskKind::Manifest);
-    assert_eq!(output.content_type.as_deref(), Some("application/metalink4+xml"));
+    assert_eq!(
+        output.content_type.as_deref(),
+        Some("application/metalink4+xml")
+    );
     assert_eq!(output.files.len(), 1, "expected exactly one file entry");
     assert_eq!(output.files[0].relative_path, "payload.bin");
     assert_eq!(output.files[0].size, "1048576");
@@ -291,7 +314,11 @@ async fn probe_aggregates_multi_file_metadata() {
         .await
         .expect("probe should succeed");
 
-    assert_eq!(output.files.len(), 2, "expected both files surfaced by probe");
+    assert_eq!(
+        output.files.len(),
+        2,
+        "expected both files surfaced by probe"
+    );
     assert_eq!(output.total_size, 1024 + 2048);
     assert!(output.capabilities.supports_multi_file);
     assert!(
@@ -317,7 +344,11 @@ async fn probe_does_not_fetch_mirror_urls() {
         .expect("probe should succeed");
 
     let hits = hits.lock().expect("hits lock").clone();
-    assert_eq!(hits.len(), 1, "probe must only fetch the manifest, got: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "probe must only fetch the manifest, got: {hits:?}"
+    );
     assert_eq!(hits[0], "/manifest.meta4");
 }
 
@@ -327,7 +358,9 @@ async fn probe_rejects_non_xml_manifest() {
     // surface a metalink_invalid_manifest error rather than panicking.
     let server = TestServer::start(|mut stream| {
         let mut buffer = [0_u8; 4096];
-        let Ok(read) = stream.read(&mut buffer) else { return };
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
         if read == 0 {
             return;
         }
@@ -382,7 +415,9 @@ async fn probe_fails_when_manifest_url_returns_500() {
     // typed error rather than retrying or panicking.
     let server = TestServer::start(|mut stream| {
         let mut buffer = [0_u8; 4096];
-        let Ok(read) = stream.read(&mut buffer) else { return };
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
         if read == 0 {
             return;
         }
@@ -635,7 +670,10 @@ async fn list_healthy_mirrors_excludes_those_in_cooldown() {
         .iter()
         .find(|r| r.id == resource_ids[0])
         .expect("failed mirror present");
-    assert!(failed.cooldown_until.is_some(), "cooldown_until must be set");
+    assert!(
+        failed.cooldown_until.is_some(),
+        "cooldown_until must be set"
+    );
     assert!(
         failed.last_attempt_at.is_some(),
         "last_attempt_at must be set"
@@ -769,12 +807,8 @@ async fn mark_metalink_resource_completed_clears_cooldown() {
 #[tokio::test]
 async fn update_mirror_speed_persists_observed_value() {
     let pool = test_pool("speed").await;
-    let (file_id, resource_ids) = seed_mirrors(
-        &pool,
-        "speed",
-        &["http://mirror-a.example.com/file.bin"],
-    )
-    .await;
+    let (file_id, resource_ids) =
+        seed_mirrors(&pool, "speed", &["http://mirror-a.example.com/file.bin"]).await;
 
     db::update_mirror_speed(&pool, &resource_ids[0], 5_242_880)
         .await
@@ -1217,6 +1251,204 @@ async fn f4_parallel_download_returns_error_on_mirror_failure() {
         error.contains("500") || error.contains("returned"),
         "error should mention the status, got: {error}"
     );
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+    let _ = tokio::fs::remove_file(&part_path).await;
+    pool.close().await;
+}
+
+// --- G-1: MetalinkRangeWorker failover orchestration ------------------------
+
+/// G-1: When the primary mirror returns 500, the MetalinkRangeWorker must
+/// exhaust retries on it, mark it failed in the DB, then pull the next
+/// mirror from the failover queue and complete the download from the
+/// healthy mirror. This exercises the full failover orchestration path
+/// (`download_metalink_file_parallel` → `MetalinkRangeWorker::run`) that
+/// was previously unreachable without an `AppHandle`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn g1_metalink_worker_failovers_to_healthy_mirror() {
+    let payload: Vec<u8> = (0..20u8).collect();
+    let payload_arc = Arc::new(payload.clone());
+
+    // Server 1: always returns 500.
+    let failing_server = start_mirror_server(
+        payload_arc.clone(),
+        Arc::new(Mutex::new(Vec::new())),
+        Some(500),
+        false,
+    );
+    // Server 2: serves the payload correctly.
+    let healthy_server = start_mirror_server(
+        payload_arc.clone(),
+        Arc::new(Mutex::new(Vec::new())),
+        None,
+        false,
+    );
+
+    let pool = test_pool("g1-failover").await;
+
+    let mirror_urls = [
+        format!("{}/payload.bin", failing_server.base_url),
+        format!("{}/payload.bin", healthy_server.base_url),
+    ];
+    let mirror_urls_ref: Vec<&str> = mirror_urls.iter().map(|s| s.as_str()).collect();
+    let (file_id, _resource_ids) = seed_mirrors(&pool, "g1-failover", &mirror_urls_ref).await;
+
+    let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("list mirrors");
+    assert_eq!(mirrors.len(), 2, "expected 2 mirrors seeded");
+
+    let primary_mirror = mirrors[0].clone();
+    let failover_mirror = mirrors[1].clone();
+    let primary_mirror_id = primary_mirror.id.clone();
+
+    let task_id = "metalink-test-task-g1-failover".to_string();
+    let client = test_client();
+    let speed_limiter = GlobalSpeedLimiter::disabled();
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let temp_path = unique_temp_path("g1-failover");
+    let part_path = part_file_path(&temp_path, 0);
+    let (progress_tx, _progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<MetalinkWorkerProgress>();
+
+    let result = run_metalink_range_worker_with_failover(
+        pool.clone(),
+        task_id,
+        file_id.clone(),
+        client,
+        vec![],
+        speed_limiter,
+        cancel_token,
+        0,
+        0,
+        19, // range_end = payload_size - 1
+        primary_mirror,
+        vec![failover_mirror],
+        part_path.clone(),
+        progress_tx,
+    )
+    .await;
+
+    let downloaded = result.expect("worker should failover to healthy mirror and succeed");
+    assert_eq!(
+        downloaded, 20,
+        "should download all 20 bytes from failover mirror"
+    );
+
+    // The part file must contain the correct payload data.
+    let part_data = tokio::fs::read(&part_path).await.expect("read part file");
+    assert_eq!(
+        part_data,
+        (0..20u8).collect::<Vec<u8>>(),
+        "part file data should match payload"
+    );
+
+    // The primary mirror must be marked as 'failed' in the DB.
+    let resources = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("list mirrors after failover");
+    let failed_mirror = resources
+        .iter()
+        .find(|r| r.id == primary_mirror_id)
+        .expect("primary mirror should still exist");
+    assert_eq!(
+        failed_mirror.status, "failed",
+        "primary mirror should be marked as failed, got status: {}",
+        failed_mirror.status
+    );
+    assert!(
+        failed_mirror.failure_count > 0,
+        "primary mirror should have failure_count > 0, got: {}",
+        failed_mirror.failure_count
+    );
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+    let _ = tokio::fs::remove_file(&part_path).await;
+    pool.close().await;
+}
+
+/// G-1: When all mirrors fail (primary + all failover mirrors), the worker
+/// must return an error rather than hanging or silently succeeding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn g1_metalink_worker_returns_error_when_all_mirrors_fail() {
+    let payload = Arc::new(vec![0u8; 10]);
+
+    // Both servers return 500.
+    let failing_server_1 = start_mirror_server(
+        payload.clone(),
+        Arc::new(Mutex::new(Vec::new())),
+        Some(500),
+        false,
+    );
+    let failing_server_2 = start_mirror_server(
+        payload.clone(),
+        Arc::new(Mutex::new(Vec::new())),
+        Some(500),
+        false,
+    );
+
+    let pool = test_pool("g1-all-fail").await;
+
+    let mirror_urls = [
+        format!("{}/payload.bin", failing_server_1.base_url),
+        format!("{}/payload.bin", failing_server_2.base_url),
+    ];
+    let mirror_urls_ref: Vec<&str> = mirror_urls.iter().map(|s| s.as_str()).collect();
+    let (file_id, _resource_ids) = seed_mirrors(&pool, "g1-all-fail", &mirror_urls_ref).await;
+
+    let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("list mirrors");
+    assert_eq!(mirrors.len(), 2);
+
+    let primary_mirror = mirrors[0].clone();
+    let failover_mirror = mirrors[1].clone();
+
+    let task_id = "metalink-test-task-g1-all-fail".to_string();
+    let client = test_client();
+    let speed_limiter = GlobalSpeedLimiter::disabled();
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let temp_path = unique_temp_path("g1-all-fail");
+    let part_path = part_file_path(&temp_path, 0);
+    let (progress_tx, _progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<MetalinkWorkerProgress>();
+
+    let result = run_metalink_range_worker_with_failover(
+        pool.clone(),
+        task_id,
+        file_id.clone(),
+        client,
+        vec![],
+        speed_limiter,
+        cancel_token,
+        0,
+        0,
+        9,
+        primary_mirror,
+        vec![failover_mirror],
+        part_path.clone(),
+        progress_tx,
+    )
+    .await;
+
+    let error = result.expect_err("worker should return error when all mirrors fail");
+    assert!(
+        error.contains("exhausted") || error.contains("mirrors"),
+        "error should mention mirror exhaustion, got: {error}"
+    );
+
+    // Both mirrors should be marked as failed.
+    let resources = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("list mirrors after all fail");
+    for resource in &resources {
+        assert_eq!(
+            resource.status, "failed",
+            "all mirrors should be marked as failed, got: {} for {}",
+            resource.status, resource.id
+        );
+    }
 
     let _ = tokio::fs::remove_file(&temp_path).await;
     let _ = tokio::fs::remove_file(&part_path).await;

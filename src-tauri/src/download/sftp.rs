@@ -29,8 +29,8 @@ use tokio::{
 use super::{
     engine::EngineFuture,
     file_ops::{finalize_download_file, persist_completed_path},
-    DownloadContext, DownloadEngine, DownloadError, GlobalSpeedLimiter, IdleReadOutcome,
-    ProbeOutput, ProbeRequest, READ_IDLE_TIMEOUT, read_with_idle_timeout,
+    read_with_idle_timeout, DownloadContext, DownloadEngine, DownloadError, GlobalSpeedLimiter,
+    IdleReadOutcome, ProbeOutput, ProbeRequest, READ_IDLE_TIMEOUT,
 };
 use crate::{
     db,
@@ -38,9 +38,9 @@ use crate::{
     download::retry::{with_retry_if, RetryPolicy},
     events::{emit_task_updated_record, TaskProgressEmitGate},
     models::{
-        AppErrorPayload, EngineCapabilities, ProbedFile, SegmentStatus,
-        SftpDirectoryEntry, SftpDirectoryProbe, TaskKind, TaskProgressPayload, TaskRecord,
-        TaskSegmentRecord, TaskStatus,
+        AppErrorPayload, EngineCapabilities, ProbedFile, SegmentStatus, SftpDirectoryEntry,
+        SftpDirectoryProbe, TaskKind, TaskProgressPayload, TaskRecord, TaskSegmentRecord,
+        TaskStatus,
     },
     proxy::{socks5_connect, AppProxyMode, ResolvedProxyConfig, SharedProxyConfig},
 };
@@ -297,15 +297,18 @@ impl DownloadEngine for SftpEngine {
                 "connecting",
                 Some("sftp"),
             );
-            let mut target =
-                SftpTarget::parse_file(&request.uri).map_err(DownloadError::Other)?;
-            let pool = request.pool.as_ref().ok_or_else(|| {
-                engine_error(
-                    "sftp_probe_state_unavailable",
-                    "SFTP probe requires database state for host key verification.",
-                    true,
-                )
-            }).map_err(DownloadError::Other)?;
+            let mut target = SftpTarget::parse_file(&request.uri).map_err(DownloadError::Other)?;
+            let pool = request
+                .pool
+                .as_ref()
+                .ok_or_else(|| {
+                    engine_error(
+                        "sftp_probe_state_unavailable",
+                        "SFTP probe requires database state for host key verification.",
+                        true,
+                    )
+                })
+                .map_err(DownloadError::Other)?;
             // Prefer credentials passed directly in the request (from the dialog).
             if let Some(creds) = &request.credentials {
                 if !creds.username.is_empty() {
@@ -1202,67 +1205,71 @@ async fn connect_sftp(
             true,
         ));
     }
-    let handle = with_retry_if(&RetryPolicy::sftp_connect(), |_attempt| {
-        let pool = pool.clone();
-        let target_host = target.host.clone();
-        let target_port = target.port;
-        let proxy_config = proxy_config.clone();
-        async move {
-            let failure = Arc::new(Mutex::new(None));
-            let handler = SftpHostKeyHandler {
-                pool,
-                host: target_host.clone(),
-                port: target_port,
-                failure: failure.clone(),
-            };
-            let config = Config {
-                nodelay: true,
-                ..Default::default()
-            };
-            let config = Arc::new(config);
-            let handle_result = if proxy_config.is_custom_socks5() {
-                let proxy_url = proxy_config
-                    .custom_socks5_url_with_auth()
-                    .ok_or_else(|| "SOCKS5 proxy URL is not configured.".to_string())?;
-                let stream = socks5_connect(
-                    &proxy_url,
-                    proxy_config.username.as_deref(),
-                    proxy_config.password.as_deref(),
-                    &target_host,
-                    target_port,
-                )
-                .await
-                .map_err(|e| {
-                    engine_error(
-                        "sftp_proxy_connect_failed",
-                        format!("SFTP proxy connection failed: {e}"),
-                        true,
+    let handle = with_retry_if(
+        &RetryPolicy::sftp_connect(),
+        |_attempt| {
+            let pool = pool.clone();
+            let target_host = target.host.clone();
+            let target_port = target.port;
+            let proxy_config = proxy_config.clone();
+            async move {
+                let failure = Arc::new(Mutex::new(None));
+                let handler = SftpHostKeyHandler {
+                    pool,
+                    host: target_host.clone(),
+                    port: target_port,
+                    failure: failure.clone(),
+                };
+                let config = Config {
+                    nodelay: true,
+                    ..Default::default()
+                };
+                let config = Arc::new(config);
+                let handle_result = if proxy_config.is_custom_socks5() {
+                    let proxy_url = proxy_config
+                        .custom_socks5_url_with_auth()
+                        .ok_or_else(|| "SOCKS5 proxy URL is not configured.".to_string())?;
+                    let stream = socks5_connect(
+                        &proxy_url,
+                        proxy_config.username.as_deref(),
+                        proxy_config.password.as_deref(),
+                        &target_host,
+                        target_port,
                     )
-                })?;
-                client::connect_stream(config, stream, handler).await
-            } else {
-                client::connect(config, (target_host.as_str(), target_port), handler).await
-            };
-            match handle_result {
-                Ok(handle) => Ok(handle),
-                Err(error) => {
-                    let failure = failure.lock().await.clone();
-                    Err(failure.unwrap_or_else(|| {
+                    .await
+                    .map_err(|e| {
                         engine_error(
-                            "sftp_connect_failed",
-                            format!("Could not connect to SFTP server: {error}"),
+                            "sftp_proxy_connect_failed",
+                            format!("SFTP proxy connection failed: {e}"),
                             true,
                         )
-                    }))
+                    })?;
+                    client::connect_stream(config, stream, handler).await
+                } else {
+                    client::connect(config, (target_host.as_str(), target_port), handler).await
+                };
+                match handle_result {
+                    Ok(handle) => Ok(handle),
+                    Err(error) => {
+                        let failure = failure.lock().await.clone();
+                        Err(failure.unwrap_or_else(|| {
+                            engine_error(
+                                "sftp_connect_failed",
+                                format!("Could not connect to SFTP server: {error}"),
+                                true,
+                            )
+                        }))
+                    }
                 }
             }
-        }
-    }, |error| {
-        // Don't retry permanent errors. Host-key mismatches (sftp_host_key_changed)
-        // will never succeed on retry — the key won't change between attempts.
-        // The error is a JSON-serialized AppErrorPayload; check for the code.
-        !error.contains("sftp_host_key_changed")
-    })
+        },
+        |error| {
+            // Don't retry permanent errors. Host-key mismatches (sftp_host_key_changed)
+            // will never succeed on retry — the key won't change between attempts.
+            // The error is a JSON-serialized AppErrorPayload; check for the code.
+            !error.contains("sftp_host_key_changed")
+        },
+    )
     .await?;
 
     let mut handle = handle;
@@ -1274,10 +1281,7 @@ async fn connect_sftp(
         match ssh_key_result {
             Ok(mut key) => {
                 if key.is_encrypted() {
-                    let passphrase = target
-                        .private_key_passphrase
-                        .as_deref()
-                        .unwrap_or("");
+                    let passphrase = target.private_key_passphrase.as_deref().unwrap_or("");
                     match key.decrypt(passphrase) {
                         Ok(decrypted) => key = decrypted,
                         Err(e) => {

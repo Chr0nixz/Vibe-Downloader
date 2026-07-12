@@ -435,12 +435,9 @@ async fn insert_scale_task_with_children(
                 (i + 1) * segment_size
             };
             let (seg_status, downloaded_until, last_error, speed) = match status {
-                TaskStatus::Completed => (
-                    SegmentStatus::Completed,
-                    range_end - range_start,
-                    None,
-                    0,
-                ),
+                TaskStatus::Completed => {
+                    (SegmentStatus::Completed, range_end - range_start, None, 0)
+                }
                 TaskStatus::Failed if i >= 2 => (
                     SegmentStatus::Failed,
                     (range_end - range_start) / 2,
@@ -453,12 +450,7 @@ async fn insert_scale_task_with_children(
                     None,
                     1_250_000,
                 ),
-                _ => (
-                    SegmentStatus::Completed,
-                    range_end - range_start,
-                    None,
-                    0,
-                ),
+                _ => (SegmentStatus::Completed, range_end - range_start, None, 0),
             };
             db::insert_segment_record(
                 pool,
@@ -472,7 +464,11 @@ async fn insert_scale_task_with_children(
                     downloaded_until,
                     speed_bps: speed,
                     status: seg_status,
-                    retry_count: if matches!(seg_status, SegmentStatus::Failed) { 2 } else { 0 },
+                    retry_count: if matches!(seg_status, SegmentStatus::Failed) {
+                        2
+                    } else {
+                        0
+                    },
                     last_error,
                 },
             )
@@ -518,7 +514,11 @@ async fn insert_scale_task_with_children(
                     )),
                     if_range_header: None,
                     status_code: if is_error { Some(500) } else { Some(206) },
-                    etag: if is_error { None } else { Some("\"abc123\"".to_string()) },
+                    etag: if is_error {
+                        None
+                    } else {
+                        Some("\"abc123\"".to_string())
+                    },
                     last_modified: None,
                     content_length: Some(task.total_size / 2),
                     error_message: if is_error {

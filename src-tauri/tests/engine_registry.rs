@@ -99,7 +99,10 @@ async fn client_rebuilds_after_invalidation() {
     engine.invalidate_clients().await;
     assert_eq!(engine.client_cache_len().await, 0);
 
-    let _second = engine.client().await.expect("second client after invalidation");
+    let _second = engine
+        .client()
+        .await
+        .expect("second client after invalidation");
     let count_after_second = engine.client_cache_len().await;
 
     assert_eq!(

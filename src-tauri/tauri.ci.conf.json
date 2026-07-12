@@ -1,6 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "node scripts/native-host-build.mjs --with-frontend",
+    "beforeBundleCommand": "node scripts/native-host-build.mjs"
+  },
   "bundle": {
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": false,
+    "externalBin": ["binaries/vibe-native-host"]
   }
 }

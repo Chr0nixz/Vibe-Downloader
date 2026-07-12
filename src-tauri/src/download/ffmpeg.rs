@@ -186,7 +186,11 @@ mod tests {
         // Pick a path that definitely exists so env-var wins over PATH.
         #[cfg(target_os = "windows")]
         let existing_path = std::env::var("WINDIR")
-            .map(|dir| std::path::Path::new(&dir).join("System32").join("where.exe"))
+            .map(|dir| {
+                std::path::Path::new(&dir)
+                    .join("System32")
+                    .join("where.exe")
+            })
             .expect("WINDIR must be set on Windows");
         #[cfg(not(target_os = "windows"))]
         let existing_path = std::env::var("PATH")
@@ -341,7 +345,11 @@ mod tests {
 
         #[cfg(target_os = "windows")]
         let fixture = std::env::var("WINDIR")
-            .map(|dir| std::path::Path::new(&dir).join("System32").join("where.exe"))
+            .map(|dir| {
+                std::path::Path::new(&dir)
+                    .join("System32")
+                    .join("where.exe")
+            })
             .expect("WINDIR must be set on Windows");
         #[cfg(not(target_os = "windows"))]
         let fixture = {

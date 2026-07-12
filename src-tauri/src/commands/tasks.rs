@@ -1,7 +1,4 @@
-use std::{
-    path::PathBuf,
-    sync::atomic::Ordering,
-};
+use std::{path::PathBuf, sync::atomic::Ordering};
 
 use serde::Deserialize;
 use specta::Type;
@@ -24,7 +21,8 @@ use crate::{
         TaskChecksumRecord, TaskFileRecord, TaskProxySettings, TaskProxySettingsInput, TaskRecord,
         TaskStatus, WebDavDirectoryProbe,
     },
-    state_machine::TransitionError, AppState, TaskRequestHeaders,
+    state_machine::TransitionError,
+    AppState, TaskRequestHeaders,
 };
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -116,7 +114,11 @@ pub async fn update_torrent_file_selection(
     .await
     .map_err(String::from)?;
     emit_queue_changed_with_ids(&app, Some(vec![task.id.clone()]));
-    state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
+    state
+        .scheduler
+        .clone()
+        .dispatch(app.clone(), state.pool.clone())
+        .await;
     task_payload(&state.pool, &task.id).await
 }
 
@@ -279,13 +281,7 @@ pub(crate) async fn check_schedule_preemption(
             }
             // Tag as schedule-paused AFTER the normal "paused" event so this
             // row has the highest ID and is seen as the latest pause reason.
-            let _ = db::insert_task_event(
-                &state.pool,
-                task_id,
-                "paused_by_schedule",
-                None,
-            )
-            .await;
+            let _ = db::insert_task_event(&state.pool, task_id, "paused_by_schedule", None).await;
         }
     } else {
         // Window just opened — resume tasks that were paused by schedule.
@@ -295,8 +291,7 @@ pub(crate) async fn check_schedule_preemption(
 
         let mut resumed_any = false;
         for task_id in &paused_ids {
-            let latest_pause =
-                db::get_latest_pause_event_type(&state.pool, task_id).await?;
+            let latest_pause = db::get_latest_pause_event_type(&state.pool, task_id).await?;
             if latest_pause.as_deref() != Some("paused_by_schedule") {
                 continue;
             }
@@ -334,8 +329,7 @@ pub(crate) fn spawn_schedule_window_monitor(app: AppHandle, _state: &AppState) {
                     tracing::debug!("schedule window monitor exiting (shutdown requested)");
                     return;
                 }
-                let default_dir =
-                    super::settings::default_download_dir(&app).unwrap_or_default();
+                let default_dir = super::settings::default_download_dir(&app).unwrap_or_default();
                 match db::get_settings(&state_ref.pool, default_dir).await {
                     Ok(settings) if settings.schedule_download_window_enabled => {
                         db::duration_until_next_window_boundary(
@@ -360,9 +354,7 @@ pub(crate) fn spawn_schedule_window_monitor(app: AppHandle, _state: &AppState) {
                 tracing::debug!("schedule window monitor exiting (shutdown requested)");
                 break;
             }
-            if let Err(error) =
-                check_schedule_preemption(app.clone(), state_ref).await
-            {
+            if let Err(error) = check_schedule_preemption(app.clone(), state_ref).await {
                 tracing::warn!(error = %error, "schedule preemption check failed");
             }
         }
@@ -379,10 +371,9 @@ const REQUEST_DIAGNOSTICS_CLEANUP_INTERVAL_SECS: u64 = 6 * 60 * 60;
 /// long-closed app gets cleaned before any new traffic arrives.
 pub(crate) fn spawn_request_diagnostics_cleanup(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(
-                REQUEST_DIAGNOSTICS_CLEANUP_INTERVAL_SECS,
-            ));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            REQUEST_DIAGNOSTICS_CLEANUP_INTERVAL_SECS,
+        ));
         // First tick fires immediately; skip it — startup cleanup runs
         // synchronously in `lib.rs` setup() before this spawns.
         interval.tick().await;
@@ -527,7 +518,9 @@ async fn queue_task_for_retry_at(
         let dispatch_pool = state.pool.clone();
         let dispatch_scheduler = state.scheduler.clone();
         tauri::async_runtime::spawn(async move {
-            dispatch_scheduler.dispatch(dispatch_app, dispatch_pool).await;
+            dispatch_scheduler
+                .dispatch(dispatch_app, dispatch_pool)
+                .await;
         });
     }
     require_task(&state.pool, id).await
@@ -640,7 +633,11 @@ async fn restart_task_from_beginning(
     emit_task_progress_snapshot(app, &task);
     emit_task_updated_record(app, &state.pool, &task).await;
     emit_queue_changed_with_ids(app, Some(vec![task.id.clone()]));
-    state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
+    state
+        .scheduler
+        .clone()
+        .dispatch(app.clone(), state.pool.clone())
+        .await;
     require_task(&state.pool, &task.id).await
 }
 

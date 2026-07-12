@@ -1191,7 +1191,10 @@ export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationS
   return {
     nativeHostName: "com.vibe_downloader.native_host",
     nativeHostPath: "~/Applications/Vibe Downloader/vibe-native-host",
+    nativeHostReady: true,
+    nativeHostError: null,
     extensionCorePath: "browser/extension-core",
+    captureAvailable: true,
     experimentalCaptureEnabled: browserExperimentalCaptureEnabled,
     realtime: {
       wsUrl: "ws://127.0.0.1:48365/browser/ws",
@@ -1211,7 +1214,7 @@ export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationS
           ? "vibe-downloader@local"
           : browser === "safari"
             ? null
-            : "abcdefghijklmnopabcdefghijklmnop",
+            : "fcjcenonhhfdblnoafphpcddpmppdeag",
       profile: "dev",
       lastError: null,
     })),

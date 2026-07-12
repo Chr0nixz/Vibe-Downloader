@@ -1,10 +1,12 @@
-use std::sync::{
-    atomic::AtomicI64,
-    Arc,
-};
+use std::sync::{atomic::AtomicI64, Arc};
 
 use reqwest::{Client, StatusCode};
-use tokio::{fs, io::{AsyncWriteExt, BufWriter}, sync::mpsc, task::JoinSet};
+use tokio::{
+    fs,
+    io::{AsyncWriteExt, BufWriter},
+    sync::mpsc,
+    task::JoinSet,
+};
 
 use super::{
     error::format_http_status,
@@ -15,7 +17,10 @@ use super::{
 };
 use crate::{
     db,
-    download::{file_ops::{finalize_download_file, preallocate_temp_file}, GlobalSpeedLimiter},
+    download::{
+        file_ops::{finalize_download_file, preallocate_temp_file},
+        GlobalSpeedLimiter,
+    },
     models::AppErrorPayload,
 };
 

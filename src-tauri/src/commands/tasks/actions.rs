@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::atomic::Ordering,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,9 @@ use crate::{
         task::now_iso, ChecksumAlgorithm, HashVerificationState, HashVerificationStatus,
         RecoveryAction, Task, TaskPriority, TaskStatus,
     },
-    platform, state_machine::TransitionError, AppState,
+    platform,
+    state_machine::TransitionError,
+    AppState,
 };
 
 use super::{
@@ -101,7 +104,11 @@ pub async fn update_task_transfer_options(
     emit_task_updated_record(&app, &state.pool, &updated).await;
     emit_queue_changed_with_ids(&app, Some(vec![updated.id.clone()]));
     if matches!(updated.status, TaskStatus::Queued) {
-        state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
+        state
+            .scheduler
+            .clone()
+            .dispatch(app.clone(), state.pool.clone())
+            .await;
     }
     task_payload(&state.pool, &input.id).await
 }
@@ -128,7 +135,11 @@ pub async fn reorder_queued_tasks(
         }
     }
     emit_queue_changed(&app);
-    state.scheduler.clone().dispatch(app, state.pool.clone()).await;
+    state
+        .scheduler
+        .clone()
+        .dispatch(app, state.pool.clone())
+        .await;
     Ok(())
 }
 
@@ -157,8 +168,35 @@ pub async fn pause_task(
             state.engine_registry.delete_runtime_task(task, false).await;
         }
         let _ = state.request_headers.lock().await.remove(&id);
-    } else if let Some(control) = state.downloads.lock().await.get(&id) {
-        control.cancel_token.cancel();
+    } else {
+        // Cancel the download and wait for the coordinator to finish its
+        // checkpoint flush before transitioning the task state.
+        //
+        // Without this wait, the coordinator's checkpoint write (a write
+        // transaction triggered by cancel) and transition_task's
+        // deferred-transaction write can race. SQLite returns
+        // SQLITE_BUSY_SNAPSHOT (code 5) when a deferred transaction's
+        // snapshot is stale due to a concurrent writer committing between
+        // the read and write phases. busy_timeout does NOT retry
+        // SQLITE_BUSY_SNAPSHOT, so the error surfaces to the user.
+        //
+        // By removing the DownloadControl and awaiting the coordinator's
+        // JoinHandle, we ensure the checkpoint commit finishes before
+        // transition_task begins. The 5s timeout bounds the wait for
+        // slow disks; if it expires, transition_task proceeds anyway and
+        // relies on busy_timeout for non-snapshot BUSY errors.
+        let handle = {
+            let mut downloads = state.downloads.lock().await;
+            if let Some(control) = downloads.remove(&id) {
+                control.cancel_token.cancel();
+                control.handle
+            } else {
+                None
+            }
+        };
+        if let Some(handle) = handle {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
     }
     match crate::state_machine::transition_task(
         &app,
@@ -188,7 +226,11 @@ pub async fn pause_task(
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
     emit_queue_changed_with_ids(&app, Some(vec![id.clone()]));
-    state.scheduler.clone().dispatch(app, state.pool.clone()).await;
+    state
+        .scheduler
+        .clone()
+        .dispatch(app, state.pool.clone())
+        .await;
     task_payload(&state.pool, &id).await
 }
 
@@ -235,8 +277,8 @@ pub async fn retry_task(
     if let Some(control) = state.downloads.lock().await.remove(&id) {
         control.cancel_token.cancel();
         if let Some(h) = control.handle.as_ref() {
-                h.abort();
-            }
+            h.abort();
+        }
     }
 
     db::insert_task_event(&state.pool, &id, "retrying", None).await?;
@@ -251,7 +293,10 @@ pub async fn list_metalink_mirrors(
     id: String,
 ) -> Result<Vec<MetalinkMirrorView>, String> {
     let records = db::list_metalink_resources_for_task(&state.pool, &id).await?;
-    Ok(records.into_iter().map(MetalinkMirrorView::from_record).collect())
+    Ok(records
+        .into_iter()
+        .map(MetalinkMirrorView::from_record)
+        .collect())
 }
 
 #[tauri::command]
@@ -272,20 +317,14 @@ pub async fn retry_task_with_mirror(
     if let Some(control) = state.downloads.lock().await.remove(&id) {
         control.cancel_token.cancel();
         if let Some(h) = control.handle.as_ref() {
-                h.abort();
-            }
+            h.abort();
+        }
     }
 
     db::reset_metalink_resource_statuses(&state.pool, &id).await?;
     // Boost the chosen mirror's priority so the Metalink engine tries it first.
     db::promote_metalink_resource_for_retry(&state.pool, &id, &mirror_url).await?;
-    db::insert_task_event(
-        &state.pool,
-        &id,
-        "retrying_with_mirror",
-        Some(&mirror_url),
-    )
-    .await?;
+    db::insert_task_event(&state.pool, &id, "retrying_with_mirror", Some(&mirror_url)).await?;
     let task = queue_task_for_retry(&app, state.inner(), &id).await?;
     task_from_record_with_files(&state.pool, task).await
 }
@@ -347,8 +386,23 @@ pub async fn cancel_task(
             state.engine_registry.delete_runtime_task(task, false).await;
         }
         let _ = state.request_headers.lock().await.remove(&id);
-    } else if let Some(control) = state.downloads.lock().await.get(&id) {
-        control.cancel_token.cancel();
+    } else {
+        // Same checkpoint-drain pattern as pause_task: cancel and wait for
+        // the coordinator's checkpoint flush to commit before transition_task
+        // begins, avoiding SQLITE_BUSY_SNAPSHOT (code 5) from concurrent
+        // deferred-transaction writes.
+        let handle = {
+            let mut downloads = state.downloads.lock().await;
+            if let Some(control) = downloads.remove(&id) {
+                control.cancel_token.cancel();
+                control.handle
+            } else {
+                None
+            }
+        };
+        if let Some(handle) = handle {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
     }
     match crate::state_machine::transition_task(
         &app,
@@ -379,7 +433,11 @@ pub async fn cancel_task(
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
     emit_queue_changed_with_ids(&app, Some(vec![id.clone()]));
-    state.scheduler.clone().dispatch(app, state.pool.clone()).await;
+    state
+        .scheduler
+        .clone()
+        .dispatch(app, state.pool.clone())
+        .await;
     task_payload(&state.pool, &id).await
 }
 
@@ -414,7 +472,9 @@ pub async fn delete_task(
     }
 
     if delete_file {
-        let use_trash = db::delete_to_trash_enabled(&state.pool).await.unwrap_or(true);
+        let use_trash = db::delete_to_trash_enabled(&state.pool)
+            .await
+            .unwrap_or(true);
         let mut file_warnings: Vec<String> = Vec::new();
         if let Some(task) = task_for_runtime {
             for file in db::list_task_file_records(&state.pool, &id).await? {
@@ -448,7 +508,11 @@ pub async fn delete_task(
 
     db::delete_task_record(&state.pool, &id).await?;
     emit_queue_changed(&app);
-    state.scheduler.clone().dispatch(app, state.pool.clone()).await;
+    state
+        .scheduler
+        .clone()
+        .dispatch(app, state.pool.clone())
+        .await;
     // R-2.5: Evict the lock entry now that the task is deleted and the guard
     // is about to drop. drop(_guard) first so evict sees Arc strong_count == 1.
     drop(_guard);
@@ -469,7 +533,9 @@ pub async fn bulk_delete_tasks(
     }
     tracing::info!(count = ids.len(), delete_file, "bulk deleting tasks");
     let use_trash = if delete_file {
-        db::delete_to_trash_enabled(&state.pool).await.unwrap_or(true)
+        db::delete_to_trash_enabled(&state.pool)
+            .await
+            .unwrap_or(true)
     } else {
         false
     };
@@ -487,8 +553,8 @@ pub async fn bulk_delete_tasks(
                 .is_none_or(|task| !is_bt_protocol(&task.protocol))
             {
                 if let Some(h) = control.handle.as_ref() {
-                h.abort();
-            }
+                    h.abort();
+                }
             }
         }
         if let Some(task) = task_for_runtime.as_ref() {
@@ -537,7 +603,11 @@ pub async fn bulk_delete_tasks(
     db::delete_task_records_batch(&state.pool, &ids).await?;
 
     emit_queue_changed(&app);
-    state.scheduler.clone().dispatch(app, state.pool.clone()).await;
+    state
+        .scheduler
+        .clone()
+        .dispatch(app, state.pool.clone())
+        .await;
     Ok(ids.len() as u32)
 }
 
@@ -662,9 +732,7 @@ pub async fn resolve_task_attention(
         RecoveryAction::OpenFolder
         | RecoveryAction::CheckUrl
         | RecoveryAction::FreeDiskSpace
-        | RecoveryAction::ConfigureFfmpeg => {
-            task_from_record_with_files(&state.pool, task).await
-        }
+        | RecoveryAction::ConfigureFfmpeg => task_from_record_with_files(&state.pool, task).await,
     }
 }
 
@@ -797,4 +865,3 @@ pub(crate) async fn verify_task_hash_with_pool(
         verified_at: updated.hash_verified_at,
     })
 }
-

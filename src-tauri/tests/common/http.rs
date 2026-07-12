@@ -269,6 +269,7 @@ pub fn extract_byte_range(request: &str) -> Option<ByteRange> {
 pub fn extract_header<'a>(request: &'a str, expected_name: &str) -> Option<&'a str> {
     request.lines().find_map(|line| {
         let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case(expected_name).then(|| value.trim())
+        name.eq_ignore_ascii_case(expected_name)
+            .then(|| value.trim())
     })
 }

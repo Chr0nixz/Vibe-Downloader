@@ -12,6 +12,7 @@ concurrency:
 jobs:
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -25,15 +26,25 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test:frontend
+      - run: pnpm test:release-tools
+      - run: pnpm check:i18n
+      - name: Version consistency check
+        run: node scripts/sync-version.mjs --check
       - run: pnpm build
+      - run: pnpm verify:extensions
 
   rust:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -45,8 +56,25 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: sudo apt-get update
-      - run: sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf ffmpeg
+      - name: Install Windows dependencies
+        if: matrix.os == 'windows-latest'
+        run: choco install ffmpeg -y --no-progress
+      - name: Install cargo-deny
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check
+      - name: Check licenses and advisories
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo deny --manifest-path src-tauri/Cargo.toml check licenses advisories
       - run: cargo check --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
       - run: pnpm test:rust

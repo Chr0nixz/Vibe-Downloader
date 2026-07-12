@@ -1,1 +1,2 @@
 npx lint-staged
+cargo fmt --check --manifest-path src-tauri/Cargo.toml

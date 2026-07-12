@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDown, MoreHorizontal, Plus, Search, SlidersHorizontal, X } from "lucide-react";
+import { ChevronDown, MoreHorizontal, Pause, Play, Plus, Search, SlidersHorizontal, X } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -519,7 +519,7 @@ export function TaskList({
         </div>
       ) : null}
 
-      <div className="border-b border-border-subtle bg-surface-base/70 px-3 py-2 text-xs">
+      <div className="flex items-center gap-1 border-b border-border-subtle bg-surface-base/70 px-3 py-2 text-xs">
         <Button
           type="button"
           variant="ghost"
@@ -541,6 +541,46 @@ export function TaskList({
             aria-hidden="true"
           />
         </Button>
+        <div className="ml-auto flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-8 gap-1.5 px-2 text-text-secondary"
+            aria-label={t("taskList.resumeAll")}
+            onClick={() => {
+              const all = useTaskDataStore.getState().tasks;
+              onBulkResume(all);
+            }}
+            disabled={
+              !useTaskDataStore
+                .getState()
+                .tasks.some((t) => t.status === "paused" || t.status === "failed" || t.status === "waiting_network")
+            }
+          >
+            <Play className="h-3.5 w-3.5" aria-hidden />
+            {t("taskList.resumeAll")}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-8 gap-1.5 px-2 text-text-secondary"
+            aria-label={t("taskList.pauseAll")}
+            onClick={() => {
+              const all = useTaskDataStore.getState().tasks;
+              onBulkPause(all);
+            }}
+            disabled={
+              !useTaskDataStore
+                .getState()
+                .tasks.some((t) => t.status === "downloading" || t.status === "retrying" || t.status === "queued")
+            }
+          >
+            <Pause className="h-3.5 w-3.5" aria-hidden />
+            {t("taskList.pauseAll")}
+          </Button>
+        </div>
         {toolPanelOpen ? (
           <div id="task-list-tool-panel" className="mt-2 flex flex-wrap items-center gap-2">
             <SelectControl

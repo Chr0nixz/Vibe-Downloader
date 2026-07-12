@@ -101,11 +101,7 @@ pub fn is_private_or_reserved_url(url: &Url) -> bool {
 ///   the engine layer).
 pub async fn is_hostname_private_via_dns(host: &str) -> bool {
     let timeout = std::time::Duration::from_secs(3);
-    let lookup = tokio::time::timeout(
-        timeout,
-        tokio::net::lookup_host(format!("{host}:0")),
-    )
-    .await;
+    let lookup = tokio::time::timeout(timeout, tokio::net::lookup_host(format!("{host}:0"))).await;
     match lookup {
         Ok(Ok(mut iter)) => iter.any(|addr| is_private_ip(&addr.ip())),
         // Timeout or resolution error: do not block — the connection-time
@@ -188,22 +184,42 @@ mod tests {
 
     #[test]
     fn is_private_or_reserved_url_handles_literal_ips() {
-        assert!(is_private_or_reserved_url(&Url::parse("http://127.0.0.1/").unwrap()));
-        assert!(is_private_or_reserved_url(&Url::parse("http://10.0.0.1/").unwrap()));
-        assert!(is_private_or_reserved_url(&Url::parse("http://169.254.169.254/").unwrap()));
-        assert!(is_private_or_reserved_url(&Url::parse("http://[::1]/").unwrap()));
-        assert!(is_private_or_reserved_url(&Url::parse("http://[fe80::1]/").unwrap()));
-        assert!(is_private_or_reserved_url(&Url::parse("http://localhost/").unwrap()));
+        assert!(is_private_or_reserved_url(
+            &Url::parse("http://127.0.0.1/").unwrap()
+        ));
+        assert!(is_private_or_reserved_url(
+            &Url::parse("http://10.0.0.1/").unwrap()
+        ));
+        assert!(is_private_or_reserved_url(
+            &Url::parse("http://169.254.169.254/").unwrap()
+        ));
+        assert!(is_private_or_reserved_url(
+            &Url::parse("http://[::1]/").unwrap()
+        ));
+        assert!(is_private_or_reserved_url(
+            &Url::parse("http://[fe80::1]/").unwrap()
+        ));
+        assert!(is_private_or_reserved_url(
+            &Url::parse("http://localhost/").unwrap()
+        ));
         // Missing host
-        assert!(is_private_or_reserved_url(&Url::parse("file:///tmp/x").unwrap()));
+        assert!(is_private_or_reserved_url(
+            &Url::parse("file:///tmp/x").unwrap()
+        ));
     }
 
     #[test]
     fn is_private_or_reserved_url_allows_public_and_hostnames() {
-        assert!(!is_private_or_reserved_url(&Url::parse("http://8.8.8.8/").unwrap()));
-        assert!(!is_private_or_reserved_url(&Url::parse("https://example.com/").unwrap()));
+        assert!(!is_private_or_reserved_url(
+            &Url::parse("http://8.8.8.8/").unwrap()
+        ));
+        assert!(!is_private_or_reserved_url(
+            &Url::parse("https://example.com/").unwrap()
+        ));
         // Hostnames are not IP-literal; DNS check is a separate async step
-        assert!(!is_private_or_reserved_url(&Url::parse("http://evil.example/").unwrap()));
+        assert!(!is_private_or_reserved_url(
+            &Url::parse("http://evil.example/").unwrap()
+        ));
     }
 
     #[tokio::test]

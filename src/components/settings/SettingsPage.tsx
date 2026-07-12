@@ -922,6 +922,9 @@ export function SettingsPage() {
     const lines = [
       `Native host: ${browserStatus.nativeHostName}`,
       `Native host path: ${browserStatus.nativeHostPath ?? "(missing)"}`,
+      `Native host ready: ${browserStatus.nativeHostReady}`,
+      `Native host error: ${browserStatus.nativeHostError ?? "(none)"}`,
+      `Capture available: ${browserStatus.captureAvailable}`,
       `Extension source: ${browserStatus.extensionCorePath ?? "(missing)"}`,
       ...browserStatus.browsers.map(
         (browser) =>
@@ -1696,14 +1699,18 @@ export function SettingsPage() {
                 {browserCapture ? (
                   <BrowserCaptureControls
                     settings={browserCapture}
-                    disabled={browserLoading || browserCaptureSaving}
+                    available={browserStatus?.captureAvailable ?? false}
+                    disabled={browserLoading || browserCaptureSaving || !browserStatus?.captureAvailable}
                     onUpdate={(patch) => void updateBrowserCapture(patch)}
                   />
                 ) : null}
                 <div className="grid">
                   {browserStatus?.browsers.map((browser) => {
                     const disabled =
-                      browserLoading || browserAction === browser.browser || !browser.supportedOnPlatform;
+                      browserLoading ||
+                      browserAction === browser.browser ||
+                      !browser.supportedOnPlatform ||
+                      !browserStatus.nativeHostReady;
                     const statusLabel = !browser.supportedOnPlatform
                       ? t("settings.browserUnsupported")
                       : browser.manifestInstalled
@@ -1753,6 +1760,11 @@ export function SettingsPage() {
                 </div>
                 {browserStatus ? (
                   <div className="border-t border-border-divider px-4 py-3 text-xs leading-5 text-text-muted">
+                    {!browserStatus.nativeHostReady ? (
+                      <p className="mb-3 text-status-danger" role="alert">
+                        {browserStatus.nativeHostError ?? t("settings.browserHostUnavailable")}
+                      </p>
+                    ) : null}
                     <p>
                       {t("settings.browserHostName")}{" "}
                       <span className="font-mono text-text-secondary">{browserStatus.nativeHostName}</span>

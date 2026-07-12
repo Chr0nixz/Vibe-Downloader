@@ -15,11 +15,9 @@ use tokio::{
 };
 
 use super::{
-    engine::EngineFuture,
-    file_ops::finalize_download_file,
-    http::HttpEngine,
-    url_classify::is_metalink_url,
-    DownloadContext, DownloadEngine, DownloadError, ProbeOutput, ProbeRequest,
+    engine::EngineFuture, file_ops::finalize_download_file, http::HttpEngine,
+    url_classify::is_metalink_url, DownloadContext, DownloadEngine, DownloadError, ProbeOutput,
+    ProbeRequest,
 };
 use crate::{
     db,
@@ -31,8 +29,7 @@ use crate::{
     models::{
         AppErrorPayload, ChecksumAlgorithm, EngineCapabilities, HashVerificationStatus,
         MetalinkChecksum, MetalinkFile, MetalinkProbeData, MetalinkResource, ProbedFile,
-        TaskFileRecord, TaskKind, TaskProgressPayload, TaskRecord,
-        TaskStatus,
+        TaskFileRecord, TaskKind, TaskProgressPayload, TaskRecord, TaskStatus,
     },
 };
 
@@ -80,7 +77,12 @@ impl MetalinkEngine {
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
     ) -> Result<MetalinkProbeData, String> {
-        crate::download::engine::emit_probe_phase(app, request_id, "fetching_manifest", Some("metalink"));
+        crate::download::engine::emit_probe_phase(
+            app,
+            request_id,
+            "fetching_manifest",
+            Some("metalink"),
+        );
         let bytes = fetch_manifest_bytes(&self.client().await?, url, request_headers).await?;
         let text = String::from_utf8(bytes).map_err(|_| {
             engine_error(
@@ -89,7 +91,12 @@ impl MetalinkEngine {
                 false,
             )
         })?;
-        crate::download::engine::emit_probe_phase(app, request_id, "parsing_manifest", Some("metalink"));
+        crate::download::engine::emit_probe_phase(
+            app,
+            request_id,
+            "parsing_manifest",
+            Some("metalink"),
+        );
         parse_metalink_manifest(url, &text)
     }
 }
@@ -486,12 +493,11 @@ async fn download_metalink_file_parallel(
     for index in 0..worker_count {
         let part_path = part_file_path(temp_path, index);
         if let Ok(metadata) = fs::metadata(&part_path).await {
-            initial_total = initial_total
-                .saturating_add(i64::try_from(metadata.len()).unwrap_or(i64::MAX));
+            initial_total =
+                initial_total.saturating_add(i64::try_from(metadata.len()).unwrap_or(i64::MAX));
         }
     }
-    db::update_task_file_progress(pool, &file.id, initial_total, TaskStatus::Downloading)
-        .await?;
+    db::update_task_file_progress(pool, &file.id, initial_total, TaskStatus::Downloading).await?;
 
     // F-3: mpsc channel for per-worker progress aggregation. Only the
     // coordinator writes `update_task_file_progress` to avoid N workers
@@ -619,10 +625,8 @@ async fn download_metalink_file_parallel(
     assemble_metalink_part_files(temp_path, worker_count)
         .await
         .map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!(
-                "Could not assemble Metalink parts: {e}"
-            ))
-            .command_error()
+            AppErrorPayload::disk_write_failed(format!("Could not assemble Metalink parts: {e}"))
+                .command_error()
         })?;
     cleanup_metalink_part_files(temp_path).await;
 
@@ -752,7 +756,8 @@ struct MetalinkRangeWorker {
     range_end: u64,
     mirror: db::MetalinkResourceRecord,
     part_path: PathBuf,
-    failover_queue: std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<db::MetalinkResourceRecord>>>,
+    failover_queue:
+        std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<db::MetalinkResourceRecord>>>,
     /// F-3: Sender for per-worker progress aggregation. Only the coordinator
     /// writes `update_task_file_progress`; workers report via this channel.
     progress_tx: mpsc::UnboundedSender<MetalinkWorkerProgress>,
@@ -835,9 +840,7 @@ impl MetalinkRangeWorker {
                                 "metalink_no_healthy_mirrors",
                                 format!(
                                     "Range {}-{} for file {} exhausted all mirrors: {error}",
-                                    self.range_start,
-                                    self.range_end,
-                                    self.file_id
+                                    self.range_start, self.range_end, self.file_id
                                 ),
                                 false,
                             ))
@@ -878,10 +881,7 @@ pub async fn download_metalink_range_from_mirror(
     let expected = (range_end - range_start + 1) as i64;
 
     // F-2: Resume — stat the existing part file to get `already_downloaded`.
-    let already_downloaded: u64 = fs::metadata(part_path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let already_downloaded: u64 = fs::metadata(part_path).await.map(|m| m.len()).unwrap_or(0);
     let already_downloaded_i64 = i64::try_from(already_downloaded).unwrap_or(i64::MAX);
     if already_downloaded_i64 >= expected {
         // Range already complete — skip download. Report final byte count
@@ -961,10 +961,8 @@ pub async fn download_metalink_range_from_mirror(
         .open(part_path)
         .await
         .map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!(
-                "Could not open Metalink part file: {e}"
-            ))
-            .command_error()
+            AppErrorPayload::disk_write_failed(format!("Could not open Metalink part file: {e}"))
+                .command_error()
         })?;
     let mut out = BufWriter::with_capacity(256 * 1024, out);
 
@@ -978,17 +976,15 @@ pub async fn download_metalink_range_from_mirror(
         .map_err(|e| format!("Metalink mirror connection failed: {e}"))?
     {
         if cancel_token.is_cancelled() {
-            out.flush().await.map_err(|e| {
-                format!("Could not flush Metalink part file: {e}")
-            })?;
+            out.flush()
+                .await
+                .map_err(|e| format!("Could not flush Metalink part file: {e}"))?;
             return Err("Download canceled.".to_string());
         }
         speed_limiter.throttle(chunk.len()).await;
         out.write_all(&chunk).await.map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!(
-                "Could not write Metalink part file: {e}"
-            ))
-            .command_error()
+            AppErrorPayload::disk_write_failed(format!("Could not write Metalink part file: {e}"))
+                .command_error()
         })?;
         downloaded = downloaded.saturating_add(i64::try_from(chunk.len()).unwrap_or(0));
         if last_progress.elapsed() >= Duration::from_millis(300) {
@@ -1000,9 +996,9 @@ pub async fn download_metalink_range_from_mirror(
             last_progress = Instant::now();
         }
     }
-    out.flush().await.map_err(|e| {
-        format!("Could not flush Metalink part file: {e}")
-    })?;
+    out.flush()
+        .await
+        .map_err(|e| format!("Could not flush Metalink part file: {e}"))?;
 
     if expected > 0 && downloaded != expected {
         return Err(format!(
@@ -1019,7 +1015,10 @@ pub async fn download_metalink_range_from_mirror(
 
 /// Concatenate the `worker_count` part files in index order into
 /// `temp_path`. After assembly each part file is removed.
-pub async fn assemble_metalink_part_files(temp_path: &Path, worker_count: usize) -> Result<(), String> {
+pub async fn assemble_metalink_part_files(
+    temp_path: &Path,
+    worker_count: usize,
+) -> Result<(), String> {
     let mut out = fs::File::create(temp_path)
         .await
         .map_err(|e| format!("Could not create assembled Metalink file: {e}"))?;
@@ -1781,4 +1780,50 @@ pub mod testing {
         all_part_files_absent, assemble_metalink_part_files, cleanup_metalink_part_files,
         download_metalink_range_from_mirror, part_file_path, MetalinkWorkerProgress,
     };
+
+    /// Constructs a `MetalinkRangeWorker` with a failover queue and runs it
+    /// to completion. Exercises the full failover orchestration path
+    /// (primary mirror failure → retry → failover to next mirror) without
+    /// requiring a Tauri `AppHandle`.
+    ///
+    /// Returns the total bytes downloaded by the worker.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_metalink_range_worker_with_failover(
+        pool: sqlx::SqlitePool,
+        task_id: String,
+        file_id: String,
+        client: reqwest::Client,
+        request_headers: Vec<(String, String)>,
+        speed_limiter: std::sync::Arc<crate::download::GlobalSpeedLimiter>,
+        cancel_token: tokio_util::sync::CancellationToken,
+        worker_index: usize,
+        range_start: u64,
+        range_end: u64,
+        primary_mirror: crate::db::MetalinkResourceRecord,
+        failover_mirrors: Vec<crate::db::MetalinkResourceRecord>,
+        part_path: std::path::PathBuf,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<MetalinkWorkerProgress>,
+    ) -> Result<i64, String> {
+        use std::collections::VecDeque;
+        let failover_queue: VecDeque<crate::db::MetalinkResourceRecord> =
+            failover_mirrors.into_iter().collect();
+        let failover_queue = std::sync::Arc::new(tokio::sync::Mutex::new(failover_queue));
+        let worker = super::MetalinkRangeWorker {
+            pool,
+            task_id,
+            file_id,
+            client,
+            request_headers,
+            speed_limiter,
+            cancel_token,
+            worker_index,
+            range_start,
+            range_end,
+            mirror: primary_mirror,
+            part_path,
+            failover_queue,
+            progress_tx,
+        };
+        worker.run().await
+    }
 }

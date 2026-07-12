@@ -1,0 +1,3 @@
+# Rust formatting baseline for CI `cargo fmt --check` gate.
+# Uses rustfmt defaults with the project's edition to avoid churn.
+edition = "2021"

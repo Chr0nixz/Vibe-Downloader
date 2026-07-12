@@ -11,10 +11,7 @@ const HASH_READ_BUFFER_SIZE: usize = 1024 * 1024;
 ///
 /// Shared by task hash verification (`commands::tasks::actions`) and Metalink
 /// checksum verification (`download::metalink`).
-pub(crate) async fn hash_file(
-    path: &Path,
-    algorithm: ChecksumAlgorithm,
-) -> Result<String, String> {
+pub(crate) async fn hash_file(path: &Path, algorithm: ChecksumAlgorithm) -> Result<String, String> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| format!("Could not open file for checksum verification: {e}"))?;

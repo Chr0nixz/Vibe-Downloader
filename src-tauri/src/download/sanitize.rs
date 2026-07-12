@@ -96,7 +96,9 @@ pub fn sanitize_single_file_name(value: &str) -> String {
 /// both with and without an extension.
 fn is_windows_reserved(stem: &str) -> bool {
     let upper = stem.to_ascii_uppercase();
-    WINDOWS_RESERVED_NAMES.iter().any(|&reserved| reserved == upper)
+    WINDOWS_RESERVED_NAMES
+        .iter()
+        .any(|&reserved| reserved == upper)
 }
 
 /// Truncate `name` to at most `max_chars` characters, trying to keep the file

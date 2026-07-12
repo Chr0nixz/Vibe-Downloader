@@ -8,8 +8,10 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
 use crate::{
-    commands::tasks::{emit_task_progress_snapshot, prepare_task_for_download, resolve_task_request_headers},
     commands::settings::default_download_dir,
+    commands::tasks::{
+        emit_task_progress_snapshot, prepare_task_for_download, resolve_task_request_headers,
+    },
     db,
     download::{DownloadContext, EngineRegistry, GlobalSpeedLimiter},
     events::{
@@ -18,10 +20,12 @@ use crate::{
     },
     logging::sanitize_url,
     models::{
-        CompletionAction, CompletionActionRequestedPayload, HashVerificationStatus, TaskStatus,
-        TaskRecord,
+        CompletionAction, CompletionActionRequestedPayload, HashVerificationStatus, TaskRecord,
+        TaskStatus,
     },
-    platform, state_machine::TransitionError, DownloadControl, TaskRequestHeaders,
+    platform,
+    state_machine::TransitionError,
+    DownloadControl, TaskRequestHeaders,
 };
 
 /// 下载调度器，封装活跃下载映射、请求头缓存、全局限速器、引擎注册表等共享状态。
@@ -259,8 +263,14 @@ impl Scheduler {
         let task_proxy_config =
             db::resolve_task_proxy_config(&pool, &task.id, &task.protocol, &global_proxy_config)
                 .await?;
-        let task = prepare_task_for_download(&app, &pool, &self.engine_registry, task, &task_request_headers)
-            .await?;
+        let task = prepare_task_for_download(
+            &app,
+            &pool,
+            &self.engine_registry,
+            task,
+            &task_request_headers,
+        )
+        .await?;
         if self.downloads.lock().await.contains_key(&task.id) {
             tracing::debug!(task_id = %task.id, "download already active, skipping start");
             return Ok(());
@@ -353,7 +363,9 @@ impl Scheduler {
                 Err(error) => {
                     mark_download_failed(&task_app, &task_pool, &task_id, error).await;
                     let _ = downloads_map.lock().await.remove(&task_id);
-                    scheduler.clone().spawn_dispatch(task_app.clone(), task_pool.clone());
+                    scheduler
+                        .clone()
+                        .spawn_dispatch(task_app.clone(), task_pool.clone());
                     return;
                 }
             };
@@ -378,10 +390,8 @@ impl Scheduler {
                 }
             });
             let effective_task_limit = min_optional_limit(task_limit_bps, scheduled_limit_bps);
-            let task_speed_limiter = GlobalSpeedLimiter::with_parent(
-                state_speed_limiter.clone(),
-                effective_task_limit,
-            );
+            let task_speed_limiter =
+                GlobalSpeedLimiter::with_parent(state_speed_limiter.clone(), effective_task_limit);
             // Spawn the download as a nested task so that a panic inside the engine
             // is caught by tokio's JoinHandle (returns Err(JoinError) with is_panic())
             // instead of aborting the entire process. Requires panic = "unwind".
@@ -429,18 +439,15 @@ impl Scheduler {
             };
             let canceled = task_cancel_token.is_cancelled();
             let _ = downloads_map.lock().await.remove(&task_id);
-            let _ = scheduler
-                .request_headers
-                .lock()
-                .await
-                .remove(&task_id);
+            let _ = scheduler.request_headers.lock().await.remove(&task_id);
 
             if let Err(error) = result {
                 if !canceled {
                     mark_download_failed(&task_app, &task_pool, &task_id, error).await;
                 }
             } else if !canceled {
-                match crate::commands::tasks::verify_task_hash_with_pool(&task_pool, &task_id).await {
+                match crate::commands::tasks::verify_task_hash_with_pool(&task_pool, &task_id).await
+                {
                     Ok(state) if state.status != HashVerificationStatus::NotRequested => {
                         tracing::info!(
                             task_id = %task_id,
@@ -460,7 +467,9 @@ impl Scheduler {
                         );
                     }
                 }
-                scheduler.maybe_emit_completion_action(&task_app, &task_pool).await;
+                scheduler
+                    .maybe_emit_completion_action(&task_app, &task_pool)
+                    .await;
             }
 
             // A-4: Evict the runtime lock entry now that the worker has finished
@@ -520,9 +529,7 @@ impl Scheduler {
 
     /// 计算 planned_slots，考虑 host_limit 和 host_used（纯函数）。
     pub fn compute_planned_slots(planned: usize, host_limit: usize, host_used: usize) -> usize {
-        planned
-            .min(host_limit.saturating_sub(host_used))
-            .max(1)
+        planned.min(host_limit.saturating_sub(host_used)).max(1)
     }
 
     /// 异步触发调度（原 spawn_schedule_queued_tasks）。
@@ -533,7 +540,12 @@ impl Scheduler {
     }
 
     /// 延迟异步触发调度（原 spawn_schedule_queued_tasks_after）。
-    pub fn spawn_dispatch_after(self: Arc<Self>, app: AppHandle, pool: SqlitePool, delay: std::time::Duration) {
+    pub fn spawn_dispatch_after(
+        self: Arc<Self>,
+        app: AppHandle,
+        pool: SqlitePool,
+        delay: std::time::Duration,
+    ) {
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
             self.dispatch_inner(app, pool).await;
@@ -590,25 +602,20 @@ async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str,
     // R-2.4: Conditional UPDATE — only mark failed if still Downloading/Retrying.
     // If the user paused/canceled/deleted while the worker was erroring out,
     // skip the failure write to avoid overwriting their action.
-    let updated = match db::mark_task_failed_if_active(
-        pool,
-        task_id,
-        status,
-        Some(&error),
-        Some(&error),
-    )
-    .await
-    {
-        Ok(updated) => updated,
-        Err(db_error) => {
-            tracing::warn!(
-                task_id = %task_id,
-                error = %db_error,
-                "failed to persist task failure status"
-            );
-            return;
-        }
-    };
+    let updated =
+        match db::mark_task_failed_if_active(pool, task_id, status, Some(&error), Some(&error))
+            .await
+        {
+            Ok(updated) => updated,
+            Err(db_error) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %db_error,
+                    "failed to persist task failure status"
+                );
+                return;
+            }
+        };
     if !updated {
         tracing::warn!(
             task_id = %task_id,

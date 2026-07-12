@@ -38,6 +38,9 @@ hls_*.txt
 
 # Rust / Tauri
 src-tauri/target/
+src-tauri/binaries/*
+!src-tauri/binaries/README.md
+src-tauri/tauri.updater-rehearsal.generated.json
 
 # SQLite local dev
 *.db

@@ -208,9 +208,7 @@ pub fn lock_screen_now() -> Result<(), String> {
             .map_err(|e| format!("Failed to lock screen: {e}"))?
     } else {
         // Try loginctl first (systemd), fall back to xdg-screensaver.
-        let result = Command::new("loginctl")
-            .arg("lock-sessions")
-            .status();
+        let result = Command::new("loginctl").arg("lock-sessions").status();
         match result {
             Ok(s) if s.success() => return Ok(()),
             _ => Command::new("xdg-screensaver")

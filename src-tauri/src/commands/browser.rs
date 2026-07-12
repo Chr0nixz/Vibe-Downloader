@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "windows")]
 use std::process::Command;
 use std::{
@@ -33,11 +35,10 @@ use crate::{
 use super::tasks::{create_task_with_state_and_headers, CreateTaskInput};
 
 const NATIVE_HOST_NAME: &str = "com.vibe_downloader.native_host";
-const CHROMIUM_DEV_EXTENSION_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
-const CHROMIUM_RELEASE_EXTENSION_ID: &str = "replace-with-chrome-web-store-id";
-const EDGE_RELEASE_EXTENSION_ID: &str = "replace-with-edge-addons-id";
-const FIREFOX_DEV_EXTENSION_ID: &str = "vibe-downloader@local";
-const FIREFOX_RELEASE_EXTENSION_ID: &str = "vibe-downloader@example.invalid";
+const CHROME_EXTENSION_ID: &str = env!("VIBE_CHROME_EXTENSION_ID_RESOLVED");
+const EDGE_EXTENSION_ID: &str = env!("VIBE_EDGE_EXTENSION_ID_RESOLVED");
+const FIREFOX_EXTENSION_ID: &str = env!("VIBE_FIREFOX_EXTENSION_ID_RESOLVED");
+const CHROMIUM_PUBLIC_KEY: &str = env!("VIBE_CHROMIUM_PUBLIC_KEY_RESOLVED");
 const SETTING_BROWSER_CAPTURE: &str = "browser_capture_settings";
 const DEFAULT_BROWSER_MIN_SIZE_BYTES: &str = "0";
 const DEFAULT_BROWSER_EXTENSIONS: &[&str] = &[
@@ -135,7 +136,7 @@ pub async fn update_browser_capture_settings(
             })
         })
         .unwrap_or(current.forward_headers_mode);
-    let next = BrowserCaptureSettings {
+    let next = enforce_browser_capture_settings_policy(BrowserCaptureSettings {
         experimental_capture_enabled: input
             .experimental_capture_enabled
             .unwrap_or(current.experimental_capture_enabled),
@@ -156,7 +157,7 @@ pub async fn update_browser_capture_settings(
         allow_intranet_handoff: input
             .allow_intranet_handoff
             .unwrap_or(current.allow_intranet_handoff),
-    };
+    });
     upsert_browser_capture_settings(&state.pool, &next).await?;
     if matches!(
         next.forward_headers_mode,
@@ -395,8 +396,8 @@ pub fn validate_handoff_file_path(path: &Path) -> Result<PathBuf, String> {
         ));
     }
 
-    let metadata = fs::metadata(&path_canon)
-        .map_err(|e| format!("handoff file metadata failed: {e}"))?;
+    let metadata =
+        fs::metadata(&path_canon).map_err(|e| format!("handoff file metadata failed: {e}"))?;
     let size = metadata.len();
     if size > HANDOFF_MAX_BYTES {
         return Err(format!(
@@ -470,10 +471,14 @@ fn default_browser_capture_settings() -> BrowserCaptureSettings {
 }
 
 pub fn enforce_browser_capture_settings_policy(
-    settings: BrowserCaptureSettings,
+    mut settings: BrowserCaptureSettings,
 ) -> BrowserCaptureSettings {
-    // No more environment variable gating — experimental capture is controlled
-    // by the `experimental_capture_enabled` field in BrowserCaptureSettings.
+    if !capture_available() {
+        settings.experimental_capture_enabled = false;
+        settings.auto_intercept = false;
+        settings.forward_headers = false;
+        settings.forward_headers_mode = BrowserForwardHeadersMode::Disabled;
+    }
     settings
 }
 
@@ -486,10 +491,10 @@ pub fn enforce_browser_capture_settings_policy(
 /// 字段名为 `BrowserCaptureSettingsInput` 的 JSON (camelCase) 序列化名，
 /// 与浏览器扩展发送的 payload key 一致。
 pub const SENSITIVE_BROWSER_SETTINGS: &[&str] = &[
-    "forwardHeaders",          // Cookie/header 转发开关
-    "forwardHeadersMode",      // 转发模式（enabled/disabled）
+    "forwardHeaders",             // Cookie/header 转发开关
+    "forwardHeadersMode",         // 转发模式（enabled/disabled）
     "experimentalCaptureEnabled", // 实验性捕获
-    "allowIntranetHandoff",    // 内网 handoff（最高风险）
+    "allowIntranetHandoff",       // 内网 handoff（最高风险）
 ];
 
 /// S-1.1: 检查 `updateSettings` 载荷是否包含敏感字段。
@@ -606,7 +611,7 @@ async fn export_extension_packages(
     let default_dir = super::settings::default_download_dir(app)?;
     let settings = db::get_settings(&state.pool, default_dir).await?;
     let capture_settings = browser_capture_settings(&state.pool).await?;
-    let experimental = capture_settings.experimental_capture_enabled;
+    let experimental = capture_available() && capture_settings.experimental_capture_enabled;
     let output_dir = PathBuf::from(settings.default_save_dir)
         .join("Vibe Downloader Extensions")
         .join(format!("v{}", env!("CARGO_PKG_VERSION")));
@@ -617,7 +622,15 @@ async fn export_extension_packages(
         .map_err(|e| format!("Could not read extension manifest template: {e}"))?;
     let background_template = fs::read_to_string(source_dir.join("background.js"))
         .map_err(|e| format!("Could not read extension background script: {e}"))?;
-    let shared_files = ["logger.js", "popup.html", "popup.js", "popup.css"];
+    let shared_files = [
+        "logger.js",
+        "popup.html",
+        "popup.js",
+        "popup.css",
+        "options.html",
+        "options.js",
+        "options.css",
+    ];
     for file in shared_files {
         if !source_dir.join(file).exists() {
             return Err(format!("Browser extension source file is missing: {file}"));
@@ -638,7 +651,8 @@ async fn export_extension_packages(
         }
 
         let manifest = extension_manifest(&manifest_template, &variant, experimental)?;
-        let background = extension_background(&background_template, variant.browser_kind, experimental);
+        let background =
+            extension_background(&background_template, variant.browser_kind, experimental);
         write_extension_package(
             &package_path,
             &source_dir,
@@ -679,7 +693,10 @@ async fn integration_status(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<BrowserIntegrationStatus, String> {
-    let native_host_path = native_host_path().map(|path| path.to_string_lossy().to_string());
+    let (native_host_path, native_host_ready, native_host_error) = match native_host_path() {
+        Ok(path) => (Some(path.to_string_lossy().to_string()), true, None),
+        Err(error) => (None, false, Some(error)),
+    };
     let extension_core_path =
         extension_core_path_for_app(app).map(|path| path.to_string_lossy().to_string());
     let mut browsers = Vec::new();
@@ -707,7 +724,10 @@ async fn integration_status(
     Ok(BrowserIntegrationStatus {
         native_host_name: NATIVE_HOST_NAME.to_string(),
         native_host_path,
+        native_host_ready,
+        native_host_error,
         extension_core_path,
+        capture_available: capture_available(),
         experimental_capture_enabled: capture.experimental_capture_enabled,
         realtime: BrowserRealtimeStatus {
             ws_url: realtime.ws_url,
@@ -823,9 +843,8 @@ struct ExtensionPackageVariant {
     install_note: &'static str,
 }
 
-fn extension_package_variants() -> [ExtensionPackageVariant; 4] {
-    let release = integration_profile() == "release";
-    [
+fn extension_package_variants() -> Vec<ExtensionPackageVariant> {
+    let mut variants = vec![
         ExtensionPackageVariant {
             id: "chromium",
             target: "Chrome, Brave, Vivaldi, Chromium",
@@ -847,22 +866,22 @@ fn extension_package_variants() -> [ExtensionPackageVariant; 4] {
             target: "Mozilla Firefox",
             browser_kind: "firefox",
             extension: "xpi",
-            firefox_id: Some(if release {
-                FIREFOX_RELEASE_EXTENSION_ID
-            } else {
-                FIREFOX_DEV_EXTENSION_ID
-            }),
+            firefox_id: Some(FIREFOX_EXTENSION_ID),
             install_note: "Firefox release builds require a signed XPI. Use this local package for development profiles.",
         },
-        ExtensionPackageVariant {
+    ];
+    if integration_profile() == "dev" {
+        variants.push(ExtensionPackageVariant {
             id: "opera",
             target: "Opera",
             browser_kind: "opera",
             extension: "zip",
             firefox_id: None,
-            install_note: "Load the package from Opera's extensions page after enabling developer mode.",
-        },
-    ]
+            install_note:
+                "Load the package from Opera's extensions page after enabling developer mode.",
+        });
+    }
+    variants
 }
 
 fn extension_manifest(
@@ -876,6 +895,10 @@ fn extension_manifest(
     apply_extension_capture_permissions(&mut manifest, experimental);
     if variant.id == "firefox" {
         manifest["name"] = serde_json::Value::String("Vibe Downloader (Firefox)".to_string());
+    } else if !CHROMIUM_PUBLIC_KEY.is_empty() {
+        manifest["key"] = serde_json::Value::String(CHROMIUM_PUBLIC_KEY.to_string());
+    } else if let Some(object) = manifest.as_object_mut() {
+        object.remove("key");
     }
     if let Some(firefox_id) = variant.firefox_id {
         manifest["browser_specific_settings"] = serde_json::json!({
@@ -956,9 +979,59 @@ fn write_extension_package(
         std::io::copy(&mut file, &mut zip)
             .map_err(|e| format!("Could not write extension file {file_name}: {e}"))?;
     }
+    write_extension_directory(
+        &mut zip,
+        &source_dir.join("_locales"),
+        Path::new("_locales"),
+        options,
+    )?;
 
     zip.finish()
         .map_err(|e| format!("Could not finalize extension package: {e}"))?;
+    Ok(())
+}
+
+fn write_extension_directory(
+    zip: &mut ZipWriter<File>,
+    source: &Path,
+    archive_prefix: &Path,
+    options: SimpleFileOptions,
+) -> Result<(), String> {
+    let mut entries = fs::read_dir(source)
+        .map_err(|e| {
+            format!(
+                "Could not read extension directory {}: {e}",
+                source.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            format!(
+                "Could not enumerate extension directory {}: {e}",
+                source.display()
+            )
+        })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let file_type = entry.file_type().map_err(|e| {
+            format!(
+                "Could not inspect extension file {}: {e}",
+                entry.path().display()
+            )
+        })?;
+        let archive_path = archive_prefix.join(entry.file_name());
+        if file_type.is_dir() {
+            write_extension_directory(zip, &entry.path(), &archive_path, options)?;
+        } else if file_type.is_file() {
+            let archive_name = archive_path.to_string_lossy().replace('\\', "/");
+            zip.start_file(&archive_name, options)
+                .map_err(|e| format!("Could not add extension file {archive_name}: {e}"))?;
+            let mut file = File::open(entry.path())
+                .map_err(|e| format!("Could not read extension file {archive_name}: {e}"))?;
+            std::io::copy(&mut file, zip)
+                .map_err(|e| format!("Could not write extension file {archive_name}: {e}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -1041,16 +1114,21 @@ fn sanitize_suggested_file_name(value: Option<&str>) -> Option<String> {
 }
 
 fn install_manifest(app: &AppHandle, browser: BrowserKind) -> Result<(), String> {
+    let native_host_path = native_host_path()?;
+    let manifest = manifest_json(browser, &native_host_path)?;
     let manifest_path = manifest_path(app, browser)?;
     if let Some(parent) = manifest_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Could not create native host manifest folder: {e}"))?;
     }
-    fs::write(&manifest_path, manifest_json(browser)?)
+    fs::write(&manifest_path, manifest)
         .map_err(|e| format!("Could not write native host manifest: {e}"))?;
 
     #[cfg(target_os = "windows")]
-    install_windows_registry(browser, &manifest_path)?;
+    if let Err(error) = install_windows_registry(browser, &manifest_path) {
+        let _ = fs::remove_file(&manifest_path);
+        return Err(error);
+    }
 
     Ok(())
 }
@@ -1069,20 +1147,23 @@ fn uninstall_manifest(app: &AppHandle, browser: BrowserKind) -> Result<(), Strin
     Ok(())
 }
 
-fn manifest_json(browser: BrowserKind) -> Result<String, String> {
-    let path = native_host_path()
-        .ok_or_else(|| "Native host executable path could not be resolved.".to_string())?;
-    let path = path.to_string_lossy().replace('\\', "\\\\");
+fn manifest_json(browser: BrowserKind, native_host_path: &Path) -> Result<String, String> {
+    let path = native_host_path.to_string_lossy().to_string();
+    let extension_id = extension_id(browser).ok_or_else(|| {
+        format!(
+            "{} is not supported by this browser integration profile.",
+            browser.display_name()
+        )
+    })?;
     let value = if matches!(browser, BrowserKind::Firefox) {
         serde_json::json!({
             "name": NATIVE_HOST_NAME,
             "description": "Vibe Downloader browser handoff host",
             "path": path,
             "type": "stdio",
-            "allowed_extensions": [extension_id(browser).unwrap_or(FIREFOX_DEV_EXTENSION_ID)]
+            "allowed_extensions": [extension_id]
         })
     } else {
-        let extension_id = extension_id(browser).unwrap_or(CHROMIUM_DEV_EXTENSION_ID);
         serde_json::json!({
             "name": NATIVE_HOST_NAME,
             "description": "Vibe Downloader browser handoff host",
@@ -1095,43 +1176,61 @@ fn manifest_json(browser: BrowserKind) -> Result<String, String> {
 }
 
 fn integration_profile() -> &'static str {
-    match option_env!("VIBE_BROWSER_PROFILE") {
-        Some("release") => "release",
-        _ if cfg!(debug_assertions) => "dev",
-        _ => "release",
-    }
+    env!("VIBE_BROWSER_PROFILE_RESOLVED")
+}
+
+fn capture_available() -> bool {
+    env!("VIBE_BROWSER_CAPTURE_AVAILABLE") == "true"
 }
 
 fn extension_id(browser: BrowserKind) -> Option<&'static str> {
-    let release = integration_profile() == "release";
     match browser {
-        BrowserKind::Firefox => Some(if release {
-            option_env!("VIBE_FIREFOX_EXTENSION_ID").unwrap_or(FIREFOX_RELEASE_EXTENSION_ID)
-        } else {
-            FIREFOX_DEV_EXTENSION_ID
-        }),
-        BrowserKind::Edge => Some(if release {
-            option_env!("VIBE_EDGE_EXTENSION_ID").unwrap_or(EDGE_RELEASE_EXTENSION_ID)
-        } else {
-            CHROMIUM_DEV_EXTENSION_ID
-        }),
+        BrowserKind::Firefox => Some(FIREFOX_EXTENSION_ID),
+        BrowserKind::Edge => Some(EDGE_EXTENSION_ID),
         BrowserKind::Safari => None,
-        _ => Some(if release {
-            option_env!("VIBE_CHROME_EXTENSION_ID").unwrap_or(CHROMIUM_RELEASE_EXTENSION_ID)
-        } else {
-            CHROMIUM_DEV_EXTENSION_ID
-        }),
+        BrowserKind::Opera if integration_profile() != "dev" => None,
+        _ => Some(CHROME_EXTENSION_ID),
     }
 }
 
-fn native_host_path() -> Option<PathBuf> {
-    let current = std::env::current_exe().ok()?;
+fn native_host_path() -> Result<PathBuf, String> {
+    let current = std::env::current_exe()
+        .map_err(|e| format!("Could not resolve the Vibe Downloader executable: {e}"))?;
     let exe_name = if cfg!(target_os = "windows") {
         "vibe-native-host.exe"
     } else {
         "vibe-native-host"
     };
-    Some(current.with_file_name(exe_name))
+    validate_native_host_path(&current.with_file_name(exe_name))
+}
+
+fn validate_native_host_path(path: &Path) -> Result<PathBuf, String> {
+    let canonical = path.canonicalize().map_err(|e| {
+        format!(
+            "Native Messaging host was not found at {}: {e}",
+            path.display()
+        )
+    })?;
+    let metadata = fs::metadata(&canonical).map_err(|e| {
+        format!(
+            "Could not inspect Native Messaging host {}: {e}",
+            canonical.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Native Messaging host is not a file: {}",
+            canonical.display()
+        ));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(format!(
+            "Native Messaging host is not executable: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
 }
 
 fn extension_core_path() -> Option<PathBuf> {
@@ -1202,7 +1301,8 @@ fn manifest_path(app: &AppHandle, browser: BrowserKind) -> Result<PathBuf, Strin
 }
 
 fn browser_supported_on_platform(browser: BrowserKind) -> bool {
-    !matches!(browser, BrowserKind::Safari) || cfg!(target_os = "macos")
+    !matches!(browser, BrowserKind::Safari)
+        && !(matches!(browser, BrowserKind::Opera) && integration_profile() != "dev")
 }
 
 fn browser_detected(app: &AppHandle, browser: BrowserKind) -> bool {
@@ -1298,4 +1398,97 @@ fn windows_registry_key(browser: BrowserKind) -> String {
         BrowserKind::Safari => "Apple\\Safari",
     };
     format!("HKCU\\Software\\{vendor}\\NativeMessagingHosts\\{NATIVE_HOST_NAME}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_fixture_dir() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "vibe-browser-command-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&path).expect("create fixture directory");
+        path
+    }
+
+    #[test]
+    fn native_host_validation_rejects_missing_files() {
+        let path = temp_fixture_dir().join("missing-native-host");
+        let error = validate_native_host_path(&path).expect_err("missing host must fail");
+        assert!(error.contains("was not found"), "unexpected error: {error}");
+        let _ = fs::remove_dir_all(path.parent().expect("fixture parent"));
+    }
+
+    #[test]
+    fn native_host_validation_returns_a_canonical_file() {
+        let dir = temp_fixture_dir();
+        let path = dir.join(if cfg!(target_os = "windows") {
+            "vibe-native-host.exe"
+        } else {
+            "vibe-native-host"
+        });
+        fs::write(&path, b"native-host").expect("write fixture");
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("set executable bit");
+        assert_eq!(
+            validate_native_host_path(&path).expect("valid host"),
+            path.canonicalize().expect("canonical fixture")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_host_validation_rejects_non_executable_unix_files() {
+        let dir = temp_fixture_dir();
+        let path = dir.join("vibe-native-host");
+        fs::write(&path, b"native-host").expect("write fixture");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .expect("clear executable bit");
+        let error = validate_native_host_path(&path).expect_err("non-executable host must fail");
+        assert!(
+            error.contains("not executable"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn manifest_json_uses_the_verified_path_and_compiled_identity() {
+        let path = if cfg!(target_os = "windows") {
+            PathBuf::from(r"C:\Program Files\Vibe Downloader\vibe-native-host.exe")
+        } else {
+            PathBuf::from("/opt/vibe-downloader/vibe-native-host")
+        };
+        let raw = manifest_json(BrowserKind::Chrome, &path).expect("manifest json");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse manifest");
+        let expected_origin = format!("chrome-extension://{CHROME_EXTENSION_ID}/");
+        assert_eq!(value["path"].as_str(), path.to_str());
+        assert_eq!(
+            value["allowed_origins"][0].as_str(),
+            Some(expected_origin.as_str())
+        );
+    }
+
+    #[test]
+    fn minimal_profiles_force_capture_settings_off() {
+        if capture_available() {
+            return;
+        }
+        let mut settings = default_browser_capture_settings();
+        settings.experimental_capture_enabled = true;
+        settings.auto_intercept = true;
+        settings.forward_headers = true;
+        settings.forward_headers_mode = BrowserForwardHeadersMode::Enabled;
+        let enforced = enforce_browser_capture_settings_policy(settings);
+        assert!(!enforced.experimental_capture_enabled);
+        assert!(!enforced.auto_intercept);
+        assert!(!enforced.forward_headers);
+        assert!(matches!(
+            enforced.forward_headers_mode,
+            BrowserForwardHeadersMode::Disabled
+        ));
+    }
 }

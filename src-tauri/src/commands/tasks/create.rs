@@ -25,9 +25,7 @@ use crate::commands::task_file_planning::{
     sanitize_probe_relative_path, task_file_records_from_probe, unique_final_path,
 };
 
-use super::{
-    is_bt_protocol, is_dash_url, is_metalink_url, is_torrent_url, task_payload,
-};
+use super::{is_bt_protocol, is_dash_url, is_metalink_url, is_torrent_url, task_payload};
 
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -440,21 +438,19 @@ pub async fn import_urls(
 
         if should_probe {
             let probe_result = match state.engine_registry.engine_for_uri(&normalized_url) {
-                Ok(engine) => {
-                    engine
-                        .probe(ProbeRequest {
-                            uri: normalized_url.clone(),
-                            source: None,
-                            request_headers: Vec::new(),
-                            pool: Some(state.pool.clone()),
-                            task_id: None,
-                            credentials: None,
-                            app: None,
-                            request_id: None,
-                        })
-                        .await
-                        .map_err(|e| ensure_structured_error(e.to_string()))
-                }
+                Ok(engine) => engine
+                    .probe(ProbeRequest {
+                        uri: normalized_url.clone(),
+                        source: None,
+                        request_headers: Vec::new(),
+                        pool: Some(state.pool.clone()),
+                        task_id: None,
+                        credentials: None,
+                        app: None,
+                        request_id: None,
+                    })
+                    .await
+                    .map_err(|e| ensure_structured_error(e.to_string())),
                 Err(error) => Err(ensure_structured_error(error)),
             };
             match probe_result {
@@ -564,8 +560,8 @@ pub(crate) async fn create_task_with_state_and_headers(
         return Err("Enter a download URL.".to_string());
     }
     let captured_credentials = db::legacy_credentials_from_url(url);
-    let has_credentials = captured_credentials.is_some()
-        || input.username.as_deref().is_some_and(|u| !u.is_empty());
+    let has_credentials =
+        captured_credentials.is_some() || input.username.as_deref().is_some_and(|u| !u.is_empty());
     if has_credentials {
         crate::secure_headers::ensure_secret_encryption_available()?;
     }
@@ -638,17 +634,18 @@ pub(crate) async fn create_task_with_state_and_headers(
     // precedence over legacy `expected_hash_sha256`. The chosen algorithm flows
     // into the `task_checksums` row below; `tasks.expected_hash_sha256` is only
     // populated for Sha256 to preserve the legacy verify path and UI columns.
-    let manual_hash_algorithm = input.expected_hash_algorithm.unwrap_or(ChecksumAlgorithm::Sha256);
+    let manual_hash_algorithm = input
+        .expected_hash_algorithm
+        .unwrap_or(ChecksumAlgorithm::Sha256);
     let manual_hash: Option<(ChecksumAlgorithm, String)> = if is_bt_protocol(&probe.protocol)
         || probe.protocol == "hls"
         || probe.protocol == "dash"
         || is_metalink_protocol(&probe.protocol)
     {
         None
-    } else if let Some(normalized) = normalize_expected_hash(
-        input.expected_hash.as_deref(),
-        manual_hash_algorithm,
-    )? {
+    } else if let Some(normalized) =
+        normalize_expected_hash(input.expected_hash.as_deref(), manual_hash_algorithm)?
+    {
         Some((manual_hash_algorithm, normalized))
     } else {
         // Fall back to legacy SHA-256-only field for backward compat with older
@@ -691,7 +688,10 @@ pub(crate) async fn create_task_with_state_and_headers(
     // 安全校验：category_key 作为子目录名，禁止包含路径分隔符或父目录引用
     if let Some(ref key) = category_key {
         if key.contains('/') || key.contains('\\') || key.contains("..") || key.is_empty() {
-            log::warn!("Classification rule returned invalid target_subdir {:?}, ignoring", key);
+            log::warn!(
+                "Classification rule returned invalid target_subdir {:?}, ignoring",
+                key
+            );
             category_key = None;
         }
     }
@@ -976,7 +976,11 @@ pub(crate) async fn create_task_with_state_and_headers(
         "task created"
     );
     emit_queue_changed_with_ids(&app, Some(vec![record.id.clone()]));
-    state.scheduler.clone().dispatch(app.clone(), state.pool.clone()).await;
+    state
+        .scheduler
+        .clone()
+        .dispatch(app.clone(), state.pool.clone())
+        .await;
 
     let task = task_payload(&state.pool, &record.id).await?;
     emit_task_updated(&app, &task);
@@ -1198,17 +1202,13 @@ fn is_metalink_protocol(protocol: &str) -> bool {
 
 /// Build an `Authorization: Basic` header from optional username and password.
 /// Returns an empty vec if username is None or empty.
-fn basic_auth_headers(
-    username: Option<&str>,
-    password: Option<&str>,
-) -> Vec<(String, String)> {
+fn basic_auth_headers(username: Option<&str>, password: Option<&str>) -> Vec<(String, String)> {
     let user = username.unwrap_or("").trim();
     if user.is_empty() {
         return Vec::new();
     }
     let pass = password.unwrap_or("");
-    let encoded =
-        base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
     vec![("Authorization".to_string(), format!("Basic {encoded}"))]
 }
 

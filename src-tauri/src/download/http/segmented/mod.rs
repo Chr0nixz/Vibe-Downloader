@@ -7,7 +7,10 @@ use std::{
 use reqwest::Client;
 use sqlx::SqlitePool;
 use tauri::AppHandle;
-use tokio::{fs, io::{AsyncWriteExt, BufWriter}};
+use tokio::{
+    fs,
+    io::{AsyncWriteExt, BufWriter},
+};
 
 mod acceleration;
 mod checkpoint;
@@ -26,13 +29,14 @@ pub(super) use self::worker::{download_segment_worker, SegmentWorkerRequest};
 use super::{error::format_http_status, request::send_get_with_retry, HTTP_CHUNK_READ_TIMEOUT};
 use crate::{
     db,
-    download::{file_ops::{finalize_download_file, persist_completed_path}, GlobalSpeedLimiter},
-    events::{
-        emit_queue_changed_with_ids, emit_task_updated_record, TaskProgressEmitGate,
+    download::{
+        file_ops::{finalize_download_file, persist_completed_path},
+        GlobalSpeedLimiter,
     },
+    events::{emit_queue_changed_with_ids, emit_task_updated_record, TaskProgressEmitGate},
     models::{
-        AppErrorPayload, RequestDiagnosticRecord, SegmentStatus, TaskRecord,
-        TaskSegmentRecord, TaskStatus,
+        AppErrorPayload, RequestDiagnosticRecord, SegmentStatus, TaskRecord, TaskSegmentRecord,
+        TaskStatus,
     },
 };
 

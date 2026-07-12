@@ -23,8 +23,8 @@
 use std::sync::Arc;
 
 use tauri_app_lib::download::{
-    DashEngine, DownloadEngine, FtpEngine, HlsEngine, HttpEngine, MetalinkEngine, SftpEngine,
-    WebDavEngine, url_classify::is_torrent_url,
+    url_classify::is_torrent_url, DashEngine, DownloadEngine, FtpEngine, HlsEngine, HttpEngine,
+    MetalinkEngine, SftpEngine, WebDavEngine,
 };
 use tauri_app_lib::proxy::ResolvedProxyConfig;
 
@@ -272,14 +272,54 @@ fn bt_scheme(s: &str) -> bool {
 #[test]
 fn dispatch_priority_prefers_hls_over_http_for_m3u8() {
     let engines: Vec<Spec> = vec![
-        Spec { id: "bt", priority: 100, matches_url: bt_matches_url, supports_scheme: bt_scheme },
-        Spec { id: "metalink", priority: 90, matches_url: metalink_matches, supports_scheme: metalink_scheme },
-        Spec { id: "hls", priority: 80, matches_url: hls_matches, supports_scheme: hls_scheme },
-        Spec { id: "dash", priority: 70, matches_url: dash_matches, supports_scheme: dash_scheme },
-        Spec { id: "webdav", priority: 0, matches_url: webdav_matches, supports_scheme: webdav_scheme },
-        Spec { id: "http", priority: 0, matches_url: http_matches, supports_scheme: http_scheme },
-        Spec { id: "ftp", priority: 0, matches_url: ftp_matches, supports_scheme: ftp_scheme },
-        Spec { id: "sftp", priority: 0, matches_url: sftp_matches, supports_scheme: sftp_scheme },
+        Spec {
+            id: "bt",
+            priority: 100,
+            matches_url: bt_matches_url,
+            supports_scheme: bt_scheme,
+        },
+        Spec {
+            id: "metalink",
+            priority: 90,
+            matches_url: metalink_matches,
+            supports_scheme: metalink_scheme,
+        },
+        Spec {
+            id: "hls",
+            priority: 80,
+            matches_url: hls_matches,
+            supports_scheme: hls_scheme,
+        },
+        Spec {
+            id: "dash",
+            priority: 70,
+            matches_url: dash_matches,
+            supports_scheme: dash_scheme,
+        },
+        Spec {
+            id: "webdav",
+            priority: 0,
+            matches_url: webdav_matches,
+            supports_scheme: webdav_scheme,
+        },
+        Spec {
+            id: "http",
+            priority: 0,
+            matches_url: http_matches,
+            supports_scheme: http_scheme,
+        },
+        Spec {
+            id: "ftp",
+            priority: 0,
+            matches_url: ftp_matches,
+            supports_scheme: ftp_scheme,
+        },
+        Spec {
+            id: "sftp",
+            priority: 0,
+            matches_url: sftp_matches,
+            supports_scheme: sftp_scheme,
+        },
     ];
 
     // `.m3u8` on https must route to HLS (priority 80), not HTTP (priority 0).

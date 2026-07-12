@@ -390,7 +390,17 @@ pub async fn update_task_status(
     error_message: Option<&str>,
 ) -> Result<Option<TaskRecord>, String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    let record = update_task_status_in_tx(&mut tx, task_id, status, expected_current_status, speed_bps, connection_count, health_summary, error_message).await?;
+    let record = update_task_status_in_tx(
+        &mut tx,
+        task_id,
+        status,
+        expected_current_status,
+        speed_bps,
+        connection_count,
+        health_summary,
+        error_message,
+    )
+    .await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(record)
 }

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.1.0)"
+        description: "Release tag (for example v0.2.0)"
         required: true
         type: string
       release_draft:
@@ -20,9 +20,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      VIBE_BROWSER_PROFILE: release
+      VIBE_CHROME_EXTENSION_ID: ${{ secrets.VIBE_CHROME_EXTENSION_ID }}
+      VIBE_EDGE_EXTENSION_ID: ${{ secrets.VIBE_EDGE_EXTENSION_ID }}
+      VIBE_FIREFOX_EXTENSION_ID: ${{ secrets.VIBE_FIREFOX_EXTENSION_ID }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Sync version from tag
+        run: node scripts/sync-version.mjs "${{ env.RELEASE_TAG }}"
+      - name: Validate release identity and signing configuration
+        run: pnpm release:preflight -- --tag "${{ env.RELEASE_TAG }}" --profile release
+
   publish:
+    needs: preflight
     permissions:
       contents: write
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -35,96 +63,117 @@ jobs:
             args: --target x86_64-unknown-linux-gnu
           - platform: windows-latest
             args: --target x86_64-pc-windows-msvc
-
     runs-on: ${{ matrix.platform }}
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      VIBE_BROWSER_PROFILE: release
+      VIBE_CHROME_EXTENSION_ID: ${{ secrets.VIBE_CHROME_EXTENSION_ID }}
+      VIBE_EDGE_EXTENSION_ID: ${{ secrets.VIBE_EDGE_EXTENSION_ID }}
+      VIBE_FIREFOX_EXTENSION_ID: ${{ secrets.VIBE_FIREFOX_EXTENSION_ID }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
-
       - uses: pnpm/action-setup@v6
         with:
           version: 10
-
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-
       - run: pnpm install --frozen-lockfile
-
       - name: Sync version from tag
-        run: node scripts/sync-version.mjs "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
-
+        run: node scripts/sync-version.mjs "${{ env.RELEASE_TAG }}"
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Optional macOS code signing (configure when certificates are available):
-          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # APPLE_ID: ${{ secrets.APPLE_ID }}
-          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Optional Windows code signing:
-          # WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          # WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         with:
-          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          releaseName: Vibe Downloader ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          releaseBody: See the assets to download this version and install.
-          releaseDraft: ${{ github.event_name == 'workflow_dispatch' && inputs.release_draft || true }}
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: Vibe Downloader ${{ env.RELEASE_TAG }}
+          releaseBody: |
+            ## Unsigned installer notice
+
+            This release is not signed with Apple Developer ID or Windows Authenticode. macOS users may need to use Finder → Open; Windows users may need to choose SmartScreen → More info → Run anyway. Linux users should verify SHA256SUMS.txt before installation.
+
+            Tauri updater artifacts are signed independently and verified by the application.
+          releaseDraft: ${{ github.event_name != 'workflow_dispatch' || inputs.release_draft }}
           prerelease: false
           includeUpdaterJson: true
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} --config src-tauri/tauri.bundle.conf.json
 
   build-extensions:
+    needs: publish
     permissions:
       contents: write
+    timeout-minutes: 20
     runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      VIBE_BROWSER_PROFILE: release
+      VIBE_CHROME_EXTENSION_ID: ${{ secrets.VIBE_CHROME_EXTENSION_ID }}
+      VIBE_EDGE_EXTENSION_ID: ${{ secrets.VIBE_EDGE_EXTENSION_ID }}
+      VIBE_FIREFOX_EXTENSION_ID: ${{ secrets.VIBE_FIREFOX_EXTENSION_ID }}
     steps:
       - uses: actions/checkout@v7
-
       - uses: pnpm/action-setup@v6
         with:
           version: 10
-
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
-
       - run: pnpm install --frozen-lockfile
-
       - name: Sync version from tag
-        run: node scripts/sync-version.mjs "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
-
-      - name: Build browser extension packages
-        run: pnpm build:extensions
-        env:
-          VIBE_BROWSER_PROFILE: release
-          VIBE_BROWSER_EXPERIMENTAL_CAPTURE: "true"
-          # Extension IDs — configure these secrets before publishing to stores:
-          # VIBE_CHROME_EXTENSION_ID: ${{ secrets.VIBE_CHROME_EXTENSION_ID }}
-          # VIBE_EDGE_EXTENSION_ID: ${{ secrets.VIBE_EDGE_EXTENSION_ID }}
-          # VIBE_FIREFOX_EXTENSION_ID: ${{ secrets.VIBE_FIREFOX_EXTENSION_ID }}
-
-      - name: Upload extension artifacts
+        run: node scripts/sync-version.mjs "${{ env.RELEASE_TAG }}"
+      - name: Build and verify minimal-permission store packages
+        run: pnpm verify:extensions
+      - name: Upload extension workflow artifact
         uses: actions/upload-artifact@v7
         with:
-          name: browser-extensions
-          path: browser/dist/
+          name: browser-store-submission-packages
+          path: browser/dist/packages/
           if-no-files-found: error
+      - name: Attach extension packages to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${RELEASE_TAG}" browser/dist/packages/* --clobber
+
+  verify-release:
+    needs: [publish, build-extensions]
+    permissions:
+      contents: write
+    timeout-minutes: 20
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download draft release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "${RELEASE_TAG}" --dir .release-assets
+      - name: Verify release asset coverage and checksums
+        run: pnpm verify:release-assets -- --dir .release-assets --version "${RELEASE_TAG#v}"
+      - name: Attach unified checksum file
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${RELEASE_TAG}" .release-assets/SHA256SUMS.txt --clobber

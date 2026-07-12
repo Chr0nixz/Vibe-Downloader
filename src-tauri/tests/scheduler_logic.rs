@@ -96,9 +96,9 @@ fn schedule_window_skips_when_outside_window_and_obeying() {
 #[test]
 fn schedule_window_does_not_skip_when_inside_window() {
     assert!(!Scheduler::should_skip_for_schedule_window(
-        true,  // enabled
-        true,  // obey_schedule
-        true,  // time_window_active
+        true, // enabled
+        true, // obey_schedule
+        true, // time_window_active
     ));
 }
 
@@ -143,7 +143,10 @@ fn planned_slots_floors_to_one_when_host_full() {
 #[test]
 fn segment_count_is_one_for_bt_protocol() {
     let task = sample_task_record("bt-1", "bt");
-    assert_eq!(db::planned_segment_count_with_plan(&task, 16 * 1024 * 1024, 4), 1);
+    assert_eq!(
+        db::planned_segment_count_with_plan(&task, 16 * 1024 * 1024, 4),
+        1
+    );
 }
 
 #[test]
@@ -249,7 +252,10 @@ async fn mark_task_failed_if_active_skips_when_status_changed() {
     )
     .await
     .expect("pause task");
-    assert!(paused.is_some(), "pause should succeed when status is Downloading");
+    assert!(
+        paused.is_some(),
+        "pause should succeed when status is Downloading"
+    );
 
     // Step 3: worker fails — must NOT overwrite Paused.
     let updated = db::mark_task_failed_if_active(
@@ -321,7 +327,10 @@ async fn complete_task_does_not_overwrite_paused() {
     )
     .await
     .expect("pause task");
-    assert!(paused.is_some(), "pause should succeed when status is Downloading");
+    assert!(
+        paused.is_some(),
+        "pause should succeed when status is Downloading"
+    );
 
     // Step 3: worker completes — must NOT overwrite Paused.
     db::complete_task(&pool, task_id)

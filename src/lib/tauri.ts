@@ -30,6 +30,7 @@ import type {
   ResolveTaskAttentionInput,
   SegmentSummary,
   SftpDirectoryProbe,
+  SystemFileIcon,
   TaskEvent,
   TaskProxySettings,
   TaskProxySettingsInput,
@@ -455,6 +456,20 @@ export async function queryDiskSpace(path: string): Promise<DiskSpaceInfo> {
   }
   const commands = await loadNativeCommands();
   return runCommand("queryDiskSpace", () => commands.queryDiskSpace(path));
+}
+
+/**
+ * Extract the OS-associated file-type icon for a file name. Returns a PNG
+ * base64 data URL suitable for `<img src>`. On non-Windows or when extraction
+ * fails, `data_url` is `null` so the caller can fall back to a generic icon.
+ */
+export async function extractSystemFileIcon(fileName: string): Promise<SystemFileIcon> {
+  if (!isTauriRuntime()) {
+    // Browser preview mock: no system icons available.
+    return { data_url: null, mime_hint: null };
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("extractSystemFileIcon", () => commands.extractSystemFileIcon(fileName));
 }
 
 export async function showFloatingStatusWindow(): Promise<void> {

@@ -1,11 +1,11 @@
-use tauri_app_lib::commands::browser::{
-    is_private_ip, is_private_or_reserved_url, validate_handoff_file_path,
-    FORWARDED_HEADER_ALLOWLIST,
-};
 use reqwest::Url;
 use serial_test::serial;
 use std::fs;
 use std::path::PathBuf;
+use tauri_app_lib::commands::browser::{
+    is_private_ip, is_private_or_reserved_url, validate_handoff_file_path,
+    FORWARDED_HEADER_ALLOWLIST,
+};
 
 fn url(s: &str) -> Url {
     Url::parse(s).unwrap()
@@ -62,7 +62,9 @@ fn test_is_private_ip_direct() {
     assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
     assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
     assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
-    assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))));
+    assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(
+        169, 254, 169, 254
+    ))));
     assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))));
     assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
     assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))));
@@ -178,10 +180,7 @@ fn test_validate_handoff_file_path_rejects_outside_dir() {
     fs::write(&outside, b"{}").unwrap();
 
     let result = validate_handoff_file_path(&outside);
-    assert!(
-        result.is_err(),
-        "path outside handoff_dir must be rejected"
-    );
+    assert!(result.is_err(), "path outside handoff_dir must be rejected");
     let err = result.unwrap_err();
     assert!(
         err.contains("must be inside"),
@@ -206,10 +205,7 @@ fn test_validate_handoff_file_path_rejects_oversize() {
     fs::write(&path, &oversize).unwrap();
 
     let result = validate_handoff_file_path(&path);
-    assert!(
-        result.is_err(),
-        "file exceeding 1 MiB must be rejected"
-    );
+    assert!(result.is_err(), "file exceeding 1 MiB must be rejected");
     let err = result.unwrap_err();
     assert!(
         err.contains("exceeds max"),
@@ -253,10 +249,7 @@ fn test_validate_handoff_file_path_rejects_wrong_name() {
                 result.err()
             );
         } else {
-            assert!(
-                result.is_err(),
-                "name `{name}` should be rejected"
-            );
+            assert!(result.is_err(), "name `{name}` should be rejected");
         }
         fs::remove_file(&path).ok();
     }

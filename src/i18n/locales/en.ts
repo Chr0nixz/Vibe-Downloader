@@ -37,6 +37,19 @@ const en = {
       resumeUnavailable: "Single connection",
       speedHistoryAria: "{{name}} speed history",
     },
+    fileType: {
+      video: "Video",
+      audio: "Audio",
+      image: "Image",
+      archive: "Archive",
+      document: "Document",
+      spreadsheet: "Spreadsheet",
+      code: "Code",
+      app: "Application",
+      manifest: "Manifest",
+      torrent: "BitTorrent",
+      file: "File",
+    },
   },
   taskDiagnostics: {
     idle: "Waiting for activity",
@@ -197,6 +210,8 @@ const en = {
     bulkPause: "Pause",
     bulkResume: "Resume",
     bulkRetry: "Retry",
+    pauseAll: "Pause all",
+    resumeAll: "Resume all",
     bulkOpenFolder: "Open folder",
     exportJson: "Export as JSON",
     exportCsv: "Export as CSV",
@@ -393,6 +408,9 @@ const en = {
     browserExperimentalCapture: "Experimental capture",
     browserExperimentalCaptureDescription:
       "Enable media sniffing and advanced capture controls. Requires re-exporting and reinstalling the browser extension to apply permission changes.",
+    browserCaptureUnavailableTitle: "Minimal-permission extension build",
+    browserCaptureUnavailableDescription:
+      "This candidate or store build supports manual hand-off only. Automatic takeover and Cookie/header forwarding are available only in explicitly marked development builds.",
     browserMinSize: "Minimum size (MiB)",
     browserMinSizeHint: "Only capture downloads larger than this size. Set to 0 to disable the size filter.",
     browserFileExtensions: "File extensions",
@@ -454,6 +472,8 @@ const en = {
     browserUninstall: "Uninstall",
     browserLoading: "Loading browser integration status...",
     browserHostName: "Native host",
+    browserHostUnavailable:
+      "The packaged Native Messaging host is unavailable. Reinstall the desktop app before installing browser integration.",
     browserNativeHostPath: "Native host path",
     browserExtensionPath: "Extension source",
     browserBuildExtensions: "Run pnpm build:extensions",

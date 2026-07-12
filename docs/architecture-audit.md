@@ -129,6 +129,8 @@ select-all 控件是 `role='checkbox'` 且 `aria-checked={selectedFiles.size ===
 
 **修复**：加 fake 多镜像 HTTP server 集成测试驱动并行路径，断言装配文件完整性、下载中进度单调、镜像 failover、暂停/恢复连续性。
 
+> **回归测试**（2026-07-03 补齐）：`tests/metalink_engine.rs` — `g1_metalink_worker_failovers_to_healthy_mirror`（双镜像 failover 端到端验证 primary 500 → failover 到 healthy mirror）、`g1_metalink_worker_returns_error_when_all_mirrors_fail`（全镜像失败时返回错误并标记所有镜像为 failed）。通过 `run_metalink_range_worker_with_failover` testing 入口驱动 `MetalinkRangeWorker::run` 完整 failover 编排路径。
+
 ### F-5 手动校验输入仅限 SHA-256，尽管引擎支持 SHA-512/SHA-1/MD5【🟡 中】（已修复 2026-06-30）
 
 **定位**：`src-tauri/src/commands/tasks/create.rs:605-613`、`src-tauri/src/download/checksum.rs:40-45`
@@ -199,6 +201,8 @@ DASH 仍拒绝 dynamic/live 与 `SegmentTimeline`（合理的早期边界）。�
 
 **修复**：在 `:323` 错误分支返回前 `self.downloads.lock().await.remove(&task.id);`（镜像 Conflict 分支）；或用 RAII guard，仅在 `:462` worker spawn 成功后才「提交」该条目。
 
+> **回归测试**（2026-07-03 补齐）：`tests/scheduler_concurrency.rs` — `g2_concurrent_dispatch_and_cancel_only_one_wins`、`g2_concurrent_worker_failure_and_pause_only_one_wins`、`g2_concurrent_multiple_dispatch_only_one_wins`、`g2_concurrent_pause_and_fail_only_one_wins`。使用 `tokio::spawn` 进行真并发条件 UPDATE 回归测试，验证 dispatch/pause/fail 竞争下只有一个操作成功修改状态。
+
 ### A-2 SSRF 防护是一次性主机名字符串检查，可经 DNS rebinding/重定向/缺失 IP 类别绕过【🔴 高】（已修复 2026-06-30）
 
 **定位**：`src-tauri/src/commands/browser.rs:747-776`、`src-tauri/src/download/http/mod.rs:276-291`、`:295`
@@ -212,6 +216,8 @@ DASH 仍拒绝 dynamic/live 与 `SegmentTimeline`（合理的早期边界）。�
 **影响**：私有/保留地址保护（内网开关关闭时）可被精心构造的交接击穿，触达云元数据端点（`169.254.169.254`）或内网服务。WS bridge 路径风险最高——本地进程持 bootstrap token 提交 `createDownload`（`browser_realtime.rs:227`）。
 
 **修复**：在**连接时**而非 URL 字符串上强制 IP 检查——自定义 resolver/connector 拒绝私有/保留解析 IP，自定义重定向策略每跳复验；扩展 `is_private_ip` 覆盖 `to_ipv4_mapped`、`is_unique_local`、`is_unicast_link_local`、`is_shared`。
+
+> **回归测试**（2026-07-03 补齐）：`tests/ssrf_engine.rs` — 7 项集成测试覆盖 DNS rebinding（localhost 解析到 127.0.0.1 被阻断）、重定向到内网（7 种内网 URL 字面量检查）、IPv4-mapped IPv6 旁路（`::ffff:127.0.0.1` 等）、CGNAT 范围（100.64.0.0/10）、双层一致性（literal-IP check + IP check 对私有/公共地址一致）。
 
 ### A-3 关闭 flush 共享单个 3 秒预算串行耗尽，且追踪的外层任务被 abort 时跳过内层清理【🟡 中】（已修复 2026-06-30）
 

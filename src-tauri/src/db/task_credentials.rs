@@ -155,53 +155,55 @@ pub async fn migrate_legacy_ftp_credentials(pool: &SqlitePool) -> Result<(), Str
         })
         .map_err(|e| format!("Could not serialize task credentials: {e}"))?;
 
-        let (credentials_ciphertext, nonce) =
-            match crate::secure_headers::encrypt_secret(&secret, "task credentials", task_id.as_bytes())
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    // Encryption failed — mark task, sanitize URL, all within the tx.
-                    let now = crate::models::task::now_iso();
-                    sqlx::query(
-                        r#"
+        let (credentials_ciphertext, nonce) = match crate::secure_headers::encrypt_secret(
+            &secret,
+            "task credentials",
+            task_id.as_bytes(),
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                // Encryption failed — mark task, sanitize URL, all within the tx.
+                let now = crate::models::task::now_iso();
+                sqlx::query(
+                    r#"
                         UPDATE tasks
                         SET url = ?, final_url = COALESCE(?, final_url), status = 'needs_attention',
                             error_message = ?, error_code = 'task_credentials_unavailable',
                             speed_bps = 0, connection_count = 0, updated_at = ?
                         WHERE id = ?
                         "#,
-                    )
-                    .bind(sanitized_url)
-                    .bind(sanitized_final_url)
-                    .bind(task_credentials_encrypt_error(&error))
-                    .bind(&now)
-                    .bind(&task_id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                )
+                .bind(sanitized_url)
+                .bind(sanitized_final_url)
+                .bind(task_credentials_encrypt_error(&error))
+                .bind(&now)
+                .bind(&task_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
 
-                    let event_now = crate::models::task::now_iso();
-                    sqlx::query(
-                        r#"
+                let event_now = crate::models::task::now_iso();
+                sqlx::query(
+                    r#"
                         INSERT INTO task_events (task_id, event_type, payload, created_at)
                         VALUES (?, 'task_credentials_unavailable', ?, ?)
                         "#,
-                    )
-                    .bind(&task_id)
-                    .bind(task_credentials_encrypt_error(&error))
-                    .bind(&event_now)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                )
+                .bind(&task_id)
+                .bind(task_credentials_encrypt_error(&error))
+                .bind(&event_now)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
 
-                    tracing::warn!(
-                        task_id = %task_id,
-                        error = %error,
-                        "legacy FTP credentials could not be encrypted; task marked for user attention"
-                    );
-                    continue;
-                }
-            };
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %error,
+                    "legacy FTP credentials could not be encrypted; task marked for user attention"
+                );
+                continue;
+            }
+        };
 
         // Inline upsert_task_credentials within the transaction.
         let now = crate::models::task::now_iso();

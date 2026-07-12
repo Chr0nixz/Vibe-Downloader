@@ -7,7 +7,7 @@ use tauri::AppHandle;
 use crate::{
     db,
     events::TaskProgressEmitGate,
-    models::{SegmentStatus, TaskProgressPayload, TaskStatus, TaskSegmentRecord},
+    models::{SegmentStatus, TaskProgressPayload, TaskSegmentRecord, TaskStatus},
 };
 
 use super::{checkpoint::checkpoint_runtime_progress, SegmentMessage};
@@ -68,7 +68,12 @@ impl RuntimeProgress {
         }
     }
 
-    pub(super) fn update_progress(&mut self, segment_id: String, downloaded_until: i64, speed_bps: i64) {
+    pub(super) fn update_progress(
+        &mut self,
+        segment_id: String,
+        downloaded_until: i64,
+        speed_bps: i64,
+    ) {
         if let Some(segment) = self.segments.get_mut(&segment_id) {
             segment.downloaded_until = downloaded_until;
             segment.speed_bps = speed_bps.max(0);

@@ -133,9 +133,7 @@ async fn prune_caps_rows_per_task_to_maximum() {
     }
     assert_eq!(count_for_task(&pool, task_id).await, inserted);
 
-    let removed = db::prune_request_diagnostics(&pool)
-        .await
-        .expect("prune");
+    let removed = db::prune_request_diagnostics(&pool).await.expect("prune");
 
     assert_eq!(
         removed,
@@ -163,9 +161,7 @@ async fn prune_removes_rows_older_than_max_age() {
     .to_rfc3339();
     set_all_created_at(&pool, task_id, &old_iso).await;
 
-    let removed = db::prune_request_diagnostics(&pool)
-        .await
-        .expect("prune");
+    let removed = db::prune_request_diagnostics(&pool).await.expect("prune");
 
     assert_eq!(removed, 5);
     assert_eq!(count_for_task(&pool, task_id).await, 0);

@@ -114,10 +114,7 @@ fn handle_connection(mut stream: TcpStream) {
 
     let request = String::from_utf8_lossy(&buffer[..read]);
     let request_line = request.lines().next().unwrap_or_default();
-    let path = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/");
+    let path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
     let (status, content_type, body) = match path {
         "/manifest.mpd" => (200, "application/dash+xml", TEMPLATE_MPD.as_bytes()),
@@ -166,16 +163,16 @@ async fn probe_succeeds_on_vod_mpd_with_template() {
     let engine = new_engine();
 
     let output = engine
-        .probe(new_probe_request(format!("{}/manifest.mpd", server.base_url)))
+        .probe(new_probe_request(format!(
+            "{}/manifest.mpd",
+            server.base_url
+        )))
         .await
         .expect("probe should succeed");
 
     assert_eq!(output.protocol, "dash");
     assert!(output.capabilities.supports_resume);
-    assert_eq!(
-        output.content_type.as_deref(),
-        Some("application/dash+xml")
-    );
+    assert_eq!(output.content_type.as_deref(), Some("application/dash+xml"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
