@@ -11,6 +11,7 @@ const zhCN = {
     failed: "\u5931\u8d25",
     settings: "\u8bbe\u7f6e",
     about: "\u5173\u4e8e",
+    more: "\u66f4\u591a",
     filters: "\u7b5b\u9009",
     expandSidebar: "\u5c55\u5f00\u4fa7\u8fb9\u680f",
     collapseSidebar: "\u6536\u8d77\u4fa7\u8fb9\u680f",
@@ -202,6 +203,7 @@ const zhCN = {
     progress: "\u6b63\u5728\u4fdd\u5b58\u4e0b\u8f7d\u8fdb\u5ea6\u2026",
   },
   taskList: {
+    retryLoad: "\u91cd\u8bd5",
     loading: "\u6b63\u5728\u52a0\u8f7d\u4efb\u52a1\u2026",
     loadingMore: "\u6b63\u5728\u52a0\u8f7d\u66f4\u591a\uff0c\u5269\u4f59 {{count}} \u9879",
     empty: "\u6b64\u89c6\u56fe\u4e2d\u6ca1\u6709\u4efb\u52a1\u3002",
@@ -270,6 +272,8 @@ const zhCN = {
   },
   settings: {
     title: "\u8bbe\u7f6e",
+    loading: "\u6b63\u5728\u52a0\u8f7d\u8bbe\u7f6e\u2026",
+    retryLoad: "\u91cd\u8bd5",
     description:
       "\u63a7\u5236\u65b0\u4efb\u52a1\u7684\u4fdd\u5b58\u4f4d\u7f6e\u548c\u540c\u65f6\u8fd0\u884c\u6570\u91cf\u3002",
     sectionsNav: "\u8bbe\u7f6e\u5206\u7c7b",
@@ -1110,6 +1114,7 @@ const zhCN = {
     stepIndicator: "第 {{current}} 步,共 {{total}} 步",
   },
   about: {
+    loading: "\u6b63\u5728\u52a0\u8f7d\u5173\u4e8e\u9875\u2026",
     version: "版本",
     description: "基于 Tauri 和 React 构建的快速、现代桌面下载管理器。",
     author: "作者",

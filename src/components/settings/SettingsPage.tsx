@@ -1074,13 +1074,28 @@ export function SettingsPage() {
                   ) : null}
                 </div>
               </div>
-              <div className="mx-auto flex max-w-4xl items-center px-3 sm:px-4 md:px-6">
-                <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto overflow-y-hidden">
+              <div className="mx-auto flex max-w-4xl items-center gap-2 px-3 sm:px-4 md:px-6">
+                <div className="min-w-0 flex-1 lg:hidden">
+                  <Select value={activeSection} onValueChange={(value) => scrollToSection(value as SettingsSectionId)}>
+                    <SelectTrigger className="h-9 w-full bg-surface-root" aria-label={t("settings.sectionsNav")}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {settingsSections.map(({ id, title }) => (
+                        <SelectItem key={id} value={id}>
+                          {title}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="hidden min-w-0 flex-1 gap-1 overflow-x-auto overflow-y-hidden lg:flex">
                   {settingsSections.map(({ id, title }) => (
                     <button
                       key={id}
                       type="button"
                       onClick={() => scrollToSection(id)}
+                      aria-current={activeSection === id ? "page" : undefined}
                       className={cn(
                         "relative shrink-0 px-3 py-2.5 text-[13px] font-medium transition-colors",
                         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary",
@@ -1094,17 +1109,28 @@ export function SettingsPage() {
                     </button>
                   ))}
                 </div>
-                <SaveStatus state={saveState} saving={saving} className="ml-3 shrink-0" />
+                <SaveStatus state={saveState} saving={saving} className="shrink-0" />
               </div>
             </nav>
             <div className="mx-auto flex w-full max-w-4xl flex-col px-3 py-4 sm:px-4 md:px-6 md:py-5">
               {error ? (
-                <p
-                  className="mb-4 rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-sm text-status-danger"
+                <div
+                  className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-sm text-status-danger"
                   role="alert"
                 >
-                  {error}
-                </p>
+                  <span className="min-w-0 flex-1">{error}</span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 shrink-0 border-border-danger text-status-danger hover:bg-status-danger/10 hover:text-status-danger"
+                    onClick={() => void refreshSettings()}
+                    disabled={loading}
+                  >
+                    <RotateCcw className={cn("h-3.5 w-3.5", loading && "animate-spin")} aria-hidden />
+                    {t("settings.retryLoad")}
+                  </Button>
+                </div>
               ) : null}
 
               {settingsSearchActive && !settingsSearchHasMatch ? (
@@ -2025,10 +2051,7 @@ function SaveStatus({
 
   return (
     <div
-      className={cn(
-        "inline-flex h-8 shrink-0 items-center gap-2 rounded-md border border-border-subtle bg-surface-root px-3 text-sm text-text-secondary",
-        className,
-      )}
+      className={cn("inline-flex min-h-8 shrink-0 items-center gap-1.5 px-1 text-xs text-text-muted", className)}
       aria-live="polite"
     >
       {isSaving ? (

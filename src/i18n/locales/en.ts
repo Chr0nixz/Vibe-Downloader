@@ -11,6 +11,7 @@ const en = {
     failed: "Failed",
     settings: "Settings",
     about: "About",
+    more: "More",
     filters: "Filters",
     expandSidebar: "Expand sidebar",
     collapseSidebar: "Collapse sidebar",
@@ -193,6 +194,7 @@ const en = {
     progress: "Saving download progress\u2026",
   },
   taskList: {
+    retryLoad: "Retry",
     loading: "Loading tasks\u2026",
     loadingMore: "Loading more, {{count}} remaining",
     empty: "No tasks in this view.",
@@ -261,6 +263,8 @@ const en = {
   },
   settings: {
     title: "Settings",
+    loading: "Loading settings\u2026",
+    retryLoad: "Retry",
     description: "Control where new downloads go and how many tasks can run at once.",
     sectionsNav: "Settings sections",
     downloads: "Downloads",
@@ -1061,6 +1065,7 @@ const en = {
     stepIndicator: "Step {{current}} of {{total}}",
   },
   about: {
+    loading: "Loading about page\u2026",
     version: "Version",
     description: "A fast, modern desktop download manager built with Tauri and React.",
     author: "Author",

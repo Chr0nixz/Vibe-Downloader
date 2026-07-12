@@ -7,6 +7,7 @@ import {
   Filter,
   Info,
   LayoutGrid,
+  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   PauseCircle,
@@ -17,6 +18,7 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { MenuItem, RegionContextMenu } from "@/components/ui/menu-item";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { type NavFilter, useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
@@ -141,6 +143,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
               label={t(item.labelKey)}
               count={counts[item.id] ?? 0}
               compact={collapsed}
+              mobileHidden={item.id === "paused"}
               onClick={() => setNav(item.id)}
               contextMenuItems={
                 <MenuItem
@@ -165,6 +168,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
             label={t(settingsItem.labelKey)}
             count={0}
             compact={collapsed}
+            mobileHidden
             onClick={() => setNav("settings")}
           />
           <NavItem
@@ -173,8 +177,50 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
             label={t(aboutItem.labelKey)}
             count={0}
             compact={collapsed}
+            mobileHidden
             onClick={() => setNav("about")}
           />
+
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                aria-label={t("nav.more")}
+                aria-current={nav === "paused" || nav === "settings" || nav === "about" ? "page" : undefined}
+                className={cn(
+                  "relative h-11 min-w-10 flex-1 flex-col gap-0.5 px-1 text-[10px] md:hidden",
+                  nav === "paused" || nav === "settings" || nav === "about"
+                    ? "bg-accent-primary/15 font-medium text-accent-primary shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]"
+                    : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
+                )}
+              >
+                <MoreHorizontal className="h-[18px] w-[18px]" aria-hidden />
+                <span>{t("nav.more")}</span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" side="top" className="w-52 p-1 md:hidden">
+              <MobileNavMenuItem
+                item={filterItems[2]}
+                label={t(filterItems[2].labelKey)}
+                active={nav === "paused"}
+                count={counts.paused}
+                onClick={() => setNav("paused")}
+              />
+              <MobileNavMenuItem
+                item={settingsItem}
+                label={t(settingsItem.labelKey)}
+                active={nav === "settings"}
+                onClick={() => setNav("settings")}
+              />
+              <MobileNavMenuItem
+                item={aboutItem}
+                label={t(aboutItem.labelKey)}
+                active={nav === "about"}
+                onClick={() => setNav("about")}
+              />
+            </PopoverContent>
+          </Popover>
 
           {/* Collapse / expand toggle */}
           <div className="hidden md:mx-1.5 md:mt-0.5 md:block lg:mx-2.5">
@@ -226,6 +272,7 @@ function NavItem({
   label,
   count,
   compact,
+  mobileHidden = false,
   onClick,
   contextMenuItems,
 }: {
@@ -234,6 +281,7 @@ function NavItem({
   label: string;
   count: number;
   compact: boolean;
+  mobileHidden?: boolean;
   onClick: () => void;
   /** Optional context-menu items for this nav entry (filter items only). */
   contextMenuItems?: React.ReactNode;
@@ -255,6 +303,7 @@ function NavItem({
           className={cn(
             // ── Base sizing per breakpoint (left-aligned) ──
             "relative h-11 min-w-10 flex-1 gap-1.5 px-1 text-xs",
+            mobileHidden && "hidden md:flex",
             "md:h-10 md:w-full md:flex-none md:flex-col md:items-start md:justify-start md:gap-1 md:px-1",
             "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
             // ── Override button transition ──
@@ -333,4 +382,38 @@ function NavItem({
   // settings/about fall through to the outer <nav> context menu.
   if (!contextMenuItems) return button;
   return <RegionContextMenu items={contextMenuItems}>{button}</RegionContextMenu>;
+}
+
+function MobileNavMenuItem({
+  item,
+  label,
+  active,
+  count = 0,
+  onClick,
+}: {
+  item: NavItemDef;
+  label: string;
+  active: boolean;
+  count?: number;
+  onClick: () => void;
+}) {
+  const Icon = item.icon;
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      onClick={onClick}
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        "h-10 w-full justify-start gap-3 px-2 text-sm",
+        active ? "bg-accent-primary/12 text-accent-primary" : "text-text-secondary",
+      )}
+    >
+      <Icon className="h-4 w-4" aria-hidden />
+      <span>{label}</span>
+      {count > 0 ? (
+        <span className="ml-auto font-mono text-xs text-text-muted">{count > 99 ? "99+" : count}</span>
+      ) : null}
+    </Button>
+  );
 }

@@ -81,12 +81,12 @@ function statusBadge(status: Task["status"]): string {
     case "needs_attention":
       return "bg-status-danger/15 text-status-danger";
     case "paused":
-      return "bg-surface-raised text-text-muted ring-1 ring-border-subtle/60";
+      return "text-text-muted";
     case "queued":
     case "waiting_network":
-      return "bg-surface-raised text-text-secondary ring-1 ring-border-subtle/60";
+      return "text-text-secondary";
     default:
-      return "bg-surface-raised text-text-secondary ring-1 ring-border-subtle/60";
+      return "text-text-secondary";
   }
 }
 
@@ -390,8 +390,8 @@ export const TaskRow = memo(function TaskRow({
     >
       <div
         id={`task-option-${task.id}`}
-        role="option"
-        aria-selected={selected || multiSelected}
+        role="listitem"
+        aria-current={selected ? "true" : undefined}
         aria-posinset={position}
         aria-setsize={setSize}
         aria-labelledby={nameId}
@@ -427,7 +427,12 @@ export const TaskRow = memo(function TaskRow({
             onNavigate("prev");
             return;
           }
-          if (event.key === "Enter" || event.key === " ") {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            onShowDetails?.(task);
+            return;
+          }
+          if (event.key === " ") {
             event.preventDefault();
             onSelect();
           }
@@ -497,7 +502,7 @@ export const TaskRow = memo(function TaskRow({
                         animate={{ opacity: 1, scale: 1 }}
                         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
                         className={cn(
-                          "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold leading-none tracking-wide",
+                          "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-semibold leading-none",
                           statusBadge(task.status),
                         )}
                       >

@@ -77,6 +77,26 @@ fn main() {
             CANDIDATE_CHROMIUM_PUBLIC_KEY
         }
     );
+
+    // On Windows, test binaries and non-app binaries (like vibe-native-host)
+    // link against Tauri's tray/window code, which imports TaskDialogIndirect
+    // from comctl32.dll. That export only exists in Common Controls v6, which
+    // requires an application manifest. The main app binary gets a manifest
+    // via tauri-build, but test/binaries do not — so the loader fails with
+    // STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139). Injecting the v6 dependency
+    // via /MANIFESTDEPENDENCY makes the linker embed the required assembly
+    // reference into every target's manifest.
+    #[cfg(target_os = "windows")]
+    {
+        let dep = "type='win32' \
+            name='Microsoft.Windows.Common-Controls' \
+            version='6.0.0.0' \
+            processorArchitecture='*' \
+            publicKeyToken='6595b64144ccf1df' \
+            language='*'";
+        println!("cargo:rustc-link-arg=/MANIFESTDEPENDENCY:{dep}");
+    }
+
     tauri_build::build()
 }
 

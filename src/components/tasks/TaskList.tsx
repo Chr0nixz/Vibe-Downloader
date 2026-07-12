@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDown, MoreHorizontal, Pause, Play, Plus, Search, SlidersHorizontal, X } from "lucide-react";
+import { ChevronDown, MoreHorizontal, Pause, Play, Plus, RotateCcw, Search, SlidersHorizontal, X } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -117,7 +117,6 @@ export function TaskList({
   const setTaskSelected = useTaskUIStore((s) => s.setTaskSelected);
   const clearSelectedIds = useTaskUIStore((s) => s.clearSelectedIds);
   const setFilters = useTaskUIStore((s) => s.setFilters);
-  const setDetailOpen = useTaskUIStore((s) => s.setDetailOpen);
   const setTaskCursorPage = useTaskDataStore((s) => s.setTaskCursorPage);
   const loading = useTaskDataStore((s) => s.loading);
   const setLoading = useTaskDataStore((s) => s.setLoading);
@@ -207,7 +206,7 @@ export function TaskList({
         if (!append) initialLoadDoneRef.current = true;
       }
     },
-    [selectTask, setDetailOpen, setError, setLoading, setTaskCursorPage],
+    [selectTask, setError, setLoading, setTaskCursorPage],
   );
 
   useEffect(() => {
@@ -268,7 +267,6 @@ export function TaskList({
   const selectAndFocus = useCallback(
     (taskId: string) => {
       selectTask(taskId);
-      setDetailOpen(true);
       const list = filteredRef.current;
       const index = list.indexOf(taskId);
       if (index >= 0) {
@@ -280,7 +278,7 @@ export function TaskList({
         });
       });
     },
-    [selectTask, setDetailOpen, virtualizer],
+    [selectTask, virtualizer],
   );
 
   const handleShiftSelect = useCallback(
@@ -318,7 +316,7 @@ export function TaskList({
     [selectAndFocus],
   );
 
-  const handleListboxKeyDown = useCallback(
+  const handleListKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       const list = filteredRef.current;
       if (list.length === 0) return;
@@ -350,7 +348,7 @@ export function TaskList({
 
   if (nav === "settings") {
     return (
-      <Suspense fallback={<div className="flex min-h-0 min-w-0 flex-1 animate-pulse bg-surface-root" />}>
+      <Suspense fallback={<SurfaceLoadingSkeleton label={t("settings.loading")} />}>
         <SettingsPage />
       </Suspense>
     );
@@ -358,7 +356,7 @@ export function TaskList({
 
   if (nav === "about") {
     return (
-      <Suspense fallback={<div className="flex min-h-0 min-w-0 flex-1 animate-pulse bg-surface-root" />}>
+      <Suspense fallback={<SurfaceLoadingSkeleton label={t("about.loading")} />}>
         <AboutPage onOpenOnboarding={onOpenOnboarding} />
       </Suspense>
     );
@@ -368,10 +366,21 @@ export function TaskList({
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-root">
       {error ? (
         <div
-          className="border-b border-border-danger bg-status-danger/10 px-4 py-2 text-sm text-status-danger"
+          className="flex flex-wrap items-center gap-2 border-b border-border-danger bg-status-danger/10 px-3 py-2 text-sm text-status-danger md:px-4"
           role="alert"
         >
-          {error}
+          <span className="min-w-0 flex-1">{error}</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 shrink-0 border-border-danger text-status-danger hover:bg-status-danger/10 hover:text-status-danger"
+            onClick={() => void loadPage(null, false)}
+            disabled={loading}
+          >
+            <RotateCcw className={cn("h-3.5 w-3.5", loading && "animate-spin")} aria-hidden />
+            {t("taskList.retryLoad")}
+          </Button>
         </div>
       ) : null}
 
@@ -519,70 +528,72 @@ export function TaskList({
         </div>
       ) : null}
 
-      <div className="flex items-center gap-1 border-b border-border-subtle bg-surface-base/70 px-3 py-2 text-xs">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          aria-expanded={toolPanelOpen}
-          aria-controls="task-list-tool-panel"
-          aria-label={
-            !toolPanelOpen && activeFilterCount > 0
-              ? t("taskList.toolPanelActive", { count: activeFilterCount })
-              : t(toolPanelOpen ? "taskList.hideToolPanel" : "taskList.showToolPanel")
-          }
-          onClick={() => setToolPanelOpen((open) => !open)}
-          className="text-text-muted"
-        >
-          <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
-          {t("taskList.toolPanel")}
-          <ChevronDown
-            className={`h-4 w-4 transition-transform duration-ui ${toolPanelOpen ? "rotate-180" : ""}`}
-            aria-hidden="true"
-          />
-        </Button>
-        <div className="ml-auto flex items-center gap-1">
+      <div className="border-b border-border-subtle bg-surface-base/70 px-3 py-2 text-xs">
+        <div className="flex min-w-0 items-center gap-1">
           <Button
             type="button"
             variant="ghost"
             size="sm"
-            className="h-8 gap-1.5 px-2 text-text-secondary"
-            aria-label={t("taskList.resumeAll")}
-            onClick={() => {
-              const all = useTaskDataStore.getState().tasks;
-              onBulkResume(all);
-            }}
-            disabled={
-              !useTaskDataStore
-                .getState()
-                .tasks.some((t) => t.status === "paused" || t.status === "failed" || t.status === "waiting_network")
+            aria-expanded={toolPanelOpen}
+            aria-controls="task-list-tool-panel"
+            aria-label={
+              !toolPanelOpen && activeFilterCount > 0
+                ? t("taskList.toolPanelActive", { count: activeFilterCount })
+                : t(toolPanelOpen ? "taskList.hideToolPanel" : "taskList.showToolPanel")
             }
+            onClick={() => setToolPanelOpen((open) => !open)}
+            className="min-w-0 text-text-muted"
           >
-            <Play className="h-3.5 w-3.5" aria-hidden />
-            {t("taskList.resumeAll")}
+            <SlidersHorizontal className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="truncate">{t("taskList.toolPanel")}</span>
+            <ChevronDown
+              className={`h-4 w-4 shrink-0 transition-transform duration-ui ${toolPanelOpen ? "rotate-180" : ""}`}
+              aria-hidden="true"
+            />
           </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-8 gap-1.5 px-2 text-text-secondary"
-            aria-label={t("taskList.pauseAll")}
-            onClick={() => {
-              const all = useTaskDataStore.getState().tasks;
-              onBulkPause(all);
-            }}
-            disabled={
-              !useTaskDataStore
-                .getState()
-                .tasks.some((t) => t.status === "downloading" || t.status === "retrying" || t.status === "queued")
-            }
-          >
-            <Pause className="h-3.5 w-3.5" aria-hidden />
-            {t("taskList.pauseAll")}
-          </Button>
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1.5 px-2 text-text-secondary"
+              aria-label={t("taskList.resumeAll")}
+              onClick={() => {
+                const all = useTaskDataStore.getState().tasks;
+                onBulkResume(all);
+              }}
+              disabled={
+                !useTaskDataStore
+                  .getState()
+                  .tasks.some((t) => t.status === "paused" || t.status === "failed" || t.status === "waiting_network")
+              }
+            >
+              <Play className="h-3.5 w-3.5" aria-hidden />
+              <span className="hidden sm:inline">{t("taskList.resumeAll")}</span>
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1.5 px-2 text-text-secondary"
+              aria-label={t("taskList.pauseAll")}
+              onClick={() => {
+                const all = useTaskDataStore.getState().tasks;
+                onBulkPause(all);
+              }}
+              disabled={
+                !useTaskDataStore
+                  .getState()
+                  .tasks.some((t) => t.status === "downloading" || t.status === "retrying" || t.status === "queued")
+              }
+            >
+              <Pause className="h-3.5 w-3.5" aria-hidden />
+              <span className="hidden sm:inline">{t("taskList.pauseAll")}</span>
+            </Button>
+          </div>
         </div>
         {toolPanelOpen ? (
-          <div id="task-list-tool-panel" className="mt-2 flex flex-wrap items-center gap-2">
+          <div id="task-list-tool-panel" className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <SelectControl
               label={t("taskList.fileType")}
               value={filters.fileType}
@@ -665,14 +676,19 @@ export function TaskList({
                 >
                   {t("taskList.clearFilters")}
                 </Button>
+              ) : !search ? (
+                <Button type="button" size="sm" onClick={onNewDownload}>
+                  <Plus className="h-4 w-4" aria-hidden />
+                  {t("commandBar.newDownload")}
+                </Button>
               ) : null}
             </div>
           ) : (
             <>
               <div
-                role="listbox"
+                role="list"
                 aria-label={t("taskList.aria")}
-                onKeyDown={handleListboxKeyDown}
+                onKeyDown={handleListKeyDown}
                 className="relative [--lp:10px] sm:[--lp:12px] md:[--lp:16px] px-2.5 pt-[var(--lp)] pb-[var(--lp)] sm:px-3 md:px-4"
                 style={{ height: `calc(${virtualizer.getTotalSize()}px + var(--lp, 16px) * 2)` }}
               >
@@ -743,7 +759,7 @@ function TaskListLoadingSkeleton({ label }: { label: string }) {
             key={index}
             className="overflow-hidden rounded-lg border border-border-subtle/60 bg-surface-base/60 px-3 py-3.5 sm:px-3.5 md:px-4"
           >
-            <div className="animate-pulse">
+            <div className="skeleton-shimmer">
               <div className="flex min-w-0 gap-3">
                 <div className="mt-0.5 h-8 w-8 shrink-0 rounded bg-surface-raised" />
                 <div className="min-w-0 flex-1 space-y-3">
@@ -771,6 +787,27 @@ function TaskListLoadingSkeleton({ label }: { label: string }) {
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function SurfaceLoadingSkeleton({ label }: { label: string }) {
+  return (
+    <div
+      className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-root p-3 sm:p-4 md:p-6"
+      role="status"
+      aria-label={label}
+    >
+      <span className="sr-only">{label}</span>
+      <div className="skeleton-shimmer mx-auto w-full max-w-4xl space-y-4">
+        <div className="h-9 w-full rounded-md bg-surface-base" />
+        <div className="h-8 w-3/4 rounded-md bg-surface-base" />
+        <div className="space-y-3 rounded-lg border border-border-subtle/60 bg-surface-base/60 p-4">
+          <div className="h-4 w-40 rounded bg-surface-raised" />
+          <div className="h-10 w-full rounded bg-surface-raised/80" />
+          <div className="h-10 w-full rounded bg-surface-raised/80" />
+        </div>
       </div>
     </div>
   );
