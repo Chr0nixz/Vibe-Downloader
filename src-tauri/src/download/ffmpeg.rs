@@ -198,7 +198,7 @@ mod tests {
             .and_then(|paths| {
                 std::env::split_paths(&paths)
                     .next()
-                    .and_then(|dir| std::fs::read_dir(dir).ok()?.next().map(|e| e.path()))
+                    .and_then(|dir| std::fs::read_dir(dir).ok()?.next()?.ok().map(|e| e.path()))
             })
             .unwrap_or_else(|| std::path::PathBuf::from("/bin/sh"));
 
