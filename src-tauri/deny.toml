@@ -17,6 +17,12 @@ ignore = [
     # Upstream must release new versions to pick up quick-xml 0.41.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # rsa Marvin Attack timing sidechannel (RUSTSEC-2023-0071).
+    # No safe upgrade available — russh 0.61.2 pins rsa 0.10.0-rc.18.
+    # This is a desktop download manager where the user initiates SFTP
+    # connections to their own servers; the attack requires observing many
+    # timings over the network. Accept until russh ships a patched rsa.
+    "RUSTSEC-2023-0071",
 ]
 
 [licenses]
