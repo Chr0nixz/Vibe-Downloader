@@ -381,8 +381,9 @@ async fn probe_file_scheme_reads_local_mpd() {
     let mpd_path: PathBuf = dir.join("local.mpd");
     std::fs::write(&mpd_path, TEMPLATE_MPD).expect("write mpd");
 
-    let uri = format!("file:///{}", mpd_path.to_string_lossy().replace('\\', "/"));
-    let uri = uri.replace("//", "/");
+    let uri = reqwest::Url::from_file_path(&mpd_path)
+        .expect("mpd path to file URL")
+        .to_string();
 
     let output = engine
         .probe(new_probe_request(uri))
