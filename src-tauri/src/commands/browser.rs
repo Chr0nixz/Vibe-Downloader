@@ -328,16 +328,16 @@ pub async fn create_browser_handoff_task_with_state(
     }
 }
 
-/// S-2.1: handoff 文件最大 1 MiB（审计建议值）。native host 写入的 JSON 载荷
-/// 远小于此值，1 MiB 足以容纳任何合法 handoff，同时防止大文件内存压力。
+/// S-2.1: Maximum handoff file size: 1 MiB (audit-recommended value). The JSON payload written by the native host
+/// is far smaller than this; 1 MiB is enough for any legitimate handoff while preventing memory pressure from large files.
 const HANDOFF_MAX_BYTES: u64 = 1024 * 1024;
 
-/// S-2.1: handoff 文件名最大长度（与 native host `safe_file_stem` 输出一致）。
+/// S-2.1: Maximum handoff file name length (consistent with native host `safe_file_stem` output).
 const HANDOFF_FILE_NAME_MAX_LEN: usize = 128;
 
-/// S-2.1: 解析 handoff 目录。优先读取与 native host 一致的环境变量
-/// `VIBE_DOWNLOADER_HANDOFF_DIR`，缺省回退到 `temp_dir/vibe-downloader-handoff`。
-/// 测试通过设置该环境变量指向临时目录隔离。
+/// S-2.1: Resolve the handoff directory. Reads the same environment variable as the native host
+/// `VIBE_DOWNLOADER_HANDOFF_DIR` first, falling back to `temp_dir/vibe-downloader-handoff` if unset.
+/// Tests isolate by setting this environment variable to a temp directory.
 fn resolve_handoff_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("VIBE_DOWNLOADER_HANDOFF_DIR") {
         return PathBuf::from(dir);
@@ -345,11 +345,11 @@ fn resolve_handoff_dir() -> PathBuf {
     std::env::temp_dir().join("vibe-downloader-handoff")
 }
 
-/// S-2.1: 校验 handoff 文件路径必须位于 `handoff_dir` 内、文件名符合
-/// `safe_file_stem` 规则（字母数字 + `-` + `_`，非空，`.json` 扩展名）、
-/// 大小不超过 `HANDOFF_MAX_BYTES`。
+/// S-2.1: Validate that the handoff file path is inside `handoff_dir`, the file name conforms to
+/// `safe_file_stem` rules (alphanumeric + `-` + `_`, non-empty, `.json` extension),
+/// and the size does not exceed `HANDOFF_MAX_BYTES`.
 ///
-/// 返回 canonicalize 后的路径，供调用方在删除前再次校验（TOCTOU 防护）。
+/// Returns the canonicalized path so callers can re-validate before deletion (TOCTOU protection).
 pub fn validate_handoff_file_path(path: &Path) -> Result<PathBuf, String> {
     let handoff_dir = resolve_handoff_dir();
     let handoff_dir_canon = handoff_dir
@@ -385,7 +385,7 @@ pub fn validate_handoff_file_path(path: &Path) -> Result<PathBuf, String> {
             HANDOFF_FILE_NAME_MAX_LEN, stem
         ));
     }
-    // 与 native host `safe_file_stem` 一致：仅允许字母数字 + `-` + `_`。
+    // Consistent with native host `safe_file_stem`: only alphanumeric + `-` + `_` allowed.
     if !stem
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
@@ -482,25 +482,25 @@ pub fn enforce_browser_capture_settings_policy(
     settings
 }
 
-/// S-1.1: WS 浏览器实时桥不允许通过 `updateSettings` 修改的敏感字段。
+/// S-1.1: Sensitive fields that the WS browser realtime bridge must not allow modifying via `updateSettings`.
 ///
-/// 这些字段影响浏览器捕获的安全边界（Cookie/header 转发、内网 handoff、
-/// 实验性捕获），必须由用户在主窗口 UI 中显式操作（通过 Tauri 命令），
-/// 而不能由持有 WS bootstrap token 的本地进程直接修改。
+/// These fields affect the browser capture security boundary (Cookie/header forwarding, intranet handoff,
+/// experimental capture) and must be explicitly operated by the user in the main window UI (via Tauri commands),
+/// not directly by a local process holding the WS bootstrap token.
 ///
-/// 字段名为 `BrowserCaptureSettingsInput` 的 JSON (camelCase) 序列化名，
-/// 与浏览器扩展发送的 payload key 一致。
+/// Field names are the JSON (camelCase) serialization names of `BrowserCaptureSettingsInput`,
+/// matching the payload keys sent by the browser extension.
 pub const SENSITIVE_BROWSER_SETTINGS: &[&str] = &[
-    "forwardHeaders",             // Cookie/header 转发开关
-    "forwardHeadersMode",         // 转发模式（enabled/disabled）
-    "experimentalCaptureEnabled", // 实验性捕获
-    "allowIntranetHandoff",       // 内网 handoff（最高风险）
+    "forwardHeaders",             // Cookie/header forwarding toggle
+    "forwardHeadersMode",         // Forwarding mode (enabled/disabled)
+    "experimentalCaptureEnabled", // Experimental capture
+    "allowIntranetHandoff",       // Intranet handoff (highest risk)
 ];
 
-/// S-1.1: 检查 `updateSettings` 载荷是否包含敏感字段。
-/// 返回冲突字段列表（空表示无冲突）。调用方应在反序列化为
-/// `BrowserCaptureSettingsInput` 之前先调用此函数，以便在载荷中
-/// 出现敏感字段时直接拒绝，不进入后续 merge/upsert 流程。
+/// S-1.1: Check whether the `updateSettings` payload contains sensitive fields.
+/// Returns the list of conflicting fields (empty means no conflict). Callers should invoke this function
+/// before deserializing into `BrowserCaptureSettingsInput`, so that if the payload
+/// contains sensitive fields it is rejected immediately without entering the merge/upsert flow.
 pub fn is_sensitive_settings_update(
     payload: &serde_json::Map<String, serde_json::Value>,
 ) -> Vec<String> {
@@ -787,6 +787,10 @@ async fn validate_handoff(
         }
     }
     registry.engine_for_uri(parsed.as_str())?;
+    // Reject embedded credentials at the handoff boundary: the handoff JSON is written to
+    // a temp dir and logged, so credentials would leak. Direct UI/clipboard creation is
+    // allowed to extract them because it encrypts and sanitizes — this asymmetry is
+    // intentional, not a gap.
     if parsed.username() != "" || parsed.password().is_some() {
         return Err("Browser handoff URLs must not contain embedded credentials.".to_string());
     }
@@ -811,6 +815,10 @@ fn sanitize_forwarded_headers(headers: Option<&[BrowserForwardedHeader]>) -> Vec
         if !FORWARDED_HEADER_ALLOWLIST.contains(&name.as_str()) {
             continue;
         }
+        // Block headers that could break download semantics (range, accept-encoding), enable
+        // spoofing (host), leak credentials (authorization, set-cookie, proxy-authorization),
+        // or inject HTTP framing (values with CR/LF). sec-* are browser-internal and meaningless
+        // to the download engine.
         if name.starts_with("sec-")
             || matches!(
                 name.as_str(),
@@ -1301,8 +1309,8 @@ fn manifest_path(app: &AppHandle, browser: BrowserKind) -> Result<PathBuf, Strin
 }
 
 fn browser_supported_on_platform(browser: BrowserKind) -> bool {
-    !matches!(browser, BrowserKind::Safari)
-        && !(matches!(browser, BrowserKind::Opera) && integration_profile() != "dev")
+    !(matches!(browser, BrowserKind::Safari)
+        || matches!(browser, BrowserKind::Opera) && integration_profile() != "dev")
 }
 
 fn browser_detected(app: &AppHandle, browser: BrowserKind) -> bool {

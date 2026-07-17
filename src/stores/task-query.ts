@@ -95,11 +95,11 @@ export function filterTasks(
       return false;
     }
     if (nav === "paused" && task.status !== "paused") return false;
+    if (nav === "queue" && task.status !== "queued") return false;
+    if (nav === "attention" && task.status !== "needs_attention") return false;
     if (nav === "completed" && task.status !== "completed") return false;
-    if (nav === "failed" && task.status !== "failed" && task.status !== "needs_attention") {
-      return false;
-    }
-    if (nav === "settings") return false;
+    if (nav === "failed" && task.status !== "failed") return false;
+    if (nav === "settings" || nav === "about") return false;
 
     if (!query) return true;
     return (

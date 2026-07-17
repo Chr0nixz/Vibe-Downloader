@@ -28,7 +28,10 @@ pub use self::classification_rules::{
     get_classification_rule, list_classification_rules, reorder_classification_rules,
     update_classification_rule,
 };
-pub use self::connection::{connect, wal_checkpoint, wal_file_size_bytes, DbConnection};
+pub use self::connection::{
+    connect, connect_for_startup, reset_database_files, wal_checkpoint, wal_file_size_bytes,
+    DatabaseConnectOutcome, DatabaseRecovery, DbConnection,
+};
 pub use self::dash::{
     bulk_upsert_dash_segments, dash_finish_requested, existing_dash_downloaded_bytes,
     existing_dash_segment_keys, get_dash_task, list_dash_segments, request_dash_finish,
@@ -73,7 +76,7 @@ pub use self::segments::{
     segment_summary, split_largest_remaining_segment, total_segment_downloaded_bytes,
     update_segment_downloaded_until, update_segment_progress, update_segment_range_end,
     update_segment_retry, update_segment_runtime_progress, update_segment_status,
-    update_segments_status_for_task, SegmentSplit,
+    update_segments_status_for_task, update_segments_status_for_task_in_tx, SegmentSplit,
 };
 pub use self::settings::{
     clipboard_monitor_enabled, delete_to_trash_enabled, duration_until_next_window_boundary,
@@ -115,8 +118,8 @@ pub use self::task_state::{
     delete_task_record, delete_task_records_batch, mark_task_failed_if_active,
     reset_interrupted_tasks, reset_task_download_state, update_task_and_segment_progress,
     update_task_final_path, update_task_health_summary, update_task_progress,
-    update_task_retry_after, update_task_runtime_progress, update_task_save_target,
-    update_task_status, update_task_status_in_tx, TaskProgressCheckpoint,
+    update_task_retry_after, update_task_retry_after_in_tx, update_task_runtime_progress,
+    update_task_save_target, update_task_status, update_task_status_in_tx, TaskProgressCheckpoint,
 };
 pub use self::torrent::{
     get_torrent_runtime_snapshot, torrent_seed_ratio_limit, torrent_seeding_enabled,

@@ -73,9 +73,7 @@ export function ProgressBar({
         aria-hidden
         className={cn(
           "absolute inset-y-0 left-0 w-full origin-left rounded-full",
-          smooth
-            ? "transition-transform duration-ui ease-out will-change-transform motion-reduce:transition-none"
-            : "transition-none",
+          smooth ? "transition-transform duration-ui ease-out motion-reduce:transition-none" : "transition-none",
           useGradient ? lgGradientFill : active ? toneFill[tone] : toneFill.neutral,
           active && tone !== "neutral" && size === "lg" && !useGradient && toneGlow[tone],
           useGradient && "shadow-[0_0_8px_color-mix(in_oklch,var(--accent-primary)_40%,transparent)]",

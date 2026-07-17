@@ -245,6 +245,12 @@ export function FloatingStatusWindow() {
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       >
+        {/* Screen-reader live region for progress updates */}
+        <span className="sr-only" aria-live="polite">
+          {idle
+            ? t("floatingStatus.idle")
+            : t("floatingStatus.progressStatus", { percent: Math.round(percent), speed: speedText })}
+        </span>
         {/* Tooltip — appears beside the bar */}
         <div
           className={cn(
@@ -256,13 +262,30 @@ export function FloatingStatusWindow() {
         </div>
 
         {/* Vertical progress track */}
-        <div className="relative h-[calc(100%-8px)] w-2.5 overflow-hidden rounded-full">
+        <div
+          role="progressbar"
+          aria-label={
+            idle
+              ? t("floatingStatus.progressLabelIdle")
+              : t("floatingStatus.progressLabelActive", { active: stats.active })
+          }
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(percent)}
+          aria-valuetext={
+            idle
+              ? t("floatingStatus.idle")
+              : t("floatingStatus.progressStatus", { percent: Math.round(percent), speed: speedText })
+          }
+          className="relative h-[calc(100%-8px)] w-2.5 overflow-hidden rounded-full"
+        >
           <div className="absolute inset-0 rounded-full bg-surface-track" />
           {!idle && percent > 0 && (
             <div
-              className="absolute bottom-0 left-0 w-full rounded-full transition-[height] duration-500 ease-out"
+              className="absolute inset-0 rounded-full transition-transform duration-500 ease-out"
               style={{
-                height: `${percent}%`,
+                transform: `scaleY(${percent / 100})`,
+                transformOrigin: "bottom",
                 // Three-hue accent gradient — the product's visual signature.
                 // energy (cool) at the base → primary mid → peak (warm) at top.
                 background: "var(--accent-gradient-vertical)",
@@ -282,6 +305,12 @@ export function FloatingStatusWindow() {
       onDoubleClick={handleDoubleClick}
       onContextMenu={handleContextMenu}
     >
+      {/* Screen-reader live region for progress updates */}
+      <span className="sr-only" aria-live="polite">
+        {idle
+          ? t("floatingStatus.idle")
+          : t("floatingStatus.progressStatus", { percent: Math.round(percent), speed: speedText })}
+      </span>
       {/* Tooltip */}
       <div className="pointer-events-none absolute -top-9 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-surface-overlay px-2.5 py-1 text-[0.65rem] leading-4 text-text-secondary opacity-0 shadow-lg ring-1 ring-border-container transition-opacity duration-200 group-hover:opacity-100">
         {idle ? t("floatingStatus.idle") : `${speedText} · ${Math.round(percent)}%`}
@@ -289,15 +318,29 @@ export function FloatingStatusWindow() {
 
       {/* Ball */}
       <div
+        role="progressbar"
+        aria-label={
+          idle
+            ? t("floatingStatus.progressLabelIdle")
+            : t("floatingStatus.progressLabelActive", { active: stats.active })
+        }
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(percent)}
+        aria-valuetext={
+          idle
+            ? t("floatingStatus.idle")
+            : t("floatingStatus.progressStatus", { percent: Math.round(percent), speed: speedText })
+        }
         className={cn(
           "floating-ball relative grid h-16 w-16 place-items-center rounded-full",
           idle
             ? "bg-surface-overlay shadow-[var(--shadow-idle-ball)] ring-1 ring-border-container"
             : "bg-surface-overlay ring-1 ring-accent-primary/25 floating-ball-glow",
         )}
-        aria-label={t("floatingStatus.title")}
       >
         {/* SVG progress ring */}
+        {/* biome-ignore lint/a11y/noSvgWithoutTitle: The ring is decorative; the adjacent speed and percentage text expose the same state. */}
         <svg viewBox="0 0 64 64" className="floating-ring absolute inset-0 h-full w-full -rotate-90" aria-hidden>
           <defs>
             <filter id="glow-dot-filter">

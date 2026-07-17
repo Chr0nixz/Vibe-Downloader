@@ -2,9 +2,11 @@
  * i18n completeness check: deep-compares leaf key paths between the English
  * (reference) and all other locale bundles.
  *
- * - zh-CN is a fully-supported locale: mismatches FAIL (exit 1).
- * - All other non-en locales (ja, es, ko, ru, zh-TW) are beta: mismatches
- *   produce WARNINGS but do not fail.
+ * - All non-en locales (zh-CN, zh-TW, ja, ko, ru, es) are fully translated:
+ *   any key mismatch FAILS (exit 1). This prevents drift when new keys are
+ *   added to en.ts without updating the other locale files.
+ * - The "beta" designation in the UI refers to translation maturity, not key
+ *   coverage; all locales must stay structurally in sync with en.
  *
  * Usage: pnpm check:i18n
  */
@@ -15,8 +17,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const localesDir = resolve(__dirname, "../src/i18n/locales");
 
-/** Locales that must be perfectly in sync with en (mismatch = CI failure). */
-const STRICT_LOCALES = new Set(["zh-CN"]);
+/**
+ * All non-en locales are strict: any key mismatch (missing or extra) fails CI.
+ * To add a new locale, complete its translation file and add its code here.
+ */
+const STRICT_LOCALES = new Set(["zh-CN", "zh-TW", "ja", "ko", "ru", "es"]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -51,7 +56,6 @@ async function main(): Promise<void> {
   const enKeys = new Set(flattenKeys(await loadLocale(enFile)));
 
   let hasFailures = false;
-  let hasWarnings = false;
 
   for (const file of files.sort()) {
     if (file === "en.ts") continue;
@@ -85,21 +89,15 @@ async function main(): Promise<void> {
 
     if (isStrict) {
       hasFailures = true;
-    } else {
-      hasWarnings = true;
     }
   }
 
   if (hasFailures) {
-    console.error("\ni18n completeness check failed (strict locales had mismatches).");
+    console.error("\ni18n completeness check failed (locales had key mismatches).");
     process.exit(1);
   }
 
-  if (hasWarnings) {
-    console.log("\ni18n completeness check passed with warnings (beta locales had mismatches).");
-  } else {
-    console.log("\ni18n completeness check passed.");
-  }
+  console.log("\ni18n completeness check passed.");
 }
 
 await main();

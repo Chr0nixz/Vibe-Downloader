@@ -112,8 +112,7 @@ function ToastItem({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [reduceMotion]);
 
   return (
     <motion.div
@@ -145,7 +144,9 @@ function ToastItem({
         aria-hidden
       />
       <div className="min-w-0">
-        <p className="truncate text-sm font-medium text-text-primary">{toast.title}</p>
+        <p className="truncate text-sm font-medium text-text-primary" title={toast.title}>
+          {toast.title}
+        </p>
         {toast.description ? (
           <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-text-secondary">{toast.description}</p>
         ) : null}

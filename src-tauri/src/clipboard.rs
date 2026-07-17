@@ -109,10 +109,10 @@ pub fn extract_download_urls(text: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    // E-9: 廉价短路。所有支持的协议 URL 都含 ":" (http://, magnet:, file:// 等)。
-    // 若文本不含 ":"，直接返回，避免对 64KB 纯文本做 to_ascii_lowercase 全量分配
-    // + 9 次子串搜索。":" 检查是 case-sensitive 的且无字母，对所有大小写形式均有效。
-    // 误判（普通文本含冒号）会走完整路径，由 normalize_download_url 过滤，无功能影响。
+    // E-9: Cheap short-circuit. All supported protocol URLs contain ":" (http://, magnet:, file://, etc.).
+    // If the text has no ":", return immediately to avoid a full to_ascii_lowercase allocation
+    // + 9 substring searches on 64KB of plain text. The ":" check is case-sensitive and letter-free, so it works for all case variants.
+    // False positives (plain text with a colon) go through the full path and are filtered by normalize_download_url with no functional impact.
     if !text.contains(':') {
         return Vec::new();
     }

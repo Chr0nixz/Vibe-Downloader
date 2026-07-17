@@ -60,6 +60,18 @@ export function nativeHostCargoEnvironment(env = process.env) {
   return cargoEnv;
 }
 
+export async function verifyStagedNativeHost({ targetTriple = resolveTargetTriple(), workspaceRoot = root } = {}) {
+  const paths = nativeHostArtifactPaths(targetTriple, workspaceRoot);
+  const stagedInfo = await stat(paths.staged).catch(() => null);
+  if (!stagedInfo?.isFile() || stagedInfo.size === 0) {
+    throw new Error(`Staged native host is missing or empty: ${path.relative(workspaceRoot, paths.staged)}.`);
+  }
+  if (!targetTriple.endsWith("-windows-msvc") && (stagedInfo.mode & 0o111) === 0) {
+    throw new Error(`Staged native host is not executable: ${path.relative(workspaceRoot, paths.staged)}.`);
+  }
+  return { targetTriple, ...paths, bytes: stagedInfo.size };
+}
+
 function run(command, args, cwd, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: "inherit", shell: false });
@@ -103,11 +115,7 @@ export async function prepareNativeHost({ targetTriple = resolveTargetTriple(), 
     await chmod(paths.staged, 0o755);
   }
 
-  const stagedInfo = await stat(paths.staged);
-  if (!stagedInfo.isFile() || stagedInfo.size === 0) {
-    throw new Error(`Staged native host is invalid: ${path.relative(workspaceRoot, paths.staged)}.`);
-  }
-  return { targetTriple, ...paths, bytes: stagedInfo.size };
+  return verifyStagedNativeHost({ targetTriple, workspaceRoot });
 }
 
 async function main() {
@@ -115,6 +123,11 @@ async function main() {
   const targetTriple = targetIndex >= 0 ? process.argv[targetIndex + 1] : undefined;
   if (targetIndex >= 0 && !targetTriple) {
     throw new Error("--target requires a Rust target triple.");
+  }
+  if (process.argv.includes("--verify-staged")) {
+    const result = await verifyStagedNativeHost({ targetTriple: targetTriple ?? resolveTargetTriple() });
+    console.log(`Verified ${path.relative(root, result.staged)} (${result.bytes} bytes) for ${result.targetTriple}.`);
+    return;
   }
   if (process.argv.includes("--with-frontend")) {
     await run(process.execPath, [path.join(root, "node_modules", "typescript", "bin", "tsc")], root);

@@ -74,12 +74,12 @@ function statusBadge(status: Task["status"]): string {
   switch (status) {
     case "downloading":
     case "retrying":
-      return "bg-accent-primary/15 text-accent-primary";
+      return "bg-accent-primary/15 dark:bg-accent-primary/10 text-accent-primary";
     case "completed":
-      return "bg-status-success/15 text-status-success";
+      return "bg-status-success/15 dark:bg-status-success/10 text-status-success";
     case "failed":
     case "needs_attention":
-      return "bg-status-danger/15 text-status-danger";
+      return "bg-status-danger/15 dark:bg-status-danger/10 text-status-danger";
     case "paused":
       return "text-text-muted";
     case "queued":
@@ -388,6 +388,7 @@ export const TaskRow = memo(function TaskRow({
       onCopyLocalPath={onCopyLocalPath}
       onShowDetails={onShowDetails}
     >
+      {/* biome-ignore lint/a11y/useSemanticElements: The virtualizer inserts a measured div between the list and each row, so an explicit listitem role preserves the accessibility tree. */}
       <div
         id={`task-option-${task.id}`}
         role="listitem"
@@ -456,12 +457,16 @@ export const TaskRow = memo(function TaskRow({
       >
         <div className="flex min-w-0 gap-2.5">
           <label
+            htmlFor={`task-select-${task.id}`}
             className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded hover:bg-surface-raised md:h-8 md:w-8"
             data-row-action
-            onClick={(event) => event.stopPropagation()}
           >
             <span className="sr-only">{t("taskList.selectTask", { name: task.fileName })}</span>
-            <Checkbox checked={multiSelected} onChange={(event) => onToggleSelected(task.id, event.target.checked)} />
+            <Checkbox
+              id={`task-select-${task.id}`}
+              checked={multiSelected}
+              onChange={(event) => onToggleSelected(task.id, event.target.checked)}
+            />
           </label>
           {/* File-type icon — leading identity marker.
               Shows the OS-associated icon for the file's extension (e.g. the
@@ -490,7 +495,11 @@ export const TaskRow = memo(function TaskRow({
             <div className="flex min-w-0 items-start justify-between gap-2 md:block">
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <div id={nameId} className="truncate text-sm font-semibold leading-snug text-text-primary">
+                  <div
+                    id={nameId}
+                    className="truncate text-sm font-semibold leading-snug text-text-primary"
+                    title={task.fileName}
+                  >
                     {task.fileName}
                   </div>
                   {(() => {
@@ -517,7 +526,7 @@ export const TaskRow = memo(function TaskRow({
                     );
                   })()}
                 </div>
-                <p id={hostId} className="truncate text-xs text-text-muted">
+                <p id={hostId} className="truncate text-xs text-text-muted" title={task.sourceKey}>
                   {task.sourceKey}
                 </p>
               </div>
@@ -525,6 +534,7 @@ export const TaskRow = memo(function TaskRow({
 
             <p
               id={diagnosticId}
+              title={diagnosticLabel}
               className={cn(
                 "truncate text-xs",
                 speedTrend.tone === "warning" && !task.healthSummary
@@ -609,7 +619,9 @@ export const TaskRow = memo(function TaskRow({
                   />
                   <div className="flex min-w-0 items-center gap-2">
                     <Activity className="h-3.5 w-3.5 shrink-0 text-accent-primary" aria-hidden />
-                    <span className="min-w-0 truncate">{diagnosticLabel}</span>
+                    <span className="min-w-0 truncate" title={diagnosticLabel}>
+                      {diagnosticLabel}
+                    </span>
                   </div>
                 </div>
                 <SpeedSparkline
@@ -922,7 +934,7 @@ const InlineRecovery = memo(function InlineRecovery({
       <div className="ml-auto flex shrink-0 items-center gap-1">
         <Button
           size="sm"
-          className="h-7 px-2 text-xs"
+          className="px-2 text-xs"
           onClick={(event) => {
             event.stopPropagation();
             onResolve(task, primaryAction);
@@ -934,7 +946,7 @@ const InlineRecovery = memo(function InlineRecovery({
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 px-2 text-xs"
+            className="px-2 text-xs"
             onClick={(event) => {
               event.stopPropagation();
               if (!expanded) onToggleExpanded();

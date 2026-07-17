@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 import { AppShell } from "@/components/shell/AppShell";
 import { FloatingStatusWindow } from "@/components/shell/FloatingStatusWindow";
+import { StartupGate } from "@/components/shell/StartupGate";
 import { TrayMenu } from "@/components/shell/TrayMenu";
 
 export default function App() {
@@ -27,5 +28,9 @@ export default function App() {
     return <FloatingStatusWindow />;
   }
 
-  return <AppShell />;
+  return (
+    <StartupGate>
+      <AppShell />
+    </StartupGate>
+  );
 }

@@ -35,6 +35,25 @@ pub struct TaskProgressEmitGate {
     pending: Option<TaskProgressPayload>,
 }
 
+/// Resolves the production Tauri handle used by download events. Download
+/// engines accept an optional handle so their core I/O can run headlessly in
+/// integration tests without weakening event delivery in the scheduler.
+pub trait DownloadEventTarget {
+    fn app_handle(&self) -> Option<&AppHandle>;
+}
+
+impl DownloadEventTarget for AppHandle {
+    fn app_handle(&self) -> Option<&AppHandle> {
+        Some(self)
+    }
+}
+
+impl DownloadEventTarget for Option<AppHandle> {
+    fn app_handle(&self) -> Option<&AppHandle> {
+        self.as_ref()
+    }
+}
+
 impl Default for TaskProgressEmitGate {
     fn default() -> Self {
         Self::new(DEFAULT_PROGRESS_EMIT_INTERVAL)
@@ -50,7 +69,12 @@ impl TaskProgressEmitGate {
         }
     }
 
-    pub fn emit_or_store(&mut self, app: &AppHandle, payload: TaskProgressPayload, force: bool) {
+    pub fn emit_or_store<T: DownloadEventTarget + ?Sized>(
+        &mut self,
+        app: &T,
+        payload: TaskProgressPayload,
+        force: bool,
+    ) {
         let due = self
             .last_emit
             .is_none_or(|last_emit| last_emit.elapsed() >= self.min_interval);
@@ -63,7 +87,7 @@ impl TaskProgressEmitGate {
         }
     }
 
-    pub fn flush(&mut self, app: &AppHandle) {
+    pub fn flush<T: DownloadEventTarget + ?Sized>(&mut self, app: &T) {
         let Some(payload) = self.pending.take() else {
             return;
         };
@@ -133,7 +157,13 @@ impl DbWriteGate {
     }
 }
 
-pub fn emit_task_progress(app: &AppHandle, payload: &TaskProgressPayload) {
+pub fn emit_task_progress<T: DownloadEventTarget + ?Sized>(
+    target: &T,
+    payload: &TaskProgressPayload,
+) {
+    let Some(app) = target.app_handle() else {
+        return;
+    };
     emit_payload(app, EVENT_TASK_PROGRESS, payload);
     if let Some(state) = app.try_state::<crate::AppState>() {
         state
@@ -142,7 +172,10 @@ pub fn emit_task_progress(app: &AppHandle, payload: &TaskProgressPayload) {
     }
 }
 
-pub fn emit_task_updated(app: &AppHandle, task: &Task) {
+pub fn emit_task_updated<T: DownloadEventTarget + ?Sized>(target: &T, task: &Task) {
+    let Some(app) = target.app_handle() else {
+        return;
+    };
     let payload = TaskUpdatedPayload { task: task.clone() };
     emit_payload(app, EVENT_TASK_UPDATED, &payload);
     if let Some(state) = app.try_state::<crate::AppState>() {
@@ -164,7 +197,34 @@ fn files_version_cache() -> &'static Mutex<HashMap<String, i64>> {
     FILES_VERSION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub async fn emit_task_updated_record(app: &AppHandle, pool: &SqlitePool, task: &TaskRecord) {
+pub fn evict_task_files_version(task_id: &str) {
+    if let Ok(mut cache) = files_version_cache().lock() {
+        cache.remove(task_id);
+    }
+}
+
+pub fn evict_task_files_versions<'a>(task_ids: impl IntoIterator<Item = &'a str>) {
+    if let Ok(mut cache) = files_version_cache().lock() {
+        for task_id in task_ids {
+            cache.remove(task_id);
+        }
+    }
+}
+
+pub fn clear_task_files_version_cache() {
+    if let Ok(mut cache) = files_version_cache().lock() {
+        cache.clear();
+    }
+}
+
+pub async fn emit_task_updated_record<T: DownloadEventTarget + ?Sized>(
+    app: &T,
+    pool: &SqlitePool,
+    task: &TaskRecord,
+) {
+    if app.app_handle().is_none() {
+        return;
+    }
     // E-7: short-circuit — if files_version hasn't changed since the last emit
     // for this task, skip the task_files query. The frontend keeps its existing
     // files when the incoming event has an empty files array.
@@ -206,7 +266,13 @@ pub fn emit_queue_changed(app: &AppHandle) {
 /// The frontend uses this to fetch only the changed tasks via `list_tasks_by_ids`
 /// instead of re-querying the entire first page. Pass `None` to signal a full
 /// refresh (batch operations, settings changes that affect all tasks).
-pub fn emit_queue_changed_with_ids(app: &AppHandle, ids: Option<Vec<String>>) {
+pub fn emit_queue_changed_with_ids<T: DownloadEventTarget + ?Sized>(
+    target: &T,
+    ids: Option<Vec<String>>,
+) {
+    let Some(app) = target.app_handle() else {
+        return;
+    };
     let _ = app.emit(
         EVENT_QUEUE_CHANGED,
         QueueChangedPayload {
@@ -291,5 +357,28 @@ fn emit_empty(app: &AppHandle, event: &str) {
 fn emit_payload<T: Clone + serde::Serialize>(app: &AppHandle, event: &str, payload: &T) {
     if let Err(error) = app.emit(event, payload) {
         tracing::warn!(event, error = %error, "failed to emit event");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_file_version_cache_evicts_deleted_tasks() {
+        clear_task_files_version_cache();
+        {
+            let mut cache = files_version_cache().lock().expect("cache lock");
+            cache.insert("keep".to_string(), 1);
+            cache.insert("remove-one".to_string(), 2);
+            cache.insert("remove-two".to_string(), 3);
+        }
+
+        evict_task_files_version("remove-one");
+        evict_task_files_versions(["remove-two"]);
+
+        let cache = files_version_cache().lock().expect("cache lock");
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get("keep"), Some(&1));
     }
 }

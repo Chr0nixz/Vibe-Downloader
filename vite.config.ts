@@ -41,6 +41,9 @@ export default defineConfig(async () => ({
           if (id.includes("/motion/")) {
             return "motion";
           }
+          if (id.includes("@tauri-apps/")) {
+            return "tauri";
+          }
         },
       },
     },

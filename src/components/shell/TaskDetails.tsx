@@ -59,15 +59,19 @@ const DETAIL_REFRESH_MS = 30_000;
 const EMPTY_TASK_FILES: Task["files"] = [];
 
 interface TaskDetailsProps {
-  task: Task | null;
+  taskId: string | null;
   open: boolean;
   onClose?: () => void;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
 }
 
-export function TaskDetails({ task, open, onClose, onResolveAttention }: TaskDetailsProps) {
+export function TaskDetails({ taskId, open, onClose, onResolveAttention }: TaskDetailsProps) {
+  // Subscribe to the task object directly from the store. This keeps the
+  // per-tick re-render scoped to TaskDetails only, removing AppShell from
+  // the progress-tick render path.
+  const task = useTaskDataStore((s) => (taskId ? (s.taskById[taskId] ?? null) : null));
   const compact = useIsCompactShell();
-  const [refreshTick, setRefreshTick] = useState(0);
+  const [, setRefreshTick] = useState(0);
   const onRefresh = useCallback(() => setRefreshTick((prev) => prev + 1), []);
   const { t } = useTranslation();
   const addToast = useToastStore((s) => s.addToast);
@@ -93,7 +97,6 @@ export function TaskDetails({ task, open, onClose, onResolveAttention }: TaskDet
         open={open}
         onClose={onClose}
         onResolveAttention={onResolveAttention}
-        refreshTick={refreshTick}
         onRefresh={onRefresh}
       />
     );
@@ -140,12 +143,7 @@ export function TaskDetails({ task, open, onClose, onResolveAttention }: TaskDet
       >
         <TaskDetailsHeader task={task} />
         <TaskDetailsErrorBoundary taskId={task.id} onClose={onClose}>
-          <TaskDetailsPanel
-            task={task}
-            onResolveAttention={onResolveAttention}
-            refreshTick={refreshTick}
-            onRefresh={onRefresh}
-          />
+          <TaskDetailsPanel task={task} onResolveAttention={onResolveAttention} onRefresh={onRefresh} />
         </TaskDetailsErrorBoundary>
       </aside>
     </RegionContextMenu>
@@ -215,14 +213,12 @@ function TaskDetailsDrawer({
   open,
   onClose,
   onResolveAttention,
-  refreshTick,
   onRefresh,
 }: {
   task: Task;
   open: boolean;
   onClose?: () => void;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
-  refreshTick: number;
   onRefresh: () => void;
 }) {
   const { t } = useTranslation();
@@ -251,8 +247,12 @@ function TaskDetailsDrawer({
         >
           <header className="flex shrink-0 items-start gap-2 border-b border-border-subtle px-4 py-3">
             <div className="min-w-0 flex-1">
-              <Dialog.Title className="truncate text-sm font-medium">{task.fileName}</Dialog.Title>
-              <p className="truncate text-xs text-text-muted">{task.saveDir}</p>
+              <Dialog.Title className="truncate text-sm font-medium" title={task.fileName}>
+                {task.fileName}
+              </Dialog.Title>
+              <p className="truncate text-xs text-text-muted" title={task.saveDir}>
+                {task.saveDir}
+              </p>
             </div>
             <Dialog.Close asChild>
               <Button
@@ -270,12 +270,7 @@ function TaskDetailsDrawer({
             {t("taskDetails.drawerDescription", { name: task.fileName })}
           </Dialog.Description>
           <TaskDetailsErrorBoundary taskId={task.id} onClose={onClose}>
-            <TaskDetailsPanel
-              task={task}
-              onResolveAttention={onResolveAttention}
-              refreshTick={refreshTick}
-              onRefresh={onRefresh}
-            />
+            <TaskDetailsPanel task={task} onResolveAttention={onResolveAttention} onRefresh={onRefresh} />
           </TaskDetailsErrorBoundary>
         </Dialog.Content>
       </Dialog.Portal>
@@ -287,10 +282,12 @@ function TaskDetailsHeader({ task }: { task: Task }) {
   return (
     <header className="flex shrink-0 items-start gap-2 border-b border-border-subtle px-4 py-3">
       <div className="min-w-0 flex-1">
-        <h2 id="task-details-heading" className="truncate text-sm font-medium">
+        <h2 id="task-details-heading" className="truncate text-sm font-medium" title={task.fileName}>
           {task.fileName}
         </h2>
-        <p className="truncate text-xs text-text-muted">{task.saveDir}</p>
+        <p className="truncate text-xs text-text-muted" title={task.saveDir}>
+          {task.saveDir}
+        </p>
       </div>
     </header>
   );
@@ -299,12 +296,10 @@ function TaskDetailsHeader({ task }: { task: Task }) {
 function TaskDetailsPanel({
   task,
   onResolveAttention,
-  refreshTick,
   onRefresh,
 }: {
   task: Task;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
-  refreshTick: number;
   onRefresh: () => void;
 }) {
   const { t } = useTranslation();
@@ -330,6 +325,7 @@ function TaskDetailsPanel({
   const isTorrentTask = task.protocol === "bt" || task.protocol === "magnet";
   const isMetalinkTask = task.protocol === "metalink";
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: task identity resets the panel; later status updates must preserve the selected tab.
   useEffect(() => {
     setActiveTab(task.status === "failed" || task.status === "needs_attention" ? "diagnostics" : "overview");
     setDiagSubTab("segments");
@@ -375,7 +371,7 @@ function TaskDetailsPanel({
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
       unlisten?.();
     };
-  }, [task.id]);
+  }, [task.id, onRefresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -426,7 +422,7 @@ function TaskDetailsPanel({
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [activeTab, task.id, task.status, refreshTick]);
+  }, [activeTab, task.id, task.status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -463,7 +459,7 @@ function TaskDetailsPanel({
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [activeTab, diagSubTab, task.id, task.status, refreshTick]);
+  }, [activeTab, diagSubTab, task.id, task.status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -499,7 +495,7 @@ function TaskDetailsPanel({
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [activeTab, isTorrentTask, task.id, task.status, refreshTick]);
+  }, [activeTab, isTorrentTask, task.id, task.status]);
 
   // Load Metalink mirrors
   useEffect(() => {
@@ -518,7 +514,7 @@ function TaskDetailsPanel({
     return () => {
       cancelled = true;
     };
-  }, [isMetalinkTask, task.id, task.status, refreshTick, activeTab]);
+  }, [isMetalinkTask, task.id, activeTab]);
 
   async function handleRetryWithMirror(mirrorUrl: string) {
     try {
@@ -646,7 +642,7 @@ function TaskDetailsPanel({
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [activeTab, task.id, task.status, refreshTick]);
+  }, [activeTab, task.id, task.status]);
 
   const isFailedOrAttention = task.status === "failed" || task.status === "needs_attention";
   const isCompleted = task.status === "completed";
@@ -854,7 +850,7 @@ function ChecksumRow({
           : null;
 
   return (
-    <div className="rounded border border-border-subtle bg-surface-raised/20 p-2">
+    <div className="py-1.5">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="font-semibold text-text-primary">{formatAlgorithm(checksum.algorithm)}</span>
@@ -868,7 +864,7 @@ function ChecksumRow({
           type="button"
           size="sm"
           variant="ghost"
-          className="h-6 px-2 text-[11px]"
+          className="px-2 text-[11px]"
           onClick={onVerify}
           disabled={verifying || disabled}
         >
@@ -1039,7 +1035,7 @@ function MetalinkMirrorPanel({
         {mirrors.map((mirror) => (
           <div
             key={mirror.id}
-            className="flex items-start justify-between gap-2 rounded border border-border-subtle bg-surface-raised/20 p-2"
+            className="flex items-start justify-between gap-2 border-t border-border-divider py-2 first:border-t-0 first:pt-0"
           >
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
@@ -1065,7 +1061,7 @@ function MetalinkMirrorPanel({
                 type="button"
                 size="sm"
                 variant="ghost"
-                className="h-6 shrink-0 px-2 text-[10px]"
+                className="shrink-0 px-2 text-[10px]"
                 onClick={() => onRetryMirror(mirror.url)}
               >
                 {t("taskDetails.mirrorRetry")}
@@ -1095,7 +1091,7 @@ function TorrentRuntimePanel({
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     setSelectedFiles(new Set(taskFiles.filter((file) => file.selected).map((file) => file.relativePath)));
-  }, [task.id, taskFiles]);
+  }, [taskFiles]);
   if (task.protocol !== "bt" && task.protocol !== "magnet") return null;
 
   const canEditFiles = taskFiles.length > 1 && task.status !== "downloading" && task.status !== "retrying";
@@ -1181,6 +1177,12 @@ function TorrentRuntimePanel({
           hint={t("taskDetails.btPiecesHint")}
         />
         <div
+          role="img"
+          aria-label={t("taskDetails.btPiecesAria", {
+            completed: completedPieces,
+            total: pieceCount,
+            percent: pieceCount > 0 ? Math.round((completedPieces / pieceCount) * 100) : 0,
+          })}
           className="grid gap-0.5 rounded-md bg-surface-root/50 px-3 py-2"
           style={{ gridTemplateColumns: "repeat(20, minmax(0, 1fr))" }}
         >
@@ -1214,7 +1216,9 @@ function TorrentRuntimePanel({
             <div className="space-y-1">
               {(snapshot.trackers ?? []).slice(0, 5).map((tracker) => (
                 <div key={tracker.url} className="flex items-center justify-between gap-2">
-                  <span className="truncate text-text-secondary">{tracker.url}</span>
+                  <span className="truncate text-text-secondary" title={tracker.url}>
+                    {tracker.url}
+                  </span>
                   <span className="shrink-0 text-text-muted">{tracker.status}</span>
                 </div>
               ))}
@@ -1264,8 +1268,13 @@ function TorrentRuntimePanel({
             </div>
             <div className="max-h-40 space-y-1 overflow-auto pr-1">
               {taskFiles.map((file) => (
-                <label key={file.id} className="flex items-center gap-2 text-xs text-text-secondary">
+                <label
+                  key={file.id}
+                  htmlFor={`task-file-${file.id}`}
+                  className="flex items-center gap-2 text-xs text-text-secondary"
+                >
                   <Checkbox
+                    id={`task-file-${file.id}`}
                     checked={selectedFiles.has(file.relativePath)}
                     disabled={!canEditFiles || saving}
                     onChange={(event) => {
@@ -1333,7 +1342,7 @@ function TaskTransferPanel({ task }: { task: Task }) {
     setPriority(task.priority);
     setCategory(task.categoryKey ?? "none");
     setError(null);
-  }, [task.id, task.taskSpeedLimitBps, task.priority, task.categoryKey]);
+  }, [task.taskSpeedLimitBps, task.priority, task.categoryKey]);
 
   const normalizedAmount = speedAmount.trim();
   const currentSpeed = speedLimitInputFromBytes(task.taskSpeedLimitBps);
@@ -1359,6 +1368,7 @@ function TaskTransferPanel({ task }: { task: Task }) {
         priority,
         queuePosition: null,
         categoryKey: category === "none" ? null : category,
+        obeySchedule: null,
       });
       upsertTask(updated);
       addToast({ tone: "success", title: t("taskDetails.transferSaved") });
@@ -1389,10 +1399,11 @@ function TaskTransferPanel({ task }: { task: Task }) {
         </Button>
       </div>
       <div className="grid gap-2">
-        <label className="grid gap-1 text-xs text-text-muted">
+        <label htmlFor="task-speed-limit" className="grid gap-1 text-xs text-text-muted">
           <span>{t("taskDetails.taskSpeedLimit")}</span>
           <div className="grid grid-cols-[minmax(0,1fr)_6rem] gap-2">
             <Input
+              id="task-speed-limit"
               value={speedAmount}
               onChange={(event) => setSpeedAmount(event.target.value)}
               inputMode="decimal"
@@ -1401,7 +1412,7 @@ function TaskTransferPanel({ task }: { task: Task }) {
               className="h-8 bg-surface-root text-xs"
             />
             <Select value={speedUnit} onValueChange={setSpeedUnit} disabled={!editable || saving}>
-              <SelectTrigger className="h-8 bg-surface-root text-xs">
+              <SelectTrigger aria-label={t("taskDetails.taskSpeedLimit")} className="h-8 bg-surface-root text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -1415,14 +1426,14 @@ function TaskTransferPanel({ task }: { task: Task }) {
           </div>
         </label>
         <div className="grid grid-cols-2 gap-2">
-          <label className="grid gap-1 text-xs text-text-muted">
-            <span>{t("taskDetails.priority")}</span>
+          <div className="grid gap-1 text-xs text-text-muted">
+            <span id="task-priority-label">{t("taskDetails.priority")}</span>
             <Select
               value={priority}
               onValueChange={(value) => setPriority(value as TaskPriority)}
               disabled={!editable || saving}
             >
-              <SelectTrigger className="h-8 bg-surface-root text-xs">
+              <SelectTrigger aria-labelledby="task-priority-label" className="h-8 bg-surface-root text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -1431,11 +1442,11 @@ function TaskTransferPanel({ task }: { task: Task }) {
                 <SelectItem value="low">{t("taskDetails.priorityLow")}</SelectItem>
               </SelectContent>
             </Select>
-          </label>
-          <label className="grid gap-1 text-xs text-text-muted">
-            <span>{t("taskDetails.category")}</span>
+          </div>
+          <div className="grid gap-1 text-xs text-text-muted">
+            <span id="task-category-label">{t("taskDetails.categoryLabel")}</span>
             <Select value={category} onValueChange={setCategory} disabled={!editable || saving}>
-              <SelectTrigger className="h-8 bg-surface-root text-xs">
+              <SelectTrigger aria-labelledby="task-category-label" className="h-8 bg-surface-root text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -1446,7 +1457,7 @@ function TaskTransferPanel({ task }: { task: Task }) {
                 ))}
               </SelectContent>
             </Select>
-          </label>
+          </div>
         </div>
       </div>
       <div className="flex items-center justify-between gap-3 text-[11px] text-text-muted">
@@ -1624,11 +1635,8 @@ function SegmentViewToggle({
   ariaLabel: string;
 }) {
   return (
-    <div
-      role="group"
-      aria-label={ariaLabel}
-      className="mb-2 inline-flex items-center gap-0.5 rounded-md border border-border-subtle bg-surface-root/50 p-0.5"
-    >
+    <fieldset className="mb-2 inline-flex min-w-0 items-center gap-0.5 rounded-md border border-border-subtle bg-surface-root/50 p-0.5">
+      <legend className="sr-only">{ariaLabel}</legend>
       {(
         [
           { mode: "ranges", label: rangesLabel },
@@ -1651,7 +1659,7 @@ function SegmentViewToggle({
           {option.label}
         </button>
       ))}
-    </div>
+    </fieldset>
   );
 }
 
@@ -1947,9 +1955,13 @@ function RequestList({
             <p className="mt-1 break-all font-mono text-[11px] text-text-secondary">{request.url}</p>
             <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-text-muted">
               <span>{t("taskDetails.requestRange")}</span>
-              <span className="truncate text-right font-mono text-text-secondary">{request.rangeHeader ?? "-"}</span>
+              <span className="truncate text-right font-mono text-text-secondary" title={request.rangeHeader ?? "-"}>
+                {request.rangeHeader ?? "-"}
+              </span>
               <span>{t("taskDetails.requestIfRange")}</span>
-              <span className="truncate text-right font-mono text-text-secondary">{request.ifRangeHeader ?? "-"}</span>
+              <span className="truncate text-right font-mono text-text-secondary" title={request.ifRangeHeader ?? "-"}>
+                {request.ifRangeHeader ?? "-"}
+              </span>
               <span>{t("taskDetails.requestLength")}</span>
               <span className="text-right font-mono text-text-secondary">
                 {request.contentLength ? formatBytes(Number(request.contentLength)) : "-"}

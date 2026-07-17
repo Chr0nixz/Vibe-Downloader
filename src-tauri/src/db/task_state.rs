@@ -329,6 +329,9 @@ pub async fn update_task_status_in_tx(
     let recovery_actions = recovery_actions_json(&recovery_actions)?;
     let expected_status_str = expected_current_status.map(|s| s.as_str());
 
+    // `(? IS NULL OR status = ?)` binds `expected_status_str` twice: when None, the clause
+    // is always true (unconditional update); when Some(s), it enforces `status = s` for
+    // optimistic concurrency. Returns no rows if the condition fails.
     let row = sqlx::query(
         r#"
         UPDATE tasks
@@ -422,6 +425,28 @@ pub async fn update_task_retry_after(
     .bind(&updated_at)
     .bind(task_id)
     .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn update_task_retry_after_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: &str,
+    retry_after_at: Option<&str>,
+) -> Result<(), String> {
+    let updated_at = crate::models::task::now_iso();
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET retry_after_at = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(retry_after_at)
+    .bind(&updated_at)
+    .bind(task_id)
+    .execute(&mut **tx)
     .await
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -603,6 +628,10 @@ pub async fn complete_task(pool: &SqlitePool, task_id: &str) -> Result<(), Strin
 
     if result.rows_affected() == 0 {
         tx.rollback().await.ok();
+        // Return Ok(()) — not Err — when no row matched. The worker has already finished
+        // successfully; surfacing an error here would route it through mark_download_failed,
+        // which would overwrite the user's concurrent pause/cancel. The silent Ok lets the
+        // user's action win.
         return Ok(());
     }
 

@@ -369,6 +369,9 @@ pub struct SegmentSplit {
     pub tail_segment: TaskSegmentRecord,
 }
 
+// Split the segment with the most bytes left, halving its REMAINING (not total) range so
+// the active worker keeps its already-downloaded prefix. The UPDATE + INSERT run in one
+// transaction so a concurrent coordinator never observes a gap or overlap in range coverage.
 pub async fn split_largest_remaining_segment(
     pool: &SqlitePool,
     task_id: &str,
@@ -516,14 +519,41 @@ pub async fn update_segments_status_for_task(
     sqlx::query(
         r#"
         UPDATE task_work_units
-        SET status = ?, last_error = ?
+        SET status = ?, last_error = ?,
+            speed_bps = CASE WHEN ? = 'downloading' THEN speed_bps ELSE 0 END
         WHERE task_id = ? AND status != 'completed'
         "#,
     )
     .bind(status.as_str())
     .bind(last_error)
+    .bind(status.as_str())
     .bind(task_id)
     .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn update_segments_status_for_task_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: &str,
+    status: SegmentStatus,
+    last_error: Option<&str>,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE task_work_units
+        SET status = ?, last_error = ?,
+            speed_bps = CASE WHEN ? = 'downloading' THEN speed_bps ELSE 0 END
+        WHERE task_id = ? AND status != 'completed'
+        "#,
+    )
+    .bind(status.as_str())
+    .bind(last_error)
+    .bind(status.as_str())
+    .bind(task_id)
+    .execute(&mut **tx)
     .await
     .map_err(|e| e.to_string())?;
 

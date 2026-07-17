@@ -57,7 +57,7 @@ struct AccelerationContext {
 
 pub(super) struct SegmentCoordinator<'a> {
     client: &'a Client,
-    app: AppHandle,
+    app: Option<AppHandle>,
     pool: SqlitePool,
     task: TaskRecord,
     temp_path: PathBuf,
@@ -71,7 +71,6 @@ pub(super) struct SegmentCoordinator<'a> {
     url: String,
     if_range: Option<String>,
     total_size: i64,
-    supports_parallel: bool,
     segment_count: usize,
     max_worker_count: usize,
 }
@@ -97,7 +96,6 @@ impl<'a> SegmentCoordinator<'a> {
         let url = task.final_url.clone().unwrap_or_else(|| task.url.clone());
         let if_range = if_range_header_value(&task);
         let total_size = task.total_size;
-        let supports_parallel = task.supports_parallel;
         let segment_count = segments.len();
         let max_worker_count = connection_limit.clamp(
             1,
@@ -118,7 +116,6 @@ impl<'a> SegmentCoordinator<'a> {
             url,
             if_range,
             total_size,
-            supports_parallel,
             segment_count,
             max_worker_count,
         }
@@ -219,6 +216,9 @@ impl<'a> SegmentCoordinator<'a> {
         // while still borrowing `self` for method calls.
         let segments = std::mem::take(&mut self.segments);
         for segment in segments {
+            // `downloaded_until` is exclusive: a value of `range_end + 1` means the segment is
+            // fully downloaded. The clamp allows `range_end + 1` through so the `offset > range_end`
+            // check below detects completion correctly.
             let offset = segment
                 .downloaded_until
                 .clamp(segment.range_start, segment.range_end.saturating_add(1));
@@ -540,7 +540,7 @@ impl<'a> SegmentCoordinator<'a> {
                     segment,
                     total_size: self.total_size,
                     segment_count: self.segment_count,
-                    supports_parallel: self.supports_parallel,
+                    supports_resume: self.task.supports_resume,
                     cancel_token: self.cancel_token.clone(),
                     progress_tx: progress_tx.clone(),
                     range_end,
@@ -579,6 +579,9 @@ impl<'a> SegmentCoordinator<'a> {
         let current_speed = runtime_progress.total_speed().max(0);
         if let Some(check) = acceleration.runtime.pending.take() {
             if check.started_at.elapsed() >= AUTO_ACCELERATION_EVALUATION {
+                // Require post-split speed to reach at least 80% of the theoretical linear speedup
+                // (before_speed × (1 + 0.8 × growth)). If it falls short, the server isn't benefiting
+                // from extra connections, so disable further splits to avoid wasting bandwidth.
                 let connection_growth = (*active_connection_count as f64
                     / check.before_connections.max(1) as f64)
                     - 1.0;
@@ -606,6 +609,10 @@ impl<'a> SegmentCoordinator<'a> {
             return Ok(());
         }
 
+        // Only split when ALL preconditions hold: warmup complete (stable baseline), speed
+        // history is stable (trustworthy measurement), pool has free worker slots, and the
+        // split budget remains. Splitting without a stable baseline risks disabling
+        // acceleration based on noisy measurements.
         if acceleration.started_at.elapsed() < AUTO_ACCELERATION_WARMUP
             || acceleration.speed_history.len() < AUTO_ACCELERATION_STABILITY_WINDOW
             || !speed_is_stable(&acceleration.speed_history)
@@ -665,7 +672,7 @@ impl<'a> SegmentCoordinator<'a> {
                 segment: split.tail_segment,
                 total_size: self.total_size,
                 segment_count: *active_connection_count as usize,
-                supports_parallel: self.supports_parallel,
+                supports_resume: self.task.supports_resume,
                 cancel_token: self.cancel_token.clone(),
                 progress_tx: progress_tx.clone(),
                 range_end: tail_range_end,

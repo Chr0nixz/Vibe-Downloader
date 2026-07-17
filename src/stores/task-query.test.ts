@@ -154,6 +154,18 @@ describe("task query helpers", () => {
     ).toEqual(["task-http"]);
   });
 
+  it("keeps queued, attention, and failed workspaces distinct", () => {
+    const tasks = [
+      makeTask({ id: "queued", status: "queued" }),
+      makeTask({ id: "attention", status: "needs_attention" }),
+      makeTask({ id: "failed", status: "failed" }),
+    ];
+
+    expect(filterTasks(tasks, "queue", "").map((task) => task.id)).toEqual(["queued"]);
+    expect(filterTasks(tasks, "attention", "").map((task) => task.id)).toEqual(["attention"]);
+    expect(filterTasks(tasks, "failed", "").map((task) => task.id)).toEqual(["failed"]);
+  });
+
   it("classifies file and failure kinds from task metadata", () => {
     expect(taskFileType(makeTask({ fileName: "photo.webp" }))).toBe("image");
     expect(
@@ -172,6 +184,7 @@ describe("task query helpers", () => {
         all: "120",
         active: "2",
         queued: "4",
+        attention: "3",
         paused: "5",
         completed: "100",
         failed: "9",
@@ -184,6 +197,7 @@ describe("task query helpers", () => {
       all: 120,
       active: 2,
       queued: 4,
+      attention: 3,
       totalSpeed: 4096,
       totalDownloaded: 2048,
       totalBytes: 8192,

@@ -3,7 +3,7 @@
 
 :root {
   --vibe-font-sans:
-    Inter, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", "Source Han Sans CN", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic", "MS PGothic", system-ui, sans-serif;
+    "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", "Source Han Sans CN", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic", "MS PGothic", sans-serif;
 }
 
 @theme inline {
@@ -298,16 +298,17 @@
   transition:
     transform 320ms cubic-bezier(0.16, 1, 0.3, 1),
     box-shadow 320ms ease-out;
-  will-change: transform;
 }
 
 .floating-ball:hover {
   transform: scale(1.12);
+  will-change: transform;
 }
 
 .floating-ball:active {
   transform: scale(0.96);
   transition-duration: 80ms;
+  will-change: transform;
 }
 
 .floating-ring {

@@ -4,11 +4,11 @@ use specta::Type;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassificationMatchKind {
-    /// 按文件扩展名匹配，如 "mp4"
+    /// Match by file extension, e.g., "mp4"
     Extension,
-    /// 按 MIME 前缀匹配，如 "video/"
+    /// Match by MIME prefix, e.g., "video/"
     Mime,
-    /// 按 URL 关键词包含匹配，如 "example.com/video"
+    /// Match by URL keyword containment, e.g., "example.com/video"
     UrlContains,
 }
 

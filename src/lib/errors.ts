@@ -82,21 +82,25 @@ export function localizedErrorMessage(error: unknown, t: TFunction): string {
  * the user wants to share diagnostics. Optional context (task id, url) is
  * included when available so the report is actionable for developers.
  */
-export function formatErrorForReport(error: unknown, context?: { taskId?: string; url?: string }): string {
+export function formatErrorForReport(
+  error: unknown,
+  t: TFunction,
+  context?: { taskId?: string; url?: string },
+): string {
   const lines: string[] = [];
-  if (context?.taskId) lines.push(`Task ID: ${context.taskId}`);
-  if (context?.url) lines.push(`URL: ${context.url}`);
+  if (context?.taskId) lines.push(`${t("errors.report.taskId")}: ${context.taskId}`);
+  if (context?.url) lines.push(`${t("errors.report.url")}: ${context.url}`);
   const payload = parseAppError(error);
   if (payload) {
-    lines.push(`Code: ${payload.code}`);
-    lines.push(`Message: ${payload.message}`);
-    lines.push(`Recoverable: ${payload.recoverable ? "true" : "false"}`);
+    lines.push(`${t("errors.report.code")}: ${payload.code}`);
+    lines.push(`${t("errors.report.message")}: ${payload.message}`);
+    lines.push(`${t("errors.report.recoverable")}: ${payload.recoverable ? "true" : "false"}`);
     if (payload.actions.length > 0) {
-      lines.push(`Actions: ${payload.actions.join(", ")}`);
+      lines.push(`${t("errors.report.actions")}: ${payload.actions.join(", ")}`);
     }
   } else {
     const message = errorMessage(error);
-    lines.push(`Message: ${message}`);
+    lines.push(`${t("errors.report.message")}: ${message}`);
   }
   return lines.join("\n");
 }

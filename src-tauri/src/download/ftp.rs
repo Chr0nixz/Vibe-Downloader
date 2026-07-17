@@ -48,7 +48,7 @@ use crate::{
         EngineCapabilities, FtpDirectoryEntry, FtpDirectoryProbe, ProbedFile, SegmentStatus,
         TaskKind, TaskProgressPayload, TaskRecord, TaskSegmentRecord, TaskStatus,
     },
-    proxy::{socks5_connect, ResolvedProxyConfig, SharedProxyConfig},
+    proxy::{proxy_connect_error, socks5_connect, ResolvedProxyConfig, SharedProxyConfig},
 };
 
 const FTP_MAX_DYNAMIC_CONNECTIONS: usize = 4;
@@ -475,6 +475,11 @@ async fn run_ftp_download(
                             segment.retry_count,
                             &error,
                         ).await?;
+                        // Only count failures on dynamically-split segments (identified by range_start > 0
+                        // or multi-segment progress) — initial-segment failures are normal transient errors.
+                        // After 2 dynamic-segment failures, disable acceleration: the server likely doesn't
+                        // handle parallel REST correctly, so continue single-stream rather than spawning
+                        // more failing workers.
                         let dynamic_segment = segment.range_start > 0 || progress_len > 1;
                         if dynamic_segment {
                             dynamic_failures += 1;
@@ -764,6 +769,16 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
     let mut last_emit_bytes = offset;
     loop {
         if request.cancel_token.is_cancelled() {
+            file.flush()
+                .await
+                .map_err(|e| format!("Could not checkpoint the temporary file: {e}"))?;
+            db::update_segment_progress(
+                &request.pool,
+                &request.segment.id,
+                offset,
+                SegmentStatus::Pending,
+            )
+            .await?;
             let _ = session.abort(remote_stream).await;
             return Err("Download canceled.".to_string());
         }
@@ -795,6 +810,16 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
         };
         let outcome = tokio::select! {
             _ = request.cancel_token.cancelled() => {
+                file.flush()
+                    .await
+                    .map_err(|e| format!("Could not checkpoint the temporary file: {e}"))?;
+                db::update_segment_progress(
+                    &request.pool,
+                    &request.segment.id,
+                    offset,
+                    SegmentStatus::Pending,
+                )
+                .await?;
                 let _ = session.abort(remote_stream).await;
                 return Err("Download canceled.".to_string());
             }
@@ -872,7 +897,7 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
 }
 
 struct FtpProgressInput<'a> {
-    app: &'a AppHandle,
+    app: &'a Option<AppHandle>,
     pool: &'a SqlitePool,
     task: &'a TaskRecord,
     active_connections: usize,
@@ -1115,6 +1140,10 @@ fn planned_ftp_split(segment: &SegmentProgress) -> Option<FtpSplit> {
         .downloaded_until
         .clamp(segment.range_start, segment.range_end.saturating_add(1));
     let remaining = segment.range_end.saturating_sub(current).saturating_add(1);
+    // Require 2× FTP_MIN_SPLIT_REMAINING so both halves meet the minimum (avoid creating
+    // a sub-16MB segment). Split at the midpoint of REMAINING bytes (current position +
+    // remaining/2), so the active worker keeps its downloaded prefix and only the
+    // undownloaded tail is reassigned.
     if remaining < FTP_MIN_SPLIT_REMAINING.saturating_mul(2) {
         return None;
     }
@@ -1150,7 +1179,7 @@ async fn connect_session(
             session
                 .login(&target.username, &target.password)
                 .await
-                .map_err(|error| ftp_connect_error(target.mode, error))?;
+                .map_err(|error| ftp_auth_error(target.mode, error))?;
             Ok(FtpSession::Plain(session))
         }
         FtpSecurityMode::ExplicitTls => {
@@ -1173,7 +1202,7 @@ async fn connect_session(
             session
                 .login(&target.username, &target.password)
                 .await
-                .map_err(|error| ftp_connect_error(target.mode, error))?;
+                .map_err(|error| ftp_auth_error(target.mode, error))?;
             Ok(FtpSession::Secure(session))
         }
         FtpSecurityMode::ImplicitTls => {
@@ -1192,7 +1221,7 @@ async fn connect_session(
             session
                 .login(&target.username, &target.password)
                 .await
-                .map_err(|error| ftp_connect_error(target.mode, error))?;
+                .map_err(|error| ftp_auth_error(target.mode, error))?;
             Ok(FtpSession::Secure(session))
         }
     };
@@ -1215,7 +1244,7 @@ async fn socks5_control_stream(
         target.port,
     )
     .await
-    .map_err(|error| format!("FTP proxy connection failed: {error}"))
+    .map_err(|error| proxy_connect_error("FTP", &error))
 }
 
 fn apply_passive_proxy<T>(
@@ -1273,6 +1302,18 @@ fn ftp_connect_error(mode: FtpSecurityMode, error: suppaftp::FtpError) -> String
     engine_error(
         code,
         format!("FTP connection failed while using {mode_hint}: {error}"),
+        true,
+    )
+}
+
+fn ftp_auth_error(mode: FtpSecurityMode, error: suppaftp::FtpError) -> String {
+    let mode_hint = match mode {
+        FtpSecurityMode::Plain => "FTP",
+        FtpSecurityMode::ExplicitTls | FtpSecurityMode::ImplicitTls => "FTPS",
+    };
+    engine_error(
+        "ftp_auth_failed",
+        format!("{mode_hint} authentication failed: {error}"),
         true,
     )
 }

@@ -51,6 +51,7 @@ export function TitleBar({ platform, onOpenPalette, onNewDownload, onOpenShortcu
 
   return (
     <RegionContextMenu items={menuItems}>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: Window dragging is a pointer-only native title-bar gesture; keyboard window controls remain buttons. */}
       <header
         className={cn(
           "titlebar relative flex h-[var(--titlebar-height)] shrink-0 items-center bg-surface-base/90",

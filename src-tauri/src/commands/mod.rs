@@ -3,6 +3,7 @@ pub mod classification;
 pub mod ffmpeg;
 pub mod floating;
 pub mod settings;
+pub mod startup;
 pub mod system;
 pub mod task_file_planning;
 pub mod task_resume;

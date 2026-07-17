@@ -4,13 +4,20 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use common::TestServer;
 use tauri_app_lib::{
+    db,
     download::{DashEngine, DownloadEngine, HttpEngine, ProbeRequest},
+    models::{SegmentStatus, TaskStatus},
     proxy::ResolvedProxyConfig,
+    state_machine,
 };
 
 const TEMPLATE_MPD: &str = r#"
@@ -90,6 +97,21 @@ const BASE_MPD: &str = r#"
 </MPD>
 "#;
 
+const RECOVERY_MPD: &str = r#"
+<MPD type="static" mediaPresentationDuration="PT2S" xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4" contentType="video">
+      <Representation id="v0" bandwidth="500000" codecs="avc1.42c01e">
+        <SegmentList>
+          <SegmentURL media="recovery-0.mp4" />
+          <SegmentURL media="recovery-1.mp4" />
+        </SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>
+"#;
+
 fn ffmpeg_available() -> bool {
     std::process::Command::new("ffmpeg")
         .arg("-version")
@@ -151,6 +173,90 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         app: None,
         request_id: None,
     }
+}
+
+fn generate_test_mp4() -> Vec<u8> {
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("vibe-dash-recovery-{id}.mp4"));
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=5",
+            "-t",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(&path)
+        .status()
+        .expect("start ffmpeg DASH fixture generation");
+    assert!(status.success(), "ffmpeg DASH fixture generation failed");
+    let bytes = std::fs::read(&path).expect("read generated DASH fixture");
+    let _ = std::fs::remove_file(path);
+    bytes
+}
+
+fn start_recovery_server(segment: Arc<Vec<u8>>, requests: Arc<[AtomicUsize; 2]>) -> TestServer {
+    TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/");
+        let (status, content_type, body, delay) = match path {
+            "/recovery.mpd" => (
+                "200 OK",
+                "application/dash+xml",
+                RECOVERY_MPD.as_bytes(),
+                None,
+            ),
+            "/recovery-0.mp4" => {
+                requests[0].fetch_add(1, Ordering::SeqCst);
+                ("200 OK", "video/mp4", segment.as_slice(), None)
+            }
+            "/recovery-1.mp4" => {
+                requests[1].fetch_add(1, Ordering::SeqCst);
+                (
+                    "200 OK",
+                    "video/mp4",
+                    segment.as_slice(),
+                    Some(Duration::from_millis(750)),
+                )
+            }
+            _ => ("404 Not Found", "text/plain", b"not found".as_slice(), None),
+        };
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
+        let _ = stream.write_all(body);
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -285,4 +391,119 @@ async fn probe_file_scheme_reads_local_mpd() {
 
     assert_eq!(output.protocol, "dash");
     assert!(output.capabilities.supports_resume);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_resumes_staging_without_redownloading_completed_segments() {
+    if !ffmpeg_available() {
+        eprintln!("skipping DASH staging recovery test: ffmpeg not in PATH");
+        return;
+    }
+    let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let server = start_recovery_server(Arc::new(generate_test_mp4()), requests.clone());
+    let pool = common::test_pool("dash-staging-recovery").await;
+    let mut paths = common::TestPaths::new("dash-staging-recovery");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("DASH test root")
+        .to_path_buf();
+    paths.temp = root.join("output.mp4.vibe-downloading");
+    paths.final_path = root.join("recovery.mp4");
+    let task = common::download_task(
+        "dash-staging-recovery",
+        format!("{}/recovery.mpd", server.base_url),
+        "dash",
+        "recovery.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert DASH task");
+    db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("insert DASH runtime unit");
+
+    let engine = new_engine();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let first_download = tokio::spawn({
+        let engine = engine.clone();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+
+    loop {
+        let segments = db::list_dash_segments(&pool, "dash-staging-recovery")
+            .await
+            .expect("list DASH segments");
+        let first_completed = segments.iter().any(|segment| {
+            segment.segment_index == 0 && segment.status == SegmentStatus::Completed
+        });
+        if first_completed && requests[1].load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cancel.cancel();
+    first_download
+        .await
+        .expect("DASH download task join")
+        .expect("DASH cancellation is a clean staging pause");
+
+    let paused = db::get_task_record(&pool, "dash-staging-recovery")
+        .await
+        .expect("read paused DASH task")
+        .expect("paused DASH task exists");
+    assert_eq!(paused.status, TaskStatus::Paused);
+    let no_app = Option::<tauri::AppHandle>::None;
+    let resumed = state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &paused.id,
+        TaskStatus::Downloading,
+        paused.downloaded_bytes,
+        1,
+        Some("Downloading"),
+        Some("resumed"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist DASH resume");
+
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("resume DASH download");
+
+    assert_eq!(
+        requests[0].load(Ordering::SeqCst),
+        1,
+        "completed DASH segment must be reused from staging"
+    );
+    assert_eq!(
+        requests[1].load(Ordering::SeqCst),
+        2,
+        "interrupted DASH segment must be requested again"
+    );
+    assert!(paths.final_path.exists());
+    assert!(
+        std::fs::metadata(&paths.final_path)
+            .expect("DASH MP4 metadata")
+            .len()
+            > 0
+    );
+    let completed = db::get_task_record(&pool, "dash-staging-recovery")
+        .await
+        .expect("read completed DASH task")
+        .expect("completed DASH task exists");
+    assert_eq!(completed.status, TaskStatus::Completed);
 }

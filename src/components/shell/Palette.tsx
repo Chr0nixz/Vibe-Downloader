@@ -1,6 +1,7 @@
 import type { TFunction } from "i18next";
 import {
   Check,
+  CircleAlert,
   Eye,
   EyeOff,
   File,
@@ -9,6 +10,7 @@ import {
   Gauge,
   Info,
   ListChecks,
+  ListOrdered,
   Moon,
   Pause,
   Play,
@@ -98,7 +100,7 @@ export function Palette({
   open,
   onOpenChange,
   platform,
-  selectedTask,
+  selectedId,
   onNewDownload,
   onStart,
   onPause,
@@ -116,7 +118,7 @@ export function Palette({
   open: boolean;
   onOpenChange: (v: boolean) => void;
   platform: Platform;
-  selectedTask: Task | null;
+  selectedId: string | null;
   onNewDownload: () => void;
   onStart: () => void;
   onPause: () => void;
@@ -139,6 +141,11 @@ export function Palette({
   const [runningId, setRunningId] = useState<string | null>(null);
 
   const tasks = useTaskDataStore(useShallow((s) => s.tasks));
+  // Derive selectedTask from the store so AppShell doesn't need to subscribe
+  // to the task object (which changes every progress tick). Palette already
+  // re-renders on progress ticks via the `tasks` subscription above, so this
+  // adds no new re-renders.
+  const selectedTask = useTaskDataStore((s) => (selectedId ? (s.taskById[selectedId] ?? null) : null));
   const selectedIds = useTaskUIStore((s) => s.selectedIds);
   const nav = useTaskUIStore((s) => s.nav);
   const taskSearch = useTaskUIStore((s) => s.search);
@@ -159,9 +166,9 @@ export function Palette({
   const addToast = useToastStore((s) => s.addToast);
   const { setTheme } = useTheme();
 
-  // E-12: useDeferredValue 让命令面板的派生计算在空闲时跑，
-  // 不阻塞主列表的进度 tick 渲染（tasks 每 250ms 变化）。
-  // selectedTasks 保持实时 tasks（选中集小，需实时反馈）。
+  // E-12: useDeferredValue lets the command palette's derived computation run during idle time,
+  // not blocking the main list's progress tick rendering (tasks change every 250ms).
+  // selectedTasks keeps real-time tasks (the selection set is small and needs real-time feedback).
   const deferredTasks = useDeferredValue(tasks);
 
   const visibleTasks = useMemo(
@@ -482,10 +489,15 @@ function CommandRow({
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-sm font-medium">{command.label}</span>
+          <span className="truncate text-sm font-medium" title={command.label}>
+            {command.label}
+          </span>
           {command.active ? <Check className="h-3.5 w-3.5 shrink-0 text-accent-primary" /> : null}
         </span>
-        <span className="block truncate text-xs text-text-muted">
+        <span
+          className="block truncate text-xs text-text-muted"
+          title={command.enabled ? command.description : command.disabledReason}
+        >
           {command.enabled ? command.description : command.disabledReason}
         </span>
       </span>
@@ -630,6 +642,30 @@ function buildCommands({
     active: nav === "all",
     featured: true,
     run: () => onSetNav("all"),
+  });
+  push({
+    id: "app.queue",
+    label: t("nav.queue"),
+    description: t("queueCenter.subtitle"),
+    group: "app",
+    icon: ListOrdered,
+    keywords: keyword("queue", "schedule", "order", "waiting", "队列", "调度", "顺序"),
+    enabled: true,
+    active: nav === "queue",
+    featured: true,
+    run: () => onSetNav("queue"),
+  });
+  push({
+    id: "app.attention",
+    label: t("nav.attention"),
+    description: t("attentionCenter.subtitle"),
+    group: "app",
+    icon: CircleAlert,
+    keywords: keyword("attention", "decision", "blocked", "recovery", "待处理", "恢复"),
+    enabled: true,
+    active: nav === "attention",
+    featured: true,
+    run: () => onSetNav("attention"),
   });
   push({
     id: "app.settings",
@@ -1045,7 +1081,14 @@ function buildCommands({
           : t("palette.descriptions.speed", { speed: formatSpeed(preset.value) }),
       group: "speed",
       icon: Gauge,
-      keywords: keyword("speed", "limit", "throttle", preset.label, "限速", "速度"),
+      keywords: keyword(
+        "speed",
+        "limit",
+        "throttle",
+        preset.value === null ? t("speedLimit.unlimited") : preset.label,
+        t("palette.keywords.speedLimit"),
+        t("palette.keywords.speed"),
+      ),
       enabled: !!settings,
       disabledReason: settingsUnavailable,
       active,

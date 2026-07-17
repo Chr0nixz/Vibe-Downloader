@@ -28,6 +28,7 @@ jobs:
       - run: pnpm test:frontend
       - run: pnpm test:release-tools
       - run: pnpm check:i18n
+      - run: pnpm verify:protocol-matrix
       - name: Version consistency check
         run: node scripts/sync-version.mjs --check
       - run: pnpm build

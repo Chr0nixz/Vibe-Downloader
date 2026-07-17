@@ -57,14 +57,14 @@ fn ignores_oversized_clipboard_text() {
 
 #[test]
 fn short_circuits_plain_text_without_url_scheme() {
-    // E-9: 纯文本无 "://" 且无 "magnet:" 应直接返回，不触发 to_ascii_lowercase 分配
+    // E-9: Plain text without "://" and without "magnet:" should return immediately without triggering to_ascii_lowercase allocation
     let plain_text = "x".repeat(60 * 1024);
     assert!(extract_download_urls(&plain_text).is_empty());
 }
 
 #[test]
 fn short_circuit_still_extracts_magnet_lowercase() {
-    // magnet: 无 "://"，短路逻辑须单独检查 "magnet:"
+    // magnet: has no "://"; the short-circuit logic must check "magnet:" separately
     let urls =
         extract_download_urls("magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10");
     assert_eq!(
@@ -75,8 +75,8 @@ fn short_circuit_still_extracts_magnet_lowercase() {
 
 #[test]
 fn short_circuit_falls_back_for_uppercase_magnet() {
-    // 大写 MAGNET: 不命中 case-sensitive "magnet:" 快路径，
-    // 但后续 to_ascii_lowercase + 前缀匹配应兜底提取
+    // Uppercase MAGNET: does not hit the case-sensitive "magnet:" fast path,
+    // but the subsequent to_ascii_lowercase + prefix matching should extract it as a fallback
     let urls =
         extract_download_urls("MAGNET:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10");
     assert_eq!(
@@ -87,7 +87,7 @@ fn short_circuit_falls_back_for_uppercase_magnet() {
 
 #[test]
 fn short_circuit_passes_through_non_download_scheme() {
-    // 含 "://" 但非下载协议（如 foo://），短路放行后由 normalize_download_url 过滤
+    // Contains "://" but is not a download protocol (e.g., foo://); the short-circuit lets it through and normalize_download_url filters it out
     let urls = extract_download_urls("foo://bar baz qux");
     assert!(urls.is_empty());
 }

@@ -2,6 +2,7 @@ import type { ReactElement, ReactNode } from "react";
 import { cloneElement, isValidElement, useCallback, useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { ClassificationMatchKind, ClassificationRule, ClassificationRuleInput } from "@/generated/bindings";
@@ -121,7 +122,7 @@ export function ClassificationRulesEditor() {
             type="button"
             onClick={() => setEditingId("new")}
             disabled={saving || loading}
-            className="rounded-md border border-border-input px-3 py-1.5 text-xs text-text-primary hover:bg-bg-hover disabled:opacity-50"
+            className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-primary hover:bg-surface-hover disabled:opacity-50"
           >
             {t("settings.addClassificationRule")}
           </button>
@@ -204,7 +205,7 @@ function RuleRow({
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-text-primary">{rule.name}</span>
           {!rule.enabled ? (
-            <span className="rounded bg-bg-muted px-1.5 py-0.5 text-xs text-text-muted">
+            <span className="rounded bg-surface-hover px-1.5 py-0.5 text-xs text-text-muted">
               {t("settings.ruleDisabled")}
             </span>
           ) : null}
@@ -218,7 +219,7 @@ function RuleRow({
           type="button"
           onClick={onMoveUp}
           disabled={disabled || !canMoveUp}
-          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-bg-hover disabled:opacity-50"
+          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.moveUp")}
         </button>
@@ -226,7 +227,7 @@ function RuleRow({
           type="button"
           onClick={onMoveDown}
           disabled={disabled || !canMoveDown}
-          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-bg-hover disabled:opacity-50"
+          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.moveDown")}
         </button>
@@ -234,7 +235,7 @@ function RuleRow({
           type="button"
           onClick={onEdit}
           disabled={disabled}
-          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-bg-hover disabled:opacity-50"
+          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.editClassificationRule")}
         </button>
@@ -242,7 +243,7 @@ function RuleRow({
           type="button"
           onClick={onDelete}
           disabled={disabled}
-          className="rounded px-2 py-1 text-xs text-text-danger hover:bg-bg-hover disabled:opacity-50"
+          className="rounded px-2 py-1 text-xs text-text-danger hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.deleteClassificationRule")}
         </button>
@@ -283,13 +284,7 @@ function RuleEditForm({
   return (
     <div className="grid gap-3">
       <Field label={t("settings.ruleName")}>
-        <input
-          type="text"
-          value={name}
-          disabled={disabled}
-          onChange={(e) => setName(e.target.value)}
-          className="w-full rounded-md border border-border-input bg-bg-input px-3 py-2 text-sm text-text-primary"
-        />
+        <Input type="text" value={name} disabled={disabled} onChange={(e) => setName(e.target.value)} />
       </Field>
       <Field label={t("settings.matchKind")}>
         <Select
@@ -297,7 +292,7 @@ function RuleEditForm({
           onValueChange={(value) => setMatchKind(value as ClassificationMatchKind)}
           disabled={disabled}
         >
-          <SelectTrigger className="w-full max-w-xs">
+          <SelectTrigger aria-label={t("settings.matchKind")} className="w-full max-w-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -308,23 +303,23 @@ function RuleEditForm({
         </Select>
       </Field>
       <Field label={t("settings.pattern")}>
-        <input
+        <Input
           type="text"
           value={pattern}
           disabled={disabled}
           onChange={(e) => setPattern(e.target.value)}
           placeholder={t(`settings.patternHint${capitalize(matchKind)}`)}
-          className="w-full max-w-md rounded-md border border-border-input bg-bg-input px-3 py-2 text-sm text-text-primary"
+          className="max-w-md"
         />
       </Field>
       <Field label={t("settings.targetSubdir")}>
-        <input
+        <Input
           type="text"
           value={targetSubdir}
           disabled={disabled}
           onChange={(e) => setTargetSubdir(e.target.value)}
           placeholder="videos"
-          className="w-full max-w-md rounded-md border border-border-input bg-bg-input px-3 py-2 text-sm text-text-primary"
+          className="max-w-md"
         />
       </Field>
       <Field label={t("settings.ruleEnabled")}>
@@ -335,7 +330,7 @@ function RuleEditForm({
           type="button"
           onClick={onCancel}
           disabled={disabled}
-          className="rounded-md border border-border-input px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-hover disabled:opacity-50"
+          className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.ruleCancel")}
         </button>

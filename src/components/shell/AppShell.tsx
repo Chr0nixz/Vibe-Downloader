@@ -20,7 +20,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ToastViewport } from "@/components/ui/toast";
-import type { CompletionActionRequestedPayload, RecoveryAction, ResolveTaskAttentionInput } from "@/generated/bindings";
+import type {
+  CompletionActionRequestedPayload,
+  RecoveryAction,
+  ResolveTaskAttentionInput,
+  TaskPriority,
+} from "@/generated/bindings";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import { localizedErrorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
@@ -58,6 +63,7 @@ import {
   resumeTask,
   retryTask,
   runTrayMenuAction,
+  updateTaskTransferOptions,
 } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settings-store";
 import { taskCursorInput, useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
@@ -143,13 +149,14 @@ export function AppShell() {
 
   const selectedId = useTaskUIStore((s) => s.selectedId);
   const taskIds = useTaskDataStore((s) => s.taskIds);
-  const totalTasks = useTaskDataStore((s) => s.total);
   const hasMoreTasks = useTaskDataStore((s) => s.hasMore);
   const pendingDeleteIds = useTaskUIStore((s) => s.pendingDeleteIds);
   const addPendingDelete = useTaskUIStore((s) => s.addPendingDelete);
   const addPendingDeletes = useTaskUIStore((s) => s.addPendingDeletes);
   const removePendingDelete = useTaskUIStore((s) => s.removePendingDelete);
-  const selected = useTaskDataStore((s) => (selectedId ? (s.taskById[selectedId] ?? null) : null));
+  // Read selected task imperatively via getState() in callbacks/handlers rather
+  // than subscribing here — subscribing would put AppShell on the per-tick
+  // re-render path (task object changes every 250ms progress tick).
   const nav = useTaskUIStore((s) => s.nav);
   const detailOpen = useTaskUIStore((s) => s.detailOpen);
   const setTaskCursorPage = useTaskDataStore((s) => s.setTaskCursorPage);
@@ -167,13 +174,13 @@ export function AppShell() {
   const addToast = useToastStore((s) => s.addToast);
   const updateToast = useToastStore((s) => s.updateToast);
 
-  const taskSurfaceActive = nav !== "settings" && nav !== "about";
+  const taskSurfaceActive = nav !== "settings" && nav !== "about" && nav !== "attention" && nav !== "queue";
 
   const refreshTasks = useCallback(
     async (selectId?: string) => {
       const page = await listTasksCursor(taskCursorInput(null));
       const data = page.items;
-      setTaskCursorPage(data, page.totalEstimate, page.nextCursor, page.filterOptions);
+      setTaskCursorPage(data, page.minimumTotal, page.nextCursor, page.filterOptions);
       if (selectId) {
         selectTask(selectId);
       } else {
@@ -337,10 +344,29 @@ export function AppShell() {
 
   const showTaskDetails = useCallback(
     (task: Task) => {
+      const currentNav = useTaskUIStore.getState().nav;
+      if (currentNav === "attention" || currentNav === "queue") setNav("all");
       selectTask(task.id);
       setDetailOpen(true);
     },
-    [selectTask, setDetailOpen],
+    [selectTask, setDetailOpen, setNav],
+  );
+
+  const updateQueueOptions = useCallback(
+    (task: Task, patch: { priority?: TaskPriority; obeySchedule?: boolean }) =>
+      runTaskAction(
+        () =>
+          updateTaskTransferOptions({
+            id: task.id,
+            taskSpeedLimitBps: task.taskSpeedLimitBps == null ? null : String(task.taskSpeedLimitBps),
+            priority: patch.priority ?? task.priority,
+            queuePosition: null,
+            categoryKey: task.categoryKey,
+            obeySchedule: patch.obeySchedule ?? task.obeySchedule,
+          }),
+        task.id,
+      ),
+    [runTaskAction],
   );
 
   const refreshTaskList = useCallback(() => {
@@ -699,6 +725,7 @@ export function AppShell() {
         return;
       }
       if (action === "check_url") {
+        setNav("all");
         selectTask(task.id);
         setDetailOpen(true);
         addToast({
@@ -795,7 +822,7 @@ export function AppShell() {
       cancelled = true;
       unlistenSettings?.();
     };
-  }, [setSettings, setSettingsError, setSettingsLoading]);
+  }, [setSettings, setSettingsError, setSettingsLoading, t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -975,6 +1002,10 @@ export function AppShell() {
       const target = event.target as HTMLElement;
       const isInput = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
 
+      // Read selected task imperatively — not a subscription, so AppShell
+      // stays off the per-tick re-render path.
+      const selected = selectedId ? (useTaskDataStore.getState().taskById[selectedId] ?? null) : null;
+
       // ── Always-active shortcuts ──
 
       if (matchesShortcut(event, "mod+k", platform)) {
@@ -1074,6 +1105,17 @@ export function AppShell() {
           return;
         }
 
+        // P0: Toggle pause/resume on the selected task: Mod+P.
+        // PRODUCT.md lists "pause, resume … mostly from the keyboard" as a
+        // success criterion; before this binding the only keyboard path was
+        // Mod+R (retry-only). toggleTransfer itself no-ops on completed and
+        // needs_attention states, so the shortcut is safe to fire universally.
+        if (matchesShortcut(event, "mod+p", platform) && selected) {
+          event.preventDefault();
+          toggleTransfer(selected);
+          return;
+        }
+
         // Delete (metadata only, undoable): Del
         if (event.key === "Delete" && event.shiftKey === false && selected) {
           event.preventDefault();
@@ -1110,10 +1152,10 @@ export function AppShell() {
           // remain, honestly tell the user so the scope is clear.
           const loaded = taskIds.filter((id) => !pendingDeleteIds.includes(id));
           setSelectedIds(loaded);
-          if (hasMoreTasks && loaded.length < totalTasks) {
+          if (hasMoreTasks) {
             addToast({
               tone: "info",
-              title: t("toast.selectedLoadedOnly", { loaded: loaded.length, total: totalTasks }),
+              title: t("toast.selectedLoadedOnly", { loaded: loaded.length }),
             });
           }
           return;
@@ -1142,16 +1184,14 @@ export function AppShell() {
     platform,
     retry,
     selectTask,
-    selected,
     selectedId,
     setSelectedIds,
     setDetailOpen,
-    setDeleteFilesTarget,
     setNav,
     softDelete,
     taskIds,
     t,
-    totalTasks,
+    toggleTransfer,
   ]);
 
   // ── Global native context-menu suppression ──
@@ -1213,11 +1253,12 @@ export function AppShell() {
             onPasteAndCreate={pasteAndCreate}
             onRefresh={refreshTaskList}
             onReorder={handleReorder}
+            onUpdateQueueOptions={updateQueueOptions}
           />
           <Suspense fallback={null}>
             <TaskDetails
-              task={taskSurfaceActive ? selected : null}
-              open={taskSurfaceActive && detailOpen && !!selected}
+              taskId={taskSurfaceActive ? selectedId : null}
+              open={taskSurfaceActive && detailOpen && !!selectedId}
               onClose={() => {
                 setDetailOpen(false);
                 const focusId = selectedId;
@@ -1245,25 +1286,31 @@ export function AppShell() {
             open={paletteOpen}
             onOpenChange={setPaletteOpen}
             platform={platform}
-            selectedTask={taskSurfaceActive ? selected : null}
+            selectedId={taskSurfaceActive ? selectedId : null}
             onNewDownload={() => openNewDownload()}
             onStart={() => {
-              if (selected) void runTaskAction(() => resumeTask(selected.id), selected.id);
+              const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
+              if (task) void runTaskAction(() => resumeTask(task.id), task.id);
             }}
             onPause={() => {
-              if (selected) void runTaskAction(() => pauseTask(selected.id), selected.id);
+              const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
+              if (task) void runTaskAction(() => pauseTask(task.id), task.id);
             }}
             onDelete={() => {
-              if (selected) softDelete(selected);
+              const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
+              if (task) softDelete(task);
             }}
             onRetry={() => {
-              if (selected) retry(selected);
+              const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
+              if (task) retry(task);
             }}
             onOpenFile={() => {
-              if (selected) openFile(selected);
+              const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
+              if (task) openFile(task);
             }}
             onOpenFolder={() => {
-              if (selected) openFolder(selected);
+              const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
+              if (task) openFolder(task);
             }}
             onBulkPause={bulkPause}
             onBulkResume={bulkResume}
@@ -1444,7 +1491,15 @@ function CompletionActionDialog({
             {hasCountdown ? t(descriptionKey, { seconds: remaining }) : t(descriptionKey)}
           </DialogDescription>
           {hasCountdown ? (
-            <div className="h-1.5 overflow-hidden rounded-full bg-surface-raised">
+            <div
+              role="progressbar"
+              aria-label={t("completionDialog.countdownProgress")}
+              aria-valuemin={0}
+              aria-valuemax={Math.max(1, request.countdownSeconds)}
+              aria-valuenow={remaining}
+              aria-valuetext={t("completionDialog.secondsRemaining", { n: remaining })}
+              className="h-1.5 overflow-hidden rounded-full bg-surface-raised"
+            >
               <div
                 className="h-full rounded-full bg-accent-primary transition-[width] duration-300"
                 style={{

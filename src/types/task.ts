@@ -22,9 +22,36 @@ function parseByteCount(value: string | number | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export function normalizeTaskProtocol(protocol: unknown, url: unknown, fileName: unknown): string {
+  if (typeof protocol === "string" && protocol.trim()) return protocol.trim().toLowerCase();
+
+  const source = typeof url === "string" ? url.trim() : "";
+  let scheme = "";
+  let pathname = typeof fileName === "string" ? fileName : "";
+  try {
+    const parsed = new URL(source);
+    scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
+    pathname ||= parsed.pathname;
+  } catch {
+    scheme = source.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase() ?? "";
+  }
+
+  if (scheme === "magnet") return "bt";
+  if (["ftp", "ftps", "sftp", "webdav", "webdavs"].includes(scheme)) return scheme;
+
+  const extension = pathname.split(/[?#]/, 1)[0]?.split(".").pop()?.toLowerCase();
+  if (extension === "torrent") return "bt";
+  if (extension === "m3u" || extension === "m3u8") return "hls";
+  if (extension === "mpd") return "dash";
+  if (extension === "meta4" || extension === "metalink") return "metalink";
+  if (scheme === "http" || scheme === "https") return "http";
+  return "unknown";
+}
+
 export function normalizeTask(task: GeneratedTask | Task): Task {
   return {
     ...task,
+    protocol: normalizeTaskProtocol(task.protocol, task.url, task.fileName),
     recoveryActions: task.recoveryActions ?? [],
     checksums: task.checksums ?? [],
     totalSize: parseByteCount(task.totalSize),

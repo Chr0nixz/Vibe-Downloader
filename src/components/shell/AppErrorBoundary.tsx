@@ -20,6 +20,7 @@ function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
   const title = t("errorBoundary.title", { defaultValue: FALLBACK.title });
   const description = t("errorBoundary.description", { defaultValue: FALLBACK.description });
   const reloadLabel = t("errorBoundary.reload", { defaultValue: FALLBACK.reload });
+  const copyLabel = t("errorBoundary.copyError", { defaultValue: FALLBACK.copyError });
   const homeLabel = t("errorBoundary.home", { defaultValue: FALLBACK.home });
 
   const handleReload = useCallback(() => {
@@ -46,6 +47,7 @@ function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
           strokeLinecap="round"
           strokeLinejoin="round"
           className="h-7 w-7 text-status-danger"
+          aria-hidden="true"
         >
           <circle cx="12" cy="12" r="10" />
           <line x1="12" y1="8" x2="12" y2="12" />
@@ -69,7 +71,7 @@ function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
           {reloadLabel}
         </Button>
         <Button type="button" variant="outline" onClick={handleCopy}>
-          {t("errorBoundary.copy")}
+          {copyLabel}
         </Button>
         <Button type="button" variant="outline" onClick={resetErrorBoundary}>
           {homeLabel}

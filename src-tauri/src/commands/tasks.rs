@@ -296,8 +296,9 @@ pub(crate) async fn check_schedule_preemption(
                 continue;
             }
             tracing::info!(task_id = %task_id, "resuming task: schedule window opened");
-            db::insert_task_event(&state.pool, task_id, "resumed", None).await?;
-            if let Err(err) = queue_task_for_retry(&app, state.inner(), task_id).await {
+            if let Err(err) =
+                queue_task_for_retry_with_event(&app, state.inner(), task_id, "resumed", None).await
+            {
                 tracing::warn!(task_id = %task_id, error = %err, "schedule auto-resume failed");
             }
             resumed_any = true;
@@ -465,12 +466,14 @@ pub(crate) async fn resolve_task_request_headers(
     Ok(persisted)
 }
 
-async fn queue_task_for_retry(
+async fn queue_task_for_retry_with_event(
     app: &AppHandle,
     state: &AppState,
     id: &str,
+    event_type: &str,
+    event_message: Option<&str>,
 ) -> Result<TaskRecord, String> {
-    queue_task_for_retry_at(app, state, id, None).await
+    queue_task_for_retry_at(app, state, id, None, Some(event_type), event_message).await
 }
 
 async fn queue_task_for_retry_at(
@@ -478,8 +481,10 @@ async fn queue_task_for_retry_at(
     state: &AppState,
     id: &str,
     retry_after_at: Option<&str>,
+    event_type: Option<&str>,
+    event_message: Option<&str>,
 ) -> Result<TaskRecord, String> {
-    match crate::state_machine::transition_task(
+    match crate::state_machine::transition_task_with_runtime_state(
         app,
         &state.pool,
         id,
@@ -487,7 +492,11 @@ async fn queue_task_for_retry_at(
         0,
         0,
         Some("Queued"),
+        event_type,
+        event_message,
+        crate::models::SegmentStatus::Pending,
         None,
+        retry_after_at,
     )
     .await
     {
@@ -497,14 +506,6 @@ async fn queue_task_for_retry_at(
         }
         Err(error) => return Err(error.into()),
     }
-    db::update_task_retry_after(&state.pool, id, retry_after_at).await?;
-    db::update_segments_status_for_task(
-        &state.pool,
-        id,
-        crate::models::SegmentStatus::Pending,
-        None,
-    )
-    .await?;
     let task = require_task(&state.pool, id).await?;
     emit_task_progress_snapshot(app, &task);
     emit_queue_changed_with_ids(app, Some(vec![id.to_string()]));
@@ -796,8 +797,8 @@ fn is_sftp_protocol(protocol: &str) -> bool {
     protocol == "sftp"
 }
 
-// URL 分类函数已统一至 `crate::download::url_classify`，此处 re-export 以保持
-// `super::is_torrent_url` 等调用路径不变。
+// URL classification functions have been consolidated into `crate::download::url_classify`; re-exported here to keep
+// call sites like `super::is_torrent_url` unchanged.
 pub(crate) use crate::download::url_classify::{is_dash_url, is_metalink_url, is_torrent_url};
 
 async fn fail_task_and_segments(

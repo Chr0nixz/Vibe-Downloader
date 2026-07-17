@@ -1,9 +1,11 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::atomic::Ordering,
     time::Duration,
 };
 
+use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, State};
@@ -11,7 +13,10 @@ use tauri::{AppHandle, State};
 use crate::{
     db,
     download::checksum::hash_file,
-    events::{emit_queue_changed, emit_queue_changed_with_ids, emit_task_updated_record},
+    events::{
+        emit_queue_changed, emit_queue_changed_with_ids, emit_task_updated_record,
+        evict_task_files_version, evict_task_files_versions,
+    },
     models::{
         task::now_iso, ChecksumAlgorithm, HashVerificationState, HashVerificationStatus,
         RecoveryAction, Task, TaskPriority, TaskStatus,
@@ -22,8 +27,8 @@ use crate::{
 };
 
 use super::{
-    delete_path, emit_task_progress_snapshot, is_bt_protocol, queue_task_for_retry,
-    queue_task_for_retry_at, require_task, restart_required_error_code,
+    delete_path, emit_task_progress_snapshot, is_bt_protocol, queue_task_for_retry_at,
+    queue_task_for_retry_with_event, require_task, restart_required_error_code,
     restart_task_from_beginning, task_error_code, task_from_record_with_files, task_payload,
     update_recovery_target, ResolveTaskAttentionInput,
 };
@@ -38,6 +43,49 @@ pub struct MetalinkMirrorView {
     pub status: String,
     pub failure_count: i32,
     pub last_error: Option<String>,
+}
+
+// Four workers keep slow recycle-bin/network-volume calls off Tokio without
+// flooding the OS shell or storage device during large batch removals.
+const MAX_CONCURRENT_FILE_DELETES: usize = 4;
+
+#[derive(Debug)]
+struct FileDeleteRequest {
+    path: String,
+    use_trash: bool,
+}
+
+async fn delete_paths_off_runtime(requests: Vec<FileDeleteRequest>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let unique = requests
+        .into_iter()
+        .filter(|request| seen.insert(request.path.clone()))
+        .collect::<Vec<_>>();
+    let mut pending = stream::iter(unique.into_iter().map(|request| {
+        tokio::task::spawn_blocking(move || {
+            let result = delete_path(&request.path, request.use_trash);
+            (request.path, result)
+        })
+    }))
+    .buffer_unordered(MAX_CONCURRENT_FILE_DELETES);
+    let mut warnings = Vec::new();
+    while let Some(outcome) = pending.next().await {
+        match outcome {
+            Ok((_, Ok(()))) => {}
+            Ok((_, Err(error))) => warnings.push(error),
+            Err(error) => warnings.push(format!("File deletion worker failed: {error}")),
+        }
+    }
+    warnings
+}
+
+fn push_delete_request(requests: &mut Vec<FileDeleteRequest>, path: Option<&str>, use_trash: bool) {
+    if let Some(path) = path.filter(|path| !path.trim().is_empty()) {
+        requests.push(FileDeleteRequest {
+            path: path.to_string(),
+            use_trash,
+        });
+    }
 }
 
 impl MetalinkMirrorView {
@@ -62,6 +110,7 @@ pub struct UpdateTaskTransferOptionsInput {
     pub priority: Option<TaskPriority>,
     pub queue_position: Option<String>,
     pub category_key: Option<String>,
+    pub obey_schedule: Option<bool>,
 }
 
 #[tauri::command]
@@ -88,6 +137,7 @@ pub async fn update_task_transfer_options(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let obey_schedule = input.obey_schedule.unwrap_or(current.obey_schedule);
 
     db::update_task_transfer_options(
         &state.pool,
@@ -97,6 +147,7 @@ pub async fn update_task_transfer_options(
             priority,
             queue_position,
             category_key,
+            obey_schedule,
         },
     )
     .await?;
@@ -198,7 +249,7 @@ pub async fn pause_task(
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
     }
-    match crate::state_machine::transition_task(
+    match crate::state_machine::transition_task_with_runtime_state(
         &app,
         &state.pool,
         &id,
@@ -207,6 +258,10 @@ pub async fn pause_task(
         0,
         Some("Paused"),
         Some("paused"),
+        Some("Paused"),
+        crate::models::SegmentStatus::Pending,
+        None,
+        None,
     )
     .await
     {
@@ -216,13 +271,6 @@ pub async fn pause_task(
         }
         Err(error) => return Err(error.into()),
     }
-    db::update_segments_status_for_task(
-        &state.pool,
-        &id,
-        crate::models::SegmentStatus::Pending,
-        None,
-    )
-    .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
     emit_queue_changed_with_ids(&app, Some(vec![id.clone()]));
@@ -251,8 +299,7 @@ pub async fn resume_task(
     if matches!(task.status, TaskStatus::NeedsAttention) {
         return Err("Remote file changed. Restart download to avoid corruption.".to_string());
     }
-    db::insert_task_event(&state.pool, &id, "resumed", None).await?;
-    let task = queue_task_for_retry(&app, state.inner(), &id).await?;
+    let task = queue_task_for_retry_with_event(&app, state.inner(), &id, "resumed", None).await?;
     task_from_record_with_files(&state.pool, task).await
 }
 
@@ -281,8 +328,7 @@ pub async fn retry_task(
         }
     }
 
-    db::insert_task_event(&state.pool, &id, "retrying", None).await?;
-    let task = queue_task_for_retry(&app, state.inner(), &id).await?;
+    let task = queue_task_for_retry_with_event(&app, state.inner(), &id, "retrying", None).await?;
     task_from_record_with_files(&state.pool, task).await
 }
 
@@ -324,8 +370,14 @@ pub async fn retry_task_with_mirror(
     db::reset_metalink_resource_statuses(&state.pool, &id).await?;
     // Boost the chosen mirror's priority so the Metalink engine tries it first.
     db::promote_metalink_resource_for_retry(&state.pool, &id, &mirror_url).await?;
-    db::insert_task_event(&state.pool, &id, "retrying_with_mirror", Some(&mirror_url)).await?;
-    let task = queue_task_for_retry(&app, state.inner(), &id).await?;
+    let task = queue_task_for_retry_with_event(
+        &app,
+        state.inner(),
+        &id,
+        "retrying_with_mirror",
+        Some(&mirror_url),
+    )
+    .await?;
     task_from_record_with_files(&state.pool, task).await
 }
 
@@ -404,7 +456,7 @@ pub async fn cancel_task(
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
     }
-    match crate::state_machine::transition_task(
+    match crate::state_machine::transition_task_with_runtime_state(
         &app,
         &state.pool,
         &id,
@@ -413,6 +465,10 @@ pub async fn cancel_task(
         0,
         Some("Canceled by user."),
         Some("failed"),
+        Some("Canceled by user."),
+        crate::models::SegmentStatus::Failed,
+        Some("Canceled by user."),
+        None,
     )
     .await
     {
@@ -422,14 +478,6 @@ pub async fn cancel_task(
         }
         Err(error) => return Err(error.into()),
     }
-    db::update_task_retry_after(&state.pool, &id, None).await?;
-    db::update_segments_status_for_task(
-        &state.pool,
-        &id,
-        crate::models::SegmentStatus::Failed,
-        Some("Canceled by user."),
-    )
-    .await?;
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
     emit_queue_changed_with_ids(&app, Some(vec![id.clone()]));
@@ -475,38 +523,23 @@ pub async fn delete_task(
         let use_trash = db::delete_to_trash_enabled(&state.pool)
             .await
             .unwrap_or(true);
-        let mut file_warnings: Vec<String> = Vec::new();
-        if let Some(task) = task_for_runtime {
+        let mut delete_requests = Vec::new();
+        if let Some(task) = task_for_runtime.as_ref() {
             for file in db::list_task_file_records(&state.pool, &id).await? {
-                // temp files always permanent; final files respect trash setting
-                if let Some(ref p) = file.temp_path {
-                    if let Err(e) = delete_path(p, false) {
-                        file_warnings.push(e);
-                    }
-                }
-                if let Some(ref p) = file.final_path {
-                    if let Err(e) = delete_path(p, use_trash) {
-                        file_warnings.push(e);
-                    }
-                }
+                push_delete_request(&mut delete_requests, file.temp_path.as_deref(), false);
+                push_delete_request(&mut delete_requests, file.final_path.as_deref(), use_trash);
             }
-            if let Some(ref p) = task.temp_path {
-                if let Err(e) = delete_path(p, false) {
-                    file_warnings.push(e);
-                }
-            }
-            if let Some(ref p) = task.final_path {
-                if let Err(e) = delete_path(p, use_trash) {
-                    file_warnings.push(e);
-                }
-            }
+            push_delete_request(&mut delete_requests, task.temp_path.as_deref(), false);
+            push_delete_request(&mut delete_requests, task.final_path.as_deref(), use_trash);
         }
+        let file_warnings = delete_paths_off_runtime(delete_requests).await;
         for warning in &file_warnings {
             tracing::warn!(task_id = %id, warning, "file deletion warning during task removal");
         }
     }
 
     db::delete_task_record(&state.pool, &id).await?;
+    evict_task_files_version(&id);
     emit_queue_changed(&app);
     state
         .scheduler
@@ -541,7 +574,7 @@ pub async fn bulk_delete_tasks(
     };
 
     // Phase 1: Cancel active downloads and clean up runtime state.
-    let mut file_warnings: Vec<String> = Vec::new();
+    let mut delete_requests = Vec::new();
     for id in &ids {
         // R-2.3: Per-task lock for the duration of this iteration.
         let _guard = state.task_runtime_locks.lock(id).await;
@@ -566,41 +599,31 @@ pub async fn bulk_delete_tasks(
 
         // Phase 2: Delete files (best-effort, filesystem ops cannot be transactional).
         if delete_file {
-            if let Some(task) = task_for_runtime {
+            if let Some(task) = task_for_runtime.as_ref() {
                 for file in db::list_task_file_records(&state.pool, id).await? {
-                    if let Some(ref p) = file.temp_path {
-                        if let Err(e) = delete_path(p, false) {
-                            file_warnings.push(e);
-                        }
-                    }
-                    if let Some(ref p) = file.final_path {
-                        if let Err(e) = delete_path(p, use_trash) {
-                            file_warnings.push(e);
-                        }
-                    }
+                    push_delete_request(&mut delete_requests, file.temp_path.as_deref(), false);
+                    push_delete_request(
+                        &mut delete_requests,
+                        file.final_path.as_deref(),
+                        use_trash,
+                    );
                 }
-                if let Some(ref p) = task.temp_path {
-                    if let Err(e) = delete_path(p, false) {
-                        file_warnings.push(e);
-                    }
-                }
-                if let Some(ref p) = task.final_path {
-                    if let Err(e) = delete_path(p, use_trash) {
-                        file_warnings.push(e);
-                    }
-                }
+                push_delete_request(&mut delete_requests, task.temp_path.as_deref(), false);
+                push_delete_request(&mut delete_requests, task.final_path.as_deref(), use_trash);
             }
         }
         // R-2.5: Evict the lock entry for this deleted task.
         drop(_guard);
         state.task_runtime_locks.evict(id).await;
     }
+    let file_warnings = delete_paths_off_runtime(delete_requests).await;
     for warning in &file_warnings {
         tracing::warn!(warning, "file deletion warning during bulk delete");
     }
 
     // Phase 3: Delete all DB records in a single transaction.
     db::delete_task_records_batch(&state.pool, &ids).await?;
+    evict_task_files_versions(ids.iter().map(String::as_str));
 
     emit_queue_changed(&app);
     state
@@ -675,8 +698,8 @@ pub async fn resolve_task_attention(
                     "This task must be restarted before it can continue safely.".to_string()
                 );
             }
-            db::insert_task_event(&state.pool, id, "retrying", None).await?;
-            let task = queue_task_for_retry(&app, state.inner(), id).await?;
+            let task =
+                queue_task_for_retry_with_event(&app, state.inner(), id, "retrying", None).await?;
             task_from_record_with_files(&state.pool, task).await
         }
         RecoveryAction::RetryLater => {
@@ -690,15 +713,16 @@ pub async fn resolve_task_attention(
                 );
             }
             let retry_after_at = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
-            db::insert_task_event(
-                &state.pool,
+            let event_message = format!("Retry scheduled for {retry_after_at}.");
+            let task = queue_task_for_retry_at(
+                &app,
+                state.inner(),
                 id,
-                "retry_later",
-                Some(&format!("Retry scheduled for {retry_after_at}.")),
+                Some(&retry_after_at),
+                Some("retry_later"),
+                Some(&event_message),
             )
             .await?;
-            let task =
-                queue_task_for_retry_at(&app, state.inner(), id, Some(&retry_after_at)).await?;
             state.scheduler.clone().spawn_dispatch_after(
                 app.clone(),
                 state.pool.clone(),
@@ -708,14 +732,14 @@ pub async fn resolve_task_attention(
         }
         RecoveryAction::ChooseAnotherName | RecoveryAction::ChooseAnotherFolder => {
             update_recovery_target(&app, state.inner(), &task, &input).await?;
-            db::insert_task_event(
-                &state.pool,
+            let task = queue_task_for_retry_with_event(
+                &app,
+                state.inner(),
                 id,
                 "retrying",
                 Some("Recovery target changed."),
             )
             .await?;
-            let task = queue_task_for_retry(&app, state.inner(), id).await?;
             task_from_record_with_files(&state.pool, task).await
         }
         RecoveryAction::Restart => {
@@ -793,6 +817,15 @@ pub(crate) async fn verify_task_hash_with_pool(
     id: &str,
 ) -> Result<HashVerificationState, String> {
     let task = require_task(pool, id).await?;
+    let task_checksums = db::list_task_checksum_records(pool, id)
+        .await?
+        .into_iter()
+        .filter(|checksum| checksum.file_id.is_none())
+        .collect::<Vec<_>>();
+    if !task_checksums.is_empty() {
+        return verify_task_checksum_records(pool, task, task_checksums).await;
+    }
+
     let Some(expected) = task.expected_hash_sha256.clone() else {
         return Ok(HashVerificationState {
             task_id: task.id,
@@ -864,4 +897,364 @@ pub(crate) async fn verify_task_hash_with_pool(
         error_message: updated.hash_error,
         verified_at: updated.hash_verified_at,
     })
+}
+
+async fn verify_task_checksum_records(
+    pool: &sqlx::SqlitePool,
+    task: crate::models::TaskRecord,
+    checksums: Vec<crate::models::TaskChecksumRecord>,
+) -> Result<HashVerificationState, String> {
+    let Some(final_path) = task.final_path.as_deref() else {
+        let message = "Downloaded file path is not available.";
+        for checksum in &checksums {
+            db::update_task_checksum_record(
+                pool,
+                &checksum.id,
+                None,
+                HashVerificationStatus::Failed,
+                Some(message),
+            )
+            .await?;
+        }
+        db::update_hash_verification(
+            pool,
+            &task.id,
+            None,
+            HashVerificationStatus::Failed,
+            Some(message),
+        )
+        .await?;
+        db::insert_task_event(pool, &task.id, "hash_failed", Some(message)).await?;
+        let updated = require_task(pool, &task.id).await?;
+        return Ok(HashVerificationState {
+            task_id: updated.id,
+            expected_sha256: updated.expected_hash_sha256,
+            actual_sha256: updated.actual_hash_sha256,
+            status: updated.hash_status,
+            error_message: updated.hash_error,
+            verified_at: updated.hash_verified_at,
+        });
+    };
+
+    db::update_hash_verification(pool, &task.id, None, HashVerificationStatus::Pending, None)
+        .await?;
+
+    let path = PathBuf::from(final_path);
+    let mut computed = Vec::<(ChecksumAlgorithm, Result<String, String>)>::new();
+    let mut actual_sha256 = None;
+    let mut failures = Vec::new();
+
+    for checksum in &checksums {
+        let actual = if let Some((_, result)) = computed
+            .iter()
+            .find(|(algorithm, _)| *algorithm == checksum.algorithm)
+        {
+            result.clone()
+        } else {
+            let result = hash_file(&path, checksum.algorithm).await;
+            computed.push((checksum.algorithm, result.clone()));
+            result
+        };
+
+        match actual {
+            Ok(actual) => {
+                if checksum.algorithm == ChecksumAlgorithm::Sha256 {
+                    actual_sha256 = Some(actual.clone());
+                }
+                let verified = actual.eq_ignore_ascii_case(&checksum.expected_hash);
+                let status = if verified {
+                    HashVerificationStatus::Verified
+                } else {
+                    HashVerificationStatus::Failed
+                };
+                let error = (!verified).then(|| {
+                    format!(
+                        "{} checksum does not match.",
+                        checksum_algorithm_label(checksum.algorithm)
+                    )
+                });
+                if let Some(error) = error.as_ref() {
+                    failures.push(error.clone());
+                }
+                db::update_task_checksum_record(
+                    pool,
+                    &checksum.id,
+                    Some(&actual),
+                    status,
+                    error.as_deref(),
+                )
+                .await?;
+            }
+            Err(error) => {
+                failures.push(error.clone());
+                db::update_task_checksum_record(
+                    pool,
+                    &checksum.id,
+                    None,
+                    HashVerificationStatus::Failed,
+                    Some(&error),
+                )
+                .await?;
+            }
+        }
+    }
+
+    let status = if failures.is_empty() {
+        HashVerificationStatus::Verified
+    } else {
+        HashVerificationStatus::Failed
+    };
+    let error_message = (!failures.is_empty()).then(|| failures.join(" "));
+    db::update_hash_verification(
+        pool,
+        &task.id,
+        actual_sha256.as_deref(),
+        status,
+        error_message.as_deref(),
+    )
+    .await?;
+    db::insert_task_event(
+        pool,
+        &task.id,
+        if status == HashVerificationStatus::Verified {
+            "hash_verified"
+        } else {
+            "hash_failed"
+        },
+        error_message.as_deref(),
+    )
+    .await?;
+
+    let updated = require_task(pool, &task.id).await?;
+    Ok(HashVerificationState {
+        task_id: updated.id,
+        expected_sha256: updated.expected_hash_sha256,
+        actual_sha256: updated.actual_hash_sha256,
+        status: updated.hash_status,
+        error_message: updated.hash_error,
+        verified_at: updated.hash_verified_at,
+    })
+}
+
+fn checksum_algorithm_label(algorithm: ChecksumAlgorithm) -> &'static str {
+    match algorithm {
+        ChecksumAlgorithm::Sha256 => "SHA-256",
+        ChecksumAlgorithm::Sha512 => "SHA-512",
+        ChecksumAlgorithm::Sha1 => "SHA-1",
+        ChecksumAlgorithm::Md5 => "MD5",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn checksum_test_pool(label: &str) -> (sqlx::SqlitePool, PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("vibe-checksum-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create checksum fixture directory");
+        let payload_path = root.join("payload.bin");
+        std::fs::write(&payload_path, b"vibe checksum protocol fixture")
+            .expect("write checksum fixture");
+        let pool = db::connect(&root.join("test.sqlite"))
+            .await
+            .expect("connect checksum database")
+            .pool;
+        (pool, root, payload_path)
+    }
+
+    fn checksum_task(id: &str, protocol: &str, final_path: &Path) -> crate::models::TaskRecord {
+        let now = now_iso();
+        crate::models::TaskRecord {
+            id: id.to_string(),
+            url: format!("{protocol}://example.com/payload.bin"),
+            final_url: Some(format!("{protocol}://example.com/payload.bin")),
+            protocol: protocol.to_string(),
+            task_kind: crate::models::TaskKind::SingleFile,
+            file_name: "payload.bin".to_string(),
+            save_dir: final_path
+                .parent()
+                .expect("fixture parent")
+                .to_string_lossy()
+                .to_string(),
+            temp_path: None,
+            final_path: Some(final_path.to_string_lossy().to_string()),
+            total_size: i64::try_from(
+                std::fs::metadata(final_path)
+                    .expect("fixture metadata")
+                    .len(),
+            )
+            .expect("fixture size"),
+            downloaded_bytes: 0,
+            status: TaskStatus::Completed,
+            etag: None,
+            last_modified: None,
+            content_type: Some("application/octet-stream".to_string()),
+            supports_resume: true,
+            supports_parallel: false,
+            supports_multi_file: false,
+            source_key: format!("{protocol}://example.com"),
+            connection_count: 0,
+            speed_bps: 0,
+            task_speed_limit_bps: None,
+            priority: TaskPriority::Normal,
+            queue_position: 0,
+            category_key: None,
+            obey_schedule: true,
+            health_summary: Some("Completed".to_string()),
+            error_message: None,
+            error_code: None,
+            recovery_actions: Vec::new(),
+            retry_after_at: None,
+            expected_hash_sha256: None,
+            actual_hash_sha256: None,
+            hash_status: HashVerificationStatus::Pending,
+            hash_error: None,
+            hash_verified_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+            files_version: 0,
+        }
+    }
+
+    fn checksum_record(
+        task: &crate::models::TaskRecord,
+        algorithm: ChecksumAlgorithm,
+        expected_hash: String,
+    ) -> crate::models::TaskChecksumRecord {
+        crate::models::TaskChecksumRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_id: task.id.clone(),
+            file_id: None,
+            algorithm,
+            expected_hash,
+            actual_hash: None,
+            status: HashVerificationStatus::Pending,
+            source_kind: "manual".to_string(),
+            source_url: None,
+            source_label: None,
+            is_primary: true,
+            weak: algorithm.is_weak(),
+            error_message: None,
+            discovered_at: None,
+            verified_at: None,
+            created_at: task.created_at.clone(),
+            updated_at: task.updated_at.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_deletes_run_off_runtime_and_deduplicate_paths() {
+        let root = std::env::temp_dir().join(format!("vibe-delete-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create fixture directory");
+        let first = root.join("first.part");
+        let second = root.join("second.part");
+        std::fs::write(&first, b"first").expect("write first fixture");
+        std::fs::write(&second, b"second").expect("write second fixture");
+
+        let requests = vec![
+            FileDeleteRequest {
+                path: first.to_string_lossy().to_string(),
+                use_trash: false,
+            },
+            FileDeleteRequest {
+                path: first.to_string_lossy().to_string(),
+                use_trash: false,
+            },
+            FileDeleteRequest {
+                path: second.to_string_lossy().to_string(),
+                use_trash: false,
+            },
+        ];
+        let warnings = delete_paths_off_runtime(requests).await;
+
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(!first.exists());
+        assert!(!second.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn non_http_single_file_protocols_verify_non_sha256_checksums() {
+        let (pool, root, payload_path) = checksum_test_pool("protocols").await;
+        let protocols = [
+            ("ftp", ChecksumAlgorithm::Sha512),
+            ("sftp", ChecksumAlgorithm::Sha1),
+            ("webdav", ChecksumAlgorithm::Md5),
+        ];
+
+        for (protocol, algorithm) in protocols {
+            let task = checksum_task(&format!("{protocol}-checksum"), protocol, &payload_path);
+            db::insert_task_record(&pool, &task)
+                .await
+                .expect("insert checksum task");
+            let expected = hash_file(&payload_path, algorithm)
+                .await
+                .expect("compute expected checksum");
+            db::insert_task_checksum_record(
+                &pool,
+                &checksum_record(&task, algorithm, expected.clone()),
+            )
+            .await
+            .expect("insert checksum record");
+
+            let state = verify_task_hash_with_pool(&pool, &task.id)
+                .await
+                .expect("verify task checksums");
+            assert_eq!(
+                state.status,
+                HashVerificationStatus::Verified,
+                "unexpected verification state for {protocol}"
+            );
+            assert!(state.expected_sha256.is_none());
+
+            let records = db::list_task_checksum_records(&pool, &task.id)
+                .await
+                .expect("list checksum records");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].status, HashVerificationStatus::Verified);
+            assert_eq!(records[0].actual_hash.as_deref(), Some(expected.as_str()));
+            assert!(records[0].verified_at.is_some());
+        }
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_updates_record_and_task_summary() {
+        let (pool, root, payload_path) = checksum_test_pool("mismatch").await;
+        let task = checksum_task("ftp-checksum-mismatch", "ftp", &payload_path);
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert checksum task");
+        db::insert_task_checksum_record(
+            &pool,
+            &checksum_record(&task, ChecksumAlgorithm::Md5, "0".repeat(32)),
+        )
+        .await
+        .expect("insert checksum record");
+
+        let state = verify_task_hash_with_pool(&pool, &task.id)
+            .await
+            .expect("verify mismatched checksum");
+        assert_eq!(state.status, HashVerificationStatus::Failed);
+        assert_eq!(
+            state.error_message.as_deref(),
+            Some("MD5 checksum does not match.")
+        );
+
+        let records = db::list_task_checksum_records(&pool, &task.id)
+            .await
+            .expect("list checksum records");
+        assert_eq!(records[0].status, HashVerificationStatus::Failed);
+        assert!(records[0].actual_hash.is_some());
+        assert_eq!(
+            records[0].error_message.as_deref(),
+            Some("MD5 checksum does not match.")
+        );
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

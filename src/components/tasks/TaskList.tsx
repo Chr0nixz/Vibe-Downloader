@@ -1,7 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, MoreHorizontal, Pause, Play, Plus, RotateCcw, Search, SlidersHorizontal, X } from "lucide-react";
 import { useReducedMotion } from "motion/react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 
@@ -17,13 +17,25 @@ const AboutPage = lazy(() =>
   })),
 );
 
+const AttentionCenter = lazy(() =>
+  import("@/components/workspaces/AttentionCenter").then((m) => ({
+    default: m.AttentionCenter,
+  })),
+);
+
+const QueueCenter = lazy(() =>
+  import("@/components/workspaces/QueueCenter").then((m) => ({
+    default: m.QueueCenter,
+  })),
+);
+
 import { ListContextMenu, type ReorderAction } from "@/components/tasks/TaskContextMenu";
 import { TaskRow } from "@/components/tasks/TaskRow";
 import { TASK_ROW_ESTIMATED_SIZE } from "@/components/tasks/task-layout";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import type { RecoveryAction } from "@/generated/bindings";
+import type { RecoveryAction, TaskPriority } from "@/generated/bindings";
 import { errorMessage } from "@/lib/errors";
 import { listTasksCursor } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
@@ -36,7 +48,7 @@ import {
 } from "@/stores/task-store";
 import type { Task } from "@/types/task";
 
-export function TaskList({
+export const TaskList = memo(function TaskList({
   onToggleTransfer,
   onRetry,
   onFinishLiveRecording,
@@ -60,6 +72,7 @@ export function TaskList({
   onShowDetails,
   onPasteAndCreate,
   onRefresh,
+  onUpdateQueueOptions,
 }: {
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
@@ -84,6 +97,7 @@ export function TaskList({
   onShowDetails?: (task: Task) => void;
   onPasteAndCreate?: () => void;
   onRefresh?: () => void;
+  onUpdateQueueOptions: (task: Task, patch: { priority?: TaskPriority; obeySchedule?: boolean }) => Promise<boolean>;
 }) {
   const { t } = useTranslation();
   const reduceMotion = !!useReducedMotion();
@@ -95,7 +109,6 @@ export function TaskList({
   const initialLoadDoneRef = useRef(false);
   const taskIds = useTaskDataStore((s) => s.taskIds);
   const storeFailureOptions = useTaskDataStore((s) => s.failureOptions);
-  const total = useTaskDataStore((s) => s.total);
   const nextCursor = useTaskDataStore((s) => s.nextCursor);
   const hasMore = useTaskDataStore((s) => s.hasMore);
   const filterOptions = useTaskDataStore((s) => s.filterOptions);
@@ -184,8 +197,42 @@ export function TaskList({
       loadingPageRef.current = true;
       if (!append) setLoading(true);
       try {
-        const result = await listTasksCursor(taskCursorInput(cursor));
-        setTaskCursorPage(result.items, result.totalEstimate, result.nextCursor, result.filterOptions, append);
+        const baseInput = taskCursorInput(cursor);
+        const input =
+          nav === "queue"
+            ? {
+                ...baseInput,
+                search: debouncedSearch,
+                sortKey: "queue_order",
+                sortDirection: "asc",
+                fileType: "all",
+                source: "all",
+                failureCategory: "all",
+                resume: "all",
+              }
+            : nav === "attention"
+              ? {
+                  ...baseInput,
+                  search: debouncedSearch,
+                  sortKey: "updated_at",
+                  sortDirection: "desc",
+                  fileType: "all",
+                  source: "all",
+                  failureCategory: "all",
+                  resume: "all",
+                }
+              : {
+                  ...baseInput,
+                  search: debouncedSearch,
+                  sortKey,
+                  sortDirection,
+                  fileType: filters.fileType,
+                  source: filters.source,
+                  failureCategory: filters.failure,
+                  resume: filters.resume,
+                };
+        const result = await listTasksCursor(input);
+        setTaskCursorPage(result.items, result.minimumTotal, result.nextCursor, result.filterOptions, append);
         if (!append) {
           const currentSelectedId = useTaskUIStore.getState().selectedId;
           if (
@@ -206,12 +253,12 @@ export function TaskList({
         if (!append) initialLoadDoneRef.current = true;
       }
     },
-    [selectTask, setError, setLoading, setTaskCursorPage],
+    [debouncedSearch, filters, nav, selectTask, setError, setLoading, setTaskCursorPage, sortDirection, sortKey],
   );
 
   useEffect(() => {
     void loadPage(null, false);
-  }, [filters, loadPage, nav, debouncedSearch, sortDirection, sortKey]);
+  }, [loadPage]);
 
   /* Keep latest infinite-scroll state in refs so the virtualizer's onChange
      callback always sees fresh values without needing them as deps. */
@@ -244,9 +291,9 @@ export function TaskList({
   });
 
   // Scroll to top when filter / sort / search changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: query fields intentionally trigger this imperative virtualizer reset.
   useEffect(() => {
     virtualizer.scrollToOffset(0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters, nav, debouncedSearch, sortDirection, sortKey]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedTasks = useCallback(() => {
@@ -258,9 +305,41 @@ export function TaskList({
     [filtered, selectedIdSet],
   );
   const allVisibleSelected = filtered.length > 0 && visibleSelectedCount === filtered.length;
+
+  // P0c: Infer a single primary bulk action from the selection's status mix so the
+  // selection bar can surface one prominent button instead of always showing both
+  // Pause All and Resume All side-by-side (which differed only by icon and invited
+  // mis-clicks on a 50-task selection). Returns null when statuses are mixed or
+  // include terminal states (completed) where pause/resume/retry don't apply.
+  //
+  // Selector returns a primitive so Zustand's Object.is equality prevents re-renders
+  // when progress patches (250ms) change taskById but not the status mix.
+  const primaryBulkAction = useTaskDataStore<"pause" | "resume" | "retry" | null>((s) => {
+    if (selectedIds.length === 0) return null;
+    // P2: queued is grouped with downloading/retrying (pauseable), NOT with
+    // paused/waiting_network (resumable). bulkResume filters out queued, so
+    // grouping queued with paused produced a silent no-op "Resume" button for
+    // all-queued selections. toggleTransfer and bulkPause both treat queued
+    // as pauseable, so "Pause" is the correct inferred action for all-queued.
+    let allActive = true; // downloading | retrying | queued
+    let allPaused = true; // paused | waiting_network
+    let allFailed = true; // failed | needs_attention
+    for (const id of selectedIds) {
+      const status = s.taskById[id]?.status;
+      if (!status) return null;
+      if (status !== "downloading" && status !== "retrying" && status !== "queued") allActive = false;
+      if (status !== "paused" && status !== "waiting_network") allPaused = false;
+      if (status !== "failed" && status !== "needs_attention") allFailed = false;
+      if (status === "completed") return null;
+    }
+    if (allActive) return "pause";
+    if (allPaused) return "resume";
+    if (allFailed) return "retry";
+    return null;
+  });
   const sourceOptions = filterOptions.sources;
-  // E-3: failureOptions 从 store 读取，避免依赖 taskById（每 250ms 重建引用）导致每帧重算。
-  // 后端已提供 failureCategories 时优先使用，否则用 store 计算的值。
+  // E-3: failureOptions is read from the store to avoid depending on taskById (which rebuilds its reference every 250ms) and causing per-frame recompute.
+  // Prefer backend-provided failureCategories when available; otherwise use the store-computed value.
   const failureOptions =
     filterOptions.failureCategories.length > 0 ? filterOptions.failureCategories : storeFailureOptions;
 
@@ -362,6 +441,42 @@ export function TaskList({
     );
   }
 
+  if (nav === "attention") {
+    return (
+      <Suspense fallback={<SurfaceLoadingSkeleton label={t("attentionCenter.loading")} />}>
+        <AttentionCenter
+          taskIds={filtered}
+          loading={loading}
+          error={error}
+          hasMore={hasMore}
+          onLoadMore={() => void loadPage(nextCursor, true)}
+          onRetryLoad={() => void loadPage(null, false)}
+          onResolve={onResolveAttention}
+          onShowDetails={onShowDetails}
+        />
+      </Suspense>
+    );
+  }
+
+  if (nav === "queue") {
+    return (
+      <Suspense fallback={<SurfaceLoadingSkeleton label={t("queueCenter.loading")} />}>
+        <QueueCenter
+          taskIds={filtered}
+          loading={loading}
+          error={error}
+          hasMore={hasMore}
+          onLoadMore={() => void loadPage(nextCursor, true)}
+          onRetryLoad={() => void loadPage(null, false)}
+          onPause={onToggleTransfer}
+          onReorder={onReorder}
+          onShowDetails={onShowDetails}
+          onUpdateOptions={onUpdateQueueOptions}
+        />
+      </Suspense>
+    );
+  }
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-root">
       {error ? (
@@ -389,45 +504,58 @@ export function TaskList({
         {statusAnnouncement}
       </div>
 
-      {/* Selection bar — contextual, appears when rows are multi-selected */}
+      {/* Selection bar — contextual, appears when rows are multi-selected.
+          P0c: collapsed from 7 inline controls to 3-4 (Count+Clear, inferred
+          primary action, More menu, Delete). Removes the Pause/Resume
+          side-by-side mis-click risk; Pause All / Resume All / Retry / Open
+          Folder / Export live in the More popover. */}
       {selectedIds.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5 border-b border-border-accent-subtle bg-accent-primary/[0.04] px-3 py-1.5 text-xs md:gap-2">
           <span className="font-medium text-text-secondary">
             {t("taskList.selectedCount", { count: selectedIds.length })}
           </span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-9 text-xs md:h-8"
-            onClick={() => setSelectedIds(filtered)}
-            disabled={allVisibleSelected}
-          >
-            {t("taskList.selectVisible", { count: filtered.length })}
-          </Button>
           <Button type="button" variant="ghost" size="sm" className="h-9 text-xs md:h-8" onClick={clearSelectedIds}>
             <X className="mr-1 h-3 w-3" aria-hidden />
             {t("taskList.clearSelection")}
           </Button>
           <div className="mx-1 h-4 w-px bg-border-subtle" aria-hidden />
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-11 md:h-8"
-            onClick={() => onBulkPause(selectedTasks())}
-          >
-            {t("taskList.bulkPause")}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-11 md:h-8"
-            onClick={() => onBulkResume(selectedTasks())}
-          >
-            {t("taskList.bulkResume")}
-          </Button>
+          {/* Inferred primary action: Pause / Resume / Retry based on selection status mix. */}
+          {primaryBulkAction === "pause" ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-11 md:h-8"
+              onClick={() => onBulkPause(selectedTasks())}
+            >
+              <Pause className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+              {t("taskList.bulkPause")}
+            </Button>
+          ) : null}
+          {primaryBulkAction === "resume" ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-11 md:h-8"
+              onClick={() => onBulkResume(selectedTasks())}
+            >
+              <Play className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+              {t("taskList.bulkResume")}
+            </Button>
+          ) : null}
+          {primaryBulkAction === "retry" ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-11 md:h-8"
+              onClick={() => onBulkRetry(selectedTasks())}
+            >
+              <RotateCcw className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+              {t("taskList.bulkRetry")}
+            </Button>
+          ) : null}
           <Popover>
             <PopoverTrigger asChild>
               <Button
@@ -443,7 +571,10 @@ export function TaskList({
             </PopoverTrigger>
             <PopoverContent align="start" className="w-52">
               <div className="space-y-0.5" role="menu">
+                <BulkMenuItem label={t("taskList.bulkPause")} onClick={() => onBulkPause(selectedTasks())} />
+                <BulkMenuItem label={t("taskList.bulkResume")} onClick={() => onBulkResume(selectedTasks())} />
                 <BulkMenuItem label={t("taskList.bulkRetry")} onClick={() => onBulkRetry(selectedTasks())} />
+                <div className="my-1 h-px bg-border-subtle" aria-hidden />
                 <BulkMenuItem label={t("taskList.bulkOpenFolder")} onClick={() => onBulkOpenFolder(selectedTasks())} />
                 <BulkMenuItem
                   label={t("taskList.selectVisible", { count: filtered.length })}
@@ -520,7 +651,7 @@ export function TaskList({
             type="button"
             variant="ghost"
             size="sm"
-            className="h-6 px-1.5 text-[11px] text-text-muted"
+            className="px-1.5 text-[11px] text-text-muted"
             onClick={() => setFilters({ fileType: "all", source: "all", failure: "all", resume: "all" })}
           >
             {t("taskList.clearAllFilters")}
@@ -685,6 +816,7 @@ export function TaskList({
             </div>
           ) : (
             <>
+              {/* biome-ignore lint/a11y/useSemanticElements: Virtual rows require measured positioning wrappers, so explicit list semantics avoid invalid ul/div/li nesting. */}
               <div
                 role="list"
                 aria-label={t("taskList.aria")}
@@ -737,9 +869,7 @@ export function TaskList({
                 })}
               </div>
               {hasMore ? (
-                <p className="px-2 py-3 text-center text-xs text-text-muted">
-                  {t("taskList.loadingMore", { count: Math.max(0, total - filtered.length) })}
-                </p>
+                <p className="px-2 py-3 text-center text-xs text-text-muted">{t("taskList.loadingMore")}</p>
               ) : null}
             </>
           )}
@@ -747,7 +877,7 @@ export function TaskList({
       </ListContextMenu>
     </div>
   );
-}
+});
 
 function TaskListLoadingSkeleton({ label }: { label: string }) {
   return (
@@ -825,7 +955,7 @@ function SelectControl({
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="flex h-11 items-center gap-1.5 text-text-muted md:h-8">
+    <div className="flex h-11 items-center gap-1.5 text-text-muted md:h-8">
       <span className="text-[11px] font-medium text-text-muted">{label}</span>
       <Select value={value} onValueChange={onChange}>
         <SelectTrigger aria-label={label} title={label} className="w-auto min-w-[6rem] px-2.5 text-xs font-medium">
@@ -839,7 +969,7 @@ function SelectControl({
           ))}
         </SelectContent>
       </Select>
-    </label>
+    </div>
   );
 }
 

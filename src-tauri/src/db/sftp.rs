@@ -2,6 +2,9 @@ use sqlx::{Row, SqlitePool};
 
 use crate::models::task::now_iso;
 
+/// TOFU (Trust On First Use): the first fingerprint seen for a host:port is recorded as
+/// trusted. Any subsequent mismatch is rejected as a potential MITM. The user must
+/// explicitly clear the `sftp_known_hosts` row to accept a legitimately-rotated key.
 pub async fn verify_or_record_sftp_host_key(
     pool: &SqlitePool,
     host: &str,

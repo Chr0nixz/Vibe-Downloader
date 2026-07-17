@@ -15,6 +15,18 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+fn bucket_capacity_milli(limit_bps: i64) -> i64 {
+    limit_bps.saturating_mul(1000)
+}
+
+fn refill_tokens(tokens: &AtomicI64, refill_milli: i64, max_milli: i64) {
+    // Relaxed ordering is sufficient because the balance does not publish any
+    // other memory; fetch_update is required only to preserve numeric atomicity.
+    let _ = tokens.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(refill_milli).min(max_milli))
+    });
+}
+
 /// Lock-free token bucket speed limiter.
 ///
 /// Uses atomic operations instead of a Mutex to avoid lock contention
@@ -35,7 +47,7 @@ impl GlobalSpeedLimiter {
         let limit = limit_bps.unwrap_or(0).max(0);
         Self {
             limit_bps: AtomicI64::new(limit),
-            tokens_milli: AtomicI64::new(limit * 1000),
+            tokens_milli: AtomicI64::new(bucket_capacity_milli(limit)),
             last_refill_millis: AtomicU64::new(now_millis()),
             parent: None,
         }
@@ -49,7 +61,7 @@ impl GlobalSpeedLimiter {
         match limit_bps {
             Some(limit) if limit > 0 => Arc::new(Self {
                 limit_bps: AtomicI64::new(limit),
-                tokens_milli: AtomicI64::new(limit * 1000),
+                tokens_milli: AtomicI64::new(bucket_capacity_milli(limit)),
                 last_refill_millis: AtomicU64::new(now_millis()),
                 parent: Some(parent),
             }),
@@ -60,11 +72,15 @@ impl GlobalSpeedLimiter {
     pub async fn set_limit(&self, limit_bps: Option<i64>) {
         let limit = limit_bps.unwrap_or(0).max(0);
         self.limit_bps.store(limit, Ordering::Relaxed);
-        self.tokens_milli.store(limit * 1000, Ordering::Relaxed);
+        self.tokens_milli
+            .store(bucket_capacity_milli(limit), Ordering::Relaxed);
         self.last_refill_millis
             .store(now_millis(), Ordering::Relaxed);
     }
 
+    /// Hierarchical limiting: each byte is charged to BOTH the per-task child and the global
+    /// parent. The effective limit is the minimum of the two (stricter wins). This lets the
+    /// global limiter cap aggregate throughput while per-task limiters enforce individual caps.
     pub fn current_limit_bps(&self) -> Option<i64> {
         let own = match self.limit_bps.load(Ordering::SeqCst) {
             value if value > 0 => Some(value),
@@ -102,7 +118,10 @@ impl GlobalSpeedLimiter {
                 return;
             }
 
-            // Refill: only one thread succeeds the CAS and performs the refill.
+            // Only the thread that wins the `last_refill_millis` CAS performs the refill;
+            // losers observe the updated timestamp and skip. This avoids a Mutex while
+            // preventing double-refill. Tokens are capped at `limit × 1000` milli-bytes
+            // (1 second's worth) so idle periods don't accumulate a burst.
             let now = now_millis();
             let last = self.last_refill_millis.load(Ordering::Relaxed);
             if now > last
@@ -114,10 +133,11 @@ impl GlobalSpeedLimiter {
                 let elapsed_millis = (now - last) as i64;
                 // Refill in milli-bytes: limit (bytes/sec) × elapsed_ms = milli-bytes
                 let refill_milli = elapsed_millis.saturating_mul(limit);
-                let current = self.tokens_milli.load(Ordering::Relaxed);
-                let max_milli = limit * 1000;
-                let new_tokens = (current + refill_milli).min(max_milli);
-                self.tokens_milli.store(new_tokens, Ordering::Relaxed);
+                refill_tokens(
+                    &self.tokens_milli,
+                    refill_milli,
+                    bucket_capacity_milli(limit),
+                );
             }
 
             // Consume: try to take tokens via CAS.
@@ -151,7 +171,6 @@ impl GlobalSpeedLimiter {
                 continue;
             }
 
-            // CAS contention backoff: spin a few times, then yield.
             spin_count += 1;
             if spin_count >= 4 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -205,5 +224,29 @@ mod tests {
         let child = GlobalSpeedLimiter::with_parent(parent, Some(1_000_000));
         // Should return the minimum of parent and child.
         assert_eq!(child.current_limit_bps(), Some(1_000_000));
+    }
+
+    #[test]
+    fn concurrent_refill_does_not_overwrite_token_consumption() {
+        let tokens = Arc::new(AtomicI64::new(1_000_000));
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let tokens = tokens.clone();
+            workers.push(std::thread::spawn(move || {
+                for _ in 0..10_000 {
+                    tokens.fetch_sub(1, Ordering::Relaxed);
+                }
+            }));
+        }
+        let refill_tokens_ref = tokens.clone();
+        workers.push(std::thread::spawn(move || {
+            for _ in 0..10_000 {
+                refill_tokens(&refill_tokens_ref, 4, 2_000_000);
+            }
+        }));
+        for worker in workers {
+            worker.join().expect("speed limiter worker");
+        }
+        assert_eq!(tokens.load(Ordering::Relaxed), 1_000_000);
     }
 }

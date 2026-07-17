@@ -3,13 +3,20 @@ mod common;
 use std::{
     io::{Read, Write},
     net::TcpStream,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use common::TestServer;
 use tauri_app_lib::{
+    db,
     download::{DownloadEngine, HlsEngine, HttpEngine, ProbeRequest},
+    models::{SegmentStatus, TaskStatus},
     proxy::ResolvedProxyConfig,
+    state_machine,
 };
 
 // E-1 integration coverage.
@@ -71,6 +78,17 @@ seg0.ts\n\
 #EXT-X-ENDLIST\n";
 
 const AES_KEY: [u8; 16] = [0u8; 16];
+
+const RECOVERY_PLAYLIST: &str = "#EXTM3U\n\
+#EXT-X-VERSION:3\n\
+#EXT-X-TARGETDURATION:1\n\
+#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXTINF:1.0,\n\
+recovery-0.ts\n\
+#EXT-X-DISCONTINUITY\n\
+#EXTINF:1.0,\n\
+recovery-1.ts\n\
+#EXT-X-ENDLIST\n";
 
 fn ffmpeg_available() -> bool {
     std::process::Command::new("ffmpeg")
@@ -164,6 +182,93 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         app: None,
         request_id: None,
     }
+}
+
+fn generate_test_transport_stream() -> Vec<u8> {
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("vibe-hls-recovery-{id}.ts"));
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=5",
+            "-t",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "mpeg2video",
+            "-f",
+            "mpegts",
+        ])
+        .arg(&path)
+        .status()
+        .expect("start ffmpeg fixture generation");
+    assert!(status.success(), "ffmpeg fixture generation failed");
+    let bytes = std::fs::read(&path).expect("read generated MPEG-TS fixture");
+    let _ = std::fs::remove_file(path);
+    bytes
+}
+
+fn start_recovery_server(segment: Arc<Vec<u8>>, requests: Arc<[AtomicUsize; 2]>) -> TestServer {
+    TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/");
+        let (content_type, body, delay) = match path {
+            "/recovery.m3u8" => (
+                "application/vnd.apple.mpegurl",
+                RECOVERY_PLAYLIST.as_bytes(),
+                None,
+            ),
+            "/recovery-0.ts" => {
+                requests[0].fetch_add(1, Ordering::SeqCst);
+                ("video/mp2t", segment.as_slice(), None)
+            }
+            "/recovery-1.ts" => {
+                requests[1].fetch_add(1, Ordering::SeqCst);
+                (
+                    "video/mp2t",
+                    segment.as_slice(),
+                    Some(Duration::from_millis(750)),
+                )
+            }
+            _ => ("text/plain", b"not found".as_slice(), None),
+        };
+        let status = if path.starts_with("/recovery") {
+            "200 OK"
+        } else {
+            "404 Not Found"
+        };
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
+        let _ = stream.write_all(body);
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -364,6 +469,119 @@ async fn probe_fails_when_playlist_url_returns_500() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_resumes_staging_without_redownloading_completed_segments() {
+    if !ffmpeg_available() {
+        eprintln!("skipping HLS staging recovery test: ffmpeg not in PATH");
+        return;
+    }
+    let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let server =
+        start_recovery_server(Arc::new(generate_test_transport_stream()), requests.clone());
+    let pool = common::test_pool("hls-staging-recovery").await;
+    let mut paths = common::TestPaths::new("hls-staging-recovery");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("recovery.mp4");
+    let task = common::download_task(
+        "hls-staging-recovery",
+        format!("{}/recovery.m3u8", server.base_url),
+        "hls",
+        "recovery.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert HLS task");
+
+    let engine = new_engine();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let first_download = tokio::spawn({
+        let engine = engine.clone();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+
+    loop {
+        let segments = db::list_hls_segments(&pool, "hls-staging-recovery")
+            .await
+            .expect("list HLS segments");
+        let first_completed = segments.iter().any(|segment| {
+            segment.media_sequence == 0 && segment.status == SegmentStatus::Completed
+        });
+        if first_completed && requests[1].load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cancel.cancel();
+    first_download
+        .await
+        .expect("HLS download task join")
+        .expect("HLS cancellation is a clean staging pause");
+
+    let paused = db::get_task_record(&pool, "hls-staging-recovery")
+        .await
+        .expect("read paused HLS task")
+        .expect("paused HLS task exists");
+    assert_eq!(paused.status, TaskStatus::Paused);
+    let no_app = Option::<tauri::AppHandle>::None;
+    let resumed = state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &paused.id,
+        TaskStatus::Downloading,
+        paused.downloaded_bytes,
+        1,
+        Some("Downloading"),
+        Some("resumed"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist HLS resume");
+
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("resume HLS download");
+
+    assert_eq!(
+        requests[0].load(Ordering::SeqCst),
+        1,
+        "completed HLS segment must be reused from staging"
+    );
+    assert_eq!(
+        requests[1].load(Ordering::SeqCst),
+        2,
+        "interrupted HLS segment must be requested again"
+    );
+    assert!(paths.final_path.exists());
+    assert!(
+        std::fs::metadata(&paths.final_path)
+            .expect("HLS MP4 metadata")
+            .len()
+            > 0
+    );
+    let completed = db::get_task_record(&pool, "hls-staging-recovery")
+        .await
+        .expect("read completed HLS task")
+        .expect("completed HLS task exists");
+    assert_eq!(completed.status, TaskStatus::Completed);
+}
+
 // ===== E-1 idle-read timeout coverage note =====
 //
 // The E-1 idle-read timeout helper (`read_with_idle_timeout`) and its 4
@@ -371,14 +589,11 @@ async fn probe_fails_when_playlist_url_returns_500() {
 // `src/download/mod.rs`. HLS and DASH both wrap `response.chunk()` with
 // this helper (error codes `hls_segment_stalled` / `dash_segment_stalled`).
 //
-// A per-protocol stall integration test is not added here because:
-// 1. The full `download()` path requires a `tauri::AppHandle` (not
-//    constructible in external test binaries), so only `probe()` is
-//    testable at this level.
-// 2. The helper is generic over `Future<Output = Result<Option<T>, E>>`;
+// A 60-second per-protocol stall integration test is not added here because:
+// 1. The helper is generic over `Future<Output = Result<Option<T>, E>>`;
 //    `response.chunk()` satisfies this contract. The SFTP session-level
 //    stall test in `sftp_engine.rs` (`sftp_stalled_read_is_detectable_via_idle_timeout`)
 //    proves the integration pattern end-to-end for the `AsyncRead::read`
 //    family; HTTP chunk uses the same helper with a compatible future.
-// 3. Adding `reqwest` as a dev-dependency solely for a chunk-stall test
-//    would be disproportionate given the helper's existing unit coverage.
+// 2. Waiting for the production timeout would make the normal suite slow;
+//    staging cancellation and restart are covered by the test above.

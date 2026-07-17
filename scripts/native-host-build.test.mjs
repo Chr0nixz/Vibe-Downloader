@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { nativeHostArtifactPaths, nativeHostCargoEnvironment, resolveTargetTriple } from "./native-host-build.mjs";
+import {
+  nativeHostArtifactPaths,
+  nativeHostCargoEnvironment,
+  resolveTargetTriple,
+  verifyStagedNativeHost,
+} from "./native-host-build.mjs";
 
 test("maps every release matrix platform to the expected Rust target", () => {
   assert.equal(resolveTargetTriple("windows", "x64"), "x86_64-pc-windows-msvc");
@@ -33,4 +40,34 @@ test("does not pass the bundle overlay into the nested sidecar Cargo build", () 
   });
   assert.equal(env.TAURI_CONFIG, undefined);
   assert.equal(env.VIBE_BROWSER_PROFILE, "release");
+});
+
+test("verifies a staged sidecar without rebuilding it", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "vibe-native-host-test-"));
+  try {
+    const targetTriple = process.platform === "win32" ? "x86_64-pc-windows-msvc" : "x86_64-unknown-linux-gnu";
+    const paths = nativeHostArtifactPaths(targetTriple, root);
+    await mkdir(path.dirname(paths.staged), { recursive: true });
+    await writeFile(paths.staged, "sidecar");
+    await chmod(paths.staged, 0o755);
+    const result = await verifyStagedNativeHost({
+      targetTriple,
+      workspaceRoot: root,
+    });
+    assert.equal(result.bytes, 7);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a missing staged sidecar", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "vibe-native-host-test-"));
+  try {
+    await assert.rejects(
+      verifyStagedNativeHost({ targetTriple: "x86_64-pc-windows-msvc", workspaceRoot: root }),
+      /missing or empty/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -28,8 +28,10 @@ import type {
   QueueChangedPayload,
   RequestDiagnostic,
   ResolveTaskAttentionInput,
+  SchedulerSnapshot,
   SegmentSummary,
   SftpDirectoryProbe,
+  StartupStatus,
   SystemFileIcon,
   TaskEvent,
   TaskProxySettings,
@@ -96,6 +98,24 @@ async function loadBrowserAdapter() {
   return import("@/lib/tauri-browser");
 }
 
+export async function getStartupStatus(): Promise<StartupStatus> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).getStartupStatus();
+  const commands = await loadNativeCommands();
+  return runCommand("getStartupStatus", () => commands.getStartupStatus());
+}
+
+export async function openDatabaseRecoveryFolder(): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).openDatabaseRecoveryFolder();
+  const commands = await loadNativeCommands();
+  await runCommand("openDatabaseRecoveryFolder", () => commands.openDatabaseRecoveryFolder());
+}
+
+export async function resetDatabaseForRecovery(): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).resetDatabaseForRecovery();
+  const commands = await loadNativeCommands();
+  await runCommand("resetDatabaseForRecovery", () => commands.resetDatabaseForRecovery());
+}
+
 export async function listTasks(): Promise<Task[]> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).listTasks();
@@ -131,6 +151,14 @@ export async function getTaskStats(): Promise<TaskStatsSnapshot> {
   return runCommand("getTaskStats", () => commands.getTaskStats());
 }
 
+export async function getSchedulerSnapshot(taskIds: string[]): Promise<SchedulerSnapshot> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getSchedulerSnapshot(taskIds);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("getSchedulerSnapshot", () => commands.getSchedulerSnapshot(taskIds));
+}
+
 export interface TaskPage {
   items: Task[];
   total: number;
@@ -141,7 +169,7 @@ export interface TaskPage {
 export interface TaskCursorPage {
   items: Task[];
   nextCursor: string | null;
-  totalEstimate: number;
+  minimumTotal: number;
   filterOptions: ListTasksCursorResult["filterOptions"];
 }
 
@@ -159,7 +187,7 @@ export async function listTasksCursor(input: ListTasksCursorInput): Promise<Task
   return {
     items: result.items.map(normalizeTask),
     nextCursor: result.nextCursor,
-    totalEstimate: Number(result.totalEstimate) || result.items.length,
+    minimumTotal: Number(result.minimumTotal) || result.items.length,
     filterOptions: result.filterOptions,
   };
 }

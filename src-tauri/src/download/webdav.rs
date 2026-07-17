@@ -22,9 +22,9 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct WebDavEngine {
-    /// E-4: 共享 `HttpEngine` 的客户端缓存与 probe/download 实现。WebDAV 把
-    /// webdav://webdavs:// 映射为 http://https:// 后委托给 HttpEngine，因此
-    /// 直接复用其缓存而非每次构造新实例。
+    /// E-4: Shares the `HttpEngine` client cache and probe/download implementation. WebDAV maps
+    /// `webdav://`/`webdavs://` to `http://`/`https://` and delegates to HttpEngine, so
+    /// it reuses the cache directly rather than constructing a new instance each time.
     http: Arc<HttpEngine>,
 }
 
@@ -62,7 +62,7 @@ impl WebDavEngine {
         let target = WebDavTarget::parse_file(&request.uri)?;
         let credentials = resolve_probe_credentials(&target, request).await?;
         let headers = webdav_request_headers(&request.request_headers, credentials.as_ref());
-        // E-4: 复用共享 HttpEngine 的客户端缓存，而非每次构造新实例。
+        // E-4: Reuses the shared HttpEngine client cache rather than constructing a new instance each time.
         let probe = self
             .http
             .probe_with_headers(&target.http_url, &headers)
@@ -117,7 +117,7 @@ impl WebDavEngine {
         let mut task = context.task.clone();
         task.url = url_target.http_url;
         task.final_url = Some(final_target.http_url);
-        // E-4: 复用共享 HttpEngine 的客户端缓存与下载实现。
+        // E-4: Reuses the shared HttpEngine client cache and download implementation.
         self.http
             .download(DownloadContext {
                 task,

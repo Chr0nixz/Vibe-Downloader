@@ -44,5 +44,8 @@ pub(super) fn speed_is_stable(speed_history: &VecDeque<(Instant, i64)>) -> bool 
     let min = speeds.iter().copied().min().unwrap_or(0);
     let max = speeds.iter().copied().max().unwrap_or(0);
     let average = speeds.iter().sum::<i64>() as f64 / speeds.len() as f64;
+    // Stable = max-to-min spread within 15% of the mean. Zero-speed samples are excluded
+    // from the band check (they indicate a momentary stall, not a steady-state speed) but
+    // still count against the minimum-sample requirement.
     average > 0.0 && (max - min) as f64 <= average * 0.15
 }

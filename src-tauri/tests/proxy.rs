@@ -1,6 +1,9 @@
 use tauri_app_lib::{
     db,
-    proxy::{normalize_proxy_url, socks5_connect, AppProxyMode, ResolvedProxyConfig},
+    models::AppErrorPayload,
+    proxy::{
+        normalize_proxy_url, proxy_connect_error, socks5_connect, AppProxyMode, ResolvedProxyConfig,
+    },
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -148,6 +151,10 @@ async fn socks5_connect_surfaces_auth_failure() {
     .await
     .expect_err("auth should fail");
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    let payload: AppErrorPayload = serde_json::from_str(&proxy_connect_error("SFTP", &error))
+        .expect("structured proxy auth error");
+    assert_eq!(payload.code, "proxy_auth_failed");
+    assert!(payload.recoverable);
     server.await.expect("server");
 }
 
@@ -178,6 +185,10 @@ async fn socks5_connect_surfaces_proxy_failure_status() {
     .await
     .expect_err("proxy should report failure");
     assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+    let payload: AppErrorPayload = serde_json::from_str(&proxy_connect_error("FTP", &error))
+        .expect("structured proxy connection error");
+    assert_eq!(payload.code, "proxy_connection_failed");
+    assert!(payload.recoverable);
     server.await.expect("server");
 }
 

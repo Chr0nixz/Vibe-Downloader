@@ -11,43 +11,63 @@ pub struct DbConnection {
     pub backup_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DatabaseRecovery {
+    pub reason: String,
+    pub message: String,
+    pub database_path: PathBuf,
+    pub backup_path: Option<PathBuf>,
+    pub backup_verified: bool,
+}
+
+pub enum DatabaseConnectOutcome {
+    Ready(DbConnection),
+    RecoveryRequired(DatabaseRecovery),
+}
+
 pub async fn connect(db_path: &Path) -> Result<DbConnection, String> {
+    match connect_for_startup(db_path).await? {
+        DatabaseConnectOutcome::Ready(connection) => Ok(connection),
+        DatabaseConnectOutcome::RecoveryRequired(recovery) => Err(recovery.message),
+    }
+}
+
+pub async fn connect_for_startup(db_path: &Path) -> Result<DatabaseConnectOutcome, String> {
     let pool = open_pool(db_path).await?;
 
     match run_migrations(&pool).await {
         Ok(()) => {
             tracing::info!(db_path = %db_path.display(), "database connected and migrations applied");
-            Ok(DbConnection {
+            Ok(DatabaseConnectOutcome::Ready(DbConnection {
                 pool,
                 data_was_reset: false,
                 backup_path: None,
-            })
+            }))
         }
-        Err(error) if should_rebuild_database_after_migration_error(&error) => {
+        Err(error) if requires_database_recovery(&error) => {
             tracing::warn!(
                 db_path = %db_path.display(),
                 error = %error,
-                "rebuilding database after recognized migration history reset"
+                "database migration requires explicit recovery"
             );
+            let reason = migration_recovery_reason(&error).to_string();
+            let message = format!("Database migration requires recovery: {error}");
+            let backup = create_verified_backup(&pool, db_path).await;
             pool.close().await;
-            let backup_path = backup_database_files(db_path)?;
-            tracing::info!(
-                db_path = %db_path.display(),
-                backup_path = %backup_path.display(),
-                "database backed up before rebuild"
-            );
-            remove_database_files(db_path)?;
-
-            let pool = open_pool(db_path).await?;
-            run_migrations(&pool)
-                .await
-                .map_err(|e| format!("Migration failed after database rebuild: {e}"))?;
-            tracing::info!(db_path = %db_path.display(), "database rebuilt and migrations applied");
-            Ok(DbConnection {
-                pool,
-                data_was_reset: true,
-                backup_path: Some(backup_path),
-            })
+            let (backup_path, backup_verified) = match backup {
+                Ok(path) => (Some(path), true),
+                Err(backup_error) => {
+                    tracing::error!(error = %backup_error, "database recovery backup failed");
+                    (None, false)
+                }
+            };
+            Ok(DatabaseConnectOutcome::RecoveryRequired(DatabaseRecovery {
+                reason,
+                message,
+                database_path: db_path.to_path_buf(),
+                backup_path,
+                backup_verified,
+            }))
         }
         // Note: as of sqlx 0.9.0, `VersionTooOld` is declared on `MigrateError`
         // but is never constructed by `Migrator::run_direct`. The actual
@@ -69,6 +89,15 @@ pub async fn connect(db_path: &Path) -> Result<DbConnection, String> {
     }
 }
 
+fn migration_recovery_reason(error: &MigrateError) -> &'static str {
+    match error {
+        MigrateError::VersionMissing(_) => "migration_missing",
+        MigrateError::VersionMismatch(_) => "migration_mismatch",
+        MigrateError::Dirty(_) => "migration_dirty",
+        _ => "migration_failed",
+    }
+}
+
 async fn open_pool(db_path: &Path) -> Result<SqlitePool, String> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
 
@@ -76,6 +105,9 @@ async fn open_pool(db_path: &Path) -> Result<SqlitePool, String> {
         .max_connections(16)
         .after_connect(|connection, _metadata| {
             Box::pin(async move {
+                // WAL + synchronous=NORMAL is the standard high-throughput SQLite config (durable across
+                // crashes, may lose the last txn on power loss). busy_timeout=5000ms lets writers wait
+                // out lock contention from the scheduler/worker pool instead of failing with SQLITE_BUSY.
                 sqlx::query("PRAGMA foreign_keys = ON")
                     .execute(&mut *connection)
                     .await?;
@@ -100,34 +132,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
     sqlx::migrate!("./src/db/migrations").run(pool).await
 }
 
-fn should_rebuild_database_after_migration_error(error: &MigrateError) -> bool {
-    // VersionMissing / VersionMismatch: the migration history recorded in
-    // `_sqlx_migrations` doesn't match the embedded migration set. This is
-    // typical when a user downgrades the app binary — the on-disk schema
-    // references migrations the new binary no longer ships. Rebuilding from
-    // scratch is safe because the user explicitly accepts the data loss in
-    // exchange for a working app (the dialog offers to open the backup folder).
-    //
-    // Dirty(n): a previous migration run was interrupted partway through
-    // migration `n`, leaving `_sqlx_migrations` flagged dirty. sqlx refuses to
-    // proceed on a dirty database. Rather than forcing the user to manually
-    // edit the table or delete the file, we treat this the same as a history
-    // mismatch: backup the file, drop it, and re-run all migrations from
-    // scratch. This loses task history but is strictly better than refusing
-    // to start.
-    //
-    // VersionTooOld(current, target): NOT covered here. This means the
-    // embedded migration set is OLDER than what's recorded on disk — i.e.
-    // the user is trying to run an older app against a newer schema. Rebuilding
-    // would silently downgrade and lose newer-version data. Instead we surface
-    // a clear error so the user knows to upgrade the app, not reset the DB.
+fn requires_database_recovery(error: &MigrateError) -> bool {
+    // History mismatches and interrupted migrations are recoverable only after
+    // the original file is preserved and the user explicitly approves reset.
+    // VersionTooOld remains a hard upgrade error rather than offering downgrade.
     matches!(
         error,
         MigrateError::VersionMissing(_) | MigrateError::VersionMismatch(_) | MigrateError::Dirty(_)
     )
 }
 
-fn remove_database_files(db_path: &Path) -> Result<(), String> {
+pub fn reset_database_files(db_path: &Path) -> Result<(), String> {
     for path in sqlite_database_paths(db_path) {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
@@ -144,22 +159,38 @@ fn remove_database_files(db_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn backup_database_files(db_path: &Path) -> Result<PathBuf, String> {
+async fn create_verified_backup(pool: &SqlitePool, db_path: &Path) -> Result<PathBuf, String> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let backup_path = db_path.with_extension(format!("db.bak-{timestamp}"));
-    std::fs::copy(db_path, &backup_path).map_err(|e| {
-        format!(
-            "Failed to backup database to {}: {e}",
-            backup_path.display()
-        )
-    })?;
-    let wal_path = sqlite_sidecar_path(db_path, "-wal");
-    if wal_path.exists() {
-        let wal_backup = sqlite_sidecar_path(&backup_path, "-wal");
-        let _ = std::fs::copy(&wal_path, &wal_backup);
+    if backup_path.exists() {
+        std::fs::remove_file(&backup_path)
+            .map_err(|e| format!("Failed to replace stale database backup: {e}"))?;
+    }
+    sqlx::query("VACUUM INTO ?")
+        .bind(backup_path.to_string_lossy().to_string())
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to create a consistent database backup: {e}"))?;
+
+    let backup_url = format!("sqlite:{}?mode=ro", backup_path.display());
+    let verification_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&backup_url)
+        .await
+        .map_err(|e| format!("Failed to open the database backup for verification: {e}"))?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&verification_pool)
+        .await
+        .map_err(|e| format!("Failed to verify the database backup: {e}"))?;
+    verification_pool.close().await;
+    if integrity != "ok" {
+        let _ = std::fs::remove_file(&backup_path);
+        return Err(format!(
+            "Database backup integrity check failed: {integrity}"
+        ));
     }
     Ok(backup_path)
 }
@@ -197,24 +228,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rebuilds_for_version_history_mismatch_and_dirty() {
-        // VersionMissing / VersionMismatch: rebuild (user accepted data loss).
-        assert!(should_rebuild_database_after_migration_error(
-            &MigrateError::VersionMissing(7)
-        ));
-        assert!(should_rebuild_database_after_migration_error(
-            &MigrateError::VersionMismatch(7)
-        ));
-        // Dirty: also rebuild — interrupted migration leaves the DB in an
-        // unusable state and forcing a rebuild is safer than asking the user
-        // to manually edit the `_sqlx_migrations` table.
-        assert!(should_rebuild_database_after_migration_error(
-            &MigrateError::Dirty(7)
-        ));
-        // VersionTooOld: NEVER rebuild. This would silently downgrade and lose
-        // newer-version data; the user must upgrade the app instead.
-        assert!(!should_rebuild_database_after_migration_error(
-            &MigrateError::VersionTooOld(3, 7)
-        ));
+    fn requires_recovery_for_version_history_mismatch_and_dirty() {
+        assert!(requires_database_recovery(&MigrateError::VersionMissing(7)));
+        assert!(requires_database_recovery(&MigrateError::VersionMismatch(
+            7
+        )));
+        assert!(requires_database_recovery(&MigrateError::Dirty(7)));
+        assert!(!requires_database_recovery(&MigrateError::VersionTooOld(
+            3, 7
+        )));
     }
 }

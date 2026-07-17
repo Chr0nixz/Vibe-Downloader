@@ -2,7 +2,7 @@
 //!
 //! HTTP segmented downloads use `http::segmented::diagnostics` which is tightly
 //! coupled to reqwest responses. The other engines (FTP, HLS, DASH, SFTP,
-//! Metalink) don't have reqwest responses and previously each duplicated a
+//! Metalink, BitTorrent) don't have reqwest responses and previously each duplicated a
 //! `persist_*_diagnostic` helper. This module provides a single shared entry
 //! point so those engines can stop repeating the same boilerplate.
 

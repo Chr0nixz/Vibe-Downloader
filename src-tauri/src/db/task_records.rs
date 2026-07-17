@@ -44,6 +44,7 @@ pub struct TaskTransferOptionsUpdate {
     pub priority: TaskPriority,
     pub queue_position: i64,
     pub category_key: Option<String>,
+    pub obey_schedule: bool,
 }
 
 pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, String> {
@@ -125,9 +126,10 @@ pub async fn task_stats_snapshot(pool: &SqlitePool) -> Result<TaskStatsSnapshot,
             COUNT(*) AS all_count,
             COALESCE(SUM(CASE WHEN status IN ('downloading', 'retrying') THEN 1 ELSE 0 END), 0) AS active_count,
             COALESCE(SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END), 0) AS queued_count,
-            COALESCE(SUM(CASE WHEN status IN ('paused', 'queued', 'waiting_network') THEN 1 ELSE 0 END), 0) AS paused_count,
+            COALESCE(SUM(CASE WHEN status = 'needs_attention' THEN 1 ELSE 0 END), 0) AS attention_count,
+            COALESCE(SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END), 0) AS paused_count,
             COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
-            COALESCE(SUM(CASE WHEN status IN ('failed', 'needs_attention') THEN 1 ELSE 0 END), 0) AS failed_count,
+            COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
             COALESCE(SUM(CASE WHEN status IN ('downloading', 'retrying') THEN speed_bps ELSE 0 END), 0) AS total_speed,
             COALESCE(SUM(CASE WHEN status IN ('downloading', 'retrying') THEN downloaded_bytes ELSE 0 END), 0) AS total_downloaded,
             COALESCE(SUM(CASE WHEN status IN ('downloading', 'retrying') THEN total_size ELSE 0 END), 0) AS total_bytes
@@ -170,6 +172,7 @@ pub async fn task_stats_snapshot(pool: &SqlitePool) -> Result<TaskStatsSnapshot,
         all: row.get::<i64, _>("all_count").to_string(),
         active: row.get::<i64, _>("active_count").to_string(),
         queued: row.get::<i64, _>("queued_count").to_string(),
+        attention: row.get::<i64, _>("attention_count").to_string(),
         paused: row.get::<i64, _>("paused_count").to_string(),
         completed: row.get::<i64, _>("completed_count").to_string(),
         failed: row.get::<i64, _>("failed_count").to_string(),
@@ -359,13 +362,11 @@ fn append_task_filters(query: &mut QueryBuilder<Sqlite>, input: &TaskListQuery) 
             "status IN ('downloading', 'retrying')",
         ),
         "paused" => push_static_filter(query, &mut has_where, "status = 'paused'"),
+        "queue" => push_static_filter(query, &mut has_where, "status = 'queued'"),
+        "attention" => push_static_filter(query, &mut has_where, "status = 'needs_attention'"),
         "completed" => push_static_filter(query, &mut has_where, "status = 'completed'"),
-        "failed" => push_static_filter(
-            query,
-            &mut has_where,
-            "status IN ('failed', 'needs_attention')",
-        ),
-        "settings" => push_static_filter(query, &mut has_where, "0 = 1"),
+        "failed" => push_static_filter(query, &mut has_where, "status = 'failed'"),
+        "settings" | "about" => push_static_filter(query, &mut has_where, "0 = 1"),
         _ => {}
     }
 
@@ -458,6 +459,7 @@ fn task_sort_sql(sort_key: &str) -> &'static str {
         "speed" => "speed_bps",
         "priority" => "CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 1 END",
         "queue_position" => "queue_position",
+        "queue_order" => "CASE priority WHEN 'high' THEN queue_position WHEN 'normal' THEN 1000000000000 + queue_position ELSE 2000000000000 + queue_position END",
         "status" => {
             "CASE status WHEN 'downloading' THEN 0 WHEN 'retrying' THEN 1 WHEN 'queued' THEN 2 WHEN 'paused' THEN 3 WHEN 'waiting_network' THEN 4 WHEN 'needs_attention' THEN 5 WHEN 'failed' THEN 6 WHEN 'completed' THEN 7 ELSE 8 END"
         }
@@ -468,7 +470,13 @@ fn task_sort_sql(sort_key: &str) -> &'static str {
 fn is_numeric_sort(sort_key: &str) -> bool {
     matches!(
         sort_key,
-        "file_size" | "progress" | "speed" | "status" | "priority" | "queue_position"
+        "file_size"
+            | "progress"
+            | "speed"
+            | "status"
+            | "priority"
+            | "queue_position"
+            | "queue_order"
     )
 }
 
@@ -720,6 +728,7 @@ pub async fn update_task_transfer_options(
             priority = ?,
             queue_position = ?,
             category_key = ?,
+            obey_schedule = ?,
             updated_at = ?
         WHERE id = ?
         "#,
@@ -728,6 +737,7 @@ pub async fn update_task_transfer_options(
     .bind(update.priority.as_str())
     .bind(update.queue_position)
     .bind(&update.category_key)
+    .bind(update.obey_schedule)
     .bind(crate::models::task::now_iso())
     .bind(task_id)
     .execute(pool)

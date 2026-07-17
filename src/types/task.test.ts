@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeTask } from "./task";
+import { normalizeTask, normalizeTaskProtocol } from "./task";
 
 describe("normalizeTask", () => {
   it("defensively fills optional task arrays for malformed browser preview data", () => {
@@ -36,5 +36,21 @@ describe("normalizeTask", () => {
     expect(normalized.files).toHaveLength(1);
     expect(normalized.files[0]?.totalSize).toBe(4096);
     expect(normalized.files[0]?.downloadedBytes).toBe(0);
+  });
+
+  it("infers protocols for legacy tasks and keeps unknown inputs renderable", () => {
+    expect(normalizeTaskProtocol(undefined, "https://example.com/live/index.m3u8", "index.m3u8")).toBe("hls");
+    expect(normalizeTaskProtocol(null, "magnet:?xt=urn:btih:test", "download")).toBe("bt");
+    expect(normalizeTaskProtocol("SFTP", "sftp://example.com/file", "file")).toBe("sftp");
+    expect(normalizeTaskProtocol(undefined, "not a url", "README")).toBe("unknown");
+  });
+
+  it("fills a missing protocol on the normalized task", () => {
+    const normalized = normalizeTask({
+      url: "https://example.com/file.zip",
+      fileName: "file.zip",
+      protocol: undefined,
+    } as never);
+    expect(normalized.protocol).toBe("http");
   });
 });

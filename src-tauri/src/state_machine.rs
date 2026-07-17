@@ -1,26 +1,25 @@
 use sqlx::SqlitePool;
-use tauri::AppHandle;
 
 use crate::{
     db,
-    events::emit_task_updated_record,
-    models::{TaskRecord, TaskStatus},
+    events::{emit_task_updated_record, DownloadEventTarget},
+    models::{SegmentStatus, TaskRecord, TaskStatus},
 };
 
-/// 状态转换错误。
+/// State transition error.
 #[derive(Debug, thiserror::Error)]
 pub enum TransitionError {
-    /// 当前状态不允许转入目标状态。
+    /// The current state does not allow transitioning to the target state.
     #[error("illegal transition: {from:?} → {to:?}")]
     Illegal { from: TaskStatus, to: TaskStatus },
-    /// 数据库错误。
+    /// Database error.
     #[error("database error: {0}")]
     Database(String),
-    /// 任务不存在。
+    /// Task not found.
     #[error("task not found: {0}")]
     NotFound(String),
-    /// 并发冲突：任务状态已被另一个路径修改，条件更新未匹配任何行。
-    /// 调用方应视为可恢复（非致命），按当前实际状态重新决策。
+    /// Concurrency conflict: task state was modified by another path; the conditional update matched no rows.
+    /// The caller should treat this as recoverable (non-fatal) and re-decide based on the actual current state.
     #[error("state transition conflict for task {task_id}: current is {current:?}, attempted {attempted:?}")]
     Conflict {
         task_id: String,
@@ -47,22 +46,22 @@ impl From<TransitionError> for String {
     }
 }
 
-/// 统一的状态转换入口。
+/// Unified state transition entry point.
 ///
-/// - 校验转换合法性（不合法返回 `TransitionError::Illegal`，不写 DB）
-/// - 写入 `db::update_task_status`（条件更新：`WHERE id = ? AND status = ?`）
-/// - 插入 `task_event`（如果 `event_type` 不为 `None`）
-/// - 发射 `emit_task_updated_record`
+/// - Validates transition legality (returns `TransitionError::Illegal` if invalid, no DB write)
+/// - Writes `db::update_task_status` (conditional update: `WHERE id = ? AND status = ?`)
+/// - Inserts a `task_event` (if `event_type` is not `None`)
+/// - Emits `emit_task_updated_record`
 ///
-/// **R-1 并发保护**：读旧状态、校验、更新均在同一事务内完成。条件更新
-/// `WHERE id = ? AND status = ?` 保证若另一路径已修改状态，本次更新不
-/// 匹配任何行，返回 `TransitionError::Conflict`（调用方可视为可恢复）。
+/// **R-1 concurrency protection**: reading the old state, validation, and update all happen in the same transaction.
+/// The conditional update `WHERE id = ? AND status = ?` ensures that if another path has already modified the state,
+/// this update matches no rows and returns `TransitionError::Conflict` (caller may treat as recoverable).
 ///
-/// **注意**：进度数值更新（Downloading → Downloading）不走此函数，
-/// 直接写 DB 以避免热路径开销。此函数仅用于**语义状态变更**。
+/// **Note**: Progress value updates (Downloading → Downloading) do not go through this function;
+/// they write directly to the DB to avoid hot-path overhead. This function is for **semantic state changes** only.
 #[allow(clippy::too_many_arguments)]
-pub async fn transition_task(
-    app: &AppHandle,
+pub async fn transition_task<T: DownloadEventTarget + ?Sized>(
+    app: &T,
     pool: &SqlitePool,
     task_id: &str,
     target: TaskStatus,
@@ -70,6 +69,68 @@ pub async fn transition_task(
     connection_count: i32,
     message: Option<&str>,
     event_type: Option<&str>,
+) -> Result<TaskRecord, TransitionError> {
+    transition_task_inner(
+        app,
+        pool,
+        task_id,
+        target,
+        downloaded_bytes,
+        connection_count,
+        message,
+        event_type,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Transition a task while atomically resetting its work units and retry schedule.
+///
+/// Pause/resume/retry use this path so the task row, task files, work units,
+/// event, and retry timestamp cannot describe different lifecycle states.
+#[allow(clippy::too_many_arguments)]
+pub async fn transition_task_with_runtime_state<T: DownloadEventTarget + ?Sized>(
+    app: &T,
+    pool: &SqlitePool,
+    task_id: &str,
+    target: TaskStatus,
+    downloaded_bytes: i64,
+    connection_count: i32,
+    message: Option<&str>,
+    event_type: Option<&str>,
+    event_message: Option<&str>,
+    work_unit_status: SegmentStatus,
+    work_unit_error: Option<&str>,
+    retry_after_at: Option<&str>,
+) -> Result<TaskRecord, TransitionError> {
+    transition_task_inner(
+        app,
+        pool,
+        task_id,
+        target,
+        downloaded_bytes,
+        connection_count,
+        message,
+        event_type,
+        Some(event_message),
+        Some((work_unit_status, work_unit_error, retry_after_at)),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn transition_task_inner<T: DownloadEventTarget + ?Sized>(
+    app: &T,
+    pool: &SqlitePool,
+    task_id: &str,
+    target: TaskStatus,
+    downloaded_bytes: i64,
+    connection_count: i32,
+    message: Option<&str>,
+    event_type: Option<&str>,
+    event_message_override: Option<Option<&str>>,
+    runtime_state: Option<(SegmentStatus, Option<&str>, Option<&str>)>,
 ) -> Result<TaskRecord, TransitionError> {
     // R-1: begin transaction first so read + validate + update are atomic.
     let mut tx = pool
@@ -132,7 +193,19 @@ pub async fn transition_task(
     };
 
     if let Some(event_type) = event_type {
-        db::insert_task_event_in_tx(&mut tx, task_id, event_type, message).await?;
+        let event_message = event_message_override.unwrap_or(message);
+        db::insert_task_event_in_tx(&mut tx, task_id, event_type, event_message).await?;
+    }
+
+    if let Some((work_unit_status, work_unit_error, retry_after_at)) = runtime_state {
+        db::update_segments_status_for_task_in_tx(
+            &mut tx,
+            task_id,
+            work_unit_status,
+            work_unit_error,
+        )
+        .await?;
+        db::update_task_retry_after_in_tx(&mut tx, task_id, retry_after_at).await?;
     }
 
     tx.commit()

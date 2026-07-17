@@ -1,7 +1,7 @@
-//! URL 协议分类工具：按 URL scheme 与路径后缀判定归属引擎。
+//! URL protocol classification: determines the owning engine by URL scheme and path suffix.
 //!
-//! 这是 `is_torrent_url` / `is_metalink_url` / `is_hls_url` / `is_dash_url`
-//! 的唯一来源，供 `EngineRegistry::engine_for_uri` 与任务创建路径共享。
+//! This is the single source of truth for `is_torrent_url` / `is_metalink_url` / `is_hls_url` / `is_dash_url`,
+//! shared by `EngineRegistry::engine_for_uri` and the task creation path.
 
 pub fn is_torrent_url(url: &reqwest::Url) -> bool {
     matches!(url.scheme(), "http" | "https" | "file")

@@ -96,8 +96,8 @@ VIBE_BROWSER_PROFILE=release pnpm build:extensions
 ### 2. Extension ID 一致性
 
 - 确认 GitHub Secrets 中 `VIBE_CHROME_EXTENSION_ID`、`VIBE_EDGE_EXTENSION_ID`、`VIBE_FIREFOX_EXTENSION_ID` 已设置且与商店注册一致。
-- 确认 [src-tauri/src/commands/browser.rs](../src-tauri/src/commands/browser.rs) 中 `extension_id()` 函数的 fallback 值不再用于 release profile（仅作为构建失败时的兜底）。
-- **自动化校验**：当 `VIBE_BROWSER_PROFILE=release` 时，`pnpm verify:manifest` 会断言三个 `VIBE_*_EXTENSION_ID` 环境变量均已设置、不以 `replace-with-` 开头、Firefox ID 不是 `vibe-downloader@example.invalid`。Dev profile 默认跳过此检查（允许使用 placeholder ID）。
+- Rust build script、扩展构建和校验脚本必须解析为同一组三平台 ID；release 不存在 placeholder fallback，缺任一 ID 会在编译/构建前失败。
+- **自动化校验**：candidate 从提交到仓库的 Chromium 测试公钥推导确定性 ID并与 Rust 常量比对；release 会校验三个正式 ID 的格式和完整性。Debug 默认 dev，非 Debug 默认 candidate，正式 workflow 必须显式指定 release。
 
 ### 3. Header Allowlist 一致性
 
@@ -109,11 +109,11 @@ VIBE_BROWSER_PROFILE=release pnpm build:extensions
 ### 4. Native Messaging Host 注册
 
 - 确认 [src-tauri/src/bin/vibe-native-host.rs](../src-tauri/src/bin/vibe-native-host.rs) 的 manifest 中 `allowed_origins` 和 `allowed_extensions` 仅包含正式 extension ID。
-- 确认 dev profile 的 ID（`abcdefghijklmnopabcdefghijklmnop`、`vibe-downloader@local`）不会泄露到 release 构建。
+- 确认 dev/candidate identity 不会泄露到 release 构建；release 只生成 Chrome、Edge、Firefox 三种商店包。
 
 ### 5. 隐私政策
 
-- 准备隐私政策页面，明确说明：扩展不收集个人数据、不发送远程服务器、所有数据仅在本机传递、用户可随时卸载扩展和桌面应用清除所有数据。
+- 使用 [browser-extension-privacy.md](browser-extension-privacy.md) 的隐私政策，明确说明 URL 只在本机传递、不进行远程收集，用户可随时卸载扩展和桌面应用清除数据。
 - Chrome Web Store 要求隐私政策 URL；Firefox AMO 在申请敏感权限时要求隐私政策。
 - Edge Add-ons 隐私政策要求与 Chrome 一致。
 

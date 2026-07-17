@@ -46,6 +46,7 @@ function buildGroups(t: (key: string) => string, platform: Platform): ShortcutGr
       shortcuts: [
         { keys: `${mod}\u2191`, label: t("shortcuts.selectPrevious") },
         { keys: `${mod}\u2193`, label: t("shortcuts.selectNext") },
+        { keys: `${mod}P`, label: t("shortcuts.toggleTransfer") },
         { keys: `${mod}D`, label: t("shortcuts.toggleDetails") },
         { keys: `${mod}O`, label: t("shortcuts.openFolder") },
         { keys: `${mod}\u21B5`, label: t("shortcuts.openFile") },
@@ -129,7 +130,7 @@ function ShortcutKeys({ keys }: { keys: string }) {
       {parts.map((part, index) => (
         <span key={index} className="flex items-center gap-1">
           {index > 0 ? <span className="text-[10px] text-text-muted">+</span> : null}
-          <kbd className="inline-flex min-w-[1.5rem] items-center justify-center rounded border border-border-subtle bg-surface-root px-1.5 py-0.5 font-mono text-[11px] text-text-muted shadow-[0_1px_0_oklch(0_0_0/0.08)]">
+          <kbd className="inline-flex min-w-[1.5rem] items-center justify-center rounded border border-border-subtle bg-surface-root px-1.5 py-0.5 font-mono text-[11px] text-text-muted">
             {part}
           </kbd>
         </span>

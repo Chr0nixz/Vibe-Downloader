@@ -58,6 +58,7 @@ export const commands = {
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_task", { id })),
 	getTaskStats: () => typedError<TaskStatsSnapshot, string>(__TAURI_INVOKE("get_task_stats")),
+	getSchedulerSnapshot: (taskIds: string[]) => typedError<SchedulerSnapshot, string>(__TAURI_INVOKE("get_scheduler_snapshot", { taskIds })),
 	listSegments: (input: ListSegmentsInput) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_segments", { input })),
 	listSegmentsPage: (input: CursorPageInput) => typedError<TaskSegmentsPageResult, string>(__TAURI_INVOKE("list_segments_page", { input })),
 	getSegmentSummary: (taskId: string) => typedError<SegmentSummary, string>(__TAURI_INVOKE("get_segment_summary", { taskId })),
@@ -86,6 +87,9 @@ export const commands = {
 	listTaskRequestsPage: (input: CursorPageInput) => typedError<TaskRequestsPageResult, string>(__TAURI_INVOKE("list_task_requests_page", { input })),
 	getSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("get_settings")),
 	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
+	getStartupStatus: () => typedError<StartupStatus, string>(__TAURI_INVOKE("get_startup_status")),
+	openDatabaseRecoveryFolder: () => typedError<null, string>(__TAURI_INVOKE("open_database_recovery_folder")),
+	resetDatabaseForRecovery: () => typedError<null, string>(__TAURI_INVOKE("reset_database_for_recovery")),
 	/**
 	 *  Probe the ffmpeg binary version.
 	 * 
@@ -377,11 +381,11 @@ export type BrowserSiteRuleMode = "auto" | "ask" | "never";
 export type ChecksumAlgorithm = "sha256" | "sha512" | "sha1" | "md5";
 
 export type ClassificationMatchKind = 
-/**  按文件扩展名匹配，如 "mp4" */
+/**  Match by file extension, e.g., "mp4" */
 "extension" | 
-/**  按 MIME 前缀匹配，如 "video/" */
+/**  Match by MIME prefix, e.g., "video/" */
 "mime" | 
-/**  按 URL 关键词包含匹配，如 "example.com/video" */
+/**  Match by URL keyword containment, e.g., "example.com/video" */
 "url_contains";
 
 export type ClassificationRule = {
@@ -562,7 +566,11 @@ export type ListTasksCursorInput = {
 export type ListTasksCursorResult = {
 	items: Task[],
 	nextCursor: string | null,
-	totalEstimate: string,
+	/**
+	 *  Lower bound for matching tasks. Cursor pagination deliberately avoids
+	 *  an extra COUNT query on the first-screen path.
+	 */
+	minimumTotal: string,
 	filterOptions: TaskFilterOptions,
 };
 
@@ -659,6 +667,15 @@ export type QueueChangedPayload = {
 	changed_task_ids: string[] | null,
 };
 
+export type QueueTaskDecision = {
+	taskId: string,
+	reason: QueueWaitReason,
+	hostUsedSlots: number,
+	hostLimit: number,
+};
+
+export type QueueWaitReason = "ready" | "retry_delay" | "active_limit" | "schedule_window" | "host_limit";
+
 export type RecoveryAction = "retry" | "retry_later" | "choose_another_name" | "choose_another_folder" | "restart" | "open_folder" | "check_url" | "free_disk_space" | "configure_ffmpeg";
 
 export type RequestDiagnostic = {
@@ -697,6 +714,26 @@ export type ScaleStateDistribution = {
 	failed: number,
 };
 
+export type SchedulerHostSnapshot = {
+	sourceKey: string,
+	usedSlots: number,
+	limit: number,
+};
+
+export type SchedulerSnapshot = {
+	generatedAt: string,
+	maxActiveTasks: number,
+	activeTaskCount: number,
+	availableTaskSlots: number,
+	maxConnectionsPerHost: number,
+	scheduleWindowEnabled: boolean,
+	scheduleWindowActive: boolean,
+	scheduleWindowStart: string,
+	scheduleWindowEnd: string,
+	hosts: SchedulerHostSnapshot[],
+	decisions: QueueTaskDecision[],
+};
+
 export type SegmentStatus = "pending" | "downloading" | "completed" | "failed";
 
 export type SegmentSummary = {
@@ -720,6 +757,16 @@ export type SftpDirectoryProbe = {
 	currentDirectory: string | null,
 	entries: SftpDirectoryEntry[],
 	diagnostics: string[],
+};
+
+export type StartupStatus = {
+	mode: string,
+	reason: string | null,
+	message: string | null,
+	databasePath: string | null,
+	backupPath: string | null,
+	backupVerified: boolean,
+	canReset: boolean,
 };
 
 export type SystemFileIcon = {
@@ -896,6 +943,7 @@ export type TaskStatsSnapshot = {
 	all: string,
 	active: string,
 	queued: string,
+	attention: string,
 	paused: string,
 	completed: string,
 	failed: string,
@@ -991,6 +1039,7 @@ export type UpdateTaskTransferOptionsInput = {
 	priority: TaskPriority | null,
 	queuePosition: string | null,
 	categoryKey: string | null,
+	obeySchedule: boolean | null,
 };
 
 export type UpdateTorrentFileSelectionInput = {

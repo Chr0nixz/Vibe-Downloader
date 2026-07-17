@@ -42,7 +42,9 @@ use crate::{
         SftpDirectoryProbe, TaskKind, TaskProgressPayload, TaskRecord, TaskSegmentRecord,
         TaskStatus,
     },
-    proxy::{socks5_connect, AppProxyMode, ResolvedProxyConfig, SharedProxyConfig},
+    proxy::{
+        proxy_connect_error, socks5_connect, AppProxyMode, ResolvedProxyConfig, SharedProxyConfig,
+    },
 };
 
 const PROTOCOL_SFTP: &str = "sftp";
@@ -996,7 +998,7 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
 }
 
 struct SftpProgressInput<'a> {
-    app: &'a AppHandle,
+    app: &'a Option<AppHandle>,
     pool: &'a SqlitePool,
     task: &'a TaskRecord,
     active_connections: usize,
@@ -1237,13 +1239,7 @@ async fn connect_sftp(
                         target_port,
                     )
                     .await
-                    .map_err(|e| {
-                        engine_error(
-                            "sftp_proxy_connect_failed",
-                            format!("SFTP proxy connection failed: {e}"),
-                            true,
-                        )
-                    })?;
+                    .map_err(|error| proxy_connect_error("SFTP", &error))?;
                     client::connect_stream(config, stream, handler).await
                 } else {
                     client::connect(config, (target_host.as_str(), target_port), handler).await

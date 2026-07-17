@@ -75,7 +75,7 @@ pub(super) struct SegmentFailure {
 
 pub(super) struct SegmentedDownloadContext<'a> {
     pub(super) client: &'a Client,
-    pub(super) app: AppHandle,
+    pub(super) app: Option<AppHandle>,
     pub(super) pool: SqlitePool,
     pub(super) task: TaskRecord,
     pub(super) cancel_token: tokio_util::sync::CancellationToken,
@@ -135,7 +135,7 @@ pub(super) async fn run_segmented_download(
 
 struct UnknownSizeDownloadContext<'a> {
     client: &'a Client,
-    app: AppHandle,
+    app: Option<AppHandle>,
     pool: SqlitePool,
     task: TaskRecord,
     temp_path_buf: PathBuf,

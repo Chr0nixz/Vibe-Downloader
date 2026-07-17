@@ -151,7 +151,7 @@ impl RuntimeProgress {
 }
 
 pub(super) struct SegmentMessageContext<'a> {
-    pub(super) app: &'a AppHandle,
+    pub(super) app: &'a Option<AppHandle>,
     pub(super) pool: &'a SqlitePool,
     pub(super) task_id: &'a str,
     pub(super) total_size: i64,
@@ -238,7 +238,7 @@ pub(super) struct AggregateProgressInput<'a> {
 }
 
 pub(super) async fn emit_aggregate_progress(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     runtime_progress: &mut RuntimeProgress,
     progress_gate: &mut TaskProgressEmitGate,
@@ -290,7 +290,7 @@ pub(super) fn progress_payload(
 }
 
 pub(super) fn emit_progress(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     progress_gate: &mut TaskProgressEmitGate,
     payload: TaskProgressPayload,
     force: bool,

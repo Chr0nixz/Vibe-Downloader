@@ -45,11 +45,15 @@ use std::{
         Arc,
     },
     thread,
+    time::Duration,
 };
 
 use tauri_app_lib::{
+    db,
     download::{DownloadEngine, FtpEngine, ProbeRequest},
+    models::{AppErrorPayload, SegmentStatus, TaskStatus},
     proxy::ResolvedProxyConfig,
+    state_machine,
 };
 
 // --- In-process FTP fake server --------------------------------------------
@@ -67,6 +71,8 @@ struct FtpServerConfig {
     /// When `true`, the server omits `SIZE` (returns 550). Used to exercise
     /// the unknown-size probe branch where `total_size` falls back to 0.
     reject_size: bool,
+    /// Delays data chunks so cancellation can interrupt a live transfer.
+    data_chunk_delay: Option<Duration>,
 }
 
 /// A running FTP fake server. Drop stops the accept loop.
@@ -199,7 +205,17 @@ fn handle_ftp_session(mut stream: TcpStream, config: FtpServerConfig) {
                     if let Some(payload) = config.files.get(&path) {
                         let start = usize::try_from(rest_offset).unwrap_or(0);
                         if start < payload.len() {
-                            let _ = data_stream.write_all(&payload[start..]);
+                            if let Some(delay) = config.data_chunk_delay {
+                                for chunk in payload[start..].chunks(8 * 1024) {
+                                    if data_stream.write_all(chunk).is_err() {
+                                        break;
+                                    }
+                                    let _ = data_stream.flush();
+                                    thread::sleep(delay);
+                                }
+                            } else {
+                                let _ = data_stream.write_all(&payload[start..]);
+                            }
                         }
                     }
                     let _ = data_stream.flush();
@@ -245,6 +261,7 @@ fn config_with_file(path: &str, size: usize) -> FtpServerConfig {
         reject_auth: false,
         reject_rest: false,
         reject_size: false,
+        data_chunk_delay: None,
     }
 }
 
@@ -331,11 +348,15 @@ async fn probe_fails_when_server_returns_530_for_user_pass() {
     let server = FtpTestServer::start(config);
     let engine = new_engine();
 
-    let result = engine
+    let error = engine
         .probe(new_probe_request(server.url("file.bin")))
-        .await;
+        .await
+        .expect_err("probe should fail on 530 auth rejection");
 
-    assert!(result.is_err(), "probe should fail on 530 auth rejection");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured FTP auth error");
+    assert_eq!(payload.code, "ftp_auth_failed");
+    assert!(payload.recoverable);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -381,4 +402,125 @@ async fn probe_strips_embedded_credentials_from_url() {
         "resolved_uri must not contain embedded username, got: {}",
         output.resolved_uri
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
+    let payload: Vec<u8> = (0..2 * 1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let mut files = HashMap::new();
+    files.insert("/resume.bin".to_string(), payload.clone());
+    let server = FtpTestServer::start(FtpServerConfig {
+        files,
+        data_chunk_delay: Some(Duration::from_millis(10)),
+        ..FtpServerConfig::default()
+    });
+    let pool = common::test_pool("ftp-pause-resume").await;
+    let paths = common::TestPaths::new("ftp-pause-resume");
+    let task = common::download_task(
+        "ftp-pause-resume",
+        server.url("resume.bin"),
+        "ftp",
+        "resume.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert FTP task");
+
+    let engine = new_engine();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let first_download = tokio::spawn({
+        let engine = engine.clone();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+
+    let partial = loop {
+        let segments = db::list_segment_records(&pool, "ftp-pause-resume")
+            .await
+            .expect("list FTP segments");
+        if let Some(downloaded) = segments
+            .first()
+            .map(|segment| segment.downloaded_until)
+            .filter(|downloaded| *downloaded > 0)
+        {
+            break downloaded;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert!(partial < payload.len() as i64);
+    cancel.cancel();
+    first_download
+        .await
+        .expect("FTP download task join")
+        .expect("FTP cancellation is a clean pause boundary");
+
+    let current = db::get_task_record(&pool, "ftp-pause-resume")
+        .await
+        .expect("read FTP task")
+        .expect("FTP task exists");
+    let no_app = Option::<tauri::AppHandle>::None;
+    state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &current.id,
+        TaskStatus::Paused,
+        current.downloaded_bytes,
+        0,
+        Some("Paused"),
+        Some("paused"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist FTP pause");
+    let resumed = state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &current.id,
+        TaskStatus::Downloading,
+        current.downloaded_bytes,
+        1,
+        Some("Downloading"),
+        Some("resumed"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist FTP resume");
+
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("resume FTP download");
+
+    let actual = std::fs::read(&paths.final_path).expect("read FTP file");
+    assert_eq!(actual.len(), payload.len());
+    assert!(
+        actual == payload,
+        "resumed FTP payload differs at byte {:?}",
+        actual
+            .iter()
+            .zip(payload.iter())
+            .position(|(actual, expected)| actual != expected)
+    );
+    assert!(!paths.temp.exists());
+    let completed = db::get_task_record(&pool, "ftp-pause-resume")
+        .await
+        .expect("read completed FTP task")
+        .expect("completed FTP task exists");
+    assert_eq!(completed.status, TaskStatus::Completed);
+    assert_eq!(completed.downloaded_bytes, payload.len() as i64);
 }

@@ -22,11 +22,11 @@ export function StatusBar({
   onOpenAbout?: () => void;
 }) {
   const { t } = useTranslation();
-  // Same split-subscription pattern as Sidebar: avoid re-rendering on every
-  // 250ms progress tick when the global stats snapshot is being used.
-  const globalTaskStats = useTaskDataStore((s) => s.globalTaskStats);
-  const localTaskStats = useTaskDataStore((s) => s.taskStats);
-  const stats = globalTaskStats ?? localTaskStats;
+  // Combined selector: when globalTaskStats is non-null (backend snapshot),
+  // it returns that stable ref and skips re-renders on progress ticks.
+  // When null, returns taskStats — which now benefits from the zero-delta
+  // fast path in patchTasksBatch (same ref when aggregate stats unchanged).
+  const stats = useTaskDataStore((s) => s.globalTaskStats ?? s.taskStats);
   const settings = useSettingsStore((s) => s.settings);
   const { updateVersion, installing, error, installUpdate, dismissUpdate, checkForUpdate } = useAppUpdater();
   const speedLimit = Number(settings?.globalSpeedLimitBps ?? 0);
@@ -53,7 +53,7 @@ export function StatusBar({
     >
       <footer
         className={cn(
-          "order-2 flex h-7 shrink-0 items-center justify-between gap-2 border-t border-border-subtle bg-surface-base px-2 text-[11px] sm:h-8 sm:px-3 md:order-none md:px-4 md:text-xs",
+          "order-2 flex h-8 shrink-0 items-center justify-between gap-2 border-t border-border-subtle bg-surface-base px-2 text-[11px] sm:px-3 md:order-none md:px-4 md:text-xs",
           className,
         )}
         role="contentinfo"
@@ -69,18 +69,24 @@ export function StatusBar({
             {formatSpeed(stats.totalSpeed)}
           </span>
         </span>
-        <span aria-live="polite" aria-atomic="true" className="flex shrink-0 items-center gap-1.5 text-text-muted">
-          <span>{t("statusBar.active")}</span>
-          <span
-            className={cn(
-              "font-mono font-bold tabular-nums",
-              stats.active > 0 ? "text-accent-primary" : "text-text-secondary",
-            )}
-          >
-            {stats.active}
+        <span aria-live="polite" aria-atomic="true" className="flex shrink-0 items-center gap-3 text-text-muted">
+          {/* P1c: replaced the "·" text separator (was text-border-subtle at ~1.4:1
+              contrast, failing WCAG 1.4.11) with gap-based grouping. Each label+number
+              pair is a discrete visual unit; gap-3 between groups provides separation
+              without relying on a low-contrast glyph. */}
+          <span className="flex items-center gap-1.5">
+            <span>{t("statusBar.active")}</span>
+            <span
+              className={cn(
+                "font-mono font-bold tabular-nums",
+                stats.active > 0 ? "text-accent-primary" : "text-text-secondary",
+              )}
+            >
+              {stats.active}
+            </span>
           </span>
-          <span className="inline">
-            <span className="text-border-subtle">·</span> {t("statusBar.queued")}{" "}
+          <span className="flex items-center gap-1.5">
+            <span>{t("statusBar.queued")}</span>
             <span
               className={cn(
                 "font-mono font-bold tabular-nums",

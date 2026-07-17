@@ -3,10 +3,12 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  CircleAlert,
   Download,
   Filter,
   Info,
   LayoutGrid,
+  ListOrdered,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -34,6 +36,8 @@ type NavItemDef = {
 const filterItems: NavItemDef[] = [
   { id: "all", labelKey: "nav.all", icon: LayoutGrid },
   { id: "downloading", labelKey: "nav.downloading", icon: Download },
+  { id: "queue", labelKey: "nav.queue", icon: ListOrdered },
+  { id: "attention", labelKey: "nav.attention", icon: CircleAlert },
   { id: "paused", labelKey: "nav.paused", icon: PauseCircle },
   { id: "completed", labelKey: "nav.completed", icon: CheckCircle2 },
   { id: "failed", labelKey: "nav.failed", icon: AlertCircle },
@@ -55,15 +59,11 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
   const { t } = useTranslation();
   const nav = useTaskUIStore((s) => s.nav);
   const setNav = useTaskUIStore((s) => s.setNav);
-  // Subscribe to the two slices separately so React only re-renders this
-  // subtree when `globalTaskStats` is null AND `taskStats` actually changed.
-  // Without this split, `s => s.globalTaskStats ?? s.taskStats` re-runs on
-  // every 250ms progress tick (which always produces a new taskStats ref),
-  // re-rendering the whole sidebar even when the global stats snapshot is
-  // being used.
-  const globalTaskStats = useTaskDataStore((s) => s.globalTaskStats);
-  const localTaskStats = useTaskDataStore((s) => s.taskStats);
-  const taskStats = globalTaskStats ?? localTaskStats;
+  // Combined selector: when globalTaskStats is non-null (backend snapshot),
+  // it returns that stable ref and skips re-renders on progress ticks.
+  // When null, returns taskStats — which now benefits from the zero-delta
+  // fast path in patchTasksBatch (same ref when aggregate stats unchanged).
+  const taskStats = useTaskDataStore((s) => s.globalTaskStats ?? s.taskStats);
 
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -86,6 +86,8 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
   const counts: Record<string, number> = {
     all: taskStats.all,
     downloading: taskStats.active,
+    queue: taskStats.queued,
+    attention: taskStats.attention,
     paused: taskStats.paused,
     completed: taskStats.completed,
     failed: taskStats.failed,
@@ -108,10 +110,9 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
         className={cn(
           // ── Mobile: horizontal bottom bar ──
           "order-3 flex h-12 w-full shrink-0 flex-row items-center gap-1 border-t px-1 py-0.5",
-          // ── Mica surface ──
-          "bg-surface-base/60",
-          "[backdrop-filter:blur(12px)]",
-          "border-border-subtle/60",
+          // ── Surface ──
+          "bg-surface-base",
+          "border-border-subtle",
           // ── Tablet: vertical compact column (always compact width) ──
           "md:order-none md:h-auto md:w-[var(--shell-nav-width-compact)]",
           "md:flex-col md:items-stretch md:justify-between md:gap-1",
@@ -143,7 +144,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
               label={t(item.labelKey)}
               count={counts[item.id] ?? 0}
               compact={collapsed}
-              mobileHidden={item.id === "paused"}
+              mobileHidden={item.id === "paused" || item.id === "queue" || item.id === "attention"}
               onClick={() => setNav(item.id)}
               contextMenuItems={
                 <MenuItem
@@ -187,10 +188,14 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
                 type="button"
                 variant="ghost"
                 aria-label={t("nav.more")}
-                aria-current={nav === "paused" || nav === "settings" || nav === "about" ? "page" : undefined}
+                aria-current={
+                  nav === "queue" || nav === "attention" || nav === "paused" || nav === "settings" || nav === "about"
+                    ? "page"
+                    : undefined
+                }
                 className={cn(
                   "relative h-11 min-w-10 flex-1 flex-col gap-0.5 px-1 text-[10px] md:hidden",
-                  nav === "paused" || nav === "settings" || nav === "about"
+                  nav === "queue" || nav === "attention" || nav === "paused" || nav === "settings" || nav === "about"
                     ? "bg-accent-primary/15 font-medium text-accent-primary shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]"
                     : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
                 )}
@@ -203,6 +208,20 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
               <MobileNavMenuItem
                 item={filterItems[2]}
                 label={t(filterItems[2].labelKey)}
+                active={nav === "queue"}
+                count={counts.queue}
+                onClick={() => setNav("queue")}
+              />
+              <MobileNavMenuItem
+                item={filterItems[3]}
+                label={t(filterItems[3].labelKey)}
+                active={nav === "attention"}
+                count={counts.attention}
+                onClick={() => setNav("attention")}
+              />
+              <MobileNavMenuItem
+                item={filterItems[4]}
+                label={t(filterItems[4].labelKey)}
                 active={nav === "paused"}
                 count={counts.paused}
                 onClick={() => setNav("paused")}
@@ -289,7 +308,10 @@ function NavItem({
   const Icon = item.icon;
   const showBadge = item.id !== "settings" && item.id !== "all" && count > 0;
   const showActivityDot =
-    item.id !== "settings" && item.id !== "all" && count > 0 && (item.id === "downloading" || item.id === "failed");
+    item.id !== "settings" &&
+    item.id !== "all" &&
+    count > 0 &&
+    (item.id === "downloading" || item.id === "attention" || item.id === "failed");
 
   const button = (
     <Tooltip>
@@ -306,6 +328,9 @@ function NavItem({
             mobileHidden && "hidden md:flex",
             "md:h-10 md:w-full md:flex-none md:flex-col md:items-start md:justify-start md:gap-1 md:px-1",
             "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
+            // ── Collapsed (lg): label and badge are hidden, so center the
+            // lone icon within the compact nav column instead of left-aligning it.
+            compact && "lg:justify-center lg:px-0",
             // ── Override button transition ──
             "transition-[color,background-color,box-shadow,border-color] duration-[var(--motion-ui)] ease-out",
             // ── Active: anchored indicator (no side-stripe; uses inset ring + stronger tint) ──
@@ -359,7 +384,11 @@ function NavItem({
               className={cn(
                 "absolute right-1.5 top-1 h-2 w-2 rounded-full md:block lg:hidden",
                 compact && "lg:block",
-                item.id === "downloading" ? "bg-accent-primary" : "bg-status-danger",
+                item.id === "downloading"
+                  ? "bg-accent-primary"
+                  : item.id === "attention"
+                    ? "bg-status-warning"
+                    : "bg-status-danger",
               )}
               aria-hidden
             >

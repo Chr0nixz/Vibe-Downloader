@@ -175,7 +175,7 @@ pub(super) async fn run_direct_segmented_download(
             segment,
             total_size: request.total_size,
             segment_count,
-            supports_parallel: request.supports_parallel,
+            supports_resume: request.supports_resume,
             cancel_token: cancel_token.clone(),
             progress_tx: progress_tx.clone(),
             range_end: Arc::new(AtomicI64::new(range_end)),

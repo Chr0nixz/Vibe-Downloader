@@ -86,7 +86,7 @@ export function AboutPage({ onOpenOnboarding }: { onOpenOnboarding: () => void }
           {/* ── Updates ── */}
           <section className="flex flex-col gap-3">
             <div className="flex flex-col gap-0.5">
-              <h2 className="text-[11px] font-medium tracking-wide text-text-muted uppercase">{t("about.updates")}</h2>
+              <h2 className="text-sm font-semibold text-text-muted">{t("about.updates")}</h2>
               <p className="text-xs text-text-muted">{t("about.updatesDescription")}</p>
             </div>
             <div className="flex flex-col gap-3 rounded-lg border border-border-subtle/60 bg-surface-raised/40 px-4 py-3">
@@ -146,9 +146,7 @@ export function AboutPage({ onOpenOnboarding }: { onOpenOnboarding: () => void }
               {updater.status === "downloading" && updater.progress ? <UpdateProgressBar updater={updater} /> : null}
               {updater.status === "available" && updater.releaseNotes ? (
                 <div className="flex flex-col gap-1">
-                  <p className="text-[11px] font-medium tracking-wide text-text-muted uppercase">
-                    {t("about.releaseNotes")}
-                  </p>
+                  <p className="text-sm font-semibold text-text-muted">{t("about.releaseNotes")}</p>
                   <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-md border border-border-subtle bg-surface-root px-3 py-2 text-xs leading-5 text-text-secondary">
                     {updater.releaseNotes}
                   </pre>
@@ -168,11 +166,11 @@ export function AboutPage({ onOpenOnboarding }: { onOpenOnboarding: () => void }
           {/* ── Author + License ── */}
           <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="flex flex-col gap-1 rounded-lg border border-border-subtle/60 bg-surface-raised/40 px-4 py-3">
-              <dt className="text-[11px] font-medium tracking-wide text-text-muted uppercase">{t("about.author")}</dt>
+              <dt className="text-sm font-semibold text-text-muted">{t("about.author")}</dt>
               <dd className="text-sm font-medium text-text-primary">{t("about.authorValue")}</dd>
             </div>
             <div className="flex flex-col gap-1 rounded-lg border border-border-subtle/60 bg-surface-raised/40 px-4 py-3">
-              <dt className="text-[11px] font-medium tracking-wide text-text-muted uppercase">{t("about.license")}</dt>
+              <dt className="text-sm font-semibold text-text-muted">{t("about.license")}</dt>
               <dd className="text-sm font-medium text-text-primary">{t("about.licenseValue")}</dd>
             </div>
           </dl>
@@ -182,7 +180,7 @@ export function AboutPage({ onOpenOnboarding }: { onOpenOnboarding: () => void }
 
           {/* ── Help ── */}
           <section className="flex flex-col gap-2">
-            <h2 className="text-[11px] font-medium tracking-wide text-text-muted uppercase">{t("about.help")}</h2>
+            <h2 className="text-sm font-semibold text-text-muted">{t("about.help")}</h2>
             <button
               type="button"
               onClick={onOpenOnboarding}
@@ -205,7 +203,7 @@ export function AboutPage({ onOpenOnboarding }: { onOpenOnboarding: () => void }
 
           {/* ── External links ── */}
           <section className="flex flex-col gap-2">
-            <h2 className="text-[11px] font-medium tracking-wide text-text-muted uppercase">{t("about.links")}</h2>
+            <h2 className="text-sm font-semibold text-text-muted">{t("about.links")}</h2>
             <ul className="flex flex-col gap-1">
               {LINKS.map((link) => {
                 const Icon = link.icon;

@@ -36,7 +36,10 @@ export function ShutdownOverlay() {
 
   return (
     <div
-      className="pointer-events-none fixed inset-0 z-[9999] flex items-center justify-center bg-surface-scrim motion-safe:animate-[fade-in_140ms_ease-out]"
+      // P1b: z-[80] continues the semantic z-index scale (z-50 radix → z-[60]
+      // drop overlay → z-[70] toast → z-[80] shutdown). The previous z-[9999]
+      // was an arbitrary magic value that broke the progression.
+      className="pointer-events-none fixed inset-0 z-[80] flex items-center justify-center bg-surface-scrim motion-safe:animate-[fade-in_140ms_ease-out]"
       role="alert"
       aria-live="assertive"
     >

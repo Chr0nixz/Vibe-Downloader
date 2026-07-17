@@ -66,8 +66,8 @@ async function assertRequiredFiles(workspaceRoot) {
   if (bundleConfig.build?.beforeBuildCommand !== "node scripts/native-host-build.mjs --with-frontend") {
     throw new Error("Tauri bundle overlay does not prepare the native host before Rust compilation.");
   }
-  if (bundleConfig.build?.beforeBundleCommand !== "node scripts/native-host-build.mjs") {
-    throw new Error("Tauri bundle overlay does not prepare the native host before bundling.");
+  if (bundleConfig.build?.beforeBundleCommand !== "node scripts/native-host-build.mjs --verify-staged") {
+    throw new Error("Tauri bundle overlay does not verify the native host before bundling.");
   }
 }
 

@@ -158,6 +158,9 @@ fn parallel_range_segments_with_completion(
             };
             let length = base + extra;
             let end = start + length - 1;
+            // When the task is already complete (re-planning after resume validation),
+            // pre-mark each segment as Completed with `downloaded_until = range_end + 1`
+            // (exclusive end sentinel). Otherwise start at `range_start` (nothing downloaded).
             let downloaded_until = if completed { end + 1 } else { start };
             let segment = TaskSegmentRecord {
                 id: uuid::Uuid::new_v4().to_string(),

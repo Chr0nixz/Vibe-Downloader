@@ -96,8 +96,8 @@ impl HttpEngine {
     /// one on first use. Reusing the client avoids repeated TCP/TLS handshakes
     /// when multiple downloads target the same host.
     ///
-    /// E-4: 公开给 HLS / DASH / Metalink / WebDAV 等派系引擎共享同一缓存，
-    /// 避免各引擎调用 `build_client()` 绕过缓存。
+    /// E-4: Exposes the shared cache to derived engines (HLS / DASH / Metalink / WebDAV),
+    /// preventing them from calling `build_client()` to bypass the cache.
     pub async fn client(&self) -> Result<Client, String> {
         let config = self.proxy_config.read().await;
         let fingerprint = proxy_fingerprint(&config);
@@ -115,8 +115,8 @@ impl HttpEngine {
         Ok(client)
     }
 
-    /// E-4: 返回当前客户端缓存条目数。用于集成测试验证 `set_proxy_config`
-    /// 后共享缓存被正确清空（四个 HTTP 派生引擎共享同一 `Arc<HttpEngine>`）。
+    /// E-4: Returns the current client cache entry count. Used by integration tests to verify
+    /// that the shared cache is correctly cleared after `set_proxy_config` (four HTTP-derived engines share the same `Arc<HttpEngine>`).
     pub async fn client_cache_len(&self) -> usize {
         self.clients.read().await.len()
     }
@@ -314,6 +314,9 @@ impl reqwest::dns::Resolve for HickoryResolver {
                 .filter(|ip| !crate::download::ssrf::is_private_ip(ip))
                 .map(|ip| SocketAddr::new(ip, 0))
                 .collect();
+            // Return an error (not an empty iterator) when all IPs are filtered. reqwest
+            // treats an empty address list as a DNS failure and may retry/hang; an explicit
+            // error fails the connection fast with a diagnosable message.
             if addrs.is_empty() {
                 return Err(Box::new(std::io::Error::other(
                     "SSRF guard: all resolved IPs are private or reserved",
@@ -361,12 +364,12 @@ pub(crate) fn build_client(config: &ResolvedProxyConfig) -> Result<Client, Strin
         .redirect(ssrf_safe_redirect_policy())
         .user_agent(concat!("VibeDownloader/", env!("CARGO_PKG_VERSION")))
         .dns_resolver(Arc::new(resolver))
-        // 仅设置连接建立阶段超时；流式下载不应受整体 timeout 限制，
-        // 否则大文件下载会在 60s 后被中断。应用层超时由各引擎在 Response
-        // 上按需设置。
+        // Only set the connection establishment timeout; streaming downloads should not be subject
+        // to an overall timeout, otherwise large file downloads would be interrupted after 60s.
+        // Application-layer timeouts are set per-engine on the Response as needed.
         .connect_timeout(Duration::from_secs(30))
-        // 连接池优化（E-10）：增大每 host 空闲连接数，设置 90s 空闲超时，
-        // 避免短间隔重复下载同一 host 时反复握手。
+        // Connection pool optimization (E-10): increase per-host idle connections, set 90s idle timeout,
+        // to avoid repeated handshakes when downloading from the same host at short intervals.
         .pool_max_idle_per_host(64)
         .pool_idle_timeout(Duration::from_secs(90));
 

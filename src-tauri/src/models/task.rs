@@ -18,8 +18,8 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
-    /// 合法状态转换表。返回 `true` 表示 `self → target` 是允许的语义状态变更。
-    /// 进度数值更新（Downloading → Downloading）不走此校验，直接写 DB。
+    /// Legal state transition table. Returns `true` if `self → target` is an allowed semantic state change.
+    /// Progress value updates (Downloading → Downloading) bypass this validation and write directly to the DB.
     pub fn can_transition_to(self, target: TaskStatus) -> bool {
         use TaskStatus::*;
         matches!(
@@ -34,7 +34,7 @@ impl TaskStatus {
                 | (Retrying, Downloading | Paused | Failed | NeedsAttention)
                 | (WaitingNetwork, Queued | Downloading | Failed)
                 | (NeedsAttention, Queued | Failed)
-                | (Failed, Queued | Retrying | NeedsAttention) // Completed 是终态，不允许转出（重新下载走 delete + create）
+                | (Failed, Queued | Retrying | NeedsAttention) // Completed is terminal; no outgoing transitions (re-download uses delete + create)
         )
     }
 }
@@ -241,6 +241,7 @@ pub struct TaskStatsSnapshot {
     pub all: String,
     pub active: String,
     pub queued: String,
+    pub attention: String,
     pub paused: String,
     pub completed: String,
     pub failed: String,

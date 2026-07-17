@@ -220,8 +220,8 @@ impl DownloadEngine for BtEngine {
         matches!(scheme, "magnet" | "file")
     }
 
-    /// R-3: magnet 链接或 `.torrent` 文件（含 http/https/file scheme）路由到 BT。
-    /// 优先级最高（100），确保在 Metalink/HLS/DASH 等也支持 http scheme 的引擎之前命中。
+    /// R-3: Magnet links or `.torrent` files (including http/https/file schemes) route to BT.
+    /// Highest priority (100), ensuring it matches before Metalink/HLS/DASH which also support http scheme.
     fn matches_url(&self, url: &Url) -> bool {
         url.scheme() == "magnet" || is_torrent_url(url)
     }
@@ -391,13 +391,39 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         )
         .await?;
     let _session_guard = SessionRefGuard::new(engine.clone(), session_key);
-    let (add, private_flag) = add_torrent_source(&task.url, &proxy_config).await?;
+    let source_started = Instant::now();
+    let source_result = add_torrent_source(&task.url, &proxy_config)
+        .await
+        .map_err(|error| {
+            crate::download::error::engine_error(
+                "bt_source_failed",
+                format!("Could not load the torrent source: {error}"),
+                true,
+            )
+        });
+    crate::download::diagnostics::persist_engine_diagnostic(
+        crate::download::diagnostics::EngineDiagnosticContext {
+            pool: &pool,
+            task_id: &task.id,
+            method: "BT SOURCE",
+            url: &task.url,
+            range_header: None,
+            status_code: None,
+            content_length: None,
+            error: source_result.as_ref().err().map(String::as_str),
+            retry_count: 0,
+            duration: source_started.elapsed(),
+        },
+    )
+    .await;
+    let (add, private_flag) = source_result?;
     let had_file_selection = !db::list_task_file_records(&pool, &task.id)
         .await?
         .is_empty();
     let selected_paths = selected_torrent_paths(&pool, &task).await?;
     mark_torrent_metadata_fetching(&app, &pool, &task, &mut progress_gate).await?;
-    let response = wait_for_torrent_metadata(
+    let metadata_started = Instant::now();
+    let metadata_result = wait_for_torrent_metadata(
         &engine,
         api.clone(),
         add,
@@ -408,7 +434,23 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         cancel_token.clone(),
         &mut progress_gate,
     )
-    .await?;
+    .await;
+    crate::download::diagnostics::persist_engine_diagnostic(
+        crate::download::diagnostics::EngineDiagnosticContext {
+            pool: &pool,
+            task_id: &task.id,
+            method: "BT METADATA",
+            url: &task.url,
+            range_header: None,
+            status_code: None,
+            content_length: None,
+            error: metadata_result.as_ref().err().map(String::as_str),
+            retry_count: 0,
+            duration: metadata_started.elapsed(),
+        },
+    )
+    .await;
+    let response = metadata_result?;
 
     let torrent_id = TorrentIdOrHash::try_from(response.details.info_hash.as_str())
         .map_err(|e| format!("Torrent info hash is invalid: {e:#}"))?;
@@ -533,9 +575,33 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             return Ok(());
         }
 
-        let stats = api
-            .api_stats_v1(torrent_id)
-            .map_err(|e| format!("Could not read torrent stats: {e:#}"))?;
+        let stats_started = Instant::now();
+        let stats = match api.api_stats_v1(torrent_id) {
+            Ok(stats) => stats,
+            Err(error) => {
+                let error = crate::download::error::engine_error(
+                    "bt_runtime_stats_failed",
+                    format!("Could not read torrent stats: {error:#}"),
+                    true,
+                );
+                crate::download::diagnostics::persist_engine_diagnostic(
+                    crate::download::diagnostics::EngineDiagnosticContext {
+                        pool: &pool,
+                        task_id: &task.id,
+                        method: "BT STATS",
+                        url: &task.url,
+                        range_header: None,
+                        status_code: None,
+                        content_length: None,
+                        error: Some(&error),
+                        retry_count: 0,
+                        duration: stats_started.elapsed(),
+                    },
+                )
+                .await;
+                return Err(error);
+            }
+        };
         let downloaded = i64::try_from(stats.progress_bytes).unwrap_or(i64::MAX);
         let total = i64::try_from(stats.total_bytes).unwrap_or(i64::MAX);
         let speed = stats
@@ -829,7 +895,7 @@ async fn wait_for_torrent_metadata(
     api: Arc<Api>,
     add: AddTorrent<'static>,
     start_paused: bool,
-    app: &tauri::AppHandle,
+    app: &Option<tauri::AppHandle>,
     pool: &sqlx::SqlitePool,
     task: &crate::models::TaskRecord,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -851,7 +917,13 @@ async fn wait_for_torrent_metadata(
     loop {
         tokio::select! {
             result = &mut add_torrent => {
-                return result.map_err(|e| format!("Could not add torrent: {e:#}"));
+                return result.map_err(|error| {
+                    crate::download::error::engine_error(
+                        "bt_metadata_failed",
+                        format!("Could not add torrent: {error:#}"),
+                        true,
+                    )
+                });
             }
             _ = interval.tick() => {
                 if cancel_token.is_cancelled() {
@@ -862,9 +934,13 @@ async fn wait_for_torrent_metadata(
                 let elapsed = started.elapsed();
                 if elapsed >= BT_METADATA_TIMEOUT {
                     engine.delete_runtime_task(&task.source_key, false).await;
-                    return Err(format!(
-                        "Could not fetch torrent metadata after {} seconds. No reachable peers returned metadata through DHT, trackers, or the magnet link.",
-                        BT_METADATA_TIMEOUT.as_secs()
+                    return Err(crate::download::error::engine_error(
+                        "bt_metadata_timeout",
+                        format!(
+                            "Could not fetch torrent metadata after {} seconds. No reachable peers returned metadata through DHT, trackers, or the magnet link.",
+                            BT_METADATA_TIMEOUT.as_secs()
+                        ),
+                        true,
                     ));
                 }
 
@@ -885,7 +961,7 @@ fn torrent_should_start_paused(selected_paths: Option<&HashSet<String>>) -> bool
 }
 
 async fn mark_torrent_metadata_fetching(
-    app: &tauri::AppHandle,
+    app: &Option<tauri::AppHandle>,
     pool: &sqlx::SqlitePool,
     task: &crate::models::TaskRecord,
     progress_gate: &mut TaskProgressEmitGate,
@@ -954,7 +1030,7 @@ async fn mark_torrent_metadata_fetching(
 }
 
 async fn mark_torrent_metadata_still_fetching(
-    app: &tauri::AppHandle,
+    app: &Option<tauri::AppHandle>,
     pool: &sqlx::SqlitePool,
     task: &crate::models::TaskRecord,
     elapsed: Duration,

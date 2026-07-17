@@ -3,6 +3,7 @@ import type { ReactElement, ReactNode } from "react";
 import { cloneElement, isValidElement, useId } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { BrowserCaptureSettings, BrowserForwardHeadersMode } from "@/generated/bindings";
@@ -87,7 +88,7 @@ export function BrowserCaptureControls({ settings, available, disabled, onUpdate
             </Select>
           </CaptureField>
           <CaptureField label={t("settings.browserMinSize")} description={t("settings.browserMinSizeHint")}>
-            <input
+            <Input
               type="number"
               min={0}
               step={1}
@@ -99,7 +100,7 @@ export function BrowserCaptureControls({ settings, available, disabled, onUpdate
                   minSizeBytes: Number.isFinite(mib) && mib > 0 ? String(Math.round(mib * 1024 * 1024)) : "0",
                 });
               }}
-              className="w-full max-w-xs rounded-md border border-border-input bg-bg-input px-3 py-2 text-sm text-text-primary"
+              className="max-w-xs"
             />
           </CaptureField>
           <CaptureField
@@ -118,7 +119,7 @@ export function BrowserCaptureControls({ settings, available, disabled, onUpdate
                 })
               }
               rows={2}
-              className="w-full max-w-xl rounded-md border border-border-input bg-bg-input px-3 py-2 text-sm text-text-primary"
+              className="w-full max-w-xl rounded-md border border-border-subtle bg-surface-base px-3 py-2 text-sm text-text-primary outline-none focus-visible:ring-2 focus-visible:ring-accent-primary disabled:cursor-not-allowed disabled:opacity-50"
             />
           </CaptureField>
           <CaptureToggle
@@ -185,13 +186,27 @@ function CaptureToggle({
   disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
+  const fieldId = useId();
+  const titleId = `${fieldId}-title`;
+  const descriptionId = `${fieldId}-description`;
+
   return (
-    <label className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+    <div className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
       <span className="min-w-0">
-        <span className="block text-sm font-medium text-text-primary">{title}</span>
-        <span className="mt-1 block text-xs leading-5 text-text-muted">{description}</span>
+        <span id={titleId} className="block text-sm font-medium text-text-primary">
+          {title}
+        </span>
+        <span id={descriptionId} className="mt-1 block text-xs leading-5 text-text-muted">
+          {description}
+        </span>
       </span>
-      <Switch checked={checked} disabled={disabled} onCheckedChange={onChange} />
-    </label>
+      <Switch
+        checked={checked}
+        disabled={disabled}
+        onCheckedChange={onChange}
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+      />
+    </div>
   );
 }

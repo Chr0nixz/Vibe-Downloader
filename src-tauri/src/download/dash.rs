@@ -48,7 +48,7 @@ const TRACK_KIND_AUDIO: &str = "audio";
 
 #[derive(Debug, Clone)]
 pub struct DashEngine {
-    /// E-4: 共享 `HttpEngine` 的客户端缓存，避免每次 probe/download 新建 Client。
+    /// E-4: Shares the `HttpEngine` client cache to avoid creating a new Client on every probe/download.
     http: Arc<HttpEngine>,
 }
 
@@ -103,13 +103,13 @@ impl DownloadEngine for DashEngine {
         PROTOCOL_DASH
     }
 
-    /// R-3: DASH 仅靠 `matches_url`（`.mpd` 后缀）路由，不参与 scheme 兜底，
-    /// 避免普通 https URL 被误路由到 DASH。
+    /// R-3: DASH routes only via `matches_url` (`.mpd` suffix), not via scheme fallback,
+    /// to prevent ordinary HTTPS URLs from being misrouted to DASH.
     fn supports_scheme(&self, _scheme: &str) -> bool {
         false
     }
 
-    /// R-3: `.mpd` 路径路由到 DASH 引擎。优先级 70。
+    /// R-3: `.mpd` paths route to the DASH engine. Priority 70.
     fn matches_url(&self, url: &reqwest::Url) -> bool {
         is_dash_url(url)
     }
@@ -944,7 +944,7 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
 
 #[allow(clippy::too_many_arguments)]
 async fn download_dash_segments(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     client: &Client,
@@ -1011,6 +1011,10 @@ async fn download_dash_segments(
                     false,
                 )
                 .await?;
+            }
+            Err(_) if cancel_token.is_cancelled() => {
+                workers.abort_all();
+                break;
             }
             Err(error) => {
                 cancel_token.cancel();
@@ -1217,7 +1221,7 @@ async fn download_dash_segment_once(
 
 #[allow(clippy::too_many_arguments)]
 async fn emit_dash_progress(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     downloaded: i64,
@@ -1266,7 +1270,7 @@ async fn emit_dash_progress(
 }
 
 async fn pause_dash_task(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     downloaded_total: i64,
@@ -1290,7 +1294,7 @@ async fn pause_dash_task(
 
 #[allow(clippy::too_many_arguments)]
 async fn finalize_dash_task(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     staging_dir: &Path,
@@ -1395,7 +1399,6 @@ async fn run_ffmpeg_remux(
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error");
-    command.arg("-allowed_extensions").arg("ALL");
     // Working directory = staging dir so ffconcat relative paths resolve.
     if let Some(video) = video_concat {
         if let Some(dir) = video.parent() {
@@ -1423,6 +1426,8 @@ async fn run_ffmpeg_remux(
         .arg("copy")
         .arg("-movflags")
         .arg("+faststart")
+        .arg("-f")
+        .arg("mp4")
         .arg(output);
     let status = command
         .status()

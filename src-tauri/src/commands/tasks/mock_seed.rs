@@ -16,6 +16,7 @@ use super::task_from_record_with_files;
 #[cfg(debug_assertions)]
 pub async fn seed_mock_data(pool: &sqlx::SqlitePool) -> Result<Vec<Task>, String> {
     db::clear_tasks(pool).await?;
+    crate::events::clear_task_files_version_cache();
     let now = now_iso();
     let mocks = build_mock_tasks(&now);
 
@@ -267,6 +268,7 @@ pub async fn seed_scale_data(
 ) -> Result<u32, String> {
     if clear_before {
         db::clear_tasks(pool).await?;
+        crate::events::clear_task_files_version_cache();
     }
 
     // When appending, offset the index by existing task count so source_key

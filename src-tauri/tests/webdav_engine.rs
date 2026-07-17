@@ -37,16 +37,24 @@ use std::{
     io::Read,
     net::TcpStream,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use common::http::{extract_byte_range, extract_header, respond_file, write_response, ByteRange};
 use common::TestServer;
 use tauri_app_lib::{
+    db,
     download::{DownloadEngine, HttpEngine, ProbeRequest, WebDavEngine},
+    models::{SegmentStatus, TaskStatus},
     proxy::ResolvedProxyConfig,
+    state_machine,
 };
 
 const SAMPLE: &[u8] = b"Vibe Downloader WebDAV regression payload.";
+
+fn resume_payload() -> Vec<u8> {
+    (0..128 * 1024).map(|index| (index % 251) as u8).collect()
+}
 
 /// Per-connection handler state. Cloned per accepted connection.
 #[derive(Clone)]
@@ -145,6 +153,15 @@ fn handle_connection(stream: &mut TcpStream, state: WebDavHandlerState) {
             false,
         ),
         "/large.bin" => respond_large_file(stream, method, byte_range),
+        "/resume.bin" => respond_file(
+            stream,
+            method,
+            &resume_payload(),
+            byte_range,
+            true,
+            "resume.bin",
+            true,
+        ),
         "/missing" => write_response(stream, 404, &[], b"not found", false),
         "/no-ranges" => respond_file(
             stream,
@@ -389,4 +406,110 @@ async fn probe_rejects_directory_url() {
         result.is_err(),
         "directory URL should be rejected by the engine probe"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_pauses_mid_transfer_and_resumes_through_http_engine() {
+    let payload = resume_payload();
+    let server = start_test_server(WebDavHandlerState::new());
+    let pool = common::test_pool("webdav-pause-resume").await;
+    let paths = common::TestPaths::new("webdav-pause-resume");
+    let task = common::download_task(
+        "webdav-pause-resume",
+        webdav_url(&server, "/resume.bin"),
+        "webdav",
+        "resume.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert WebDAV task");
+
+    let engine = new_engine();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let first_download = tokio::spawn({
+        let engine = engine.clone();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+
+    let partial = loop {
+        let segments = db::list_segment_records(&pool, "webdav-pause-resume")
+            .await
+            .expect("list WebDAV segments");
+        if let Some(downloaded) = segments
+            .first()
+            .map(|segment| segment.downloaded_until)
+            .filter(|downloaded| *downloaded > 0)
+        {
+            break downloaded;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert!(partial < payload.len() as i64);
+    cancel.cancel();
+    first_download
+        .await
+        .expect("WebDAV download task join")
+        .expect("WebDAV cancellation is a clean pause boundary");
+
+    let current = db::get_task_record(&pool, "webdav-pause-resume")
+        .await
+        .expect("read WebDAV task")
+        .expect("WebDAV task exists");
+    let no_app = Option::<tauri::AppHandle>::None;
+    state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &current.id,
+        TaskStatus::Paused,
+        current.downloaded_bytes,
+        0,
+        Some("Paused"),
+        Some("paused"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist WebDAV pause");
+    let resumed = state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &current.id,
+        TaskStatus::Downloading,
+        current.downloaded_bytes,
+        1,
+        Some("Downloading"),
+        Some("resumed"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist WebDAV resume");
+
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("resume WebDAV download");
+
+    let actual = std::fs::read(&paths.final_path).expect("read WebDAV file");
+    assert_eq!(actual.len(), payload.len());
+    assert!(actual == payload, "resumed WebDAV payload differs");
+    assert!(!paths.temp.exists());
+    let completed = db::get_task_record(&pool, "webdav-pause-resume")
+        .await
+        .expect("read completed WebDAV task")
+        .expect("completed WebDAV task exists");
+    assert_eq!(completed.status, TaskStatus::Completed);
+    assert_eq!(completed.downloaded_bytes, payload.len() as i64);
 }

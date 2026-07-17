@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn long_name_unicode_truncated_at_char_boundary() {
-        // Each 文 is 3 bytes but 1 char; truncation should be by char count.
+        // Each CJK character (e.g., 文) is 3 bytes but 1 char; truncation should be by char count.
         let input = "文".repeat(250);
         let result = sanitize_single_file_name(&input);
         assert_eq!(result.chars().count(), 200);

@@ -231,9 +231,10 @@ versions, but:
 - `@tanstack/react-virtual`: keep. It is central to the virtualized task list.
 - `zustand`: keep. The current task-data/task-ui/speed-history split fits the
   event-driven desktop UI well.
-- `i18next` and `react-i18next`: keep. The eager `en`/`zh-CN` plus lazy beta
-  locale structure is reasonable, though only `en` and `zh-CN` should remain
-  actively supported unless more locales are prioritized.
+- `i18next` and `react-i18next`: keep. The eager `en`/`zh-CN` plus lazy-loaded
+  beta locale (`zh-TW`/`ja`/`ko`/`ru`/`es`) structure is reasonable. All 7
+  locales are now fully translated and kept structurally in sync via
+  `pnpm check:i18n` (any key mismatch fails CI).
 - `lucide-react`: keep. Used broadly for icon buttons and task/status UI.
 - `next-themes`: keep unless the app moves theme state fully into its own
   settings store. Current usage is small and harmless.

@@ -1,7 +1,7 @@
-//! 跨协议共享的文件操作工具：临时文件预分配、最终路径落定、完成路径持久化。
+//! Cross-protocol shared file operations: temp file preallocation, final path resolution, completed path persistence.
 //!
-//! 原位于 `download/http/file.rs`，因其被 FTP/SFTP/DASH/HLS/Metalink 等非
-//! HTTP 引擎复用，上移至协议中立位置。
+//! Originally in `download/http/file.rs`; moved to a protocol-neutral location because
+//! it is reused by FTP/SFTP/DASH/HLS/Metalink and other HTTP-derived engines.
 
 use std::path::{Path, PathBuf};
 

@@ -1,6 +1,6 @@
 # 项目改进审计
 
-最后更新：2026-07-10
+最后更新：2026-07-13
 适用版本：Vibe Downloader `0.2.0`
 审计对象：当前工作区代码、配置、测试、构建脚本与产品文档（包含尚未提交的改动）
 
@@ -14,7 +14,7 @@
 
 Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下载管理器所需的大部分骨架：HTTP/HTTPS 主路径较成熟，多协议入口、SQLite 持久化、队列调度、限速、恢复动作、浏览器交接、任务诊断、虚拟列表、响应式桌面 UI 和中英文界面均已落地。
 
-当前主要矛盾不是功能数量不足，而是**已实现能力与公开发布可信度不匹配**：浏览器 Native Messaging host 尚未被可靠装入安装包；发布签名和商店链路未闭环；若干已确认的崩溃、数据恢复、限速并发和 HLS 内存问题仍在；非 HTTP 协议的可靠性、诊断和自动化验证明显弱于 HTTP；质量门禁在本次审计快照下也不是全绿。
+当前主要矛盾不是功能数量不足，而是**工程闭环与外部发布验收之间仍有距离**。本轮已实现 Native Messaging sidecar、候选/正式扩展身份、发布 preflight、安全数据库恢复、HLS 统一 ffmpeg、流式 AES 解密、限速并发修复和旧预览数据迁移；但四平台真实安装包、浏览器商店正式身份与签名、updater 跨版本演练仍需外部环境完成。非 HTTP 协议虽然已有统一矩阵，可靠性和诊断证据仍明显弱于 HTTP。
 
 因此，当前版本适合作为积极开发中的 `0.2.0`，但还不应被描述为“可公开稳定发布、全协议同等成熟、可替代 IDM 的正式版本”。
 
@@ -22,27 +22,27 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 
 | 维度 | 当前成熟度 | 主要优势 | 首要缺口 |
 | --- | --- | --- | --- |
-| 用户交互便捷性 | 良好，但存在高影响边界缺陷 | 主任务流清晰；键盘、鼠标、命令面板路径齐全；主列表在窄屏可用；主题和状态表达成熟 | 旧浏览器预览数据可令整页崩溃；设置页副作用风险、错误边界文案键错误、移动设置页过密 |
+| 用户交互便捷性 | 良好，已关闭主要崩溃边界 | 主任务流清晰；旧预览任务会迁移协议；数据库恢复有显式安全界面；设置自动保存及失败竞态、错误边界、新建下载探测和任务详情/移动抽屉已有组件回归测试；游标数量下界不再伪装成精确总数；六类 a11y 静态规则均已恢复 | 窄屏设置页仍需多尺寸视觉验收；主壳贯通流程与屏幕阅读器端到端测试仍需改进 |
 | 功能丰富性与完整性 | 功能面宽，成熟度不均 | HTTP、队列、限速、代理、凭据、多协议、浏览器交接和诊断能力丰富 | 非 HTTP 协议可靠性仍未与 HTTP 对齐；多项协议边界必须明确；发布链路尚未形成可交付功能 |
-| 架构鲁棒性与稳定性 | 核心防护较强，仍有发布级风险 | 事务化状态机、运行时锁、SSRF 防护、加密凭据、关闭收敛和恢复模型已建立 | 数据库迁移失败会先自动重建再告知用户；HLS 绕过统一 ffmpeg 配置；错误类型化和模块拆分未完成；质量门禁未全绿 |
-| 程序运行效率 | 已有正确方向，缺生产规模证据 | 游标分页、虚拟列表、事件节流、批量查询、WAL、HTTP client 复用均已存在 | token bucket 有并发覆盖竞态；加密 HLS 单 worker 可接近 1 GiB 瞬时内存；缓存无界；大库搜索和批量删除缺规模验证 |
+| 架构鲁棒性与稳定性 | 核心防护较强，数据恢复已改为 fail closed | 事务化状态机、运行时锁、SSRF 防护、加密凭据、关闭收敛、一致备份和显式恢复模型已建立 | 真实 bundle/updater 尚未跑完；错误类型化和超大模块拆分未完成 |
+| 程序运行效率 | 两项 P1 与两项缓存 P2 已修，仍缺生产规模证据 | 游标分页、虚拟列表、事件节流、有界图标缓存、原子 token refill、HLS 小缓冲流式解密均已存在 | 大库搜索和批量删除反馈缺规模验证；尚无生产规模 RSS/吞吐基线 |
 
 ### 3. 当前优先级数量
 
 | 优先级 | 数量 | 含义 |
 | --- | ---: | --- |
-| P0 | 2 | 阻断公开发布或核心发布能力，必须先闭环 |
-| P1 | 7 | 可能造成崩溃、数据丢失、行为错误、显著资源风险或错误成熟度承诺，发布前应完成 |
-| P2 | 15 | 影响可维护性、长期规模、诊断一致性或部分设备体验，应进入近期迭代 |
+| P0 | 2 | 工程实现已完成，仍由真实安装验收、正式商店凭据和 updater 演练阻断关闭 |
+| P1 | 7 | UX-01、FUN-02、ARC-01、PERF-01、PERF-02 已修；ARC-02 本地闭环待 CI；FUN-01 已大部分完成 |
+| P2 | 15 | UX-02、UX-03、UX-05、UX-06、ARC-05、PERF-03、PERF-04 已修；UX-04 与 PERF-06 部分闭环，其余进入近期迭代 |
 | P3 | 1 组 | 产品广度增强，不应挤占可靠性和发布闭环 |
 
 最高优先事项：
 
-1. 将 `vibe-native-host` 作为真实安装包组成部分交付，并完成安装后浏览器交接冒烟测试。
-2. 闭环扩展商店身份、扩展签名、权限审查、updater 演练及 OS 签名或明确的 unsigned 策略。
-3. 修复旧预览任务崩溃、数据库迁移自动清空、HLS ffmpeg 设置失效、限速并发竞态和 HLS 内存峰值。
-4. 让 lint、bindings、Windows Rust 集成测试等质量门禁恢复为可重复的全绿状态。
-5. 在继续扩协议前，补齐非 HTTP 协议的恢复、代理、凭据、校验和故障诊断矩阵。
+1. 在四目标 candidate 安装包中验证 `vibe-native-host`，并完成安装后浏览器交接与卸载残留冒烟测试。
+2. 取得正式扩展商店身份/签名，完成 `rc.0 → rc.1` updater 演练；OS 包保持明确的 unsigned 策略。
+3. 在干净 checkout 和目标 CI 关闭 bindings、Windows Rust integration tests 与 bundle 门禁。
+4. 按已建立的协议矩阵补齐非 HTTP 协议恢复、代理、凭据、校验和故障诊断自动化。
+5. 建立生产规模性能基线，再处理缓存、搜索、批量删除和模块拆分等 P2。
 
 ## 二、审计方法与证据口径
 
@@ -67,23 +67,24 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 - 本次快照的工作区有大量未提交改动；结论描述的是**当前文件状态**，不等同于某个 Git commit。
 - 未完成 Windows、macOS、Linux 三个平台安装包的全量实机安装、升级、卸载和浏览器商店验证。
 - 性能部分没有以生产硬件跑完 `1k/10k/50k` 历史任务及 `100` 活跃任务基准，因此不会把所有潜在热点写成已发生性能故障。
-- beta 语言的大量缺键是已知范围；当前主动维护语言仍仅为 `en` 和 `zh-CN`。
+- 七种受支持语言均由完整性脚本校验；`zh-TW`、`ja`、`ko`、`ru`、`es` 仍按产品定义标记为 Beta，且不会被自动检测选中。
 
 ## 三、质量门禁实测
 
 | 检查 | 结果 | 说明 |
 | --- | --- | --- |
-| `pnpm typecheck` | 通过 | TypeScript 类型检查通过 |
-| `pnpm lint` | **失败** | 122 个文件中有 4 个 error、25 个 warning；3 个文件需格式化，1 个 import organize error，25 个均为 `useExhaustiveDependencies` |
-| `pnpm check:i18n` | 主动语言通过 | `zh-CN` 与 `en` 一致；beta 语言仍有大量已知缺键警告 |
-| `pnpm test:frontend` | 通过 | 16 个测试文件、47 个测试通过 |
-| `pnpm build` | 通过 | 前端生产构建通过 |
-| `pnpm check:bindings` | **失败** | 检出 `extract_system_file_icon` / `SystemFileIcon` 绑定漂移；生成文件已刷新，但在纳入版本并重新验证前门禁仍不闭环 |
+| `pnpm check` | 通过 | TypeScript、Biome 与七语言完整性检查均通过；147 个前端/脚本文件无 lint error/warning；六类 a11y 规则全部恢复为 error |
+| `pnpm test:frontend` | 通过 | 17 个测试文件、60 个测试通过；包含错误边界、Settings autosave 及失败竞态、axe 无障碍扫描、删除确认、新建下载探测和任务详情/移动抽屉组合测试 |
+| `pnpm build` | 通过 | TypeScript 与 Vite 生产构建通过 |
+| `pnpm test:release-tools` | 通过 | 22 项通过，包含 sidecar、身份/权限、preflight、确定性扩展 ZIP、资产和 updater rehearsal |
+| `pnpm verify:extensions` | 通过 | dev 四变体与 candidate 三变体均通过；capture 关闭、manifest 最小权限与 allowlist 校验通过，candidate ZIP 确定性由 release-tools 覆盖 |
+| `pnpm verify:protocol-matrix` | 通过 | 七类非 HTTP 协议、统一列、状态值与仓库测试证据完整 |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | 通过 | Rust 编译检查通过 |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` | 通过 | Clippy 零 warning |
-| Rust 测试 | **未完整通过** | 165 个 library tests 和前序集成测试通过；Windows `dash_engine` 测试二进制在执行测试前以 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 退出 |
+| Rust 全测试 | 通过（串行复验） | `cargo test --jobs 1` 完整通过：177 library tests、7 native-host tests 及全部 integration/doc tests；FTP/WebDAV 传输中恢复、HLS/DASH staging 恢复和 55 个协议引擎测试均正常执行 |
+| Specta bindings | 已生成，待干净树门禁 | `StartupStatus` 与三个 startup command 已生成且 idempotence 校验通过；工作区本身有预期未提交差异，不能用当前 `git diff --exit-code` 代表干净 checkout 结果 |
 
-结论：当前代码不是“构建全面失败”，但也不能称为“CI/本地质量门禁全绿”。尤其应区分测试断言失败与 Windows 测试二进制装载失败：后者仍然会阻止可信发布，不能以“测试没跑到”视为通过。
+结论：本轮静态检查、前端、发布工具、扩展、协议矩阵、Rust check/clippy 和全量 Rust 测试均已通过。Windows 默认并行构建曾超过本机页文件，串行复验已证明测试本身可运行；CI 仍需验证默认 runner 资源和四目标 bundle。当前剩余阻断主要是安装包/真实浏览器/updater/商店凭据，而非已知代码门禁失败。
 
 ## 四、已确认优势
 
@@ -107,9 +108,9 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 
 | 子维度 | 分数 | 结论 |
 | --- | ---: | --- |
-| 可访问性 | 3/4 | 主路径有语义、ARIA、键盘和焦点态；但多项 Biome a11y 规则被全局关闭，缺自动回归保障 |
+| 可访问性 | 3/4 | 主路径有语义、ARIA、键盘和焦点态；六类 Biome a11y 规则均已恢复强制门禁，错误边界、设置和删除确认通过 axe；完整主壳/新建下载的屏幕阅读器端到端验收仍待补 |
 | 前端性能 | 3/4 | 虚拟列表、store 拆分和事件批处理方向正确；缓存、effect 风险和规模基准仍需处理 |
-| 响应式 | 3/4 | 主任务视图在窄屏可用；设置页仍过密且依赖横向滚动的分区选择器 |
+| 响应式 | 3/4 | 主任务视图在窄屏可用；设置页在小于 `lg` 时已改为紧凑下拉分区导航，但仍需 `320/390/768/1280px` 多尺寸视觉验收 |
 | 主题系统 | 4/4 | OKLCH token、明暗模式和 8 个强调色覆盖完整，未发现主要主题断裂 |
 | 反模式控制 | 3/4 | 产品型密集工具风格成立，未落入卡片墙、渐变文字或营销页模板；少量装饰效果需持续克制 |
 | **合计** | **16/20** | **良好：界面基础可信，需集中修复边界状态和自动化保障** |
@@ -122,47 +123,41 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 
 ### 3. 具体问题
 
-#### UX-01（P1，已确认缺陷）：旧浏览器预览任务可导致整页崩溃
+#### UX-01（P1，已修复）：旧浏览器预览任务协议迁移
 
-- **证据**：`src/lib/tauri-browser.ts:182-196,216-223` 只规范化错误和恢复字段，没有为旧任务补齐 `protocol`；`src/components/tasks/TaskRow.tsx:159-160` 无保护地调用 `protocol.toLowerCase()`。
-- **影响**：用户或开发者只要保留旧版本 localStorage 任务，任务列表渲染即可抛错；错误边界接管后，整个主界面不可操作。
-- **改进**：在统一 `normalizeTask`/持久化迁移层为缺失协议推导可靠默认值；展示组件仍应对未知协议容错。禁止只在 `TaskRow` 临时写空字符串而不修复数据迁移。
-- **验收**：加入旧 schema localStorage fixture；加载后任务列表正常显示、协议标签合理、刷新后数据已迁移；缺失/未知协议均不触发 error boundary。
+- **原缺陷**：旧 localStorage 任务可能缺失 `protocol`，而任务行曾直接调用 `protocol.toLowerCase()`，可触发整页错误边界。
+- **实现**：`src/types/task.ts` 的统一规范化层会按 URL scheme 和文件扩展名推导协议，并为无法识别的旧记录使用 `unknown`；浏览器预览加载后会把迁移结果写回 localStorage。
+- **证据**：`src/types/task.test.ts` 覆盖缺失协议、非 HTTP scheme、manifest 扩展名及未知输入；前端 typecheck、lint、测试和生产构建通过。
 
-#### UX-02（P2，已确认缺陷）：错误边界使用不存在的翻译键
+#### UX-02（P2，已修复）：错误边界翻译键
 
-- **证据**：`src/components/shell/AppErrorBoundary.tsx:72` 使用 `errorBoundary.copy`，而 `src/i18n/locales/en.ts:1094` 和 `zh-CN.ts:1144` 定义的是 `errorBoundary.copyError`。
-- **影响**：应用最需要清晰恢复信息时，按钮可能显示原始 key 或 fallback，不利于用户复制错误求助。
-- **改进**：改用正确 key，并为 error boundary 增加 en/zh-CN 组件测试，覆盖复制、重载和回到主界面。
-- **验收**：两种主动语言均显示正确按钮文本，复制内容包含错误消息且不会再次抛错。
+- **原缺陷**：组件使用不存在的 `errorBoundary.copy`，可能在恢复界面显示原始 key。
+- **实现**：已改用 `errorBoundary.copyError`，为 i18n 未初始化场景保留英文 fallback，并由七语言完整性门禁保证 key 存在。
+- **证据**：`AppErrorBoundary.test.tsx` 覆盖中文按钮与标题、复制诊断内容以及不重载应用的 reset 恢复路径；七语言完整性检查通过。
 
-#### UX-03（P2，回归风险）：25 个 Hook 依赖警告集中在关键交互
+#### UX-03（P2，已修复）：关键交互 Hook 依赖与 Settings autosave
 
-- **证据**：Biome 报告 25 个 `useExhaustiveDependencies` warning，涉及 `SettingsPage`、`AppShell`、`NewDownloadDialog`、`TaskDetails`、`TaskList` 和 `toast`；例如 `SettingsPage.tsx:566` 的自动保存 effect、`:988` 的初始化刷新 effect。
-- **影响**：闭包过期或重复 effect 可能影响设置自动保存、资源探测、详情状态和 toast 计时；这些问题通常只在快速切换或异步竞态中出现。
-- **改进**：逐条判断依赖、稳定 callback 和 effect 职责，不要机械补 dependency；把自动保存拆成可测试 hook/state machine，并用 fake timers 覆盖 debounce、卸载和并发刷新。
-- **验收**：`useExhaustiveDependencies` 告警归零或每个例外都有局部注释与测试；设置快速连续修改只保存最终状态，切页/卸载不产生陈旧写入。
+- **原风险**：25 个 `useExhaustiveDependencies` warning 集中在设置自动保存、资源探测、详情状态和 toast 计时等异步路径。
+- **实现**：已逐项补齐真实依赖、删除伪依赖，并只在一次初始化、订阅所有权和 autosave 快照等有意保持边界的位置使用局部说明。
+- **证据**：Biome 告警清零；`SettingsPage.test.tsx` 使用 fake timer 覆盖快速连续编辑只保存最新快照、`1000ms` 防抖和页面卸载取消未提交保存。
 
-#### UX-04（P2，实测）：移动设置页信息密度过高
+#### UX-04（P2，工程实现完成，视觉验收待补）：窄屏设置分区导航
 
-- **证据**：主任务视图在 `390px` 下无页面级横向溢出，新建下载和命令面板可用；但设置页仍使用横向滚动分区选择器，长表单在窄屏上认知负担明显。
-- **影响**：小窗口或触屏设备上难以定位当前分区，保存状态和字段关系不易扫描，横向滑动也可能与页面手势冲突。
-- **改进**：窄屏改为原生 select/菜单式分区导航或 sticky 单列目录；保持字段单列、40px 可点击目标和错误就近显示；不要牺牲桌面端密度。
-- **验收**：`320/390/768/1280px` 截图与键盘测试无内容遮挡、无页面横向滚动；最长中英文标签不溢出；所有分区可在两次操作内到达。
+- **实现**：设置页在小于 `lg` 时使用 sticky 的 Radix Select 分区导航，桌面端保留横向紧凑标签；搜索、分区导航和保存状态位于同一固定导航区域，字段在窄屏保持单列和 `44px` 主要输入高度。
+- **证据**：`SettingsPage.test.tsx` 断言紧凑分区导航具有可访问名称，保存状态通过 `aria-live="polite"` 暴露；主任务视图既有 `390px` 预览无页面级横向溢出。
+- **剩余**：仍需补齐 `320/390/768/1280px` 中英文截图与键盘/触控验收，确认最长标签、Select portal 和软键盘场景无内容遮挡。
 
-#### UX-05（P2，已确认语义问题）：游标分页的 `total` 不是总数
+#### UX-05（P2，已修复）：游标分页数量下界语义
 
-- **证据**：`src-tauri/src/db/task_records.rs:337-345` 将 `total` 设为“本页已加载数量 + has_more 时的 1”。
-- **影响**：任何把该字段展示为总任务数、选中范围或统计依据的 UI 都可能误导用户；其语义也与普通分页 API 的 `total` 不一致。
-- **改进**：将字段重命名为 `loaded_count`/`minimum_total`，或在真正需要时单独查询准确 count；不要为每次无限滚动强制昂贵 count。
-- **验收**：IPC 类型明确区分准确值与估算值；UI 不再把下界显示为总数；大库场景不会因 count 查询拖慢首屏。
+- **原缺陷**：游标查询用“本页已加载数量 + `has_more` 时的 1”避免额外 COUNT，但 IPC 曾命名为 `totalEstimate`，UI 又把它显示为精确的剩余数和筛选总数。
+- **实现**：IPC 字段改为带文档的 `minimumTotal`，明确它只是匹配任务数下界；无限滚动改为不带伪精确数字的“正在加载更多”，全选提示只说明仍有更多匹配任务，不再展示下界为总数。
+- **证据**：Specta bindings 已同步；Rust cursor 测试固定 12 条匹配数据的第一页下界为 6，证明该值不是精确总数；前端和七语言文案均不再消费 `{{total}}`/`{{count}}` 作为游标总量。
 
-#### UX-06（P2，系统性风险）：关键 a11y 规则被全局关闭
+#### UX-06（P2，已修复）：a11y 静态规则与组件检查
 
-- **证据**：`biome.json:60-66` 全局关闭点击键盘配对、SVG title、label-control、语义元素、静态元素交互和 ARIA role 支持检查。
-- **影响**：现有界面虽然整体可用，但后续新增组件可在无告警情况下引入键盘不可达、错误 role 或无标签控件。
-- **改进**：逐项恢复规则；确需例外时在具体组件局部抑制并说明 Radix/自定义控件语义；增加 axe 或 Testing Library 组件级冒烟测试。
-- **验收**：至少表单 label、静态元素交互、ARIA role 三类规则重新启用；主壳、新建下载、设置、删除确认和错误边界通过自动 a11y 检查。
+- **实现**：`noLabelWithoutControl`、`noStaticElementInteractions`、`useAriaPropsSupportedByRole`、`useKeyWithClickEvents`、`noSvgWithoutTitle`、`useSemanticElements` 均已从全局关闭改为 error。分段选择改用 `fieldset` 与 `aria-pressed`，步骤指示改为有序列表，操作组使用 `fieldset/legend`，容量摘要使用命名 `section`；虚拟列表、标题栏拖拽和装饰性 SVG 只保留带原因的局部抑制。
+- **证据**：六条规则对整个 `src/` 强制执行且 `pnpm check` 通过；`jest-axe` 扫描错误边界、默认设置页、单项和批量删除确认均为零违规，删除测试同时覆盖长 CJK/emoji 文件名、取消、确认和名称截断。
+- **后续保障**：完整主壳、新建下载和移动 drawer 的屏幕阅读器/键盘端到端验收继续归入 FUN-04，不再作为静态规则恢复的阻断。
 
 ### 4. UX 修复工作流建议
 
@@ -181,27 +176,27 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 | FTP/FTPS | 动态并行、凭据、目录探测、SOCKS5 | implicit FTPS + SOCKS5 明确不支持；诊断/恢复测试弱于 HTTP | 可用但不可宣称同等成熟 |
 | SFTP | 单文件、密码/密钥相关能力、TOFU、目录探测、SOCKS5、本地临时文件续传 | 大文件仍以较保守读路径为主；跨服务端兼容矩阵不足 | 中等成熟度 |
 | BitTorrent | magnet、torrent URL/本地文件、多文件选择、peer/tracker/DHT 快照、做种、SOCKS5、限速 | 实时 tracker/NAT/端口可达性诊断仍有限 | 功能丰富，运维可见性不足 |
-| HLS | master variant、AES-128-CBC、init map、byte range、并发分片、live polling、多音轨/字幕、MP4 remux | 不支持 SAMPLE-AES/DRM；ffmpeg 设置和内存峰值有已确认问题 | 需要先修可靠性再扩格式 |
+| HLS | master variant、流式 AES-128-CBC、init map、byte range、并发分片、live polling、多音轨/字幕、MP4 remux | 不支持 SAMPLE-AES/DRM；仍需真实媒体 RSS 与 ffmpeg setting 冒烟 | 关键 P1 已修，继续补生产证据 |
 | DASH | 静态 MPD、ffmpeg 下载/remux、进度监控 | 拒绝 dynamic/live；缺 `SegmentTimeline` | 第一阶段 VOD 能力 |
 | WebDAV/WebDAVS | Basic Auth、PROPFIND、委托 HTTP 引擎 | 仅 Basic Auth；无 Digest/OAuth/企业认证矩阵 | 基础能力，不是完整 WebDAV 客户端 |
 | Metalink4 | 多文件、镜像优先级/failover、校验、分文件进度 | 非 HTTP 镜像和长期恢复诊断仍有限 | 中等成熟度 |
-| 浏览器交接 | Native Messaging、WebSocket bridge、去重、单实例、下载接管、显式 header/cookie 转发 | 安全边界刻意限制为 HTTP/HTTPS；安装包 host 交付未闭环 | 代码能力强，但发布交付被 P0 阻断 |
+| 浏览器交接 | Native Messaging sidecar、WebSocket bridge、去重、单实例、下载接管、显式 header/cookie 转发 | 安全边界刻意限制为 HTTP/HTTPS；等待四目标 bundle 与正式商店实测 | 工程闭环，外部发布验收阻断 |
 | 本地自动化 | 剪贴板监控、命令面板、批量动作 | 无稳定 JSON-RPC/REST API | 适合交互使用，自动化生态未形成 |
 
 ### 2. 具体问题
 
-#### FUN-01（P1，成熟度缺口）：非 HTTP 协议缺少统一可靠性与诊断验收矩阵
+#### FUN-01（P1，大部分完成）：已建立非 HTTP 协议统一可靠性矩阵
 
 - **影响**：入口已经存在会提高用户预期；如果暂停/恢复、凭据过期、代理失败、磁盘失败和校验失败不能给出同等级恢复动作，功能数量反而削弱信任。
-- **改进**：为 FTP/FTPS、SFTP、BT、HLS、DASH、WebDAV、Metalink 建立相同的 capability contract：创建、探测、暂停、恢复、取消、重试、代理、凭据、校验、进程重启和错误诊断。
-- **验收**：每个协议都有支持矩阵和自动化证据；不支持项在创建前明确提示；失败任务都能输出稳定 error code、用户说明和至少一个可执行恢复动作。
+- **实现**：[protocol-reliability-matrix.md](protocol-reliability-matrix.md) 统一记录创建、探测、暂停、恢复、取消、重试、代理、凭据、校验、重启和诊断状态；`pnpm verify:protocol-matrix` 在 CI 中阻止协议行、状态或测试证据缺失。
+- **新增证据**：FTP、SFTP、BT、HLS、DASH、WebDAV、Metalink 的取消状态、进程重启恢复和显式从头重启现在共享跨协议契约测试；取消与 Restart 两列已升级为 `automated`。暂停、恢复、取消现在把任务、文件、work unit、重试时间和事件放入同一事务，跨协议测试验证临时文件保留、最终文件不提前发布和进度不回退。FTP 与 WebDAV 又新增真实传输中暂停、持久化偏移和字节级恢复测试；HLS 与 DASH 新增 staging 中断、已完成分片复用、未完成分片重取和 ffmpeg remux 测试，因此四个协议的 Pause/Resume 已升级为 `automated`。这些测试同时修复了 FTP 缓冲区未落盘却提前持久化偏移、HTTP 小文件把 resume 错绑到 parallel、HLS 取消被误报失败及 remux 缺少输出参数、DASH upsert 清空完成分片及 ffmpeg 参数/输出格式错误。FTP、SFTP、WebDAV 的任务级 SHA-512/SHA-1/MD5 也会在完成后持久化校验结果；FTP 凭据拒绝和 FTP/SFTP SOCKS5 失败使用稳定结构化错误码，BitTorrent 已记录 source、metadata 和 stats 诊断并采用稳定 `bt_*` 错误码。
+- **剩余**：Metalink 的完整任务级暂停/恢复，以及 BT、媒体协议和各引擎诊断仍有 `partial`；跨进程与真实外部服务兼容性也需继续积累。只有稳定 error code、恢复动作和临时文件一致性均有自动化证据后，本项才能完全关闭。
 
-#### FUN-02（P1，已确认缺陷）：设置中的 ffmpeg 路径对 HLS 不生效
+#### FUN-02（P1，已修复）：HLS 与 DASH 共享 ffmpeg 配置
 
-- **证据**：`src-tauri/src/download/ffmpeg.rs:22-58` 已提供 env → SQLite setting → PATH 的统一异步解析；DASH 使用该路径。HLS 却在 `hls.rs:1883-1900` 保留独立同步实现，只检查 `VIBE_FFMPEG_PATH` 和 PATH。
-- **影响**：用户在 Settings 中成功选择 ffmpeg 后，DASH 可工作而 HLS 仍报告缺失；同一设置对两个依赖相同工具的功能表现不一致。
-- **改进**：删除 HLS 私有 resolver，统一调用 `download::ffmpeg`；probe 和 download 都传入 pool，并统一错误码与检测文案。
-- **验收**：在 PATH 和环境变量均无 ffmpeg 时，仅设置 SQLite `ffmpeg_path`，HLS probe、下载和 remux 均成功；无效路径返回可恢复错误并可跳转到设置。
+- **原缺陷**：DASH 使用 env → SQLite setting → PATH 的统一解析，而 HLS 曾有只检查 env/PATH 的私有 resolver。
+- **实现**：HLS 私有同步 resolver 已删除；probe、download 和 remux 统一使用 `download::ffmpeg::ensure_ffmpeg_available`，解析顺序与 DASH 相同。
+- **剩余验收**：还需在无 PATH/env 的真实安装环境只配置 SQLite `ffmpeg_path`，完成一次 HLS remux 冒烟测试。
 
 #### FUN-03（P2，能力边界）：协议格式支持仍有明确缺口
 
@@ -214,10 +209,11 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 
 验收方式不是一次性全部实现，而是让 New Download、帮助文档、README 和错误提示对这些边界保持一致，并用负向测试保证“不支持时明确拒绝”。
 
-#### FUN-04（P2，测试完整性）：前端测试规模与界面复杂度不匹配
+#### FUN-04（P2，持续改进）：前端测试规模与界面复杂度不匹配
 
-- **现状**：Vitest 已有 16 文件/47 测试并全部通过，但复杂界面包含 2407 行 Settings、2038 行 TaskDetails、虚拟列表、命令面板、多个 dialog 和大量异步事件。
-- **缺口**：设置自动保存、新建下载探测、任务详情切换、旧数据迁移、错误边界、批量删除、键盘选择和移动 drawer 等关键组合行为覆盖不足。
+- **现状**：本轮 Vitest 有 17 文件/60 测试通过；错误边界中英文恢复/复制、设置自动保存防抖/卸载取消/失败恢复/过期响应隔离、单项/批量删除确认和关键表面 axe 扫描已有回归证据，旧数据迁移、任务行键盘与恢复动作也有自动化覆盖。
+- **新增证据**：`NewDownloadDialog.test.tsx` 覆盖 `650ms` 自动探测防抖、成功探测快照提交、结构化 timeout 恢复提示、URL 变化后的旧 Promise 隔离，以及 request ID phase 过滤和卸载注销；`TaskDetails.test.tsx` 使用真实用户事件覆盖详情 tab 按需加载、任务切换重置到 Overview，以及移动 drawer 的语义、初始焦点和关闭动作。
+- **缺口**：主壳级搜索/筛选/选择/详情/删除贯通流程，以及完整主壳和新建下载的屏幕阅读器/键盘端到端验收仍不足。
 - **改进**：优先增加组件/集成测试而非继续堆纯 helper 测试；对 Tauri adapter 使用稳定 mock contract。
 - **验收**：上述高风险流程均有成功、失败、取消/卸载和中英文测试；真实用户动作不依赖实现细节断言。
 
@@ -240,34 +236,30 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 
 ### 2. 具体问题
 
-#### RLS-01（P0，发布阻断）：Native Messaging host 未进入 Tauri bundle 闭环
+#### RLS-01（P0，工程已闭环，安装验收待完成）：Native Messaging sidecar
 
-- **证据**：`src-tauri/src/commands/browser.rs:1128-1135` 假设 `vibe-native-host(.exe)` 与主程序同目录；`src-tauri/tauri.conf.json:30-43` 只打包 extension-core 资源和图标，没有 `externalBin`、sidecar 或等价 host 二进制规则。
-- **影响**：开发环境中 host binary 存在，不代表安装后存在。正式安装包可能成功安装 manifest，却让浏览器指向不存在的 executable，第一方核心工作流直接失效。
-- **改进**：确定 Tauri 2 sidecar/external binary 方案、目标三元组命名、安装路径和升级/卸载行为；manifest 必须使用安装后的真实绝对路径。
-- **验收**：对 Windows x64、macOS arm64/x64、Linux x64 的正式 bundle 安装后检查 host 文件、执行权限和 manifest；Chrome/Edge/Firefox 至少完成一次浏览器发起 → host → app → task 创建的端到端冒烟测试；卸载后无失效残留。
+- **实现**：bundle overlay 使用 `externalBin`；准备脚本只支持 Windows x64、macOS arm64/x64、Linux x64，按 Tauri target 后缀暂存并校验文件/执行权限。普通 Cargo check 不加载 bundle overlay，避免生成物阻断开发门禁。
+- **防失效**：manifest 安装只接受已验证存在的绝对 host 路径，Windows registry 写入失败会回滚本轮 manifest；host 提供 `--self-check` 验证版本、协议和兄弟主程序。
+- **自动化**：Tauri build 与 candidate workflow 都会解包代表性 MSI、`.app`、`.deb`、AppImage 并执行 self-check；Node 测试覆盖目标映射、命名、暂存验证和不支持目标拒绝。
+- **剩余门禁**：必须等待四目标 CI bundle 真实通过，并在 Chrome、Edge、Firefox 完成安装、交接、去重、卸载残留验收后才能从 P0 完全关闭。
 
-#### RLS-02（P0，发布阻断）：公开发布信任链未闭环
+#### RLS-02（P0，工程闭环、外部凭据阻断）：公开发布信任链
 
-- **缺口**：Chrome/Edge/Firefox 正式 store ID、生产扩展签名、Firefox signed XPI、权限说明/review copy、Safari 取舍、OS 代码签名、真实 updater 升级演练尚未全部完成。
-- **影响**：用户会遭遇来源警告、扩展身份变化、Native Messaging allowlist 不匹配或升级失败；即使二进制可构建，也不构成可信发布。
-- **改进**：建立 release candidate 清单，固定 app/extension identity；签名与权限文档进入 release job；若短期明确 unsigned，下载页和 release notes 必须如实说明风险。
-- **验收**：从上一稳定版本安装，经 `latest.json` 检测、下载、校验、重启到新版本；浏览器扩展升级后 ID 不变且 host 继续可用；三平台安装/卸载证据归档。
+- **实现**：dev/candidate/release 三种身份已统一到 Rust 与扩展构建；candidate 使用确定性 Chromium 测试公钥，release 缺任一正式 ID 会 fail closed。商店包仅生成 Chrome、Edge、Firefox，采用最小权限并关闭 capture；Opera 仅 dev，Safari 明确不支持。
+- **发布工程**：preflight 校验 tag/版本/签名材料/正式 ID/权限/allowlist；扩展 ZIP 可重复构建并输出版本清单和 SHA-256；candidate 四目标 workflow、发布资产复验、隐私政策、商店资料和 tag-specific updater rehearsal 配置均已加入。
+- **已接受边界**：OS 安装包仍 unsigned，release notes 必须显示 Gatekeeper、SmartScreen 和校验说明。
+- **外部阻断**：仍需正式 Chrome/Edge/Firefox ID、商店账号、Firefox signed XPI，以及 `rc.0 → rc.1` 三平台 updater 实机证据。取得这些凭据后预期无需代码调整。
 
-#### ARC-01（P1，已确认数据风险）：迁移异常会在用户同意前重建数据库
+#### ARC-01（P1，已修复）：数据库迁移恢复改为 fail closed
 
-- **证据**：`src-tauri/src/db/connection.rs:26-50` 遇到特定 migration error 后关闭 pool、备份、删除 DB 文件并重建；`src-tauri/src/lib.rs:567-590` 在应用完成初始化后才告知用户任务和设置已清空。
-- **附加风险**：`connection.rs:147-163` 顺序复制主 DB 和 WAL，忽略 WAL copy 失败，也没有使用 SQLite online backup/VACUUM INTO；备份不保证是同一一致性时间点。
-- **影响**：一次可恢复的迁移历史问题会自动变成数据丢失事件；通知不是授权。备份若不一致，用户可能无法恢复原任务和设置。
-- **改进**：失败时默认 fail closed；先显示“退出/打开备份位置/安全重建”选择。使用 SQLite backup API 或 `VACUUM INTO` 生成一致备份，并验证可打开、`integrity_check` 通过后才允许重建。
-- **验收**：Dirty、VersionMissing、降级和损坏快照均有测试；未确认时原库字节不变；备份可迁移、任务/设置数量可核对；重建操作有明确日志和恢复说明。
+- **实现**：迁移 Dirty、VersionMissing 和 VersionMismatch 不再删除原库；启动状态进入专用恢复界面，仅允许打开恢复目录、重试或在明确输入确认后重建。
+- **备份保证**：使用参数化 `VACUUM INTO` 创建一致备份，再以只读连接执行 `PRAGMA integrity_check`；只有已验证备份存在时后端才接受重建命令。
+- **证据**：migration integration tests 覆盖 Dirty、VersionMissing、原库保留、已验证备份和显式重建后的干净 schema，11 项全部通过。
 
-#### ARC-02（P1，工程稳定性）：质量门禁当前不全绿
+#### ARC-02（P1，本地已闭环，等待 CI）：质量门禁
 
-- **证据**：见“质量门禁实测”。lint 有 4 error/25 warning；bindings 有漂移；Windows `dash_engine` 测试 binary 在测试前装载失败。
-- **影响**：格式/依赖问题本身不是严重运行故障，但持续红门禁会掩盖真正回归；测试进程无法启动意味着该平台的相关能力实际未验证。
-- **改进**：先修当前错误，再把 typecheck、lint、active i18n、bindings、frontend test、Rust check/clippy/test 纳入必过 CI；Windows loader 错误需定位 DLL/feature/toolchain 依赖，不能仅在 job 中忽略。
-- **验收**：干净 checkout 上所有门禁连续两次通过；生成 bindings 后 `git diff --exit-code` 为零；Windows `dash_engine` 至少真正开始并完成测试枚举。
+- **当前结果**：typecheck、Biome、七语言完整性、前端测试、生产 build、Cargo check/clippy、全量 Rust tests、bindings idempotence 均通过；CI 还新增协议矩阵与 release-tools 验证。
+- **剩余门禁**：干净 checkout 的 `check:bindings` 和 Windows/Linux CI 必须复验。Windows 首次默认并行编译曾因本机页文件不足失败，但 `--jobs 1` 后 `dash_engine` 与全部测试正常运行；若 hosted runner 复现，应限制 Cargo jobs 或调整 runner 资源，不能忽略测试。
 
 #### ARC-03（P2，可维护性）：超大模块扩大变更影响面
 
@@ -284,9 +276,9 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 - **改进**：按网络、认证、代理、远端变更、磁盘、工具缺失、格式不支持和取消等稳定类别逐步迁移；DB 错误可保留内部 source，但 command 层输出结构化 payload。
 - **验收**：调度和恢复逻辑只匹配枚举/code，不匹配人类文案；跨协议同类错误共享 code；未知错误仍保留 source chain 和可复制诊断。
 
-#### ARC-05（P2，架构重复）：ffmpeg 单一事实源未真正统一
+#### ARC-05（P2，已修复）：ffmpeg 单一事实源已统一
 
-该问题的用户表现见 FUN-02，架构根因是 `download/ffmpeg.rs` 与 `hls.rs` 同时维护 resolver、可用性检测和文案。修复时应删除重复实现，而不是让两份逻辑再次同步。
+HLS 私有 resolver 和 PATH 检测已删除，HLS/DASH 统一通过 `download/ffmpeg.rs` 解析环境变量、SQLite 设置与 PATH。后续新增 ffmpeg 协议不得再次维护独立 resolver。
 
 ## 八、程序运行效率
 
@@ -301,33 +293,27 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 
 ### 2. 具体问题
 
-#### PERF-01（P1，已确认并发正确性）：全局 token bucket refill 可覆盖并发扣减
+#### PERF-01（P1，已修复）：token bucket refill 与扣减使用原子更新
 
-- **证据**：`src-tauri/src/download/speed.rs:105-120` 用 CAS 争抢 refill 所有权，但随后通过普通 atomic `store(new_tokens)` 写回；`:123-140` 的另一个线程可能在 load 与 store 之间成功 CAS 扣减 token。
-- **影响**：refill 线程会把并发扣减覆盖掉，短时间额外发放 token；高并发下载时全局/逐任务限速可能超出配置，且问题难以用普通单线程测试复现。
-- **改进**：使用 `fetch_update`/CAS loop 在同一原子变量上完成“读取当前 token + refill + clamp”，或用小粒度 mutex 合并时间和 token 状态；明确内存序理由。
-- **验收**：加入多线程确定性测试和长时间统计测试；多个 consumer 下总吞吐在允许 burst 后收敛到配置值，TSAN/loom 可行时补模型测试。
+- **原缺陷**：refill 曾在争抢更新时间后用普通 atomic `store` 写回，可覆盖另一个线程已成功的 token 扣减。
+- **实现**：refill 改用同一 token 原子的 `fetch_update` 完成读取、补充和 clamp，不再用 `store` 覆盖并发扣减；代码说明了 Relaxed ordering 只保护数值原子性、不承担跨数据同步。
+- **证据**：并发 refill/consume 回归测试与既有限速测试共 5 项通过。长时间多 consumer 吞吐基准仍归入 PERF-07。
 
-#### PERF-02（P1，已确认内存风险）：加密 HLS 分片存在接近 1 GiB/worker 的瞬时峰值
+#### PERF-02（P1，已修复）：加密 HLS 分片采用流式 AES-CBC 解密
 
-- **证据**：`hls.rs:48-55` 允许单分片最大 512 MiB；`:903-949` 先收集完整 ciphertext；`:1095-1101` 在原 buffer 上解密后又 `.to_vec()` 生成 decrypted buffer。
-- **影响**：单 worker 最坏同时持有约 512 MiB ciphertext backing buffer 和 512 MiB plaintext；多个并发分片可快速触发交换、OOM 或整机卡顿。512 MiB cap 只把“无界”变成“过高的有界”。
-- **改进**：实现 AES-128-CBC block streaming decrypt，尾部保留一个 block 处理 PKCS#7；写入临时文件并原子完成。同步设置合理的单 segment 上限和全任务内存预算。
-- **验收**：使用大加密 segment fixture 监控峰值 RSS；并发 worker 增加时内存按固定小 buffer 线性增长，不按完整 segment 大小增长；取消/解密失败不留下可误用成品。
+- **原缺陷**：加密路径曾先收集最多 512 MiB ciphertext，再复制出 plaintext，单 worker 可接近 1 GiB 瞬时内存。
+- **实现**：ciphertext 按网络 chunk 输入，decryptor 最多保留 16 字节尾块处理 PKCS#7，plaintext 写入 256 KiB `BufWriter` 临时文件，成功后发布；取消、网络、padding 或磁盘错误会清理临时文件。
+- **证据**：任意 chunk 边界、非法 padding 和未对齐密文单元测试通过。还需在 PERF-07 的大加密媒体基准记录实际峰值 RSS。
 
-#### PERF-03（P2，已确认增长）：系统文件图标缓存按完整文件名且无上限
+#### PERF-03（P2，已修复）：系统文件图标缓存有界且按扩展复用
 
-- **证据**：`src/hooks/use-system-file-icon.ts:4-20` 明知 OS 图标只依赖扩展名，仍以完整 `fileName` 为 key；`iconCache` 和 `inflight` 没有容量或淘汰策略。
-- **影响**：大量不同文件名但相同扩展会重复 IPC、重复 base64 PNG，并在长会话中永久占用前端内存。
-- **改进**：按规范化扩展/MIME key；使用小容量 LRU（例如 128/256）并对无扩展和特殊协议设置稳定 key；后端也应按扩展缓存原始图标结果。
-- **验收**：1 万个不同名称、100 个扩展只触发约 100 次提取；缓存容量有上界；滚动和主题切换不造成图标闪烁或重复请求风暴。
+- **实现**：缓存与 in-flight 请求都使用小写扩展名 key，无扩展名使用稳定 sentinel；LRU 容量固定为 256，命中会刷新淘汰顺序，`null` 仍是有效缓存值。
+- **证据**：前端单元测试覆盖 Windows/Unix 路径归一化、同扩展复用、无扩展名、LRU 淘汰和 `null` 命中。
 
-#### PERF-04（P2，已确认增长）：后端 `files_version` 全局缓存无淘汰
+#### PERF-04（P2，已修复）：`files_version` 缓存跟随任务生命周期
 
-- **证据**：`src-tauri/src/events/mod.rs:155-164` 使用静态 `HashMap<String, i64>`；更新时插入，但删除任务路径没有对应 evict。
-- **影响**：长时间创建/删除任务后，已删除 task id 永久驻留。单条成本不高，但这是明确的生命周期泄漏。
-- **改进**：在任务删除事件中移除；或将缓存放入 AppState，由任务生命周期统一管理；必要时加容量保护。
-- **验收**：批量创建/删除后缓存回到接近存量任务数；并发 emit/delete 不死锁、不复活旧项。
+- **实现**：单任务删除、批量删除和 debug clear/scale seed 都会同步淘汰或清空缓存；锁中毒仍按既有策略安全降级。
+- **证据**：Rust 单元测试固定单项/批量淘汰后仅保留存量任务条目。
 
 #### PERF-05（P2，待基准验证）：历史任务搜索无法利用普通索引
 
@@ -336,12 +322,11 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 - **改进**：先用真实数据跑 `EXPLAIN QUERY PLAN` 和 p50/p95；若超预算，引入 FTS5/规范化 search column，或限制搜索字段和触发时机。
 - **验收**：50k 数据下连续输入不阻塞主界面；目标建议为本地常规 SSD 上 p95 < 100ms，并记录硬件、数据分布和 query plan。
 
-#### PERF-06（P2，已确认阻塞路径）：批量文件删除在 async command 中同步串行执行
+#### PERF-06（P2，核心阻塞已修复，反馈待增强）：文件删除移出 async runtime
 
-- **证据**：`src-tauri/src/commands/tasks/actions.rs:474-503,543-597` 在 async command 内循环调用同步 `delete_path`/trash 操作，并对任务逐个串行处理。
-- **影响**：回收站 API、网络盘或大量小文件可能长时间占用 Tokio worker；批量删除期间响应变慢，且无法显示可取消进度。
-- **改进**：把阻塞文件系统操作放入 `spawn_blocking`；设有界并发；数据库删除与文件删除结果分别建模，向 UI 报告部分成功和剩余项。
-- **验收**：删除数千文件时主事件循环保持响应；可报告进度/警告；取消或个别失败不会重复删除已完成项。
+- **实现**：单个与批量删除统一收集、去重路径，通过最多 4 个 `spawn_blocking` worker 执行；回收站失败仍不会降级为永久删除，所有 warning 写入诊断日志。
+- **证据**：Rust 异步测试覆盖重复路径不会重复处理，临时文件在 worker 完成后被删除。
+- **剩余**：IPC 仍只返回删除数量，尚未把部分文件失败和可取消进度呈现给 UI；完成该反馈前本项不标记完全关闭。
 
 #### PERF-07（P2，证据缺口）：缺少可重复的生产规模性能基线
 
@@ -361,79 +346,68 @@ Vibe Downloader 已经越过“HTTP 下载 MVP”阶段，具备真实桌面下�
 
 ### P0：公开发布前必须完成
 
-| ID | 事项 | 完成标准 |
+| ID | 当前状态 | 完成标准 |
 | --- | --- | --- |
-| RLS-01 | Native Messaging host 随安装包交付 | 三平台 bundle 内存在正确 host；manifest 路径、执行权限、升级和卸载正确；真实浏览器交接通过 |
-| RLS-02 | 发布信任链 | 固定商店 ID/签名/权限文案；完成 updater E2E；配置 OS signing 或明确、可见地接受 unsigned 风险 |
+| RLS-01 | 工程闭环，等待四目标 bundle/浏览器实测 | bundle 内存在正确 host；manifest 路径、执行权限、升级和卸载正确；真实浏览器交接通过 |
+| RLS-02 | 工程闭环，外部凭据与 updater 实测阻断 | 固定正式商店 ID/签名；完成 updater E2E；保持明确、可见的 unsigned 风险说明 |
 
 ### P1：发布前应完成
 
-| ID | 事项 | 完成标准 |
+| ID | 当前状态 | 剩余完成标准 |
 | --- | --- | --- |
-| UX-01 | 旧预览任务迁移和渲染容错 | 旧 localStorage fixture 不崩溃并持久化新 schema |
-| FUN-01 | 非 HTTP 协议可靠性矩阵 | 每协议关键生命周期、失败和恢复路径有自动化证据与明确边界 |
-| FUN-02 | HLS 统一 ffmpeg 配置 | Settings 路径对 HLS probe/download/remux 生效，重复 resolver 删除 |
-| ARC-01 | 安全数据库恢复 | 未经确认不删除原库；备份一致、可校验、可恢复；迁移快照覆盖 |
-| ARC-02 | 质量门禁恢复 | lint/bindings/typecheck/test/build/clippy 全绿；Windows dash tests 真正运行 |
-| PERF-01 | token bucket 原子性 | 并发测试证明扣减不会被 refill 覆盖，长期吞吐收敛 |
-| PERF-02 | HLS 流式解密和内存预算 | 大分片/多 worker RSS 在预算内，失败和取消清理正确 |
+| UX-01 | 已修复 | 保持旧 schema fixture 回归测试 |
+| FUN-01 | 大部分完成 | 补齐 Metalink 任务级暂停/恢复、跨进程重启和剩余诊断 `partial` 证据 |
+| FUN-02 | 已修复 | 真实安装环境完成 SQLite ffmpeg path 冒烟测试 |
+| ARC-01 | 已修复 | 保持迁移快照和显式恢复回归测试 |
+| ARC-02 | 本地闭环，等待 CI | 干净 checkout bindings 全绿；Windows/Linux 默认 runner 完整通过 |
+| PERF-01 | 已修复 | 长时间吞吐统计纳入性能基线 |
+| PERF-02 | 已修复 | 大分片/多 worker RSS 纳入性能基线 |
 
 ### P2：近期工程迭代
 
 | ID | 事项 |
 | --- | --- |
-| UX-02 | 修复 error boundary 翻译键并加恢复测试 |
-| UX-03 | 清理 25 个 Hook dependency 警告，重点重构 settings autosave |
-| UX-04 | 重做窄屏设置分区导航和触控/文本验收 |
-| UX-05 | 明确 cursor `total` 的准确度语义 |
-| UX-06 | 恢复关键 a11y 静态规则并增加组件检查 |
+| UX-02 | 已修复：error boundary 翻译键、fallback、复制与 reset 恢复测试 |
+| UX-03 | 已修复：Hook dependency 告警清零，autosave 防抖与卸载取消组件测试通过 |
+| UX-04 | 工程实现完成：窄屏下拉分区导航；待多尺寸中英文视觉/触控验收 |
+| UX-05 | 已修复：cursor IPC 改为 `minimumTotal`，UI 移除伪精确剩余数和筛选总数 |
+| UX-06 | 已修复：六类 a11y 规则恢复为 error，错误边界、设置和删除确认通过 axe 扫描 |
 | FUN-03 | 在 UI/文档/负向测试中明确协议能力边界 |
-| FUN-04 | 扩展前端组件和集成测试覆盖 |
+| FUN-04 | 已增至 17 文件/60 测试；探测、Settings 失败竞态、详情和移动 drawer 已覆盖，继续补主壳贯通流程和真实辅助技术验收 |
 | ARC-03 | 按职责拆分五个超大模块 |
 | ARC-04 | 从边界包装继续推进结构化错误 |
-| ARC-05 | 消除 ffmpeg 配置重复事实源 |
-| PERF-03 | 图标缓存按扩展归一化并设容量 |
-| PERF-04 | `files_version` 缓存随任务删除淘汰 |
+| ARC-05 | 已消除 ffmpeg 配置重复事实源，保持单一 resolver |
+| PERF-03 | 已修复：图标缓存按扩展归一化并使用 256 项 LRU |
+| PERF-04 | 已修复：`files_version` 缓存随任务删除/清库淘汰 |
 | PERF-05 | 为 50k 搜索建立 query plan/FTS 方案 |
-| PERF-06 | 将批量文件删除移出 async worker 的同步串行路径 |
+| PERF-06 | 核心阻塞已修复；继续增加部分失败与可取消进度反馈 |
 | PERF-07 | 建立 1k/10k/50k 与 100 活跃任务生产规模基线 |
 
 ### P3：可靠性稳定后再规划
 
 - FUN-05：JSON-RPC/REST、PAC、路径模板、完整站点规则、云盘/视频嗅探、云账号同步、插件协议框架。
 
-## 十、建议实施顺序
+## 十、下一步修复顺序
 
-### 阶段 0：恢复可信基线
+### 阶段 A：完成外部 P0 验收
 
-1. 固化当前工作区，审查并纳入生成 bindings。
-2. 清除 lint error；逐项处理而非隐藏 25 个 Hook warning。
-3. 定位 Windows `0xc0000139`，确保 Rust 集成测试可执行。
-4. 将所有必过命令放入 CI，并在干净 checkout 复验。
+1. 在 candidate workflow 跑完 Windows x64、macOS arm64/x64、Linux x64，保存解包结构和 sidecar `--self-check` 日志。
+2. 在 Chrome、Edge、Firefox 分别完成 manifest 安装、未启动/已启动交接、request ID 去重和卸载残留测试。
+3. 发布 `rc.0`、`rc.1`，用 tag-specific rehearsal endpoint 完成三平台签名升级、重启、数据库保留和 manifest 路径复验。
+4. 取得正式商店 ID、账号与 Firefox signed XPI；配置 secrets 后运行 release preflight。OS 包继续 unsigned，除非另行引入代码签名。
 
-### 阶段 1：修正会破坏信任的行为
+### 阶段 B：关闭剩余 P1 证据缺口
 
-1. 修复数据库恢复授权和一致备份。
-2. 修复旧任务崩溃、HLS ffmpeg 设置、token bucket 竞态和 HLS 内存峰值。
-3. 为每项缺陷先加入可复现测试，再修改实现。
+1. 在干净 checkout 与 Windows CI 复验 bindings 和全部 Rust integration tests，解决任何仍存在的 loader/pagefile 问题。
+2. 取消、重启、FTP/SFTP/WebDAV 单文件校验，以及 FTP/HLS/DASH/WebDAV 暂停/恢复已自动化；下一步补齐 Metalink 完整任务级暂停/恢复、跨进程重启，以及 BT/媒体协议和诊断 `partial` 项。
+3. 为 SQLite `ffmpeg_path` 的 HLS 路径、数据库恢复 UI 和 Settings autosave 增加组件/安装环境冒烟测试。
 
-### 阶段 2：闭环安装与发布
+### 阶段 C：P2 规模和可维护性
 
-1. 完成 host sidecar/bundle、manifest 安装和卸载。
-2. 完成扩展身份、签名、权限审查和 Safari 范围决策。
-3. 完成三平台安装包、updater、升级后浏览器交接和 unsigned/signed 策略验收。
-
-### 阶段 3：协议可靠性对齐
-
-1. 建立统一 capability/error/recovery contract。
-2. 先补 FTP/SFTP/BT/HLS/DASH/WebDAV/Metalink 的失败矩阵和长测。
-3. 只有矩阵稳定后再扩 DASH live、SAMPLE-AES 等格式能力。
-
-### 阶段 4：规模与可维护性
-
-1. 建立 1k/10k/50k 和 100 活跃任务基线。
-2. 根据数据实施 FTS、缓存上限、删除并发和模块拆分。
-3. 最后再排自动化 API、PAC、云和插件生态。
+1. 建立 1k/10k/50k 历史任务、100 活跃任务和大加密 HLS 的生产基线。
+2. 图标/files_version 缓存和删除 `spawn_blocking` 已完成；下一步依据数据实施 FTS/search column，并补删除部分失败与可取消进度 UI。
+3. 按职责拆分 Settings、TaskDetails、HLS、DASH、Metalink，并继续推进结构化错误码。
+4. 最后再排自动化 API、PAC、云和插件生态。
 
 ## 十一、发布验收定义
 
@@ -459,6 +433,9 @@ pnpm check:i18n
 pnpm test:frontend
 pnpm build
 pnpm check:bindings
+pnpm test:release-tools
+pnpm verify:extensions
+pnpm verify:protocol-matrix
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 pnpm test:rust
@@ -467,13 +444,13 @@ pnpm test:rust
 浏览器集成变更：
 
 ```bash
-pnpm build:extensions
+pnpm verify:extensions
 ```
 
 发布候选还必须执行真实 bundle，而不是只跑 compile check：
 
 ```bash
-pnpm tauri build --config src-tauri/tauri.ci.conf.json
+VIBE_BROWSER_PROFILE=candidate pnpm tauri build --config src-tauri/tauri.ci.conf.json
 ```
 
 构建后应使用安装包完成本文“发布验收定义”中的安装、Native Messaging、updater、升级和卸载步骤。
@@ -485,5 +462,8 @@ pnpm tauri build --config src-tauri/tauri.ci.conf.json
 - [engineering-quality-audit.md](engineering-quality-audit.md)：测试、CI、迁移、依赖、文档和脚本专项快照。
 - [cross-platform-audit.md](cross-platform-audit.md)：Windows/macOS/Linux 运行、打包与系统集成专项。
 - [dependency-modernization-audit.md](dependency-modernization-audit.md)：依赖选型与现代化建议。
+- [protocol-reliability-matrix.md](protocol-reliability-matrix.md)：非 HTTP 协议统一生命周期、失败恢复与自动化证据基线。
+- [browser-extension-privacy.md](browser-extension-privacy.md) / [browser-store-submission.md](browser-store-submission.md)：扩展隐私、最小权限与商店提交资料。
+- [updater-rehearsal.md](updater-rehearsal.md)：候选版本 tag-specific updater 演练流程。
 
 这些文档保留历史证据价值，但不应把其中“当时未实现”或“当时已修复”的文字直接当作当前事实；关闭本文事项时必须回到当前代码、自动化测试和真实安装包重新验证。

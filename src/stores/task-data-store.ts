@@ -10,9 +10,18 @@ import { useTaskUIStore } from "./task-ui-store";
 
 /* ── Types ── */
 
-export type NavFilter = "all" | "downloading" | "paused" | "completed" | "failed" | "settings" | "about";
+export type NavFilter =
+  | "all"
+  | "downloading"
+  | "queue"
+  | "attention"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "settings"
+  | "about";
 
-export type TaskSortKey = "updated_at" | "created_at" | "file_size" | "progress" | "speed" | "status";
+export type TaskSortKey = "updated_at" | "created_at" | "file_size" | "progress" | "speed" | "status" | "queue_order";
 
 export type TaskSortDirection = "asc" | "desc";
 export type FileTypeFilter = "all" | "archive" | "image" | "video" | "document" | "app" | "other";
@@ -22,6 +31,7 @@ export interface TaskStats {
   all: number;
   active: number;
   queued: number;
+  attention: number;
   paused: number;
   completed: number;
   failed: number;
@@ -44,6 +54,7 @@ export const EMPTY_TASK_STATS: TaskStats = {
   all: 0,
   active: 0,
   queued: 0,
+  attention: 0,
   paused: 0,
   completed: 0,
   failed: 0,
@@ -65,6 +76,7 @@ export function calculateTaskStats(tasks: Task[]): TaskStats {
   const activeTasks: Task[] = [];
   let active = 0;
   let queued = 0;
+  let attention = 0;
   let paused = 0;
   let completed = 0;
   let failed = 0;
@@ -84,13 +96,16 @@ export function calculateTaskStats(tasks: Task[]): TaskStats {
     if (task.status === "queued") {
       queued += 1;
     }
-    if (task.status === "paused" || task.status === "queued" || task.status === "waiting_network") {
+    if (task.status === "needs_attention") {
+      attention += 1;
+    }
+    if (task.status === "paused") {
       paused += 1;
     }
     if (task.status === "completed") {
       completed += 1;
     }
-    if (task.status === "failed" || task.status === "needs_attention") {
+    if (task.status === "failed") {
       failed += 1;
     }
     if (
@@ -113,6 +128,7 @@ export function calculateTaskStats(tasks: Task[]): TaskStats {
     all: tasks.length,
     active,
     queued,
+    attention,
     paused,
     completed,
     failed,
@@ -128,6 +144,7 @@ export function normalizeTaskStatsSnapshot(stats: TaskStats | TaskStatsSnapshot)
     all: Number(stats.all) || 0,
     active: Number(stats.active) || 0,
     queued: Number(stats.queued) || 0,
+    attention: Number(stats.attention) || 0,
     paused: Number(stats.paused) || 0,
     completed: Number(stats.completed) || 0,
     failed: Number(stats.failed) || 0,
@@ -149,7 +166,7 @@ function taskCollections(tasks: Task[]) {
   };
 }
 
-/** E-3: 从任务列表计算失败类别选项（仅在任务加载/状态变化时调用，不在进度 tick 时重算） */
+/** E-3: Compute failure category options from the task list (called only on task load/status change, not on progress ticks) */
 function computeFailureOptions(tasks: Task[]): string[] {
   return Array.from(new Set(tasks.map(failureKind).filter((kind) => kind !== "none"))).sort();
 }
@@ -158,6 +175,20 @@ function applyProgressToTask(task: Task, payload: TaskProgressPayload): Task {
   const downloadedBytes = parseByteCount(payload.downloadedBytes);
   const totalSize = parseByteCount(payload.totalSize);
   const speedBps = parseByteCount(payload.speedBps);
+
+  // Zero-delta fast path: if no field actually changed, return the same
+  // reference so callers can skip the patch entirely. This prevents
+  // patchTasksBatch from allocating new tasks/taskById/taskStats objects
+  // when the backend re-sends unchanged progress values.
+  if (
+    task.downloadedBytes === downloadedBytes &&
+    task.totalSize === totalSize &&
+    task.speedBps === speedBps &&
+    task.connectionCount === payload.connectionCount &&
+    task.status === payload.status
+  ) {
+    return task;
+  }
 
   return {
     ...task,
@@ -180,13 +211,16 @@ function applyProgressToTask(task: Task, payload: TaskProgressPayload): Task {
 }
 
 /** Map a task status to the stat counter fields it contributes to. */
-function statusCounterKeys(status: Task["status"]): Array<"active" | "queued" | "paused" | "completed" | "failed"> {
-  const keys: Array<"active" | "queued" | "paused" | "completed" | "failed"> = [];
+function statusCounterKeys(
+  status: Task["status"],
+): Array<"active" | "queued" | "attention" | "paused" | "completed" | "failed"> {
+  const keys: Array<"active" | "queued" | "attention" | "paused" | "completed" | "failed"> = [];
   if (status === "downloading" || status === "retrying") keys.push("active");
-  if (status === "queued") keys.push("queued", "paused");
-  if (status === "paused" || status === "waiting_network") keys.push("paused");
+  if (status === "queued") keys.push("queued");
+  if (status === "needs_attention") keys.push("attention");
+  if (status === "paused") keys.push("paused");
   if (status === "completed") keys.push("completed");
-  if (status === "failed" || status === "needs_attention") keys.push("failed");
+  if (status === "failed") keys.push("failed");
   return keys;
 }
 
@@ -214,7 +248,7 @@ interface TaskDataStore {
   setTaskPage: (tasks: Task[], total: number, page: number, pageSize: number, append?: boolean) => void;
   setTaskCursorPage: (
     tasks: Task[],
-    totalEstimate: number,
+    minimumTotal: number,
     nextCursor: string | null,
     filterOptions: TaskFilterOptions,
     append?: boolean,
@@ -301,7 +335,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       };
     }),
 
-  setTaskCursorPage: (tasks, totalEstimate, nextCursor, filterOptions, append = false) =>
+  setTaskCursorPage: (tasks, minimumTotal, nextCursor, filterOptions, append = false) =>
     set((state) => {
       const nextTasks = append ? mergePagedTasks(state.tasks, tasks) : tasks;
       const ids = new Set(nextTasks.map((task) => task.id));
@@ -309,7 +343,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       // Delegate speed history pruning to dedicated store
       useSpeedHistoryStore.getState().pruneToIds(ids);
 
-      const knownTotal = Math.max(totalEstimate, nextTasks.length + (nextCursor ? 1 : 0));
+      const knownTotal = Math.max(minimumTotal, nextTasks.length + (nextCursor ? 1 : 0));
 
       // Cross-store: prune selectedIds in UI store
       pruneUISelectedIds(ids);
@@ -366,8 +400,8 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       tasks[existingIndex] = merged;
       const taskById = { ...state.taskById, [task.id]: merged };
 
-      // E-3: 仅当 status/failureCategory/errorCode/errorMessage 变化时重算 failureOptions，
-      // 避免每 250ms 进度 tick 重算。
+      // E-3: Recompute failureOptions only when status/failureCategory/errorCode/errorMessage change,
+      // avoiding recompute on every 250ms progress tick.
       const statusChanged =
         existing.status !== merged.status ||
         existing.failureCategory !== merged.failureCategory ||
@@ -467,6 +501,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       // Incremental stats deltas
       let dActive = 0;
       let dQueued = 0;
+      let dAttention = 0;
       let dPaused = 0;
       let dCompleted = 0;
       let dFailed = 0;
@@ -477,18 +512,21 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       for (const payload of latestByTaskId.values()) {
         const index = state.taskIndexById[payload.taskId];
         if (index === undefined) continue;
+        const old = state.tasks[index];
+        const nextTask = applyProgressToTask(old, payload);
+        // Zero-delta fast path: applyProgressToTask returns the same reference
+        // when no field actually changed. Skip allocation and stats work.
+        if (nextTask === old) continue;
         if (!changed) {
           tasks = [...state.tasks];
           taskById = { ...state.taskById };
           changed = true;
         }
-        const old = tasks[index];
-        const nextTask = applyProgressToTask(old, payload);
         tasks[index] = nextTask;
         taskById[payload.taskId] = nextTask;
         speedSamples.push({
           taskId: payload.taskId,
-          sample: { at: now, speedBps: parseByteCount(payload.speedBps) },
+          sample: { at: now, speedBps: nextTask.speedBps },
         });
 
         // Accumulate stats delta
@@ -497,6 +535,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
           for (const key of statusCounterKeys(old.status)) {
             if (key === "active") dActive -= 1;
             else if (key === "queued") dQueued -= 1;
+            else if (key === "attention") dAttention -= 1;
             else if (key === "paused") dPaused -= 1;
             else if (key === "completed") dCompleted -= 1;
             else if (key === "failed") dFailed -= 1;
@@ -504,6 +543,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
           for (const key of statusCounterKeys(nextTask.status)) {
             if (key === "active") dActive += 1;
             else if (key === "queued") dQueued += 1;
+            else if (key === "attention") dAttention += 1;
             else if (key === "paused") dPaused += 1;
             else if (key === "completed") dCompleted += 1;
             else if (key === "failed") dFailed += 1;
@@ -517,18 +557,35 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       if (!changed) return {};
 
       const prevStats = state.taskStats;
-      const nextStats: TaskStats = {
-        all: prevStats.all,
-        active: prevStats.active + dActive,
-        queued: prevStats.queued + dQueued,
-        paused: prevStats.paused + dPaused,
-        completed: prevStats.completed + dCompleted,
-        failed: prevStats.failed + dFailed,
-        totalSpeed: Math.max(0, prevStats.totalSpeed + dTotalSpeed),
-        totalDownloaded: Math.max(0, prevStats.totalDownloaded + dTotalDownloaded),
-        totalBytes: Math.max(0, prevStats.totalBytes + dTotalBytes),
-        featuredTaskId: prevStats.featuredTaskId,
-      };
+      // Zero-delta fast path: if individual tasks changed but all aggregate
+      // deltas cancelled out (e.g. one task sped up, another slowed down),
+      // reuse the same stats reference so combined selectors like
+      // `s.globalTaskStats ?? s.taskStats` don't trigger re-renders.
+      const statsUnchanged =
+        dActive === 0 &&
+        dQueued === 0 &&
+        dAttention === 0 &&
+        dPaused === 0 &&
+        dCompleted === 0 &&
+        dFailed === 0 &&
+        dTotalSpeed === 0 &&
+        dTotalDownloaded === 0 &&
+        dTotalBytes === 0;
+      const nextStats: TaskStats = statsUnchanged
+        ? prevStats
+        : {
+            all: prevStats.all,
+            active: prevStats.active + dActive,
+            queued: prevStats.queued + dQueued,
+            attention: prevStats.attention + dAttention,
+            paused: prevStats.paused + dPaused,
+            completed: prevStats.completed + dCompleted,
+            failed: prevStats.failed + dFailed,
+            totalSpeed: Math.max(0, prevStats.totalSpeed + dTotalSpeed),
+            totalDownloaded: Math.max(0, prevStats.totalDownloaded + dTotalDownloaded),
+            totalBytes: Math.max(0, prevStats.totalBytes + dTotalBytes),
+            featuredTaskId: prevStats.featuredTaskId,
+          };
 
       return {
         tasks,
@@ -536,7 +593,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
         taskStats: nextStats,
         taskIds: state.taskIds,
         taskIndexById: state.taskIndexById,
-        // E-3: 仅在 status 变化时重算，避免每 250ms 进度 tick 重算 failureOptions
+        // E-3: Recompute only on status change, avoiding failureOptions recompute on every 250ms progress tick
         failureOptions: statusChanged ? computeFailureOptions(tasks) : state.failureOptions,
       };
     });
@@ -589,6 +646,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       newStats.all === current.all &&
       newStats.active === current.active &&
       newStats.queued === current.queued &&
+      newStats.attention === current.attention &&
       newStats.paused === current.paused &&
       newStats.completed === current.completed &&
       newStats.failed === current.failed &&

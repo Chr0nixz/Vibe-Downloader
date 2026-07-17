@@ -387,17 +387,10 @@ async fn migration_idempotent_on_reconnect() {
 
 // --- A-1: Dirty / VersionTooOld recovery -------------------------------------
 
-/// Validates the A-1 recovery flow: when a previous migration run was
-/// interrupted (sqlx leaves `_sqlx_migrations` flagged dirty), the next
-/// `db::connect` must:
-///
-/// 1. Detect the dirty state via `MigrateError::Dirty`.
-/// 2. Back up the corrupted database file alongside the original path.
-/// 3. Drop the file and re-run all migrations from scratch.
-/// 4. Return a `DbConnection` with `data_was_reset == true` and the backup
-///    path surfaced so the startup dialog can reveal it to the user.
+/// A dirty migration must preserve the original database and produce a
+/// verified backup before the application offers an explicit reset.
 #[tokio::test]
-async fn rebuilds_for_dirty_migration() {
+async fn dirty_migration_requires_explicit_recovery() {
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time")
@@ -415,49 +408,39 @@ async fn rebuilds_for_dirty_migration() {
         .expect("flag dirty");
     pool.close().await;
 
-    // Second connect must trigger the rebuild path.
-    let connection = db::connect(&path)
+    let recovery = match db::connect_for_startup(&path)
         .await
-        .expect("rebuild after dirty migration");
-    assert!(
-        connection.data_was_reset,
-        "Dirty migration should have triggered a rebuild"
-    );
-    let backup_path = connection
-        .backup_path
-        .as_ref()
-        .expect("backup path should be surfaced after rebuild");
-    assert!(
-        backup_path.exists(),
-        "backup file should exist on disk at {}",
-        backup_path.display()
-    );
+        .expect("inspect dirty migration")
+    {
+        db::DatabaseConnectOutcome::RecoveryRequired(recovery) => recovery,
+        db::DatabaseConnectOutcome::Ready(_) => panic!("dirty migration must not start normally"),
+    };
+    assert_eq!(recovery.reason, "migration_dirty");
+    assert!(recovery.backup_verified);
+    let backup_path = recovery.backup_path.expect("verified backup path");
+    assert!(backup_path.is_file());
+    assert!(path.is_file(), "the original database must remain on disk");
 
-    // The rebuilt database must have a clean migration history (all rows
-    // marked success=1).
+    let original = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=ro", path.display()))
+        .await
+        .expect("open preserved original");
     let dirty_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = 0")
-            .fetch_one(&connection.pool)
+            .fetch_one(&original)
             .await
-            .expect("count dirty");
-    assert_eq!(
-        dirty_count, 0,
-        "no migration row should be flagged dirty after rebuild"
-    );
-
-    connection.pool.close().await;
+            .expect("count preserved dirty rows");
+    assert!(dirty_count > 0);
+    original.close().await;
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
-    let _ = std::fs::remove_file(backup_path);
+    let _ = std::fs::remove_file(&backup_path);
 }
 
 /// Validates the A-1 downgrade recovery path. When a previous (newer) version
 /// of the app recorded a migration that the current (older) binary doesn't
 /// ship, sqlx 0.9 fires `VersionMissing(n)` for the orphaned applied row.
-/// Our recovery path treats this the same as `Dirty`: back up the file, drop
-/// it, and re-run all migrations from scratch — surfacing `data_was_reset`
-/// so the startup dialog can offer to open the backup folder.
+/// The recovery path must back up the file without silently downgrading it.
 ///
 /// This is the actual real-world "user downgraded the app" scenario. Note
 /// that `MigrateError::VersionTooOld` is declared on the enum but is never
@@ -465,7 +448,7 @@ async fn rebuilds_for_dirty_migration() {
 /// `VersionTooOld` arm in `db::connect` exists purely as defensive
 /// programming for future sqlx releases.
 #[tokio::test]
-async fn rebuilds_for_version_missing_after_downgrade() {
+async fn version_missing_requires_explicit_recovery() {
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time")
@@ -487,54 +470,27 @@ async fn rebuilds_for_version_missing_after_downgrade() {
     .expect("insert fake future migration");
     pool.close().await;
 
-    // Second connect must trigger the rebuild path. `DbConnection` doesn't
-    // implement `Debug` (it wraps a `SqlitePool`), so we match on the
-    // `Ok` variant manually rather than using `expect`.
-    let connection = match db::connect(&path).await {
-        Ok(connection) => connection,
-        Err(message) => {
-            panic!("VersionMissing should trigger a rebuild, not surface an error. Got: {message}")
-        }
+    let recovery = match db::connect_for_startup(&path)
+        .await
+        .expect("inspect future migration")
+    {
+        db::DatabaseConnectOutcome::RecoveryRequired(recovery) => recovery,
+        db::DatabaseConnectOutcome::Ready(_) => panic!("future migration must require recovery"),
     };
-    assert!(
-        connection.data_was_reset,
-        "VersionMissing should have triggered a rebuild"
-    );
-    let backup_path = connection
-        .backup_path
-        .as_ref()
-        .expect("backup path should be surfaced after rebuild");
-    assert!(
-        backup_path.exists(),
-        "backup file should exist on disk at {}",
-        backup_path.display()
-    );
-
-    // The rebuilt database must have a clean migration history: only the
-    // three real migrations (versions 1, 2, and 3), no orphaned version 999 row.
-    let migrations: Vec<i64> =
-        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
-            .fetch_all(&connection.pool)
-            .await
-            .expect("list migrations");
-    assert_eq!(
-        migrations,
-        vec![1, 2, 3],
-        "rebuilt database should only contain the embedded migration versions, got: {migrations:?}"
-    );
-
-    connection.pool.close().await;
+    assert_eq!(recovery.reason, "migration_missing");
+    assert!(recovery.backup_verified);
+    let backup_path = recovery.backup_path.expect("verified backup path");
+    assert!(backup_path.is_file());
+    assert!(path.is_file(), "the newer database must remain on disk");
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
-    let _ = std::fs::remove_file(backup_path);
+    let _ = std::fs::remove_file(&backup_path);
 }
 
-/// Validates that after a Dirty-triggered rebuild, the rebuilt database
-/// still contains every key table from the baseline schema — the rebuild
-/// path doesn't silently skip any migration.
+/// After explicit recovery approval, a fresh database must contain the full schema.
 #[tokio::test]
-async fn rebuild_after_dirty_produces_clean_schema() {
+async fn explicit_reset_after_dirty_produces_clean_schema() {
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time")
@@ -548,10 +504,18 @@ async fn rebuild_after_dirty_produces_clean_schema() {
         .expect("flag dirty");
     pool.close().await;
 
+    let recovery = match db::connect_for_startup(&path)
+        .await
+        .expect("inspect dirty migration")
+    {
+        db::DatabaseConnectOutcome::RecoveryRequired(recovery) => recovery,
+        db::DatabaseConnectOutcome::Ready(_) => panic!("dirty migration must require recovery"),
+    };
+    assert!(recovery.backup_verified);
+    db::reset_database_files(&path).expect("explicitly reset database files");
     let connection = db::connect(&path)
         .await
-        .expect("rebuild after dirty migration");
-    assert!(connection.data_was_reset);
+        .expect("connect after explicit reset");
 
     let tables = [
         "tasks",
@@ -616,6 +580,9 @@ async fn rebuild_after_dirty_produces_clean_schema() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    if let Some(backup_path) = recovery.backup_path {
+        let _ = std::fs::remove_file(backup_path);
+    }
 }
 
 // --- Migration 003: HLS track selection columns -------------------------------

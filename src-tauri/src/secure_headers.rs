@@ -28,6 +28,10 @@ pub fn encrypt_secret(value: &str, label: &str, aad: &[u8]) -> Result<(String, S
         msg: value.as_bytes(),
         aad,
     };
+    // AAD binds the ciphertext to its context (label + caller-provided bytes) so a credential
+    // encrypted for one purpose can't be decrypted for another. Version byte (0x01) enables
+    // future algorithm changes; legacy ciphertexts without the prefix are decrypted without
+    // AAD for backward compat.
     let raw_ct = cipher
         .encrypt(&nonce, payload)
         .map_err(|_| format!("Could not encrypt {label}."))?;
@@ -76,6 +80,10 @@ pub fn ensure_secret_encryption_available() -> Result<(), String> {
 }
 
 fn encryption_key() -> Result<[u8; 32], String> {
+    // First-use auto-generates a 256-bit key and stores it in the OS keyring. Key loss is
+    // unrecoverable — all encrypted credentials become undecryptable (no rotation/escrow).
+    // The env-var override is gated on `debug_assertions` (not just `test`) so integration
+    // tests in debug builds can use a fixed key; release builds always use the keyring.
     #[cfg(any(test, debug_assertions))]
     if let Ok(value) = std::env::var("VIBE_DOWNLOADER_TEST_SECRET_KEY") {
         return decode_key(&value);

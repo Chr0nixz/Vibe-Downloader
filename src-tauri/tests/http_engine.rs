@@ -622,22 +622,16 @@ async fn segmented_direct_fails_when_range_is_not_honored() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn probe_follows_redirect_and_resolves_file_name() {
+async fn probe_refuses_redirect_to_private_target() {
     let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
 
-    let probe = engine
+    let error = engine
         .probe(&format!("{}/redirect-to-file", server.base_url))
         .await
-        .expect("probe redirect");
+        .expect_err("redirects to loopback must not be followed");
 
-    assert_eq!(probe.file_name, "sample.bin");
-    assert_eq!(probe.total_size, SAMPLE.len() as i64);
-    assert!(probe.supports_parallel);
-    assert!(
-        probe.final_url.contains("/file"),
-        "final_url should point to the redirect target"
-    );
+    assert_eq!(error, "The server returned HTTP 302.");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

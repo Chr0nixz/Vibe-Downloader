@@ -178,6 +178,7 @@ macro_rules! vibe_commands_base {
             commands::tasks::list_tasks_by_ids,
             commands::tasks::get_task,
             commands::tasks::get_task_stats,
+            commands::tasks::get_scheduler_snapshot,
             commands::tasks::list_segments,
             commands::tasks::list_segments_page,
             commands::tasks::get_segment_summary,
@@ -187,6 +188,9 @@ macro_rules! vibe_commands_base {
             commands::tasks::list_task_requests_page,
             commands::settings::get_settings,
             commands::settings::update_settings,
+            commands::startup::get_startup_status,
+            commands::startup::open_database_recovery_folder,
+            commands::startup::reset_database_for_recovery,
             commands::ffmpeg::probe_ffmpeg_version,
             commands::browser::get_browser_integration_status,
             commands::browser::install_browser_integration,
@@ -246,9 +250,9 @@ macro_rules! vibe_commands_base {
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     use tauri_specta::{collect_commands, Builder};
 
-    // R-4: tauri-specta 的 `Builder::commands()` 与 Tauri 的 `invoke_handler()`
-    // 均为覆盖语义，无法追加。命令列表由 `vibe_commands_base!` 宏单点定义；
-    // debug 构建通过 `extra` 参数追加 `seed_mock_tasks` / `seed_scale_tasks`。
+    // R-4: tauri-specta's `Builder::commands()` and Tauri's `invoke_handler()`
+    // both have override semantics and cannot be appended to. The command list is defined in a single place via the `vibe_commands_base!` macro;
+    // debug builds append `seed_mock_tasks` / `seed_scale_tasks` via the `extra` parameter.
     #[cfg(debug_assertions)]
     let builder = Builder::<tauri::Wry>::new().commands(vibe_commands_base!(
         collect_commands,
@@ -382,7 +386,13 @@ pub fn run() {
                     return;
                 }
                 let app = window.app_handle();
-                let state = app.state::<AppState>();
+                // AppState may not be managed yet if the user closes the
+                // window during the brief background-init window. In that
+                // case, allow the close to proceed normally instead of
+                // panicking on state access.
+                let Some(state) = app.try_state::<AppState>() else {
+                    return;
+                };
                 if state
                     .quit_requested
                     .load(std::sync::atomic::Ordering::SeqCst)
@@ -422,7 +432,7 @@ pub fn run() {
             }
         });
 
-    // R-4: invoke_handler 同样覆盖语义；复用 vibe_commands_base! 宏保持命令列表单点。
+    // R-4: invoke_handler also has override semantics; reuse the vibe_commands_base! macro to keep a single command list source.
     #[cfg(debug_assertions)]
     let builder = builder.invoke_handler(vibe_commands_base!(
         generate_handler,
@@ -438,6 +448,7 @@ pub fn run() {
             logging::init_logging(app.handle())?;
 
             let handle = app.handle().clone();
+            app.manage(commands::startup::StartupState::initializing());
 
             // Show the main window as early as possible so the user sees the
             // splash placeholder (rendered by index.html before React mounts)
@@ -448,125 +459,20 @@ pub fn run() {
                 let _ = window.show();
             }
 
-            let db_path = platform::db_path(&handle)?;
-            let db_connection =
-                tauri::async_runtime::block_on(async { db::connect(&db_path).await })?;
-            let data_was_reset = db_connection.data_was_reset;
-            let backup_path = db_connection.backup_path;
-            let pool = db_connection.pool;
-            // Startup WAL checkpoint: if the `-wal` file exceeds 100 MB after
-            // an unclean shutdown or a long session, truncate it now so the
-            // app starts with a bounded journal.
-            if db::wal_file_size_bytes(&db_path) > 100 * 1024 * 1024 {
-                tracing::info!("WAL file exceeds 100MB, running checkpoint on startup");
-                tauri::async_runtime::block_on(async {
-                    if let Err(e) = db::wal_checkpoint(&pool).await {
-                        tracing::warn!(error = %e, "startup WAL checkpoint failed");
-                    }
-                });
-            }
-            // Run non-critical maintenance synchronously so it finishes before
-            // scheduling starts.  Best-effort; failures are logged but never
-            // abort startup.
-            tauri::async_runtime::block_on(async {
-                if let Err(error) = db::clear_expired_task_request_headers(&pool).await {
-                    tracing::warn!(error = %error, "expired browser request header cleanup failed");
-                }
-                if let Err(error) = db::migrate_legacy_ftp_credentials(&pool).await {
-                    tracing::warn!(error = %error, "legacy FTP credential migration failed");
-                }
-                match db::prune_request_diagnostics(&pool).await {
-                    Ok(0) => {}
-                    Ok(removed) => {
-                        tracing::info!(removed, "startup request diagnostics prune");
-                    }
-                    Err(error) => {
-                        tracing::warn!(error = %error, "request diagnostics prune failed");
-                    }
+            // All heavy initialization (DB, migrations, settings, scheduler,
+            // tray, browser bridge) runs on a background task so the main
+            // thread is free for the webview to paint the inline splash
+            // immediately. Without this, the ~8 block_on calls below would
+            // keep the main thread busy and WebView2 could not paint the
+            // splash until all of them finished — which is why the loading
+            // icon took a long time to appear. StartupState transitions to
+            // "ready" once the backend can handle IPC; the frontend
+            // StartupGate polls get_startup_status until then.
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = run_startup_init(&handle).await {
+                    tracing::error!(error = %error, "startup initialization failed");
                 }
             });
-            let default_dir = commands::settings::default_download_dir(&handle)?;
-            let settings = tauri::async_runtime::block_on(async {
-                db::get_settings(&pool, default_dir).await
-            })?;
-            tauri::async_runtime::block_on(async {
-                db::reset_interrupted_tasks(&pool, settings.auto_resume_on_startup).await
-            })?;
-            let speed_limiter = Arc::new(download::GlobalSpeedLimiter::new(
-                db::parse_speed_limit_bps(settings.global_speed_limit_bps.as_deref()),
-            ));
-            let engine_registry = Arc::new(download::EngineRegistry::new()?);
-            tauri::async_runtime::block_on(async {
-                engine_registry
-                    .set_proxy_config(proxy::ResolvedProxyConfig::from_settings(&settings))
-                    .await
-            });
-            let browser_realtime = browser_realtime::BrowserRealtimeState::new();
-            let downloads = Arc::new(Mutex::new(HashMap::new()));
-            let request_headers: TaskRequestHeaders = Arc::new(Mutex::new(HashMap::new()));
-            let task_runtime_locks = Arc::new(TaskRuntimeLocks::default());
-            let scheduler = Arc::new(scheduler::Scheduler::new(
-                downloads.clone(),
-                request_headers.clone(),
-                speed_limiter.clone(),
-                engine_registry.clone(),
-                task_runtime_locks.clone(),
-            ));
-
-            app.manage(AppState {
-                pool: pool.clone(),
-                downloads,
-                request_headers,
-                browser_realtime: browser_realtime.clone(),
-                scheduler,
-                speed_limiter,
-                engine_registry,
-                quit_requested: Arc::new(AtomicBool::new(false)),
-                task_runtime_locks,
-            });
-            clipboard::start(handle.clone());
-            tauri::async_runtime::block_on(async {
-                browser_realtime::start(handle.clone(), browser_realtime).await
-            })?;
-            // Spawn scheduling — downloads start without blocking UI.
-            {
-                let handle_clone = handle.clone();
-                let state = handle_clone.state::<AppState>();
-                let scheduler = state.scheduler.clone();
-                let pool_clone = state.pool.clone();
-                tauri::async_runtime::spawn(async move {
-                    scheduler
-                        .clone()
-                        .dispatch(handle_clone.clone(), pool_clone.clone())
-                        .await;
-                    scheduler
-                        .schedule_retry_after_wakeup(handle_clone, pool_clone)
-                        .await;
-                });
-            }
-            // Background schedule-window monitor: pauses/resumes tasks every 60s.
-            commands::tasks::spawn_schedule_window_monitor(
-                handle.clone(),
-                handle.state::<AppState>().inner(),
-            );
-            // Background request-diagnostics cleanup: bounds `task_requests`
-            // growth for long-running / high-retry sessions.
-            commands::tasks::spawn_request_diagnostics_cleanup(handle.clone());
-            // Background WAL checkpoint: bounds `-wal` growth for long sessions.
-            commands::tasks::spawn_wal_checkpoint_monitor(handle.clone());
-            create_tray(&handle)?;
-            process_browser_handoff_files_from_args(
-                &handle,
-                std::env::args().collect(),
-                "initial-launch",
-            );
-
-            if settings.floating_window_enabled {
-                commands::floating::sync_floating_status_window(&handle, true)?;
-            }
-            if data_was_reset {
-                show_database_reset_dialog(&handle, backup_path.as_deref());
-            }
 
             Ok(())
         })
@@ -574,59 +480,125 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn show_database_reset_dialog(app: &tauri::AppHandle, backup_path: Option<&std::path::Path>) {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-
-    // Two-state UX: if we have a backup path, offer the user the choice to
-    // reveal it in their file manager before continuing. If we don't (the
-    // rebuild path couldn't capture a backup, e.g. the file vanished between
-    // the failed migration and the rebuild), just acknowledge with Ok.
-    match backup_path {
-        Some(path) => {
-            let display = path.display().to_string();
-            let message = format!(
-                "数据库迁移失败（迁移历史不匹配或迁移被中断），已自动备份旧数据库并重建。\n\n\
-                 备份路径：{display}\n\n\
-                 Vibe Downloader 已删除并重建数据库，原有下载任务和设置已清空。\n\n\
-                 点击「是」打开备份所在目录后再继续；点击「否」直接继续使用。"
-            );
-            let backup_path = path.to_path_buf();
-            app.dialog()
-                .message(message)
-                .title("Database reset")
-                .kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::YesNo)
-                .show(move |confirmed| {
-                    if confirmed {
-                        // Reveal the backup file's parent directory in the
-                        // platform file manager. We open the parent rather than
-                        // the .bak file itself because most file managers won't
-                        // open a binary blob usefully; the user just needs to
-                        // see where the backup lives.
-                        if let Some(parent) = backup_path.parent() {
-                            if let Err(error) = crate::platform::open_path(parent) {
-                                tracing::warn!(
-                                    path = %parent.display(),
-                                    error = %error,
-                                    "could not open backup folder for user"
-                                );
-                            }
-                        }
-                    }
-                });
+/// Heavy startup work that runs after the main window is shown.
+///
+/// Runs on a background async task so the main thread stays free for the
+/// webview to paint the splash. `StartupState` is transitioned to "ready"
+/// once `AppState` is managed and the scheduler is spawned — at that point
+/// the frontend `StartupGate` mounts `AppShell`.
+async fn run_startup_init(handle: &tauri::AppHandle) -> Result<(), String> {
+    let db_path = platform::db_path(handle)?;
+    let db_connection = match db::connect_for_startup(&db_path).await? {
+        db::DatabaseConnectOutcome::Ready(connection) => connection,
+        db::DatabaseConnectOutcome::RecoveryRequired(recovery) => {
+            handle
+                .state::<commands::startup::StartupState>()
+                .set_recovery(recovery);
+            return Ok(());
         }
-        None => {
-            app.dialog()
-                .message(
-                    "数据库迁移失败，已重建数据库。原有下载任务和设置已清空。\n\n\
-                     （未生成备份文件 — 请检查磁盘空间或文件权限后重启应用。）",
-                )
-                .title("Database reset")
-                .kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::Ok)
-                .show(|_| {});
+    };
+    let pool = db_connection.pool;
+    // Startup WAL checkpoint: if the `-wal` file exceeds 100 MB after
+    // an unclean shutdown or a long session, truncate it now so the
+    // app starts with a bounded journal.
+    if db::wal_file_size_bytes(&db_path) > 100 * 1024 * 1024 {
+        tracing::info!("WAL file exceeds 100MB, running checkpoint on startup");
+        if let Err(e) = db::wal_checkpoint(&pool).await {
+            tracing::warn!(error = %e, "startup WAL checkpoint failed");
         }
     }
+    // Run non-critical maintenance so it finishes before scheduling starts.
+    // Best-effort; failures are logged but never abort startup.
+    if let Err(error) = db::clear_expired_task_request_headers(&pool).await {
+        tracing::warn!(error = %error, "expired browser request header cleanup failed");
+    }
+    if let Err(error) = db::migrate_legacy_ftp_credentials(&pool).await {
+        tracing::warn!(error = %error, "legacy FTP credential migration failed");
+    }
+    match db::prune_request_diagnostics(&pool).await {
+        Ok(0) => {}
+        Ok(removed) => {
+            tracing::info!(removed, "startup request diagnostics prune");
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "request diagnostics prune failed");
+        }
+    }
+    let default_dir = commands::settings::default_download_dir(handle)?;
+    let settings = db::get_settings(&pool, default_dir).await?;
+    db::reset_interrupted_tasks(&pool, settings.auto_resume_on_startup).await?;
+    let speed_limiter = Arc::new(download::GlobalSpeedLimiter::new(
+        db::parse_speed_limit_bps(settings.global_speed_limit_bps.as_deref()),
+    ));
+    let engine_registry = Arc::new(download::EngineRegistry::new()?);
+    engine_registry
+        .set_proxy_config(proxy::ResolvedProxyConfig::from_settings(&settings))
+        .await;
+    let browser_realtime = browser_realtime::BrowserRealtimeState::new();
+    let downloads = Arc::new(Mutex::new(HashMap::new()));
+    let request_headers: TaskRequestHeaders = Arc::new(Mutex::new(HashMap::new()));
+    let task_runtime_locks = Arc::new(TaskRuntimeLocks::default());
+    let scheduler = Arc::new(scheduler::Scheduler::new(
+        downloads.clone(),
+        request_headers.clone(),
+        speed_limiter.clone(),
+        engine_registry.clone(),
+        task_runtime_locks.clone(),
+    ));
+
+    handle.manage(AppState {
+        pool: pool.clone(),
+        downloads,
+        request_headers,
+        browser_realtime: browser_realtime.clone(),
+        scheduler,
+        speed_limiter,
+        engine_registry,
+        quit_requested: Arc::new(AtomicBool::new(false)),
+        task_runtime_locks,
+    });
+
+    // AppState is now managed — the backend can safely handle IPC. Transition
+    // StartupState to "ready" so the frontend StartupGate mounts AppShell.
+    handle
+        .state::<commands::startup::StartupState>()
+        .set_ready();
+
+    clipboard::start(handle.clone());
+    browser_realtime::start(handle.clone(), browser_realtime).await?;
+    // Spawn scheduling — downloads start without blocking UI.
+    {
+        let handle_clone = handle.clone();
+        let state = handle_clone.state::<AppState>();
+        let scheduler = state.scheduler.clone();
+        let pool_clone = state.pool.clone();
+        tauri::async_runtime::spawn(async move {
+            scheduler
+                .clone()
+                .dispatch(handle_clone.clone(), pool_clone.clone())
+                .await;
+            scheduler
+                .schedule_retry_after_wakeup(handle_clone, pool_clone)
+                .await;
+        });
+    }
+    // Background schedule-window monitor: pauses/resumes tasks every 60s.
+    commands::tasks::spawn_schedule_window_monitor(
+        handle.clone(),
+        handle.state::<AppState>().inner(),
+    );
+    // Background request-diagnostics cleanup: bounds `task_requests`
+    // growth for long-running / high-retry sessions.
+    commands::tasks::spawn_request_diagnostics_cleanup(handle.clone());
+    // Background WAL checkpoint: bounds `-wal` growth for long sessions.
+    commands::tasks::spawn_wal_checkpoint_monitor(handle.clone());
+    create_tray(handle).map_err(|e| format!("{e}"))?;
+    process_browser_handoff_files_from_args(handle, std::env::args().collect(), "initial-launch");
+
+    if settings.floating_window_enabled {
+        commands::floating::sync_floating_status_window(handle, true)?;
+    }
+    Ok(())
 }
 
 fn process_browser_handoff_files_from_args(
@@ -646,7 +618,16 @@ fn process_browser_handoff_files_from_args(
 
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let state = handle.state::<AppState>();
+        // AppState may not be managed yet if a second instance launches
+        // during the background-init window. Skip handoff in that case —
+        // the browser extension will retry or the user can re-trigger.
+        let Some(state) = handle.try_state::<AppState>() else {
+            tracing::warn!(
+                source,
+                "browser handoff received before startup completed; skipping"
+            );
+            return;
+        };
         for path in files {
             match commands::browser::read_handoff_file(&path) {
                 Ok(input) => {
@@ -672,8 +653,8 @@ fn process_browser_handoff_files_from_args(
                             "browser handoff task creation failed"
                         );
                     } else {
-                        // S-2.2: 删除前再次校验路径仍在 handoff_dir 内（TOCTOU 防护）。
-                        // 防止文件在读取后被替换为符号链接指向任意路径。
+                        // S-2.2: Re-validate that the path is still inside handoff_dir before deletion (TOCTOU protection).
+                        // Prevents the file from being replaced by a symlink to an arbitrary path after reading.
                         if let Err(reason) = commands::browser::validate_handoff_file_path(&path) {
                             tracing::warn!(
                                 request_id = %request_id,
@@ -700,7 +681,7 @@ fn process_browser_handoff_files_from_args(
                         error = %error,
                         "browser handoff file read failed"
                     );
-                    // S-2.2: 即使读取失败也只在路径仍合法时删除，避免删除被替换的任意文件。
+                    // S-2.2: Even if reading fails, only delete when the path is still valid, to avoid deleting a substituted arbitrary file.
                     if let Err(reason) = commands::browser::validate_handoff_file_path(&path) {
                         tracing::warn!(
                             path = %path.display(),

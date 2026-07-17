@@ -76,10 +76,10 @@ function normalizeLocale(value: string | null | undefined): Locale {
 export function detectInitialLocale(): Locale {
   const stored = readStoredLocale();
   if (stored) {
-    // UX-1: 用户显式选择（含设置页选的 beta 语言）经 localStorage 持久化，信任
+    // UX-1: Explicit user choices (including beta languages selected in settings) are persisted via localStorage and trusted
     return normalizeLocale(stored);
   }
-  // UX-1: 自动检测仅选稳定语言，beta 需用户显式选
+  // UX-1: Auto-detection only selects stable languages; beta requires explicit user choice
   const locale = normalizeLocale(readNavigatorLanguage());
   if (!STABLE_LOCALES.includes(locale)) {
     return "en";

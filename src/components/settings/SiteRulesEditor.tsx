@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { BrowserSiteRule, BrowserSiteRuleMode } from "@/generated/bindings";
@@ -49,7 +50,7 @@ export function SiteRulesEditor({ rules, disabled, onUpdate }: SiteRulesEditorPr
           type="button"
           onClick={addRule}
           disabled={disabled}
-          className="rounded-md border border-border-input px-3 py-1.5 text-xs text-text-primary hover:bg-bg-hover disabled:opacity-50"
+          className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-primary hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.addSiteRule")}
         </button>
@@ -110,7 +111,7 @@ function RuleRow({
           type="button"
           onClick={onEdit}
           disabled={disabled}
-          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-bg-hover disabled:opacity-50"
+          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.editRule")}
         </button>
@@ -118,7 +119,7 @@ function RuleRow({
           type="button"
           onClick={onDelete}
           disabled={disabled}
-          className="rounded px-2 py-1 text-xs text-text-danger hover:bg-bg-hover disabled:opacity-50"
+          className="rounded px-2 py-1 text-xs text-text-danger hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.deleteRule")}
         </button>
@@ -144,17 +145,18 @@ function RuleEditForm({
   return (
     <div className="grid gap-3">
       <Field label={t("settings.ruleHostPattern")}>
-        <input
+        <Input
+          aria-label={t("settings.ruleHostPattern")}
           type="text"
           value={rule.hostPattern}
           disabled={disabled}
           onChange={(e) => onChange({ hostPattern: e.target.value })}
           placeholder="*.example.com"
-          className="w-full rounded-md border border-border-input bg-bg-input px-3 py-2 text-sm text-text-primary"
         />
       </Field>
       <Field label={t("settings.ruleIncludeSubdomains")}>
         <Switch
+          aria-label={t("settings.ruleIncludeSubdomains")}
           checked={rule.includeSubdomains}
           disabled={disabled}
           onCheckedChange={(checked) => onChange({ includeSubdomains: checked })}
@@ -166,7 +168,7 @@ function RuleEditForm({
           onValueChange={(value) => onChange({ mode: value as BrowserSiteRuleMode })}
           disabled={disabled}
         >
-          <SelectTrigger className="w-full max-w-xs">
+          <SelectTrigger aria-label={t("settings.ruleMode")} className="w-full max-w-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -177,7 +179,8 @@ function RuleEditForm({
         </Select>
       </Field>
       <Field label={t("settings.ruleMinSize")}>
-        <input
+        <Input
+          aria-label={t("settings.ruleMinSize")}
           type="number"
           min={0}
           step={1}
@@ -190,11 +193,12 @@ function RuleEditForm({
             });
           }}
           placeholder="0"
-          className="w-full max-w-xs rounded-md border border-border-input bg-bg-input px-3 py-2 text-sm text-text-primary"
+          className="max-w-xs"
         />
       </Field>
       <Field label={t("settings.ruleFileExtensions")}>
-        <input
+        <Input
+          aria-label={t("settings.ruleFileExtensions")}
           type="text"
           value={rule.fileExtensions.join(", ")}
           disabled={disabled}
@@ -207,7 +211,7 @@ function RuleEditForm({
             })
           }
           placeholder="mp4, mkv"
-          className="w-full max-w-md rounded-md border border-border-input bg-bg-input px-3 py-2 text-sm text-text-primary"
+          className="max-w-md"
         />
       </Field>
       <Field label={t("settings.ruleForwardHeaders")}>
@@ -219,7 +223,7 @@ function RuleEditForm({
           }}
           disabled={disabled}
         >
-          <SelectTrigger className="w-full max-w-xs">
+          <SelectTrigger aria-label={t("settings.ruleForwardHeaders")} className="w-full max-w-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -234,7 +238,7 @@ function RuleEditForm({
           type="button"
           onClick={onDelete}
           disabled={disabled}
-          className="rounded px-3 py-1.5 text-xs text-text-danger hover:bg-bg-hover disabled:opacity-50"
+          className="rounded px-3 py-1.5 text-xs text-text-danger hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.deleteRule")}
         </button>
@@ -254,7 +258,7 @@ function RuleEditForm({
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="grid gap-1 sm:grid-cols-[minmax(8rem,12rem)_minmax(0,1fr)] sm:items-center">
-      <label className="text-xs text-text-secondary">{label}</label>
+      <span className="text-xs text-text-secondary">{label}</span>
       <div>{children}</div>
     </div>
   );

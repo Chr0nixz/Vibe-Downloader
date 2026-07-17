@@ -23,8 +23,10 @@ import type {
   RecoveryAction,
   RequestDiagnostic,
   ResolveTaskAttentionInput,
+  SchedulerSnapshot,
   SegmentSummary,
   SftpDirectoryProbe,
+  StartupStatus,
   TaskEvent,
   TaskProxySettings,
   TaskProxySettingsInput,
@@ -65,6 +67,22 @@ const LEGACY_HEALTH_SUMMARY_KEYS: Record<string, string> = {
   Queued: "taskDiagnostics.queued",
   "Finishing HLS recording": "taskDiagnostics.finishingHls",
 };
+
+export async function getStartupStatus(): Promise<StartupStatus> {
+  return {
+    mode: "ready",
+    reason: null,
+    message: null,
+    databasePath: null,
+    backupPath: null,
+    backupVerified: false,
+    canReset: false,
+  };
+}
+
+export async function openDatabaseRecoveryFolder(): Promise<void> {}
+
+export async function resetDatabaseForRecovery(): Promise<void> {}
 
 type BrowserListener = (payload: TaskProgressPayload) => void;
 type TaskUpdatedListener = (task: Task) => void;
@@ -218,7 +236,10 @@ function loadStoredTasks(): Task[] | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown[];
-    return Array.isArray(parsed) ? parsed.map((task) => normalizeStoredMockTask(task as Task)) : null;
+    if (!Array.isArray(parsed)) return null;
+    const normalized = parsed.map((task) => normalizeStoredMockTask(task as Task));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+    return normalized;
   } catch {
     return null;
   }
@@ -777,17 +798,83 @@ export async function getTaskStats(): Promise<TaskStatsSnapshot> {
     all: String(tasks.length),
     active: String(activeTasks.length),
     queued: String(tasks.filter((task) => task.status === "queued").length),
-    paused: String(
-      tasks.filter((task) => task.status === "paused" || task.status === "queued" || task.status === "waiting_network")
-        .length,
-    ),
+    attention: String(tasks.filter((task) => task.status === "needs_attention").length),
+    paused: String(tasks.filter((task) => task.status === "paused").length),
     completed: String(tasks.filter((task) => task.status === "completed").length),
-    failed: String(tasks.filter((task) => task.status === "failed" || task.status === "needs_attention").length),
+    failed: String(tasks.filter((task) => task.status === "failed").length),
     totalSpeed: String(activeTasks.reduce((sum, task) => sum + task.speedBps, 0)),
     totalDownloaded: String(activeTasks.reduce((sum, task) => sum + task.downloadedBytes, 0)),
     totalBytes: String(activeTasks.reduce((sum, task) => sum + task.totalSize, 0)),
     featuredTaskId: featuredTask?.id ?? null,
   };
+}
+
+export async function getSchedulerSnapshot(taskIds: string[]): Promise<SchedulerSnapshot> {
+  const activeTasks = tasks.filter((task) => task.status === "downloading" || task.status === "retrying");
+  const hostUsage = new Map<string, number>();
+  for (const task of activeTasks) {
+    hostUsage.set(task.sourceKey, (hostUsage.get(task.sourceKey) ?? 0) + Math.max(1, task.connectionCount));
+  }
+  const scheduleWindowActive = localTimeWindowActive(
+    settings.scheduleDownloadWindowStart,
+    settings.scheduleDownloadWindowEnd,
+  );
+  const activeTaskCount = activeTasks.length;
+  const taskIdSet = new Set(taskIds);
+  const decisions = tasks
+    .filter((task) => taskIdSet.has(task.id) && task.status === "queued")
+    .map((task) => {
+      const hostUsedSlots = hostUsage.get(task.sourceKey) ?? 0;
+      const retryDelayed = task.retryAfterAt ? Date.parse(task.retryAfterAt) > Date.now() : false;
+      const reason = retryDelayed
+        ? "retry_delay"
+        : activeTaskCount >= settings.maxActiveTasks
+          ? "active_limit"
+          : settings.scheduleDownloadWindowEnabled && task.obeySchedule && !scheduleWindowActive
+            ? "schedule_window"
+            : hostUsedSlots >= settings.maxConnectionsPerHost
+              ? "host_limit"
+              : "ready";
+      return {
+        taskId: task.id,
+        reason,
+        hostUsedSlots,
+        hostLimit: settings.maxConnectionsPerHost,
+      } as const;
+    });
+  return {
+    generatedAt: nowIso(),
+    maxActiveTasks: settings.maxActiveTasks,
+    activeTaskCount,
+    availableTaskSlots: Math.max(0, settings.maxActiveTasks - activeTaskCount),
+    maxConnectionsPerHost: settings.maxConnectionsPerHost,
+    scheduleWindowEnabled: settings.scheduleDownloadWindowEnabled,
+    scheduleWindowActive,
+    scheduleWindowStart: settings.scheduleDownloadWindowStart,
+    scheduleWindowEnd: settings.scheduleDownloadWindowEnd,
+    hosts: Array.from(hostUsage, ([sourceKey, usedSlots]) => ({
+      sourceKey,
+      usedSlots,
+      limit: settings.maxConnectionsPerHost,
+    })).sort((left, right) => left.sourceKey.localeCompare(right.sourceKey)),
+    decisions,
+  };
+}
+
+function localTimeWindowActive(start: string, end: string): boolean {
+  const parse = (value: string) => {
+    const [hours, minutes] = value.split(":").map(Number);
+    return Number.isInteger(hours) && Number.isInteger(minutes) ? hours * 60 + minutes : null;
+  };
+  const startMinutes = parse(start);
+  const endMinutes = parse(end);
+  if (startMinutes == null || endMinutes == null) return false;
+  if (startMinutes === endMinutes) return true;
+  const now = new Date();
+  const current = now.getHours() * 60 + now.getMinutes();
+  return startMinutes < endMinutes
+    ? current >= startMinutes && current < endMinutes
+    : current >= startMinutes || current < endMinutes;
 }
 
 async function mockTaskSegmentsForTask(taskId: string): Promise<TaskSegment[]> {
@@ -844,7 +931,7 @@ export async function listTasksCursor(input: ListTasksCursorInput) {
   return {
     items,
     nextCursor: next < all.length ? String(next) : null,
-    totalEstimate: all.length,
+    minimumTotal: all.length,
     filterOptions: {
       sources: Array.from(new Set(all.map((task) => task.sourceKey).filter(Boolean))).sort(),
       failureCategories,
@@ -852,7 +939,7 @@ export async function listTasksCursor(input: ListTasksCursorInput) {
   } satisfies {
     items: Task[];
     nextCursor: string | null;
-    totalEstimate: number;
+    minimumTotal: number;
     filterOptions: ListTasksCursorResult["filterOptions"];
   };
 }
@@ -1385,6 +1472,7 @@ export async function updateTaskTransferOptions(input: UpdateTaskTransferOptions
     priority: input.priority ?? task.priority,
     queuePosition: input.queuePosition ?? task.queuePosition,
     categoryKey: input.categoryKey,
+    obeySchedule: input.obeySchedule ?? task.obeySchedule,
   });
 }
 

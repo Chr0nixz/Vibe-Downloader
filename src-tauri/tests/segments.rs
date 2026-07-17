@@ -738,6 +738,9 @@ async fn cursor_task_query_pages_and_maps_failure_categories() {
         .expect("first cursor page");
     assert_eq!(first.items.len(), 5);
     assert!(first.has_more);
+    // Cursor pages expose only a lower bound so the first-screen path avoids
+    // a COUNT query over the filtered task set.
+    assert_eq!(first.total, 6);
     assert_eq!(first.items[0].id, "task-cursor-11");
 
     let last = first.items.last().expect("last first page");
@@ -868,9 +871,10 @@ async fn task_stats_snapshot_uses_full_database_counts() {
     assert_eq!(stats.all, "7");
     assert_eq!(stats.active, "2");
     assert_eq!(stats.queued, "1");
-    assert_eq!(stats.paused, "2");
+    assert_eq!(stats.attention, "1");
+    assert_eq!(stats.paused, "1");
     assert_eq!(stats.completed, "1");
-    assert_eq!(stats.failed, "2");
+    assert_eq!(stats.failed, "1");
     assert_eq!(stats.total_speed, "100");
     assert_eq!(stats.total_downloaded, "750");
     assert_eq!(stats.total_bytes, "3000");
@@ -1006,6 +1010,296 @@ async fn reset_interrupted_tasks_can_queue_active_records_for_startup_resume() {
             .status,
         TaskStatus::Paused
     );
+}
+
+#[tokio::test]
+async fn non_http_protocols_share_process_restart_recovery_contract() {
+    const PROTOCOLS: [&str; 7] = ["ftp", "sftp", "bt", "hls", "dash", "webdav", "metalink"];
+
+    for auto_resume in [false, true] {
+        let pool = test_pool(if auto_resume {
+            "protocol-restart-auto"
+        } else {
+            "protocol-restart-paused"
+        })
+        .await;
+        for (index, protocol) in PROTOCOLS.iter().enumerate() {
+            let mut task = sample_task(&format!("{protocol}-restart"), 1024);
+            task.protocol = (*protocol).to_string();
+            task.status = if index % 2 == 0 {
+                TaskStatus::Downloading
+            } else {
+                TaskStatus::Retrying
+            };
+            task.downloaded_bytes = 512;
+            db::insert_task_record(&pool, &task)
+                .await
+                .expect("insert protocol task");
+        }
+
+        db::reset_interrupted_tasks(&pool, auto_resume)
+            .await
+            .expect("reset interrupted protocol tasks");
+
+        let expected = if auto_resume {
+            TaskStatus::Queued
+        } else {
+            TaskStatus::Paused
+        };
+        for protocol in PROTOCOLS {
+            let task = db::get_task_record(&pool, &format!("{protocol}-restart"))
+                .await
+                .expect("load protocol task")
+                .expect("protocol task");
+            assert_eq!(
+                task.status, expected,
+                "unexpected restart state for {protocol}"
+            );
+            assert_eq!(
+                task.downloaded_bytes, 512,
+                "restart recovery must preserve progress for {protocol}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn non_http_protocols_share_explicit_restart_reset_contract() {
+    const PROTOCOLS: [&str; 7] = ["ftp", "sftp", "bt", "hls", "dash", "webdav", "metalink"];
+    let pool = test_pool("protocol-explicit-restart").await;
+
+    for protocol in PROTOCOLS {
+        let mut task = sample_task(&format!("{protocol}-explicit-restart"), 1024);
+        task.protocol = protocol.to_string();
+        task.status = TaskStatus::NeedsAttention;
+        task.downloaded_bytes = 512;
+        task.speed_bps = 128;
+        task.connection_count = 2;
+        task.error_message = Some("Restart required.".to_string());
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert protocol task");
+
+        db::reset_task_download_state(&pool, &task.id)
+            .await
+            .expect("reset protocol task");
+        let reset = db::get_task_record(&pool, &task.id)
+            .await
+            .expect("load reset task")
+            .expect("reset task");
+        assert_eq!(
+            reset.status,
+            TaskStatus::Queued,
+            "unexpected reset state for {protocol}"
+        );
+        assert_eq!(
+            reset.downloaded_bytes, 0,
+            "restart must clear progress for {protocol}"
+        );
+        assert_eq!(reset.speed_bps, 0);
+        assert_eq!(reset.connection_count, 0);
+        assert!(reset.error_message.is_none());
+    }
+}
+
+#[tokio::test]
+async fn non_http_protocols_share_cancellation_state_contract() {
+    const PROTOCOLS: [&str; 7] = ["ftp", "sftp", "bt", "hls", "dash", "webdav", "metalink"];
+    let pool = test_pool("protocol-cancel-state").await;
+
+    for protocol in PROTOCOLS {
+        let mut task = sample_task(&format!("{protocol}-cancel"), 1024);
+        task.protocol = protocol.to_string();
+        task.status = TaskStatus::Downloading;
+        task.downloaded_bytes = 512;
+        task.speed_bps = 128;
+        task.connection_count = 2;
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert protocol task");
+
+        let canceled = db::update_task_status(
+            &pool,
+            &task.id,
+            TaskStatus::Failed,
+            Some(TaskStatus::Downloading),
+            0,
+            0,
+            Some("Canceled by user."),
+            Some("Canceled by user."),
+        )
+        .await
+        .expect("cancel protocol task")
+        .expect("updated protocol task");
+        assert_eq!(
+            canceled.status,
+            TaskStatus::Failed,
+            "unexpected cancel state for {protocol}"
+        );
+        assert_eq!(
+            canceled.downloaded_bytes, 512,
+            "cancel must preserve resumable progress for {protocol}"
+        );
+        assert_eq!(canceled.speed_bps, 0);
+        assert_eq!(canceled.connection_count, 0);
+    }
+}
+
+#[tokio::test]
+async fn non_http_protocols_share_atomic_pause_resume_persistence_contract() {
+    const PROTOCOLS: [&str; 7] = ["ftp", "sftp", "bt", "hls", "dash", "webdav", "metalink"];
+    let pool = test_pool("protocol-pause-resume").await;
+    let root = std::env::temp_dir().join(format!(
+        "vibe-protocol-pause-resume-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).expect("create lifecycle fixture directory");
+
+    for protocol in PROTOCOLS {
+        let mut task = sample_task(&format!("{protocol}-pause-resume"), 1024);
+        task.protocol = protocol.to_string();
+        task.status = TaskStatus::Downloading;
+        task.downloaded_bytes = 512;
+        task.speed_bps = 128;
+        task.connection_count = 2;
+        let temp_path = root.join(format!("{protocol}.vibe-downloading"));
+        let final_path = root.join(format!("{protocol}.bin"));
+        if matches!(protocol, "hls" | "dash") {
+            std::fs::create_dir_all(&temp_path).expect("create media staging directory");
+        } else {
+            std::fs::write(&temp_path, vec![0xA5; 512]).expect("write resumable temp file");
+        }
+        task.temp_path = Some(temp_path.to_string_lossy().to_string());
+        task.final_path = Some(final_path.to_string_lossy().to_string());
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert protocol task");
+        let segment = db::ensure_single_segment_for_task(&pool, &task)
+            .await
+            .expect("create protocol work unit");
+        db::update_segment_runtime_progress(
+            &pool,
+            &segment.id,
+            512,
+            128,
+            SegmentStatus::Downloading,
+        )
+        .await
+        .expect("seed protocol progress");
+        db::update_task_retry_after(&pool, &task.id, Some("2099-01-01T00:00:00Z"))
+            .await
+            .expect("seed retry schedule");
+
+        let mut pause_tx = pool.begin().await.expect("begin pause transaction");
+        db::update_task_status_in_tx(
+            &mut pause_tx,
+            &task.id,
+            TaskStatus::Paused,
+            Some(TaskStatus::Downloading),
+            0,
+            0,
+            Some("Paused"),
+            None,
+        )
+        .await
+        .expect("pause task")
+        .expect("pause transition matched");
+        db::update_segments_status_for_task_in_tx(
+            &mut pause_tx,
+            &task.id,
+            SegmentStatus::Pending,
+            None,
+        )
+        .await
+        .expect("pause work units");
+        db::update_task_retry_after_in_tx(&mut pause_tx, &task.id, None)
+            .await
+            .expect("clear retry schedule");
+        db::insert_task_event_in_tx(&mut pause_tx, &task.id, "paused", None)
+            .await
+            .expect("record pause event");
+        pause_tx.commit().await.expect("commit pause transaction");
+
+        let paused = db::get_task_record(&pool, &task.id)
+            .await
+            .expect("load paused task")
+            .expect("paused task");
+        let paused_segments = db::list_segment_records(&pool, &task.id)
+            .await
+            .expect("load paused work units");
+        assert_eq!(
+            paused.status,
+            TaskStatus::Paused,
+            "pause failed for {protocol}"
+        );
+        assert_eq!(paused.downloaded_bytes, 512);
+        assert_eq!(paused.speed_bps, 0);
+        assert_eq!(paused.connection_count, 0);
+        assert!(paused.retry_after_at.is_none());
+        assert_eq!(paused_segments[0].status, SegmentStatus::Pending);
+        assert_eq!(paused_segments[0].downloaded_until, 512);
+        assert_eq!(paused_segments[0].speed_bps, 0);
+        assert!(
+            temp_path.exists(),
+            "pause removed temp storage for {protocol}"
+        );
+        assert!(
+            !final_path.exists(),
+            "pause published a final file for {protocol}"
+        );
+
+        let mut resume_tx = pool.begin().await.expect("begin resume transaction");
+        db::update_task_status_in_tx(
+            &mut resume_tx,
+            &task.id,
+            TaskStatus::Queued,
+            Some(TaskStatus::Paused),
+            0,
+            0,
+            Some("Queued"),
+            None,
+        )
+        .await
+        .expect("resume task")
+        .expect("resume transition matched");
+        db::update_segments_status_for_task_in_tx(
+            &mut resume_tx,
+            &task.id,
+            SegmentStatus::Pending,
+            None,
+        )
+        .await
+        .expect("resume work units");
+        db::update_task_retry_after_in_tx(&mut resume_tx, &task.id, None)
+            .await
+            .expect("keep retry schedule clear");
+        db::insert_task_event_in_tx(&mut resume_tx, &task.id, "resumed", None)
+            .await
+            .expect("record resume event");
+        resume_tx.commit().await.expect("commit resume transaction");
+
+        let resumed = db::get_task_record(&pool, &task.id)
+            .await
+            .expect("load resumed task")
+            .expect("resumed task");
+        assert_eq!(
+            resumed.status,
+            TaskStatus::Queued,
+            "resume failed for {protocol}"
+        );
+        assert_eq!(resumed.downloaded_bytes, 512);
+        assert!(
+            temp_path.exists(),
+            "resume removed temp storage for {protocol}"
+        );
+        assert!(
+            !final_path.exists(),
+            "resume published a final file for {protocol}"
+        );
+    }
+
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

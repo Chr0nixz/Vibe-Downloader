@@ -52,12 +52,20 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
+            kind: macos
+            target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
           - platform: macos-latest
+            kind: macos
+            target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
           - platform: ubuntu-22.04
+            kind: linux
+            target: x86_64-unknown-linux-gnu
             args: --target x86_64-unknown-linux-gnu
           - platform: windows-latest
+            kind: windows
+            target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc
     runs-on: ${{ matrix.platform }}
     env:
@@ -105,6 +113,46 @@ jobs:
           prerelease: true
           includeUpdaterJson: true
           args: ${{ matrix.args }} --config ${{ inputs.updater_target_tag != '' && 'src-tauri/tauri.updater-rehearsal.generated.json' || 'src-tauri/tauri.bundle.conf.json' }}
+      - name: Verify Windows installer sidecar
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $bundle = "src-tauri/target/${{ matrix.target }}/release/bundle"
+          $msi = Get-ChildItem $bundle -Recurse -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { throw "Candidate build did not produce an MSI" }
+          $extract = Join-Path $env:RUNNER_TEMP "vibe-msi-extract"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @("/a", "`"$($msi.FullName)`"", "/qn", "TARGETDIR=`"$extract`"")
+          if ($process.ExitCode -ne 0) { throw "MSI administrative extraction failed with $($process.ExitCode)" }
+          $host = Get-ChildItem $extract -Recurse -Filter vibe-native-host.exe | Select-Object -First 1
+          if (-not $host) { throw "MSI does not contain vibe-native-host.exe" }
+          & $host.FullName --self-check
+      - name: Verify macOS app sidecar
+        if: matrix.kind == 'macos'
+        run: |
+          app_path="$(find 'src-tauri/target/${{ matrix.target }}/release/bundle/macos' -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app_path"
+          test -x "$app_path/Contents/MacOS/vibe-native-host"
+          "$app_path/Contents/MacOS/vibe-native-host" --self-check
+      - name: Verify Linux package sidecars
+        if: matrix.kind == 'linux'
+        run: |
+          bundle='src-tauri/target/${{ matrix.target }}/release/bundle'
+          deb_path="$(find "$bundle" -name '*.deb' -print -quit)"
+          test -n "$deb_path"
+          mkdir -p "$RUNNER_TEMP/vibe-deb-extract"
+          dpkg-deb -x "$deb_path" "$RUNNER_TEMP/vibe-deb-extract"
+          deb_host="$(find "$RUNNER_TEMP/vibe-deb-extract" -type f -name vibe-native-host -print -quit)"
+          test -x "$deb_host"
+          "$deb_host" --self-check
+
+          appimage_path="$(find "$bundle" -name '*.AppImage' -print -quit)"
+          test -n "$appimage_path"
+          chmod +x "$appimage_path"
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE/$appimage_path" --appimage-extract >/dev/null
+          test -x squashfs-root/usr/bin/vibe-native-host
+          squashfs-root/usr/bin/vibe-native-host --self-check
 
   build-extensions:
     needs: publish

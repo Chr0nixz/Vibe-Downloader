@@ -277,9 +277,9 @@ async fn handle_client_message(app: &AppHandle, raw: &str) -> String {
             let id = message.id;
             let input = match message.payload {
                 Some(payload) => {
-                    // S-1.1: 拒绝通过 WS 桥修改敏感字段。这些字段必须由用户
-                    // 在主窗口 UI 中显式操作（通过 Tauri 命令），不能由持有
-                    // WS bootstrap token 的本地进程直接修改。
+                    // S-1.1: Reject modifying sensitive fields via the WS bridge. These fields must be
+                    // explicitly operated by the user in the main window UI (via Tauri commands), not by
+                    // a local process holding the WS bootstrap token.
                     let conflicts = payload
                         .as_object()
                         .map(commands::browser::is_sensitive_settings_update)

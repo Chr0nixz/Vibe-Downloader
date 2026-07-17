@@ -39,7 +39,7 @@ pub(in crate::download::http) struct SegmentWorkerRequest {
     pub(in crate::download::http) segment: TaskSegmentRecord,
     pub(in crate::download::http) total_size: i64,
     pub(in crate::download::http) segment_count: usize,
-    pub(in crate::download::http) supports_parallel: bool,
+    pub(in crate::download::http) supports_resume: bool,
     pub(in crate::download::http) cancel_token: tokio_util::sync::CancellationToken,
     pub(in crate::download::http) progress_tx: mpsc::Sender<SegmentMessage>,
     pub(in crate::download::http) range_end: Arc<AtomicI64>,
@@ -59,7 +59,7 @@ pub(in crate::download::http) async fn download_segment_worker(
         segment,
         total_size,
         segment_count,
-        supports_parallel,
+        supports_resume,
         cancel_token,
         progress_tx,
         range_end,
@@ -87,7 +87,7 @@ pub(in crate::download::http) async fn download_segment_worker(
             segment: &segment,
             total_size,
             segment_count,
-            supports_parallel,
+            supports_resume,
             cancel_token: &cancel_token,
             progress_tx: &progress_tx,
             range_end: &range_end,
@@ -110,6 +110,9 @@ pub(in crate::download::http) async fn download_segment_worker(
                     &error.failure.error,
                 )
                 .await?;
+                // Honor the server's Retry-After header when present (RFC 7231); otherwise use
+                // exponential backoff (1s→2s→4s→8s→15s). VIBE_FAST_RETRY_DELAYS is a test-only
+                // override to keep integration tests fast.
                 tokio::time::sleep(
                     error
                         .retry_after
@@ -130,7 +133,7 @@ struct SegmentAttemptRequest<'a> {
     segment: &'a TaskSegmentRecord,
     total_size: i64,
     segment_count: usize,
-    supports_parallel: bool,
+    supports_resume: bool,
     cancel_token: &'a tokio_util::sync::CancellationToken,
     progress_tx: &'a mpsc::Sender<SegmentMessage>,
     range_end: &'a Arc<AtomicI64>,
@@ -157,7 +160,7 @@ async fn download_segment_once(
         segment,
         total_size,
         segment_count,
-        supports_parallel,
+        supports_resume,
         cancel_token,
         progress_tx,
         range_end,
@@ -176,7 +179,7 @@ async fn download_segment_once(
     }
 
     let use_range = segment_count > 1 || offset > segment.range_start;
-    if use_range && !supports_parallel {
+    if use_range && !supports_resume {
         return Err(non_retryable(segment_failure(
             segment,
             offset,
@@ -358,6 +361,10 @@ async fn download_segment_once(
         if write_len <= 0 {
             return Ok(offset);
         }
+        // If the chunk overshoots the CURRENT range_end, check whether the range was
+        // shrunk by acceleration (current_end != initial_range_end). A shrunk range means
+        // we voluntarily stopped early — truncate and return Ok. An overshoot on the
+        // original range means the server violated the byte-range contract — fail non-retryably.
         if i64::try_from(chunk.len()).unwrap_or(0) > allowed && current_end == initial_range_end {
             return Err(non_retryable(segment_failure(
                 segment,

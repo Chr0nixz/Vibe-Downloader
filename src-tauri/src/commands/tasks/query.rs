@@ -1,6 +1,8 @@
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::{
     db,
@@ -12,6 +14,8 @@ use crate::{
 };
 
 use super::{task_from_record_with_files, tasks_from_records_with_files};
+
+const QUEUE_PRIORITY_STRIDE: i64 = 1_000_000_000_000;
 
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -140,12 +144,57 @@ pub struct TaskFilterOptions {
     pub failure_categories: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueWaitReason {
+    Ready,
+    RetryDelay,
+    ActiveLimit,
+    ScheduleWindow,
+    HostLimit,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueTaskDecision {
+    pub task_id: String,
+    pub reason: QueueWaitReason,
+    pub host_used_slots: i32,
+    pub host_limit: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SchedulerHostSnapshot {
+    pub source_key: String,
+    pub used_slots: i32,
+    pub limit: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SchedulerSnapshot {
+    pub generated_at: String,
+    pub max_active_tasks: i32,
+    pub active_task_count: i32,
+    pub available_task_slots: i32,
+    pub max_connections_per_host: i32,
+    pub schedule_window_enabled: bool,
+    pub schedule_window_active: bool,
+    pub schedule_window_start: String,
+    pub schedule_window_end: String,
+    pub hosts: Vec<SchedulerHostSnapshot>,
+    pub decisions: Vec<QueueTaskDecision>,
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ListTasksCursorResult {
     pub items: Vec<Task>,
     pub next_cursor: Option<String>,
-    pub total_estimate: String,
+    /// Lower bound for matching tasks. Cursor pagination deliberately avoids
+    /// an extra COUNT query on the first-screen path.
+    pub minimum_total: String,
     pub filter_options: TaskFilterOptions,
 }
 
@@ -213,7 +262,7 @@ pub async fn list_tasks_cursor(
     Ok(ListTasksCursorResult {
         items: tasks,
         next_cursor,
-        total_estimate: page.total.to_string(),
+        minimum_total: page.total.to_string(),
         filter_options: TaskFilterOptions {
             sources: options.sources,
             failure_categories: options.failure_categories,
@@ -234,8 +283,20 @@ fn task_cursor_value(task: &TaskRecord, sort_key: &str) -> String {
         }
         "speed" => task.speed_bps.to_string(),
         "status" => status_rank(task.status).to_string(),
+        "queue_order" => queue_order_value(task).to_string(),
         _ => task.updated_at.clone(),
     }
+}
+
+fn queue_order_value(task: &TaskRecord) -> i64 {
+    let priority_rank = match task.priority {
+        crate::models::TaskPriority::High => 0,
+        crate::models::TaskPriority::Normal => 1,
+        crate::models::TaskPriority::Low => 2,
+    };
+    // Queue positions are spaced by 1,000; this stride preserves scheduler
+    // priority ordering while leaving ample room for large persisted queues.
+    i64::from(priority_rank) * QUEUE_PRIORITY_STRIDE + task.queue_position
 }
 
 fn status_rank(status: TaskStatus) -> i32 {
@@ -280,6 +341,118 @@ pub async fn list_tasks_by_ids(
 #[specta::specta]
 pub async fn get_task_stats(state: State<'_, AppState>) -> Result<TaskStatsSnapshot, String> {
     db::task_stats_snapshot(&state.pool).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_scheduler_snapshot(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    task_ids: Vec<String>,
+) -> Result<SchedulerSnapshot, String> {
+    let default_dir = crate::commands::settings::default_download_dir(&app).unwrap_or_default();
+    let settings = db::get_settings(&state.pool, default_dir).await?;
+    let (active_task_count, host_usage) = {
+        let downloads = state.downloads.lock().await;
+        let mut host_usage = HashMap::<String, usize>::new();
+        for control in downloads.values() {
+            *host_usage.entry(control.source_key.clone()).or_default() += control.connection_slots;
+        }
+        (downloads.len(), host_usage)
+    };
+
+    // The UI requests decisions only for its loaded cursor page. The cap keeps
+    // a compromised WebView from creating an unbounded SQLite IN clause.
+    let mut seen = HashSet::new();
+    let scoped_task_ids = task_ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .take(usize::try_from(db::MAX_TASK_PAGE_SIZE).unwrap_or(500))
+        .collect::<Vec<_>>();
+    let tasks = db::list_task_records_by_ids(&state.pool, &scoped_task_ids).await?;
+    let schedule_window_active = db::local_time_window_active(
+        &settings.schedule_download_window_start,
+        &settings.schedule_download_window_end,
+    );
+    let now = chrono::Utc::now();
+    let host_limit = settings.max_connections_per_host.max(1);
+    let decisions = tasks
+        .into_iter()
+        .filter(|task| task.status == TaskStatus::Queued)
+        .map(|task| {
+            let host_used = host_usage.get(&task.source_key).copied().unwrap_or(0);
+            let reason = queue_wait_reason(
+                task.retry_after_at.as_deref(),
+                now,
+                active_task_count,
+                settings.max_active_tasks,
+                settings.schedule_download_window_enabled
+                    && task.obey_schedule
+                    && !schedule_window_active,
+                host_used,
+                usize::try_from(host_limit).unwrap_or(1),
+            );
+            QueueTaskDecision {
+                task_id: task.id,
+                reason,
+                host_used_slots: i32::try_from(host_used).unwrap_or(i32::MAX),
+                host_limit,
+            }
+        })
+        .collect();
+    let mut hosts = host_usage
+        .into_iter()
+        .map(|(source_key, used_slots)| SchedulerHostSnapshot {
+            source_key,
+            used_slots: i32::try_from(used_slots).unwrap_or(i32::MAX),
+            limit: host_limit,
+        })
+        .collect::<Vec<_>>();
+    hosts.sort_by(|left, right| left.source_key.cmp(&right.source_key));
+
+    Ok(SchedulerSnapshot {
+        generated_at: now.to_rfc3339(),
+        max_active_tasks: settings.max_active_tasks,
+        active_task_count: i32::try_from(active_task_count).unwrap_or(i32::MAX),
+        available_task_slots: crate::scheduler::Scheduler::compute_available_slots(
+            settings.max_active_tasks,
+            active_task_count,
+        ),
+        max_connections_per_host: host_limit,
+        schedule_window_enabled: settings.schedule_download_window_enabled,
+        schedule_window_active,
+        schedule_window_start: settings.schedule_download_window_start,
+        schedule_window_end: settings.schedule_download_window_end,
+        hosts,
+        decisions,
+    })
+}
+
+fn queue_wait_reason(
+    retry_after_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+    active_task_count: usize,
+    max_active_tasks: i32,
+    schedule_blocked: bool,
+    host_used_slots: usize,
+    host_limit: usize,
+) -> QueueWaitReason {
+    let retry_delayed = retry_after_at
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_some_and(|value| value.with_timezone(&chrono::Utc) > now);
+    if retry_delayed {
+        return QueueWaitReason::RetryDelay;
+    }
+    if active_task_count >= usize::try_from(max_active_tasks.max(0)).unwrap_or(0) {
+        return QueueWaitReason::ActiveLimit;
+    }
+    if schedule_blocked {
+        return QueueWaitReason::ScheduleWindow;
+    }
+    if host_used_slots >= host_limit.max(1) {
+        return QueueWaitReason::HostLimit;
+    }
+    QueueWaitReason::Ready
 }
 
 #[tauri::command]
@@ -389,4 +562,39 @@ pub async fn list_task_requests_page(
         None
     };
     Ok(TaskRequestsPageResult { items, next_cursor })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{queue_wait_reason, QueueWaitReason};
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-07-13T12:00:00Z")
+            .expect("valid fixture time")
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn queue_wait_reason_follows_scheduler_gate_order() {
+        assert_eq!(
+            queue_wait_reason(Some("2026-07-13T12:05:00Z"), now(), 2, 2, true, 8, 8,),
+            QueueWaitReason::RetryDelay
+        );
+        assert_eq!(
+            queue_wait_reason(None, now(), 2, 2, true, 8, 8),
+            QueueWaitReason::ActiveLimit
+        );
+        assert_eq!(
+            queue_wait_reason(None, now(), 1, 2, true, 8, 8),
+            QueueWaitReason::ScheduleWindow
+        );
+        assert_eq!(
+            queue_wait_reason(None, now(), 1, 2, false, 8, 8),
+            QueueWaitReason::HostLimit
+        );
+        assert_eq!(
+            queue_wait_reason(None, now(), 1, 2, false, 4, 8),
+            QueueWaitReason::Ready
+        );
+    }
 }

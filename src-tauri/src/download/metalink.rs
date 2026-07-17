@@ -57,7 +57,7 @@ pub struct MetalinkWorkerProgress {
 
 #[derive(Debug, Clone)]
 pub struct MetalinkEngine {
-    /// E-4: 共享 `HttpEngine` 的客户端缓存，避免每次 probe/download 新建 Client。
+    /// E-4: Shares the `HttpEngine` client cache to avoid creating a new Client on every probe/download.
     http: Arc<HttpEngine>,
 }
 
@@ -106,13 +106,13 @@ impl DownloadEngine for MetalinkEngine {
         PROTOCOL_METALINK
     }
 
-    /// R-3: Metalink 仅靠 `matches_url`（`.meta4`/`.metalink` 后缀）路由，
-    /// 不参与 scheme 兜底，避免普通 https URL 被误路由到 Metalink。
+    /// R-3: Metalink routes only via `matches_url` (`.meta4`/`.metalink` suffix),
+    /// not via scheme fallback, to prevent ordinary HTTPS URLs from being misrouted to Metalink.
     fn supports_scheme(&self, _scheme: &str) -> bool {
         false
     }
 
-    /// R-3: `.meta4` / `.metalink` 路径路由到 Metalink 引擎。优先级 90。
+    /// R-3: `.meta4` / `.metalink` paths route to the Metalink engine. Priority 90.
     fn matches_url(&self, url: &reqwest::Url) -> bool {
         is_metalink_url(url)
     }
@@ -246,7 +246,7 @@ async fn run_metalink_download(
 
 #[allow(clippy::too_many_arguments)]
 async fn download_metalink_file(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     file: &TaskFileRecord,
@@ -394,7 +394,7 @@ async fn download_metalink_file(
 /// error and the engine falls back to the serial full-file path.
 #[allow(clippy::too_many_arguments)]
 async fn download_metalink_file_parallel(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     file: &TaskFileRecord,
@@ -653,7 +653,7 @@ async fn download_metalink_file_parallel(
 /// parallel eligibility is not met (e.g. only one healthy mirror).
 #[allow(clippy::too_many_arguments)]
 async fn download_metalink_file_serial(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     file: &TaskFileRecord,
@@ -1086,7 +1086,7 @@ pub async fn all_part_files_absent(temp_path: &Path, worker_count: usize) -> boo
 }
 
 struct DownloadFileContext<'a> {
-    app: &'a AppHandle,
+    app: &'a Option<AppHandle>,
     pool: &'a SqlitePool,
     task: &'a TaskRecord,
     file: &'a TaskFileRecord,
@@ -1299,7 +1299,7 @@ async fn verify_metalink_file(
 
 #[allow(clippy::too_many_arguments)]
 async fn emit_metalink_progress(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     file: &TaskFileRecord,
@@ -1336,7 +1336,7 @@ async fn emit_metalink_progress(
 }
 
 async fn pause_metalink_task(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     downloaded: i64,
@@ -1358,7 +1358,7 @@ async fn pause_metalink_task(
 }
 
 async fn complete_metalink_task(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     downloaded: i64,

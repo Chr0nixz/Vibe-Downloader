@@ -14,7 +14,17 @@ import {
   X,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { BrowserCaptureControls } from "@/components/settings/BrowserCaptureControls";
 import { ClassificationRulesEditor } from "@/components/settings/ClassificationRulesEditor";
@@ -98,14 +108,14 @@ const DEFAULT_EXPANDED_SETTINGS_SECTIONS = new Set<SettingsSectionId>([
 ]);
 
 const ACCENT_SWATCHES: Record<string, { light: string; dark: string }> = {
-  blue: { light: "oklch(0.48 0.18 235)", dark: "oklch(0.76 0.14 235)" },
-  purple: { light: "oklch(0.48 0.18 290)", dark: "oklch(0.76 0.14 290)" },
-  teal: { light: "oklch(0.48 0.15 190)", dark: "oklch(0.76 0.14 190)" },
-  green: { light: "oklch(0.48 0.16 150)", dark: "oklch(0.76 0.14 150)" },
-  orange: { light: "oklch(0.48 0.16 55)", dark: "oklch(0.76 0.14 55)" },
-  rose: { light: "oklch(0.48 0.18 350)", dark: "oklch(0.76 0.14 350)" },
-  indigo: { light: "oklch(0.48 0.18 265)", dark: "oklch(0.76 0.14 265)" },
-  amber: { light: "oklch(0.48 0.16 80)", dark: "oklch(0.76 0.14 80)" },
+  blue: { light: "oklch(0.4 0.18 235)", dark: "oklch(0.76 0.14 235)" },
+  purple: { light: "oklch(0.4 0.18 290)", dark: "oklch(0.76 0.14 290)" },
+  teal: { light: "oklch(0.4 0.15 190)", dark: "oklch(0.76 0.14 190)" },
+  green: { light: "oklch(0.4 0.16 150)", dark: "oklch(0.76 0.14 150)" },
+  orange: { light: "oklch(0.4 0.16 55)", dark: "oklch(0.76 0.14 55)" },
+  rose: { light: "oklch(0.4 0.18 350)", dark: "oklch(0.76 0.14 350)" },
+  indigo: { light: "oklch(0.4 0.18 265)", dark: "oklch(0.76 0.14 265)" },
+  amber: { light: "oklch(0.4 0.16 80)", dark: "oklch(0.76 0.14 80)" },
 };
 
 const SettingsSearchContext = createContext<{
@@ -316,6 +326,11 @@ export function SettingsPage() {
           t("locale.label"),
           t("locale.en"),
           t("locale.zhCN"),
+          t("locale.zhTW"),
+          t("locale.ja"),
+          t("locale.ko"),
+          t("locale.ru"),
+          t("locale.es"),
           t("settings.accentColor"),
         ],
       },
@@ -563,6 +578,7 @@ export function SettingsPage() {
     setSaveState("saved");
   }, [settings]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: saveSettings is a stable store action; form fields define the debounce snapshot.
   useEffect(() => {
     if (!settings || loading) return;
     if (
@@ -988,10 +1004,12 @@ export function SettingsPage() {
     setDefaultSaveDir("");
   }
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: startup loading is attempted once to avoid retry loops after failure.
   useEffect(() => {
     if (!settings && !loading) void refreshSettings();
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the subscription owns refreshes after the initial request.
   useEffect(() => {
     void refreshBrowserIntegration();
     let unlisten: (() => void) | undefined;
@@ -1609,21 +1627,27 @@ export function SettingsPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {STABLE_LOCALES.map((locale) => (
+                      {SUPPORTED_LOCALES.map((locale) => (
                         <SelectItem key={locale} value={locale}>
-                          {LOCALE_LABEL_KEYS[locale] ? t(LOCALE_LABEL_KEYS[locale]) : locale}
+                          <span className="flex items-center gap-2">
+                            {LOCALE_LABEL_KEYS[locale] ? t(LOCALE_LABEL_KEYS[locale]) : locale}
+                            {!STABLE_LOCALES.includes(locale) && (
+                              <span className="rounded bg-surface-hover px-1.5 py-0.5 text-xs text-text-muted">
+                                {t("locale.beta")}
+                              </span>
+                            )}
+                          </span>
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 </SettingsRow>
                 <SettingsRow title={t("settings.accentColor")} htmlFor="accent-color-picker">
-                  <div
+                  <fieldset
                     id="accent-color-picker"
-                    role="radiogroup"
-                    aria-label={t("settings.accentColor")}
-                    className="flex flex-wrap items-center gap-2.5"
+                    className="m-0 flex min-w-0 flex-wrap items-center gap-2.5 border-0 p-0"
                   >
+                    <legend className="sr-only">{t("settings.accentColor")}</legend>
                     {(
                       [
                         ["blue", t("settings.accentBlue")],
@@ -1644,8 +1668,7 @@ export function SettingsPage() {
                         <button
                           key={color}
                           type="button"
-                          role="radio"
-                          aria-checked={isSelected ? "true" : "false"}
+                          aria-pressed={isSelected}
                           aria-label={label}
                           title={label}
                           disabled={controlsDisabled}
@@ -1662,7 +1685,7 @@ export function SettingsPage() {
                         />
                       );
                     })}
-                  </div>
+                  </fieldset>
                 </SettingsRow>
                 <SettingsToggle
                   title={t("settings.titlebarGradient")}
@@ -1755,10 +1778,16 @@ export function SettingsPage() {
                         </div>
                         <div className="min-w-0">
                           <p className="text-sm text-text-primary">{statusLabel}</p>
-                          <p className="mt-1 truncate text-xs text-text-muted">
+                          <p
+                            className="mt-1 truncate text-xs text-text-muted"
+                            title={browser.manifestPath ?? t("settings.browserNoManifestPath")}
+                          >
                             {browser.manifestPath ?? t("settings.browserNoManifestPath")}
                           </p>
-                          <p className="mt-1 truncate text-xs text-text-muted">
+                          <p
+                            className="mt-1 truncate text-xs text-text-muted"
+                            title={`${browser.profile} / ${browser.extensionId ?? ""}`}
+                          >
                             {browser.profile} / {browser.extensionId ?? t("settings.browserNoExtensionId")}
                           </p>
                           {browser.lastError ? (
@@ -1795,20 +1824,20 @@ export function SettingsPage() {
                       {t("settings.browserHostName")}{" "}
                       <span className="font-mono text-text-secondary">{browserStatus.nativeHostName}</span>
                     </p>
-                    <p className="truncate">
+                    <p className="truncate" title={browserStatus.nativeHostPath ?? ""}>
                       {t("settings.browserNativeHostPath")}{" "}
                       <span className="font-mono text-text-secondary">
                         {browserStatus.nativeHostPath ?? t("settings.browserNoManifestPath")}
                       </span>
                     </p>
-                    <p className="truncate">
+                    <p className="truncate" title={browserStatus.extensionCorePath ?? ""}>
                       {t("settings.browserExtensionPath")}{" "}
                       <span className="font-mono text-text-secondary">
                         {browserStatus.extensionCorePath ?? t("settings.browserBuildExtensions")}
                       </span>
                     </p>
                     {browserExportResult ? (
-                      <p className="mt-2 truncate">
+                      <p className="mt-2 truncate" title={browserExportResult.outputDir}>
                         {t("settings.browserExportPath")}{" "}
                         <span className="font-mono text-text-secondary">{browserExportResult.outputDir}</span>
                       </p>
@@ -1888,11 +1917,11 @@ export function SettingsPage() {
                     </div>
                     {ffmpegVersion ? (
                       <div className="flex items-center gap-2 text-sm text-text-secondary">
-                        <Check className="h-4 w-4 text-green-600 dark:text-green-400" />
+                        <Check className="h-4 w-4 text-status-success" />
                         <span className="font-mono">{ffmpegVersion}</span>
                       </div>
                     ) : ffmpegProbeError ? (
-                      <div className="flex items-start gap-2 text-sm text-rose-600 dark:text-rose-400">
+                      <div className="flex items-start gap-2 text-sm text-status-danger">
                         <X className="mt-0.5 h-4 w-4 shrink-0" />
                         <span className="break-all">{ffmpegProbeError}</span>
                       </div>
@@ -2081,6 +2110,7 @@ function SettingsSection({
   matchesSearch?: boolean;
   children: ReactNode;
 }) {
+  const { t } = useTranslation();
   const { query, setQuery } = useSettingsSearch();
   const searchActive = query.trim().length > 0;
   const [open, setOpen] = useState(defaultOpen);
@@ -2089,38 +2119,42 @@ function SettingsSection({
 
   return (
     <section id={id} className="scroll-mt-12 border-t border-border-subtle py-4 first:border-t-0 first:pt-0">
-      <button
-        type="button"
-        className={cn(
-          "flex w-full items-start justify-between gap-3 rounded-md px-1 py-2 text-left transition-colors",
-          "hover:bg-surface-base/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
-        )}
-        aria-expanded={contentVisible}
-        aria-controls={panelId}
-        onClick={() => {
-          if (searchActive) return;
-          setOpen((current) => !current);
-        }}
-      >
-        <span className="grid min-w-0 gap-1">
+      <div className="flex w-full items-start justify-between gap-3 rounded-md px-1 py-2">
+        <h2 className="grid min-w-0 flex-1 gap-1 text-sm font-semibold text-text-primary">
           <span className="flex min-w-0 flex-wrap items-center gap-2">
-            <h2 className="text-sm font-semibold text-text-primary">{title}</h2>
+            <span>{title}</span>
             {summary ? (
               <span className="min-w-0 truncate rounded-full bg-surface-raised px-2 py-0.5 text-[11px] font-medium text-text-muted">
                 {summary}
               </span>
             ) : null}
           </span>
-          {description ? <span className="max-w-2xl text-sm leading-5 text-text-muted">{description}</span> : null}
-        </span>
-        <ChevronDown
+          {description ? (
+            <span className="max-w-2xl text-sm font-medium leading-5 text-text-muted">{description}</span>
+          ) : null}
+        </h2>
+        <button
+          type="button"
           className={cn(
-            "mt-0.5 h-4 w-4 shrink-0 text-text-muted transition-transform duration-ui",
-            contentVisible && "rotate-180",
+            "mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors",
+            "hover:bg-surface-base/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
           )}
-          aria-hidden
-        />
-      </button>
+          aria-expanded={contentVisible}
+          aria-controls={panelId}
+          aria-label={
+            contentVisible ? t("settings.collapseSection", { title }) : t("settings.expandSection", { title })
+          }
+          onClick={() => {
+            if (searchActive) return;
+            setOpen((current) => !current);
+          }}
+        >
+          <ChevronDown
+            className={cn("h-4 w-4 shrink-0 transition-transform duration-ui", contentVisible && "rotate-180")}
+            aria-hidden
+          />
+        </button>
+      </div>
       {contentVisible ? (
         <SettingsSearchContext.Provider
           value={{
@@ -2242,20 +2276,34 @@ function SettingsToggle({
   onChange: (checked: boolean) => void;
 }) {
   const { query, forceVisible } = useSettingsSearch();
+  const fieldId = useId();
+  const titleId = `${fieldId}-title`;
+  const descriptionId = `${fieldId}-description`;
   const matchesSearch =
     forceVisible ||
     !query ||
     title.toLowerCase().includes(query.toLowerCase()) ||
     description.toLowerCase().includes(query.toLowerCase());
   if (!matchesSearch) return null;
+
   return (
-    <label className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+    <div className="grid gap-3 border-t border-border-divider px-4 py-4 first:border-t-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
       <span className="min-w-0">
-        <span className="block text-sm font-medium text-text-primary">{title}</span>
-        <span className="mt-1 block text-xs leading-5 text-text-muted">{description}</span>
+        <span id={titleId} className="block text-sm font-medium text-text-primary">
+          {title}
+        </span>
+        <span id={descriptionId} className="mt-1 block text-xs leading-5 text-text-muted">
+          {description}
+        </span>
       </span>
-      <Switch checked={checked} disabled={disabled} onCheckedChange={onChange} />
-    </label>
+      <Switch
+        checked={checked}
+        disabled={disabled}
+        onCheckedChange={onChange}
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+      />
+    </div>
   );
 }
 

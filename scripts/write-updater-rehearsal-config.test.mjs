@@ -18,7 +18,7 @@ test("rejects unsafe or non-semver tags", () => {
 test("keeps the native host bundle overlay in rehearsal builds", () => {
   const config = updaterRehearsalConfig("v0.2.0-rc.1");
   assert.equal(config.build.beforeBuildCommand, "node scripts/native-host-build.mjs --with-frontend");
-  assert.equal(config.build.beforeBundleCommand, "node scripts/native-host-build.mjs");
+  assert.equal(config.build.beforeBundleCommand, "node scripts/native-host-build.mjs --verify-staged");
   assert.deepEqual(config.bundle.externalBin, ["binaries/vibe-native-host"]);
   assert.deepEqual(config.plugins.updater.endpoints, [
     "https://github.com/Chr0nixz/Vibe-Downloader/releases/download/v0.2.0-rc.1/latest.json",

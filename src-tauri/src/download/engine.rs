@@ -80,7 +80,9 @@ pub struct ProbeOutput {
 
 #[derive(Debug, Clone)]
 pub struct DownloadContext {
-    pub app: AppHandle,
+    /// Production downloads emit UI events through this handle. Integration
+    /// tests may omit it so engine persistence and file I/O stay headless.
+    pub app: Option<AppHandle>,
     pub pool: SqlitePool,
     pub task: TaskRecord,
     pub cancel_token: tokio_util::sync::CancellationToken,
@@ -94,18 +96,18 @@ pub struct DownloadContext {
 pub trait DownloadEngine: Send + Sync {
     fn id(&self) -> &'static str;
     fn supports_scheme(&self, scheme: &str) -> bool;
-    /// R-3: URL 内容级匹配（如 `is_hls_url` / `is_metalink_url`）。
+    /// R-3: URL content-level matching (e.g., `is_hls_url` / `is_metalink_url`).
     ///
-    /// 默认返回 `false`，表示该引擎仅靠 `supports_scheme` 兜底。需要按 URL
-    /// 路径后缀或 scheme 精确匹配的引擎应覆盖此方法，并相应提升 `priority`，
-    /// 以便在 `supports_scheme` 兜底之前被 `engine_for_uri` 选中。
+    /// Defaults to `false`, meaning the engine relies solely on `supports_scheme` fallback.
+    /// Engines requiring exact URL path suffix or scheme matching should override this method
+    /// and raise their `priority` accordingly, so `engine_for_uri` selects them before `supports_scheme` fallback.
     fn matches_url(&self, _url: &reqwest::Url) -> bool {
         false
     }
-    /// R-3: 路由优先级，数值越大越优先。默认 `0`。
+    /// R-3: Routing priority; higher values take precedence. Defaults to `0`.
     ///
-    /// URL 内容匹配型引擎（BT/HLS/DASH/Metalink）应返回正数，确保在
-    /// `supports_scheme` 兜底之前被检查。同优先级引擎按注册顺序遍历。
+    /// URL content-matching engines (BT/HLS/DASH/Metalink) should return a positive value
+    /// to ensure they are checked before `supports_scheme` fallback. Same-priority engines are iterated in registration order.
     fn priority(&self) -> i32 {
         0
     }
@@ -141,8 +143,8 @@ impl EngineRegistry {
         Ok(Self {
             engines: vec![
                 bt_engine.clone(),
-                // E-4: HLS/DASH/Metalink/WebDAV 共享同一 `Arc<HttpEngine>`，
-                // 复用其客户端缓存与 `invalidate_clients` 失效路径。
+                // E-4: HLS/DASH/Metalink/WebDAV share the same `Arc<HttpEngine>`,
+                // reusing its client cache and `invalidate_clients` invalidation path.
                 Arc::new(MetalinkEngine::new(http_engine.clone())),
                 Arc::new(HlsEngine::new(http_engine.clone())),
                 Arc::new(DashEngine::new(http_engine.clone())),
@@ -162,7 +164,7 @@ impl EngineRegistry {
         self.http_engine.invalidate_clients().await;
     }
 
-    /// E-4: 暴露共享 HTTP 引擎引用，供集成测试验证客户端缓存共享与失效。
+    /// E-4: Exposes the shared HTTP engine reference for integration tests verifying client cache sharing and invalidation.
     pub fn http_engine(&self) -> &Arc<HttpEngine> {
         &self.http_engine
     }
@@ -175,8 +177,8 @@ impl EngineRegistry {
         let parsed =
             reqwest::Url::parse(uri.trim()).map_err(|_| "Download URL is invalid.".to_string())?;
         let scheme = parsed.scheme();
-        // R-3: 引擎自描述 matches_url + priority，按优先级降序遍历，命中即返回。
-        // sort_by_key 是稳定排序，同优先级引擎保持注册顺序。
+        // R-3: Engines self-describe via matches_url + priority; iterate in descending priority order, return on first match.
+        // sort_by_key is a stable sort; same-priority engines preserve registration order.
         // Clone the Vec (bumps Arc refcounts) so iteration yields owned `Arc<dyn>`
         // and `.clone()` resolves to `<Arc<dyn> as Clone>::clone` returning `Arc<dyn>`.
         let mut sorted = self.engines.clone();
@@ -186,7 +188,7 @@ impl EngineRegistry {
                 return Ok(Arc::clone(engine));
             }
         }
-        // 兜底：supports_scheme（HTTP/FTP/SFTP/WebDAV 等仅按 scheme 匹配的引擎）
+        // Fallback: supports_scheme (engines matching by scheme only, e.g., HTTP/FTP/SFTP/WebDAV)
         sorted
             .into_iter()
             .find(|engine| engine.supports_scheme(scheme))

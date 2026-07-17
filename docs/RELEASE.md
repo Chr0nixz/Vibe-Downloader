@@ -8,6 +8,7 @@
 | --- | --- | --- | --- |
 | CI | `.github/workflows/ci.yml` | push 到 `main`/`master`，或 pull request | 前端 typecheck/lint/build、Rust check/clippy/test、Specta drift |
 | Tauri Build | `.github/workflows/tauri-build.yml` | push 到 `main`/`master`，或 pull request | Windows/macOS/Linux `pnpm tauri build --config src-tauri/tauri.ci.conf.json` |
+| Release Candidate | `.github/workflows/release-candidate.yml` | 手动触发 | 使用 candidate 身份构建四目标 prerelease、解包验证 sidecar，并可生成 updater rehearsal endpoint |
 | Release | `.github/workflows/release.yml` | `v*` tag 或手动触发 | 构建安装包，上传 GitHub Release assets，生成 updater `latest.json` |
 
 `tauri.ci.conf.json` 会关闭 updater artifacts，用于 CI 构建验证；正式 Release workflow 会生成 updater artifacts。
@@ -59,6 +60,9 @@ base64 -i vibe-downloader.key
 | `TAURI_SIGNING_PRIVATE_KEY` | 是 | Base64 编码的 updater 私钥 |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 视密钥而定 | updater 私钥密码 |
 | `GITHUB_TOKEN` | GitHub 内置 | 创建 Release 并上传 assets |
+| `VIBE_CHROME_EXTENSION_ID` | 正式发布必需 | Chrome Web Store 正式 ID |
+| `VIBE_EDGE_EXTENSION_ID` | 正式发布必需 | Edge Add-ons 正式 ID |
+| `VIBE_FIREFOX_EXTENSION_ID` | 正式发布必需 | Firefox AMO 正式 ID |
 
 后续操作系统代码签名预留：
 
@@ -83,6 +87,8 @@ base64 -i vibe-downloader.key
 
 ## 发布流程
 
+正式发布前先按 [updater-rehearsal.md](updater-rehearsal.md) 创建至少两个 candidate tag，完成 `rc.0 → rc.1` 三平台升级。Candidate 使用仓库内非秘密测试公钥和确定性扩展 ID，只用于验收，不能作为商店正式版本。
+
 1. 确认主分支 CI 和 Tauri Build 全绿。
 2. 创建并推送 semver tag：
 
@@ -92,6 +98,7 @@ base64 -i vibe-downloader.key
    ```
 
 3. Release workflow 会执行：
+   - `scripts/release-preflight.mjs`，校验 tag/版本、updater 私钥、三个正式扩展 ID、最小权限和 Rust/JS allowlist
    - `scripts/sync-version.mjs`，同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`
    - 构建 macOS arm64、macOS x64、Linux x64、Windows x64
    - 创建 GitHub Release
@@ -165,9 +172,11 @@ Tauri updater 签名独立于 OS 代码签名，始终生效，不受上述决�
 pnpm typecheck
 pnpm build
 pnpm check:bindings
+pnpm test:release-tools
+pnpm verify:extensions
+pnpm verify:protocol-matrix
 pnpm test:rust
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-pnpm build:extensions
-pnpm tauri build --config src-tauri/tauri.ci.conf.json
+VIBE_BROWSER_PROFILE=candidate pnpm tauri build --config src-tauri/tauri.ci.conf.json
 ```

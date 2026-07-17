@@ -28,22 +28,22 @@ use crate::{
     DownloadControl, TaskRequestHeaders,
 };
 
-/// 下载调度器，封装活跃下载映射、请求头缓存、全局限速器、引擎注册表等共享状态。
+/// Download scheduler: encapsulates active download map, request header cache, global speed limiter, engine registry, and other shared state.
 ///
-/// 所有调度方法通过 `self: Arc<Self>` 调用，以便在 spawned task 中克隆 `Arc` 继续调度。
-/// `app` 和 `pool` 不存入结构体，每次调用时传入（避免 Scheduler 持有 DB 连接池生命周期）。
+/// All scheduling methods take `self: Arc<Self>` so an `Arc` clone can continue scheduling in a spawned task.
+/// `app` and `pool` are not stored in the struct; they are passed in on each call (to avoid the Scheduler owning the DB connection pool lifetime).
 pub struct Scheduler {
-    /// 互斥锁，保证调度串行执行（原 AppState.scheduler: Arc<Mutex<()>>）
+    /// Mutex ensuring scheduling runs serially (formerly AppState.scheduler: Arc<Mutex<()>>)
     lock: Mutex<()>,
-    /// 活跃下载映射（与 AppState.downloads 共享同一 Arc）
+    /// Active download map (shares the same Arc as AppState.downloads)
     downloads: Arc<Mutex<HashMap<String, DownloadControl>>>,
-    /// 请求头缓存（与 AppState.request_headers 共享同一 Arc）
+    /// Request header cache (shares the same Arc as AppState.request_headers)
     request_headers: TaskRequestHeaders,
-    /// 全局限速器（与 AppState.speed_limiter 共享同一 Arc）
+    /// Global speed limiter (shares the same Arc as AppState.speed_limiter)
     speed_limiter: Arc<GlobalSpeedLimiter>,
-    /// 引擎注册表（与 AppState.engine_registry 共享同一 Arc）
+    /// Engine registry (shares the same Arc as AppState.engine_registry)
     engine_registry: Arc<EngineRegistry>,
-    /// R-2: per-task 运行时锁（与 AppState.task_runtime_locks 共享同一 Arc）
+    /// R-2: Per-task runtime lock (shares the same Arc as AppState.task_runtime_locks)
     task_runtime_locks: Arc<crate::TaskRuntimeLocks>,
 }
 
@@ -65,12 +65,12 @@ impl Scheduler {
         }
     }
 
-    /// 调度入口（原 schedule_queued_tasks）。
+    /// Scheduling entry point (formerly schedule_queued_tasks).
     pub async fn dispatch(self: Arc<Self>, app: AppHandle, pool: SqlitePool) {
         self.dispatch_inner(app, pool).await;
     }
 
-    /// 延迟调度入口（原 spawn_schedule_queued_tasks_after 的调度分支）。
+    /// Delayed scheduling entry point (formerly the schedule branch of spawn_schedule_queued_tasks_after).
     pub async fn schedule_retry_after_wakeup(self: Arc<Self>, app: AppHandle, pool: SqlitePool) {
         let Some(next) = (match db::next_retry_after_at(&pool).await {
             Ok(value) => value,
@@ -96,7 +96,7 @@ impl Scheduler {
         }
     }
 
-    /// 核心调度逻辑（原 schedule_queued_tasks_inner）。
+    /// Core scheduling logic (formerly schedule_queued_tasks_inner).
     async fn dispatch_inner(self: Arc<Self>, app: AppHandle, pool: SqlitePool) {
         if let Some(state) = app.try_state::<crate::AppState>() {
             if state
@@ -120,6 +120,9 @@ impl Scheduler {
                 return;
             }
         };
+        // Fetch enough queued tasks to potentially fill every host slot (active × per-host),
+        // but cap at one page to avoid loading the entire queue each dispatch tick.
+        // The lower clamp ensures we always fetch at least max_active_tasks candidates.
         let queued_limit = i64::from(settings.max_active_tasks)
             .saturating_mul(i64::from(settings.max_connections_per_host).max(1))
             .clamp(
@@ -158,8 +161,8 @@ impl Scheduler {
             .unwrap_or(usize::try_from(db::DEFAULT_MAX_CONNECTIONS_PER_HOST).unwrap_or(8))
             .max(1);
 
-        // E-6: 一次性构建 host → 已用槽位 计数表，避免循环内每个任务都 lock +
-        // 全量遍历 downloads（O(N×M) + N 次 Mutex lock）。
+        // E-6: Build the host → used slots count map in one pass, avoiding per-task lock +
+        // full downloads traversal inside the loop (O(N×M) + N Mutex locks).
         let mut host_slot_map: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         {
@@ -218,7 +221,7 @@ impl Scheduler {
                 Ok(()) => {
                     // Task was inserted into the downloads map — count it.
                     active_count += 1;
-                    // 同步更新本地计数表，后续任务看到最新槽位占用。
+                    // Update the local count map synchronously so subsequent tasks see the latest slot usage.
                     *host_slot_map.entry(source_key).or_insert(0) += planned_slots;
                 }
                 Err(error) => {
@@ -244,7 +247,7 @@ impl Scheduler {
         emit_queue_changed(&app);
     }
 
-    /// 启动单个任务下载（原 start_task_download）。
+    /// Start a single task download (formerly start_task_download).
     async fn start_task(
         self: Arc<Self>,
         app: AppHandle,
@@ -389,6 +392,8 @@ impl Scheduler {
                     None
                 }
             });
+            // Per-task limit and scheduled-window limit both apply; the stricter (minimum) wins.
+            // If the scheduled window is inactive, only the per-task limit applies.
             let effective_task_limit = min_optional_limit(task_limit_bps, scheduled_limit_bps);
             let task_speed_limiter =
                 GlobalSpeedLimiter::with_parent(state_speed_limiter.clone(), effective_task_limit);
@@ -403,7 +408,7 @@ impl Scheduler {
             let download_handle = tokio::spawn(async move {
                 engine
                     .download(DownloadContext {
-                        app: inner_app,
+                        app: Some(inner_app),
                         pool: inner_pool,
                         task,
                         cancel_token: inner_cancel_token,
@@ -502,7 +507,7 @@ impl Scheduler {
         Ok(())
     }
 
-    /// 计算指定 host 已用的连接槽位数（原 host_connection_slots）。
+    /// Count used connection slots for the given host (formerly host_connection_slots).
     pub async fn host_used(&self, source_key: &str) -> usize {
         self.downloads
             .lock()
@@ -513,12 +518,12 @@ impl Scheduler {
             .sum()
     }
 
-    /// 计算可用槽位数（纯函数，无副作用）。
+    /// Compute available slots (pure function, no side effects).
     pub fn compute_available_slots(max_active_tasks: i32, active_count: usize) -> i32 {
         max_active_tasks.saturating_sub(active_count as i32).max(0)
     }
 
-    /// 判断任务是否应被调度窗口跳过（纯函数）。
+    /// Determine whether a task should be skipped by the scheduling window (pure function).
     pub fn should_skip_for_schedule_window(
         schedule_window_enabled: bool,
         obey_schedule: bool,
@@ -527,19 +532,22 @@ impl Scheduler {
         schedule_window_enabled && obey_schedule && !time_window_active
     }
 
-    /// 计算 planned_slots，考虑 host_limit 和 host_used（纯函数）。
+    /// Compute planned_slots, considering host_limit and host_used (pure function).
     pub fn compute_planned_slots(planned: usize, host_limit: usize, host_used: usize) -> usize {
+        // Floor at 1: even single-stream downloads need one slot, and we allow a new task
+        // to exceed host_limit by 1 rather than starving it. host_limit is a soft target,
+        // not a hard cap.
         planned.min(host_limit.saturating_sub(host_used)).max(1)
     }
 
-    /// 异步触发调度（原 spawn_schedule_queued_tasks）。
+    /// Asynchronously trigger scheduling (formerly spawn_schedule_queued_tasks).
     fn spawn_dispatch(self: Arc<Self>, app: AppHandle, pool: SqlitePool) {
         tokio::spawn(async move {
             self.dispatch_inner(app, pool).await;
         });
     }
 
-    /// 延迟异步触发调度（原 spawn_schedule_queued_tasks_after）。
+    /// Asynchronously trigger scheduling with a delay (formerly spawn_schedule_queued_tasks_after).
     pub fn spawn_dispatch_after(
         self: Arc<Self>,
         app: AppHandle,
@@ -552,7 +560,7 @@ impl Scheduler {
         });
     }
 
-    /// 队列空且无活跃任务时发射完成动作（原 maybe_emit_completion_action）。
+    /// Emit the completion action when the queue is empty and no tasks are active (formerly maybe_emit_completion_action).
     async fn maybe_emit_completion_action(&self, app: &AppHandle, pool: &SqlitePool) {
         if !self.downloads.lock().await.is_empty() {
             return;
@@ -588,11 +596,14 @@ impl Scheduler {
     }
 }
 
-/// 标记任务下载失败并更新 DB/事件（原 commands::tasks::mark_download_failed）。
-/// 仅在 scheduler 模块内部使用。
+/// Mark a task download as failed and update DB/events (formerly commands::tasks::mark_download_failed).
+/// Internal to the scheduler module.
 async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str, error: String) {
     tracing::error!(task_id = %task_id, error = %error, "download failed");
     let payload = serde_json::from_str::<crate::models::AppErrorPayload>(&error).ok();
+    // These errors are recoverable with user action (resolve a file conflict, re-auth
+    // the browser) → NeedsAttention, not Failed. Keep this list in sync with
+    // AppErrorPayload code constants.
     let status = match payload.as_ref().map(|payload| payload.code.as_str()) {
         Some("final_path_conflict" | "auth_headers_expired" | "auth_headers_unavailable") => {
             TaskStatus::NeedsAttention

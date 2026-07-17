@@ -6,8 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aes::Aes128;
-use cbc::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
+use aes::{
+    cipher::{Array, BlockCipherDecrypt, KeyInit},
+    Aes128,
+};
 use hls_m3u8::{MasterPlaylist as ParsedMasterPlaylist, MediaPlaylist as ParsedMediaPlaylist};
 use reqwest::{
     header::{HeaderName, HeaderValue, ACCEPT_ENCODING, RANGE},
@@ -39,15 +41,12 @@ use crate::{
     },
 };
 
-type Aes128CbcDec = cbc::Decryptor<Aes128>;
-
 const PROTOCOL_HLS: &str = "hls";
 const HLS_CONTENT_TYPE: &str = "application/vnd.apple.mpegurl";
 const HLS_SEGMENT_RETRIES: i32 = 2;
 const HLS_LIVE_MAX_IDLE_POLLS: usize = 6;
-/// E-2: Maximum allowed size for a single HLS segment. Protects against
-/// malicious or malformed playlists that would otherwise buffer an unbounded
-/// segment into memory.
+/// E-2: Maximum streamed size for a single HLS segment. This bounds disk and
+/// network abuse while encrypted payload memory stays fixed-size.
 const HLS_SEGMENT_MAX_BYTES: usize = 512 * 1024 * 1024;
 /// E-2: Maximum allowed size for HLS init maps, keys, and playlists fetched
 /// via `fetch_bytes`. These are small control-plane resources; a 64 MiB cap
@@ -56,7 +55,7 @@ const HLS_INIT_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct HlsEngine {
-    /// E-4: 共享 `HttpEngine` 的客户端缓存，避免每次 probe/download 新建 Client。
+    /// E-4: Shares the `HttpEngine` client cache to avoid creating a new Client on every probe/download.
     http: Arc<HttpEngine>,
 }
 
@@ -180,11 +179,17 @@ impl HlsEngine {
         &self,
         url: &str,
         request_headers: &[(String, String)],
+        pool: Option<&SqlitePool>,
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
     ) -> Result<ProbePlan, String> {
         crate::download::engine::emit_probe_phase(app, request_id, "checking_ffmpeg", Some("hls"));
-        ensure_ffmpeg_available()?;
+        super::ffmpeg::ensure_ffmpeg_available(
+            pool,
+            "hls_ffmpeg_missing",
+            "ffmpeg was not found. Install ffmpeg or configure its path in Settings before creating HLS tasks.",
+        )
+        .await?;
         let client = self.client().await?;
         crate::download::engine::emit_probe_phase(
             app,
@@ -247,13 +252,13 @@ impl DownloadEngine for HlsEngine {
         PROTOCOL_HLS
     }
 
-    /// R-3: HLS 仅靠 `matches_url`（`.m3u8` 后缀）路由，不参与 scheme 兜底，
-    /// 避免普通 https URL 被误路由到 HLS。
+    /// R-3: HLS routes only via `matches_url` (`.m3u8` suffix), not via scheme fallback,
+    /// to prevent ordinary HTTPS URLs from being misrouted to HLS.
     fn supports_scheme(&self, _scheme: &str) -> bool {
         false
     }
 
-    /// R-3: `.m3u8` 路径路由到 HLS 引擎。优先级 80（介于 Metalink 90 与 DASH 70 之间）。
+    /// R-3: `.m3u8` paths route to the HLS engine. Priority 80 (between Metalink 90 and DASH 70).
     fn matches_url(&self, url: &reqwest::Url) -> bool {
         is_hls_url(url)
     }
@@ -271,6 +276,7 @@ impl DownloadEngine for HlsEngine {
                 .probe_hls(
                     &request.uri,
                     &request.request_headers,
+                    request.pool.as_ref(),
                     &request.app,
                     &request.request_id,
                 )
@@ -332,17 +338,13 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         request_headers,
         proxy_config: _proxy_config,
     } = context;
-    ensure_ffmpeg_available()?;
-    // Capture ffmpeg path once before any awaits to avoid TOCTOU:
-    // if ffmpeg were removed between ensure_ffmpeg_available() and run_ffmpeg(),
-    // the second call would return None and fail after a long download.
-    let ffmpeg = ffmpeg_path().ok_or_else(|| {
-        engine_error(
-            "hls_ffmpeg_missing",
-            "ffmpeg was not found. Install ffmpeg or set VIBE_FFMPEG_PATH before creating HLS tasks.",
-            true,
-        )
-    })?;
+    // Resolve once so a settings change cannot switch binaries midway through a task.
+    let ffmpeg = super::ffmpeg::ensure_ffmpeg_available(
+        Some(&pool),
+        "hls_ffmpeg_missing",
+        "ffmpeg was not found. Install ffmpeg or configure its path in Settings before creating HLS tasks.",
+    )
+    .await?;
     let client = engine.client().await?;
     let staging_dir = task
         .temp_path
@@ -355,7 +357,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     })?;
 
     let plan = engine
-        .probe_hls(&task.url, &request_headers, &None, &None)
+        .probe_hls(&task.url, &request_headers, Some(&pool), &None, &None)
         .await?;
     db::upsert_hls_task(
         &pool,
@@ -661,7 +663,7 @@ async fn persist_hls_segment_plans(
 
 #[allow(clippy::too_many_arguments)]
 async fn download_hls_segments(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     client: &Client,
@@ -729,6 +731,10 @@ async fn download_hls_segments(
                     false,
                 )
                 .await?;
+            }
+            Err(_) if cancel_token.is_cancelled() => {
+                workers.abort_all();
+                break;
             }
             Err(error) => {
                 cancel_token.cancel();
@@ -902,59 +908,16 @@ async fn download_hls_segment_once(
 
     let key = plan.key.as_ref();
     if let Some(key) = key {
-        // E-1 + E-2: Encrypted segment — buffer the ciphertext with a safety
-        // size limit and idle timeout, then decrypt the full buffer and write
-        // to disk. A streaming AES-128-CBC decryptor would avoid the double
-        // buffer but requires manual block-alignment and PKCS7 tail handling;
-        // the size cap already removes the unbounded-growth risk.
-        let mut data: Vec<u8> = Vec::new();
-        loop {
-            let outcome = tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    return Err("Download canceled.".to_string());
-                }
-                outcome = read_with_idle_timeout(response.chunk(), READ_IDLE_TIMEOUT) => outcome,
-            };
-            let chunk = match outcome {
-                IdleReadOutcome::Data(chunk) => chunk,
-                IdleReadOutcome::End => break,
-                IdleReadOutcome::Error(e) => {
-                    return Err(format!("HLS segment connection failed: {e}"));
-                }
-                IdleReadOutcome::IdleTimeout => {
-                    return Err(engine_error(
-                        "hls_segment_stalled",
-                        "HLS segment stalled: no data received for 60 seconds.",
-                        true,
-                    ));
-                }
-            };
-            speed_limiter.throttle(chunk.len()).await;
-            data.extend_from_slice(&chunk);
-            if data.len() > HLS_SEGMENT_MAX_BYTES {
-                return Err(engine_error(
-                    "hls_segment_too_large",
-                    format!("HLS segment exceeds the {HLS_SEGMENT_MAX_BYTES} byte safety limit."),
-                    false,
-                ));
-            }
-        }
-        let decrypted =
-            decrypt_hls_segment(client, request_headers, key, plan.media_sequence, data).await?;
-        let bytes = i64::try_from(decrypted.len()).unwrap_or(i64::MAX);
-        let mut file = fs::File::create(&plan.local_path).await.map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!("Could not create HLS segment file: {e}"))
-                .command_error()
-        })?;
-        file.write_all(&decrypted).await.map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!("Could not write HLS segment: {e}"))
-                .command_error()
-        })?;
-        file.flush().await.map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!("Could not flush HLS segment: {e}"))
-                .command_error()
-        })?;
-        Ok(bytes)
+        stream_encrypted_hls_segment(
+            client,
+            request_headers,
+            speed_limiter,
+            cancel_token,
+            response,
+            key,
+            plan,
+        )
+        .await
     } else {
         // E-1 + E-2: Unencrypted segment — stream directly to disk with an
         // idle timeout (prevents stalled servers from holding a worker) and a
@@ -1054,16 +1017,12 @@ async fn ensure_hls_init_map(
     })
 }
 
-async fn decrypt_hls_segment(
+async fn hls_decryptor(
     client: &Client,
     request_headers: &[(String, String)],
     key: &HlsKey,
     media_sequence: i64,
-    data: Vec<u8>,
-) -> Result<Vec<u8>, String> {
-    if key.method.eq_ignore_ascii_case("NONE") {
-        return Ok(data);
-    }
+) -> Result<StreamingAes128CbcDecryptor, String> {
     if !key.method.eq_ignore_ascii_case("AES-128") {
         return Err(engine_error(
             "hls_unsupported_encryption",
@@ -1078,27 +1037,185 @@ async fn decrypt_hls_segment(
             false,
         )
     })?;
-    let key_bytes = fetch_bytes(client, uri, request_headers, None).await?;
-    if key_bytes.len() != 16 {
-        return Err(engine_error(
-            "hls_unsupported_encryption",
-            "AES-128 HLS key must be 16 bytes.",
-            false,
-        ));
-    }
+    let key_bytes: [u8; 16] = fetch_bytes(client, uri, request_headers, None)
+        .await?
+        .try_into()
+        .map_err(|_| {
+            engine_error(
+                "hls_unsupported_encryption",
+                "AES-128 HLS key must be 16 bytes.",
+                false,
+            )
+        })?;
     let iv = key
         .iv
         .as_deref()
         .map(parse_hls_iv)
         .transpose()?
         .unwrap_or_else(|| sequence_iv(media_sequence));
-    let mut buffer = data;
-    let decrypted = Aes128CbcDec::new_from_slices(&key_bytes, &iv)
-        .map_err(|_| "Could not initialize AES-128 decryptor.".to_string())?
-        .decrypt_padded::<Pkcs7>(&mut buffer)
-        .map_err(|_| "Could not decrypt AES-128 HLS segment.".to_string())?
-        .to_vec();
-    Ok(decrypted)
+    Ok(StreamingAes128CbcDecryptor::new(key_bytes, iv))
+}
+
+async fn stream_encrypted_hls_segment(
+    client: &Client,
+    request_headers: &[(String, String)],
+    speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    mut response: reqwest::Response,
+    key: &HlsKey,
+    plan: &SegmentDownloadPlan,
+) -> Result<i64, String> {
+    let mut decryptor = hls_decryptor(client, request_headers, key, plan.media_sequence).await?;
+    let file_name = plan
+        .local_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("segment");
+    let temp_path = plan
+        .local_path
+        .with_file_name(format!("{file_name}.{}.part", Uuid::new_v4()));
+    let result = async {
+        let file = fs::File::create(&temp_path).await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not create HLS segment file: {e}"))
+                .command_error()
+        })?;
+        let mut writer = BufWriter::with_capacity(256 * 1024, file);
+        let mut downloaded = 0_usize;
+        let mut written = 0_usize;
+        loop {
+            let outcome = tokio::select! {
+                _ = cancel_token.cancelled() => return Err("Download canceled.".to_string()),
+                outcome = read_with_idle_timeout(response.chunk(), READ_IDLE_TIMEOUT) => outcome,
+            };
+            let chunk = match outcome {
+                IdleReadOutcome::Data(chunk) => chunk,
+                IdleReadOutcome::End => break,
+                IdleReadOutcome::Error(error) => {
+                    return Err(format!("HLS segment connection failed: {error}"));
+                }
+                IdleReadOutcome::IdleTimeout => {
+                    return Err(engine_error(
+                        "hls_segment_stalled",
+                        "HLS segment stalled: no data received for 60 seconds.",
+                        true,
+                    ));
+                }
+            };
+            speed_limiter.throttle(chunk.len()).await;
+            downloaded = downloaded.saturating_add(chunk.len());
+            if downloaded > HLS_SEGMENT_MAX_BYTES {
+                return Err(engine_error(
+                    "hls_segment_too_large",
+                    format!("HLS segment exceeds the {HLS_SEGMENT_MAX_BYTES} byte safety limit."),
+                    false,
+                ));
+            }
+            let plaintext = decryptor.push(&chunk)?;
+            writer.write_all(&plaintext).await.map_err(|e| {
+                AppErrorPayload::disk_write_failed(format!("Could not write HLS segment: {e}"))
+                    .command_error()
+            })?;
+            written = written.saturating_add(plaintext.len());
+        }
+        let tail = decryptor.finish()?;
+        writer.write_all(&tail).await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not write HLS segment tail: {e}"))
+                .command_error()
+        })?;
+        written = written.saturating_add(tail.len());
+        writer.flush().await.map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not flush HLS segment: {e}"))
+                .command_error()
+        })?;
+        drop(writer);
+        if fs::try_exists(&plan.local_path).await.unwrap_or(false) {
+            fs::remove_file(&plan.local_path).await.map_err(|e| {
+                AppErrorPayload::disk_write_failed(format!("Could not replace HLS segment: {e}"))
+                    .command_error()
+            })?;
+        }
+        fs::rename(&temp_path, &plan.local_path)
+            .await
+            .map_err(|e| {
+                AppErrorPayload::disk_write_failed(format!("Could not publish HLS segment: {e}"))
+                    .command_error()
+            })?;
+        Ok(i64::try_from(written).unwrap_or(i64::MAX))
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path).await;
+    }
+    result
+}
+
+struct StreamingAes128CbcDecryptor {
+    cipher: Aes128,
+    previous_ciphertext: [u8; 16],
+    pending: Vec<u8>,
+}
+
+impl StreamingAes128CbcDecryptor {
+    fn new(key: [u8; 16], iv: [u8; 16]) -> Self {
+        Self {
+            cipher: Aes128::new(&Array::from(key)),
+            previous_ciphertext: iv,
+            pending: Vec::with_capacity(32),
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<u8>, String> {
+        self.pending.extend_from_slice(chunk);
+        let process_bytes = self.pending.len().saturating_sub(1) / 16 * 16;
+        if process_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let retained = self.pending.split_off(process_bytes);
+        let ready = std::mem::replace(&mut self.pending, retained);
+        self.decrypt_blocks(&ready)
+    }
+
+    fn finish(mut self) -> Result<Vec<u8>, String> {
+        if self.pending.is_empty() || !self.pending.len().is_multiple_of(16) {
+            return Err("AES-128 HLS ciphertext is not block-aligned.".to_string());
+        }
+        let pending = std::mem::take(&mut self.pending);
+        let mut plaintext = self.decrypt_blocks(&pending)?;
+        let padding = usize::from(*plaintext.last().unwrap_or(&0));
+        if padding == 0
+            || padding > 16
+            || plaintext.len() < padding
+            || !plaintext[plaintext.len() - padding..]
+                .iter()
+                .all(|value| usize::from(*value) == padding)
+        {
+            return Err("Could not decrypt AES-128 HLS segment: invalid padding.".to_string());
+        }
+        plaintext.truncate(plaintext.len() - padding);
+        Ok(plaintext)
+    }
+
+    fn decrypt_blocks(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+        if !ciphertext.len().is_multiple_of(16) {
+            return Err("AES-128 HLS ciphertext is not block-aligned.".to_string());
+        }
+        let mut plaintext = Vec::with_capacity(ciphertext.len());
+        for block_bytes in ciphertext.chunks_exact(16) {
+            let ciphertext_block: [u8; 16] = block_bytes
+                .try_into()
+                .map_err(|_| "AES-128 HLS ciphertext block is invalid.".to_string())?;
+            let mut block = Array::from(ciphertext_block);
+            self.cipher.decrypt_block(&mut block);
+            plaintext.extend(
+                block
+                    .iter()
+                    .zip(self.previous_ciphertext)
+                    .map(|(value, previous)| *value ^ previous),
+            );
+            self.previous_ciphertext = ciphertext_block;
+        }
+        Ok(plaintext)
+    }
 }
 
 /// F-6: Download an external HLS audio/subtitle track into a staging subdir.
@@ -1167,7 +1284,7 @@ async fn download_external_track(
 }
 
 async fn finalize_hls_task(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     staging_dir: &Path,
@@ -1288,6 +1405,8 @@ async fn run_ffmpeg(
         .arg("error")
         .arg("-allowed_extensions")
         .arg("ALL")
+        .arg("-extension_picky")
+        .arg("0")
         .arg("-i")
         .arg(input);
     // F-6: Add extra audio/subtitle track inputs.
@@ -1301,6 +1420,7 @@ async fn run_ffmpeg(
             cmd.arg("-map").arg(format!("{i}"));
         }
     }
+    cmd.arg(output);
     let status = cmd
         .status()
         .await
@@ -1312,7 +1432,7 @@ async fn run_ffmpeg(
 }
 
 async fn pause_hls_task(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     downloaded_total: i64,
@@ -1336,7 +1456,7 @@ async fn pause_hls_task(
 
 #[allow(clippy::too_many_arguments)]
 async fn emit_hls_progress(
-    app: &AppHandle,
+    app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
     downloaded: i64,
@@ -1880,46 +2000,10 @@ fn sequence_iv(sequence: i64) -> [u8; 16] {
     out
 }
 
-fn ensure_ffmpeg_available() -> Result<(), String> {
-    if ffmpeg_path().is_some() {
-        Ok(())
-    } else {
-        Err(engine_error(
-            "hls_ffmpeg_missing",
-            "ffmpeg was not found. Install ffmpeg or set VIBE_FFMPEG_PATH before creating HLS tasks.",
-            true,
-        ))
-    }
-}
-
-fn ffmpeg_path() -> Option<PathBuf> {
-    std::env::var_os("VIBE_FFMPEG_PATH")
-        .map(PathBuf::from)
-        .filter(|path| path.exists())
-        .or_else(|| executable_in_path("ffmpeg"))
-}
-
-fn executable_in_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let candidate = dir.join(format!("{name}.exe"));
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
 
     #[test]
     fn chooses_highest_bandwidth_variant() {
@@ -1993,6 +2077,55 @@ mod tests {
     fn derives_aes_iv_from_sequence() {
         let iv = sequence_iv(258);
         assert_eq!(&iv[14..], &[1, 2]);
+    }
+
+    #[test]
+    fn streaming_aes_decrypts_arbitrary_chunk_boundaries() {
+        let key = [7_u8; 16];
+        let iv = [3_u8; 16];
+        let plaintext = (0..4097)
+            .map(|value| (value % 251) as u8)
+            .collect::<Vec<_>>();
+        let ciphertext = cbc::Encryptor::<Aes128>::new(&Array::from(key), &Array::from(iv))
+            .encrypt_padded_vec::<Pkcs7>(&plaintext);
+        let mut decryptor = StreamingAes128CbcDecryptor::new(key, iv);
+        let mut output = Vec::new();
+        let chunk_sizes = [1_usize, 15, 2, 31, 64, 7, 513];
+        let mut offset = 0;
+        let mut chunk_index = 0;
+        while offset < ciphertext.len() {
+            let end = (offset + chunk_sizes[chunk_index % chunk_sizes.len()]).min(ciphertext.len());
+            output.extend(
+                decryptor
+                    .push(&ciphertext[offset..end])
+                    .expect("decrypt chunk"),
+            );
+            assert!(decryptor.pending.len() <= 16);
+            offset = end;
+            chunk_index += 1;
+        }
+        output.extend(decryptor.finish().expect("finish decrypt"));
+        assert_eq!(output, plaintext);
+    }
+
+    #[test]
+    fn streaming_aes_rejects_invalid_padding_and_alignment() {
+        let key = [11_u8; 16];
+        let iv = [13_u8; 16];
+        let plaintext = b"padding fixture";
+        let mut ciphertext = cbc::Encryptor::<Aes128>::new(&Array::from(key), &Array::from(iv))
+            .encrypt_padded_vec::<Pkcs7>(plaintext);
+        let last = ciphertext.len() - 1;
+        ciphertext[last] ^= 0x7f;
+        let mut invalid_padding = StreamingAes128CbcDecryptor::new(key, iv);
+        invalid_padding
+            .push(&ciphertext)
+            .expect("accept ciphertext blocks");
+        assert!(invalid_padding.finish().unwrap_err().contains("padding"));
+
+        let mut unaligned = StreamingAes128CbcDecryptor::new(key, iv);
+        unaligned.push(&[0_u8; 17]).expect("buffer incomplete tail");
+        assert!(unaligned.finish().unwrap_err().contains("block-aligned"));
     }
 
     #[test]

@@ -53,15 +53,20 @@ export function CommandBar({ platform, onOpenPalette, onNewDownload, inputRef }:
   const [savingSpeed, setSavingSpeed] = useState(false);
   const speedTriggerRef = useRef<HTMLButtonElement>(null);
   const currentLimit = Number(settings?.globalSpeedLimitBps ?? 0);
+  const speedLabel =
+    currentLimit > 0
+      ? t("commandBar.speedLimitActive", { speed: formatSpeed(currentLimit) })
+      : t("commandBar.speedLimit");
 
-  // First-run tooltip: auto-shows once per session to help new users discover the button
+  // First-run tooltip: auto-shows once per session to help new users discover the button.
+  // P0b: previously suppressed entirely under prefers-reduced-motion, which removed
+  // the hint for the audience that needs it most. Now we always show the tip; under
+  // reduced-motion we extend the auto-dismiss to 10s so users have more time to read.
   const [firstRunTip, setFirstRunTip] = useState(true);
   useEffect(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setFirstRunTip(false);
-      return;
-    }
-    const timer = window.setTimeout(() => setFirstRunTip(false), 4000);
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const delay = reducedMotion ? 10000 : 4000;
+    const timer = window.setTimeout(() => setFirstRunTip(false), delay);
     return () => window.clearTimeout(timer);
   }, []);
 
@@ -133,23 +138,28 @@ export function CommandBar({ platform, onOpenPalette, onNewDownload, inputRef }:
 
       <div className="hidden shrink-0 items-center gap-1 md:flex md:gap-2">
         <Popover open={speedPopoverOpen} onOpenChange={setSpeedPopoverOpen}>
-          <PopoverTrigger asChild>
-            <ActionIcon
-              label={
-                currentLimit > 0
-                  ? t("commandBar.speedLimitActive", {
-                      speed: formatSpeed(currentLimit),
-                    })
-                  : t("commandBar.speedLimit")
-              }
-              icon={savingSpeed ? LoaderCircle : Gauge}
-              className={cn("hidden md:inline-flex", savingSpeed && "animate-spin")}
-              disabled={!settings || savingSpeed}
-              buttonRef={speedTriggerRef}
-            />
-          </PopoverTrigger>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <PopoverTrigger asChild>
+                <Button
+                  ref={speedTriggerRef}
+                  variant="ghost"
+                  size="icon"
+                  aria-label={speedLabel}
+                  disabled={!settings || savingSpeed}
+                  className={cn("hidden md:inline-flex", savingSpeed && "animate-spin")}
+                >
+                  {savingSpeed ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Gauge className="h-4 w-4" />}
+                </Button>
+              </PopoverTrigger>
+            </TooltipTrigger>
+            <TooltipContent>
+              <span>{speedLabel}</span>
+            </TooltipContent>
+          </Tooltip>
           <PopoverContent className="w-64" align="start">
-            <div className="space-y-0.5" role="radiogroup" aria-label={t("speedLimit.customBytes")}>
+            <fieldset className="m-0 space-y-0.5 border-0 p-0">
+              <legend className="sr-only">{t("speedLimit.customBytes")}</legend>
               <SpeedOption
                 label={t("speedLimit.unlimited")}
                 active={currentLimit <= 0}
@@ -163,13 +173,17 @@ export function CommandBar({ platform, onOpenPalette, onNewDownload, inputRef }:
                   onClick={() => void setSpeedLimit(preset.value)}
                 />
               ))}
-            </div>
+            </fieldset>
             <div className="mt-1.5 border-t border-border-subtle pt-1.5">
-              <label className="block px-2 py-1 text-[11px] font-medium text-text-muted">
+              <label
+                htmlFor="command-bar-custom-speed-limit"
+                className="block px-2 py-1 text-[11px] font-medium text-text-muted"
+              >
                 {t("speedLimit.custom")}
               </label>
               <div className="flex gap-1 px-1">
                 <Input
+                  id="command-bar-custom-speed-limit"
                   value={customAmount}
                   onChange={(event) => setCustomAmount(event.target.value)}
                   onKeyDown={(event) => {
@@ -287,8 +301,7 @@ function SpeedOption({ label, active, onClick }: { label: string; active: boolea
   return (
     <button
       type="button"
-      role="radio"
-      aria-checked={active ? "true" : "false"}
+      aria-pressed={active}
       className={cn(
         "flex h-8 w-full items-center justify-between rounded-md px-2 text-left text-sm text-text-secondary",
         "transition-[background-color,color] duration-[var(--motion-ui)] ease-out",
@@ -301,49 +314,5 @@ function SpeedOption({ label, active, onClick }: { label: string; active: boolea
       <span>{label}</span>
       {active ? <Check className="h-4 w-4 text-accent-primary" /> : null}
     </button>
-  );
-}
-
-function ActionIcon({
-  label,
-  icon: Icon,
-  onClick,
-  disabled,
-  className,
-  buttonRef,
-  shortcutLabel,
-}: {
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  onClick?: () => void;
-  disabled?: boolean;
-  className?: string;
-  buttonRef?: React.Ref<HTMLButtonElement>;
-  shortcutLabel?: string;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          ref={buttonRef}
-          variant="ghost"
-          size="icon"
-          aria-label={label}
-          onClick={onClick}
-          disabled={disabled}
-          className={className}
-        >
-          <Icon className="h-4 w-4" />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>
-        <span>{label}</span>
-        {shortcutLabel ? (
-          <kbd className="ml-1.5 rounded border border-border-subtle bg-surface-root px-1.5 py-0.5 font-mono text-[10px] font-semibold text-text-secondary">
-            {shortcutLabel}
-          </kbd>
-        ) : null}
-      </TooltipContent>
-    </Tooltip>
   );
 }

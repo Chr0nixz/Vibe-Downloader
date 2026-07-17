@@ -226,7 +226,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
               try {
                 const ids = payload?.changed_task_ids ?? null;
                 if (ids && ids.length > 0 && ids.length <= 50) {
-                  // E-1: 增量 — 只拉变更的 task
+                  // E-1: Incremental — fetch only changed tasks
                   const changed = await listTasksByIds(ids);
                   if (cancelled) return;
                   const previous = useTaskDataStore.getState().tasks;
@@ -235,7 +235,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
                   scheduleRecalculateStats(150);
                   scheduleStatsRefresh(150);
                 } else {
-                  // 全量回退（None 或 >50）
+                  // Full fallback (None or >50)
                   const previous = useTaskDataStore.getState().tasks;
                   const page = await listTasksCursor(taskCursorInput(null));
                   if (cancelled) return;
@@ -243,7 +243,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
                   const merged = mergeTasksFromServer(previous, fresh);
                   useTaskDataStore
                     .getState()
-                    .setTaskCursorPage(merged, page.totalEstimate, page.nextCursor, page.filterOptions);
+                    .setTaskCursorPage(merged, page.minimumTotal, page.nextCursor, page.filterOptions);
                   notifyTaskStatusChanges(previous, merged);
                   scheduleRecalculateStats(150);
                   scheduleStatsRefresh(150);

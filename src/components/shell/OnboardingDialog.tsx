@@ -116,13 +116,12 @@ export function OnboardingDialog({
         </DialogHeader>
         <DialogBody className="space-y-4">
           {/* Step indicator */}
-          <div
-            className="flex items-center justify-center gap-2"
-            role="group"
+          <ol
+            className="m-0 flex list-none items-center justify-center gap-2 p-0"
             aria-label={t("onboarding.stepIndicator", { current: step + 1, total: TOTAL_STEPS })}
           >
             {Array.from({ length: TOTAL_STEPS }, (_, i) => (
-              <span
+              <li
                 key={i}
                 aria-hidden={i !== step ? "true" : undefined}
                 aria-current={i === step ? "step" : undefined}
@@ -132,7 +131,7 @@ export function OnboardingDialog({
                 )}
               />
             ))}
-          </div>
+          </ol>
 
           <div className="space-y-2">
             <h3 className="text-base font-semibold text-text-primary">{t(stepTitleKey)}</h3>

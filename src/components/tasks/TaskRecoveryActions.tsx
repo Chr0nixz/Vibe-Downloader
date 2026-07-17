@@ -22,7 +22,7 @@ export function TaskRecoveryActions({
 
   const handleCopy = useCallback(() => {
     if (!task.errorMessage) return;
-    const text = formatErrorForReport(task.errorMessage, { taskId: task.id, url: task.url });
+    const text = formatErrorForReport(task.errorMessage, t, { taskId: task.id, url: task.url });
     navigator.clipboard.writeText(text).catch(() => {});
     addToast({
       tone: "info",
@@ -33,11 +33,8 @@ export function TaskRecoveryActions({
   if (!task.errorMessage || actions.length === 0) return null;
 
   return (
-    <div
-      className="rounded-md border border-border-danger-subtle bg-status-danger/10 px-3 py-2"
-      role="group"
-      aria-label={t("recovery.groupLabel")}
-    >
+    <fieldset className="m-0 min-w-0 rounded-md border border-border-danger-subtle bg-status-danger/10 px-3 py-2">
+      <legend className="sr-only">{t("recovery.groupLabel")}</legend>
       <div className="flex items-start justify-between gap-2">
         <p role="alert" className="text-xs leading-5 text-status-danger">
           {localizedErrorMessage(task.errorMessage, t)}
@@ -46,7 +43,7 @@ export function TaskRecoveryActions({
           type="button"
           variant="ghost"
           size="sm"
-          className="h-6 shrink-0 px-1.5"
+          className="shrink-0 px-1.5"
           aria-label={t("recovery.copyError")}
           title={t("recovery.copyError")}
           onClick={(event) => {
@@ -74,7 +71,7 @@ export function TaskRecoveryActions({
           </Button>
         ))}
       </div>
-    </div>
+    </fieldset>
   );
 }
 

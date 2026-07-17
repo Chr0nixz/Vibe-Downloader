@@ -72,9 +72,10 @@ export function ResolveAttentionDialog({
                   })}
             </DialogDescription>
             {isSaveAs ? (
-              <label className="flex flex-col gap-1 text-xs text-text-muted">
+              <label htmlFor="recovery-file-name" className="flex flex-col gap-1 text-xs text-text-muted">
                 {t("recoveryDialog.fileName")}
                 <Input
+                  id="recovery-file-name"
                   value={fileName}
                   onChange={(event) => setFileName(event.target.value)}
                   className="h-11 md:h-8"

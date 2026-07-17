@@ -229,6 +229,30 @@ pub async fn socks5_connect(
     Ok(stream.into_inner())
 }
 
+/// Convert a SOCKS5 connection error into the shared structured task error contract.
+///
+/// The underlying error never includes the configured proxy URL or password, so
+/// callers can persist this payload without leaking proxy credentials.
+pub fn proxy_connect_error(protocol: &str, error: &io::Error) -> String {
+    let code = match error.kind() {
+        io::ErrorKind::PermissionDenied => "proxy_auth_failed",
+        io::ErrorKind::ConnectionRefused
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::NotConnected => "proxy_connection_failed",
+        io::ErrorKind::TimedOut => "proxy_timeout",
+        io::ErrorKind::InvalidInput => "proxy_configuration_invalid",
+        _ => "proxy_connect_failed",
+    };
+    crate::models::AppErrorPayload::new(
+        code,
+        format!("{protocol} SOCKS5 proxy connection failed: {error}"),
+        true,
+        vec!["retry", "check_url"],
+    )
+    .command_error()
+}
+
 fn map_socks5_error(error: tokio_socks::Error) -> io::Error {
     use tokio_socks::Error as SocksError;
     let kind = match &error {

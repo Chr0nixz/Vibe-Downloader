@@ -58,12 +58,12 @@
         }
       },
       "a11y": {
-        "useKeyWithClickEvents": "off",
-        "noSvgWithoutTitle": "off",
-        "noLabelWithoutControl": "off",
-        "useSemanticElements": "off",
-        "noStaticElementInteractions": "off",
-        "useAriaPropsSupportedByRole": "off"
+        "useKeyWithClickEvents": "error",
+        "noSvgWithoutTitle": "error",
+        "noLabelWithoutControl": "error",
+        "useSemanticElements": "error",
+        "noStaticElementInteractions": "error",
+        "useAriaPropsSupportedByRole": "error"
       },
       "complexity": {
         "noForEach": "off",

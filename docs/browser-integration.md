@@ -82,6 +82,8 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
 Native host 二进制名为 `vibe-native-host`。
 
+安装包通过 Tauri `externalBin` 将 host 与主程序一起交付。manifest 安装命令只会写入已验证存在的绝对路径；解包或安装验收可执行 `vibe-native-host --self-check`，检查 host 版本、协议版本和兄弟主程序路径。
+
 传统 handoff 工作流程：
 
 1. 浏览器通过 Native Messaging 向 host 发送 payload。

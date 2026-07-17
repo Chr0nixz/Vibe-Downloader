@@ -151,6 +151,8 @@ function probeErrorHintKey(rawError: unknown, message: string): string {
       case "dns_failure":
         return "newDownload.probeErrorDns";
       case "http_denied":
+      case "ftp_auth_failed":
+      case "proxy_auth_failed":
       case "sftp_auth_failed":
       case "sftp_credentials_required":
         return "newDownload.probeErrorDenied";
@@ -160,12 +162,20 @@ function probeErrorHintKey(rawError: unknown, message: string): string {
       case "server_rate_limited":
         return "newDownload.probeErrorRateLimited";
       case "timeout":
+      case "proxy_timeout":
+      case "bt_metadata_timeout":
         return "newDownload.probeErrorTimeout";
       case "connection_refused":
       case "network_unreachable":
+      case "proxy_connect_failed":
+      case "proxy_connection_failed":
+      case "proxy_configuration_invalid":
       case "sftp_connect_failed":
       case "sftp_proxy_connect_failed":
       case "ftp_connect_failed":
+      case "bt_source_failed":
+      case "bt_metadata_failed":
+      case "bt_runtime_stats_failed":
         return "newDownload.probeErrorConnection";
       case "tls_error":
         return "newDownload.probeErrorTls";
@@ -505,6 +515,7 @@ export function NewDownloadDialog({
     }
   }
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: URL changes own the debounce; detect reads the latest form options when the timer fires.
   useEffect(() => {
     const nextUrl = url.trim();
     setSubmitStatus(null);
@@ -656,7 +667,7 @@ export function NewDownloadDialog({
     setFileLoading(true);
     try {
       const picked = await openFilePicker([
-        { name: "Manifest / Text", extensions: ["torrent", "meta4", "metalink", "mpd", "txt"] },
+        { name: t("newDownload.manifestTextFilter"), extensions: ["torrent", "meta4", "metalink", "mpd", "txt"] },
       ]);
       if (!picked) return;
 
@@ -742,6 +753,7 @@ export function NewDownloadDialog({
     }
   }
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: initialSourceId is the single-use handoff identity; callbacks must not replay it.
   useEffect(() => {
     if (!initialSourceId || appliedInitialSourceId.current === initialSourceId) return;
     appliedInitialSourceId.current = initialSourceId;
@@ -816,15 +828,11 @@ export function NewDownloadDialog({
             {/* Mode segmented control: Single vs Batch. Promotes the batch
                 textarea out of the Advanced section so the two task-creation
                 paths are equally reachable. */}
-            <div
-              role="tablist"
-              aria-label={t("newDownload.title")}
-              className="grid grid-cols-2 gap-1 rounded-md border border-border-subtle bg-surface-raised/40 p-1"
-            >
+            <fieldset className="m-0 grid min-w-0 grid-cols-2 gap-1 rounded-md border border-border-subtle bg-surface-raised/40 p-1">
+              <legend className="sr-only">{t("newDownload.title")}</legend>
               <button
                 type="button"
-                role="tab"
-                aria-selected={mode === "single"}
+                aria-pressed={mode === "single"}
                 onClick={() => setMode("single")}
                 className={`rounded px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary ${
                   mode === "single"
@@ -836,8 +844,7 @@ export function NewDownloadDialog({
               </button>
               <button
                 type="button"
-                role="tab"
-                aria-selected={mode === "batch"}
+                aria-pressed={mode === "batch"}
                 onClick={() => setMode("batch")}
                 className={`rounded px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary ${
                   mode === "batch"
@@ -847,7 +854,7 @@ export function NewDownloadDialog({
               >
                 {t("newDownload.modeBatch")}
               </button>
-            </div>
+            </fieldset>
 
             {mode === "single" ? (
               <>
@@ -858,6 +865,8 @@ export function NewDownloadDialog({
                     <Input
                       id="new-download-url"
                       value={url}
+                      aria-invalid={!!error}
+                      aria-describedby={error ? "new-download-error" : undefined}
                       onChange={(event) => {
                         setUrl(event.target.value);
                         setProbe(null);
@@ -947,7 +956,9 @@ export function NewDownloadDialog({
                             }
                           }}
                         >
-                          <span className="truncate text-text-secondary">{entry.name}</span>
+                          <span className="truncate text-text-secondary" title={entry.name}>
+                            {entry.name}
+                          </span>
                           <span className="shrink-0 text-text-muted">
                             {entry.probableFileUrl ? t("newDownload.useFileUrl") : t("newDownload.directoryEntry")}
                           </span>
@@ -955,7 +966,9 @@ export function NewDownloadDialog({
                       ))}
                     </div>
                     {remoteDirectoryProbe.diagnostics.length > 0 ? (
-                      <p className="mt-2 truncate text-text-muted">{remoteDirectoryProbe.diagnostics[0]}</p>
+                      <p className="mt-2 truncate text-text-muted" title={remoteDirectoryProbe.diagnostics[0]}>
+                        {remoteDirectoryProbe.diagnostics[0]}
+                      </p>
                     ) : null}
                   </div>
                 ) : null}
@@ -973,13 +986,16 @@ export function NewDownloadDialog({
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm text-text-primary">{selectedLocalFile.name}</p>
+                      <p className="truncate text-sm text-text-primary" title={selectedLocalFile.name}>
+                        {selectedLocalFile.name}
+                      </p>
                       <p className="text-xs text-text-muted">{localFileKindLabel(selectedLocalFile.kind, t)}</p>
                     </div>
                     <button
                       type="button"
                       onClick={clearSelectedLocalFile}
                       className="shrink-0 rounded p-1.5 min-h-8 min-w-8 text-text-muted transition-colors hover:bg-surface-raised hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+                      aria-label={t("newDownload.removeFile")}
                       title={t("newDownload.removeFile")}
                     >
                       <X className="h-4 w-4" />
@@ -1005,6 +1021,7 @@ export function NewDownloadDialog({
                       className="h-11 shrink-0 md:h-8 md:w-8"
                       onClick={chooseDirectory}
                       disabled={submitting}
+                      aria-label={t("newDownload.chooseDirectory")}
                       title={t("newDownload.chooseDirectory")}
                     >
                       <FolderOpen className="h-4 w-4" />
@@ -1037,8 +1054,12 @@ export function NewDownloadDialog({
                       <>
                         {/* Header bar */}
                         <div className="flex items-center justify-between border-b border-border-subtle px-3 py-2">
-                          <label className="flex cursor-pointer items-center gap-2 rounded text-xs text-text-secondary transition-colors hover:text-text-primary focus-within:outline-none focus-within:ring-2 focus-within:ring-accent-primary">
+                          <label
+                            htmlFor="new-download-select-all-files"
+                            className="flex cursor-pointer items-center gap-2 rounded text-xs text-text-secondary transition-colors hover:text-text-primary focus-within:outline-none focus-within:ring-2 focus-within:ring-accent-primary"
+                          >
                             <Checkbox
+                              id="new-download-select-all-files"
                               checked={selectedFiles.size === probe.files.length}
                               indeterminate={selectedFiles.size > 0 && selectedFiles.size < probe.files.length}
                               onChange={toggleAllFiles}
@@ -1110,7 +1131,9 @@ export function NewDownloadDialog({
                               className="group flex w-full items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                               title={t("newDownload.editFileName")}
                             >
-                              <span className="truncate text-sm text-text-primary">{fileName || probe.fileName}</span>
+                              <span className="truncate text-sm text-text-primary" title={fileName || probe.fileName}>
+                                {fileName || probe.fileName}
+                              </span>
                               <Pencil className="h-3 w-3 shrink-0 text-text-muted opacity-0 transition-opacity group-hover:opacity-100" />
                             </button>
                           )}
@@ -1167,16 +1190,19 @@ export function NewDownloadDialog({
                   <div className="flex flex-col gap-1 text-xs text-text-muted">
                     <span>{t("newDownload.hlsAudioTracks")}</span>
                     <div className="flex flex-col gap-1">
-                      {probe.hlsAudioTracks.map((track) => {
+                      {probe.hlsAudioTracks.map((track, index) => {
                         const trackUri = track.uri ?? "";
                         const disabled = !track.uri;
                         const checked = selectedHlsAudioTrackUris.includes(trackUri);
+                        const checkboxId = `new-download-hls-audio-${index}`;
                         return (
                           <label
                             key={`${track.groupId}-${track.name}`}
+                            htmlFor={checkboxId}
                             className={`flex items-center gap-2 ${disabled ? "opacity-50" : ""}`}
                           >
                             <Checkbox
+                              id={checkboxId}
                               checked={checked}
                               disabled={disabled}
                               onChange={(e) => {
@@ -1205,16 +1231,19 @@ export function NewDownloadDialog({
                   <div className="flex flex-col gap-1 text-xs text-text-muted">
                     <span>{t("newDownload.hlsSubtitleTracks")}</span>
                     <div className="flex flex-col gap-1">
-                      {probe.hlsSubtitleTracks.map((track) => {
+                      {probe.hlsSubtitleTracks.map((track, index) => {
                         const trackUri = track.uri ?? "";
                         const disabled = !track.uri;
                         const checked = selectedHlsSubtitleTrackUris.includes(trackUri);
+                        const checkboxId = `new-download-hls-subtitle-${index}`;
                         return (
                           <label
                             key={`${track.groupId}-${track.name}`}
+                            htmlFor={checkboxId}
                             className={`flex items-center gap-2 ${disabled ? "opacity-50" : ""}`}
                           >
                             <Checkbox
+                              id={checkboxId}
                               checked={checked}
                               disabled={disabled}
                               onChange={(e) => {
@@ -1244,8 +1273,9 @@ export function NewDownloadDialog({
                 this is off. */}
                 {!isTorrentProbe && !isMetalinkProbe && !isHlsProbe && !isDashProbe ? (
                   <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
-                    <label className="flex cursor-pointer items-start gap-2">
+                    <label htmlFor="new-download-use-credentials" className="flex cursor-pointer items-start gap-2">
                       <Checkbox
+                        id="new-download-use-credentials"
                         checked={useCredentials}
                         onChange={(event) => setUseCredentials(event.target.checked)}
                         aria-label={t("newDownload.useCredentials")}
@@ -1320,6 +1350,7 @@ export function NewDownloadDialog({
                                   size="sm"
                                   onClick={() => setPrivateKeyData("")}
                                   className="shrink-0"
+                                  aria-label={t("newDownload.sshKeyClear")}
                                 >
                                   <X className="size-3.5" />
                                 </Button>
@@ -1463,6 +1494,7 @@ export function NewDownloadDialog({
                       className="h-11 shrink-0 md:h-8 md:w-8"
                       onClick={chooseDirectory}
                       disabled={submitting}
+                      aria-label={t("newDownload.chooseDirectory")}
                       title={t("newDownload.chooseDirectory")}
                     >
                       <FolderOpen className="h-4 w-4" />
@@ -1485,7 +1517,9 @@ export function NewDownloadDialog({
             {/* Error */}
             {error ? (
               <div
+                id="new-download-error"
                 role="alert"
+                aria-live="polite"
                 className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
               >
                 <p>{error}</p>
@@ -1571,16 +1605,19 @@ function FileRow({
 
   return (
     <label
+      htmlFor={`new-download-file-${index}`}
       className={`flex w-full cursor-pointer items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-raised/60 focus-within:outline-none focus-within:ring-2 focus-within:ring-inset focus-within:ring-accent-primary ${
         index > 0 ? "border-t border-border-subtle/50" : ""
       }`}
     >
-      <Checkbox checked={checked} onChange={onToggle} aria-label={displayName} />
+      <Checkbox id={`new-download-file-${index}`} checked={checked} onChange={onToggle} aria-label={displayName} />
       <span className="shrink-0 text-text-muted">{fileIcon(displayName)}</span>
       <div className="min-w-0 flex-1">
-        <p className={`truncate text-sm ${checked ? "text-text-primary" : "text-text-muted"}`}>{displayName}</p>
+        <p className={`truncate text-sm ${checked ? "text-text-primary" : "text-text-muted"}`} title={displayName}>
+          {displayName}
+        </p>
         {hasPath ? (
-          <p className="truncate text-[10px] text-text-muted">
+          <p className="truncate text-[10px] text-text-muted" title={file.relativePath}>
             {file.relativePath.slice(0, file.relativePath.length - displayName.length - 1)}
           </p>
         ) : null}
@@ -1611,7 +1648,10 @@ function BatchResultSummary({ result }: { result: BatchImportResult }) {
           key={`${item.inputUrl}-${item.normalizedUrl ?? "invalid"}`}
           className="grid gap-1 rounded-md border border-border-divider bg-surface-raised/50 px-2 py-1"
         >
-          <span className="truncate font-mono text-text-primary">
+          <span
+            className="truncate font-mono text-text-primary"
+            title={item.fileName ?? sanitizeUrlForDisplay(item.normalizedUrl ?? item.inputUrl)}
+          >
             {item.fileName ?? sanitizeUrlForDisplay(item.normalizedUrl ?? item.inputUrl)}
           </span>
           <span className={item.valid ? "text-text-muted" : "text-status-danger"}>

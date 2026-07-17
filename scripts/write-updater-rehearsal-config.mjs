@@ -20,7 +20,7 @@ export function updaterRehearsalConfig(tag, repository = DEFAULT_REPOSITORY) {
   return {
     build: {
       beforeBuildCommand: "node scripts/native-host-build.mjs --with-frontend",
-      beforeBundleCommand: "node scripts/native-host-build.mjs",
+      beforeBundleCommand: "node scripts/native-host-build.mjs --verify-staged",
     },
     bundle: {
       externalBin: ["binaries/vibe-native-host"],

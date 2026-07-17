@@ -675,7 +675,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    // 自动分类：用户未显式指定 category_key 时，按分类规则匹配
+    // Auto-classification: when the user has not explicitly specified a category_key, match by classification rules
     if category_key.is_none() {
         if let Ok(rules) = db::list_classification_rules(&state.pool).await {
             if let Some(target_subdir) =
@@ -685,7 +685,7 @@ pub(crate) async fn create_task_with_state_and_headers(
             }
         }
     }
-    // 安全校验：category_key 作为子目录名，禁止包含路径分隔符或父目录引用
+    // Security check: category_key is used as a subdirectory name; path separators and parent directory references are forbidden
     if let Some(ref key) = category_key {
         if key.contains('/') || key.contains('\\') || key.contains("..") || key.is_empty() {
             log::warn!(
@@ -695,12 +695,12 @@ pub(crate) async fn create_task_with_state_and_headers(
             category_key = None;
         }
     }
-    // 计算实际保存目录：若命中分类规则或用户指定 category_key，拼接子目录
+    // Compute the actual save directory: if a classification rule matched or the user specified a category_key, append the subdirectory
     let effective_save_dir = if let Some(ref subdir) = category_key {
         let target = save_dir.join(subdir);
         std::fs::create_dir_all(&target)
             .map_err(|e| format!("Could not create the classification subdirectory: {e}"))?;
-        // 路径穿越校验：canonicalize 后确认 target 在 save_dir 之下
+        // Path traversal check: after canonicalize, confirm target is under save_dir
         let canonical_save = save_dir.canonicalize().unwrap_or_else(|_| save_dir.clone());
         let canonical_target = target.canonicalize().unwrap_or_else(|_| target.clone());
         if !canonical_target.starts_with(&canonical_save) {
