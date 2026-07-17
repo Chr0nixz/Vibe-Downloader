@@ -61,7 +61,7 @@ base64 = "0.22.1"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 keyring = "4"
 librqbit = { version = "9.0.0-rc.0", default-features = false, features = ["rust-tls"] }
-quick-xml = "0.40.1"
+quick-xml = "0.41.0"
 russh = "0.61.2"
 russh-sftp = "2.3.0"
 trash = "5.2.6"

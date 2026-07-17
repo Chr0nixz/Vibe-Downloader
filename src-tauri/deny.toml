@@ -9,6 +9,15 @@
 yanked = "deny"
 unmaintained = "workspace"
 unsound = "workspace"
+ignore = [
+    # quick-xml <0.41 DoS vulnerabilities (RUSTSEC-2026-0194, RUSTSEC-2026-0195).
+    # Our direct dep is 0.41.0 (patched). These remain in transitive deps:
+    #  - tauri-winrt-notification 0.7.2 (toast notification XML, not attacker-controlled)
+    #  - librqbit-upnp 9.0.0-rc.0 (local UPnP, not internet-facing)
+    # Upstream must release new versions to pick up quick-xml 0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [licenses]
 # Allow common permissive licenses compatible with the project's GPL-3.0-only.
@@ -19,17 +28,14 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
     "MPL-2.0",
     "GPL-3.0-only",
-    "GPL-3.0-or-later",
-    "LGPL-3.0-only",
     "CC0-1.0",
     "0BSD",
     "BSL-1.0",
-    "OpenSSL",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 
