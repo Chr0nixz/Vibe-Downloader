@@ -568,7 +568,7 @@ async fn persist_hls_segment_plans(
     for segment in segments {
         let id = Uuid::new_v4().to_string();
         let local_name = format!(
-            "seg-{}-{}.bin",
+            "seg-{}-{}.ts",
             segment.discontinuity_sequence, segment.media_sequence
         );
         let local_path = staging_dir.join(local_name);
@@ -1249,7 +1249,7 @@ async fn download_external_track(
             return Ok(None);
         }
         let uri = resolve_url(track_url, &segment.uri)?;
-        let local_name = format!("seg-{}.bin", segment.media_sequence);
+        let local_name = format!("seg-{}.ts", segment.media_sequence);
         let local_path = track_dir.join(&local_name);
         let bytes = fetch_bytes(client, &uri, request_headers, None).await?;
         fs::write(&local_path, &bytes).await.map_err(|e| {
@@ -1375,7 +1375,7 @@ async fn write_local_hls_playlist(
         let path = PathBuf::from(&segment.local_path)
             .file_name()
             .and_then(|value| value.to_str())
-            .unwrap_or("segment.bin")
+            .unwrap_or("segment.ts")
             .replace('\\', "/");
         text.push_str(&format!("#EXTINF:{duration:.3},\n{path}\n"));
     }
