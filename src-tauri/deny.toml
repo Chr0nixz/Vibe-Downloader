@@ -3,11 +3,12 @@
 # Run: cargo deny check licenses advisories
 
 [advisories]
-# Fail CI on known vulnerabilities and yanked crates; warn on unmaintained.
-vulnerability = "deny"
-unmaintained = "warn"
+# vulnerability, unsound, and notice advisories always emit errors and cannot
+# be downgraded; use the `ignore` list to suppress specific advisory IDs.
+# Fail CI on yanked crates; limit unmaintained/unsound failures to workspace deps.
 yanked = "deny"
-notice = "warn"
+unmaintained = "workspace"
+unsound = "workspace"
 
 [licenses]
 # Allow common permissive licenses compatible with the project's GPL-3.0-only.
