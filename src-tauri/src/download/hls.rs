@@ -1405,8 +1405,6 @@ async fn run_ffmpeg(
         .arg("error")
         .arg("-allowed_extensions")
         .arg("ALL")
-        .arg("-extension_picky")
-        .arg("0")
         .arg("-i")
         .arg(input);
     // F-6: Add extra audio/subtitle track inputs.
