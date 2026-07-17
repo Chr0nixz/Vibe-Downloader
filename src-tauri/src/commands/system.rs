@@ -350,7 +350,7 @@ fn category_prefix(ext: &str) -> Option<&'static str> {
         "exe" | "msi" | "deb" | "rpm" | "apk" | "appimage" => "application-x-executable",
         "torrent" => "application-x-bittorrent",
         "iso" | "img" => "application-x-cd-image",
-        "js" | "ts" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "json" | "xml" | "yaml"
+        "js" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "json" | "xml" | "yaml"
         | "html" | "css" => "text-x-script",
         _ => "text-x-generic",
     })
