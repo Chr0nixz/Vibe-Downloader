@@ -56,9 +56,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $extract | Out-Null
           $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @("/a", "`"$($msi.FullName)`"", "/qn", "TARGETDIR=`"$extract`"")
           if ($process.ExitCode -ne 0) { throw "MSI administrative extraction failed with $($process.ExitCode)" }
-          $host = Get-ChildItem $extract -Recurse -Filter vibe-native-host.exe | Select-Object -First 1
-          if (-not $host) { throw "MSI does not contain vibe-native-host.exe" }
-          & $host.FullName --self-check
+          $nativeHost = Get-ChildItem $extract -Recurse -Filter vibe-native-host.exe | Select-Object -First 1
+          if (-not $nativeHost) { throw "MSI does not contain vibe-native-host.exe" }
+          & $nativeHost.FullName --self-check
       - name: Verify macOS app sidecar
         if: matrix.platform == 'macos'
         run: |
