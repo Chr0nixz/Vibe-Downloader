@@ -262,7 +262,7 @@ unsafe fn hicon_to_png(icon: windows::Win32::UI::WindowsAndMessaging::HICON) -> 
 #[cfg(target_os = "macos")]
 fn extract_icon_macos(ext: &str) -> Option<String> {
     use objc2::rc::Retained;
-    use objc2::runtime::NSObject;
+    use objc2::runtime::AnyObject;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWorkspace};
     use objc2_foundation::{NSDictionary, NSString};
 
@@ -270,10 +270,13 @@ fn extract_icon_macos(ext: &str) -> Option<String> {
         // NSWorkspace.sharedWorkspace
         let workspace = NSWorkspace::sharedWorkspace();
 
-        // iconForContentType: takes a UTI. macOS accepts a bare extension as
-        // a UTI for backward compatibility through the dynamic UTI fallback.
+        // iconForFileType: takes an extension or UTI string.
+        // Deprecated in favor of iconForContentType:, but the replacement
+        // requires UTType from objc2-uniform-type-identifiers. The legacy
+        // method accepts a bare extension string, which is what we need.
         let ext_ns = NSString::from_str(ext);
-        let image: Retained<NSImage> = workspace.iconForContentType(&ext_ns);
+        #[allow(deprecated)]
+        let image: Retained<NSImage> = workspace.iconForFileType(&ext_ns);
 
         // NSImage → TIFF data
         let tiff_data = image.TIFFRepresentation()?;
@@ -284,14 +287,14 @@ fn extract_icon_macos(ext: &str) -> Option<String> {
         // NSBitmapImageRep → PNG data. The properties dict can be empty —
         // NSBitmapImageRepPropertyKey is a type alias for NSString, so we
         // use NSString as the key type.
-        let empty_props = NSDictionary::<NSString, NSObject>::new();
+        let empty_props = NSDictionary::<NSString, AnyObject>::new();
         let png_data = bitmap_rep
             .representationUsingType_properties(NSBitmapImageFileType::PNG, &empty_props)?;
 
-        // NSData → bytes → base64
-        let ptr = png_data.bytes().as_ptr();
-        let len = png_data.len();
-        let bytes = std::slice::from_raw_parts(ptr, len);
+        // NSData → bytes → base64. as_bytes_unchecked is the correct way to
+        // access NSData bytes in objc2-foundation 0.3.x — the older bytes()
+        // method returning a raw pointer was removed.
+        let bytes = png_data.as_bytes_unchecked();
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
         Some(format!("data:image/png;base64,{b64}"))
     }
