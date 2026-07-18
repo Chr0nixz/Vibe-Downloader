@@ -39,3 +39,21 @@ test("preflight rejects missing updater signing material", () => {
     /TAURI_SIGNING_PRIVATE_KEY/,
   );
 });
+
+test("release preflight can skip store extension IDs when allowed", () => {
+  const result = validateReleasePreflight({
+    tag: "v0.2.0",
+    versions: {
+      "package.json": "0.2.0",
+      "src-tauri/tauri.conf.json": "0.2.0",
+      "src-tauri/Cargo.toml": "0.2.0",
+    },
+    profile: "release",
+    env: {
+      TAURI_SIGNING_PRIVATE_KEY: "test-key",
+      VIBE_ALLOW_CANDIDATE_EXTENSION_IDS: "true",
+    },
+  });
+  assert.equal(result.identity.profile, "release");
+  assert.equal(result.identity.usingCandidateFallback, true);
+});

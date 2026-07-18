@@ -56,6 +56,23 @@ function requireFirefoxId(value) {
   return id;
 }
 
+function hasConfiguredValue(value) {
+  return String(value ?? "").trim().length > 0;
+}
+
+function candidateExtensionIdentity(profile, captureAvailable, usingCandidateFallback = false) {
+  return {
+    profile,
+    captureAvailable,
+    usingCandidateFallback,
+    chromeId: CANDIDATE_CHROMIUM_EXTENSION_ID,
+    edgeId: CANDIDATE_CHROMIUM_EXTENSION_ID,
+    firefoxId: CANDIDATE_FIREFOX_EXTENSION_ID,
+    chromiumPublicKey: CANDIDATE_CHROMIUM_PUBLIC_KEY,
+    variants: profile === "dev" ? ["chromium", "edge", "firefox", "opera"] : ["chromium", "edge", "firefox"],
+  };
+}
+
 export function resolveExtensionIdentity(env = process.env, fallbackProfile = "dev") {
   const profile = resolveBrowserProfile(env.VIBE_BROWSER_PROFILE, fallbackProfile);
   const captureRequested = parseBoolean(env.VIBE_BROWSER_EXPERIMENTAL_CAPTURE);
@@ -64,9 +81,20 @@ export function resolveExtensionIdentity(env = process.env, fallbackProfile = "d
   }
 
   if (profile === "release") {
+    const formalConfigured = [
+      env.VIBE_CHROME_EXTENSION_ID,
+      env.VIBE_EDGE_EXTENSION_ID,
+      env.VIBE_FIREFOX_EXTENSION_ID,
+    ].some(hasConfiguredValue);
+
+    if (!formalConfigured && parseBoolean(env.VIBE_ALLOW_CANDIDATE_EXTENSION_IDS)) {
+      return candidateExtensionIdentity(profile, false, true);
+    }
+
     return {
       profile,
       captureAvailable: false,
+      usingCandidateFallback: false,
       chromeId: requireChromiumId("VIBE_CHROME_EXTENSION_ID", env.VIBE_CHROME_EXTENSION_ID),
       edgeId: requireChromiumId("VIBE_EDGE_EXTENSION_ID", env.VIBE_EDGE_EXTENSION_ID),
       firefoxId: requireFirefoxId(env.VIBE_FIREFOX_EXTENSION_ID),
@@ -75,15 +103,7 @@ export function resolveExtensionIdentity(env = process.env, fallbackProfile = "d
     };
   }
 
-  return {
-    profile,
-    captureAvailable: profile === "dev" && captureRequested,
-    chromeId: CANDIDATE_CHROMIUM_EXTENSION_ID,
-    edgeId: CANDIDATE_CHROMIUM_EXTENSION_ID,
-    firefoxId: CANDIDATE_FIREFOX_EXTENSION_ID,
-    chromiumPublicKey: CANDIDATE_CHROMIUM_PUBLIC_KEY,
-    variants: profile === "dev" ? ["chromium", "edge", "firefox", "opera"] : ["chromium", "edge", "firefox"],
-  };
+  return candidateExtensionIdentity(profile, profile === "dev" && captureRequested);
 }
 
 export function applyCapturePermissions(manifest, captureAvailable) {

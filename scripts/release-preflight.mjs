@@ -28,6 +28,11 @@ export function validateReleasePreflight({ tag, versions, profile, env }) {
   return { version, tag: normalizedTag, identity };
 }
 
+function formatIdentitySummary(identity) {
+  const fallback = identity.usingCandidateFallback ? ", candidate extension IDs" : "";
+  return `${identity.profile}${fallback}, ${identity.variants.join(", ")}`;
+}
+
 function cargoVersion(source) {
   const match = source.match(/^version\s*=\s*"([^"]+)"/m);
   if (!match) throw new Error("Could not read package version from src-tauri/Cargo.toml.");
@@ -83,9 +88,12 @@ async function main() {
     versions: await readWorkspaceVersions(root),
     env: process.env,
   });
-  console.log(
-    `Release preflight passed for ${result.tag} (${result.identity.profile}, ${result.identity.variants.join(", ")}).`,
-  );
+  if (result.identity.usingCandidateFallback) {
+    console.warn(
+      "Store extension IDs are missing; continuing with candidate extension identities because VIBE_ALLOW_CANDIDATE_EXTENSION_IDS is set.",
+    );
+  }
+  console.log(`Release preflight passed for ${result.tag} (${formatIdentitySummary(result.identity)}).`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

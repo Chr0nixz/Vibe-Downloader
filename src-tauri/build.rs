@@ -16,6 +16,7 @@ fn main() {
     for name in [
         "VIBE_BROWSER_PROFILE",
         "VIBE_BROWSER_EXPERIMENTAL_CAPTURE",
+        "VIBE_ALLOW_CANDIDATE_EXTENSION_IDS",
         "VIBE_CHROME_EXTENSION_ID",
         "VIBE_EDGE_EXTENSION_ID",
         "VIBE_FIREFOX_EXTENSION_ID",
@@ -47,17 +48,47 @@ fn main() {
         panic!("Experimental browser capture is only available in the dev profile");
     }
 
-    let (chrome_id, edge_id, firefox_id) = if browser_profile == "release" {
-        (
-            require_chromium_extension_id("VIBE_CHROME_EXTENSION_ID"),
-            require_chromium_extension_id("VIBE_EDGE_EXTENSION_ID"),
-            require_firefox_extension_id(),
-        )
+    let allow_candidate_extension_ids = env::var("VIBE_ALLOW_CANDIDATE_EXTENSION_IDS")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+
+    let formal_configured = [
+        env::var("VIBE_CHROME_EXTENSION_ID").ok(),
+        env::var("VIBE_EDGE_EXTENSION_ID").ok(),
+        env::var("VIBE_FIREFOX_EXTENSION_ID").ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| !value.trim().is_empty());
+
+    let (chrome_id, edge_id, firefox_id, use_candidate_public_key) = if browser_profile == "release"
+    {
+        if !formal_configured && allow_candidate_extension_ids {
+            (
+                CANDIDATE_CHROMIUM_EXTENSION_ID.to_string(),
+                CANDIDATE_CHROMIUM_EXTENSION_ID.to_string(),
+                CANDIDATE_FIREFOX_EXTENSION_ID.to_string(),
+                true,
+            )
+        } else {
+            (
+                require_chromium_extension_id("VIBE_CHROME_EXTENSION_ID"),
+                require_chromium_extension_id("VIBE_EDGE_EXTENSION_ID"),
+                require_firefox_extension_id(),
+                false,
+            )
+        }
     } else {
         (
             CANDIDATE_CHROMIUM_EXTENSION_ID.to_string(),
             CANDIDATE_CHROMIUM_EXTENSION_ID.to_string(),
             CANDIDATE_FIREFOX_EXTENSION_ID.to_string(),
+            true,
         )
     };
 
@@ -71,10 +102,10 @@ fn main() {
     println!("cargo:rustc-env=VIBE_FIREFOX_EXTENSION_ID_RESOLVED={firefox_id}");
     println!(
         "cargo:rustc-env=VIBE_CHROMIUM_PUBLIC_KEY_RESOLVED={}",
-        if browser_profile == "release" {
-            ""
-        } else {
+        if use_candidate_public_key {
             CANDIDATE_CHROMIUM_PUBLIC_KEY
+        } else {
+            ""
         }
     );
 
@@ -100,24 +131,49 @@ fn main() {
     tauri_build::build()
 }
 
+fn is_chromium_extension_id(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
+fn is_firefox_extension_id(value: &str) -> bool {
+    !value.trim().is_empty()
+        && !value.chars().any(char::is_whitespace)
+        && value != "vibe-downloader@example.invalid"
+        && (value.contains('@') || (value.starts_with('{') && value.ends_with('}')))
+}
+
+fn optional_chromium_extension_id(name: &str) -> Option<String> {
+    env::var(name).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else if is_chromium_extension_id(trimmed) {
+            Some(trimmed.to_string())
+        } else {
+            panic!("{name} must be a 32-character Chromium extension ID using letters a-p");
+        }
+    })
+}
+
+fn optional_firefox_extension_id() -> Option<String> {
+    env::var("VIBE_FIREFOX_EXTENSION_ID").ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else if is_firefox_extension_id(trimmed) {
+            Some(trimmed.to_string())
+        } else {
+            panic!("VIBE_FIREFOX_EXTENSION_ID must be a non-placeholder email-like ID or braced UUID");
+        }
+    })
+}
+
 fn require_chromium_extension_id(name: &str) -> String {
-    let value = env::var(name).unwrap_or_else(|_| panic!("{name} is required for release builds"));
-    let valid = value.len() == 32 && value.bytes().all(|byte| (b'a'..=b'p').contains(&byte));
-    if !valid {
-        panic!("{name} must be a 32-character Chromium extension ID using letters a-p");
-    }
-    value
+    optional_chromium_extension_id(name)
+        .unwrap_or_else(|| panic!("{name} is required for release builds"))
 }
 
 fn require_firefox_extension_id() -> String {
-    let value = env::var("VIBE_FIREFOX_EXTENSION_ID")
-        .unwrap_or_else(|_| panic!("VIBE_FIREFOX_EXTENSION_ID is required for release builds"));
-    let valid = !value.trim().is_empty()
-        && !value.chars().any(char::is_whitespace)
-        && value != "vibe-downloader@example.invalid"
-        && (value.contains('@') || (value.starts_with('{') && value.ends_with('}')));
-    if !valid {
-        panic!("VIBE_FIREFOX_EXTENSION_ID must be a non-placeholder email-like ID or braced UUID");
-    }
-    value
+    optional_firefox_extension_id()
+        .unwrap_or_else(|| panic!("VIBE_FIREFOX_EXTENSION_ID is required for release builds"))
 }

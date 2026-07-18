@@ -60,9 +60,11 @@ base64 -i vibe-downloader.key
 | `TAURI_SIGNING_PRIVATE_KEY` | 是 | Base64 编码的 updater 私钥 |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 视密钥而定 | updater 私钥密码 |
 | `GITHUB_TOKEN` | GitHub 内置 | 创建 Release 并上传 assets |
-| `VIBE_CHROME_EXTENSION_ID` | 正式发布必需 | Chrome Web Store 正式 ID |
-| `VIBE_EDGE_EXTENSION_ID` | 正式发布必需 | Edge Add-ons 正式 ID |
-| `VIBE_FIREFOX_EXTENSION_ID` | 正式发布必需 | Firefox AMO 正式 ID |
+| `VIBE_CHROME_EXTENSION_ID` | 有则优先 | Chrome Web Store 正式 ID |
+| `VIBE_EDGE_EXTENSION_ID` | 有则优先 | Edge Add-ons 正式 ID |
+| `VIBE_FIREFOX_EXTENSION_ID` | 有则优先 | Firefox AMO 正式 ID |
+
+正式发版 workflow 默认设置 `VIBE_ALLOW_CANDIDATE_EXTENSION_IDS=true`：三个商店 ID 都未配置时，回退到仓库内候选扩展身份并继续构建桌面端。任一商店 ID 已配置时，仍要求三个 ID 全部合法。拿到商店正式 ID 后写入 Secrets 即可自动改用正式身份。
 
 后续操作系统代码签名预留：
 

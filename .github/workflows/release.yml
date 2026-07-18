@@ -26,6 +26,8 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       VIBE_BROWSER_PROFILE: release
+      # When store IDs are unset, fall back to candidate extension identities.
+      VIBE_ALLOW_CANDIDATE_EXTENSION_IDS: "true"
       VIBE_CHROME_EXTENSION_ID: ${{ secrets.VIBE_CHROME_EXTENSION_ID }}
       VIBE_EDGE_EXTENSION_ID: ${{ secrets.VIBE_EDGE_EXTENSION_ID }}
       VIBE_FIREFOX_EXTENSION_ID: ${{ secrets.VIBE_FIREFOX_EXTENSION_ID }}
@@ -67,6 +69,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       VIBE_BROWSER_PROFILE: release
+      VIBE_ALLOW_CANDIDATE_EXTENSION_IDS: "true"
       VIBE_CHROME_EXTENSION_ID: ${{ secrets.VIBE_CHROME_EXTENSION_ID }}
       VIBE_EDGE_EXTENSION_ID: ${{ secrets.VIBE_EDGE_EXTENSION_ID }}
       VIBE_FIREFOX_EXTENSION_ID: ${{ secrets.VIBE_FIREFOX_EXTENSION_ID }}
@@ -121,6 +124,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       VIBE_BROWSER_PROFILE: release
+      VIBE_ALLOW_CANDIDATE_EXTENSION_IDS: "true"
       VIBE_CHROME_EXTENSION_ID: ${{ secrets.VIBE_CHROME_EXTENSION_ID }}
       VIBE_EDGE_EXTENSION_ID: ${{ secrets.VIBE_EDGE_EXTENSION_ID }}
       VIBE_FIREFOX_EXTENSION_ID: ${{ secrets.VIBE_FIREFOX_EXTENSION_ID }}
