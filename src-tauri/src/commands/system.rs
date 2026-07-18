@@ -262,17 +262,18 @@ unsafe fn hicon_to_png(icon: windows::Win32::UI::WindowsAndMessaging::HICON) -> 
 #[cfg(target_os = "macos")]
 fn extract_icon_macos(ext: &str) -> Option<String> {
     use objc2::rc::Retained;
-    use objc2::AnyObject;
+    use objc2::runtime::NSObject;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWorkspace};
-    use objc2_foundation::{NSData, NSDictionary, NSString};
+    use objc2_foundation::{NSDictionary, NSString};
 
     unsafe {
         // NSWorkspace.sharedWorkspace
         let workspace = NSWorkspace::sharedWorkspace();
 
-        // iconForFileType: takes an extension or UTI string.
+        // iconForContentType: takes a UTI. macOS accepts a bare extension as
+        // a UTI for backward compatibility through the dynamic UTI fallback.
         let ext_ns = NSString::from_str(ext);
-        let image: Retained<NSImage> = workspace.iconForFileType(&ext_ns);
+        let image: Retained<NSImage> = workspace.iconForContentType(&ext_ns);
 
         // NSImage → TIFF data
         let tiff_data = image.TIFFRepresentation()?;
@@ -283,7 +284,7 @@ fn extract_icon_macos(ext: &str) -> Option<String> {
         // NSBitmapImageRep → PNG data. The properties dict can be empty —
         // NSBitmapImageRepPropertyKey is a type alias for NSString, so we
         // use NSString as the key type.
-        let empty_props = NSDictionary::<NSString, AnyObject>::new();
+        let empty_props = NSDictionary::<NSString, NSObject>::new();
         let png_data = bitmap_rep
             .representationUsingType_properties(NSBitmapImageFileType::PNG, &empty_props)?;
 

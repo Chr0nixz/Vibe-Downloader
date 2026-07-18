@@ -86,7 +86,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSData", "NSDictionary", "NSObject"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSWorkspace", "NSImage", "NSBitmapImageRep"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 freedesktop = { version = "0.0.3", default-features = false, features = ["icon"] }
