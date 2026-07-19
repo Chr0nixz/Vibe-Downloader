@@ -371,40 +371,45 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验证测试**：`download::speed::tests::throttle_cancels_during_low_rate_wait`。
 - **验收**：1 B/s 下取消在秒级收敛。
 
-### ARC-05（P1，Open）：调度全局锁跨越远程 resume probe
+### ARC-05（P1，Closed）：调度全局锁跨越远程 resume probe
 
-- **证据**：[`scheduler/mod.rs`](../src-tauri/src/scheduler/mod.rs#L111) 获取全局调度锁后 await start_task；有临时文件时 [`tasks.rs`](../src-tauri/src/commands/tasks.rs#L705) 会执行远程 probe。
+- **证据**：[`scheduler/mod.rs`](../src-tauri/src/scheduler/mod.rs) 曾在持有全局调度锁期间 await `start_task`；有临时文件时 `prepare_task_for_download` 会执行远程 probe。
 - **影响**：一个慢主机的连接超时会串行阻塞所有队列派发和调度响应。
-- **修复方向**：锁内只选择候选并原子预留任务、host 和连接槽；网络准备在锁外 worker 中进行，失败后原子释放 reservation。
-- **验收**：一个 30 秒慢 probe 不影响其他 host 在预期时间内启动；同任务和同槽位仍保持单赢家。
+- **修复**：`start_task` 在锁内仅插入 pending `DownloadControl`、Queued→Downloading 并 spawn worker；resume probe 移入 worker（锁外）。probe 失败时原子移除 pending control 并释放 host 槽。
+- **验证测试**：`scheduler_dispatch.rs`（`arc05_slow_probe_does_not_block_other_host`、`arc05_double_dispatch_single_winner`、`arc05_probe_failure_releases_slot`）。
+- **验收**：慢 resume probe 不阻塞其他 host 启动；同任务/同槽仍单赢家。
 
-### ARC-06（P1，Open）：SQLite 状态转移可能遇到 `SQLITE_BUSY_SNAPSHOT`
+### ARC-06（P1，Closed）：SQLite 状态转移可能遇到 `SQLITE_BUSY_SNAPSHOT`
 
-- **证据**：[`state_machine.rs`](../src-tauri/src/state_machine.rs#L135) 使用 deferred transaction，先读后写；其他任务 checkpoint 可在读写之间提交。
+- **证据**：[`state_machine.rs`](../src-tauri/src/state_machine.rs) 曾用 deferred `BEGIN`，先读后写；其他任务 checkpoint 可在读写之间提交。
 - **影响**：busy timeout 不一定处理 snapshot 升级失败，暂停、重试或 worker 完成可能偶发失败。
-- **修复方向**：使用 `BEGIN IMMEDIATE`，或单条条件 `UPDATE ... RETURNING` 后判定状态；对 BUSY 和 BUSY_SNAPSHOT 做有界重试。
-- **验收**：多任务每秒 checkpoint 与 pause/retry/fail 并发压力测试无随机失败，终态不被覆盖。
+- **修复**：`db::begin_immediate`（`BEGIN IMMEDIATE`）；对 BUSY / BUSY_SNAPSHOT 有界指数退避重试；`retry_task` / `retry_task_with_mirror` 对齐 pause/cancel 的 JoinHandle drain。
+- **验证测试**：`state_machine_busy.rs`（`arc06_checkpoint_and_control_plane_stress`、`arc06_transition_conflict_still_surfaces`）；既有 `scheduler_concurrency.rs` / `state_machine.rs` 条件 UPDATE 回归保留。
+- **验收**：高频 checkpoint 与 pause/retry/fail 并发下无偶发 BUSY_SNAPSHOT 用户可见失败。
 
-### ARC-07（P1，Open）：旧分页请求可覆盖最新查询
+### ARC-07（P1，Closed）：旧分页请求可覆盖最新查询
 
-- **证据**：[`TaskList.tsx`](../src/components/tasks/TaskList.tsx#L194) 用单个 `loadingPageRef` 阻止新请求；查询变化时旧请求未完成，新 effect 直接返回，完成后也不补跑最新条件。
+- **证据**：[`TaskList.tsx`](../src/components/tasks/TaskList.tsx) 曾用单个 `loadingPageRef` 阻止新请求；查询变化时旧请求未完成，新 effect 直接返回。
 - **影响**：快速切换搜索、筛选、导航或排序后，界面可长期显示旧结果。
-- **修复方向**：使用 request generation 或 AbortController，只接收最新响应；替换查询和 append 请求分开管理，并保留 pending latest query。
-- **验收**：人为乱序响应时最终列表始终对应最新 query，旧响应不改变 cursor、selection 或 error。
+- **修复**：共享 [`list-query-epoch.ts`](../src/lib/list-query-epoch.ts) generation；replace/append 分轨；pending reload；`AppShell.refreshTasks` 与事件 full refresh 共用 epoch。
+- **验证测试**：`list-query-epoch.test.ts`；`TaskList.query-race.test.tsx`。
+- **验收**：乱序响应下最终列表对应最新 query；旧响应不改变 cursor、selection 或 error。
 
-### ARC-08（P1，Open）：实体缓存和当前查询成员关系混在一起
+### ARC-08（P1，Closed）：实体缓存和当前查询成员关系混在一起
 
-- **证据**：[`use-task-events.ts`](../src/hooks/use-task-events.ts#L212) 对任意 task update 直接 upsert；[`task-data-store.ts`](../src/stores/task-data-store.ts#L366) 会插入新任务并保留状态变化任务；列表只额外过滤软删除。
-- **影响**：Completed 视图可能出现 queued 任务，离开当前筛选的任务仍留在列表，不匹配的新任务被插入。
-- **修复方向**：分离 entity cache 与 query-keyed ID pages；成员关系或排序字段变化时按当前 query 重取，或使用与后端同源 predicate 更新并使 cursor 失效。
-- **验收**：状态、分类、协议、失败码和搜索字段变化后，当前结果集合与后端分页完全一致。
+- **证据**：`upsertTask`/`upsertTasksBatch`/`patchTasksBatch` 曾无条件 prepend 或保留已离开筛选的任务。
+- **影响**：Completed 视图可能出现 queued 任务；不匹配的新任务被插入。
+- **修复**：`taskById` 实体缓存与 `taskIds` 视图分离；`taskMatchesListQuery` + `effectiveListQueryMembership`；不匹配则 evict；匹配但不在页内则 bump `viewReloadToken`；Palette 基于实体缓存过滤。
+- **验证测试**：`task-data-store.membership.test.ts`。
+- **验收**：状态、筛选与搜索变化后，当前结果集合与后端分页一致（经 reload 收敛）。
 
-### ARC-09（P1，Open）：`queue-changed` 防抖只保留最后一批 ID
+### ARC-09（P1，Closed）：`queue-changed` 防抖只保留最后一批 ID
 
-- **证据**：[`use-task-events.ts`](../src/hooks/use-task-events.ts#L220) 每次事件清 timer，closure 只读取最后 payload。
-- **影响**：100ms 内 A、B 两任务变化时可能只拉取 B，队列位置和状态长期过时。
-- **修复方向**：窗口内累计 ID Set；任一 full-refresh 事件将整批提升为 full refresh。
-- **验收**：快速多事件、重复 ID、超过 50 项和 full refresh 混合测试不丢任务。
+- **证据**：[`use-task-events.ts`](../src/hooks/use-task-events.ts) 每次事件清 timer，closure 只读取最后 payload。
+- **影响**：100ms 内多任务变化可能只刷新最后一批。
+- **修复**：`accumulateQueueChanged` / `takeQueueFlushPlan` 窗口内累计 ID Set；null 或 >50 提升为 full refresh。
+- **验证测试**：`use-task-events.queue-debounce.test.ts`。
+- **验收**：快速多事件、重复 ID、超过 50 项和 full refresh 混合不丢任务。
 
 ### ARC-10（P1，Open）：控制面响应缺少流式硬上限
 

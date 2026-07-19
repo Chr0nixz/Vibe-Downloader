@@ -37,6 +37,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { RecoveryAction, TaskPriority } from "@/generated/bindings";
 import { errorMessage } from "@/lib/errors";
+import { beginListLoad, createListLoadFlight, endListLoad, isCurrentListQueryEpoch } from "@/lib/list-query-epoch";
 import { listTasksCursor } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import {
@@ -105,7 +106,7 @@ export const TaskList = memo(function TaskList({
   const [statusAnnouncement, setStatusAnnouncement] = useState("");
   const prevTaskStatusesRef = useRef<Record<string, string>>({});
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const loadingPageRef = useRef(false);
+  const loadFlightRef = useRef(createListLoadFlight());
   const initialLoadDoneRef = useRef(false);
   const taskIds = useTaskDataStore((s) => s.taskIds);
   const storeFailureOptions = useTaskDataStore((s) => s.failureOptions);
@@ -193,45 +194,14 @@ export const TaskList = memo(function TaskList({
   selectedIdRef.current = selectedId;
   const loadPage = useCallback(
     async (cursor: string | null, append = false) => {
-      if (loadingPageRef.current) return;
-      loadingPageRef.current = true;
-      if (!append) setLoading(true);
+      const begin = beginListLoad(loadFlightRef.current, append);
+      if (begin.kind === "skip") return;
+      const { epoch, role } = begin;
+      if (role === "replace") setLoading(true);
       try {
-        const baseInput = taskCursorInput(cursor);
-        const input =
-          nav === "queue"
-            ? {
-                ...baseInput,
-                search: debouncedSearch,
-                sortKey: "queue_order",
-                sortDirection: "asc",
-                fileType: "all",
-                source: "all",
-                failureCategory: "all",
-                resume: "all",
-              }
-            : nav === "attention"
-              ? {
-                  ...baseInput,
-                  search: debouncedSearch,
-                  sortKey: "updated_at",
-                  sortDirection: "desc",
-                  fileType: "all",
-                  source: "all",
-                  failureCategory: "all",
-                  resume: "all",
-                }
-              : {
-                  ...baseInput,
-                  search: debouncedSearch,
-                  sortKey,
-                  sortDirection,
-                  fileType: filters.fileType,
-                  source: filters.source,
-                  failureCategory: filters.failure,
-                  resume: filters.resume,
-                };
-        const result = await listTasksCursor(input);
+        const result = await listTasksCursor(taskCursorInput(cursor, { search: debouncedSearch }));
+        // ARC-07: ignore stale responses after a newer replace bumped the epoch.
+        if (!isCurrentListQueryEpoch(epoch)) return;
         setTaskCursorPage(result.items, result.minimumTotal, result.nextCursor, result.filterOptions, append);
         if (!append) {
           const currentSelectedId = useTaskUIStore.getState().selectedId;
@@ -246,11 +216,17 @@ export const TaskList = memo(function TaskList({
         }
         setError(null);
       } catch (err) {
-        setError(errorMessage(err));
+        if (isCurrentListQueryEpoch(epoch)) {
+          setError(errorMessage(err));
+        }
       } finally {
-        setLoading(false);
-        loadingPageRef.current = false;
-        if (!append) initialLoadDoneRef.current = true;
+        if (role === "replace") {
+          setLoading(false);
+          initialLoadDoneRef.current = true;
+        }
+        if (endListLoad(loadFlightRef.current, role)) {
+          void loadPage(null, false);
+        }
       }
     },
     [debouncedSearch, filters, nav, selectTask, setError, setLoading, setTaskCursorPage, sortDirection, sortKey],
@@ -259,6 +235,13 @@ export const TaskList = memo(function TaskList({
   useEffect(() => {
     void loadPage(null, false);
   }, [loadPage]);
+
+  const viewReloadToken = useTaskDataStore((s) => s.viewReloadToken);
+  useEffect(() => {
+    // ARC-08: membership/sort invalidation requests a replace reload through ARC-07.
+    if (viewReloadToken === 0) return;
+    void loadPage(null, false);
+  }, [viewReloadToken, loadPage]);
 
   /* Keep latest infinite-scroll state in refs so the virtualizer's onChange
      callback always sees fresh values without needing them as deps. */
@@ -281,7 +264,8 @@ export const TaskList = memo(function TaskList({
       const totalSize = instance.getTotalSize();
       if (
         hasMoreRef.current &&
-        !loadingPageRef.current &&
+        !loadFlightRef.current.replaceInFlight &&
+        !loadFlightRef.current.appendInFlight &&
         totalSize - (lastItem.start + lastItem.size) < 700 &&
         scrollLen > 0
       ) {

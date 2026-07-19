@@ -223,19 +223,13 @@ pub async fn pause_task(
         // Cancel the download and wait for the coordinator to finish its
         // checkpoint flush before transitioning the task state.
         //
-        // Without this wait, the coordinator's checkpoint write (a write
-        // transaction triggered by cancel) and transition_task's
-        // deferred-transaction write can race. SQLite returns
-        // SQLITE_BUSY_SNAPSHOT (code 5) when a deferred transaction's
-        // snapshot is stale due to a concurrent writer committing between
-        // the read and write phases. busy_timeout does NOT retry
-        // SQLITE_BUSY_SNAPSHOT, so the error surfaces to the user.
+        // Without this wait, the coordinator's checkpoint write and
+        // transition_task can race. ARC-06 uses BEGIN IMMEDIATE + BUSY
+        // retries on transitions; draining the JoinHandle remains defense
+        // in depth so the checkpoint commit finishes first.
         //
-        // By removing the DownloadControl and awaiting the coordinator's
-        // JoinHandle, we ensure the checkpoint commit finishes before
-        // transition_task begins. The 5s timeout bounds the wait for
-        // slow disks; if it expires, transition_task proceeds anyway and
-        // relies on busy_timeout for non-snapshot BUSY errors.
+        // The 5s timeout bounds the wait for slow disks; if it expires,
+        // transition_task proceeds anyway and relies on IMMEDIATE/retry.
         let handle = {
             let mut downloads = state.downloads.lock().await;
             if let Some(control) = downloads.remove(&id) {
@@ -321,11 +315,20 @@ pub async fn retry_task(
     {
         return Err("This task must be restarted before it can continue safely.".to_string());
     }
-    if let Some(control) = state.downloads.lock().await.remove(&id) {
-        control.cancel_token.cancel();
-        if let Some(h) = control.handle.as_ref() {
-            h.abort();
+    // ARC-06: Align with pause/cancel — drain the worker JoinHandle so any
+    // in-flight checkpoint commits before the retry transition (defense in
+    // depth alongside BEGIN IMMEDIATE).
+    let handle = {
+        let mut downloads = state.downloads.lock().await;
+        if let Some(control) = downloads.remove(&id) {
+            control.cancel_token.cancel();
+            control.handle
+        } else {
+            None
         }
+    };
+    if let Some(handle) = handle {
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
     }
 
     let task = queue_task_for_retry_with_event(&app, state.inner(), &id, "retrying", None).await?;
@@ -360,11 +363,18 @@ pub async fn retry_task_with_mirror(
     if task.protocol != "metalink" {
         return Err("Mirror retry is only supported for Metalink tasks.".to_string());
     }
-    if let Some(control) = state.downloads.lock().await.remove(&id) {
-        control.cancel_token.cancel();
-        if let Some(h) = control.handle.as_ref() {
-            h.abort();
+    // ARC-06: Same checkpoint-drain pattern as pause_task / retry_task.
+    let handle = {
+        let mut downloads = state.downloads.lock().await;
+        if let Some(control) = downloads.remove(&id) {
+            control.cancel_token.cancel();
+            control.handle
+        } else {
+            None
         }
+    };
+    if let Some(handle) = handle {
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
     }
 
     db::reset_metalink_resource_statuses(&state.pool, &id).await?;
@@ -441,8 +451,8 @@ pub async fn cancel_task(
     } else {
         // Same checkpoint-drain pattern as pause_task: cancel and wait for
         // the coordinator's checkpoint flush to commit before transition_task
-        // begins, avoiding SQLITE_BUSY_SNAPSHOT (code 5) from concurrent
-        // deferred-transaction writes.
+        // begins. ARC-06 IMMEDIATE + retry covers residual BUSY; drain remains
+        // defense in depth.
         let handle = {
             let mut downloads = state.downloads.lock().await;
             if let Some(control) = downloads.remove(&id) {

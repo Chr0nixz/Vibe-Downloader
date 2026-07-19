@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use sqlx::{migrate::MigrateError, sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{migrate::MigrateError, sqlite::SqlitePoolOptions, SqlitePool, Transaction};
 
 pub struct DbConnection {
     pub pool: SqlitePool,
@@ -30,6 +30,18 @@ pub async fn connect(db_path: &Path) -> Result<DbConnection, String> {
         DatabaseConnectOutcome::Ready(connection) => Ok(connection),
         DatabaseConnectOutcome::RecoveryRequired(recovery) => Err(recovery.message),
     }
+}
+
+/// ARC-06: Begin a write transaction that acquires the reserved lock immediately.
+///
+/// Default `pool.begin()` is `BEGIN` (DEFERRED). A deferred reader that later
+/// upgrades to a writer can fail with `SQLITE_BUSY_SNAPSHOT` when another
+/// connection commits between the snapshot read and the first write. State
+/// transitions always write, so IMMEDIATE removes that upgrade race.
+pub async fn begin_immediate(
+    pool: &SqlitePool,
+) -> Result<Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
+    pool.begin_with("BEGIN IMMEDIATE").await
 }
 
 pub async fn connect_for_startup(db_path: &Path) -> Result<DatabaseConnectOutcome, String> {

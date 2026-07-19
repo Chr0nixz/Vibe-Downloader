@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use sqlx::SqlitePool;
 
 use crate::{
@@ -5,6 +7,11 @@ use crate::{
     events::{emit_task_updated_record, DownloadEventTarget},
     models::{SegmentStatus, TaskRecord, TaskStatus},
 };
+
+/// Bounded retries for SQLITE_BUSY / BUSY_SNAPSHOT (ARC-06).
+/// Backoff: 20/40/80/160ms — stays well under the 5s busy_timeout budget.
+const TRANSITION_BUSY_MAX_ATTEMPTS: u32 = 5;
+const TRANSITION_BUSY_BASE_DELAY_MS: u64 = 20;
 
 /// State transition error.
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +53,15 @@ impl From<TransitionError> for String {
     }
 }
 
+fn is_retryable_sqlite_busy(error: &TransitionError) -> bool {
+    let TransitionError::Database(message) = error else {
+        return false;
+    };
+    let lower = message.to_ascii_lowercase();
+    // SQLITE_BUSY (5), SQLITE_BUSY_SNAPSHOT (517), and sqlx "database is locked".
+    lower.contains("busy") || lower.contains("database is locked") || lower.contains("(code: 5)")
+}
+
 /// Unified state transition entry point.
 ///
 /// - Validates transition legality (returns `TransitionError::Illegal` if invalid, no DB write)
@@ -56,6 +72,11 @@ impl From<TransitionError> for String {
 /// **R-1 concurrency protection**: reading the old state, validation, and update all happen in the same transaction.
 /// The conditional update `WHERE id = ? AND status = ?` ensures that if another path has already modified the state,
 /// this update matches no rows and returns `TransitionError::Conflict` (caller may treat as recoverable).
+///
+/// **ARC-06**: Uses `BEGIN IMMEDIATE` so the write lock is taken before the status
+/// read, avoiding `SQLITE_BUSY_SNAPSHOT` when checkpoints commit between a deferred
+/// snapshot and the conditional UPDATE. Transient BUSY errors are retried with
+/// bounded exponential backoff.
 ///
 /// **Note**: Progress value updates (Downloading → Downloading) do not go through this function;
 /// they write directly to the DB to avoid hot-path overhead. This function is for **semantic state changes** only.
@@ -132,9 +153,57 @@ async fn transition_task_inner<T: DownloadEventTarget + ?Sized>(
     event_message_override: Option<Option<&str>>,
     runtime_state: Option<(SegmentStatus, Option<&str>, Option<&str>)>,
 ) -> Result<TaskRecord, TransitionError> {
-    // R-1: begin transaction first so read + validate + update are atomic.
-    let mut tx = pool
-        .begin()
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match transition_task_once(
+            app,
+            pool,
+            task_id,
+            target,
+            downloaded_bytes,
+            connection_count,
+            message,
+            event_type,
+            event_message_override,
+            runtime_state,
+        )
+        .await
+        {
+            Ok(record) => return Ok(record),
+            Err(error)
+                if is_retryable_sqlite_busy(&error) && attempt < TRANSITION_BUSY_MAX_ATTEMPTS =>
+            {
+                let delay_ms = TRANSITION_BUSY_BASE_DELAY_MS << (attempt - 1);
+                tracing::warn!(
+                    task_id = %task_id,
+                    attempt,
+                    delay_ms,
+                    error = %error,
+                    "state transition hit SQLITE_BUSY; retrying"
+                );
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn transition_task_once<T: DownloadEventTarget + ?Sized>(
+    app: &T,
+    pool: &SqlitePool,
+    task_id: &str,
+    target: TaskStatus,
+    downloaded_bytes: i64,
+    connection_count: i32,
+    message: Option<&str>,
+    event_type: Option<&str>,
+    event_message_override: Option<Option<&str>>,
+    runtime_state: Option<(SegmentStatus, Option<&str>, Option<&str>)>,
+) -> Result<TaskRecord, TransitionError> {
+    // ARC-06 + R-1: IMMEDIATE write lock + conditional UPDATE in one transaction.
+    let mut tx = db::begin_immediate(pool)
         .await
         .map_err(|e| TransitionError::Database(e.to_string()))?;
 

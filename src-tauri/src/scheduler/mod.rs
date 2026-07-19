@@ -213,6 +213,10 @@ impl Scheduler {
             let planned_slots = Self::compute_planned_slots(planned, host_limit, host_used);
             let task_id = task.id.clone();
             let source_key = task.source_key.clone();
+            // ARC-05: start_task only reserves the slot + transitions under this
+            // global lock, then spawns a worker that runs resume probe off-lock.
+            // Awaiting the short reservation path keeps host_slot_map accurate
+            // without serializing remote probes across hosts.
             match self
                 .clone()
                 .start_task(app.clone(), pool.clone(), task, planned_slots)
@@ -248,6 +252,11 @@ impl Scheduler {
     }
 
     /// Start a single task download (formerly start_task_download).
+    ///
+    /// ARC-05: Under the caller's scheduler lock this only reserves a pending
+    /// `DownloadControl`, transitions Queued→Downloading, and spawns a worker.
+    /// Resume probe (`prepare_task_for_download`) runs inside that worker so a
+    /// slow remote host cannot block dispatch of other hosts.
     async fn start_task(
         self: Arc<Self>,
         app: AppHandle,
@@ -260,20 +269,14 @@ impl Scheduler {
         // conditional DB update to avoid overwriting user-initiated state changes.
         let _runtime_guard = self.task_runtime_locks.lock(&task.id).await;
 
+        // Header/proxy resolution is local DB work and stays on the reservation
+        // path so the worker already has the values it needs for probe+download.
         let task_request_headers =
             resolve_task_request_headers(&pool, self.request_headers.clone(), &task.id).await?;
         let global_proxy_config = self.engine_registry.proxy_config().await;
         let task_proxy_config =
             db::resolve_task_proxy_config(&pool, &task.id, &task.protocol, &global_proxy_config)
                 .await?;
-        let task = prepare_task_for_download(
-            &app,
-            &pool,
-            &self.engine_registry,
-            task,
-            &task_request_headers,
-        )
-        .await?;
         if self.downloads.lock().await.contains_key(&task.id) {
             tracing::debug!(task_id = %task.id, "download already active, skipping start");
             return Ok(());
@@ -361,11 +364,49 @@ impl Scheduler {
         let scheduler = self.clone();
 
         let handle = tokio::spawn(async move {
+            // ARC-05: network resume validation runs here, after the scheduler
+            // global lock has been released by dispatch_inner's next iteration.
+            let task = match prepare_task_for_download(
+                &task_app,
+                &task_pool,
+                &task_engine_registry,
+                task,
+                &task_request_headers,
+            )
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    // Atomic slot release: drop pending control before any
+                    // failure transition so host/active counts cannot leak.
+                    let _ = downloads_map.lock().await.remove(&task_id);
+                    let _ = scheduler.request_headers.lock().await.remove(&task_id);
+                    match db::get_task_record(&task_pool, &task_id).await {
+                        Ok(Some(current)) if current.status == TaskStatus::Downloading => {
+                            mark_download_failed(&task_app, &task_pool, &task_id, error).await;
+                        }
+                        Ok(Some(current)) => {
+                            // prepare already moved the task (NeedsAttention/Failed).
+                            emit_task_progress_snapshot(&task_app, &current);
+                            emit_task_updated_record(&task_app, &task_pool, &current).await;
+                        }
+                        _ => {}
+                    }
+                    scheduler.task_runtime_locks.evict(&task_id).await;
+                    scheduler
+                        .clone()
+                        .spawn_dispatch(task_app.clone(), task_pool.clone());
+                    return;
+                }
+            };
+
             let engine = match task_engine_registry.engine_for_uri(&task.url) {
                 Ok(engine) => engine,
                 Err(error) => {
                     mark_download_failed(&task_app, &task_pool, &task_id, error).await;
                     let _ = downloads_map.lock().await.remove(&task_id);
+                    let _ = scheduler.request_headers.lock().await.remove(&task_id);
+                    scheduler.task_runtime_locks.evict(&task_id).await;
                     scheduler
                         .clone()
                         .spawn_dispatch(task_app.clone(), task_pool.clone());

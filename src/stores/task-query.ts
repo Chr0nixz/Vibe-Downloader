@@ -88,43 +88,79 @@ export function filterTasks(
     resume: "all",
   },
 ): Task[] {
-  const query = search.trim().toLowerCase();
-
-  const filtered = tasks.filter((task) => {
-    if (nav === "downloading" && task.status !== "downloading" && task.status !== "retrying") {
-      return false;
-    }
-    if (nav === "paused" && task.status !== "paused") return false;
-    if (nav === "queue" && task.status !== "queued") return false;
-    if (nav === "attention" && task.status !== "needs_attention") return false;
-    if (nav === "completed" && task.status !== "completed") return false;
-    if (nav === "failed" && task.status !== "failed") return false;
-    if (nav === "settings" || nav === "about") return false;
-
-    if (!query) return true;
-    return (
-      task.fileName.toLowerCase().includes(query) ||
-      task.sourceKey.toLowerCase().includes(query) ||
-      sanitizeUrlForDisplay(task.url).toLowerCase().includes(query)
-    );
-  });
-
-  return filtered
-    .filter((task) => {
-      if (filters.fileType !== "all" && taskFileType(task) !== filters.fileType) {
-        return false;
-      }
-      if (filters.source !== "all" && task.sourceKey !== filters.source) {
-        return false;
-      }
-      if (filters.failure !== "all" && failureKind(task) !== filters.failure) {
-        return false;
-      }
-      if (filters.resume === "resumable" && !task.supportsResume) return false;
-      if (filters.resume === "single_connection" && task.supportsResume) return false;
-      return true;
-    })
+  const snapshot: ListQueryMembership = { nav, search, filters };
+  return tasks
+    .filter((task) => taskMatchesListQuery(task, snapshot))
     .sort((a, b) => compareTasks(a, b, sortKey, sortDirection));
+}
+
+/** Membership fields for ARC-08 view reconcile (mirrors TaskList cursor input). */
+export type ListQueryMembership = {
+  nav: NavFilter;
+  search: string;
+  filters: TaskFilters;
+};
+
+/**
+ * Effective list query as TaskList builds `listTasksCursor` input — queue/attention
+ * clear facet filters so membership matches server pages.
+ */
+export function effectiveListQueryMembership(
+  nav: NavFilter,
+  search: string,
+  filters: TaskFilters,
+): ListQueryMembership {
+  if (nav === "queue" || nav === "attention") {
+    return {
+      nav,
+      search,
+      filters: {
+        fileType: "all",
+        source: "all",
+        failure: "all",
+        resume: "all",
+      },
+    };
+  }
+  return { nav, search, filters };
+}
+
+/** Whether a task belongs in the current list query result set. */
+export function taskMatchesListQuery(task: Task, snapshot: ListQueryMembership): boolean {
+  const { nav, search, filters } = snapshot;
+  if (nav === "downloading" && task.status !== "downloading" && task.status !== "retrying") {
+    return false;
+  }
+  if (nav === "paused" && task.status !== "paused") return false;
+  if (nav === "queue" && task.status !== "queued") return false;
+  if (nav === "attention" && task.status !== "needs_attention") return false;
+  if (nav === "completed" && task.status !== "completed") return false;
+  if (nav === "failed" && task.status !== "failed") return false;
+  if (nav === "settings" || nav === "about") return false;
+
+  const query = search.trim().toLowerCase();
+  if (query) {
+    const haystack = [
+      task.fileName.toLowerCase(),
+      task.sourceKey.toLowerCase(),
+      sanitizeUrlForDisplay(task.url).toLowerCase(),
+      task.protocol.toLowerCase(),
+    ];
+    if (!haystack.some((value) => value.includes(query))) return false;
+  }
+
+  if (filters.fileType !== "all" && taskFileType(task) !== filters.fileType) {
+    return false;
+  }
+  if (filters.source !== "all" && task.sourceKey !== filters.source) {
+    return false;
+  }
+  if (filters.failure !== "all" && failureKind(task) !== filters.failure) {
+    return false;
+  }
+  if (filters.resume === "resumable" && !task.supportsResume) return false;
+  if (filters.resume === "single_connection" && task.supportsResume) return false;
+  return true;
 }
 
 export function taskFileType(task: Task): FileTypeFilter {

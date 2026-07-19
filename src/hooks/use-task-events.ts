@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import i18n from "@/i18n";
 import { localizedErrorMessage, localizedMessage } from "@/lib/errors";
+import { bumpListQueryEpoch, isCurrentListQueryEpoch } from "@/lib/list-query-epoch";
 import { createLogger } from "@/lib/logger";
 import {
   getTaskStats,
@@ -23,6 +24,7 @@ import type { Task } from "@/types/task";
 
 const log = createLogger("task-events");
 const MAX_NOTIFIED_STATUS_KEYS = 600;
+const QUEUE_INCREMENTAL_ID_LIMIT = 50;
 
 export function rememberStatusNotification(
   notifiedStatuses: Set<string>,
@@ -43,6 +45,56 @@ function clearTaskStatusNotifications(notifiedStatuses: Set<string>, taskId: str
   notifiedStatuses.delete(`${taskId}:failed`);
   notifiedStatuses.delete(`${taskId}:needs_attention`);
   notifiedStatuses.delete(`${taskId}:completed`);
+}
+
+/** ARC-09: debounce window accumulator for queue-changed payloads. */
+export type QueueChangedAccumulator = {
+  ids: Set<string>;
+  fullRefresh: boolean;
+};
+
+export function createQueueChangedAccumulator(): QueueChangedAccumulator {
+  return { ids: new Set(), fullRefresh: false };
+}
+
+export type QueueChangedPayloadLike = {
+  changed_task_ids?: string[] | null;
+} | null;
+
+/** Merge one queue-changed payload into the debounce accumulator. */
+export function accumulateQueueChanged(state: QueueChangedAccumulator, payload: QueueChangedPayloadLike): void {
+  const ids = payload?.changed_task_ids ?? null;
+  if (ids == null) {
+    state.fullRefresh = true;
+    state.ids.clear();
+    return;
+  }
+  if (state.fullRefresh) return;
+  for (const id of ids) {
+    state.ids.add(id);
+  }
+}
+
+export type QueueFlushPlan = { kind: "noop" } | { kind: "incremental"; ids: string[] } | { kind: "full" };
+
+/** Decide flush strategy and clear the accumulator. */
+export function takeQueueFlushPlan(
+  state: QueueChangedAccumulator,
+  incrementalLimit = QUEUE_INCREMENTAL_ID_LIMIT,
+): QueueFlushPlan {
+  if (state.fullRefresh) {
+    state.fullRefresh = false;
+    state.ids.clear();
+    return { kind: "full" };
+  }
+  if (state.ids.size === 0) return { kind: "noop" };
+  if (state.ids.size > incrementalLimit) {
+    state.ids.clear();
+    return { kind: "full" };
+  }
+  const ids = [...state.ids];
+  state.ids.clear();
+  return { kind: "incremental", ids };
 }
 
 interface UseTaskEventsOptions {
@@ -82,6 +134,7 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
     let progressFrame: number | undefined;
     let progressFallbackTimer: ReturnType<typeof setTimeout> | undefined;
     let pendingProgressPayloads: unknown[] = [];
+    const pendingQueue = createQueueChangedAccumulator();
 
     function notifyTaskStatusChanges(previous: Task[], next: Task[]) {
       if (!notify) return;
@@ -217,37 +270,41 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
           notifyTaskStatusChanges(previous, useTaskDataStore.getState().tasks);
           scheduleRecalculateStats(150);
         }),
-        onQueueChanged(async (payload) => {
+        onQueueChanged((payload) => {
           if (cancelled) return;
           flushProgressBatch();
+          accumulateQueueChanged(pendingQueue, payload);
           if (queueRefreshTimer) clearTimeout(queueRefreshTimer);
           queueRefreshTimer = setTimeout(() => {
+            queueRefreshTimer = undefined;
             void (async () => {
+              const plan = takeQueueFlushPlan(pendingQueue);
+              if (plan.kind === "noop") return;
               try {
-                const ids = payload?.changed_task_ids ?? null;
-                if (ids && ids.length > 0 && ids.length <= 50) {
-                  // E-1: Incremental — fetch only changed tasks
-                  const changed = await listTasksByIds(ids);
+                if (plan.kind === "incremental") {
+                  const changed = await listTasksByIds(plan.ids);
                   if (cancelled) return;
                   const previous = useTaskDataStore.getState().tasks;
                   useTaskDataStore.getState().upsertTasksBatch(changed);
                   notifyTaskStatusChanges(previous, useTaskDataStore.getState().tasks);
                   scheduleRecalculateStats(150);
                   scheduleStatsRefresh(150);
-                } else {
-                  // Full fallback (None or >50)
-                  const previous = useTaskDataStore.getState().tasks;
-                  const page = await listTasksCursor(taskCursorInput(null));
-                  if (cancelled) return;
-                  const fresh = page.items;
-                  const merged = mergeTasksFromServer(previous, fresh);
-                  useTaskDataStore
-                    .getState()
-                    .setTaskCursorPage(merged, page.minimumTotal, page.nextCursor, page.filterOptions);
-                  notifyTaskStatusChanges(previous, merged);
-                  scheduleRecalculateStats(150);
-                  scheduleStatsRefresh(150);
+                  return;
                 }
+
+                // ARC-07: full refresh shares the list query epoch.
+                const epoch = bumpListQueryEpoch();
+                const previous = useTaskDataStore.getState().tasks;
+                const page = await listTasksCursor(taskCursorInput(null));
+                if (cancelled || !isCurrentListQueryEpoch(epoch)) return;
+                const fresh = page.items;
+                const merged = mergeTasksFromServer(previous, fresh);
+                useTaskDataStore
+                  .getState()
+                  .setTaskCursorPage(merged, page.minimumTotal, page.nextCursor, page.filterOptions);
+                notifyTaskStatusChanges(previous, merged);
+                scheduleRecalculateStats(150);
+                scheduleStatsRefresh(150);
               } catch (error) {
                 log.warn("queue refresh failed", error);
               }

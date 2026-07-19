@@ -22,9 +22,11 @@ export {
   useTaskDataStore,
 } from "./task-data-store";
 export {
+  effectiveListQueryMembership,
   failureKind,
   filterTasks,
   mergeTasksFromServer,
   taskFileType,
+  taskMatchesListQuery,
 } from "./task-query";
 export { useTaskUIStore } from "./task-ui-store";

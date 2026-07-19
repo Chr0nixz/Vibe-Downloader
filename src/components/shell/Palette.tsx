@@ -141,6 +141,10 @@ export function Palette({
   const [runningId, setRunningId] = useState<string | null>(null);
 
   const tasks = useTaskDataStore(useShallow((s) => s.tasks));
+  // ARC-08: palette search/filter runs against the entity cache, not only the
+  // current page view, so off-view matches remain discoverable.
+  const taskById = useTaskDataStore((s) => s.taskById);
+  const entities = useMemo(() => Object.values(taskById), [taskById]);
   // Derive selectedTask from the store so AppShell doesn't need to subscribe
   // to the task object (which changes every progress tick). Palette already
   // re-renders on progress ticks via the `tasks` subscription above, so this
@@ -169,20 +173,23 @@ export function Palette({
   // E-12: useDeferredValue lets the command palette's derived computation run during idle time,
   // not blocking the main list's progress tick rendering (tasks change every 250ms).
   // selectedTasks keeps real-time tasks (the selection set is small and needs real-time feedback).
-  const deferredTasks = useDeferredValue(tasks);
+  const deferredEntities = useDeferredValue(entities);
 
   const visibleTasks = useMemo(
-    () => filterTasks(deferredTasks, nav, taskSearch, sortKey, sortDirection, filters),
-    [deferredTasks, filters, nav, sortDirection, sortKey, taskSearch],
+    () => filterTasks(deferredEntities, nav, taskSearch, sortKey, sortDirection, filters),
+    [deferredEntities, filters, nav, sortDirection, sortKey, taskSearch],
   );
-  const selectedTasks = useMemo(() => tasks.filter((task) => selectedIds.includes(task.id)), [selectedIds, tasks]);
+  const selectedTasks = useMemo(
+    () => selectedIds.map((id) => taskById[id]).filter((task): task is Task => Boolean(task)),
+    [selectedIds, taskById],
+  );
   const sourceOptions = useMemo(
-    () => Array.from(new Set(deferredTasks.map((task) => task.sourceKey))).sort(),
-    [deferredTasks],
+    () => Array.from(new Set(deferredEntities.map((task) => task.sourceKey))).sort(),
+    [deferredEntities],
   );
   const failureOptions = useMemo(
-    () => Array.from(new Set(deferredTasks.map(failureKind).filter((kind) => kind !== "none"))).sort(),
-    [deferredTasks],
+    () => Array.from(new Set(deferredEntities.map(failureKind).filter((kind) => kind !== "none"))).sort(),
+    [deferredEntities],
   );
 
   const commands = useMemo(

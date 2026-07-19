@@ -28,6 +28,7 @@ import type {
 } from "@/generated/bindings";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import { localizedErrorMessage } from "@/lib/errors";
+import { bumpListQueryEpoch, isCurrentListQueryEpoch } from "@/lib/list-query-epoch";
 import { createLogger } from "@/lib/logger";
 import { getPlatform, type Platform, trafficLightsInsetPx } from "@/lib/platform";
 import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
@@ -178,7 +179,10 @@ export function AppShell() {
 
   const refreshTasks = useCallback(
     async (selectId?: string) => {
+      // ARC-07: share epoch with TaskList so a late refresh cannot overwrite a newer query.
+      const epoch = bumpListQueryEpoch();
       const page = await listTasksCursor(taskCursorInput(null));
+      if (!isCurrentListQueryEpoch(epoch)) return;
       const data = page.items;
       setTaskCursorPage(data, page.minimumTotal, page.nextCursor, page.filterOptions);
       if (selectId) {

@@ -29,8 +29,8 @@ pub use self::classification_rules::{
     update_classification_rule,
 };
 pub use self::connection::{
-    connect, connect_for_startup, reset_database_files, wal_checkpoint, wal_file_size_bytes,
-    DatabaseConnectOutcome, DatabaseRecovery, DbConnection,
+    begin_immediate, connect, connect_for_startup, reset_database_files, wal_checkpoint,
+    wal_file_size_bytes, DatabaseConnectOutcome, DatabaseRecovery, DbConnection,
 };
 pub use self::dash::{
     bulk_upsert_dash_segments, dash_finish_requested, existing_dash_downloaded_bytes,

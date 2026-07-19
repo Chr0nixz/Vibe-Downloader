@@ -5,7 +5,13 @@ import type { Task } from "@/types/task";
 import { parseByteCount } from "@/types/task";
 import { normalizeTaskProgressPayload, type TaskProgressPayload } from "@/types/task-progress";
 import { useSpeedHistoryStore } from "./speed-history-store";
-import { buildTaskCursorInput, buildTaskPageInput, failureKind, mergePagedTasks } from "./task-query";
+import {
+  buildTaskCursorInput,
+  buildTaskPageInput,
+  effectiveListQueryMembership,
+  failureKind,
+  taskMatchesListQuery,
+} from "./task-query";
 import { useTaskUIStore } from "./task-ui-store";
 
 /* ── Types ── */
@@ -155,14 +161,45 @@ export function normalizeTaskStatsSnapshot(stats: TaskStats | TaskStatsSnapshot)
   };
 }
 
-function taskCollections(tasks: Task[]) {
+/** Merge page rows into the entity cache while keeping view order separate. */
+function mergeEntities(existing: Record<string, Task>, incoming: Task[]): Record<string, Task> {
+  const next = { ...existing };
+  for (const task of incoming) {
+    const prior = next[task.id];
+    const mergedFiles = (task.files?.length ?? 0) > 0 ? task.files : (prior?.files ?? task.files);
+    next[task.id] = prior ? { ...prior, ...task, files: mergedFiles } : task;
+  }
+  return next;
+}
+
+function viewFromIds(taskById: Record<string, Task>, taskIds: string[]): Task[] {
+  return taskIds.map((id) => taskById[id]).filter((task): task is Task => Boolean(task));
+}
+
+function currentMembershipSnapshot() {
+  const ui = useTaskUIStore.getState();
+  return effectiveListQueryMembership(ui.nav, ui.search, ui.filters);
+}
+
+function rebuildViewCollections(
+  taskById: Record<string, Task>,
+  taskIds: string[],
+  extras: Partial<{
+    total: number;
+    failureOptions: string[];
+    viewReloadToken: number;
+  }> = {},
+) {
+  const tasks = viewFromIds(taskById, taskIds);
   return {
+    taskById,
     tasks,
-    taskIds: tasks.map((task) => task.id),
-    taskById: mapTasksById(tasks),
+    taskIds,
     taskIndexById: indexTasks(tasks),
     taskStats: calculateTaskStats(tasks),
-    failureOptions: computeFailureOptions(tasks),
+    failureOptions: extras.failureOptions ?? computeFailureOptions(Object.values(taskById)),
+    ...(extras.total !== undefined ? { total: extras.total } : {}),
+    ...(extras.viewReloadToken !== undefined ? { viewReloadToken: extras.viewReloadToken } : {}),
   };
 }
 
@@ -244,6 +281,8 @@ interface TaskDataStore {
   completionFlashIds: string[];
   loading: boolean;
   error: string | null;
+  /** ARC-08: bumped when membership/sort requires a safe full list reload. */
+  viewReloadToken: number;
   setTasks: (tasks: Task[]) => void;
   setTaskPage: (tasks: Task[], total: number, page: number, pageSize: number, append?: boolean) => void;
   setTaskCursorPage: (
@@ -265,6 +304,7 @@ interface TaskDataStore {
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   recalculateTaskStats: () => void;
+  requestViewReload: () => void;
 }
 
 /* ── Store ── */
@@ -290,19 +330,21 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
   completionFlashIds: [],
   loading: true,
   error: null,
+  viewReloadToken: 0,
+
+  requestViewReload: () => set((state) => ({ viewReloadToken: state.viewReloadToken + 1 })),
 
   setTasks: (tasks) =>
     set((state) => {
-      const ids = new Set(tasks.map((task) => task.id));
+      const taskById = mergeEntities(state.taskById, tasks);
+      const taskIds = tasks.map((task) => task.id);
+      const ids = new Set(taskIds);
 
-      // Delegate speed history pruning to dedicated store
       useSpeedHistoryStore.getState().pruneToIds(ids);
-
-      // Cross-store: prune selectedIds in UI store
       pruneUISelectedIds(ids);
 
       return {
-        ...taskCollections(tasks),
+        ...rebuildViewCollections(taskById, taskIds),
         total: tasks.length,
         page: 0,
         nextCursor: null,
@@ -314,22 +356,21 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
 
   setTaskPage: (tasks, total, page, pageSize, append = false) =>
     set((state) => {
-      const nextTasks = append ? mergePagedTasks(state.tasks, tasks) : tasks;
-      const ids = new Set(nextTasks.map((task) => task.id));
+      const taskById = mergeEntities(state.taskById, tasks);
+      const taskIds = append
+        ? [...state.taskIds, ...tasks.map((task) => task.id).filter((id) => !state.taskIndexById[id])]
+        : tasks.map((task) => task.id);
+      const ids = new Set(taskIds);
 
-      // Delegate speed history pruning to dedicated store
       useSpeedHistoryStore.getState().pruneToIds(ids);
-
-      // Cross-store: prune selectedIds in UI store
       pruneUISelectedIds(ids);
 
       return {
-        ...taskCollections(nextTasks),
-        total,
+        ...rebuildViewCollections(taskById, taskIds, { total }),
         page,
         pageSize,
         nextCursor: null,
-        hasMore: nextTasks.length < total,
+        hasMore: taskIds.length < total,
         expandedTaskIds: state.expandedTaskIds.filter((id) => ids.has(id)),
         completionFlashIds: state.completionFlashIds.filter((id) => ids.has(id)),
       };
@@ -337,20 +378,20 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
 
   setTaskCursorPage: (tasks, minimumTotal, nextCursor, filterOptions, append = false) =>
     set((state) => {
-      const nextTasks = append ? mergePagedTasks(state.tasks, tasks) : tasks;
-      const ids = new Set(nextTasks.map((task) => task.id));
+      const taskById = mergeEntities(state.taskById, tasks);
+      const incomingIds = tasks.map((task) => task.id);
+      const taskIds = append
+        ? [...state.taskIds, ...incomingIds.filter((id) => state.taskIndexById[id] === undefined)]
+        : incomingIds;
+      const ids = new Set(taskIds);
 
-      // Delegate speed history pruning to dedicated store
       useSpeedHistoryStore.getState().pruneToIds(ids);
 
-      const knownTotal = Math.max(minimumTotal, nextTasks.length + (nextCursor ? 1 : 0));
-
-      // Cross-store: prune selectedIds in UI store
+      const knownTotal = Math.max(minimumTotal, taskIds.length + (nextCursor ? 1 : 0));
       pruneUISelectedIds(ids);
 
       return {
-        ...taskCollections(nextTasks),
-        total: knownTotal,
+        ...rebuildViewCollections(taskById, taskIds, { total: knownTotal }),
         page: append ? state.page + 1 : 0,
         nextCursor,
         hasMore: Boolean(nextCursor),
@@ -365,94 +406,112 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
 
   upsertTask: (task) =>
     set((state) => {
-      const existingIndex = state.taskIndexById[task.id];
+      const membership = currentMembershipSnapshot();
+      const matches = taskMatchesListQuery(task, membership);
+      const existing = state.taskById[task.id];
+      const inView = state.taskIndexById[task.id] !== undefined;
+      const mergedFiles = (task.files?.length ?? 0) > 0 ? task.files : (existing?.files ?? task.files);
+      const merged = existing ? { ...existing, ...task, files: mergedFiles } : task;
+      const taskById = { ...state.taskById, [task.id]: merged };
 
-      if (existingIndex === undefined) {
-        // New task — prepend and rebuild arrays/maps
-        const tasks = [task, ...state.tasks];
-        return {
-          ...taskCollections(tasks),
-          total: Math.max(state.total, tasks.length),
-        };
-      }
-
-      // Existing task — shallow-compare key fields to skip no-op updates
-      const existing = state.tasks[existingIndex];
-      const mergedFiles = (task.files?.length ?? 0) > 0 ? task.files : existing.files;
       if (
-        existing.status === task.status &&
-        existing.downloadedBytes === task.downloadedBytes &&
-        existing.totalSize === task.totalSize &&
-        existing.speedBps === task.speedBps &&
-        existing.connectionCount === task.connectionCount &&
-        existing.updatedAt === task.updatedAt &&
-        existing.fileName === task.fileName &&
-        existing.saveDir === task.saveDir &&
-        existing.errorMessage === task.errorMessage &&
-        mergedFiles === existing.files
+        existing &&
+        inView &&
+        existing.status === merged.status &&
+        existing.downloadedBytes === merged.downloadedBytes &&
+        existing.totalSize === merged.totalSize &&
+        existing.speedBps === merged.speedBps &&
+        existing.connectionCount === merged.connectionCount &&
+        existing.updatedAt === merged.updatedAt &&
+        existing.fileName === merged.fileName &&
+        existing.saveDir === merged.saveDir &&
+        existing.errorMessage === merged.errorMessage &&
+        existing.queuePosition === merged.queuePosition &&
+        mergedFiles === existing.files &&
+        matches
       ) {
         return {};
       }
 
-      // Surgical update: only replace the single entry, keep stable references
-      const merged = { ...existing, ...task, files: mergedFiles };
-      const tasks = [...state.tasks];
-      tasks[existingIndex] = merged;
-      const taskById = { ...state.taskById, [task.id]: merged };
+      let taskIds = state.taskIds;
+      let viewReloadToken = state.viewReloadToken;
+      let total = state.total;
 
-      // E-3: Recompute failureOptions only when status/failureCategory/errorCode/errorMessage change,
-      // avoiding recompute on every 250ms progress tick.
+      if (inView && !matches) {
+        taskIds = state.taskIds.filter((id) => id !== task.id);
+        total = Math.max(0, state.total - 1);
+      } else if (!inView && matches) {
+        // Do not invent sort position — ask TaskList to reload via ARC-07.
+        viewReloadToken = state.viewReloadToken + 1;
+      } else if (inView && matches && existing && existing.queuePosition !== merged.queuePosition) {
+        viewReloadToken = state.viewReloadToken + 1;
+      }
+
       const statusChanged =
+        !existing ||
         existing.status !== merged.status ||
         existing.failureCategory !== merged.failureCategory ||
         existing.errorCode !== merged.errorCode ||
         existing.errorMessage !== merged.errorMessage;
 
       return {
-        tasks,
-        taskById,
-        // taskIds and taskIndexById are unchanged — keep existing references
-        taskIds: state.taskIds,
-        taskIndexById: state.taskIndexById,
-        failureOptions: statusChanged ? computeFailureOptions(tasks) : state.failureOptions,
+        ...rebuildViewCollections(taskById, taskIds, {
+          total: Math.max(total, taskIds.length),
+          failureOptions: statusChanged ? undefined : state.failureOptions,
+          viewReloadToken,
+        }),
       };
     }),
 
   upsertTasksBatch: (incoming) =>
     set((state) => {
       if (incoming.length === 0) return {};
-      const byId = new Map<string, Task>(Object.entries(state.taskById));
+      const membership = currentMembershipSnapshot();
+      const taskById = { ...state.taskById };
+      let taskIds = [...state.taskIds];
+      let viewReloadToken = state.viewReloadToken;
       let statusChangedAny = false;
-      const newTasks: Task[] = [];
+      let totalDelta = 0;
+
       for (const task of incoming) {
-        const existingIndex = state.taskIndexById[task.id];
-        if (existingIndex === undefined) {
-          newTasks.push(task);
-          byId.set(task.id, task);
-        } else {
-          const existing = state.tasks[existingIndex];
-          const mergedFiles = (task.files?.length ?? 0) > 0 ? task.files : existing.files;
-          const merged = { ...existing, ...task, files: mergedFiles };
-          byId.set(task.id, merged);
-          if (
-            existing.status !== merged.status ||
+        const existing = taskById[task.id];
+        const inView = state.taskIndexById[task.id] !== undefined || taskIds.includes(task.id);
+        const matches = taskMatchesListQuery(task, membership);
+        const mergedFiles = (task.files?.length ?? 0) > 0 ? task.files : (existing?.files ?? task.files);
+        const merged = existing ? { ...existing, ...task, files: mergedFiles } : task;
+        taskById[task.id] = merged;
+
+        if (
+          existing &&
+          (existing.status !== merged.status ||
             existing.failureCategory !== merged.failureCategory ||
             existing.errorCode !== merged.errorCode ||
-            existing.errorMessage !== merged.errorMessage
-          ) {
-            statusChangedAny = true;
-          }
+            existing.errorMessage !== merged.errorMessage)
+        ) {
+          statusChangedAny = true;
+        }
+
+        if (inView && !matches) {
+          taskIds = taskIds.filter((id) => id !== task.id);
+          totalDelta -= 1;
+        } else if (!inView && matches) {
+          viewReloadToken += 1;
+        } else if (inView && matches && existing && existing.queuePosition !== merged.queuePosition) {
+          viewReloadToken += 1;
         }
       }
-      // Prepend new tasks (newest first), keep existing order for the rest.
-      const tasks: Task[] =
-        newTasks.length > 0
-          ? [...newTasks, ...state.tasks.map((t) => byId.get(t.id) ?? t)]
-          : state.tasks.map((t) => byId.get(t.id) ?? t);
+
+      // Deduplicate reload bumps from a single batch.
+      if (viewReloadToken > state.viewReloadToken) {
+        viewReloadToken = state.viewReloadToken + 1;
+      }
+
       return {
-        ...taskCollections(tasks),
-        total: Math.max(state.total, tasks.length),
-        failureOptions: statusChangedAny || newTasks.length > 0 ? computeFailureOptions(tasks) : state.failureOptions,
+        ...rebuildViewCollections(taskById, taskIds, {
+          total: Math.max(0, state.total + totalDelta, taskIds.length),
+          failureOptions: statusChangedAny ? undefined : state.failureOptions,
+          viewReloadToken,
+        }),
       };
     }),
 
@@ -587,14 +646,38 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
             featuredTaskId: prevStats.featuredTaskId,
           };
 
+      // ARC-08: drop view members that no longer match the active query.
+      const membership = currentMembershipSnapshot();
+      let taskIds = state.taskIds;
+      let removed = 0;
+      if (statusChanged) {
+        const nextIds = taskIds.filter((id) => {
+          const task = taskById[id];
+          if (!task) return false;
+          if (taskMatchesListQuery(task, membership)) return true;
+          removed += 1;
+          return false;
+        });
+        if (nextIds.length !== taskIds.length) {
+          taskIds = nextIds;
+          tasks = viewFromIds(taskById, taskIds);
+        }
+      }
+
       return {
         tasks,
         taskById,
-        taskStats: nextStats,
-        taskIds: state.taskIds,
-        taskIndexById: state.taskIndexById,
-        // E-3: Recompute only on status change, avoiding failureOptions recompute on every 250ms progress tick
-        failureOptions: statusChanged ? computeFailureOptions(tasks) : state.failureOptions,
+        taskStats:
+          removed > 0
+            ? {
+                ...nextStats,
+                all: Math.max(0, nextStats.all - removed),
+              }
+            : nextStats,
+        taskIds,
+        taskIndexById: removed > 0 ? indexTasks(tasks) : state.taskIndexById,
+        total: removed > 0 ? Math.max(0, state.total - removed) : state.total,
+        failureOptions: statusChanged ? computeFailureOptions(Object.values(taskById)) : state.failureOptions,
       };
     });
 
@@ -691,16 +774,26 @@ export function taskPageInput(page = useTaskDataStore.getState().page): ListTask
   );
 }
 
-export function taskCursorInput(cursor: string | null = null): ListTasksCursorInput {
+export function taskCursorInput(cursor: string | null = null, overrides?: { search?: string }): ListTasksCursorInput {
   const data = useTaskDataStore.getState();
   const ui = useTaskUIStore.getState();
+  const membership = effectiveListQueryMembership(ui.nav, overrides?.search ?? ui.search, ui.filters);
+  let sortKey = ui.sortKey;
+  let sortDirection = ui.sortDirection;
+  if (ui.nav === "queue") {
+    sortKey = "queue_order";
+    sortDirection = "asc";
+  } else if (ui.nav === "attention") {
+    sortKey = "updated_at";
+    sortDirection = "desc";
+  }
   return buildTaskCursorInput(
     {
-      nav: ui.nav,
-      search: ui.search,
-      sortKey: ui.sortKey,
-      sortDirection: ui.sortDirection,
-      filters: ui.filters,
+      nav: membership.nav,
+      search: membership.search,
+      sortKey,
+      sortDirection,
+      filters: membership.filters,
       page: data.page,
       pageSize: data.pageSize,
     },
