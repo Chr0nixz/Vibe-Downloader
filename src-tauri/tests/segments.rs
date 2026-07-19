@@ -549,7 +549,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
 }
 
 #[tokio::test]
-async fn recovery_target_update_preserves_progress_and_temp_path() {
+async fn recovery_target_update_preserves_progress_and_retargets_temp_path() {
     let pool = test_pool("recovery-target").await;
     let mut task = sample_task("task-recovery-target", 1024);
     task.downloaded_bytes = 512;
@@ -557,10 +557,16 @@ async fn recovery_target_update_preserves_progress_and_temp_path() {
     db::insert_task_record(&pool, &task)
         .await
         .expect("insert task");
-    let temp_path = task.temp_path.clone();
 
     let save_dir = std::env::temp_dir().join("vibe-recovery-target");
     let final_path = save_dir.join("renamed.bin");
+    // ARC-02: retargeting rewrites temp to `{final}.{task_id}.vibe-downloading`
+    // so concurrent same-name recoveries cannot collide on a shared temp file.
+    let expected_temp_path = format!(
+        "{}.{}.vibe-downloading",
+        final_path.to_string_lossy(),
+        task.id
+    );
     db::update_task_save_target(
         &pool,
         &task.id,
@@ -581,7 +587,10 @@ async fn recovery_target_update_preserves_progress_and_temp_path() {
         updated.final_path.as_deref(),
         Some(final_path.to_string_lossy().as_ref())
     );
-    assert_eq!(updated.temp_path, temp_path);
+    assert_eq!(
+        updated.temp_path.as_deref(),
+        Some(expected_temp_path.as_str())
+    );
     assert_eq!(updated.downloaded_bytes, 512);
 }
 
