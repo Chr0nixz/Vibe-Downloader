@@ -110,6 +110,18 @@ impl TestPaths {
     }
 }
 
+/// Fixed ChaCha20 key so credential encryption works without an OS keyring (CI).
+///
+/// Matches the unit-test helper in `db::task_credentials`. The library only
+/// honors `VIBE_DOWNLOADER_TEST_SECRET_KEY` under `debug_assertions`.
+#[allow(dead_code)]
+pub fn install_test_secret_key() {
+    std::env::set_var(
+        "VIBE_DOWNLOADER_TEST_SECRET_KEY",
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+    );
+}
+
 /// Opens an isolated migrated database for a real engine integration test.
 #[allow(dead_code)]
 pub async fn test_pool(label: &str) -> SqlitePool {
