@@ -67,6 +67,7 @@ pub fn task_stored_temp_path(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn task_file_records_from_probe(
     task: &TaskRecord,
     files: &[ProbedFile],

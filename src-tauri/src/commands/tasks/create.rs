@@ -161,6 +161,7 @@ pub async fn probe_task(
     Ok(probe_payload_from_output(url, probe))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_create_probe(
     state: &AppState,
     url: &str,

@@ -1324,6 +1324,7 @@ async fn download_external_track(
     Ok(Some(playlist_path))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finalize_hls_task(
     app: &Option<AppHandle>,
     pool: &SqlitePool,
