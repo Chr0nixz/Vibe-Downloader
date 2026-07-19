@@ -1,5 +1,7 @@
 # Browser Extension Permissions Review
 
+最后更新：2026-07-19
+
 本文档说明 Vibe Downloader 浏览器扩展申请的每个权限、用途、最小化原则和审核回复模板，供 Chrome Web Store / Edge Add-ons / Firefox AMO 审核团队参考，也作为发布前权限审计的内部清单。
 
 ## 权限清单

@@ -1,5 +1,7 @@
 # Rust 后端审计
 
+> 历史快照：本文记录 `0.2.0` 阶段的 Rust 后端审计。当前开放问题和验收标准以 [project-improvement-audit.md](project-improvement-audit.md) 为准。
+
 最后更新：2026-06-28
 
 本文单独审阅 Vibe Downloader `0.2.0` 当前 Rust 后端实现与架构，聚焦三个方面：

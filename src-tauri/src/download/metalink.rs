@@ -70,12 +70,20 @@ impl MetalinkEngine {
         self.http.client().await
     }
 
+    async fn client_for_config(
+        &self,
+        config: &crate::proxy::ResolvedProxyConfig,
+    ) -> Result<Client, String> {
+        self.http.client_for_config(config).await
+    }
+
     async fn probe_metalink(
         &self,
         url: &str,
         request_headers: &[(String, String)],
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
+        proxy_config: Option<&crate::proxy::ResolvedProxyConfig>,
     ) -> Result<MetalinkProbeData, String> {
         crate::download::engine::emit_probe_phase(
             app,
@@ -83,7 +91,12 @@ impl MetalinkEngine {
             "fetching_manifest",
             Some("metalink"),
         );
-        let bytes = fetch_manifest_bytes(&self.client().await?, url, request_headers).await?;
+        let client = if let Some(config) = proxy_config {
+            self.client_for_config(config).await?
+        } else {
+            self.client().await?
+        };
+        let bytes = fetch_manifest_bytes(&client, url, request_headers).await?;
         let text = String::from_utf8(bytes).map_err(|_| {
             engine_error(
                 "metalink_invalid_manifest",
@@ -132,6 +145,7 @@ impl DownloadEngine for MetalinkEngine {
                     &request.request_headers,
                     &request.app,
                     &request.request_id,
+                    request.proxy_config.as_ref(),
                 )
                 .await
                 .map_err(DownloadError::Other)?;
@@ -197,9 +211,11 @@ async fn run_metalink_download(
         cancel_token,
         speed_limiter,
         request_headers,
+        proxy_config,
         ..
     } = context;
-    let client = engine.client().await?;
+    // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
+    let client = engine.client_for_config(&proxy_config).await?;
     let files = db::list_task_file_records(&pool, &task.id)
         .await?
         .into_iter()
@@ -220,13 +236,13 @@ async fn run_metalink_download(
 
     for file in files {
         if cancel_token.is_cancelled() {
-            pause_metalink_task(&app, &pool, &task, completed_total).await?;
+            clean_pause_metalink_download(&app, &pool, &task, completed_total).await?;
             return Ok(());
         }
         if file.status == TaskStatus::Completed {
             continue;
         }
-        let downloaded = download_metalink_file(
+        match download_metalink_file(
             &app,
             &pool,
             &task,
@@ -237,8 +253,19 @@ async fn run_metalink_download(
             &cancel_token,
             completed_total,
         )
-        .await?;
-        completed_total = completed_total.saturating_add(downloaded);
+        .await
+        {
+            Ok(downloaded) => {
+                completed_total = completed_total.saturating_add(downloaded);
+            }
+            // Mid-transfer cancel is a clean pause: children force-checkpoint
+            // file progress, then we mark the task Paused and return Ok(()).
+            Err(_) if cancel_token.is_cancelled() => {
+                clean_pause_metalink_download(&app, &pool, &task, completed_total).await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
     }
 
     complete_metalink_task(&app, &pool, &task, completed_total).await
@@ -553,9 +580,10 @@ async fn download_metalink_file_parallel(
                         task,
                         file,
                         completed_before_file,
-                        completed_before_file.saturating_add(downloaded_total),
+                        downloaded_total,
                         &mut progress_gate,
                         false,
+                        TaskStatus::Downloading,
                     )
                     .await?;
                     last_emit = Instant::now();
@@ -596,6 +624,19 @@ async fn download_metalink_file_parallel(
     }
 
     if cancel_token.is_cancelled() {
+        // Force a final checkpoint so resume sees disk-aligned part progress.
+        emit_metalink_progress(
+            app,
+            pool,
+            task,
+            file,
+            completed_before_file,
+            downloaded_total,
+            &mut progress_gate,
+            true,
+            TaskStatus::Downloading,
+        )
+        .await?;
         progress_gate.flush(app);
         return Err("Download canceled.".to_string());
     }
@@ -632,16 +673,16 @@ async fn download_metalink_file_parallel(
 
     verify_metalink_file(pool, file, temp_path).await?;
     finalize_download_file(temp_path, final_path).await?;
-    db::update_task_file_progress(pool, &file.id, total_size, TaskStatus::Completed).await?;
     emit_metalink_progress(
         app,
         pool,
         task,
         file,
         completed_before_file,
-        completed_before_file.saturating_add(total_size),
+        total_size,
         &mut progress_gate,
         true,
+        TaskStatus::Completed,
     )
     .await?;
     progress_gate.flush(app);
@@ -981,7 +1022,16 @@ pub async fn download_metalink_range_from_mirror(
                 .map_err(|e| format!("Could not flush Metalink part file: {e}"))?;
             return Err("Download canceled.".to_string());
         }
-        speed_limiter.throttle(chunk.len()).await;
+        if speed_limiter
+            .throttle(chunk.len(), cancel_token)
+            .await
+            .is_err()
+        {
+            out.flush()
+                .await
+                .map_err(|e| format!("Could not flush Metalink part file: {e}"))?;
+            return Err("Download canceled.".to_string());
+        }
         out.write_all(&chunk).await.map_err(|e| {
             AppErrorPayload::disk_write_failed(format!("Could not write Metalink part file: {e}"))
                 .command_error()
@@ -1202,10 +1252,33 @@ async fn download_from_resource(
             out.flush()
                 .await
                 .map_err(|e| format!("Could not flush Metalink temp file: {e}"))?;
+            // Force checkpoint before surfacing cancel so the parent clean-pause
+            // path persists bytes already on disk.
+            emit_metalink_progress(
+                app,
+                pool,
+                task,
+                file,
+                completed_before_file,
+                downloaded,
+                &mut progress_gate,
+                true,
+                TaskStatus::Downloading,
+            )
+            .await?;
             progress_gate.flush(app);
             return Err("Download canceled.".to_string());
         }
-        speed_limiter.throttle(chunk.len()).await;
+        if speed_limiter
+            .throttle(chunk.len(), cancel_token)
+            .await
+            .is_err()
+        {
+            out.flush()
+                .await
+                .map_err(|e| format!("Could not flush Metalink file: {e}"))?;
+            return Err("Download canceled.".to_string());
+        }
         out.write_all(&chunk).await.map_err(|e| {
             AppErrorPayload::disk_write_failed(format!("Could not write Metalink file: {e}"))
                 .command_error()
@@ -1221,6 +1294,7 @@ async fn download_from_resource(
                 downloaded,
                 &mut progress_gate,
                 false,
+                TaskStatus::Downloading,
             )
             .await?;
             last_emit = Instant::now();
@@ -1237,7 +1311,6 @@ async fn download_from_resource(
     }
     verify_metalink_file(pool, file, temp_path).await?;
     finalize_download_file(temp_path, final_path).await?;
-    db::update_task_file_progress(pool, &file.id, downloaded, TaskStatus::Completed).await?;
     emit_metalink_progress(
         app,
         pool,
@@ -1247,6 +1320,7 @@ async fn download_from_resource(
         downloaded,
         &mut progress_gate,
         true,
+        TaskStatus::Completed,
     )
     .await?;
     progress_gate.flush(app);
@@ -1307,9 +1381,10 @@ async fn emit_metalink_progress(
     file_downloaded: i64,
     progress_gate: &mut TaskProgressEmitGate,
     force: bool,
+    file_status: TaskStatus,
 ) -> Result<(), String> {
     let total_downloaded = completed_before_file.saturating_add(file_downloaded);
-    db::update_task_file_progress(pool, &file.id, file_downloaded, TaskStatus::Downloading).await?;
+    db::update_task_file_progress(pool, &file.id, file_downloaded, file_status).await?;
     db::update_task_runtime_progress(
         pool,
         &task.id,
@@ -1333,6 +1408,32 @@ async fn emit_metalink_progress(
         force,
     );
     Ok(())
+}
+
+async fn metalink_selected_downloaded_bytes(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<i64, String> {
+    Ok(db::list_task_file_records(pool, task_id)
+        .await?
+        .into_iter()
+        .filter(|file| file.selected)
+        .map(|file| file.downloaded_bytes)
+        .sum())
+}
+
+/// Prefer persisted per-file progress (floor-clamped) when entering Paused so
+/// a cancel mid-file never reports fewer bytes than already checkpointed.
+async fn clean_pause_metalink_download(
+    app: &Option<AppHandle>,
+    pool: &SqlitePool,
+    task: &TaskRecord,
+    floor: i64,
+) -> Result<(), String> {
+    let downloaded = metalink_selected_downloaded_bytes(pool, &task.id)
+        .await?
+        .max(floor);
+    pause_metalink_task(app, pool, task, downloaded).await
 }
 
 async fn pause_metalink_task(

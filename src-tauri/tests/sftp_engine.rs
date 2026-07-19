@@ -63,6 +63,7 @@ fn probe_request(uri: String, pool: sqlx::SqlitePool) -> ProbeRequest {
         pool: Some(pool),
         task_id: None,
         credentials: None,
+        proxy_config: None,
         app: None,
         request_id: None,
     }
@@ -297,6 +298,7 @@ async fn probe_fails_without_db_pool() {
         pool: None,
         task_id: None,
         credentials: None,
+        proxy_config: None,
         app: None,
         request_id: None,
     };

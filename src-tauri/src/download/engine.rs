@@ -27,6 +27,8 @@ pub struct ProbeRequest {
     pub pool: Option<SqlitePool>,
     pub task_id: Option<String>,
     pub credentials: Option<TaskCredentials>,
+    /// FUN-02: optional per-probe proxy override (create/probe path).
+    pub proxy_config: Option<ResolvedProxyConfig>,
     /// UX-6: When `Some`, engines emit `probe-phase` events for real-time
     /// stage feedback in the NewDownloadDialog. `None` for internal callers
     /// (create_task, import_urls, resume validation) that don't need UI feedback.

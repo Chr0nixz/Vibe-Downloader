@@ -1,136 +1,300 @@
 # Vibe Downloader Roadmap
 
-Last updated: 2026-06-28
+Last updated: 2026-07-19
 
-This roadmap reflects the current repository state. Product and design constraints live in [PRODUCT.md](../PRODUCT.md) and [DESIGN.md](../DESIGN.md). Error and browser header-forwarding details live in [error-codes.md](error-codes.md) and [browser-header-forwarding.md](browser-header-forwarding.md).
+Current baseline: `0.3.0`
+
+This document is the forward plan. It is not a changelog or a complete inventory of implemented features. Current user-facing capabilities live in [README.md](../README.md), active risks and acceptance criteria live in [project-improvement-audit.md](project-improvement-audit.md), and protocol evidence lives in [protocol-reliability-matrix.md](protocol-reliability-matrix.md).
+
+## Product Direction
+
+Vibe Downloader is moving toward a trustworthy desktop download manager with:
+
+- an HTTP/HTTPS path that is safe under concurrency, cancellation, restart, and file conflicts;
+- lower-maturity protocol engines that make their boundaries explicit and fail without corrupting data;
+- dense, predictable desktop workflows with visible recovery paths;
+- browser integration whose permissions and behavior match each published build profile;
+- reproducible release, migration, and performance evidence.
+
+Reliability takes precedence over adding more protocol or cloud-service entry points.
 
 ## Current Baseline
 
-Version: `0.2.0`.
+The repository contains:
 
-The app now includes a working HTTP/HTTPS desktop download manager, plus lower-maturity FTP/FTPS, SFTP, BitTorrent, HLS, DASH, WebDAV, and Metalink entry points, with:
+- Tauri 2, React 19, Rust, Tokio, SQLite, Specta, and WebExtension Native Messaging infrastructure.
+- A mature HTTP/HTTPS core with probe, single-stream and Range downloads, segmented resume, retry, checkpoint persistence, diagnostics, and speed limits.
+- First-pass FTP/FTPS, SFTP, BitTorrent, HLS, static DASH, WebDAV, and Metalink engines.
+- Queue scheduling, priority, per-host slots, scheduled windows, completion actions, encrypted credentials, task proxy records, checksum records, and SFTP TOFU storage.
+- A cursor-paged and virtualized task UI with filtering, sorting, batch actions, command palette, details, diagnostics, settings, responsive navigation, themes, and seven locales.
+- Native Messaging and WebSocket browser integration with manual HTTP/HTTPS hand-off in minimal-permission builds.
+- CI, multi-platform Tauri build workflows, release tooling, updater configuration, and a substantial Rust and frontend test suite.
 
-- Tauri 2 + React 19 + Rust shell for Windows/macOS/Linux.
-- HTTP probe, unknown-size single stream downloads, Range segmented downloads, resume validation, segment retry, global speed limit, per-host scheduling, and queue persistence.
-- FTP/FTPS task creation and downloads, with credential-bearing URLs moved into encrypted task credentials and sanitized URLs persisted for task records, events, logs, and diagnostics.
-- FTP/FTPS directory probing is exposed through the New download flow so directory URLs can show diagnostics and file candidates without creating recursive directory tasks.
-- SFTP first-pass task creation and single-file downloads with password credentials, sanitized task URLs, encrypted task credentials, local-temp pause/resume, one-level directory probing, request diagnostics, SOCKS5-only proxy support, and SQLite-backed TOFU host-key fingerprint checks.
-- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files. HTTP/HTTPS `.torrent` URLs are routed as BitTorrent tasks by default, selected-file tasks apply file selection before starting, magnet metadata can stop in `needs_attention` for multi-file selection, and BitTorrent runtime snapshots expose piece, tracker, DHT, seeding, and recent-error data.
-- Metalink task creation from HTTP/HTTPS and local `file://*.meta4` / `file://*.metalink` manifests. The first pass parses manifest files, persists mirrors and per-file checksums, supports multi-file selection, downloads selected files through HTTP/HTTPS mirror fallback, and verifies the strongest available checksum per file.
-- HLS/m3u8 streaming engine with master playlist variant selection, AES-128-CBC decryption (explicit IV or sequence-derived), init map (EXT-X-MAP) support with deduplication, byte range segments with automatic contiguous offsets, concurrent segment downloads with configurable connection limit, live event polling (every `target_duration`, max 6 idle polls), segment persistence to `hls_segments`, and ffmpeg-based local playlist + MP4 remuxing.
-- DASH (MPEG-DASH / MPD) engine with `quick_xml` manifest parsing (rejects dynamic/live profiles), ffmpeg-based download with `-c copy -movflags +faststart`, 500ms progress monitoring, and structured error codes for missing ffmpeg, empty output, or invalid manifests.
-- WebDAV/WebDAVS engine mapping `webdav://` to `http://` and `webdavs://` to `https://`, with Basic Auth credentials (from URL or encrypted DB storage), PROPFIND depth-1 directory probing (up to 200 entries), multistatus XML parsing, and delegation to the HTTP engine for actual downloads.
-- HTTP segmented download auto-acceleration: evaluates speed stability (coefficient of variation within 15%) after a 10s warmup, then splits the largest remaining segment every 5s if conditions are met, up to 8 segments with 8 MB minimum remaining.
-- Encrypted task credential storage using ChaCha20-Poly1305 for FTP/FTPS, SFTP, and WebDAV protocols, with automatic legacy plaintext migration on startup.
-- Per-task proxy overrides are persisted separately from global proxy settings. HTTP/HTTPS supports HTTP, HTTPS, and SOCKS5 task proxies; BitTorrent, FTP/explicit FTPS, and SFTP support SOCKS5 only and return structured diagnostics for unsupported combinations.
-- Global scheduled-download settings cover queued-task download windows, timed stricter global throttling, and completion actions. App exit uses a cancellable countdown; shutdown requires explicit confirmation.
-- SQLite persistence for tasks, files, work units, events, request diagnostics, settings, browser handoff messages, hash verification state, task credentials, per-task proxy settings, metalink resources, and SFTP known hosts.
-- Task list with Zustand store decomposition (task-data, task-ui, speed-history stores as separate modules behind a facade), virtualized infinite scroll via `@tanstack/react-virtual` with cursor-based pagination, search, filtering, sorting, multi-select, batch actions, command palette, task details, Chunks, Connections, Requests, Logs, toast notifications, recovery actions, and English/Simplified Chinese i18n.
-- Settings page overhauled with 7 collapsible sections (Downloads, Advanced Downloads, Scheduled Downloads, Network, Interface, Desktop Integration, Browser Integration), sticky search bar with IntersectionObserver scroll-spy, auto-save with 1000ms debounce, accent color picker (8 colors), scheduled download windows, proxy configuration, and reset-to-defaults dialog.
-- Floating status window as a separate Tauri window with ball mode (84px circular SVG progress ring with aurora glow) and bar mode (240px edge-docked pill), drag-to-move, edge snapping, double-click to focus main window, and completion burst animation.
-- OKLCH-based color system with 8 accent color themes (blue, purple, teal, green, orange, rose, indigo, amber), each with light/dark variants and three energy levels (primary, energy, peak).
-- Collapsible sidebar with three responsive tiers (mobile bottom bar, tablet compact vertical, desktop expandable with labels), mica-style surface with backdrop blur, optional accent stripe indicator, and activity dots for downloading/failed states.
-- Browser Native Messaging handoff plus local WebSocket bridge for HTTP/HTTPS URLs, with manifest install/uninstall diagnostics, dev/release extension identity support, popup live status, automatic browser download takeover, optional Cookie/header forwarding, request id de-duplication, and atomic handoff files.
-- Clipboard monitoring for supported manual links while the desktop app is running, including HTTP/HTTPS, FTP/FTPS, SFTP, WebDAV/WebDAVS, magnet, HTTP/HTTPS `.torrent`, HTTP/HTTPS Metalink manifests, and local `file://*.torrent` / `file://*.meta4` / `file://*.metalink` / `file://*.mpd`, with user confirmation through the New download flow. Embedded credentials in URLs are extracted, encrypted, and stored separately.
-- Batch URL import preview/create flow, cross-task duplicate detection with explicit manual duplicate override, and SHA-256 integrity verification.
+This baseline is not yet a stable release. Six active P0 issues can cause core workflow failure, policy mismatch, or data corruption. They are tracked below and in the main audit.
 
-## Completed: P0/P1/P2/P3/P4 First Pass
+## Phase A: Release Blockers
 
-### P0/P1
+Phase A must finish before any public stable release or expansion of product scope.
 
-- Command palette and toolbar actions cover new download, pause, resume, retry, delete, open file/folder, view switching, settings, and speed limit presets.
-- New download flow performs automatic probe and supports optional SHA-256 input.
-- Task events are written for lifecycle, resume checks, and hash verification.
-- Task list supports multi-select, batch actions, sorting, and filters by file type, source, failure reason, and resume capability.
-- Settings support friendly speed/size units, advanced download grouping, system notifications, tray behavior, close-to-tray, autostart, clipboard monitoring, and optional startup auto-resume for interrupted tasks.
+### A1. Database Deduplication Semantics
 
-### P2
+Audit ID: `ARC-01`
 
-- Request diagnostics are persisted in `task_requests` and exposed through paged task request commands.
-- Task details include a Requests tab with URL, method, status, Range, If-Range, content length, ETag, duration, retry count, and errors.
-- Segment runtime speed is persisted on `task_work_units.speed_bps`; Connections uses real per-segment speed instead of averaging task speed.
-- Segment cursor/page and summary commands are available through task detail APIs.
-- Resume validation distinguishes strong ETag, weak/missing validators, Last-Modified changes, Range support loss, and local temp/segment corruption, with diagnostic task events.
-- Native Messaging handoff files use create-new temp files plus atomic rename; invalid handoff files are logged and cleaned up after read failure.
+- Remove the host-level active-task UNIQUE constraint on `tasks(source_key)`.
+- Keep BitTorrent info-hash uniqueness in the torrent-specific model.
+- Add migration tests proving that different URLs on one host can coexist in queued, paused, and downloading states.
 
-### P3
+### A2. Atomic Output Reservation
 
-- Browser integration exposes dev/release profile, extension id, native host path, manifest path, extension path, and copyable diagnostics in Settings.
-- Native Messaging manifests derive allowed origins/extensions from the active browser profile.
-- Extension build output syncs the extension version from `package.json` and emits Chrome/Edge/Firefox/Opera variants.
-- Extension popup includes bridge status, capture toggles, live tasks, and a recent handoff panel backed by extension local storage.
-- Automatic browser download takeover, ask/enabled/disabled Cookie/header forwarding, browser task status, encrypted per-task header restore, and minimal site-rule management are implemented behind explicit settings.
+Audit ID: `ARC-02`
 
-### P4 First Pass
+- Give every task a UUID-scoped temporary path.
+- Reserve final paths atomically across concurrent task creation.
+- Publish completed files with no-clobber semantics on same-volume and cross-volume paths.
+- Add concurrent same-name and external-conflict integration tests.
 
-- Batch URL import supports multi-line input, de-duplication, optional probe preview, and partial-success task creation.
-- SHA-256 can be supplied at task creation; completed files are verified automatically and can be rechecked manually. Sidecar checksum files (`.sha256`, `.sha512`, `.sha1`, `.md5`) are auto-discovered during probe.
-- Hash verification records expected hash, actual hash, status, error, and verification timestamp without deleting failed files.
-- HLS/m3u8 streaming engine is implemented as a first pass. DASH/MPD and WebDAV/WebDAVS are implemented as first passes. Cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols remain deferred. Metalink and SFTP are implemented as first passes, not as a general protocol plugin framework or a full SSH account browser.
-- BT, FTP/FTPS, SFTP, Metalink, HLS, DASH, and WebDAV have stronger diagnostics than the initial entry points, but they are still below the HTTP/HTTPS path in maturity.
+### A3. Download Ownership And Cancellation
 
-## Known Boundaries
+Audit IDs: `ARC-03`, `ARC-04`
 
-- Safari wrapper/signing/review is not implemented.
-- Browser store IDs are represented by release placeholders and must be replaced before store submission.
-- Browser capture still needs final store review copy and a full end-to-end permission review before public extension submission.
-- Browser handoff remains HTTP/HTTPS only; FTP/FTPS, SFTP, WebDAV/WebDAVS, magnet, local torrent files, local Metalink files, and local MPD files are manual/clipboard flows.
-- Scheduled download windows currently gate queued task starts; they do not preemptively pause every already-running transfer when the window closes.
-- BitTorrent tracker status currently reports configured tracker entries from task metadata; deeper live tracker health depends on engine API support.
-- Implicit FTPS over SOCKS5 remains unsupported and returns a diagnostic instead of silently bypassing the task proxy.
-- HLS and DASH downloads require `ffmpeg` on the system PATH (or `VIBE_FFMPEG_PATH`); the app reports a structured error if missing.
-- Task list uses backend cursor pagination plus frontend windowing for large histories; browser realtime snapshots send active tasks plus a bounded recent history, and the extension caps its live task cache. Future work should benchmark production-scale databases on each target OS.
-- BT/FTP/SFTP/Metalink/HLS/DASH/WebDAV hardening and any future plugin protocol work should use mature engines/adapters when scheduled.
-- OS code signing is intentionally not configured for the current release cycle. Releases are unsigned and ship with explicit risk notes in README and Release Notes. See [RELEASE.md](RELEASE.md) for the unsigned policy and the path to enable signing later.
+- Remove detached nested download workers or retain and terminate every child handle.
+- Make speed-limiter waits cancellation-aware.
+- Manage ffmpeg as a cancellable child with kill, wait, cleanup, and kill-on-drop behavior.
+- Release scheduler slots only after workers have actually exited.
 
-## Mid-term Targets
+### A4. HTTP Authentication
 
-The following items are deferred to the mid-term horizon (post-0.2.x). They are tracked here so the codebase keeps the extension points open and avoids design decisions that would block them later.
+Audit ID: `FUN-01`
 
-### Safari WebExtension Wrapper
+- Carry direct HTTP Basic credentials from create and probe through scheduler, download, resume, and sidecar requests.
+- Preserve URL and log sanitization and encrypted-at-rest credentials.
+- Add protected Range-service lifecycle tests.
 
-Safari is not supported in the current release because Safari WebExtensions must be packaged inside a macOS app container and distributed through the Mac App Store (or via Developer ID signed `.app` with notarization). This requires:
+### A5. Per-Task Proxy Routing
 
-- An active Apple Developer Program membership (currently out of scope; see unsigned policy in [RELEASE.md](RELEASE.md)).
-- Xcode project that wraps `browser/extension-core` source as a Safari Web Extension.
-- `manifest_v2`/`manifest_v3` parity review against Safari's subset of WebExtension APIs (Safari does not implement `webRequest` blocking for MV3 on all versions; Cookie/header forwarding may need fallback paths).
-- Mac App Store review preparation: privacy policy, sandbox entitlements, hardened runtime entitlements, and screenshots.
+Audit ID: `FUN-02`
 
-Implementation plan (when prioritized):
+- Add proxy override fields to create and directory-probe inputs.
+- Use the same resolved proxy for initial probe and runtime download.
+- Make HTTP, HLS, DASH, Metalink, and WebDAV select clients from the task-resolved proxy rather than the global proxy.
+- Verify Inherit, Off, and Custom with a real proxy listener.
 
-1. Create `browser/safari/` Xcode project scaffold that references `browser/extension-core/src` as the shared source set.
-2. Adapt `scripts/build-browser-extensions.mjs` to emit a Safari variant manifest that mirrors the Chromium package, with `browser_specific_settings.safari` populated.
-3. Verify `nativeMessaging` works through Safari's Native Messaging host registration on macOS (`~/Library/Application Support/Mozilla/NativeMessagingHosts` and Safari's own registry).
-4. Decide between Mac App Store distribution (sandboxed, requires review) and direct download (Developer ID signed, notarized).
-5. Update `BrowserKind::Safari` in `src-tauri/src/commands/browser.rs` to return a real extension id and install manifest, and remove the `=> None` placeholder.
-6. Update [docs/browser-integration.md](browser-integration.md) and README.md to remove the "Safari not supported" note.
-7. Add Safari to the CI extension build matrix in `release.yml` (macOS runner only).
+### A6. Startup Failure Recovery
 
-Until this is done, the Safari entry remains `BrowserKind::Safari => None` and Safari users should use the clipboard monitoring path or the manual New Download flow.
+Audit ID: `UX-01`
+
+- Add a structured `startup_failed` state.
+- Expose localized retry, restart, log, and data-directory actions.
+- Make startup retry idempotent and prevent duplicate background services.
+
+## Phase B: Primary Workflow Correctness
+
+Phase B closes user-visible and cross-layer correctness gaps.
+
+### B1. Query And Event Consistency
+
+Audit IDs: `ARC-07`, `ARC-08`, `ARC-09`
+
+- Separate the entity cache from query-keyed page membership.
+- Ignore stale responses and preserve the latest pending query.
+- Merge queue event IDs during debounce and upgrade mixed batches to full refresh when required.
+
+### B2. Scheduler And State Concurrency
+
+Audit IDs: `ARC-05`, `ARC-06`
+
+- Keep remote probe work outside the global scheduler lock.
+- Use immediate or single-statement conditional state transitions with bounded BUSY retry.
+- Stress checkpoint, pause, retry, cancel, and completion races across multiple tasks.
+
+### B3. Browser Settings And Recovery
+
+Audit IDs: `UX-03`, `UX-06`, `UX-07`, `FUN-03`, `FUN-13`, `FUN-14`
+
+- Introduce draft, validation, save, cancel, and undo behavior for site rules.
+- Remove the duplicate two-state/three-state header-forwarding controls.
+- Implement or rename the current passive `ask` mode.
+- Allow a fresh hand-off to replace expired headers on the original recoverable task.
+- Keep release builds minimal-permission until capture permissions complete store review.
+
+### B4. Create And Bulk Workflows
+
+Audit IDs: `UX-04`, `UX-05`, `FUN-04`, `FUN-05`, `FUN-06`, `FUN-17`
+
+- Switch imported text files directly into bulk preview.
+- Move pause-all and resume-all to backend-defined global operations.
+- Use one create-draft contract for credentials, proxy, checksum, priority, category, duplicate policy, and media selection.
+- Make authenticated directory probes use the same secure credential and proxy path as task creation.
+- Remove checksum-discovery and MIME-classification races.
+
+### B5. Recovery And Accessibility
+
+Audit IDs: `UX-02`, `UX-08`, `UX-09`, `UX-10`, `UX-11`, `ARC-14`, `ARC-15`
+
+- Restore custom context menus without exposing unwanted WebView native menus.
+- Add a visible desktop detail close action and correct Queue Center keyboard semantics.
+- Preserve independent undo actions when multiple toasts are present.
+- Localize all stable error codes.
+- Replay cold-start browser hand-offs and add explicit SFTP known-host management.
+
+## Phase C: Protocol Reliability
+
+Phase C raises each advertised protocol from “entry point exists” to a tested lifecycle.
+
+### C1. Metalink Integrity
+
+Audit IDs: `FUN-08`, `FUN-09`
+
+- Define strongest-hash and multi-hash completion semantics.
+- Persist remote validators and validate Content-Range on resume.
+- Prevent cross-mirror resume without a trustworthy checksum or validator.
+
+### C2. HLS And DASH
+
+Audit IDs: `FUN-10`, `FUN-12`, `ARC-10`, `ARC-11`
+
+- Reuse the main HLS pipeline for selected audio and subtitle tracks.
+- Resolve relative track URIs and fail visibly when selected tracks cannot be produced.
+- Bound manifest and playlist bodies with streaming reads and cancellation.
+- Make live idle polling and target-duration sleeps bounded and cancellable.
+- Build a representative static MPD corpus and explicitly reject unsupported inheritance, timeline, or multi-period cases.
+
+### C3. BitTorrent
+
+Audit IDs: `FUN-11`, `FUN-15`, `ARC-12`, `ARC-13`
+
+- Enforce both seeding ratio and time limits without consuming ordinary download slots after completion.
+- Make session ownership, reference counting, and speed policy explicit.
+- Publish real per-file progress and clearly label configured-only tracker data.
+
+### C4. FTP, SFTP, And WebDAV
+
+- Complete authenticated directory-probe workflows.
+- Add credential rotation, restart, proxy-failure, permission-denied, and host-key-recovery tests.
+- Keep implicit FTPS over SOCKS5 explicitly unsupported until a safe implementation exists.
+
+### C5. Protocol Acceptance Matrix
+
+Every stable protocol must have evidence for:
+
+- create and probe;
+- download and completion;
+- pause and resume;
+- retry and network recovery;
+- process restart;
+- delete and cleanup;
+- proxy and credentials where applicable;
+- checksum and remote-change protection where applicable;
+- stable diagnostics and recovery actions.
+
+The source of truth for current cells is [protocol-reliability-matrix.md](protocol-reliability-matrix.md).
+
+## Phase D: Release And Data Portability
+
+### D1. Browser Distribution
+
+- Reserve formal Chrome Web Store, Edge Add-ons, and Firefox AMO identities.
+- Keep public packages on the minimal manual-hand-off profile unless capture permissions pass review.
+- Complete store submission, Firefox signing, install-from-store Native Messaging tests, and uninstall cleanup.
+- Defer Safari until an Xcode wrapper, Apple account, signing, notarization, and API parity review are available.
+
+### D2. Desktop Distribution
+
+- Run `rc.0` to `rc.1` updater rehearsals on Windows x64, macOS arm64/x64, and Linux x64.
+- Verify installation, first launch, database migration, update, relaunch, browser manifest, and uninstall behavior.
+- Continue to label packages unsigned until Apple Developer ID and Windows Authenticode signing are configured and verified.
+
+### D3. Backup And Restore
+
+Audit ID: `FUN-16`
+
+- Rename the current JSON/CSV output as report export.
+- Design a versioned, checksummed, rollback-safe backup and restore format.
+- Define whether and how encrypted credentials can be migrated between installations.
+
+## Phase E: Performance And Maintainability
+
+Performance work must start with measurements rather than assumptions.
+
+### E1. Reproducible Baseline
+
+Audit ID: `PERF-11`
+
+- Record cold start, first interactive frame, search, filter, scroll FPS, RSS, DB write rate, event rate, long-running HLS/BT growth, and bulk deletion.
+- Run at 1k, 10k, 50k, and at least one larger task history.
+- Record hardware, OS, build profile, data distribution, p50/p95, peak values, and query plans.
+
+### E2. Known Hotspots
+
+Audit IDs: `PERF-01` through `PERF-08`, `PERF-10`
+
+- Benchmark FTS5 or a normalized search column for leading-wildcard search.
+- Stop TaskDetails polling for invisible tabs and prevent overlapping requests.
+- Make progress notification work proportional to changed task IDs.
+- Cache shared HLS keys and init maps.
+- Bound files-version and task-event retention.
+- Move synchronous filesystem and user-command work off async workers.
+- Use a monotonic, fair, cancellable speed limiter.
+- Add bundle-size budgets tied to actual startup and interaction measurements.
+
+### E3. Module Boundaries
+
+Audit IDs: `ARC-16`, `ARC-17`
+
+- Migrate download errors from strings to stable typed categories.
+- Split large modules along parser, plan, transfer, process, persistence, and UI orchestration boundaries.
+- Preserve existing public contracts and move tests toward extracted pure modules.
+
+## Later Product Scope
+
+These items remain intentionally deferred until Phase A through C are substantially complete:
+
+- stable CLI, JSON-RPC, or REST automation;
+- PAC/WPAD proxy support;
+- cloud-drive parsing and cloud-account synchronization;
+- complete media sniffing;
+- plugin protocols;
+- advanced site-rule conflict analysis, import/export, and hit diagnostics;
+- Safari WebExtension distribution.
+
+## Stable Product Boundaries
+
+The following are intentional unless a future product decision changes them:
+
+- Browser hand-off accepts HTTP/HTTPS only.
+- Browser hand-off rejects embedded URL credentials and browser-controlled local save paths.
+- Header forwarding remains explicit, allowlisted, local-only, and encrypted when persisted.
+- Direct UI and clipboard task creation may extract embedded credentials, encrypt them, and sanitize stored URLs.
+- HLS AES-128 support does not imply SAMPLE-AES or DRM support.
+- WebDAV Basic Auth does not imply complete enterprise WebDAV compatibility.
+- Unsupported proxy/protocol combinations must fail explicitly rather than silently bypassing the configured proxy.
 
 ## Verification Baseline
 
-For important changes run:
+For frontend and ordinary changes:
 
 ```bash
-pnpm typecheck
+pnpm check
 pnpm test:frontend
 pnpm build
+```
+
+For Rust command, model, database, scheduler, or engine changes:
+
+```bash
 pnpm specta
 pnpm check:bindings
-pnpm test:rust
+cargo test --manifest-path src-tauri/Cargo.toml -j 1
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 ```
 
-For browser extension changes also run:
+For browser and release changes:
 
 ```bash
-pnpm build:extensions
+pnpm verify:extensions
+pnpm test:release-tools
+pnpm verify:protocol-matrix
 ```
 
-For release changes also run:
-
-```bash
-pnpm tauri build --config src-tauri/tauri.ci.conf.json
-```
+Passing these general commands does not replace the scenario-specific acceptance tests in the main audit.

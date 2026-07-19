@@ -73,16 +73,25 @@ export async function getStartupStatus(): Promise<StartupStatus> {
     mode: "ready",
     reason: null,
     message: null,
+    code: null,
     databasePath: null,
     backupPath: null,
     backupVerified: false,
     canReset: false,
+    logPath: null,
+    dataPath: null,
   };
 }
 
 export async function openDatabaseRecoveryFolder(): Promise<void> {}
 
 export async function resetDatabaseForRecovery(): Promise<void> {}
+
+export async function openStartupLogFolder(): Promise<void> {}
+
+export async function openStartupDataFolder(): Promise<void> {}
+
+export async function retryStartupInit(): Promise<void> {}
 
 type BrowserListener = (payload: TaskProgressPayload) => void;
 type TaskUpdatedListener = (task: Task) => void;
@@ -1384,6 +1393,11 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
           privateKeyData: null,
           privateKeyPassphrase: null,
           requestId: null,
+          proxyMode: null,
+          proxyUrl: null,
+          proxyUsername: null,
+          proxyPassword: null,
+          proxyNoProxy: null,
         });
   const duplicate = duplicateTaskForProbe(normalizedUrl, probe);
   if (duplicate && !input.allowDuplicate) {
@@ -1513,6 +1527,11 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
           privateKeyData: null,
           privateKeyPassphrase: null,
           requestId: null,
+          proxyMode: null,
+          proxyUrl: null,
+          proxyUsername: null,
+          proxyPassword: null,
+          proxyNoProxy: null,
         });
     const existingTask = !duplicate && probe ? duplicateTaskForProbe(normalized, probe) : null;
     const isDuplicate = duplicate || Boolean(existingTask);
@@ -1538,6 +1557,11 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
             selectedHlsVariantUri: null,
             selectedHlsAudioTrackUris: null,
             selectedHlsSubtitleTrackUris: null,
+            proxyMode: null,
+            proxyUrl: null,
+            proxyUsername: null,
+            proxyPassword: null,
+            proxyNoProxy: null,
           })
         : null;
     items.push({

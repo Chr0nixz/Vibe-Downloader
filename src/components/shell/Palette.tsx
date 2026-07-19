@@ -193,6 +193,7 @@ export function Palette({
         selectedTask,
         selectedTasks,
         selectedCount: selectedIds.length,
+        allTasks: tasks,
         visibleTasks,
         nav,
         sortKey,
@@ -261,6 +262,7 @@ export function Palette({
       sortKey,
       sourceOptions,
       t,
+      tasks,
       visibleTasks,
     ],
   );
@@ -397,6 +399,7 @@ export function Palette({
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={t("palette.searchPlaceholder")}
+                aria-label={t("palette.searchPlaceholder")}
                 className="h-9 bg-surface-base pl-9"
                 role="combobox"
                 aria-expanded={open}
@@ -516,6 +519,7 @@ function buildCommands({
   selectedTask,
   selectedTasks,
   selectedCount,
+  allTasks,
   visibleTasks,
   nav,
   sortKey,
@@ -553,6 +557,7 @@ function buildCommands({
   selectedTask: Task | null;
   selectedTasks: Task[];
   selectedCount: number;
+  allTasks: Task[];
   visibleTasks: Task[];
   nav: NavFilter;
   sortKey: TaskSortKey;
@@ -609,6 +614,12 @@ function buildCommands({
     (task) => task.status === "paused" || task.status === "failed" || task.status === "waiting_network",
   );
   const canBulkRetry = selectedTasks.some((task) => task.status !== "completed");
+  const canPauseAll = allTasks.some(
+    (task) => task.status === "downloading" || task.status === "retrying" || task.status === "queued",
+  );
+  const canResumeAll = allTasks.some(
+    (task) => task.status === "paused" || task.status === "failed" || task.status === "waiting_network",
+  );
   const filtersActive =
     filters.fileType !== DEFAULT_FILTERS.fileType ||
     filters.source !== DEFAULT_FILTERS.source ||
@@ -893,20 +904,46 @@ function buildCommands({
     run: () => onBulkDelete(selectedTasks),
   });
 
-  (["all", "downloading", "paused", "completed", "failed", "settings"] as const).forEach((nextNav) => {
-    push({
-      id: `view.${nextNav}`,
-      label: t(`nav.${nextNav}`),
-      description: t("palette.descriptions.view"),
-      group: "views",
-      icon: nextNav === "settings" ? Settings : ListChecks,
-      keywords: keyword("view", "filter", nextNav, "视图", "导航"),
-      enabled: true,
-      active: nav === nextNav,
-      featured: nextNav !== "settings",
-      run: () => onSetNav(nextNav),
-    });
+  // Global transfer controls live in the palette (not always-on chrome).
+  push({
+    id: "bulk.pause-all",
+    label: t("palette.commands.pauseAll"),
+    description: t("palette.descriptions.pauseAll"),
+    group: "bulk",
+    icon: Pause,
+    keywords: keyword("pause", "all", "global", "全部", "暂停"),
+    enabled: canPauseAll,
+    disabledReason: t("palette.disabled.noPauseableTasks"),
+    run: () => onBulkPause(allTasks),
   });
+  push({
+    id: "bulk.resume-all",
+    label: t("palette.commands.resumeAll"),
+    description: t("palette.descriptions.resumeAll"),
+    group: "bulk",
+    icon: Play,
+    keywords: keyword("resume", "start", "all", "global", "全部", "继续", "开始"),
+    enabled: canResumeAll,
+    disabledReason: t("palette.disabled.noResumableTasks"),
+    run: () => onBulkResume(allTasks),
+  });
+
+  (["all", "downloading", "queue", "attention", "paused", "completed", "failed", "settings"] as const).forEach(
+    (nextNav) => {
+      push({
+        id: `view.${nextNav}`,
+        label: t(`nav.${nextNav}`),
+        description: t("palette.descriptions.view"),
+        group: "views",
+        icon: nextNav === "settings" ? Settings : ListChecks,
+        keywords: keyword("view", "filter", nextNav, "视图", "导航"),
+        enabled: true,
+        active: nav === nextNav,
+        featured: nextNav !== "settings",
+        run: () => onSetNav(nextNav),
+      });
+    },
+  );
 
   const sortCommands: Array<{
     id: string;

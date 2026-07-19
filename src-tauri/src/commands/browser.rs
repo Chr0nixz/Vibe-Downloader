@@ -247,6 +247,11 @@ pub async fn create_browser_handoff_task_with_state(
         selected_hls_variant_uri: None,
         selected_hls_audio_track_uris: None,
         selected_hls_subtitle_track_uris: None,
+        proxy_mode: None,
+        proxy_url: None,
+        proxy_username: None,
+        proxy_password: None,
+        proxy_no_proxy: None,
     });
 
     let create_input = match task_result {

@@ -852,7 +852,15 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
             }
         };
 
-        request.speed_limiter.throttle(read).await;
+        if request
+            .speed_limiter
+            .throttle(read, &request.cancel_token)
+            .await
+            .is_err()
+        {
+            let _ = session.abort(remote_stream).await;
+            return Err("Download canceled.".to_string());
+        }
         file.write_all(&buffer[..read])
             .await
             .map_err(|e| format!("Could not write to the temporary file: {e}"))?;

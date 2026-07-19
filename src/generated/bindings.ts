@@ -89,7 +89,11 @@ export const commands = {
 	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
 	getStartupStatus: () => typedError<StartupStatus, string>(__TAURI_INVOKE("get_startup_status")),
 	openDatabaseRecoveryFolder: () => typedError<null, string>(__TAURI_INVOKE("open_database_recovery_folder")),
+	openStartupLogFolder: () => typedError<null, string>(__TAURI_INVOKE("open_startup_log_folder")),
+	openStartupDataFolder: () => typedError<null, string>(__TAURI_INVOKE("open_startup_data_folder")),
 	resetDatabaseForRecovery: () => typedError<null, string>(__TAURI_INVOKE("reset_database_for_recovery")),
+	/**  UX-01: idempotent retry after `startup_failed`. */
+	retryStartupInit: () => typedError<null, string>(__TAURI_INVOKE("retry_startup_init")),
 	/**
 	 *  Probe the ffmpeg binary version.
 	 * 
@@ -459,6 +463,12 @@ export type CreateTaskInput = {
 	selectedHlsAudioTrackUris: string[] | null,
 	/**  F-6: Selected subtitle track URIs from `#EXT-X-MEDIA TYPE=SUBTITLES`. */
 	selectedHlsSubtitleTrackUris: string[] | null,
+	/**  FUN-02: Optional per-task proxy override at create time. */
+	proxyMode: TaskProxyMode | null,
+	proxyUrl: string | null,
+	proxyUsername: string | null,
+	proxyPassword: string | null,
+	proxyNoProxy: string | null,
 };
 
 export type CursorPageInput = {
@@ -628,6 +638,12 @@ export type ProbeTaskInput = {
 	 *  When `Some`, engines emit `probe-phase` events keyed by this ID.
 	 */
 	requestId: string | null,
+	/**  FUN-02: Optional per-task proxy override at probe time. */
+	proxyMode: TaskProxyMode | null,
+	proxyUrl: string | null,
+	proxyUsername: string | null,
+	proxyPassword: string | null,
+	proxyNoProxy: string | null,
 };
 
 export type ProbeTaskPayload = {
@@ -763,10 +779,13 @@ export type StartupStatus = {
 	mode: string,
 	reason: string | null,
 	message: string | null,
+	code: string | null,
 	databasePath: string | null,
 	backupPath: string | null,
 	backupVerified: boolean,
 	canReset: boolean,
+	logPath: string | null,
+	dataPath: string | null,
 };
 
 export type SystemFileIcon = {

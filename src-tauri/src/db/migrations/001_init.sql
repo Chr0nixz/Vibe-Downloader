@@ -443,15 +443,23 @@ CREATE INDEX idx_tasks_created_at_id ON tasks(created_at DESC, id ASC);
 CREATE INDEX idx_tasks_status_updated_at_id ON tasks(status, updated_at DESC, id ASC);
 CREATE INDEX idx_tasks_source_key_updated_at_id ON tasks(source_key, updated_at DESC, id ASC);
 CREATE INDEX idx_tasks_error_code_updated_at_id ON tasks(error_code, updated_at DESC, id ASC);
--- Dedup partial unique index (012): one active task per non-empty source_key.
-CREATE UNIQUE INDEX idx_tasks_source_key_active
-    ON tasks (source_key)
-    WHERE source_key IS NOT NULL
-      AND source_key != ''
-      AND status IN ('queued', 'downloading', 'retrying', 'paused', 'waiting_network', 'needs_attention');
+-- ARC-01: host-level source_key must NOT be uniquely constrained for active tasks.
+-- Per-host connection slots still use source_key; BT dedup uses torrent_tasks.info_hash.
 
 -- task_files
 CREATE INDEX idx_task_files_task_id ON task_files(task_id);
+-- ARC-02: reserve final paths for active/selected rows so concurrent same-name
+-- tasks cannot share an output path.
+CREATE UNIQUE INDEX idx_tasks_final_path_active
+    ON tasks (final_path)
+    WHERE final_path IS NOT NULL
+      AND final_path != ''
+      AND status IN ('queued', 'downloading', 'retrying', 'paused', 'waiting_network', 'needs_attention');
+CREATE UNIQUE INDEX idx_task_files_final_path_selected
+    ON task_files (final_path)
+    WHERE final_path IS NOT NULL
+      AND final_path != ''
+      AND selected = 1;
 
 -- task_work_units
 CREATE INDEX idx_work_units_task_id ON task_work_units(task_id);

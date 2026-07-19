@@ -512,23 +512,25 @@ pub async fn update_task_save_target(
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let updated_at = crate::models::task::now_iso();
 
+    // ARC-02: keep temp paths UUID-qualified so recovery retargets cannot collide.
+    let temp_path = format!("{final_path}.{task_id}.vibe-downloading");
     sqlx::query(
         r#"
         UPDATE tasks
-        SET file_name = ?, save_dir = ?, final_path = ?, updated_at = ?
+        SET file_name = ?, save_dir = ?, final_path = ?, temp_path = ?, updated_at = ?
         WHERE id = ?
         "#,
     )
     .bind(file_name)
     .bind(save_dir)
     .bind(final_path)
+    .bind(&temp_path)
     .bind(&updated_at)
     .bind(task_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
-    let temp_path = format!("{final_path}.vibe-downloading");
     sqlx::query(
         r#"
         UPDATE task_files
@@ -540,7 +542,7 @@ pub async fn update_task_save_target(
     .bind(file_name)
     .bind(save_dir)
     .bind(final_path)
-    .bind(temp_path)
+    .bind(&temp_path)
     .bind(task_id)
     .execute(&mut *tx)
     .await

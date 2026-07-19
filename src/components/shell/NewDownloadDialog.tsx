@@ -455,6 +455,12 @@ export function NewDownloadDialog({
         privateKeyData: useCredentials ? privateKeyData || null : null,
         privateKeyPassphrase: useCredentials ? privateKeyPassphrase || null : null,
         requestId: String(requestId),
+        // FUN-02: inherit global proxy at probe time until create dialog exposes overrides.
+        proxyMode: null,
+        proxyUrl: null,
+        proxyUsername: null,
+        proxyPassword: null,
+        proxyNoProxy: null,
       });
       if (requestId !== probeRequestId.current) return;
       setProbe(nextProbe);
@@ -615,6 +621,12 @@ export function NewDownloadDialog({
           currentIsHlsProbe && selectedHlsAudioTrackUris.length > 0 ? selectedHlsAudioTrackUris : null,
         selectedHlsSubtitleTrackUris:
           currentIsHlsProbe && selectedHlsSubtitleTrackUris.length > 0 ? selectedHlsSubtitleTrackUris : null,
+        // FUN-02: inherit global proxy; TaskDetails can override after create.
+        proxyMode: null,
+        proxyUrl: null,
+        proxyUsername: null,
+        proxyPassword: null,
+        proxyNoProxy: null,
       });
       onCreated(task);
       resetForm();

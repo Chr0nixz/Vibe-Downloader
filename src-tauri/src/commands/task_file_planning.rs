@@ -10,6 +10,9 @@ use crate::{
     models::{ProbedFile, TaskFileRecord, TaskRecord, TaskStatus},
 };
 
+pub const TEMP_DOWNLOAD_SUFFIX: &str = ".vibe-downloading";
+pub const STAGING_DIR_NAME: &str = ".vibe-staging";
+
 pub fn normalized_probe_files(probe: &ProbeOutput) -> Vec<ProbedFile> {
     if probe.files.is_empty() {
         return vec![ProbedFile {
@@ -21,6 +24,49 @@ pub fn normalized_probe_files(probe: &ProbeOutput) -> Vec<ProbedFile> {
     probe.files.clone()
 }
 
+/// Per-task temp file path. Includes task UUID so concurrent same-name downloads
+/// never share a temporary file.
+pub fn task_temp_file_path(final_path: &Path, task_id: &str) -> PathBuf {
+    PathBuf::from(format!(
+        "{}.{task_id}{TEMP_DOWNLOAD_SUFFIX}",
+        final_path.display()
+    ))
+}
+
+/// Legacy temp path used before ARC-02 (`{final}.vibe-downloading`).
+pub fn legacy_temp_file_path(final_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}{TEMP_DOWNLOAD_SUFFIX}", final_path.display()))
+}
+
+/// Prefer an existing legacy temp file for resume compatibility; otherwise use
+/// the UUID-qualified temp path for new downloads.
+pub fn resolve_temp_file_path(final_path: &Path, task_id: &str) -> PathBuf {
+    let legacy = legacy_temp_file_path(final_path);
+    if legacy.exists() {
+        return legacy;
+    }
+    task_temp_file_path(final_path, task_id)
+}
+
+/// HLS/DASH staging directory isolated per task under the save directory.
+pub fn task_staging_dir(save_dir: &Path, task_id: &str) -> PathBuf {
+    save_dir.join(STAGING_DIR_NAME).join(task_id)
+}
+
+/// Temp path stored on the task row: staging dir for HLS, UUID temp file otherwise.
+pub fn task_stored_temp_path(
+    protocol: &str,
+    save_dir: &Path,
+    final_path: &Path,
+    task_id: &str,
+) -> PathBuf {
+    if protocol == "hls" {
+        task_staging_dir(save_dir, task_id)
+    } else {
+        task_temp_file_path(final_path, task_id)
+    }
+}
+
 pub fn task_file_records_from_probe(
     task: &TaskRecord,
     files: &[ProbedFile],
@@ -29,12 +75,14 @@ pub fn task_file_records_from_probe(
     single_temp_path: &Path,
     single_file_name: &str,
     selected_relative_paths: Option<&HashSet<String>>,
+    reserved_final_paths: &mut HashSet<String>,
 ) -> Result<Vec<TaskFileRecord>, String> {
     let single_file = files.len() == 1;
     let mut records = Vec::with_capacity(files.len());
     for file in files {
         let selection_key = sanitize_probe_relative_path(&file.relative_path);
         let (relative_path, file_name, final_path, temp_path) = if single_file {
+            reserved_final_paths.insert(single_final_path.to_string_lossy().to_string());
             (
                 single_file_name.to_string(),
                 single_file_name.to_string(),
@@ -50,7 +98,8 @@ pub fn task_file_records_from_probe(
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("download");
-            let final_path = unique_final_path(&parent, requested_name);
+            let final_path = unique_final_path_among(&parent, requested_name, reserved_final_paths);
+            reserved_final_paths.insert(final_path.to_string_lossy().to_string());
             let relative_path = final_path
                 .strip_prefix(save_dir)
                 .unwrap_or(&final_path)
@@ -61,7 +110,7 @@ pub fn task_file_records_from_probe(
                 .and_then(|value| value.to_str())
                 .unwrap_or(requested_name)
                 .to_string();
-            let temp_path = PathBuf::from(format!("{}.vibe-downloading", final_path.display()));
+            let temp_path = task_temp_file_path(&final_path, &task.id);
             (relative_path, file_name, final_path, temp_path)
         };
 
@@ -125,11 +174,18 @@ pub fn normalize_expected_hash(
 }
 
 pub fn unique_final_path(save_dir: &Path, requested_file_name: &str) -> PathBuf {
+    unique_final_path_among(save_dir, requested_file_name, &HashSet::new())
+}
+
+/// Allocate a final path that is free on disk and not already reserved in DB.
+pub fn unique_final_path_among(
+    save_dir: &Path,
+    requested_file_name: &str,
+    reserved: &HashSet<String>,
+) -> PathBuf {
     let sanitized = sanitize_file_name(requested_file_name);
     let candidate = save_dir.join(&sanitized);
-    if !candidate.exists()
-        && !PathBuf::from(format!("{}.vibe-downloading", candidate.display())).exists()
-    {
+    if path_is_available(&candidate, reserved) {
         return candidate;
     }
 
@@ -146,14 +202,41 @@ pub fn unique_final_path(save_dir: &Path, requested_file_name: &str) -> PathBuf 
             _ => format!("{stem} ({index})"),
         };
         let candidate = save_dir.join(name);
-        if !candidate.exists()
-            && !PathBuf::from(format!("{}.vibe-downloading", candidate.display())).exists()
-        {
+        if path_is_available(&candidate, reserved) {
             return candidate;
         }
     }
 
     save_dir.join(format!("download-{}", chrono::Utc::now().timestamp()))
+}
+
+fn path_is_available(candidate: &Path, reserved: &HashSet<String>) -> bool {
+    let key = candidate.to_string_lossy().to_string();
+    if reserved.contains(&key) {
+        return false;
+    }
+    if candidate.exists() {
+        return false;
+    }
+    if legacy_temp_file_path(candidate).exists() {
+        return false;
+    }
+    // Any UUID-qualified temp for this final basename blocks the path.
+    if let Some(parent) = candidate.parent() {
+        if let Some(file_name) = candidate.file_name().and_then(|value| value.to_str()) {
+            let prefix = format!("{file_name}.");
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with(&prefix) && name.ends_with(TEMP_DOWNLOAD_SUFFIX) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 pub fn sanitize_probe_relative_path(value: &str) -> String {
@@ -262,5 +345,30 @@ mod tests {
             normalize_expected_hash(Some("   "), ChecksumAlgorithm::Sha256).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn task_temp_file_path_includes_task_id() {
+        let final_path = Path::new("/tmp/file.bin");
+        let temp = task_temp_file_path(final_path, "abc-123");
+        assert!(temp
+            .to_string_lossy()
+            .ends_with(&format!("file.bin.abc-123{TEMP_DOWNLOAD_SUFFIX}")));
+    }
+
+    #[test]
+    fn unique_final_path_skips_reserved_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "vibe-reserved-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reserved = HashSet::from([dir.join("file.bin").to_string_lossy().to_string()]);
+        let path = unique_final_path_among(&dir, "file.bin", &reserved);
+        assert_eq!(
+            path.file_name().and_then(|v| v.to_str()),
+            Some("file (1).bin")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

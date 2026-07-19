@@ -63,15 +63,39 @@ function ToastItem({
   const remainingRef = useRef(duration);
   const startedAtRef = useRef(Date.now());
   const pausedRef = useRef(false);
+  // One settle path per mount: commit (timeout/X) or undo — never both.
+  const settledRef = useRef(false);
+  // Keep callbacks in refs so the dismiss timer is not reset when the store
+  // replaces toast object identity without changing duration.
+  const onAutoCommitRef = useRef(toast.onAutoCommit);
+  const actionRef = useRef(toast.action);
+  onAutoCommitRef.current = toast.onAutoCommit;
+  actionRef.current = toast.action;
+
+  const settleCommit = useCallback(() => {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    clearTimeout(timerRef.current);
+    onAutoCommitRef.current?.();
+    onDismiss();
+  }, [onDismiss]);
+
+  const settleUndo = useCallback(() => {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    clearTimeout(timerRef.current);
+    actionRef.current?.onClick();
+    onDismiss();
+  }, [onDismiss]);
 
   const startTimer = useCallback(() => {
     startedAtRef.current = Date.now();
     pausedRef.current = false;
-    timerRef.current = setTimeout(onDismiss, remainingRef.current);
-  }, [onDismiss]);
+    timerRef.current = setTimeout(settleCommit, remainingRef.current);
+  }, [settleCommit]);
 
   const pauseTimer = useCallback(() => {
-    if (pausedRef.current) return;
+    if (pausedRef.current || settledRef.current) return;
     clearTimeout(timerRef.current);
     remainingRef.current -= Date.now() - startedAtRef.current;
     if (remainingRef.current < 0) remainingRef.current = 0;
@@ -79,12 +103,13 @@ function ToastItem({
   }, []);
 
   const resumeTimer = useCallback(() => {
+    if (settledRef.current) return;
     if (remainingRef.current <= 0) {
-      onDismiss();
+      settleCommit();
       return;
     }
     startTimer();
-  }, [onDismiss, startTimer]);
+  }, [settleCommit, startTimer]);
 
   useEffect(() => {
     startTimer();
@@ -156,10 +181,7 @@ function ToastItem({
             variant="ghost"
             size="sm"
             className="mt-2 h-11 px-3 text-xs md:h-7 md:px-2"
-            onClick={() => {
-              toast.action?.onClick();
-              onDismiss();
-            }}
+            onClick={settleUndo}
           >
             {toast.action.label}
           </Button>
@@ -171,7 +193,7 @@ function ToastItem({
         size="icon"
         className="h-11 w-11 shrink-0 md:h-8 md:w-8"
         aria-label={dismissLabel}
-        onClick={onDismiss}
+        onClick={settleCommit}
       >
         <X className="h-3.5 w-3.5" />
       </Button>

@@ -1,5 +1,7 @@
 # Release Guide
 
+最后更新：2026-07-19
+
 本文档说明 Vibe Downloader 如何通过 GitHub Actions 发布安装包，并让应用内自动更新可用。
 
 ## Workflows
@@ -91,12 +93,12 @@ base64 -i vibe-downloader.key
 
 正式发布前先按 [updater-rehearsal.md](updater-rehearsal.md) 创建至少两个 candidate tag，完成 `rc.0 → rc.1` 三平台升级。Candidate 使用仓库内非秘密测试公钥和确定性扩展 ID，只用于验收，不能作为商店正式版本。
 
-1. 确认主分支 CI 和 Tauri Build 全绿。
+1. 确认 [project-improvement-audit.md](project-improvement-audit.md) 中所有 P0/P1 已关闭，主分支 CI 和 Tauri Build 全绿。当前 `0.3.0` 工作区仍有发布阻断，不能仅凭 workflow 成功发布稳定版。
 2. 创建并推送 semver tag：
 
    ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag v0.3.0
+   git push origin v0.3.0
    ```
 
 3. Release workflow 会执行：
@@ -111,7 +113,7 @@ base64 -i vibe-downloader.key
 
 ## 手动发布
 
-GitHub Actions -> `Release` -> `Run workflow`，输入 tag，例如 `v0.2.0`，并选择是否 draft。
+GitHub Actions -> `Release` -> `Run workflow`，输入 tag，例如 `v0.3.0`，并选择是否 draft。手动触发不绕过主审计、签名、浏览器身份或 updater 演练门禁。
 
 ## 自动更新行为
 

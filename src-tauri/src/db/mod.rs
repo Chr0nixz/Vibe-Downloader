@@ -101,16 +101,17 @@ pub use self::task_files::{
     update_task_file_progress, update_task_file_selection, update_task_file_selection_in_tx,
 };
 pub use self::task_proxy::{
-    get_task_proxy_settings, resolve_task_proxy_config, upsert_task_proxy_settings,
-    validate_task_proxy_protocol,
+    get_task_proxy_settings, resolve_probe_proxy_config, resolve_task_proxy_config,
+    upsert_task_proxy_settings, validate_task_proxy_protocol,
 };
 pub use self::task_records::{
     find_duplicate_task_record, get_task_record, get_task_record_in_tx, insert_task_record,
     insert_task_record_in_tx, list_browser_realtime_task_records, list_paused_schedulable_tasks,
-    list_queued_task_records, list_task_records, list_task_records_by_ids,
-    list_task_records_cursor, list_task_records_page, next_queue_position, next_retry_after_at,
-    reorder_queued_tasks, task_filter_options, task_stats_snapshot, update_task_transfer_options,
-    TaskFilterOptions, TaskListPage, TaskListQuery, TaskTransferOptionsUpdate,
+    list_queued_task_records, list_reserved_final_paths, list_task_records,
+    list_task_records_by_ids, list_task_records_cursor, list_task_records_page,
+    next_queue_position, next_retry_after_at, reorder_queued_tasks, task_filter_options,
+    task_stats_snapshot, update_task_transfer_options, TaskFilterOptions, TaskListPage,
+    TaskListQuery, TaskTransferOptionsUpdate,
 };
 pub use self::task_state::{
     checkpoint_task_progress, clear_tasks, complete_segment, complete_task, complete_task_segment,

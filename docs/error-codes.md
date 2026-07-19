@@ -11,8 +11,10 @@ This table documents the structured task error fields used by the backend and UI
 | `disk_write_failed` | `disk_write` | Yes | `free_disk_space`, `choose_another_folder`, `retry` | Could not write to disk. | Download writer |
 | `http_*` | `http` | Usually | `retry`, `retry_later`, `check_url` | HTTP request failed. | HTTP engine |
 | `server_rate_limited` | `http` | Yes | `retry_later`, `check_url` | Server asked the app to wait before retrying. | HTTP engine |
-| `auth_headers_expired` | `auth` | Yes | `check_url`, `restart` | Browser authentication headers expired; send from browser again. | Header restore |
-| `auth_headers_unavailable` | `auth` | Yes | `check_url`, `restart` | Stored browser authentication headers are unavailable; send from browser again. | OS key store/header restore |
+| `auth_headers_expired` | `auth` | Yes | `check_url`, `restart` | Browser authentication headers expired. Refreshing the original task is not yet implemented (`FUN-03`). | Header restore |
+| `auth_headers_unavailable` | `auth` | Yes | `check_url`, `restart` | Stored browser authentication headers are unavailable. Refreshing the original task is not yet implemented (`FUN-03`). | OS key store/header restore |
 | `final_path_conflict` | `other` | Yes | `choose_another_name`, `choose_another_folder` | Final output path conflicts with an existing file. | File finalization |
 
 `RetryLater` keeps the task queued and sets `retry_after_at` to five minutes in the future. The scheduler skips queued tasks until the timestamp expires, including after app restart.
+
+The current `check_url` and `restart` actions do not attach newly forwarded browser headers to an existing recoverable task. UI copy must not promise “send from browser again” until the `FUN-03` recovery flow in [project-improvement-audit.md](project-improvement-audit.md) is closed.

@@ -1,80 +1,165 @@
-//! Cross-protocol shared file operations: temp file preallocation, final path resolution, completed path persistence.
+//! Cross-protocol shared file operations: temp file preallocation, final path
+//! resolution, completed path persistence.
 //!
-//! Originally in `download/http/file.rs`; moved to a protocol-neutral location because
-//! it is reused by FTP/SFTP/DASH/HLS/Metalink and other HTTP-derived engines.
+//! Originally in `download/http/file.rs`; moved to a protocol-neutral location
+//! because it is reused by FTP/SFTP/DASH/HLS/Metalink and other HTTP-derived engines.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use sqlx::SqlitePool;
 use tokio::fs;
+use uuid::Uuid;
 
 use crate::{db, models::AppErrorPayload};
 
+const TEMP_DOWNLOAD_SUFFIX: &str = ".vibe-downloading";
+
+/// Publish a completed download to its reserved final path without clobbering.
+///
+/// Same-volume: rename only when the destination does not already exist.
+/// Cross-volume: copy into a unique staging file beside the destination, fsync,
+/// then atomic rename onto the final path. Never copies directly over an existing
+/// final file.
 pub(crate) async fn finalize_download_file(
     temp_path: &Path,
     preferred_final_path: &Path,
 ) -> Result<PathBuf, String> {
-    let final_path = available_final_path(preferred_final_path).await?;
-    if fs::rename(temp_path, &final_path).await.is_ok() {
-        // E-11: fsync the final path after rename to ensure data is durable on
-        // disk. Without this, a crash/power loss after rename could leave the
-        // file system metadata committed but file data not yet flushed to the
-        // storage device. fsync failure is non-fatal (warn only) — same policy
-        // as the cross-drive copy path below.
-        if let Ok(file) = fs::File::open(&final_path).await {
-            if let Err(error) = file.sync_all().await {
-                tracing::warn!(
-                    final_path = %final_path.display(),
-                    error = %error,
-                    "fsync after finalize failed (data may not be durable)"
-                );
-            }
-        }
-        return Ok(final_path);
+    if fs::try_exists(preferred_final_path).await.unwrap_or(false) {
+        return Err(
+            AppErrorPayload::final_path_conflict(&preferred_final_path.to_string_lossy())
+                .command_error(),
+        );
     }
-    // Cross-drive fallback: rename fails with EXDEV when source and dest are
-    // on different volumes (e.g. C: → D: on Windows). Copy, fsync, then delete.
-    fs::copy(temp_path, &final_path).await.map_err(|e| {
+
+    match fs::rename(temp_path, preferred_final_path).await {
+        Ok(()) => {
+            fsync_path(preferred_final_path).await;
+            Ok(preferred_final_path.to_path_buf())
+        }
+        Err(error) if is_cross_device_error(&error) => {
+            publish_across_volumes(temp_path, preferred_final_path).await?;
+            Ok(preferred_final_path.to_path_buf())
+        }
+        Err(error) => {
+            // Destination may have appeared between the exists check and rename.
+            if fs::try_exists(preferred_final_path).await.unwrap_or(false) {
+                return Err(AppErrorPayload::final_path_conflict(
+                    &preferred_final_path.to_string_lossy(),
+                )
+                .command_error());
+            }
+            Err(AppErrorPayload::disk_write_failed(format!(
+                "Could not move downloaded file to {dest}: {error}",
+                dest = preferred_final_path.display()
+            ))
+            .command_error())
+        }
+    }
+}
+
+async fn publish_across_volumes(
+    temp_path: &Path,
+    preferred_final_path: &Path,
+) -> Result<(), String> {
+    if fs::try_exists(preferred_final_path).await.unwrap_or(false) {
+        return Err(
+            AppErrorPayload::final_path_conflict(&preferred_final_path.to_string_lossy())
+                .command_error(),
+        );
+    }
+
+    let token = publish_token(temp_path, preferred_final_path);
+    let staging_path = PathBuf::from(format!(
+        "{}.{token}.staging",
+        preferred_final_path.display()
+    ));
+    if fs::try_exists(&staging_path).await.unwrap_or(false) {
+        return Err(
+            AppErrorPayload::final_path_conflict(&preferred_final_path.to_string_lossy())
+                .command_error(),
+        );
+    }
+
+    fs::copy(temp_path, &staging_path).await.map_err(|e| {
         AppErrorPayload::disk_write_failed(format!(
-            "Could not copy downloaded file to {dest}: {e}",
-            dest = final_path.display()
+            "Could not copy downloaded file to staging {dest}: {e}",
+            dest = staging_path.display()
         ))
         .command_error()
     })?;
-    // fsync the destination to ensure data is on disk before removing the source.
-    // If sync fails, keep the temp file as a safety net — deleting the source
-    // without confirmed persistence risks data loss on network/unreliable drives.
-    let synced = match fs::File::open(&final_path).await {
-        Ok(file) => match file.sync_all().await {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!(
-                    path = %final_path.display(),
-                    error = %error,
-                    "sync_all failed after cross-drive copy; keeping temp file as safety net"
-                );
-                false
-            }
-        },
-        Err(error) => {
-            tracing::warn!(
-                path = %final_path.display(),
-                error = %error,
-                "could not open copied file for sync_all"
-            );
-            false
+    fsync_path(&staging_path).await;
+
+    if fs::try_exists(preferred_final_path).await.unwrap_or(false) {
+        let _ = fs::remove_file(&staging_path).await;
+        return Err(
+            AppErrorPayload::final_path_conflict(&preferred_final_path.to_string_lossy())
+                .command_error(),
+        );
+    }
+
+    fs::rename(&staging_path, preferred_final_path)
+        .await
+        .map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!(
+                "Could not publish staged file to {dest}: {e}",
+                dest = preferred_final_path.display()
+            ))
+            .command_error()
+        })?;
+    fsync_path(preferred_final_path).await;
+
+    if let Err(error) = fs::remove_file(temp_path).await {
+        tracing::warn!(
+            path = %temp_path.display(),
+            error = %error,
+            "could not remove temp file after cross-volume publish"
+        );
+    }
+    Ok(())
+}
+
+/// Prefer the task UUID embedded in `{final}.{task_id}.vibe-downloading`.
+fn publish_token(temp_path: &Path, preferred_final_path: &Path) -> String {
+    let temp_name = temp_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let final_name = preferred_final_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let prefix = format!("{final_name}.");
+    if let Some(middle) = temp_name
+        .strip_prefix(&prefix)
+        .and_then(|rest| rest.strip_suffix(TEMP_DOWNLOAD_SUFFIX))
+    {
+        if !middle.is_empty() {
+            return middle.to_string();
         }
-    };
-    if synced {
-        if let Err(error) = fs::remove_file(temp_path).await {
+    }
+    Uuid::new_v4().to_string()
+}
+
+async fn fsync_path(path: &Path) {
+    // E-11: fsync after publish so a crash cannot leave metadata committed
+    // without durable file data. Failure is non-fatal (warn only).
+    if let Ok(file) = fs::File::open(path).await {
+        if let Err(error) = file.sync_all().await {
             tracing::warn!(
-                path = %temp_path.display(),
+                path = %path.display(),
                 error = %error,
-                "could not remove temp file after cross-drive copy"
+                "fsync after finalize failed (data may not be durable)"
             );
         }
     }
-    Ok(final_path)
+}
+
+fn is_cross_device_error(error: &std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::CrossesDevices)
+        || matches!(error.raw_os_error(), Some(17) | Some(18))
 }
 
 pub(crate) async fn preallocate_temp_file(file: &fs::File, total_size: i64, task_id: &str) {
@@ -92,40 +177,6 @@ pub(crate) async fn preallocate_temp_file(file: &fs::File, total_size: i64, task
             "failed to preallocate temporary download file"
         );
     }
-}
-
-async fn available_final_path(preferred_final_path: &Path) -> Result<PathBuf, String> {
-    if !fs::try_exists(preferred_final_path).await.unwrap_or(false) {
-        return Ok(preferred_final_path.to_path_buf());
-    }
-
-    let parent = preferred_final_path
-        .parent()
-        .unwrap_or_else(|| Path::new(""));
-    let stem = preferred_final_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("download");
-    let extension = preferred_final_path
-        .extension()
-        .and_then(|value| value.to_str());
-
-    for index in 1..10_000 {
-        let file_name = match extension {
-            Some(extension) if !extension.is_empty() => format!("{stem} ({index}).{extension}"),
-            _ => format!("{stem} ({index})"),
-        };
-        let candidate = parent.join(file_name);
-        if !fs::try_exists(&candidate).await.unwrap_or(false) {
-            return Ok(candidate);
-        }
-    }
-
-    Err(
-        AppErrorPayload::final_path_conflict(&preferred_final_path.to_string_lossy())
-            .command_error(),
-    )
 }
 
 pub(crate) async fn persist_completed_path(

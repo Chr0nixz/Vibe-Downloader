@@ -15,14 +15,16 @@ use crate::{
     models::{
         task::now_iso, AppErrorPayload, BatchImportItem, BatchImportResult, BrowserKind,
         ChecksumAlgorithm, HashVerificationStatus, MetalinkProbeData, ProbeTaskPayload, Task,
-        TaskChecksumRecord, TaskFileRecord, TaskPriority, TaskRecord, TaskStatus,
+        TaskChecksumRecord, TaskFileRecord, TaskPriority, TaskProxyMode, TaskProxySettingsInput,
+        TaskRecord, TaskStatus,
     },
     AppState,
 };
 
 use crate::commands::task_file_planning::{
     normalize_expected_hash, normalize_sha256, normalized_probe_files,
-    sanitize_probe_relative_path, task_file_records_from_probe, unique_final_path,
+    sanitize_probe_relative_path, task_file_records_from_probe, task_stored_temp_path,
+    unique_final_path_among,
 };
 
 use super::{is_bt_protocol, is_dash_url, is_metalink_url, is_torrent_url, task_payload};
@@ -59,6 +61,12 @@ pub struct CreateTaskInput {
     pub selected_hls_audio_track_uris: Option<Vec<String>>,
     /// F-6: Selected subtitle track URIs from `#EXT-X-MEDIA TYPE=SUBTITLES`.
     pub selected_hls_subtitle_track_uris: Option<Vec<String>>,
+    /// FUN-02: Optional per-task proxy override at create time.
+    pub proxy_mode: Option<TaskProxyMode>,
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+    pub proxy_no_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -72,6 +80,12 @@ pub struct ProbeTaskInput {
     /// UX-6: Frontend-generated correlation ID for probe-phase events.
     /// When `Some`, engines emit `probe-phase` events keyed by this ID.
     pub request_id: Option<String>,
+    /// FUN-02: Optional per-task proxy override at probe time.
+    pub proxy_mode: Option<TaskProxyMode>,
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+    pub proxy_no_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -99,6 +113,16 @@ pub async fn probe_task(
 
     tracing::debug!(url = %sanitize_url(url), "probing download url");
     let engine = state.engine_registry.engine_for_uri(url)?;
+    let global_proxy = state.engine_registry.proxy_config().await;
+    let proxy_config = db::resolve_probe_proxy_config(
+        &global_proxy,
+        engine.id(),
+        input.proxy_mode,
+        input.proxy_url.as_deref(),
+        input.proxy_username.as_deref(),
+        input.proxy_password.as_deref(),
+        input.proxy_no_proxy.as_deref(),
+    )?;
     let credentials = if input.username.is_some()
         || input.password.is_some()
         || input.private_key_data.is_some()
@@ -121,6 +145,7 @@ pub async fn probe_task(
             pool: Some(state.pool.clone()),
             task_id: None,
             credentials,
+            proxy_config: Some(proxy_config),
             app: Some(app),
             request_id: input.request_id,
         })
@@ -141,12 +166,27 @@ async fn resolve_create_probe(
     url: &str,
     snapshot: Option<&ProbeTaskPayload>,
     request_headers: &[(String, String)],
+    proxy_mode: Option<TaskProxyMode>,
+    proxy_url: Option<&str>,
+    proxy_username: Option<&str>,
+    proxy_password: Option<&str>,
+    proxy_no_proxy: Option<&str>,
 ) -> Result<ProbeOutput, String> {
     if let Some(probe) = snapshot.and_then(|snapshot| probe_output_from_snapshot(url, snapshot)) {
         return Ok(probe);
     }
 
     let engine = state.engine_registry.engine_for_uri(url)?;
+    let global_proxy = state.engine_registry.proxy_config().await;
+    let proxy_config = db::resolve_probe_proxy_config(
+        &global_proxy,
+        engine.id(),
+        proxy_mode,
+        proxy_url,
+        proxy_username,
+        proxy_password,
+        proxy_no_proxy,
+    )?;
     engine
         .probe(ProbeRequest {
             uri: url.to_string(),
@@ -155,6 +195,7 @@ async fn resolve_create_probe(
             pool: Some(state.pool.clone()),
             task_id: None,
             credentials: None,
+            proxy_config: Some(proxy_config),
             app: None,
             request_id: None,
         })
@@ -446,6 +487,7 @@ pub async fn import_urls(
                         pool: Some(state.pool.clone()),
                         task_id: None,
                         credentials: None,
+                        proxy_config: None,
                         app: None,
                         request_id: None,
                     })
@@ -513,6 +555,11 @@ pub async fn import_urls(
                     selected_hls_variant_uri: None,
                     selected_hls_audio_track_uris: None,
                     selected_hls_subtitle_track_uris: None,
+                    proxy_mode: None,
+                    proxy_url: None,
+                    proxy_username: None,
+                    proxy_password: None,
+                    proxy_no_proxy: None,
                 },
             )
             .await
@@ -582,8 +629,18 @@ pub(crate) async fn create_task_with_state_and_headers(
         headers
     };
 
-    let probe =
-        resolve_create_probe(state, url, input.probe_snapshot.as_ref(), &auth_headers).await?;
+    let probe = resolve_create_probe(
+        state,
+        url,
+        input.probe_snapshot.as_ref(),
+        &auth_headers,
+        input.proxy_mode,
+        input.proxy_url.as_deref(),
+        input.proxy_username.as_deref(),
+        input.proxy_password.as_deref(),
+        input.proxy_no_proxy.as_deref(),
+    )
+    .await?;
     let storage_url = captured_credentials
         .as_ref()
         .map(|credentials| credentials.sanitized_url.clone())
@@ -713,20 +770,8 @@ pub(crate) async fn create_task_with_state_and_headers(
     } else {
         save_dir.clone()
     };
-    let final_path = unique_final_path(&effective_save_dir, requested_file_name);
-    let file_name = final_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            // Defensive fallback: unique_final_path already sanitizes via
-            // sanitize_file_name, so Path::file_name() should only return
-            // None for degenerate inputs (e.g. trailing `..`). Re-sanitize
-            // through the shared helper rather than echoing the raw request.
-            crate::download::sanitize::sanitize_single_file_name(requested_file_name)
-        });
-    let temp_path = PathBuf::from(format!("{}.vibe-downloading", final_path.display()));
     let queue_position = db::next_queue_position(&state.pool).await?;
+    let task_id = Uuid::new_v4().to_string();
 
     let task_url = match input.selected_hls_variant_uri.as_deref() {
         Some(variant_uri) if probe.protocol == "hls" => reqwest::Url::parse(&storage_url)
@@ -737,74 +782,118 @@ pub(crate) async fn create_task_with_state_and_headers(
         _ => storage_url.clone(),
     };
 
-    let record = TaskRecord {
-        id: Uuid::new_v4().to_string(),
-        url: task_url,
-        final_url: Some(storage_final_url),
-        protocol: probe.protocol.clone(),
-        task_kind: probe.task_kind,
-        file_name: file_name.clone(),
-        save_dir: save_dir.to_string_lossy().to_string(),
-        temp_path: Some(temp_path.to_string_lossy().to_string()),
-        final_path: Some(final_path.to_string_lossy().to_string()),
-        total_size: task_total_size,
-        downloaded_bytes: 0,
-        status: TaskStatus::Queued,
-        etag: probe.etag.clone(),
-        last_modified: probe.last_modified.clone(),
-        content_type: probe.content_type.clone(),
-        supports_resume: probe.capabilities.supports_resume,
-        supports_parallel: probe.capabilities.supports_parallel,
-        supports_multi_file: probe.capabilities.supports_multi_file,
-        source_key: probe.source_key.clone(),
-        connection_count: 0,
-        speed_bps: 0,
-        task_speed_limit_bps,
-        priority,
-        queue_position,
-        category_key,
-        obey_schedule: true,
-        health_summary: Some("Queued".to_string()),
-        error_message: None,
-        error_code: None,
-        recovery_actions: Vec::new(),
-        retry_after_at: None,
-        expected_hash_sha256,
-        actual_hash_sha256: None,
-        hash_status,
-        hash_error: None,
-        hash_verified_at: None,
-        created_at: now.clone(),
-        updated_at: now,
-        files_version: 0,
-    };
+    // ARC-02: reserve final/temp paths inside the create transaction so concurrent
+    // same-name tasks cannot share an output path. Partial UNIQUE indexes enforce
+    // the reservation; retry when a concurrent creator wins the same path.
+    let (record, final_path, temp_path, file_name) = {
+        const MAX_PATH_RESERVE_ATTEMPTS: usize = 32;
+        let mut last_error = None;
+        let mut outcome = None;
+        for _ in 0..MAX_PATH_RESERVE_ATTEMPTS {
+            let mut tx = state.pool.begin().await.map_err(|e| e.to_string())?;
+            let reserved = db::list_reserved_final_paths(&mut *tx).await?;
+            let final_path =
+                unique_final_path_among(&effective_save_dir, requested_file_name, &reserved);
+            let file_name = final_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    crate::download::sanitize::sanitize_single_file_name(requested_file_name)
+                });
+            let temp_path =
+                task_stored_temp_path(&probe.protocol, &effective_save_dir, &final_path, &task_id);
 
-    // Close the TOCTOU race: BEGIN IMMEDIATE acquires a RESERVED lock before any
-    // SELECT runs, so a concurrent creator blocks until this transaction commits —
-    // its dup-check SELECT will then see our INSERT. (sqlx's `begin()` uses DEFERRED,
-    // which reads a WAL snapshot and would let both creators pass the dup-check.)
-    {
-        let mut tx = state.pool.begin().await.map_err(|e| e.to_string())?;
-        if !input.allow_duplicate.unwrap_or(false) {
-            let bt_source_key = if record.source_key.starts_with("bt:") {
-                Some(record.source_key.as_str())
-            } else {
-                None
+            let record = TaskRecord {
+                id: task_id.clone(),
+                url: task_url.clone(),
+                final_url: Some(storage_final_url.clone()),
+                protocol: probe.protocol.clone(),
+                task_kind: probe.task_kind,
+                file_name: file_name.clone(),
+                save_dir: save_dir.to_string_lossy().to_string(),
+                temp_path: Some(temp_path.to_string_lossy().to_string()),
+                final_path: Some(final_path.to_string_lossy().to_string()),
+                total_size: task_total_size,
+                downloaded_bytes: 0,
+                status: TaskStatus::Queued,
+                etag: probe.etag.clone(),
+                last_modified: probe.last_modified.clone(),
+                content_type: probe.content_type.clone(),
+                supports_resume: probe.capabilities.supports_resume,
+                supports_parallel: probe.capabilities.supports_parallel,
+                supports_multi_file: probe.capabilities.supports_multi_file,
+                source_key: probe.source_key.clone(),
+                connection_count: 0,
+                speed_bps: 0,
+                task_speed_limit_bps: task_speed_limit_bps.clone(),
+                priority,
+                queue_position,
+                category_key: category_key.clone(),
+                obey_schedule: true,
+                health_summary: Some("Queued".to_string()),
+                error_message: None,
+                error_code: None,
+                recovery_actions: Vec::new(),
+                retry_after_at: None,
+                expected_hash_sha256: expected_hash_sha256.clone(),
+                actual_hash_sha256: None,
+                hash_status,
+                hash_error: None,
+                hash_verified_at: None,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                files_version: 0,
             };
-            if let Some(duplicate) = db::find_duplicate_task_record(
-                &mut *tx,
-                &record.url,
-                record.final_url.as_deref(),
-                bt_source_key,
-            )
-            .await?
-            {
-                return Err(AppErrorPayload::duplicate_task(&duplicate.file_name).command_error());
+
+            if !input.allow_duplicate.unwrap_or(false) {
+                let bt_source_key = if record.source_key.starts_with("bt:") {
+                    Some(record.source_key.as_str())
+                } else {
+                    None
+                };
+                if let Some(duplicate) = db::find_duplicate_task_record(
+                    &mut *tx,
+                    &record.url,
+                    record.final_url.as_deref(),
+                    bt_source_key,
+                )
+                .await?
+                {
+                    return Err(
+                        AppErrorPayload::duplicate_task(&duplicate.file_name).command_error()
+                    );
+                }
+            }
+
+            match db::insert_task_record_in_tx(&mut tx, &record).await {
+                Ok(()) => match tx.commit().await {
+                    Ok(()) => {
+                        outcome = Some((record, final_path, temp_path, file_name));
+                        break;
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        if is_final_path_unique_conflict(&message) {
+                            last_error = Some(message);
+                            continue;
+                        }
+                        return Err(message);
+                    }
+                },
+                Err(error) if is_final_path_unique_conflict(&error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
         }
-        db::insert_task_record_in_tx(&mut tx, &record).await?;
-        tx.commit().await.map_err(|e| e.to_string())?;
-    }
+        outcome.ok_or_else(|| {
+            last_error.unwrap_or_else(|| {
+                "Could not reserve a unique output path for the download.".to_string()
+            })
+        })?
+    };
     // F-6: Store the user's selected HLS audio/subtitle track URIs. Uses
     // `upsert_hls_task` with placeholder values for fields that will be
     // filled in by `run_hls_download` when it probes the media playlist.
@@ -898,7 +987,23 @@ pub(crate) async fn create_task_with_state_and_headers(
         )
         .await?;
     }
+    if input.proxy_mode.is_some() {
+        db::upsert_task_proxy_settings(
+            &state.pool,
+            TaskProxySettingsInput {
+                task_id: record.id.clone(),
+                mode: input.proxy_mode.unwrap_or(TaskProxyMode::Inherit),
+                proxy_url: input.proxy_url.clone(),
+                proxy_username: input.proxy_username.clone(),
+                proxy_password: input.proxy_password.clone(),
+                clear_proxy_password: None,
+                no_proxy: input.proxy_no_proxy.clone(),
+            },
+        )
+        .await?;
+    }
     db::insert_task_event(&state.pool, &record.id, "created", None).await?;
+    let mut reserved_final_paths = db::list_reserved_final_paths(&state.pool).await?;
     let file_records = task_file_records_from_probe(
         &record,
         &probe_files,
@@ -907,6 +1012,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         &temp_path,
         &file_name,
         selected_relative_paths.as_ref(),
+        &mut reserved_final_paths,
     )?;
     for file_record in &file_records {
         db::insert_task_file_record(&state.pool, file_record).await?;
@@ -1003,8 +1109,15 @@ fn spawn_checksum_sidecar_discovery(
     let timestamp = timestamp.to_string();
 
     tauri::async_runtime::spawn(async move {
+        let mut headers = request_headers;
+        if let Ok(Some(credentials)) = db::resolve_task_credentials(&pool, &task_id).await {
+            headers.extend(basic_auth_headers(
+                Some(credentials.username.as_str()),
+                Some(credentials.password.as_str()),
+            ));
+        }
         let checksums =
-            discover_checksum_sidecars(&task_id, &final_url, &request_headers, &timestamp).await;
+            discover_checksum_sidecars(&task_id, &final_url, &headers, &timestamp).await;
         if checksums.is_empty() {
             return;
         }
@@ -1210,6 +1323,14 @@ fn basic_auth_headers(username: Option<&str>, password: Option<&str>) -> Vec<(St
     let pass = password.unwrap_or("");
     let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
     vec![("Authorization".to_string(), format!("Basic {encoded}"))]
+}
+
+fn is_final_path_unique_conflict(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("unique")
+        && (lower.contains("final_path")
+            || lower.contains("idx_tasks_final_path_active")
+            || lower.contains("idx_task_files_final_path_selected"))
 }
 
 #[cfg(test)]

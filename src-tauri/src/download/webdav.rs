@@ -65,7 +65,7 @@ impl WebDavEngine {
         // E-4: Reuses the shared HttpEngine client cache rather than constructing a new instance each time.
         let probe = self
             .http
-            .probe_with_headers(&target.http_url, &headers)
+            .probe_with_headers_and_proxy(&target.http_url, &headers, request.proxy_config.as_ref())
             .await?;
         let final_url = webdav_url_from_http(&probe.final_url, &target.protocol)?;
         Ok(ProbeOutput {

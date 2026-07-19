@@ -13,6 +13,7 @@ use std::{
 use common::{TestPaths, TestServer};
 use sha2::{Digest, Sha256};
 use tauri_app_lib::{
+    db,
     download::GlobalSpeedLimiter,
     download::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine},
     models::{SegmentStatus, TaskSegmentRecord},
@@ -150,6 +151,51 @@ async fn probe_maps_common_http_failures() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_uses_persisted_basic_auth_credentials() {
+    // FUN-01: credentials stored at create must authorize the real download path.
+    let server = start_test_server();
+    let pool = common::test_pool("http-basic-auth").await;
+    let paths = TestPaths::new("http-basic-auth");
+    let url = format!("{}/basic-auth", server.base_url);
+    let task = common::download_task(
+        "http-basic-auth",
+        url,
+        "http",
+        "protected.bin",
+        SAMPLE.len() as i64,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+    db::upsert_task_credentials(&pool, &task.id, "http", "user", "pass", None, None)
+        .await
+        .expect("store credentials");
+
+    let engine = HttpEngine::new().expect("engine");
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("authenticated download");
+
+    assert_eq!(fs::read(&paths.final_path).expect("read final"), SAMPLE);
+    // Authorization must not be written into the persisted request-headers table.
+    let header_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM task_request_headers WHERE task_id = ?")
+            .bind("http-basic-auth")
+            .fetch_one(&pool)
+            .await
+            .expect("query headers");
+    assert_eq!(header_count, 0, "Authorization must not be persisted");
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_download_writes_final_file() {
     let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
@@ -207,14 +253,15 @@ async fn direct_unknown_size_download_writes_final_file() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn direct_download_renames_when_final_path_exists() {
+async fn direct_download_conflicts_when_final_path_exists() {
+    // ARC-02: finalize must not clobber or silently rename over an existing final.
     let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("final-conflict");
     let existing = b"existing user file";
     fs::write(&paths.final_path, existing).expect("seed existing final");
 
-    let downloaded = engine
+    let error = engine
         .download_direct(
             DirectDownloadRequest {
                 url: format!("{}/file", server.base_url),
@@ -230,19 +277,16 @@ async fn direct_download_renames_when_final_path_exists() {
             tokio_util::sync::CancellationToken::new(),
         )
         .await
-        .expect("download");
+        .expect_err("final path conflict");
 
-    let renamed = paths
-        .final_path
-        .parent()
-        .expect("parent")
-        .join("file (1).bin");
-    assert_eq!(downloaded, SAMPLE.len() as i64);
+    assert!(
+        error.contains("final_path_conflict") || error.to_lowercase().contains("conflict"),
+        "expected final_path_conflict, got: {error}"
+    );
     assert_eq!(
         fs::read(&paths.final_path).expect("read existing"),
         existing
     );
-    assert_eq!(fs::read(renamed).expect("read renamed final"), SAMPLE);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -779,6 +823,34 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
             "sample.bin",
             false,
         ),
+        "/basic-auth" => {
+            // FUN-01: require Authorization: Basic dXNlcjpwYXNz (user:pass).
+            let authorized = request.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization")
+                        && value.trim() == "Basic dXNlcjpwYXNz"
+                })
+            });
+            if !authorized {
+                write_response(
+                    &mut stream,
+                    401,
+                    &[("WWW-Authenticate", "Basic realm=\"vibe\"")],
+                    b"unauthorized",
+                    false,
+                );
+            } else {
+                respond_file(
+                    &mut stream,
+                    method,
+                    SAMPLE,
+                    byte_range,
+                    true,
+                    "protected.bin",
+                    false,
+                );
+            }
+        }
         "/requires-if-range"
             if byte_range.is_some() && if_range.as_deref() != Some("\"strong\"") =>
         {

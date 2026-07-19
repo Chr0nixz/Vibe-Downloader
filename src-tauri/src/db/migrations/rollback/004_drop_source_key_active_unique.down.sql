@@ -1,0 +1,16 @@
+-- Rollback for migration 004: ARC-01 drop of idx_tasks_source_key_active.
+--
+-- Restoring this index will again block concurrent active tasks that share a
+-- host-level source_key. Only use for emergency recovery; sqlx::migrate! does
+-- NOT auto-execute files in migrations/rollback/.
+--
+-- Manual recovery (database must be offline; resolve duplicate source_keys first):
+--
+--     CREATE UNIQUE INDEX idx_tasks_source_key_active
+--         ON tasks (source_key)
+--         WHERE source_key IS NOT NULL
+--           AND source_key != ''
+--           AND status IN ('queued', 'downloading', 'retrying', 'paused', 'waiting_network', 'needs_attention');
+--
+-- Then remove the 004 row from _sqlx_migrations.
+SELECT 1;

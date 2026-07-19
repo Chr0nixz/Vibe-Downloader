@@ -16,8 +16,34 @@
 use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
+use tokio_util::sync::CancellationToken;
 
 use crate::db;
+
+/// Spawn an ffmpeg command with kill-on-drop and cancel ownership (ARC-03).
+pub(crate) async fn run_cancellable(
+    mut command: tokio::process::Command,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    command.kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Could not start ffmpeg: {e}"))?;
+    tokio::select! {
+        _ = cancel.cancelled() => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err("Download canceled.".to_string())
+        }
+        status = child.wait() => {
+            let status = status.map_err(|e| format!("Could not wait for ffmpeg: {e}"))?;
+            if !status.success() {
+                return Err(format!("ffmpeg failed with status {status}."));
+            }
+            Ok(())
+        }
+    }
+}
 
 /// Resolve the ffmpeg binary path using the full resolution chain.
 ///

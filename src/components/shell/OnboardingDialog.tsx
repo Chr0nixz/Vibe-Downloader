@@ -15,7 +15,7 @@ import { getBrowserIntegrationStatus } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 
 const ONBOARDING_STORAGE_KEY = "vibe-onboarding-completed";
-const TOTAL_STEPS = 5;
+const TOTAL_STEPS = 3;
 
 export function markOnboardingCompleted() {
   try {
@@ -37,18 +37,21 @@ export function OnboardingDialog({
   open,
   onOpenChange,
   onOpenSettings,
+  onOpenNewDownload,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onOpenSettings?: () => void;
+  /** Opens New Download and ends onboarding — the aha path. */
+  onOpenNewDownload?: () => void;
 }) {
   const { t } = useTranslation();
   const [step, setStep] = useState(0);
   const [extensionInstalled, setExtensionInstalled] = useState(false);
 
-  // Check browser extension installation status when reaching step 2 (index 2 = extension step)
+  // Extension status only matters on the browser-handoff step.
   useEffect(() => {
-    if (!open || step !== 2) return;
+    if (!open || step !== 1) return;
     let cancelled = false;
     void getBrowserIntegrationStatus()
       .then((status) => {
@@ -81,23 +84,17 @@ export function OnboardingDialog({
     if (step > 0) setStep(step - 1);
   };
 
+  const handleCreateDownload = () => {
+    markOnboardingCompleted();
+    onOpenChange(false);
+    onOpenNewDownload?.();
+  };
+
   const isLastStep = step === TOTAL_STEPS - 1;
   const isFirstStep = step === 0;
 
-  const stepTitleKey = [
-    "onboarding.step1Title",
-    "onboarding.step2Title",
-    "onboarding.step3Title",
-    "onboarding.step4Title",
-    "onboarding.step5Title",
-  ][step];
-  const stepBodyKey = [
-    "onboarding.step1Body",
-    "onboarding.step2Body",
-    "onboarding.step3Body",
-    "onboarding.step4Body",
-    "onboarding.step5Body",
-  ][step];
+  const stepTitleKey = ["onboarding.step1Title", "onboarding.step2Title", "onboarding.step3Title"][step];
+  const stepBodyKey = ["onboarding.step1Body", "onboarding.step2Body", "onboarding.step3Body"][step];
 
   return (
     <Dialog
@@ -115,7 +112,6 @@ export function OnboardingDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-4">
-          {/* Step indicator */}
           <ol
             className="m-0 flex list-none items-center justify-center gap-2 p-0"
             aria-label={t("onboarding.stepIndicator", { current: step + 1, total: TOTAL_STEPS })}
@@ -138,8 +134,15 @@ export function OnboardingDialog({
             <p className="text-sm leading-relaxed text-text-secondary">{t(stepBodyKey)}</p>
           </div>
 
-          {/* Step 2 (index 2): browser extension install action */}
-          {step === 2 ? (
+          {step === 0 ? (
+            <div className="pt-1">
+              <Button type="button" variant="default" className="w-full" onClick={handleCreateDownload}>
+                {t("onboarding.createDownload")}
+              </Button>
+            </div>
+          ) : null}
+
+          {step === 1 ? (
             <div className="pt-1">
               {extensionInstalled ? (
                 <p className="text-sm font-medium text-status-success">{t("onboarding.extensionInstalled")}</p>
@@ -169,7 +172,7 @@ export function OnboardingDialog({
                 {t("onboarding.back")}
               </Button>
             ) : null}
-            <Button type="button" variant="default" onClick={handleNext}>
+            <Button type="button" variant={isFirstStep ? "ghost" : "default"} onClick={handleNext}>
               {isLastStep ? t("onboarding.start") : t("onboarding.next")}
             </Button>
           </div>

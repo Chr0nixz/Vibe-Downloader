@@ -126,11 +126,8 @@ pub async fn shutdown_active_downloads(state: &AppState, timeout: std::time::Dur
     }
     drop(remaining);
 
-    // A-3: Wait for all workers concurrently under a single shared timeout.
-    // The previous serial loop let the first slow task exhaust the entire
-    // deadline, leaving later tasks zero budget and immediate abort() which
-    // skipped their inner download_handle cleanup. join_all gives every task
-    // a fair share of the total budget.
+    // A-3 / ARC-03: Wait for all workers concurrently under a shared timeout.
+    // After abort, await again so the supervisor fully exits and releases slots.
     let join_all = futures_util::future::join_all(handles.into_iter().map(
         |(task_id, mut handle)| async move {
             tokio::select! {
@@ -143,6 +140,10 @@ pub async fn shutdown_active_downloads(state: &AppState, timeout: std::time::Dur
                 _ = tokio::time::sleep(timeout) => {
                     tracing::warn!(task_id, "download task did not exit in time, aborting");
                     handle.abort();
+                    match handle.await {
+                        Ok(()) => tracing::debug!(task_id, "aborted download task joined"),
+                        Err(e) => tracing::warn!(task_id, error = %e, "aborted download task join error"),
+                    }
                 }
             }
         },
@@ -190,7 +191,10 @@ macro_rules! vibe_commands_base {
             commands::settings::update_settings,
             commands::startup::get_startup_status,
             commands::startup::open_database_recovery_folder,
+            commands::startup::open_startup_log_folder,
+            commands::startup::open_startup_data_folder,
             commands::startup::reset_database_for_recovery,
+            commands::startup::retry_startup_init,
             commands::ffmpeg::probe_ffmpeg_version,
             commands::browser::get_browser_integration_status,
             commands::browser::install_browser_integration,
@@ -484,94 +488,139 @@ pub fn run() {
 ///
 /// Runs on a background async task so the main thread stays free for the
 /// webview to paint the splash. `StartupState` is transitioned to "ready"
-/// once `AppState` is managed and the scheduler is spawned — at that point
-/// the frontend `StartupGate` mounts `AppShell`.
-async fn run_startup_init(handle: &tauri::AppHandle) -> Result<(), String> {
-    let db_path = platform::db_path(handle)?;
-    let db_connection = match db::connect_for_startup(&db_path).await? {
-        db::DatabaseConnectOutcome::Ready(connection) => connection,
-        db::DatabaseConnectOutcome::RecoveryRequired(recovery) => {
-            handle
-                .state::<commands::startup::StartupState>()
-                .set_recovery(recovery);
-            return Ok(());
-        }
-    };
-    let pool = db_connection.pool;
-    // Startup WAL checkpoint: if the `-wal` file exceeds 100 MB after
-    // an unclean shutdown or a long session, truncate it now so the
-    // app starts with a bounded journal.
-    if db::wal_file_size_bytes(&db_path) > 100 * 1024 * 1024 {
-        tracing::info!("WAL file exceeds 100MB, running checkpoint on startup");
-        if let Err(e) = db::wal_checkpoint(&pool).await {
-            tracing::warn!(error = %e, "startup WAL checkpoint failed");
+/// once `AppState` is managed — at that point the frontend `StartupGate`
+/// mounts `AppShell`. Ordinary failures before ready become `startup_failed`
+/// so the UI can offer an idempotent Retry (UX-01).
+pub(crate) async fn run_startup_init(handle: &tauri::AppHandle) -> Result<(), String> {
+    let startup = handle.state::<commands::startup::StartupState>();
+    if !startup.try_begin_init() {
+        return Ok(());
+    }
+    let result = run_startup_init_inner(handle).await;
+    startup.end_init();
+    if let Err(ref error) = result {
+        if startup.current_mode() == "initializing" {
+            startup.set_failed(
+                commands::startup::classify_startup_error(error),
+                error.clone(),
+            );
         }
     }
-    // Run non-critical maintenance so it finishes before scheduling starts.
-    // Best-effort; failures are logged but never abort startup.
-    if let Err(error) = db::clear_expired_task_request_headers(&pool).await {
-        tracing::warn!(error = %error, "expired browser request header cleanup failed");
-    }
-    if let Err(error) = db::migrate_legacy_ftp_credentials(&pool).await {
-        tracing::warn!(error = %error, "legacy FTP credential migration failed");
-    }
-    match db::prune_request_diagnostics(&pool).await {
-        Ok(0) => {}
-        Ok(removed) => {
-            tracing::info!(removed, "startup request diagnostics prune");
-        }
-        Err(error) => {
-            tracing::warn!(error = %error, "request diagnostics prune failed");
-        }
-    }
-    let default_dir = commands::settings::default_download_dir(handle)?;
-    let settings = db::get_settings(&pool, default_dir).await?;
-    db::reset_interrupted_tasks(&pool, settings.auto_resume_on_startup).await?;
-    let speed_limiter = Arc::new(download::GlobalSpeedLimiter::new(
-        db::parse_speed_limit_bps(settings.global_speed_limit_bps.as_deref()),
-    ));
-    let engine_registry = Arc::new(download::EngineRegistry::new()?);
-    engine_registry
-        .set_proxy_config(proxy::ResolvedProxyConfig::from_settings(&settings))
-        .await;
-    let browser_realtime = browser_realtime::BrowserRealtimeState::new();
-    let downloads = Arc::new(Mutex::new(HashMap::new()));
-    let request_headers: TaskRequestHeaders = Arc::new(Mutex::new(HashMap::new()));
-    let task_runtime_locks = Arc::new(TaskRuntimeLocks::default());
-    let scheduler = Arc::new(scheduler::Scheduler::new(
-        downloads.clone(),
-        request_headers.clone(),
-        speed_limiter.clone(),
-        engine_registry.clone(),
-        task_runtime_locks.clone(),
-    ));
+    result
+}
 
-    handle.manage(AppState {
-        pool: pool.clone(),
-        downloads,
-        request_headers,
-        browser_realtime: browser_realtime.clone(),
-        scheduler,
-        speed_limiter,
-        engine_registry,
-        quit_requested: Arc::new(AtomicBool::new(false)),
-        task_runtime_locks,
-    });
+async fn run_startup_init_inner(handle: &tauri::AppHandle) -> Result<(), String> {
+    let startup = handle.state::<commands::startup::StartupState>();
 
-    // AppState is now managed — the backend can safely handle IPC. Transition
+    if !startup.app_state_managed() {
+        let db_path = platform::db_path(handle)?;
+        let db_connection = match db::connect_for_startup(&db_path).await? {
+            db::DatabaseConnectOutcome::Ready(connection) => connection,
+            db::DatabaseConnectOutcome::RecoveryRequired(recovery) => {
+                startup.set_recovery(recovery);
+                return Ok(());
+            }
+        };
+        let pool = db_connection.pool;
+        // Startup WAL checkpoint: if the `-wal` file exceeds 100 MB after
+        // an unclean shutdown or a long session, truncate it now so the
+        // app starts with a bounded journal.
+        if db::wal_file_size_bytes(&db_path) > 100 * 1024 * 1024 {
+            tracing::info!("WAL file exceeds 100MB, running checkpoint on startup");
+            if let Err(e) = db::wal_checkpoint(&pool).await {
+                tracing::warn!(error = %e, "startup WAL checkpoint failed");
+            }
+        }
+        // Run non-critical maintenance so it finishes before scheduling starts.
+        // Best-effort; failures are logged but never abort startup.
+        if let Err(error) = db::clear_expired_task_request_headers(&pool).await {
+            tracing::warn!(error = %error, "expired browser request header cleanup failed");
+        }
+        if let Err(error) = db::migrate_legacy_ftp_credentials(&pool).await {
+            tracing::warn!(error = %error, "legacy FTP credential migration failed");
+        }
+        match db::prune_request_diagnostics(&pool).await {
+            Ok(0) => {}
+            Ok(removed) => {
+                tracing::info!(removed, "startup request diagnostics prune");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "request diagnostics prune failed");
+            }
+        }
+        let default_dir = commands::settings::default_download_dir(handle)?;
+        let settings = db::get_settings(&pool, default_dir).await?;
+        db::reset_interrupted_tasks(&pool, settings.auto_resume_on_startup).await?;
+        let speed_limiter = Arc::new(download::GlobalSpeedLimiter::new(
+            db::parse_speed_limit_bps(settings.global_speed_limit_bps.as_deref()),
+        ));
+        let engine_registry = Arc::new(download::EngineRegistry::new()?);
+        engine_registry
+            .set_proxy_config(proxy::ResolvedProxyConfig::from_settings(&settings))
+            .await;
+        let browser_realtime = browser_realtime::BrowserRealtimeState::new();
+        let downloads = Arc::new(Mutex::new(HashMap::new()));
+        let request_headers: TaskRequestHeaders = Arc::new(Mutex::new(HashMap::new()));
+        let task_runtime_locks = Arc::new(TaskRuntimeLocks::default());
+        let scheduler = Arc::new(scheduler::Scheduler::new(
+            downloads.clone(),
+            request_headers.clone(),
+            speed_limiter.clone(),
+            engine_registry.clone(),
+            task_runtime_locks.clone(),
+        ));
+
+        handle.manage(AppState {
+            pool: pool.clone(),
+            downloads,
+            request_headers,
+            browser_realtime: browser_realtime.clone(),
+            scheduler,
+            speed_limiter,
+            engine_registry,
+            quit_requested: Arc::new(AtomicBool::new(false)),
+            task_runtime_locks,
+        });
+        startup.mark_app_state_managed();
+        run_post_app_state_services(handle, settings.floating_window_enabled).await?;
+    } else {
+        // AppState already exists from a prior partial attempt; finish services
+        // without re-managing state or re-reading settings for floating sync.
+        run_post_app_state_services(handle, false).await?;
+    }
+
+    Ok(())
+}
+
+async fn run_post_app_state_services(
+    handle: &tauri::AppHandle,
+    floating_window_enabled: bool,
+) -> Result<(), String> {
+    let startup = handle.state::<commands::startup::StartupState>();
+    let app_state = handle
+        .try_state::<AppState>()
+        .ok_or_else(|| "AppState is not managed.".to_string())?;
+
+    // AppState is managed — the backend can safely handle IPC. Transition
     // StartupState to "ready" so the frontend StartupGate mounts AppShell.
-    handle
-        .state::<commands::startup::StartupState>()
-        .set_ready();
+    if startup.current_mode() != "ready" {
+        startup.set_ready();
+    }
 
-    clipboard::start(handle.clone());
-    browser_realtime::start(handle.clone(), browser_realtime).await?;
-    // Spawn scheduling — downloads start without blocking UI.
-    {
+    if !startup.clipboard_started() {
+        clipboard::start(handle.clone());
+        startup.mark_clipboard_started();
+    }
+
+    if !startup.browser_bridge_started() {
+        browser_realtime::start(handle.clone(), app_state.browser_realtime.clone()).await?;
+        startup.mark_browser_bridge_started();
+    }
+
+    if !startup.scheduler_started() {
         let handle_clone = handle.clone();
-        let state = handle_clone.state::<AppState>();
-        let scheduler = state.scheduler.clone();
-        let pool_clone = state.pool.clone();
+        let scheduler = app_state.scheduler.clone();
+        let pool_clone = app_state.pool.clone();
         tauri::async_runtime::spawn(async move {
             scheduler
                 .clone()
@@ -581,23 +630,28 @@ async fn run_startup_init(handle: &tauri::AppHandle) -> Result<(), String> {
                 .schedule_retry_after_wakeup(handle_clone, pool_clone)
                 .await;
         });
+        startup.mark_scheduler_started();
     }
-    // Background schedule-window monitor: pauses/resumes tasks every 60s.
-    commands::tasks::spawn_schedule_window_monitor(
-        handle.clone(),
-        handle.state::<AppState>().inner(),
-    );
-    // Background request-diagnostics cleanup: bounds `task_requests`
-    // growth for long-running / high-retry sessions.
-    commands::tasks::spawn_request_diagnostics_cleanup(handle.clone());
-    // Background WAL checkpoint: bounds `-wal` growth for long sessions.
-    commands::tasks::spawn_wal_checkpoint_monitor(handle.clone());
-    create_tray(handle).map_err(|e| format!("{e}"))?;
+
+    if !startup.monitors_started() {
+        commands::tasks::spawn_schedule_window_monitor(handle.clone(), app_state.inner());
+        commands::tasks::spawn_request_diagnostics_cleanup(handle.clone());
+        commands::tasks::spawn_wal_checkpoint_monitor(handle.clone());
+        startup.mark_monitors_started();
+    }
+
+    if !startup.tray_created() {
+        create_tray(handle).map_err(|e| format!("{e}"))?;
+        startup.mark_tray_created();
+    }
+
     process_browser_handoff_files_from_args(handle, std::env::args().collect(), "initial-launch");
 
-    if settings.floating_window_enabled {
+    if floating_window_enabled && !startup.floating_synced() {
         commands::floating::sync_floating_status_window(handle, true)?;
+        startup.mark_floating_synced();
     }
+
     Ok(())
 }
 

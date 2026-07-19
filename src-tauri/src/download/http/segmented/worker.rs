@@ -374,7 +374,16 @@ async fn download_segment_once(
         }
 
         let write_len_usize = usize::try_from(write_len).unwrap_or(0);
-        speed_limiter.throttle(write_len_usize).await;
+        if speed_limiter
+            .throttle(write_len_usize, cancel_token)
+            .await
+            .is_err()
+        {
+            send_segment_progress(progress_tx, &segment.id, offset, 0)
+                .await
+                .map_err(non_retryable_attempt)?;
+            return Ok(offset);
+        }
         file.write_all(&chunk[..write_len_usize])
             .await
             .map_err(|e| {

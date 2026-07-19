@@ -591,6 +591,10 @@ async fn restart_task_from_beginning(
     let engine = state.engine_registry.engine_for_uri(&task.url)?;
     let request_headers =
         resolve_task_request_headers(&state.pool, state.request_headers.clone(), &task.id).await?;
+    let credentials = db::resolve_task_credentials(&state.pool, &task.id).await?;
+    let global_proxy = state.engine_registry.proxy_config().await;
+    let proxy_config =
+        db::resolve_task_proxy_config(&state.pool, &task.id, &task.protocol, &global_proxy).await?;
     let probe = engine
         .probe(ProbeRequest {
             uri: task.url.clone(),
@@ -598,7 +602,8 @@ async fn restart_task_from_beginning(
             request_headers,
             pool: Some(state.pool.clone()),
             task_id: Some(task.id.clone()),
-            credentials: None,
+            credentials,
+            proxy_config: Some(proxy_config),
             app: None,
             request_id: None,
         })
@@ -722,6 +727,10 @@ pub(crate) async fn prepare_task_for_download(
     if temp_size > 0 {
         let uri = task.final_url.as_deref().unwrap_or(&task.url).to_string();
         let engine = engine_registry.engine_for_uri(&uri)?;
+        let credentials = db::resolve_task_credentials(pool, &task.id).await?;
+        let global_proxy = engine_registry.proxy_config().await;
+        let proxy_config =
+            db::resolve_task_proxy_config(pool, &task.id, &task.protocol, &global_proxy).await?;
         let probe = engine
             .probe(ProbeRequest {
                 uri,
@@ -729,7 +738,8 @@ pub(crate) async fn prepare_task_for_download(
                 request_headers: request_headers.to_vec(),
                 pool: Some(pool.clone()),
                 task_id: Some(task.id.clone()),
-                credentials: None,
+                credentials,
+                proxy_config: Some(proxy_config),
                 app: None,
                 request_id: None,
             })

@@ -179,6 +179,7 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         pool: None,
         task_id: None,
         credentials: None,
+        proxy_config: None,
         app: None,
         request_id: None,
     }

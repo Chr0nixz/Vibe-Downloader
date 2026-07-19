@@ -116,6 +116,24 @@ export async function resetDatabaseForRecovery(): Promise<void> {
   await runCommand("resetDatabaseForRecovery", () => commands.resetDatabaseForRecovery());
 }
 
+export async function openStartupLogFolder(): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).openStartupLogFolder();
+  const commands = await loadNativeCommands();
+  await runCommand("openStartupLogFolder", () => commands.openStartupLogFolder());
+}
+
+export async function openStartupDataFolder(): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).openStartupDataFolder();
+  const commands = await loadNativeCommands();
+  await runCommand("openStartupDataFolder", () => commands.openStartupDataFolder());
+}
+
+export async function retryStartupInit(): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).retryStartupInit();
+  const commands = await loadNativeCommands();
+  await runCommand("retryStartupInit", () => commands.retryStartupInit());
+}
+
 export async function listTasks(): Promise<Task[]> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).listTasks();

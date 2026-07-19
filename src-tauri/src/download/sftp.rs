@@ -958,7 +958,15 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
             }
         };
 
-        request.speed_limiter.throttle(read).await;
+        if request
+            .speed_limiter
+            .throttle(read, &request.cancel_token)
+            .await
+            .is_err()
+        {
+            let _ = connection.session.close().await;
+            return Err("Download canceled.".to_string());
+        }
         file.write_all(&buffer[..read]).await.map_err(|e| {
             AppErrorPayload::disk_write_failed(format!("Could not write SFTP temp file: {e}"))
                 .command_error()

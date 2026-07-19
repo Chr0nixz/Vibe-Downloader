@@ -61,6 +61,13 @@ impl DashEngine {
         self.http.client().await
     }
 
+    async fn client_for_config(
+        &self,
+        config: &crate::proxy::ResolvedProxyConfig,
+    ) -> Result<Client, String> {
+        self.http.client_for_config(config).await
+    }
+
     async fn probe_dash(
         &self,
         url: &str,
@@ -764,7 +771,7 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
         speed_limiter,
         connection_limit,
         request_headers,
-        proxy_config: _proxy_config,
+        proxy_config,
         ..
     } = context;
 
@@ -786,11 +793,10 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
         .map(PathBuf::from)
         .ok_or_else(|| "DASH task is missing a final path.".to_string())?;
 
-    // staging dir = temp_path parent / "<task_id>-staging"
-    let staging_dir = temp_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!("{}-staging", task.id));
+    // ARC-02: isolate staging under save_dir/.vibe-staging/{task_id}.
+    let staging_dir = PathBuf::from(&task.save_dir)
+        .join(".vibe-staging")
+        .join(&task.id);
     fs::create_dir_all(&staging_dir).await.map_err(|e| {
         AppErrorPayload::disk_write_failed(format!("Could not create DASH staging folder: {e}"))
             .command_error()
@@ -802,7 +808,8 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
         })?;
     }
 
-    let client = engine.client().await?;
+    // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
+    let client = engine.client_for_config(&proxy_config).await?;
     let mpd_text = fetch_mpd_text(&client, &manifest_url, &request_headers).await?;
     let parsed = parse_dash_manifest(&manifest_url, &mpd_text)?;
     let (video_rep, audio_rep) = select_tracks(&parsed)?;
@@ -938,6 +945,7 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
         &final_path,
         downloaded_total,
         &ffmpeg,
+        &cancel_token,
     )
     .await
 }
@@ -1205,7 +1213,14 @@ async fn download_dash_segment_once(
                 ));
             }
         };
-        speed_limiter.throttle(chunk.len()).await;
+        if speed_limiter
+            .throttle(chunk.len(), cancel_token)
+            .await
+            .is_err()
+        {
+            writer.flush().await.ok();
+            return Err("Download canceled.".to_string());
+        }
         writer
             .write_all(&chunk)
             .await
@@ -1302,7 +1317,15 @@ async fn finalize_dash_task(
     final_path: &Path,
     downloaded_total: i64,
     ffmpeg: &Path,
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
+    // ARC-03: do not publish after delete/pause removed the active task.
+    let still_active = db::get_task_record(pool, &task.id)
+        .await?
+        .is_some_and(|current| current.status == TaskStatus::Downloading);
+    if !still_active || cancel_token.is_cancelled() {
+        return Err("Download canceled.".to_string());
+    }
     // Generate ffconcat files for video and audio tracks.
     let segments = db::list_dash_segments(pool, &task.id).await?;
     let video_segments: Vec<_> = segments
@@ -1338,8 +1361,21 @@ async fn finalize_dash_task(
         video_concat.as_deref(),
         audio_concat.as_deref(),
         temp_path,
+        cancel_token,
     )
     .await?;
+
+    if cancel_token.is_cancelled() {
+        let _ = fs::remove_file(temp_path).await;
+        return Err("Download canceled.".to_string());
+    }
+    let still_active = db::get_task_record(pool, &task.id)
+        .await?
+        .is_some_and(|current| current.status == TaskStatus::Downloading);
+    if !still_active {
+        let _ = fs::remove_file(temp_path).await;
+        return Err("Download canceled.".to_string());
+    }
 
     let downloaded = fs::metadata(temp_path)
         .await
@@ -1387,6 +1423,7 @@ async fn run_ffmpeg_remux(
     video_concat: Option<&Path>,
     audio_concat: Option<&Path>,
     output: &Path,
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
     if fs::try_exists(output).await.unwrap_or(false) {
         fs::remove_file(output)
@@ -1429,18 +1466,21 @@ async fn run_ffmpeg_remux(
         .arg("-f")
         .arg("mp4")
         .arg(output);
-    let status = command
-        .status()
-        .await
-        .map_err(|e| format!("Could not start ffmpeg: {e}"))?;
-    if !status.success() {
-        return Err(engine_error(
-            "dash_ffmpeg_failed",
-            format!("ffmpeg could not remux DASH segments. Exit status: {status}"),
-            true,
-        ));
+    match super::ffmpeg::run_cancellable(command, cancel_token).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.contains("canceled") => {
+            let _ = fs::remove_file(output).await;
+            Err(error)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(output).await;
+            Err(engine_error(
+                "dash_ffmpeg_failed",
+                format!("ffmpeg could not remux DASH segments: {error}"),
+                true,
+            ))
+        }
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

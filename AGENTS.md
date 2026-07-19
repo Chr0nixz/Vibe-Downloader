@@ -6,7 +6,9 @@ This file gives coding agents the local project context and working rules for Vi
 
 Vibe Downloader is a desktop download manager built with Tauri 2, React 19, TypeScript, Rust, SQLite, and WebExtension Native Messaging.
 
-The project is currently at `0.2.0`. It is not a finished IDM replacement yet. Treat HTTP/HTTPS as the most mature path, with FTP/FTPS, SFTP, BitTorrent, HLS, DASH, WebDAV, and Metalink entry points already present at varying maturity levels.
+The project is currently at `0.3.0`. It is not a finished IDM replacement or a stable public release. Treat HTTP/HTTPS as the most mature path, with FTP/FTPS, SFTP, BitTorrent, HLS, DASH, WebDAV, and Metalink entry points present at varying maturity levels.
+
+Before fixing or describing current gaps, read [docs/project-improvement-audit.md](docs/project-improvement-audit.md). It is the canonical active-risk register and provides stable IDs, acceptance criteria, and repair order. Historical audit documents are point-in-time snapshots and must not override current code or the main audit.
 
 Implemented today:
 
@@ -17,18 +19,18 @@ Implemented today:
 - Global speed limiting through a Rust token bucket.
 - Per-task speed limits enforced across HTTP/FTP/SFTP/BT, combined with global limit (minimum wins).
 - Task priorities (high/normal/low) used by the queue scheduler to dispatch tasks in priority order.
-- Per-task proxy overrides (Inherit/Off/Custom) with protocol-aware validation: HTTP(S) allows HTTP/HTTPS/SOCKS5 proxies; BT, FTP/FTPS, and SFTP allow SOCKS5 only.
+- Per-task proxy override models, encrypted settings, protocol-aware validation, and task detail controls. The HTTP-derived runtime path currently ignores the resolved task proxy; see `FUN-02` before claiming end-to-end support.
 - FTP/FTPS task creation and downloads with dynamic parallel segments, SOCKS5 proxy support, encrypted credential storage, and directory probing.
-- SFTP task creation and single-file downloads with password credentials, encrypted credential storage, local-temp pause/resume, directory probing, SOCKS5 proxy support, and TOFU host-key fingerprint verification.
-- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files, with multi-file selection, runtime snapshots (piece map, peers, trackers, DHT, seeding), SOCKS5 proxy support, and configurable seeding.
+- SFTP task creation and single-file downloads with password or OpenSSH private-key credentials, encrypted credential storage, local-temp pause/resume, directory probing, SOCKS5 proxy support, and TOFU host-key fingerprint verification.
+- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files, with multi-file selection, runtime snapshots (piece map, peers, configured trackers, DHT, seeding), SOCKS5 proxy support, and persisted seeding policy. The time limit and session ownership still have active gaps.
 - HLS/m3u8 streaming engine with master playlist variant selection, AES-128-CBC decryption, init map (EXT-X-MAP) support, byte range segments, concurrent segment downloads, live polling, and ffmpeg-based MP4 remuxing.
-- DASH (MPEG-DASH / MPD) engine with manifest parsing (rejects dynamic/live), ffmpeg-based download and MP4 remuxing, and progress monitoring.
+- DASH (MPEG-DASH / MPD) first-pass engine for a limited static/VOD subset, with ffmpeg-based download, MP4 remuxing, and progress monitoring. Dynamic/live, SegmentTimeline, and several inheritance/template cases are unsupported.
 - WebDAV/WebDAVS engine mapping to HTTP/HTTPS with Basic Auth credentials, PROPFIND directory probing, and delegation to the HTTP engine.
-- Metalink4 engine with manifest parsing, multi-file selection, HTTP/HTTPS mirror failover by priority, per-file progress, and checksum verification (strongest available algorithm per file).
+- Metalink4 engine with manifest parsing, multi-file selection, HTTP/HTTPS mirror failover by priority, per-file progress, and checksum persistence/verification. Multi-hash priority and cross-mirror resume validation remain active gaps.
 - Encrypted task credential storage (ChaCha20-Poly1305) for FTP/FTPS, SFTP, and WebDAV, with legacy plaintext migration on startup.
-- React task list with store decomposition (task-data, task-ui, speed-history stores), virtualized infinite scroll, cursor pagination, status filters, search, sorting, multi-select, batch actions, command palette, settings page with 7 collapsible sections and search, task details, Chunks/Connections/Requests/Logs views, toast, delete confirmation, recovery actions, 8 accent color themes, floating status window (ball and bar modes), and en/zh-CN i18n.
+- React task list with store decomposition (task-data, task-ui, speed-history stores), virtualized infinite scroll, cursor pagination, status filters, search, sorting, multi-select, batch actions, command palette, settings page with 7 collapsible sections and search, task details, Chunks/Connections/Requests/Logs views, toast, delete confirmation, recovery actions, 8 accent color themes, floating status window (ball and bar modes), and 7 locales.
 - Clipboard link monitoring for all supported protocols (HTTP/HTTPS, FTP/FTPS, SFTP, WebDAV/WebDAVS, magnet, local manifests) while the desktop app is running.
-- Browser Native Messaging host, local WebSocket bridge, manifest install/uninstall diagnostics, duplicate request handling, Tauri single-instance forwarding, browser download takeover, and optional allowlisted Cookie/header forwarding.
+- Browser Native Messaging host, local WebSocket bridge, manifest install/uninstall diagnostics, duplicate request handling, Tauri single-instance forwarding, and manual HTTP/HTTPS handoff. Automatic takeover and Cookie/header forwarding are experimental dev-profile capabilities and are removed from candidate/release packages.
 - CI, Tauri build matrix, Release workflow, Specta bindings, and Tauri updater configuration.
 - Vitest coverage for pure frontend logic plus Rust unit/integration tests.
 
@@ -39,6 +41,17 @@ Not implemented yet:
 - BT/FTP/SFTP/Metalink/HLS/DASH/WebDAV reliability and diagnostics parity with the HTTP/HTTPS path.
 - Full site rule management UI, and full file classification automation.
 - OS code-signed production distribution.
+
+Active release blockers:
+
+- `UX-01`: ordinary startup failures leave the app in an unrecoverable loading state.
+- `FUN-01`: direct HTTP Basic Auth is used for probe but lost before the actual download.
+- `FUN-02`: HTTP/HLS/DASH/Metalink/WebDAV ignore the resolved per-task proxy at runtime, and proxy overrides cannot participate in create-time probe.
+- `ARC-01`: the active `source_key` UNIQUE index incorrectly prevents different URLs on the same host from coexisting.
+- `ARC-02`: output paths are not atomically reserved, so concurrent same-name tasks can share or overwrite files.
+- `ARC-03`: nested download workers, limiter waits, and ffmpeg children do not have reliable cancellation ownership.
+
+Do not weaken, hide, or document around these blockers. Fix them with the acceptance tests specified in the main audit, and update the audit status only after those tests pass.
 
 ## Key Directories
 
@@ -67,7 +80,8 @@ Useful checks:
 ```bash
 pnpm typecheck      # TypeScript type checking (tsc --noEmit)
 pnpm lint           # Biome static analysis (NOT type checking)
-pnpm check          # typecheck + lint combined
+pnpm check          # typecheck + lint + i18n completeness
+pnpm check:i18n
 pnpm test:frontend
 pnpm build
 pnpm check:bindings
@@ -75,9 +89,12 @@ pnpm test:rust
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 pnpm build:extensions
+pnpm verify:extensions
+pnpm verify:protocol-matrix
+pnpm test:release-tools
 ```
 
-Note: `pnpm lint` runs Biome (linting/formatting), not TypeScript type checking. Use `pnpm typecheck` or `pnpm check` for type errors.
+Note: `pnpm lint` runs Biome (linting/formatting), not TypeScript type checking. Use `pnpm typecheck` or `pnpm check` for type errors; `pnpm check` also verifies i18n completeness.
 
 Run `pnpm build:extensions` when touching `browser/extension-core`, Native Messaging behavior, or related documentation.
 
@@ -106,7 +123,7 @@ Important current constants:
 - Max connections per host defaults to 8 and is clamped to 1-16.
 - HTTP auto-acceleration: max 8 segments, 10s warmup, 5s evaluation, 8 MB minimum remaining.
 - FTP dynamic parallel: max 4 segments, 8s warmup, 5s interval, 16 MB minimum split remaining.
-- HLS segment retries: 2; live max idle polls: 6.
+- HLS segment retries: 2; the configured live idle threshold is 6 polls, but its current exit condition is ineffective (`ARC-11`).
 - BT metadata timeout: 90s; progress interval: 10s.
 - DASH progress interval: 500ms.
 - SFTP read buffer: 64 KB; progress interval: 300ms.
@@ -120,20 +137,22 @@ Important current constants:
 
 - Keep [README.md](README.md) as the concise current-state entry point.
 - Keep [docs/ROADMAP.md](docs/ROADMAP.md) as the forward plan, not a changelog.
-- Keep [docs/project-improvement-audit.md](docs/project-improvement-audit.md) as the risk and prioritization document.
+- Keep [docs/project-improvement-audit.md](docs/project-improvement-audit.md) as the canonical active-risk, priority, acceptance, and repair-order document. Use its IDs in fixes and update status only after its acceptance criteria pass.
 - Keep [PRODUCT.md](PRODUCT.md) and [DESIGN.md](DESIGN.md) as product and design constraints.
+- Treat `docs/architecture-audit.md`, `docs/cross-platform-audit.md`, `docs/dependency-modernization-audit.md`, `docs/engineering-quality-audit.md`, and `docs/rust-backend-audit.md` as historical snapshots. Preserve their dated findings, but do not use them as current status when they conflict with code or the main audit.
 - Do not reintroduce deleted duplicate docs: `docs/functional-design.md` and `docs/ui-design-style.md`.
 - Do not describe planned features as implemented. Current gaps are documented explicitly in README and roadmap.
 
 ## Coding Rules For Agents
 
 - Read the local implementation before changing behavior. Some older documentation may describe the repository incorrectly.
+- When a request names an audit ID, revalidate the cited code, implement the complete acceptance criteria for that ID, add the required tests, and update the audit entry without deleting its historical rationale.
 - Do not overwrite or revert unrelated working-tree changes. The workspace may be dirty.
 - Keep changes scoped to the requested area.
 - Prefer existing patterns over new abstractions.
 - Use generated Specta bindings rather than hand-writing IPC types when Rust models or commands change.
 - Supported locales: `en`/`zh-CN` (stable, fully translated) and `zh-TW`/`ja`/`ko`/`ru`/`es` (beta, fully translated but marked with a Beta badge in the language selector). Auto-detection only picks stable locales; beta locales require explicit user selection. When adding new i18n keys, update all 7 locale files and run `pnpm check:i18n` to verify completeness.
-- Preserve the current browser handoff security boundary: browser handoff is HTTP/HTTPS only, browser handoff URLs must not contain embedded credentials (rejected at the handoff boundary), browsers do not control local save paths, and Cookie/header forwarding must stay explicit, allowlisted, and encrypted when persisted. Note: direct task creation (UI and clipboard) does extract embedded credentials from HTTP/HTTPS URLs via `legacy_credentials_from_url`, encrypts them, and sanitizes the task URL — this is by design, not a security gap.
+- Preserve the current browser handoff security boundary: browser handoff is HTTP/HTTPS only, browser handoff URLs must not contain embedded credentials (rejected at the handoff boundary), browsers do not control local save paths, and Cookie/header forwarding must stay explicit, allowlisted, and encrypted when persisted. Candidate/release extensions are minimal-permission manual-handoff builds; automatic capture and header forwarding are dev-only experimental capabilities. Note: direct task creation (UI and clipboard) does extract embedded credentials from HTTP/HTTPS URLs via `legacy_credentials_from_url`, encrypts them, and sanitizes the task URL. That storage behavior is intentional, but the current HTTP runtime consumption bug is tracked as `FUN-01` and must not be documented as working until fixed.
 - Keep debug-only mock behavior out of production builds. `seed_mock_tasks` is intentionally debug-only.
 - When changing download or resume logic, add or update Rust tests under `src-tauri/tests`.
 - When changing frontend behavior, run at least `pnpm typecheck` and `pnpm test:frontend`; run `pnpm build` for UI or bundling changes.

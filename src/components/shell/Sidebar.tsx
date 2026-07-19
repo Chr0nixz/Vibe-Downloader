@@ -33,13 +33,18 @@ type NavItemDef = {
   icon: React.ComponentType<{ className?: string }>;
 };
 
-const filterItems: NavItemDef[] = [
+/** Primary scan path — keep ≤4 so first paint asks to act, not classify. */
+const primaryFilterItems: NavItemDef[] = [
   { id: "all", labelKey: "nav.all", icon: LayoutGrid },
   { id: "downloading", labelKey: "nav.downloading", icon: Download },
-  { id: "queue", labelKey: "nav.queue", icon: ListOrdered },
   { id: "attention", labelKey: "nav.attention", icon: CircleAlert },
-  { id: "paused", labelKey: "nav.paused", icon: PauseCircle },
   { id: "completed", labelKey: "nav.completed", icon: CheckCircle2 },
+];
+
+/** Secondary views — still reachable via More + command palette + shortcuts. */
+const secondaryFilterItems: NavItemDef[] = [
+  { id: "queue", labelKey: "nav.queue", icon: ListOrdered },
+  { id: "paused", labelKey: "nav.paused", icon: PauseCircle },
   { id: "failed", labelKey: "nav.failed", icon: AlertCircle },
 ];
 
@@ -93,6 +98,11 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
     failed: taskStats.failed,
   };
 
+  const secondaryActive = secondaryFilterItems.some((item) => item.id === nav);
+  const secondaryNeedsAttention = (counts.failed ?? 0) > 0 || (counts.queue ?? 0) > 0;
+  const mobileMoreActive =
+    secondaryActive || nav === "queue" || nav === "paused" || nav === "failed" || nav === "settings" || nav === "about";
+
   return (
     <RegionContextMenu
       items={
@@ -136,7 +146,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
             {t("nav.filters")}
           </span>
 
-          {filterItems.map((item) => (
+          {primaryFilterItems.map((item) => (
             <NavItem
               key={item.id}
               item={item}
@@ -144,7 +154,6 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
               label={t(item.labelKey)}
               count={counts[item.id] ?? 0}
               compact={collapsed}
-              mobileHidden={item.id === "paused" || item.id === "queue" || item.id === "attention"}
               onClick={() => setNav(item.id)}
               contextMenuItems={
                 <MenuItem
@@ -156,6 +165,62 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
               }
             />
           ))}
+
+          {/* Desktop/tablet: secondary views behind More */}
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                aria-label={t("nav.moreViews")}
+                aria-current={secondaryActive ? "page" : undefined}
+                className={cn(
+                  "relative hidden h-11 min-w-10 flex-1 gap-1.5 px-1 text-xs md:flex",
+                  "md:h-10 md:w-full md:flex-none md:flex-col md:items-start md:justify-start md:gap-1 md:px-1",
+                  "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
+                  collapsed && "lg:justify-center lg:px-0",
+                  "transition-[color,background-color,box-shadow,border-color] duration-[var(--motion-ui)] ease-out",
+                  secondaryActive
+                    ? [
+                        "bg-accent-primary/15 font-medium text-accent-primary dark:bg-accent-primary/20",
+                        "shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
+                      ]
+                    : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
+                )}
+              >
+                <MoreHorizontal className="h-[18px] w-[18px] shrink-0" aria-hidden />
+                <span
+                  className={cn(
+                    "hidden max-w-16 truncate text-[10px] leading-tight md:inline md:max-w-none lg:text-sm lg:leading-normal",
+                    collapsed && "lg:hidden",
+                  )}
+                >
+                  {t("nav.moreViews")}
+                </span>
+                {secondaryNeedsAttention ? (
+                  <span
+                    className={cn(
+                      "absolute right-1.5 top-1 h-2 w-2 rounded-full bg-status-danger md:block",
+                      collapsed ? "lg:block" : "lg:hidden",
+                    )}
+                    aria-hidden
+                  />
+                ) : null}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" side="right" className="hidden w-52 p-1 md:block">
+              {secondaryFilterItems.map((item) => (
+                <MobileNavMenuItem
+                  key={item.id}
+                  item={item}
+                  label={t(item.labelKey)}
+                  active={nav === item.id}
+                  count={counts[item.id] ?? 0}
+                  onClick={() => setNav(item.id)}
+                />
+              ))}
+            </PopoverContent>
+          </Popover>
         </div>
 
         {/* ── Separator + Settings + Collapse toggle (bottom on md+) ── */}
@@ -182,50 +247,39 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
             onClick={() => setNav("about")}
           />
 
+          {/* Mobile bottom-bar overflow */}
           <Popover>
             <PopoverTrigger asChild>
               <Button
                 type="button"
                 variant="ghost"
                 aria-label={t("nav.more")}
-                aria-current={
-                  nav === "queue" || nav === "attention" || nav === "paused" || nav === "settings" || nav === "about"
-                    ? "page"
-                    : undefined
-                }
+                aria-current={mobileMoreActive ? "page" : undefined}
                 className={cn(
                   "relative h-11 min-w-10 flex-1 flex-col gap-0.5 px-1 text-[10px] md:hidden",
-                  nav === "queue" || nav === "attention" || nav === "paused" || nav === "settings" || nav === "about"
+                  mobileMoreActive
                     ? "bg-accent-primary/15 font-medium text-accent-primary shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]"
                     : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
                 )}
               >
                 <MoreHorizontal className="h-[18px] w-[18px]" aria-hidden />
                 <span>{t("nav.more")}</span>
+                {secondaryNeedsAttention ? (
+                  <span className="absolute right-1.5 top-1 h-2 w-2 rounded-full bg-status-danger" aria-hidden />
+                ) : null}
               </Button>
             </PopoverTrigger>
             <PopoverContent align="end" side="top" className="w-52 p-1 md:hidden">
-              <MobileNavMenuItem
-                item={filterItems[2]}
-                label={t(filterItems[2].labelKey)}
-                active={nav === "queue"}
-                count={counts.queue}
-                onClick={() => setNav("queue")}
-              />
-              <MobileNavMenuItem
-                item={filterItems[3]}
-                label={t(filterItems[3].labelKey)}
-                active={nav === "attention"}
-                count={counts.attention}
-                onClick={() => setNav("attention")}
-              />
-              <MobileNavMenuItem
-                item={filterItems[4]}
-                label={t(filterItems[4].labelKey)}
-                active={nav === "paused"}
-                count={counts.paused}
-                onClick={() => setNav("paused")}
-              />
+              {secondaryFilterItems.map((item) => (
+                <MobileNavMenuItem
+                  key={item.id}
+                  item={item}
+                  label={t(item.labelKey)}
+                  active={nav === item.id}
+                  count={counts[item.id] ?? 0}
+                  onClick={() => setNav(item.id)}
+                />
+              ))}
               <MobileNavMenuItem
                 item={settingsItem}
                 label={t(settingsItem.labelKey)}

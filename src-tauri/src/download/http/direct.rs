@@ -99,7 +99,16 @@ pub(super) async fn run_direct_download(
                 Err(_) => return Err("Connection stalled: no data received for 60 seconds.".to_string()),
             }
         };
-        speed_limiter.throttle(chunk.len()).await;
+        if speed_limiter
+            .throttle(chunk.len(), &cancel_token)
+            .await
+            .is_err()
+        {
+            file.flush()
+                .await
+                .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
+            return Ok(downloaded);
+        }
         file.write_all(&chunk).await.map_err(|e| {
             AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
                 .command_error()

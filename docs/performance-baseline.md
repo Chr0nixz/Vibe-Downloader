@@ -1,210 +1,187 @@
 # 性能基线
 
-最后更新：2026-06-29（E-5 阶段 10 落地）
+最后更新：2026-07-19
 
-本文件记录 Vibe Downloader `0.2.0` 的性能压测工具、方法论与基线数据。目的是让后续性能回归有可对比的参照点，并把"1k/10k/50k 任务库是否可用"从主观感受转化为可重复执行的步骤。
+适用版本：Vibe Downloader `0.3.0`
 
----
+状态：测量方法和数据模板已建立，尚未形成可用于回归门禁的生产规模实测基线。
 
-## 1. 压测工具：`seed_scale_tasks`
+本文只记录可重复的性能测量。当前风险优先级见 [project-improvement-audit.md](project-improvement-audit.md) 的 `PERF-01` 至 `PERF-11`；没有硬件、OS、构建模式、数据分布和重复次数的单次数字不能作为性能结论。
 
-### 1.1 定位
+## 1. 当前已知事实
 
-`seed_scale_tasks` 是 **debug-only** 的参数化 seed 命令，用于生成生产规模的 SQLite 任务库。实现在 [src-tauri/src/commands/tasks/mock_seed.rs](../src-tauri/src/commands/tasks/mock_seed.rs)，受 `#[cfg(debug_assertions)]` 保护，release 构建中不存在（已通过 `cargo check --release` 验证）。
+- 前端使用游标分页和 `@tanstack/react-virtual`，避免首次加载和渲染全部历史任务。
+- Rust 进度事件由 `TaskProgressEmitGate` 限制到至少 250ms，前端按批次应用进度更新。
+- SQLite 使用 WAL；request diagnostics 已有按年龄和每任务条数的清理策略。
+- HTTP client 按全局代理 fingerprint 复用，但逐任务代理 client 仍未贯通，不能用当前 client cache 数据评价最终设计。
+- HLS AES-CBC 主路径采用流式解密，不需要同时保留完整 ciphertext 和 plaintext。
+- 2026-07-18 至 2026-07-19 的验证中，421 项 Rust 测试和 65 项前端测试通过，typecheck、build、cargo check 和严格 Clippy 通过；这些结果证明功能回归可运行，不代表性能达标。
 
-### 1.2 调用约定
+当前没有以下实测数据：
+
+- 1k、10k、50k、100k 或更大任务库的冷启动与首屏时间。
+- 搜索、筛选和排序的 p50/p95 与 SQLite query plan。
+- 长时间 HLS、BT、事件表、WAL、缓存和文件句柄增长曲线。
+- 100 个活动任务的 CPU、RSS、DB write rate、事件率和 UI FPS。
+- 1k 文件删除、1k 文件 torrent 和大量分段任务的响应时间。
+- release `opt-level="s"` 与 `opt-level="3"` 在 hash、AES、XML 和 BT 热点上的对比。
+- 前端 chunk 的 raw、gzip、brotli 预算及其与启动时间的关系。
+
+## 2. 当前待测热点
+
+| Audit ID | 热点 | 测量重点 |
+| --- | --- | --- |
+| `PERF-01` | 三字段 `LOWER(...) LIKE '%term%'` | query plan、p50/p95、输入取消和 DB pool 占用 |
+| `PERF-02` | TaskDetails 非相关 tab 轮询 segments | IPC 次数、重叠请求数、DB 查询时间 |
+| `PERF-03` | 每批进度构造全任务 Map | loaded task 数量与 CPU/GC 的关系 |
+| `ARC-13` | BT task progress 复制完整 files | 100、1k、10k 文件的 payload 和 heap |
+| `PERF-04` | HLS key/init-map 重复请求与竞争 | 请求次数、磁盘操作、并发 worker 数 |
+| `PERF-05` | files-version cache 和 task events 保留 | 24h/7d 内存、行数、WAL 大小 |
+| `PERF-06` | async 热路径同步文件系统调用 | 慢盘/网络盘下 runtime stall |
+| `PERF-07` | 用户完成命令同步等待 | 挂起命令对 Tokio worker 和调度的影响 |
+| `PERF-08` | SystemTime token refill 和 CAS 竞争 | 时钟变化、连接公平性、吞吐误差 |
+| `PERF-09` | release profile 尺寸优化 | 二进制体积、启动、hash/AES/XML/BT 吞吐 |
+| `PERF-10` | 无 bundle budget | raw/gzip/brotli 体积、解析、执行和首交互时间 |
+
+## 3. 数据生成工具
+
+Debug 构建暴露 `seed_scale_tasks`，用于生成任务、文件、work unit 和 request diagnostics。该命令必须保持 debug-only，不能注册到 release 构建。
+
+输入模型：
 
 ```ts
-// bindings.ts
-seedScaleTasks: (
-  distribution: ScaleStateDistribution,
-  clearBefore: boolean | null,
-) => Promise<number>
-
-export type ScaleStateDistribution = {
-  queued: number       // i32，生成 Queued 任务数
-  downloading: number // i32，生成 Downloading 任务数
-  completed: number    // i32，生成 Completed 任务数
-  failed: number       // i32，生成 Failed 任务数
-}
+type ScaleSeedInput = {
+  queued: number;
+  downloading: number;
+  completed: number;
+  failed: number;
+};
 ```
 
-- `clearBefore = true`：先 `db::clear_tasks` 清库再写入。
-- `clearBefore = false`（默认）：追加模式，`index` 按 `SELECT COUNT(*) FROM tasks` 偏移，保证 `source_key` 唯一约束不冲突。
-- 返回值：本次实际写入的任务数（`u32`，映射到 TS `number`，避免 Specta BigInt 限制）。
+调用约定：
 
-### 1.3 生成的关联数据
+- `clearBefore = true`：先清空现有任务，再生成数据。
+- `clearBefore = false`：追加数据。
+- 总任务数硬上限为 50,000；更大规模测试需要专用 fixture 或提升工具上限，并记录修改。
+- 每批插入应保持事务化和确定性分布，避免数据生成时间主导应用测量。
 
-每条任务除了 `tasks` 行之外，还会写入：
+示例：
 
-| 状态 | `task_files` | `task_work_units`（segments） | `task_events` | `task_request_diagnostics` |
-| --- | --- | --- | --- | --- |
-| Queued | 1 | 0（未规划） | 1（task_created） | 0 |
-| Downloading | 1 | 4（含进度） | 2（task_created + state_change） | 2 |
-| Completed | 1 | 4（全部 Completed） | 2 | 2 |
-| Failed | 1 | 4（前 2 Completed，后 2 Failed） | 2 | 2 |
-
-Failed 任务额外携带：
-- `error_message = "Connection reset by peer"`
-- `error_code = "http_request_failed"`
-- 后 2 个 segment 的 `last_error` 同步填充
-
-### 1.4 确定性与变化
-
-- `total_size = 100 MB + (index % 10) * 45 MB`，范围 100–505 MB，避免均匀数据集。
-- `source_key = "scale-{index}.example.com"`，唯一。
-- `url = "https://scale-{index}.example.com/file.bin"`。
-- 时间戳统一为 `seed_scale_data` 调用时刻的 ISO 时间，避免 50k 行写入期间时间漂移。
-- 4 个 segment 的 range 在 `[0, total_size)` 上等分并连续（`range_end` 收敛到 `total_size`）。
-
-### 1.5 单元测试覆盖
-
-8 项测试位于 [src-tauri/tests/scale_seed.rs](../src-tauri/tests/scale_seed.rs)：
-
-1. `generates_correct_total_count`
-2. `generates_correct_state_distribution`
-3. `clear_before_wipes_existing_tasks`
-4. `append_mode_preserves_existing_tasks`
-5. `generates_segments_for_non_queued_tasks`
-6. `generates_events_for_all_tasks`
-7. `generates_request_diagnostics_for_non_queued_tasks`
-8. `failed_tasks_have_error_metadata`
-
----
-
-## 2. 推荐压测场景
-
-| 规模 | distribution（queued, downloading, completed, failed） | 用途 | 运行环境 |
-| --- | --- | --- | --- |
-| 1k | (250, 250, 400, 100) | CI 回归基线 | CI（Linux stable） |
-| 10k | (2000, 2000, 5000, 1000) | 日常开发本机压测 | 本地 |
-| 50k | (10000, 5000, 30000, 5000) | 内存上限与极限滚动 | 本地高性能机 |
-
-调用示例（dev 模式下通过 Tauri devtools console）：
-
-```js
-// 1k 场景，先清库
-await window.__TAURI__.seedScaleTasks(
-  { queued: 250, downloading: 250, completed: 400, failed: 100 },
-  true,
-)
-
-// 追加 10k 到现有 1k 上（共 11k）
+```ts
 await window.__TAURI__.seedScaleTasks(
   { queued: 2000, downloading: 2000, completed: 5000, failed: 1000 },
-  false,
-)
+  true,
+);
 ```
 
----
+相关测试：[`src-tauri/tests/scale_seed.rs`](../src-tauri/tests/scale_seed.rs)。
 
-## 3. 手工测量方法论
+## 4. 测试矩阵
 
-以下指标需要在本机运行 `pnpm tauri dev` 后人工测量并填入"基线数据"小节。当前轮次未在 CI 中自动化采集，留作后续 GUI 自动化或 devtools trace 接入后再补全。
+每个规模至少重复 5 次，冷启动取中位数并保留全部原始样本；持续运行场景至少运行 30 分钟，发布候选应补 8 小时 soak。
 
-### 3.1 冷启动首屏耗时
+| 场景 | 数据规模 | 指标 |
+| --- | --- | --- |
+| 冷启动和首屏 | 0、1k、10k、50k tasks | process start、first paint、可交互、首个任务页 IPC、RSS |
+| 搜索 | 10k、50k、100k tasks | p50/p95、query plan、取消旧请求、主线程长任务 |
+| 筛选和排序 | 10k、50k tasks | p50/p95、payload、临时排序、cursor 正确性 |
+| 连续滚动 | 50k tasks | 平均/最低 FPS、长任务、heap、DOM 节点数 |
+| 详情页 | 1k tasks，含 diagnostics | tab 首开、轮询次数、重叠请求、关闭后清理 |
+| 活动下载 | 10、50、100 mixed tasks | CPU、RSS、网络、DB writes/s、events/s、UI FPS |
+| 大 torrent | 100、1k、10k files | snapshot 大小、per-file 更新、heap、渲染时间 |
+| 长 HLS/BT | 30min、8h | RSS、句柄、task events、WAL、临时文件、子进程 |
+| 批量删除 | 100、1k tasks/files | 总耗时、UI 响应、部分失败、取消和磁盘队列 |
+| Hash/AES/XML | 1GB fixture/大型 manifest | MB/s、CPU、峰值 RSS、profile 对比 |
 
-1. 删除 `%LOCALAPPDATA%\com.vibe-downloader.vibe-downloader`（或等价目录）。
-2. `pnpm tauri dev`，从 cargo 编译完成到任务列表渲染出第一屏可交互任务。
-3. 用 devtools Performance 录制，取 `first paint` 到 `largest contentful paint` 的时间。
-4. 分别在 1k / 10k / 50k 任务库下重复 3 次取中位数。
+## 5. 测量方法
 
-### 3.2 任务列表滚动 FPS
+### 5.1 构建模式
 
-1. 在 50k 任务库下打开任务列表。
-2. devtools Performance → Record。
-3. 用滚轮连续滚动 10 秒，覆盖至少 500 行跨度。
-4. 取平均 FPS 与最低 FPS。
+至少记录以下三种模式，不能把 dev 数据当作 release 数据：
 
-### 3.3 筛选响应
+1. `pnpm tauri dev`，用于定位和 DevTools trace。
+2. 未签名 release candidate，用于真实启动、CPU 和 RSS。
+3. 对照 profile，仅用于 `opt-level` 或特定优化实验。
 
-1. 在 50k 任务库下，从"全部"切到"Completed"。
-2. devtools Performance → Record，记录从点击到列表稳定的时间。
-3. 重复 3 次取中位数。
+### 5.2 冷启动
 
-### 3.4 详情页 Requests tab 打开时间
+1. 为每个规模准备固定数据库快照。
+2. 完全退出应用，确认无残留 worker 或 WebView 进程。
+3. 从进程创建开始计时，记录窗口首次显示、首屏任务出现和输入可响应时间。
+4. 记录 SQLite 文件、WAL 大小、RSS 和 CPU 峰值。
+5. 每个规模运行 5 次，第一轮冷缓存和后续暖缓存分开报告。
 
-1. 选中一个有 2 条 request diagnostics 的 Failed 任务。
-2. 打开 TaskDetails → Requests tab。
-3. devtools Performance → Record，记录从点击 tab 到渲染完成的时间。
+### 5.3 搜索、筛选和排序
 
-### 3.5 内存峰值
+1. 保存 `EXPLAIN QUERY PLAN`。
+2. 使用短、高频和无匹配关键词，覆盖 filename、URL 和 source key。
+3. 连续输入并快速切换筛选，确认旧请求取消且最终查询正确。
+4. 记录 IPC、DB、React commit 和主线程总时间。
 
-1. 重启 app，记录 devtools Memory → Heap snapshot 的初始大小。
-2. 加载 50k 任务库，再次取 Heap snapshot。
-3. 取差值作为"50k 任务库增量内存"。
+### 5.4 滚动和交互
 
----
+1. 在固定窗口尺寸和缩放率下连续滚动 10 秒。
+2. 记录平均 FPS、最低 FPS、long task、React commit 和 heap delta。
+3. 分别测试普通列表、Queue Center、Attention Center 和打开详情面板的布局。
 
-## 4. 内存评估：`task-data-store` 全量 `taskById` map
+### 5.5 长时间运行
 
-### 4.1 数据结构
+1. 固定协议混合、连接数、限速和事件频率。
+2. 每分钟记录 RSS、CPU、句柄、SQLite/WAL、task_events、request diagnostics、cache entries 和临时文件。
+3. 在运行中执行暂停、恢复、删除、网络断开、代理失败和应用退出。
+4. 结束后确认没有 ffmpeg、BT session、worker、句柄或 staging 文件残留。
 
-[src/stores/task-data-store.ts](../src/stores/task-data-store.ts) 第 198 行：
+## 6. 结果记录模板
 
-```ts
-taskById: Record<string, Task>;
+每次基线提交都填写：
+
+```text
+Date:
+Git commit / worktree note:
+App version:
+OS and build:
+CPU / RAM / disk:
+Node / Rust / WebView version:
+Build profile:
+Dataset seed and distribution:
+Repetitions:
+
+Metric                 p50       p95       peak/min       notes
+Cold start
+First interactive
+Search
+Filter
+Scroll FPS
+RSS
+CPU
+DB writes/s
+Events/s
+WAL size
+Open handles
+Bundle raw/gzip/brotli
 ```
 
-`Task` 类型定义在 [src/types/task.ts](../src/types/task.ts)，是基于 Specta 生成的 `GeneratedTask` 的 Omit + 扩展，将 `totalSize` / `downloadedBytes` / `speedBps` 从 string 归一化为 number，并附加 `files: TaskFile[]`。
+原始 trace、query plan 和采样 CSV 应作为 CI artifact 或 release evidence 保存，不要只把汇总数字写入本文。
 
-### 4.2 单条 Task 估算
+## 7. 暂定预算
 
-`Task` 共 38 个字段（参考 [src/generated/bindings.ts](../src/generated/bindings.ts) 第 619–661 行）。按字段类型估算 V8 堆占用：
+以下只是建立门禁前的初始目标，第一次真实测量后必须校准：
 
-| 字段类别 | 示例 | 估算单条占用 |
-| --- | --- | --- |
-| UUID 字符串（36 字符） | `id` | ~96 B |
-| URL / 文件名字符串（avg 30–50 字符） | `url`, `fileName`, `saveDir`, `sourceKey` | 4 × ~100 B = ~400 B |
-| ISO 时间字符串（25 字符） | `createdAt`, `updatedAt` | 2 × ~74 B = ~148 B |
-| 可空字符串（多数为 null） | `tempPath`, `finalPath`, `etag`, `lastModified`, `contentType`, `errorMessage`, `errorCode`, `retryAfterAt`, `expectedHashSha256`, `actualHashSha256`, `hashError`, `hashVerifiedAt`, `healthSummary`, `categoryKey`, `failureCategory`, `taskSpeedLimitBps`, `finalUrl` | 17 × 8 B（null） = ~136 B（非空时增加） |
-| 数值 / 布尔 | `connectionCount`, `supportsResume`, `supportsParallel`, `supportsMultiFile`, `obeySchedule`, `hashStatus` | 6 × 8 B = ~48 B |
-| 枚举字符串 | `status`, `taskKind`, `priority`, `hashStatus` | 4 × ~44 B = ~176 B |
-| 字节量字符串（数字转 string） | `totalSize`, `downloadedBytes`, `speedBps`, `queuePosition` | 4 × ~44 B = ~176 B |
-| 空数组 | `recoveryActions`, `checksums` | 2 × ~32 B = ~64 B |
-| `files: TaskFile[]`（1 条单文件任务） | 见下 | ~250 B |
-| V8 对象开销（隐藏类 + 属性槽） | — | ~200 B |
+| 指标 | 暂定目标 |
+| --- | --- |
+| 10k 任务搜索 p95 | 小于 100ms DB 时间 |
+| 50k 连续滚动 | 平均不低于 55 FPS，最低不低于 30 FPS |
+| 非活动详情 tab | 0 次无关轮询 |
+| 长时间空闲内存 | 达到稳定平台，不持续线性增长 |
+| 取消和退出 | 目标时限内无残留 worker、子进程和文件写入 |
+| HLS 共享 key/map | 每个 URI 每任务最多一次成功获取和发布 |
+| 进度通知 | 工作量与 changed IDs 近似线性 |
 
-**单条 Task（含 1 个 TaskFile，无 checksums/recoveryActions）估算：~1.7 KB**
+这些预算不是公开 SLA。任何平台无法达到时，应记录真实数据和取舍，而不是删除失败样本。
 
-`TaskFile` 约 11 个字段（`id`, `taskId`, `relativePath`, `fileName`, `saveDir`, `tempPath`, `finalPath`, `totalSize`, `downloadedBytes`, `selected`, `status`, `contentType`），估算 ~750 B 含 V8 对象开销；1 条文件场景下 ~250 B 已足够（多数字段为 null 或短串）。
+## 8. 更新规则
 
-### 4.3 全量 map 估算
-
-| 规模 | `taskById` 条目数 | 增量内存估算（不含 React 组件、虚拟滚动 buffer、speed-history） |
-| --- | --- | --- |
-| 1k | 1,000 | ~1.7 MB |
-| 10k | 10,000 | ~17 MB |
-| 50k | 50,000 | ~85 MB |
-
-V8 `Record`（底层 `OrderedHashTable`）的属性槽开销约 50 B/槽，50k 条额外 ~2.5 MB，已计入上表。
-
-### 4.4 风险评估
-
-- **50k 任务库 ~85 MB** 在主流 16 GB+ 桌面机上可接受，但已接近"全量 map"模式的合理上限。
-- 真实增量会更高：React 组件状态、虚拟滚动 overscan buffer、`speed-history-store`（每任务 60 samples × 8 B = 480 B/task → 50k × 480 B ≈ 23 MB）、Tauri IPC 序列化缓冲。
-- **建议**：50k 以上规模需要切换到"按页懒加载 + cursor pagination 到 DB"的模式，把 `taskById` 改为 LRU cache（容量 1k–2k）。**当前不实施**，留作后续架构调整，参考 [docs/architecture-audit.md](architecture-audit.md) E-5 章节的后续优化建议。
-
----
-
-## 5. 已验证项
-
-本轮（2026-06-29）已通过自动化验证的内容：
-
-- **`seed_scale_tasks` 正确性**：8 项单元测试全部通过（见 [src-tauri/tests/scale_seed.rs](../src-tauri/tests/scale_seed.rs)）。
-- **release 构建隔离**：`cargo check --release` 成功，确认 debug-only 命令不会泄露到 release。
-- **全量 Rust 回归**：`cargo test --no-fail-fast` 314 项通过，0 失败。
-- **clippy**：`cargo clippy --tests -- -D warnings` 清洁。
-- **前端类型与构建**：`pnpm typecheck`、`pnpm test:frontend`（18 项）、`pnpm build` 均通过。
-- **bindings 一致性**：`pnpm specta` 重新生成 `src/generated/bindings.ts` 后，与 Rust 命令注册完全一致。
-
----
-
-## 6. 后续步骤
-
-| 项 | 状态 | 说明 |
-| --- | --- | --- |
-| 1k 规模 CI 集成 | 待办 | 需要新增 `cargo test --test scale_seed` 到 `.github/workflows/` 的 nightly 或 ci job |
-| 10k / 50k 本机基线数据采集 | 待办 | 需要在真实开发机上按 §3 方法论测量并回填本文件 |
-| `taskById` LRU 改造 | 评估中 | 50k 任务 ~85 MB 已接近上限，未来若用户反馈卡顿需优先实施 |
-| GUI 自动化 trace 采集 | 待办 | 评估 Playwright / Tauri devtools protocol 自动化 FPS 采集可行性 |
+- 性能修复必须提供修复前后相同环境的对比。
+- 先证明热点再引入 FTS、LRU、拆包或 profile override。
+- 功能正确性、数据完整性和取消收敛优先于吞吐数字。
+- 基线结果变化后同步主审计对应 `PERF-*` 状态，但不要删除历史测量。

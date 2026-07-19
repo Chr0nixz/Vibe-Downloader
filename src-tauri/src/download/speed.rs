@@ -6,6 +6,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use tokio_util::sync::CancellationToken;
+
 /// Returns the current time as milliseconds since the Unix epoch.
 /// Used for atomic timestamp storage without requiring a Mutex.
 fn now_millis() -> u64 {
@@ -99,23 +101,32 @@ impl GlobalSpeedLimiter {
         }
     }
 
-    pub async fn throttle(&self, bytes: usize) {
+    /// Acquire `bytes` permits from the token bucket.
+    ///
+    /// ARC-04: waits are cancellable so pause/delete/exit can converge under
+    /// very low limits (e.g. 1 B/s) instead of sleeping for hours.
+    pub async fn throttle(&self, bytes: usize, cancel: &CancellationToken) -> Result<(), ()> {
         if let Some(parent) = &self.parent {
-            self.throttle_self(bytes).await;
-            parent.throttle_self(bytes).await;
+            self.throttle_self(bytes, cancel).await?;
+            parent.throttle_self(bytes, cancel).await?;
         } else {
-            self.throttle_self(bytes).await;
+            self.throttle_self(bytes, cancel).await?;
         }
+        Ok(())
     }
 
-    async fn throttle_self(&self, bytes: usize) {
+    async fn throttle_self(&self, bytes: usize, cancel: &CancellationToken) -> Result<(), ()> {
         let mut remaining = bytes as i64;
         let mut spin_count = 0u32;
 
         while remaining > 0 {
+            if cancel.is_cancelled() {
+                return Err(());
+            }
+
             let limit = self.limit_bps.load(Ordering::Relaxed);
             if limit <= 0 {
-                return;
+                return Ok(());
             }
 
             // Only the thread that wins the `last_refill_millis` CAS performs the refill;
@@ -166,17 +177,24 @@ impl GlobalSpeedLimiter {
                 let deficit_milli = request_milli - current;
                 // wait_ms = deficit_milli / limit (milli-bytes / bytes-per-sec = ms)
                 let wait_ms = (((deficit_milli as f64) / (limit as f64)) as u64).clamp(1, 250);
-                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err(()),
+                    _ = tokio::time::sleep(Duration::from_millis(wait_ms)) => {}
+                }
                 spin_count = 0;
                 continue;
             }
 
             spin_count += 1;
             if spin_count >= 4 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err(()),
+                    _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
                 spin_count = 0;
             }
         }
+        Ok(())
     }
 }
 
@@ -187,15 +205,23 @@ mod tests {
     #[tokio::test]
     async fn test_throttle_no_limit() {
         let limiter = GlobalSpeedLimiter::new(None);
+        let cancel = CancellationToken::new();
         // With no limit (0), throttle should return immediately.
-        limiter.throttle(1_000_000).await;
+        limiter
+            .throttle(1_000_000, &cancel)
+            .await
+            .expect("unlimited throttle");
     }
 
     #[tokio::test]
     async fn test_throttle_with_limit() {
         let limiter = GlobalSpeedLimiter::new(Some(1_000_000)); // 1 MB/s
-                                                                // Should be able to consume up to the limit immediately (tokens pre-filled).
-        limiter.throttle(500_000).await;
+        let cancel = CancellationToken::new();
+        // Should be able to consume up to the limit immediately (tokens pre-filled).
+        limiter
+            .throttle(500_000, &cancel)
+            .await
+            .expect("limited throttle");
         // Remaining tokens should be ~500_000.
         let tokens = limiter.tokens_milli.load(Ordering::Relaxed);
         assert!(tokens < 1_000_000_000, "tokens should have been consumed");
@@ -204,12 +230,32 @@ mod tests {
     #[tokio::test]
     async fn test_set_limit_resets_tokens() {
         let limiter = GlobalSpeedLimiter::new(Some(1_000_000));
+        let cancel = CancellationToken::new();
         // Consume some tokens.
-        limiter.throttle(500_000).await;
+        limiter
+            .throttle(500_000, &cancel)
+            .await
+            .expect("consume tokens");
         // Change limit — should reset tokens to the new full bucket.
         limiter.set_limit(Some(2_000_000)).await;
         let tokens = limiter.tokens_milli.load(Ordering::Relaxed);
         assert_eq!(tokens, 2_000_000_000, "tokens should be reset to new limit");
+    }
+
+    #[tokio::test]
+    async fn throttle_cancels_during_low_rate_wait() {
+        // ARC-04: 1 B/s wait must exit promptly when cancelled.
+        let limiter = GlobalSpeedLimiter::new(Some(1));
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let handle = tokio::spawn(async move { limiter.throttle(10_000, &cancel_clone).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("throttle cancel must converge quickly")
+            .expect("join");
+        assert!(result.is_err(), "throttle should report cancellation");
     }
 
     #[tokio::test]

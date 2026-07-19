@@ -111,6 +111,47 @@ pub async fn upsert_task_proxy_settings(
     get_task_proxy_settings(pool, &input.task_id).await
 }
 
+/// FUN-02: Resolve a create/probe-time proxy override without a task id yet.
+pub fn resolve_probe_proxy_config(
+    global: &ResolvedProxyConfig,
+    protocol: &str,
+    mode: Option<TaskProxyMode>,
+    proxy_url: Option<&str>,
+    proxy_username: Option<&str>,
+    proxy_password: Option<&str>,
+    no_proxy: Option<&str>,
+) -> Result<ResolvedProxyConfig, String> {
+    let mode = mode.unwrap_or(TaskProxyMode::Inherit);
+    match mode {
+        TaskProxyMode::Inherit => Ok(global.clone()),
+        TaskProxyMode::Off => Ok(ResolvedProxyConfig::default()),
+        TaskProxyMode::Custom => {
+            let url = proxy_url
+                .and_then(proxy::normalize_proxy_url)
+                .ok_or_else(|| proxy_protocol_error(protocol, "Custom proxy URL is invalid."))?;
+            validate_task_proxy_protocol(protocol, &url)?;
+            let username = proxy_username
+                .and_then(proxy::normalize_proxy_optional)
+                .unwrap_or_default();
+            proxy::validate_proxy_settings(AppProxyMode::Custom, &url, &username)?;
+            Ok(ResolvedProxyConfig {
+                mode: AppProxyMode::Custom,
+                url: Some(url),
+                no_proxy: no_proxy.and_then(proxy::normalize_proxy_no_proxy),
+                username: if username.is_empty() {
+                    None
+                } else {
+                    Some(username)
+                },
+                password: proxy_password
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+            })
+        }
+    }
+}
+
 pub async fn resolve_task_proxy_config(
     pool: &SqlitePool,
     task_id: &str,
@@ -296,5 +337,55 @@ mod tests {
         let decrypt = proxy_secret_decrypt_error("boom".to_string());
         assert!(encrypt.contains("proxy_secret_encrypt_failed"));
         assert!(decrypt.contains("proxy_secret_decrypt_failed"));
+    }
+
+    #[test]
+    fn resolve_probe_proxy_config_supports_inherit_off_custom() {
+        let global = ResolvedProxyConfig {
+            mode: AppProxyMode::Custom,
+            url: Some("http://global.proxy:8080".to_string()),
+            no_proxy: None,
+            username: None,
+            password: Some("secret".to_string()),
+        };
+        let inherit = resolve_probe_proxy_config(
+            &global,
+            "http",
+            Some(TaskProxyMode::Inherit),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("inherit");
+        assert_eq!(inherit.url.as_deref(), Some("http://global.proxy:8080"));
+        assert!(inherit.fingerprint().contains("global.proxy"));
+        assert!(!inherit.fingerprint().contains("secret"));
+
+        let off = resolve_probe_proxy_config(
+            &global,
+            "http",
+            Some(TaskProxyMode::Off),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("off");
+        assert_eq!(off.mode, AppProxyMode::Off);
+        assert_eq!(off.fingerprint(), "off");
+
+        let custom = resolve_probe_proxy_config(
+            &global,
+            "http",
+            Some(TaskProxyMode::Custom),
+            Some("socks5://task.proxy:1080"),
+            Some("user"),
+            Some("pass"),
+            None,
+        )
+        .expect("custom");
+        assert_eq!(custom.url.as_deref(), Some("socks5://task.proxy:1080"));
+        assert!(!custom.fingerprint().contains("pass"));
     }
 }

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use sqlx::{Executor, QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::models::{
@@ -572,6 +574,38 @@ pub async fn get_task_record_in_tx(
     .map_err(|e| e.to_string())?;
 
     row.as_ref().map(row_to_task).transpose()
+}
+
+/// Final paths already reserved by active tasks or selected task files.
+/// Used by ARC-02 path planning inside the create transaction.
+pub async fn list_reserved_final_paths<'e, E>(executor: E) -> Result<HashSet<String>, String>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let rows = sqlx::query(
+        r#"
+        SELECT final_path FROM tasks
+        WHERE final_path IS NOT NULL
+          AND final_path != ''
+          AND status IN ('queued', 'downloading', 'retrying', 'paused', 'waiting_network', 'needs_attention')
+        UNION
+        SELECT tf.final_path FROM task_files tf
+        INNER JOIN tasks t ON t.id = tf.task_id
+        WHERE tf.final_path IS NOT NULL
+          AND tf.final_path != ''
+          AND tf.selected = 1
+          AND t.status IN ('queued', 'downloading', 'retrying', 'paused', 'waiting_network', 'needs_attention')
+        "#,
+    )
+    .fetch_all(executor)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("final_path").ok())
+        .filter(|path| !path.is_empty())
+        .collect::<HashSet<_>>())
 }
 
 pub async fn find_duplicate_task_record<'e, E>(

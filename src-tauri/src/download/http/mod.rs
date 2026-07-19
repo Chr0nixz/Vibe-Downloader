@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 
 use super::GlobalSpeedLimiter;
 use crate::{
+    db,
     logging::sanitize_url,
     models::{EngineCapabilities, ProbedFile, TaskKind, TaskSegmentRecord},
     proxy::{AppProxyMode, ResolvedProxyConfig, SharedProxyConfig},
@@ -25,6 +26,7 @@ use self::{
     request::{send_get_with_retry, send_head_with_retry},
     segmented::run_segmented_download,
 };
+
 use super::engine::EngineFuture;
 use super::{DownloadContext, DownloadEngine, DownloadError, ProbeOutput, ProbeRequest};
 
@@ -92,22 +94,26 @@ impl HttpEngine {
         })
     }
 
-    /// Returns a cached `Client` for the current proxy configuration, building
-    /// one on first use. Reusing the client avoids repeated TCP/TLS handshakes
-    /// when multiple downloads target the same host.
+    /// Returns a cached `Client` for the current global proxy configuration.
     ///
     /// E-4: Exposes the shared cache to derived engines (HLS / DASH / Metalink / WebDAV),
     /// preventing them from calling `build_client()` to bypass the cache.
     pub async fn client(&self) -> Result<Client, String> {
-        let config = self.proxy_config.read().await;
-        let fingerprint = proxy_fingerprint(&config);
+        let config = self.proxy_config.read().await.clone();
+        self.client_for_config(&config).await
+    }
+
+    /// FUN-02: Return a cached client for an explicit resolved proxy config.
+    /// Task overrides (Inherit/Off/Custom) must use this instead of the global client.
+    pub async fn client_for_config(&self, config: &ResolvedProxyConfig) -> Result<Client, String> {
+        let fingerprint = config.fingerprint();
         {
             let cache = self.clients.read().await;
             if let Some(client) = cache.get(&fingerprint) {
                 return Ok(client.clone());
             }
         }
-        let client = build_client(&config)?;
+        let client = build_client(config)?;
         self.clients
             .write()
             .await
@@ -136,7 +142,21 @@ impl HttpEngine {
         url: &str,
         request_headers: &[(String, String)],
     ) -> Result<ProbeResult, String> {
-        let client = self.client().await?;
+        self.probe_with_headers_and_proxy(url, request_headers, None)
+            .await
+    }
+
+    pub async fn probe_with_headers_and_proxy(
+        &self,
+        url: &str,
+        request_headers: &[(String, String)],
+        proxy_config: Option<&ResolvedProxyConfig>,
+    ) -> Result<ProbeResult, String> {
+        let client = if let Some(config) = proxy_config {
+            self.client_for_config(config).await?
+        } else {
+            self.client().await?
+        };
         let sanitized = sanitize_url(url);
         let head = send_head_with_retry(&client, url, request_headers).await;
         if let Ok(response) = head {
@@ -191,9 +211,13 @@ impl HttpEngine {
     }
 
     pub async fn download(&self, context: DownloadContext) -> Result<(), String> {
-        // Use the cached client (keyed by proxy fingerprint) instead of building
-        // a fresh one per download. This reuses TCP/TLS connections across tasks.
-        let client = self.client().await?;
+        // FUN-02: use the task-resolved proxy from DownloadContext, not only global.
+        let client = self.client_for_config(&context.proxy_config).await?;
+        // FUN-01: inject Basic Auth from encrypted task credentials at runtime.
+        // Authorization is never persisted in task_request_headers.
+        let credentials = db::resolve_task_credentials(&context.pool, &context.task.id).await?;
+        let request_headers =
+            request::merge_basic_auth_headers(&context.request_headers, credentials.as_ref());
         run_segmented_download(segmented::SegmentedDownloadContext {
             client: &client,
             app: context.app,
@@ -202,7 +226,7 @@ impl HttpEngine {
             cancel_token: context.cancel_token,
             speed_limiter: context.speed_limiter,
             connection_limit: context.connection_limit,
-            request_headers: context.request_headers,
+            request_headers,
         })
         .await
     }
@@ -246,16 +270,6 @@ impl HttpEngine {
         )
         .await
     }
-}
-
-fn proxy_fingerprint(config: &ResolvedProxyConfig) -> String {
-    format!(
-        "{}|{}|{}|{}",
-        config.mode.as_str(),
-        config.url.as_deref().unwrap_or(""),
-        config.username.as_deref().unwrap_or(""),
-        config.no_proxy.as_deref().unwrap_or(""),
-    )
 }
 
 /// DNS resolver adapter wrapping hickory-resolver to implement reqwest's `Resolve` trait.
@@ -429,10 +443,27 @@ impl DownloadEngine for HttpEngine {
                 "connecting",
                 Some("http"),
             );
-            let probe =
-                HttpEngine::probe_with_headers(self, &request.uri, &request.request_headers)
+            // FUN-01: use ProbeRequest credentials when present; otherwise load
+            // from DB when a task_id is available (resume probe path).
+            let credentials = if request.credentials.is_some() {
+                request.credentials.clone()
+            } else if let (Some(pool), Some(task_id)) = (&request.pool, &request.task_id) {
+                db::resolve_task_credentials(pool, task_id)
                     .await
-                    .map_err(DownloadError::Other)?;
+                    .map_err(DownloadError::Other)?
+            } else {
+                None
+            };
+            let headers =
+                request::merge_basic_auth_headers(&request.request_headers, credentials.as_ref());
+            let probe = HttpEngine::probe_with_headers_and_proxy(
+                self,
+                &request.uri,
+                &headers,
+                request.proxy_config.as_ref(),
+            )
+            .await
+            .map_err(DownloadError::Other)?;
             Ok(ProbeOutput {
                 protocol: reqwest::Url::parse(&probe.final_url)
                     .map(|url| url.scheme().to_string())

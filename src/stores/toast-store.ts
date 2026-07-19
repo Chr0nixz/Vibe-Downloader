@@ -25,6 +25,12 @@ export interface AppToast {
    * `TOAST_TIMEOUT_MS` is used. Undo toasts should set this so the Undo
    * action stays reachable. */
   durationMs?: number;
+  /**
+   * Called when the toast leaves without Undo (timeout, dismiss X, or clear).
+   * Soft-delete commits hard delete here so hover-paused toast timers also
+   * delay the commit — one lifecycle, not a separate setTimeout.
+   */
+  onAutoCommit?: () => void;
 }
 
 interface ToastStore {
@@ -45,6 +51,11 @@ export const useToastStore = create<ToastStore>((set, get) => ({
     if (toast.key) {
       const existing = get().toasts.find((t) => t.key === toast.key);
       if (existing) {
+        // Replacing a soft-delete toast must still commit the previous action
+        // so pending deletes are not left without a commit path.
+        if (existing.onAutoCommit && existing.onAutoCommit !== toast.onAutoCommit) {
+          existing.onAutoCommit();
+        }
         set((state) => ({
           toasts: state.toasts.map((t) => (t.id === existing.id ? { ...t, ...toast } : t)),
         }));
@@ -65,5 +76,11 @@ export const useToastStore = create<ToastStore>((set, get) => ({
     set((state) => ({
       toasts: state.toasts.filter((toast) => toast.id !== id),
     })),
-  clearToasts: () => set({ toasts: [] }),
+  clearToasts: () => {
+    // Dismissing the stack accepts pending soft-deletes (same as X / timeout).
+    for (const toast of get().toasts) {
+      toast.onAutoCommit?.();
+    }
+    set({ toasts: [] });
+  },
 }));

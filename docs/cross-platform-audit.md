@@ -1,5 +1,7 @@
 # 跨平台能力审计
 
+> 历史快照：本文是 `0.2.0` 阶段的跨平台静态审计。当前发布阻断和验收顺序以 [project-improvement-audit.md](project-improvement-audit.md) 为准，实际发布操作以 [RELEASE.md](RELEASE.md) 为准。
+
 最后更新：2026-07-05
 
 本文基于当前仓库的静态代码与配置核查，聚焦 Vibe Downloader `0.2.0` 在 Windows、macOS、Linux 三个平台上的运行、打包、系统集成、浏览器集成、协议引擎与发布验证能力。本文不替代 [project-improvement-audit.md](project-improvement-audit.md) 的全局风险排序，也不替代 [RELEASE.md](RELEASE.md) 的发布操作说明；它只回答一个问题：当前项目离“可信的三平台桌面下载器”还有多远。

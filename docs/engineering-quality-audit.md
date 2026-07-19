@@ -1,5 +1,7 @@
 # 工程质量审计（测试 / CI / 迁移 / 依赖 / 文档 / 脚本）
 
+> 历史快照：本文针对 `0.2.0` 和指定提交后的工程状态，保留用于追溯，不代表 `0.3.0` 当前门禁结果。当前状态以 [project-improvement-audit.md](project-improvement-audit.md) 为准。
+
 最后更新：2026-07-02
 
 本文是 Vibe Downloader `0.2.0` 第三轮深度代码审查的「工程质量」分册，聚焦 b4ba790（+18866 行，*"feat: major protocol engine expansion, UI overhaul, and infrastructure hardening"*）提交之后的测试覆盖、CI 工作流、数据库迁移纪律、依赖健康、文档一致性与脚本/钩子质量，并核对构建配置与仓库卫生。

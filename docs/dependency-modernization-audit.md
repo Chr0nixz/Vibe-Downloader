@@ -1,5 +1,7 @@
 # Dependency Modernization Audit
 
+> Historical snapshot: this review records dependency decisions as of 2026-06-29. Recheck `package.json`, Cargo manifests, lockfiles, advisories, and current code before applying any recommendation. Active project priorities remain in [project-improvement-audit.md](project-improvement-audit.md).
+
 Date: 2026-06-29
 
 This document summarizes the current dependency review for Vibe Downloader and

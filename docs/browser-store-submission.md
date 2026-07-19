@@ -1,6 +1,6 @@
 # Browser Store Submission
 
-Last updated: 2026-07-10
+Last updated: 2026-07-19
 
 ## Release Scope
 
@@ -61,4 +61,4 @@ Submission archives and their checksums are written to `browser/dist/packages/`.
 - Submit the three generated packages and complete review.
 - Download the store-installed Chrome/Edge packages and AMO-signed Firefox XPI, then repeat Native Messaging acceptance testing.
 
-Until those external gates are complete, the repository is release-candidate ready but the public extension P0 remains externally blocked.
+The extension packaging path is candidate-ready, but the desktop repository still has active P0/P1 issues in [project-improvement-audit.md](project-improvement-audit.md). No public extension should be described as generally release-ready until both the external store gates and the desktop release gates are closed.

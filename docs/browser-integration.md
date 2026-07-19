@@ -1,8 +1,16 @@
 # Browser Integration
 
-Vibe Downloader 当前使用 Native Messaging 启动和引导浏览器集成，再通过本地 WebSocket 提供实时任务状态、设置同步和自动下载接管。没有建立 WebSocket 时，扩展仍会回退到 Native Messaging handoff。
+最后更新：2026-07-19
 
-浏览器 handoff 和自动接管当前只支持 HTTP/HTTPS URL。FTP/FTPS、magnet、HTTP/HTTPS `.torrent` URL 和本地 `file://*.torrent` 通过手动新建或剪贴板确认流程进入；HTTP/HTTPS `.torrent` 默认创建 BitTorrent 任务。
+Vibe Downloader 使用 Native Messaging 启动和引导浏览器集成，再通过本地 WebSocket 提供实时任务状态和设置同步。没有建立 WebSocket 时，扩展仍会回退到 Native Messaging handoff。
+
+所有 profile 都只接受 HTTP/HTTPS handoff。FTP/FTPS、SFTP、WebDAV scheme、magnet 和本地 `file://` 资源必须通过桌面应用的手动新建或剪贴板确认流程进入。
+
+浏览器构建 profile 的能力不同：
+
+- `candidate` 和 `release` 是最小权限手动交接包，不包含自动接管、Cookie/header 转发或全站 host permissions。
+- `dev` 默认同样是手动交接。只有显式设置 `VIBE_BROWSER_EXPERIMENTAL_CAPTURE=true` 才加入 `downloads`、`cookies`、`webRequest` 和 HTTP/HTTPS host permissions。
+- 当前站点规则中的 `ask` 不会弹出即时确认；capture ask 等同于不自动接管，header ask 等同于不读取或转发敏感 header。该行为由主审计 `FUN-14` 跟踪。
 
 ## 当前状态
 
@@ -16,15 +24,15 @@ Vibe Downloader 当前使用 Native Messaging 启动和引导浏览器集成，�
 - 单实例转发：应用已运行时，第二次启动参数会转发给现有实例。
 - SQLite `browser_messages` 表：request id 去重和错误诊断。
 - 本地 WebSocket bridge：扩展可读取实时任务快照、任务进度和队列变化。
-- 自动接管浏览器原生 HTTP/HTTPS 下载，并在 Vibe 创建成功后取消浏览器下载。
-- Cookie/header 转发基础能力：由设置控制，并只转发受控 allowlist header。
+- dev-profile 实验性自动接管：在显式启用 capture 权限的开发包中接管浏览器原生 HTTP/HTTPS 下载，并在 Vibe 创建成功后取消浏览器下载。
+- dev-profile 实验性 Cookie/header 转发：由设置控制，并只转发受控 allowlist header。
 - 浏览器捕获设置：自动接管、header 转发、最小文件大小、扩展名和站点规则模型。
 
 扩展当前入口：
 
 - 右键 HTTP/HTTPS 链接：`Download with Vibe Downloader`。
 - 右键选中文本：从文本中提取第一个 HTTP/HTTPS URL。
-- popup：发送当前 tab URL、查看 bridge 状态、切换自动接管和 Cookie/header 转发、查看实时任务与最近 handoff。
+- popup：发送当前 tab URL、查看 bridge 状态、查看实时任务与最近 handoff；capture-enabled dev 包还可切换自动接管和 Cookie/header 转发。
 
 尚未实现：
 
@@ -33,6 +41,8 @@ Vibe Downloader 当前使用 Native Messaging 启动和引导浏览器集成，�
 - FTP/FTPS、magnet 和 `.torrent` 的浏览器自动接管。
 - 生产 Safari Web Extension wrapper。
 - Chrome Web Store / Edge Add-ons / Firefox AMO 的正式 ID、签名和审核流程。
+- `ask` 模式的即时确认 UI。
+- Header 过期后把浏览器重新发送的凭据绑定回原 recoverable task 的闭环恢复。
 
 ## 支持浏览器
 
@@ -123,7 +133,7 @@ Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messagin
 - Chromium manifest 当前使用固定开发 ID：`abcdefghijklmnopabcdefghijklmnop`。
 - Firefox manifest 当前使用：`vibe-downloader@local`。
 
-正式发布前必须替换为商店扩展 ID，并区分开发/生产 manifest。
+正式发布前必须替换为商店扩展 ID，并区分开发/生产 manifest。正式商店包保持最小权限手动交接，除非未来 capture 权限通过独立审核。
 
 ## Handoff payload
 
@@ -144,7 +154,7 @@ Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messagin
   "mime": "application/zip",
   "forwardedHeaders": [
     { "name": "cookie", "value": "session=..." },
-    { "name": "authorization", "value": "Bearer ..." }
+    { "name": "accept-language", "value": "zh-CN,en;q=0.9" }
   ]
 }
 ```
@@ -152,11 +162,12 @@ Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messagin
 安全规则：
 
 - 只接受 `http` 和 `https` URL。
-- FTP/FTPS、magnet、`.torrent` 和 `file://` 不进入浏览器 handoff payload。
+- FTP/FTPS、SFTP、WebDAV scheme、magnet 和本地 `file://` 不进入浏览器 handoff payload；HTTP/HTTPS `.torrent` URL 仍属于允许的 HTTP/HTTPS handoff，并由任务创建路由决定协议。
 - 拒绝带内嵌用户名或密码的 URL。
 - 扩展不能指定本地保存路径。
 - Cookie/header 转发必须由设置开启，并经过后端 allowlist 过滤。
-- 当前 allowlist 包括 `cookie`、`authorization`、`referer`、`user-agent`、`accept`、`accept-language`、`accept-encoding`、`range`、`origin`。
+- 当前 allowlist 包括 `cookie`、`user-agent`、`referer`、`origin`、`accept`、`accept-language`、`dnt`、`cache-control`、`pragma`。
+- `authorization`、`proxy-authorization`、`set-cookie`、`range`、`accept-encoding`、`host` 和 `connection` 会被明确拒绝。
 - URL 日志会去掉 query string 和凭据。
 
 ## 手动端到端验证
@@ -175,8 +186,8 @@ Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messagin
    - Opera：加载 `browser/dist/opera`。
 4. 右键 HTTP/HTTPS 链接，选择 `Download with Vibe Downloader`。
 5. 在 popup 中确认 bridge 为 connected，并能看到实时任务状态。
-6. 开启 Auto capture 后，在浏览器里触发一个普通 HTTP/HTTPS 文件下载。
-7. 确认浏览器下载被暂停/取消，Vibe 中出现新的 queued/downloading task。
+6. 对手动交接 profile，确认工具栏、右键菜单和 popup 可以创建任务，且 manifest 不包含 capture 权限。
+7. 只有在 dev profile 显式启用 `VIBE_BROWSER_EXPERIMENTAL_CAPTURE=true` 时，才开启 Auto capture 并验证浏览器下载被暂停/取消、Vibe 中出现 queued/downloading task。
 8. 确认 `browser_messages` 记录 request id、browser、url、status。
 
 ## 排查清单
@@ -196,4 +207,5 @@ Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messagin
 - 建立扩展签名、商店审核和版本同步流程。
 - 完成 Chrome/Edge/Firefox 的端到端验证矩阵。
 - Safari 需要单独 macOS wrapper 和签名/审核流程。
-- 在 Settings 中增加复制诊断信息入口。
+- 保持商店包为最小权限手动交接；若未来发布 capture 变体，单独完成权限、隐私和商店审核。
+- 修复 `FUN-03` 的过期 Header 恢复路径和 `FUN-14` 的 Ask 语义后再扩展相关产品文案。

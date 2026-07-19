@@ -397,51 +397,24 @@ impl Scheduler {
             let effective_task_limit = min_optional_limit(task_limit_bps, scheduled_limit_bps);
             let task_speed_limiter =
                 GlobalSpeedLimiter::with_parent(state_speed_limiter.clone(), effective_task_limit);
-            // Spawn the download as a nested task so that a panic inside the engine
-            // is caught by tokio's JoinHandle (returns Err(JoinError) with is_panic())
-            // instead of aborting the entire process. Requires panic = "unwind".
-            // Clone the shared handles that are still needed after the nested spawn
-            // so the outer task retains access once `async move` captures them.
-            let inner_app = task_app.clone();
-            let inner_pool = task_pool.clone();
-            let inner_cancel_token = task_cancel_token.clone();
-            let download_handle = tokio::spawn(async move {
-                engine
-                    .download(DownloadContext {
-                        app: Some(inner_app),
-                        pool: inner_pool,
-                        task,
-                        cancel_token: inner_cancel_token,
-                        finish: task_finish.clone(),
-                        speed_limiter: task_speed_limiter,
-                        connection_limit,
-                        request_headers: task_request_headers.clone(),
-                        proxy_config: task_proxy_config,
-                    })
-                    .await
-            });
-            let result = match download_handle.await {
-                Ok(result) => result.map_err(String::from),
-                Err(join_error) => {
-                    let message = if join_error.is_panic() {
-                        let payload = join_error.into_panic();
-                        payload
-                            .downcast_ref::<String>()
-                            .map(|s| s.as_str())
-                            .or_else(|| payload.downcast_ref::<&str>().copied())
-                            .unwrap_or("unknown panic")
-                            .to_string()
-                    } else {
-                        "Download task was cancelled.".to_string()
-                    };
-                    tracing::error!(
-                        task_id = %task_id,
-                        error = %message,
-                        "download task terminated unexpectedly"
-                    );
-                    Err(message)
-                }
-            };
+            // ARC-03: run the engine directly inside this supervisor task. A nested
+            // tokio::spawn previously detached the engine when the outer handle was
+            // aborted, leaving workers/ffmpeg running after pause/delete/shutdown.
+            // Panics still surface through this outer JoinHandle (panic=unwind).
+            let result = engine
+                .download(DownloadContext {
+                    app: Some(task_app.clone()),
+                    pool: task_pool.clone(),
+                    task,
+                    cancel_token: task_cancel_token.clone(),
+                    finish: task_finish.clone(),
+                    speed_limiter: task_speed_limiter,
+                    connection_limit,
+                    request_headers: task_request_headers.clone(),
+                    proxy_config: task_proxy_config,
+                })
+                .await
+                .map_err(String::from);
             let canceled = task_cancel_token.is_cancelled();
             let _ = downloads_map.lock().await.remove(&task_id);
             let _ = scheduler.request_headers.lock().await.remove(&task_id);

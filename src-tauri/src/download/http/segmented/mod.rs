@@ -293,7 +293,27 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
             return Ok(());
         }
 
-        speed_limiter.throttle(chunk.len()).await;
+        if speed_limiter
+            .throttle(chunk.len(), &cancel_token)
+            .await
+            .is_err()
+        {
+            file.flush()
+                .await
+                .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
+            db::update_task_and_segment_progress(
+                &pool,
+                &task.id,
+                &segment.id,
+                downloaded,
+                0,
+                1,
+                TaskStatus::Downloading,
+            )
+            .await?;
+            progress_gate.flush(&app);
+            return Ok(());
+        }
         file.write_all(&chunk).await.map_err(|e| {
             AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
                 .command_error()

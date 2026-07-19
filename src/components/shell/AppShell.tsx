@@ -469,18 +469,22 @@ export function AppShell() {
   );
 
   // ── Soft-delete (metadata only) with undo ──
-  // Hides the task immediately via pendingDeleteIds, shows an undo toast, and
-  // commits the hard delete after the undo window elapses. Undo restores the
-  // task before the commit fires.
+  // Hides the task immediately via pendingDeleteIds and commits the hard delete
+  // when the undo toast settles without Undo (timeout, dismiss, or clear). The
+  // toast hover/focus pause is the only clock — no separate commit timer.
   const softDelete = useCallback(
     (task: Task) => {
       const id = task.id;
       if (useTaskUIStore.getState().pendingDeleteIds.includes(id)) return;
       addPendingDelete(id);
-      const commitTimer = window.setTimeout(() => {
+      let settled = false;
+      const commit = () => {
+        if (settled) return;
+        settled = true;
         void (async () => {
           try {
             await deleteTask(id, false);
+            removePendingDelete(id);
           } catch (err) {
             log.error("soft-delete commit failed", err);
             removePendingDelete(id);
@@ -491,19 +495,22 @@ export function AppShell() {
             });
           }
         })();
-      }, UNDO_TOAST_TIMEOUT_MS);
+      };
+      const undo = () => {
+        if (settled) return;
+        settled = true;
+        removePendingDelete(id);
+      };
       addToast({
         tone: "info",
         title: t("toast.taskDeleted", { name: task.fileName }),
         description: t("toast.undoHint"),
         durationMs: UNDO_TOAST_TIMEOUT_MS,
         key: `soft-delete-${id}`,
+        onAutoCommit: commit,
         action: {
           label: t("toast.undo"),
-          onClick: () => {
-            window.clearTimeout(commitTimer);
-            removePendingDelete(id);
-          },
+          onClick: undo,
         },
       });
     },
@@ -519,10 +526,14 @@ export function AppShell() {
       const freshIds = fresh.map((task) => task.id);
       addPendingDeletes(freshIds);
       const label = t("taskList.bulkDelete", { count: fresh.length });
-      const commitTimer = window.setTimeout(() => {
+      let settled = false;
+      const commit = () => {
+        if (settled) return;
+        settled = true;
         void (async () => {
           try {
             await bulkDeleteTasks(freshIds, false);
+            for (const id of freshIds) removePendingDelete(id);
             addToast({
               tone: "success",
               title: t("toast.bulkComplete", { action: label, done: freshIds.length, total: freshIds.length }),
@@ -530,7 +541,6 @@ export function AppShell() {
             });
           } catch (err) {
             log.error("soft-delete bulk commit failed", err);
-            // Delete failed — unhide the tasks so the user can retry.
             for (const id of freshIds) removePendingDelete(id);
             addToast({
               tone: "error",
@@ -540,20 +550,22 @@ export function AppShell() {
             });
           }
         })();
-      }, UNDO_TOAST_TIMEOUT_MS);
+      };
+      const undo = () => {
+        if (settled) return;
+        settled = true;
+        for (const id of freshIds) removePendingDelete(id);
+      };
       addToast({
         tone: "info",
         title: t("toast.tasksDeleted", { count: fresh.length }),
         description: t("toast.undoHint"),
         durationMs: UNDO_TOAST_TIMEOUT_MS,
         key: "bulk-soft-delete",
+        onAutoCommit: commit,
         action: {
           label: t("toast.undo"),
-          onClick: () => {
-            window.clearTimeout(commitTimer);
-            // Restore each freshly-hidden task.
-            for (const id of freshIds) removePendingDelete(id);
-          },
+          onClick: undo,
         },
       });
     },
@@ -609,6 +621,14 @@ export function AppShell() {
     }
     setNewDownloadOpen(true);
   }, []);
+
+  // Stable shell handlers so memoized children (TaskList / TaskRow) are not
+  // invalidated by fresh arrow functions on every AppShell render.
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
+  const openShortcutPanel = useCallback(() => setShortcutPanelOpen(true), []);
+  const openOnboarding = useCallback(() => setOnboardingOpen(true), []);
+  const openAbout = useCallback(() => setNav("about"), [setNav]);
+  const requestDeleteFiles = useCallback((task: Task) => setDeleteFilesTarget(task), []);
 
   const applyClipboardDownload = useCallback((sourceId: string, urls: string[]) => {
     if (urls.length === 0) return;
@@ -1215,18 +1235,18 @@ export function AppShell() {
     <div className="flex h-full flex-col">
       <TitleBar
         platform={platform}
-        onOpenPalette={() => setPaletteOpen(true)}
-        onNewDownload={() => openNewDownload()}
-        onOpenShortcuts={() => setShortcutPanelOpen(true)}
+        onOpenPalette={openPalette}
+        onNewDownload={openNewDownload}
+        onOpenShortcuts={openShortcutPanel}
       />
       <CommandBar
         platform={platform}
-        onOpenPalette={() => setPaletteOpen(true)}
-        onNewDownload={() => openNewDownload()}
+        onOpenPalette={openPalette}
+        onNewDownload={openNewDownload}
         inputRef={searchInputRef}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
-        <Sidebar onNewDownload={() => openNewDownload()} />
+        <Sidebar onNewDownload={openNewDownload} />
         <main className="order-1 flex min-h-0 min-w-0 flex-1 md:order-none">
           <h1 className="sr-only">{t("app.name")}</h1>
           <TaskList
@@ -1236,9 +1256,9 @@ export function AppShell() {
             onOpenFile={openFile}
             onOpenFolder={openFolder}
             onResolveAttention={resolveAttention}
-            onDelete={(task) => softDelete(task)}
-            onDeleteFiles={(task) => setDeleteFilesTarget(task)}
-            onNewDownload={() => openNewDownload()}
+            onDelete={softDelete}
+            onDeleteFiles={requestDeleteFiles}
+            onNewDownload={openNewDownload}
             onBulkPause={bulkPause}
             onBulkResume={bulkResume}
             onBulkRetry={bulkRetry}
@@ -1246,7 +1266,7 @@ export function AppShell() {
             onBulkDeleteFiles={bulkDeleteFiles}
             onBulkOpenFolder={bulkOpenFolder}
             onBulkExport={bulkExport}
-            onOpenOnboarding={() => setOnboardingOpen(true)}
+            onOpenOnboarding={openOnboarding}
             onCopyUrl={copyTaskUrl}
             onCopyLocalPath={copyTaskLocalPath}
             onShowDetails={showTaskDetails}
@@ -1273,12 +1293,7 @@ export function AppShell() {
           </Suspense>
         </main>
       </div>
-      <StatusBar
-        className="flex"
-        platform={platform}
-        onOpenShortcuts={() => setShortcutPanelOpen(true)}
-        onOpenAbout={() => setNav("about")}
-      />
+      <StatusBar className="flex" platform={platform} onOpenShortcuts={openShortcutPanel} onOpenAbout={openAbout} />
       <ToastViewport />
       {paletteOpen ? (
         <Suspense fallback={null}>
@@ -1287,7 +1302,7 @@ export function AppShell() {
             onOpenChange={setPaletteOpen}
             platform={platform}
             selectedId={taskSurfaceActive ? selectedId : null}
-            onNewDownload={() => openNewDownload()}
+            onNewDownload={openNewDownload}
             onStart={() => {
               const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
               if (task) void runTaskAction(() => resumeTask(task.id), task.id);
@@ -1417,6 +1432,7 @@ export function AppShell() {
               setNav("settings");
               setOnboardingOpen(false);
             }}
+            onOpenNewDownload={() => setNewDownloadOpen(true)}
           />
         </Suspense>
       ) : null}

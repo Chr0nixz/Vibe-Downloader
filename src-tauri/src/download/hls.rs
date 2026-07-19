@@ -175,6 +175,13 @@ impl HlsEngine {
         self.http.client().await
     }
 
+    async fn client_for_config(
+        &self,
+        config: &crate::proxy::ResolvedProxyConfig,
+    ) -> Result<Client, String> {
+        self.http.client_for_config(config).await
+    }
+
     async fn probe_hls(
         &self,
         url: &str,
@@ -182,6 +189,7 @@ impl HlsEngine {
         pool: Option<&SqlitePool>,
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
+        proxy_config: Option<&crate::proxy::ResolvedProxyConfig>,
     ) -> Result<ProbePlan, String> {
         crate::download::engine::emit_probe_phase(app, request_id, "checking_ffmpeg", Some("hls"));
         super::ffmpeg::ensure_ffmpeg_available(
@@ -190,7 +198,11 @@ impl HlsEngine {
             "ffmpeg was not found. Install ffmpeg or configure its path in Settings before creating HLS tasks.",
         )
         .await?;
-        let client = self.client().await?;
+        let client = if let Some(config) = proxy_config {
+            self.client_for_config(config).await?
+        } else {
+            self.client().await?
+        };
         crate::download::engine::emit_probe_phase(
             app,
             request_id,
@@ -279,6 +291,7 @@ impl DownloadEngine for HlsEngine {
                     request.pool.as_ref(),
                     &request.app,
                     &request.request_id,
+                    request.proxy_config.as_ref(),
                 )
                 .await
                 .map_err(DownloadError::Other)?;
@@ -336,7 +349,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         speed_limiter,
         connection_limit,
         request_headers,
-        proxy_config: _proxy_config,
+        proxy_config,
     } = context;
     // Resolve once so a settings change cannot switch binaries midway through a task.
     let ffmpeg = super::ffmpeg::ensure_ffmpeg_available(
@@ -345,7 +358,8 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         "ffmpeg was not found. Install ffmpeg or configure its path in Settings before creating HLS tasks.",
     )
     .await?;
-    let client = engine.client().await?;
+    // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
+    let client = engine.client_for_config(&proxy_config).await?;
     let staging_dir = task
         .temp_path
         .as_deref()
@@ -357,7 +371,14 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     })?;
 
     let plan = engine
-        .probe_hls(&task.url, &request_headers, Some(&pool), &None, &None)
+        .probe_hls(
+            &task.url,
+            &request_headers,
+            Some(&pool),
+            &None,
+            &None,
+            Some(&proxy_config),
+        )
         .await?;
     db::upsert_hls_task(
         &pool,
@@ -533,6 +554,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         downloaded_total,
         &ffmpeg,
         &extra_inputs,
+        &cancel_token,
     )
     .await
 }
@@ -953,7 +975,14 @@ async fn download_hls_segment_once(
                     ));
                 }
             };
-            speed_limiter.throttle(chunk.len()).await;
+            if speed_limiter
+                .throttle(chunk.len(), cancel_token)
+                .await
+                .is_err()
+            {
+                writer.flush().await.ok();
+                return Err("Download canceled.".to_string());
+            }
             downloaded = downloaded.saturating_add(chunk.len());
             if downloaded > HLS_SEGMENT_MAX_BYTES {
                 writer.flush().await.ok();
@@ -996,7 +1025,13 @@ async fn ensure_hls_init_map(
     if cancel_token.is_cancelled() {
         return Err("Download canceled.".to_string());
     }
-    speed_limiter.throttle(data.len()).await;
+    if speed_limiter
+        .throttle(data.len(), cancel_token)
+        .await
+        .is_err()
+    {
+        return Err("Download canceled.".to_string());
+    }
     if let Some(parent) = init_map.local_path.parent() {
         fs::create_dir_all(parent).await.map_err(|e| {
             AppErrorPayload::disk_write_failed(format!("Could not create HLS init map folder: {e}"))
@@ -1101,7 +1136,13 @@ async fn stream_encrypted_hls_segment(
                     ));
                 }
             };
-            speed_limiter.throttle(chunk.len()).await;
+            if speed_limiter
+                .throttle(chunk.len(), cancel_token)
+                .await
+                .is_err()
+            {
+                return Err("Download canceled.".to_string());
+            }
             downloaded = downloaded.saturating_add(chunk.len());
             if downloaded > HLS_SEGMENT_MAX_BYTES {
                 return Err(engine_error(
@@ -1291,11 +1332,37 @@ async fn finalize_hls_task(
     downloaded_total: i64,
     ffmpeg: &Path,
     extra_inputs: &[PathBuf],
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
+    // ARC-03: do not publish after delete/pause removed the active task.
+    let still_active = db::get_task_record(pool, &task.id)
+        .await?
+        .is_some_and(|current| current.status == TaskStatus::Downloading);
+    if !still_active || cancel_token.is_cancelled() {
+        return Err("Download canceled.".to_string());
+    }
     db::update_task_health_summary(pool, &task.id, Some("Converting HLS stream to MP4")).await?;
     let local_playlist = write_local_hls_playlist(pool, &task.id, staging_dir).await?;
     let mp4_temp = staging_dir.join("output.mp4");
-    run_ffmpeg(&local_playlist, &mp4_temp, ffmpeg, extra_inputs).await?;
+    run_ffmpeg(
+        &local_playlist,
+        &mp4_temp,
+        ffmpeg,
+        extra_inputs,
+        cancel_token,
+    )
+    .await?;
+    if cancel_token.is_cancelled() {
+        let _ = fs::remove_file(&mp4_temp).await;
+        return Err("Download canceled.".to_string());
+    }
+    let still_active = db::get_task_record(pool, &task.id)
+        .await?
+        .is_some_and(|current| current.status == TaskStatus::Downloading);
+    if !still_active {
+        let _ = fs::remove_file(&mp4_temp).await;
+        return Err("Download canceled.".to_string());
+    }
     let final_path = task
         .final_path
         .as_deref()
@@ -1392,6 +1459,7 @@ async fn run_ffmpeg(
     output: &Path,
     ffmpeg: &Path,
     extra_inputs: &[PathBuf],
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
     if fs::try_exists(output).await.unwrap_or(false) {
         fs::remove_file(output)
@@ -1419,14 +1487,13 @@ async fn run_ffmpeg(
         }
     }
     cmd.arg(output);
-    let status = cmd
-        .status()
-        .await
-        .map_err(|e| format!("Could not start ffmpeg: {e}"))?;
-    if !status.success() {
-        return Err(format!("ffmpeg failed with status {status}."));
+    match super::ffmpeg::run_cancellable(cmd, cancel_token).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(output).await;
+            Err(error)
+        }
     }
-    Ok(())
 }
 
 async fn pause_hls_task(

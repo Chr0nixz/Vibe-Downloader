@@ -505,10 +505,8 @@ export const TaskList = memo(function TaskList({
       </div>
 
       {/* Selection bar — contextual, appears when rows are multi-selected.
-          P0c: collapsed from 7 inline controls to 3-4 (Count+Clear, inferred
-          primary action, More menu, Delete). Removes the Pause/Resume
-          side-by-side mis-click risk; Pause All / Resume All / Retry / Open
-          Folder / Export live in the More popover. */}
+          Inferred primary + More menu for selection-scoped bulk actions.
+          Global Pause all / Resume all live in the command palette only. */}
       {selectedIds.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5 border-b border-border-accent-subtle bg-accent-primary/[0.04] px-3 py-1.5 text-xs md:gap-2">
           <span className="font-medium text-text-secondary">
@@ -682,46 +680,6 @@ export const TaskList = memo(function TaskList({
               aria-hidden="true"
             />
           </Button>
-          <div className="ml-auto flex shrink-0 items-center gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-8 gap-1.5 px-2 text-text-secondary"
-              aria-label={t("taskList.resumeAll")}
-              onClick={() => {
-                const all = useTaskDataStore.getState().tasks;
-                onBulkResume(all);
-              }}
-              disabled={
-                !useTaskDataStore
-                  .getState()
-                  .tasks.some((t) => t.status === "paused" || t.status === "failed" || t.status === "waiting_network")
-              }
-            >
-              <Play className="h-3.5 w-3.5" aria-hidden />
-              <span className="hidden sm:inline">{t("taskList.resumeAll")}</span>
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-8 gap-1.5 px-2 text-text-secondary"
-              aria-label={t("taskList.pauseAll")}
-              onClick={() => {
-                const all = useTaskDataStore.getState().tasks;
-                onBulkPause(all);
-              }}
-              disabled={
-                !useTaskDataStore
-                  .getState()
-                  .tasks.some((t) => t.status === "downloading" || t.status === "retrying" || t.status === "queued")
-              }
-            >
-              <Pause className="h-3.5 w-3.5" aria-hidden />
-              <span className="hidden sm:inline">{t("taskList.pauseAll")}</span>
-            </Button>
-          </div>
         </div>
         {toolPanelOpen ? (
           <div id="task-list-tool-panel" className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
