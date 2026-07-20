@@ -142,6 +142,12 @@ export function BrowserCaptureControls({
           ) : null}
           <SiteRulesEditor
             rules={settings.siteRules}
+            captureGlobals={{
+              autoIntercept: settings.autoIntercept,
+              minSizeBytes: settings.minSizeBytes,
+              fileExtensions: settings.fileExtensions,
+              forwardHeadersMode: settings.forwardHeadersMode,
+            }}
             disabled={disabled}
             onUpdate={(siteRules) => onUpdate({ siteRules })}
           />

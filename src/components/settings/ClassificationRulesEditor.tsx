@@ -5,12 +5,18 @@ import { useTranslation } from "react-i18next";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import type { ClassificationMatchKind, ClassificationRule, ClassificationRuleInput } from "@/generated/bindings";
+import type {
+  ClassificationMatchKind,
+  ClassificationRule,
+  ClassificationRuleInput,
+  PreviewClassificationResult,
+} from "@/generated/bindings";
 import { localizedErrorMessage } from "@/lib/errors";
 import {
   createClassificationRule,
   deleteClassificationRule,
   listClassificationRules,
+  previewClassificationMatch,
   reorderClassificationRules,
   updateClassificationRule,
 } from "@/lib/tauri";
@@ -175,6 +181,129 @@ export function ClassificationRulesEditor() {
           ) : null}
         </ul>
       )}
+      <ClassificationTryPanel disabled={saving || loading} />
+    </div>
+  );
+}
+
+function ClassificationTryPanel({ disabled }: { disabled?: boolean }) {
+  const { t } = useTranslation();
+  const addToast = useToastStore((s) => s.addToast);
+  const [url, setUrl] = useState("https://example.com/video/file.mp4");
+  const [fileName, setFileName] = useState("file.mp4");
+  const [contentType, setContentType] = useState("video/mp4");
+  const [categoryKey, setCategoryKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<PreviewClassificationResult | null>(null);
+
+  async function runPreview() {
+    if (!url.trim()) {
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: t("settings.classificationTryEmptyUrl"),
+      });
+      return;
+    }
+    setBusy(true);
+    try {
+      const preview = await previewClassificationMatch({
+        url: url.trim(),
+        fileName: fileName.trim() || null,
+        contentType: contentType.trim() || null,
+        categoryKey: categoryKey.trim() || null,
+      });
+      setResult(preview);
+    } catch (err) {
+      setResult(null);
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: localizedErrorMessage(err, t),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="grid gap-2 rounded-md border border-border-divider p-3">
+      <div>
+        <h5 className="text-xs font-medium text-text-primary">{t("settings.classificationTryTitle")}</h5>
+        <p className="mt-1 text-xs text-text-muted">{t("settings.classificationTryHint")}</p>
+      </div>
+      <Field label={t("settings.classificationTryUrl")}>
+        <Input
+          aria-label={t("settings.classificationTryUrl")}
+          type="url"
+          value={url}
+          disabled={disabled || busy}
+          onChange={(e) => setUrl(e.target.value)}
+          className="max-w-xl"
+        />
+      </Field>
+      <Field label={t("settings.classificationTryFilename")}>
+        <Input
+          aria-label={t("settings.classificationTryFilename")}
+          type="text"
+          value={fileName}
+          disabled={disabled || busy}
+          onChange={(e) => setFileName(e.target.value)}
+          className="max-w-md"
+        />
+      </Field>
+      <Field label={t("settings.classificationTryMime")}>
+        <Input
+          aria-label={t("settings.classificationTryMime")}
+          type="text"
+          value={contentType}
+          disabled={disabled || busy}
+          onChange={(e) => setContentType(e.target.value)}
+          className="max-w-md"
+        />
+      </Field>
+      <Field label={t("settings.classificationTryCategory")}>
+        <Input
+          aria-label={t("settings.classificationTryCategory")}
+          type="text"
+          value={categoryKey}
+          disabled={disabled || busy}
+          onChange={(e) => setCategoryKey(e.target.value)}
+          placeholder={t("settings.classificationTryCategoryPlaceholder")}
+          className="max-w-md"
+        />
+      </Field>
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => void runPreview()}
+          disabled={disabled || busy || !url.trim()}
+          className="rounded-md bg-accent-primary px-3 py-1.5 text-xs text-text-on-accent hover:opacity-90 disabled:opacity-50"
+        >
+          {t("settings.classificationTryRun")}
+        </button>
+      </div>
+      {result ? (
+        <dl className="grid gap-1 text-xs text-text-secondary">
+          {result.manualOverride ? (
+            <p className="text-status-warning">{t("settings.classificationTryManualOverride")}</p>
+          ) : null}
+          <div>
+            <dt className="inline text-text-muted">{t("settings.classificationTryMatched")}: </dt>
+            <dd className="inline text-text-primary">
+              {result.matchedRule?.name ?? t("settings.classificationTryNoMatch")}
+            </dd>
+          </div>
+          <div>
+            <dt className="inline text-text-muted">{t("settings.classificationTryTarget")}: </dt>
+            <dd className="inline text-text-primary">{result.targetSubdir ?? "—"}</dd>
+          </div>
+          <div>
+            <dt className="inline text-text-muted">{t("settings.classificationTrySaveDir")}: </dt>
+            <dd className="inline break-all text-text-primary">{result.effectiveSaveDir ?? "—"}</dd>
+          </div>
+        </dl>
+      ) : null}
     </div>
   );
 }

@@ -32,8 +32,8 @@ pub use self::browser_messages::{
 };
 pub use self::classification_rules::{
     apply_classification_rules, create_classification_rule, delete_classification_rule,
-    get_classification_rule, list_classification_rules, reorder_classification_rules,
-    update_classification_rule,
+    get_classification_rule, list_classification_rules, match_classification_rule,
+    reorder_classification_rules, update_classification_rule,
 };
 pub use self::connection::{
     begin_immediate, connect, connect_for_startup, reset_database_files, wal_checkpoint,

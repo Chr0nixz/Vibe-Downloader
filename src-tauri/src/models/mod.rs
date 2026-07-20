@@ -9,7 +9,10 @@ pub use browser::{
     BrowserIntegrationUpdateInput, BrowserKind, BrowserRealtimeStatus, BrowserSiteRule,
     BrowserSiteRuleMode,
 };
-pub use classification::{ClassificationMatchKind, ClassificationRule, ClassificationRuleInput};
+pub use classification::{
+    ClassificationMatchKind, ClassificationRule, ClassificationRuleInput,
+    PreviewClassificationInput, PreviewClassificationInputsUsed, PreviewClassificationResult,
+};
 pub use task::{
     AppAccentColor, AppErrorPayload, AppSettings, BatchImportItem, BatchImportResult,
     BulkTaskActionResult, ChecksumAlgorithm, CompletionAction, CompletionActionRequestedPayload,

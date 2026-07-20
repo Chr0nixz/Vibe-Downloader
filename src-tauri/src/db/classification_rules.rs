@@ -203,14 +203,13 @@ pub async fn get_classification_rule(
     Ok(row.map(row_to_rule))
 }
 
-/// Apply classification rules to a download candidate and return the target subdirectory
-/// of the first matching enabled rule. Rules are expected to be sorted by position ascending.
-pub fn apply_classification_rules(
+/// Return the first matching enabled rule. Rules must be sorted by position ascending.
+pub fn match_classification_rule<'a>(
     url: &str,
     file_name: &str,
     content_type: &str,
-    rules: &[ClassificationRule],
-) -> Option<String> {
+    rules: &'a [ClassificationRule],
+) -> Option<&'a ClassificationRule> {
     let url_lower = url.to_lowercase();
     let file_name_lower = file_name.to_lowercase();
     let content_type_lower = content_type.to_lowercase();
@@ -232,10 +231,22 @@ pub fn apply_classification_rules(
             ClassificationMatchKind::UrlContains => url_lower.contains(&pattern_lower),
         };
         if matched {
-            return Some(rule.target_subdir.clone());
+            return Some(rule);
         }
     }
     None
+}
+
+/// Apply classification rules to a download candidate and return the target subdirectory
+/// of the first matching enabled rule. Rules are expected to be sorted by position ascending.
+pub fn apply_classification_rules(
+    url: &str,
+    file_name: &str,
+    content_type: &str,
+    rules: &[ClassificationRule],
+) -> Option<String> {
+    match_classification_rule(url, file_name, content_type, rules)
+        .map(|rule| rule.target_subdir.clone())
 }
 
 async fn next_position(pool: &SqlitePool) -> Result<i32, String> {

@@ -126,6 +126,8 @@ export const commands = {
 	updateClassificationRule: (id: string, input: ClassificationRuleInput) => typedError<ClassificationRule, string>(__TAURI_INVOKE("update_classification_rule", { id, input })),
 	deleteClassificationRule: (id: string) => typedError<null, string>(__TAURI_INVOKE("delete_classification_rule", { id })),
 	reorderClassificationRules: (ids: string[]) => typedError<null, string>(__TAURI_INVOKE("reorder_classification_rules", { ids })),
+	/**  Preview which classification rule would apply without creating a task. */
+	previewClassificationMatch: (input: PreviewClassificationInput) => typedError<PreviewClassificationResult, string>(__TAURI_INVOKE("preview_classification_match", { input })),
 	showFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("show_floating_status_window")),
 	hideFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("hide_floating_status_window")),
 	toggleFloatingStatusWindow: () => typedError<null, string>(__TAURI_INVOKE("toggle_floating_status_window")),
@@ -687,6 +689,29 @@ export type MetalinkMirrorView = {
 	status: string,
 	failureCount: number,
 	lastError: string | null,
+};
+
+export type PreviewClassificationInput = {
+	url: string,
+	fileName: string | null,
+	contentType: string | null,
+	/**  When set, preview reports a manual override and skips automatic rules. */
+	categoryKey: string | null,
+};
+
+export type PreviewClassificationInputsUsed = {
+	url: string,
+	fileName: string,
+	contentType: string,
+};
+
+export type PreviewClassificationResult = {
+	matched: boolean,
+	manualOverride: boolean,
+	targetSubdir: string | null,
+	matchedRule: ClassificationRule | null,
+	effectiveSaveDir: string | null,
+	inputsUsed: PreviewClassificationInputsUsed,
 };
 
 /**

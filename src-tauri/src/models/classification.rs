@@ -56,3 +56,32 @@ pub struct ClassificationRuleInput {
     pub pattern: Option<String>,
     pub target_subdir: Option<String>,
 }
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewClassificationInput {
+    pub url: String,
+    pub file_name: Option<String>,
+    pub content_type: Option<String>,
+    /// When set, preview reports a manual override and skips automatic rules.
+    pub category_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewClassificationInputsUsed {
+    pub url: String,
+    pub file_name: String,
+    pub content_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewClassificationResult {
+    pub matched: bool,
+    pub manual_override: bool,
+    pub target_subdir: Option<String>,
+    pub matched_rule: Option<ClassificationRule>,
+    pub effective_save_dir: Option<String>,
+    pub inputs_used: PreviewClassificationInputsUsed,
+}

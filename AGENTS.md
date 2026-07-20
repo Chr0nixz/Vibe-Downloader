@@ -39,7 +39,7 @@ Not implemented yet:
 - Cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols.
 - Safari wrapper, browser store submission IDs, production extension signing, and final browser permission review copy.
 - BT/FTP/SFTP/Metalink/HLS/DASH/WebDAV reliability and diagnostics parity with the HTTP/HTTPS path.
-- Full site rule management UI, and full file classification automation.
+- Site-rule runtime hit telemetry (settings already cover conflict analysis, import/export, and URL try-run). Classification create-dialog live preview and dynamic subdir templates (settings try-run is available).
 - OS code-signed production distribution.
 
 Active release blockers:

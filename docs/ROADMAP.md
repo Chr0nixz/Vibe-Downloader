@@ -258,7 +258,8 @@ These items remain intentionally deferred until Phase A through C are substantia
 - cloud-drive parsing and cloud-account synchronization;
 - complete media sniffing;
 - plugin protocols;
-- advanced site-rule conflict analysis, import/export, and hit diagnostics;
+- advanced site-rule runtime hit telemetry (settings UI now covers conflict analysis, import/export, and URL try-run);
+- classification create-dialog live preview and dynamic `{host}/{date}` subdir templates (settings try-run is available);
 - Safari WebExtension distribution.
 
 ## Stable Product Boundaries

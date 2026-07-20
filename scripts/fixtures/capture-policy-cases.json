@@ -1,0 +1,141 @@
+[
+  {
+    "name": "FUN-14: header mode enabled",
+    "kind": "headerForwarding",
+    "url": "https://cdn.example.com/video.mp4",
+    "settings": { "forwardHeadersMode": "enabled", "siteRules": [] },
+    "expected": { "forward": true, "state": "allowed" }
+  },
+  {
+    "name": "FUN-14: header mode disabled",
+    "kind": "headerForwarding",
+    "url": "https://cdn.example.com/video.mp4",
+    "settings": { "forwardHeadersMode": "disabled", "siteRules": [] },
+    "expected": { "forward": false, "state": "denied" }
+  },
+  {
+    "name": "FUN-14: header mode ask is passive",
+    "kind": "headerForwarding",
+    "url": "https://cdn.example.com/video.mp4",
+    "settings": { "forwardHeadersMode": "ask", "siteRules": [] },
+    "expected": { "forward": false, "state": "ask" }
+  },
+  {
+    "name": "FUN-14: site rule forces header forward over global disabled",
+    "kind": "headerForwarding",
+    "url": "https://auth.example.com/file.bin",
+    "settings": {
+      "forwardHeadersMode": "disabled",
+      "siteRules": [
+        {
+          "hostPattern": "auth.example.com",
+          "includeSubdomains": false,
+          "forwardHeaders": true,
+          "mode": "auto"
+        }
+      ]
+    },
+    "expected": { "forward": true, "state": "allowed" }
+  },
+  {
+    "name": "FUN-14: site rule denies header forward over global enabled",
+    "kind": "headerForwarding",
+    "url": "https://auth.example.com/file.bin",
+    "settings": {
+      "forwardHeadersMode": "enabled",
+      "siteRules": [
+        {
+          "hostPattern": "auth.example.com",
+          "includeSubdomains": false,
+          "forwardHeaders": false,
+          "mode": "auto"
+        }
+      ]
+    },
+    "expected": { "forward": false, "state": "denied" }
+  },
+  {
+    "name": "FUN-14: ask capture mode never intercepts",
+    "kind": "shouldIntercept",
+    "download": { "url": "https://example.com/a.mp4", "totalBytes": 10000000, "filename": "a.mp4" },
+    "settings": {
+      "autoIntercept": true,
+      "minSizeBytes": "0",
+      "fileExtensions": ["mp4"],
+      "siteRules": [{ "hostPattern": "example.com", "includeSubdomains": true, "mode": "ask" }]
+    },
+    "expected": { "intercept": false, "reason": "ask-rule" }
+  },
+  {
+    "name": "FUN-14: never capture mode",
+    "kind": "shouldIntercept",
+    "download": { "url": "https://example.com/a.mp4", "totalBytes": 10000000, "filename": "a.mp4" },
+    "settings": {
+      "autoIntercept": true,
+      "minSizeBytes": "0",
+      "fileExtensions": ["mp4"],
+      "siteRules": [{ "hostPattern": "example.com", "includeSubdomains": true, "mode": "never" }]
+    },
+    "expected": { "intercept": false, "reason": "site-rule" }
+  },
+  {
+    "name": "FUN-14: auto capture mode intercepts",
+    "kind": "shouldIntercept",
+    "download": { "url": "https://example.com/a.mp4", "totalBytes": 10000000, "filename": "a.mp4" },
+    "settings": {
+      "autoIntercept": true,
+      "minSizeBytes": "0",
+      "fileExtensions": ["mp4"],
+      "siteRules": [{ "hostPattern": "example.com", "includeSubdomains": true, "mode": "auto" }]
+    },
+    "expected": { "intercept": true }
+  },
+  {
+    "name": "matching: first-wins when overlapping subdomain rules",
+    "kind": "matchingRule",
+    "hostname": "cdn.example.com",
+    "rules": [
+      { "id": "early", "hostPattern": "example.com", "includeSubdomains": true, "mode": "never" },
+      { "id": "late", "hostPattern": "cdn.example.com", "includeSubdomains": false, "mode": "auto" }
+    ],
+    "expected": { "id": "early" }
+  },
+  {
+    "name": "matching: wildcard root matches apex and subdomain",
+    "kind": "matchingRule",
+    "hostname": "www.example.com",
+    "rules": [{ "id": "wild", "hostPattern": "*.example.com", "includeSubdomains": false, "mode": "auto" }],
+    "expected": { "id": "wild" }
+  },
+  {
+    "name": "matching: exact host without subdomains misses subdomain",
+    "kind": "matchingRule",
+    "hostname": "cdn.example.com",
+    "rules": [{ "id": "exact", "hostPattern": "example.com", "includeSubdomains": false, "mode": "auto" }],
+    "expected": { "id": null }
+  },
+  {
+    "name": "shouldIntercept: size filter blocks small downloads",
+    "kind": "shouldIntercept",
+    "download": { "url": "https://example.com/a.mp4", "totalBytes": 100, "filename": "a.mp4" },
+    "settings": {
+      "autoIntercept": true,
+      "minSizeBytes": "1048576",
+      "fileExtensions": [],
+      "siteRules": []
+    },
+    "expected": { "intercept": false, "reason": "size" }
+  },
+  {
+    "name": "shouldIntercept: extension filter blocks unmatched types",
+    "kind": "shouldIntercept",
+    "download": { "url": "https://example.com/a.pdf", "totalBytes": 10000000, "filename": "a.pdf" },
+    "settings": {
+      "autoIntercept": true,
+      "minSizeBytes": "0",
+      "fileExtensions": ["mp4"],
+      "siteRules": []
+    },
+    "expected": { "intercept": false, "reason": "extension" }
+  }
+]

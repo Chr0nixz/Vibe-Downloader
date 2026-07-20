@@ -213,6 +213,7 @@ macro_rules! vibe_commands_base {
             commands::classification::update_classification_rule,
             commands::classification::delete_classification_rule,
             commands::classification::reorder_classification_rules,
+            commands::classification::preview_classification_match,
             commands::floating::show_floating_status_window,
             commands::floating::hide_floating_status_window,
             commands::floating::toggle_floating_status_window,

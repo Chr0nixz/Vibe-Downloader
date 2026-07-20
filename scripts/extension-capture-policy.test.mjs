@@ -7,6 +7,7 @@ import vm from "node:vm";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const policyPath = path.join(root, "browser", "extension-core", "src", "capture-policy.js");
+const fixturesPath = path.join(root, "scripts", "fixtures", "capture-policy-cases.json");
 
 function loadPolicy() {
   const code = readFileSync(policyPath, "utf8");
@@ -17,66 +18,29 @@ function loadPolicy() {
 }
 
 const policy = loadPolicy();
+const fixtures = JSON.parse(readFileSync(fixturesPath, "utf8"));
 
-test("FUN-14: always / never / ask header modes", () => {
-  const url = "https://cdn.example.com/video.mp4";
-  assert.equal(policy.headerForwardingDecision(url, { forwardHeadersMode: "enabled", siteRules: [] }).forward, true);
-  assert.equal(policy.headerForwardingDecision(url, { forwardHeadersMode: "disabled", siteRules: [] }).forward, false);
-  const ask = policy.headerForwardingDecision(url, { forwardHeadersMode: "ask", siteRules: [] });
-  assert.equal(ask.forward, false);
-  assert.equal(ask.state, "ask");
-});
-
-test("FUN-14: site rule priority overrides global header mode", () => {
-  const url = "https://auth.example.com/file.bin";
-  const rules = [
-    {
-      hostPattern: "auth.example.com",
-      includeSubdomains: false,
-      forwardHeaders: true,
-      mode: "auto",
-    },
-  ];
-  assert.equal(
-    policy.headerForwardingDecision(url, { forwardHeadersMode: "disabled", siteRules: rules }).forward,
-    true,
-  );
-  assert.equal(
-    policy.headerForwardingDecision(url, {
-      forwardHeadersMode: "enabled",
-      siteRules: [{ ...rules[0], forwardHeaders: false }],
-    }).forward,
-    false,
-  );
-});
-
-test("FUN-14: ask capture mode never intercepts and never prompts", () => {
-  const download = { url: "https://example.com/a.mp4", totalBytes: 10_000_000, filename: "a.mp4" };
-  assert.equal(
-    policy.shouldIntercept(download, {
-      autoIntercept: true,
-      minSizeBytes: "0",
-      fileExtensions: ["mp4"],
-      siteRules: [{ hostPattern: "example.com", includeSubdomains: true, mode: "ask" }],
-    }).reason,
-    "ask-rule",
-  );
-  assert.equal(
-    policy.shouldIntercept(download, {
-      autoIntercept: true,
-      minSizeBytes: "0",
-      fileExtensions: ["mp4"],
-      siteRules: [{ hostPattern: "example.com", includeSubdomains: true, mode: "never" }],
-    }).reason,
-    "site-rule",
-  );
-  assert.equal(
-    policy.shouldIntercept(download, {
-      autoIntercept: true,
-      minSizeBytes: "0",
-      fileExtensions: ["mp4"],
-      siteRules: [{ hostPattern: "example.com", includeSubdomains: true, mode: "auto" }],
-    }).intercept,
-    true,
-  );
-});
+for (const fixture of fixtures) {
+  test(fixture.name, () => {
+    if (fixture.kind === "headerForwarding") {
+      const decision = policy.headerForwardingDecision(fixture.url, fixture.settings);
+      assert.equal(decision.forward, fixture.expected.forward);
+      assert.equal(decision.state, fixture.expected.state);
+      return;
+    }
+    if (fixture.kind === "shouldIntercept") {
+      const decision = policy.shouldIntercept(fixture.download, fixture.settings);
+      assert.equal(decision.intercept, fixture.expected.intercept);
+      if ("reason" in fixture.expected) {
+        assert.equal(decision.reason, fixture.expected.reason);
+      }
+      return;
+    }
+    if (fixture.kind === "matchingRule") {
+      const matched = policy.matchingRule(fixture.hostname, fixture.rules);
+      assert.equal(matched?.id ?? null, fixture.expected.id);
+      return;
+    }
+    assert.fail(`unknown fixture kind: ${fixture.kind}`);
+  });
+}

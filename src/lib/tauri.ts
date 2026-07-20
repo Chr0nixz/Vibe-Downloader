@@ -23,6 +23,8 @@ import type {
   ListTasksInput,
   ListTasksResult,
   MetalinkMirrorView,
+  PreviewClassificationInput,
+  PreviewClassificationResult,
   ProbePhasePayload,
   ProbeTaskInput,
   ProbeTaskPayload,
@@ -653,6 +655,13 @@ export async function deleteClassificationRule(id: string): Promise<void> {
 export async function reorderClassificationRules(ids: string[]): Promise<void> {
   const commands = await loadNativeCommands();
   await runCommand("reorderClassificationRules", () => commands.reorderClassificationRules(ids));
+}
+
+export async function previewClassificationMatch(
+  input: PreviewClassificationInput,
+): Promise<PreviewClassificationResult> {
+  const commands = await loadNativeCommands();
+  return runCommand("previewClassificationMatch", () => commands.previewClassificationMatch(input));
 }
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {
