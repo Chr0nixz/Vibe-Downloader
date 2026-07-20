@@ -57,7 +57,7 @@ vi.mock("@/lib/tauri", () => ({
   verifyTaskHash: mocks.verifyTaskHash,
 }));
 
-function makeTask(id: string, fileName = `${id}.zip`): Task {
+function makeTask(id: string, fileName = `${id}.zip`, overrides: Partial<Task> = {}): Task {
   const now = "2026-07-14T00:00:00.000Z";
   return {
     id,
@@ -101,6 +101,7 @@ function makeTask(id: string, fileName = `${id}.zip`): Task {
     files: [],
     createdAt: now,
     updatedAt: now,
+    ...overrides,
   };
 }
 
@@ -155,6 +156,46 @@ describe("TaskDetails", () => {
     await user.click(screen.getByRole("tab", { name: "taskDetails.logs" }));
     await waitFor(() => expect(mocks.listTaskEventsPage).toHaveBeenCalledTimes(1));
     expect(screen.getByText("taskDetails.noLogs")).toBeInTheDocument();
+  });
+
+  it("stops segment polling when switching to the Requests sub-tab", async () => {
+    const user = userEvent.setup();
+    const task = makeTask("task-req-tab", "requests.zip", { status: "downloading" });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    await user.click(screen.getByRole("tab", { name: "taskDetails.diagnostics" }));
+    await waitFor(() => expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole("tab", { name: "taskDetails.requests" }));
+    await waitFor(() => expect(mocks.listTaskRequestsPage).toHaveBeenCalledTimes(1));
+
+    const callsAfterSwitch = mocks.listSegmentsPage.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(callsAfterSwitch);
+  });
+
+  it("skips overlapping segments polls while a request is in flight", async () => {
+    const user = userEvent.setup();
+    let release!: (value: { items: never[]; nextCursor: null }) => void;
+    const gate = new Promise<{ items: never[]; nextCursor: null }>((resolve) => {
+      release = resolve;
+    });
+    mocks.listSegmentsPage.mockImplementation(() => gate);
+
+    const task = makeTask("task-inflight", "inflight.zip", { status: "downloading" });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    await user.click(screen.getByRole("tab", { name: "taskDetails.diagnostics" }));
+    await waitFor(() => expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(1));
+
+    // Interval ticks cannot start a second request while the first is pending.
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(1);
+
+    release({ items: [], nextCursor: null });
+    await waitFor(() => expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(1));
   });
 
   it("resets the selected tab when switching to another task", async () => {

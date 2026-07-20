@@ -115,7 +115,7 @@ describe("task-data-store membership (ARC-08)", () => {
       failureCategories: [],
     });
 
-    useTaskDataStore.getState().patchTasksBatch([
+    const result = useTaskDataStore.getState().patchTasksBatch([
       {
         taskId: "q1",
         downloadedBytes: "10",
@@ -126,6 +126,13 @@ describe("task-data-store membership (ARC-08)", () => {
       },
     ]);
 
+    expect(result.statusTransitions).toEqual([
+      expect.objectContaining({
+        taskId: "q1",
+        previousStatus: "queued",
+        task: expect.objectContaining({ id: "q1", status: "completed" }),
+      }),
+    ]);
     expect(useTaskDataStore.getState().taskIds).toEqual([]);
     expect(useTaskDataStore.getState().taskById.q1?.status).toBe("completed");
   });
@@ -174,7 +181,7 @@ describe("task-data-store membership (ARC-08)", () => {
       failureCategories: [],
     });
 
-    useTaskDataStore.getState().patchTasksBatch([
+    const result = useTaskDataStore.getState().patchTasksBatch([
       {
         taskId: "multi",
         downloadedBytes: "60",
@@ -185,6 +192,7 @@ describe("task-data-store membership (ARC-08)", () => {
       },
     ]);
 
+    expect(result.statusTransitions).toEqual([]);
     const next = useTaskDataStore.getState().taskById.multi;
     expect(next?.downloadedBytes).toBe(60);
     expect(next?.files?.[0]?.downloadedBytes).toBe(10);

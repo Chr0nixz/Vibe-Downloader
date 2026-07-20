@@ -29,6 +29,17 @@ export type NavFilter =
 
 export type TaskSortKey = "updated_at" | "created_at" | "file_size" | "progress" | "speed" | "status" | "queue_order";
 
+/** Status transition detected during a progress patch (PERF-03 toast path). */
+export type TaskStatusTransition = {
+  taskId: string;
+  previousStatus: Task["status"];
+  task: Task;
+};
+
+export type PatchTasksBatchResult = {
+  statusTransitions: TaskStatusTransition[];
+};
+
 export type TaskSortDirection = "asc" | "desc";
 export type FileTypeFilter = "all" | "archive" | "image" | "video" | "document" | "app" | "other";
 export type ResumeFilter = "all" | "resumable" | "single_connection";
@@ -287,8 +298,8 @@ interface TaskDataStore {
   upsertTask: (task: Task) => void;
   upsertTasksBatch: (tasks: Task[]) => void;
   reorderTasksLocally: (orderedIds: string[]) => void;
-  patchTask: (payload: TaskProgressPayload | unknown) => void;
-  patchTasksBatch: (payloads: Array<TaskProgressPayload | unknown>) => void;
+  patchTask: (payload: TaskProgressPayload | unknown) => PatchTasksBatchResult;
+  patchTasksBatch: (payloads: Array<TaskProgressPayload | unknown>) => PatchTasksBatchResult;
   setGlobalTaskStats: (stats: TaskStats | TaskStatsSnapshot | null) => void;
   toggleTaskExpanded: (id: string) => void;
   collapseTask: (id: string) => void;
@@ -538,10 +549,13 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       const payload = normalizeTaskProgressPayload(raw);
       if (payload) latestByTaskId.set(payload.taskId, payload);
     }
-    if (latestByTaskId.size === 0) return;
+    if (latestByTaskId.size === 0) {
+      return { statusTransitions: [] };
+    }
 
     const now = Date.now();
     const speedSamples: Array<{ taskId: string; sample: { at: number; speedBps: number } }> = [];
+    const statusTransitions: TaskStatusTransition[] = [];
 
     set((state) => {
       let tasks = state.tasks;
@@ -583,6 +597,11 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
         // Accumulate stats delta
         if (old.status !== nextTask.status) {
           statusChanged = true;
+          statusTransitions.push({
+            taskId: payload.taskId,
+            previousStatus: old.status,
+            task: nextTask,
+          });
           for (const key of statusCounterKeys(old.status)) {
             if (key === "active") dActive -= 1;
             else if (key === "queued") dQueued -= 1;
@@ -677,6 +696,8 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
     if (speedSamples.length > 0) {
       useSpeedHistoryStore.getState().appendBatch(speedSamples);
     }
+
+    return { statusTransitions };
   },
 
   setGlobalTaskStats: (stats) =>

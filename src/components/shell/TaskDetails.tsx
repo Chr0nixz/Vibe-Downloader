@@ -396,14 +396,19 @@ function TaskDetailsPanel({
   useEffect(() => {
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
+    let inFlight = false;
 
-    if (activeTab !== "diagnostics") {
+    // PERF-02: only poll while the Segments sub-tab is visible (Requests has its own effect).
+    if (activeTab !== "diagnostics" || diagSubTab !== "segments") {
       setSegments([]);
       setSegmentError(null);
       return;
     }
 
     const loadSegments = () => {
+      if (cancelled || inFlight) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      inFlight = true;
       void listSegmentsPage({ taskId: task.id, cursor: null, pageSize: 100 })
         .then((result) => {
           if (!cancelled) {
@@ -428,21 +433,53 @@ function TaskDetailsPanel({
         })
         .catch((error) => {
           if (!cancelled) setSegmentError(errorMessage(error));
+        })
+        .finally(() => {
+          inFlight = false;
         });
     };
 
-    loadSegments();
+    const startPolling = () => {
+      if (intervalId) return;
+      const isLive = task.status === "downloading" || task.status === "retrying";
+      if (isLive) {
+        intervalId = setInterval(loadSegments, SEGMENT_REFRESH_MS);
+      }
+    };
 
-    const isLive = task.status === "downloading" || task.status === "retrying";
-    if (isLive) {
-      intervalId = setInterval(loadSegments, SEGMENT_REFRESH_MS);
+    const stopPolling = () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = undefined;
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (typeof document === "undefined") return;
+      if (document.visibilityState === "hidden") {
+        stopPolling();
+        return;
+      }
+      loadSegments();
+      startPolling();
+    };
+
+    loadSegments();
+    if (typeof document === "undefined" || document.visibilityState !== "hidden") {
+      startPolling();
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
     }
 
     return () => {
       cancelled = true;
-      if (intervalId) clearInterval(intervalId);
+      stopPolling();
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
     };
-  }, [activeTab, task.id, task.status]);
+  }, [activeTab, diagSubTab, task.id, task.status]);
 
   useEffect(() => {
     let cancelled = false;

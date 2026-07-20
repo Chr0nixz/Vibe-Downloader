@@ -136,16 +136,16 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
     let pendingProgressPayloads: unknown[] = [];
     const pendingQueue = createQueueChangedAccumulator();
 
-    function notifyTaskStatusChanges(previous: Task[], next: Task[]) {
-      if (!notify) return;
-      const previousById = new Map(previous.map((task) => [task.id, task]));
+    function notifyTaskStatusTransitions(
+      transitions: Array<{ taskId: string; previousStatus: Task["status"]; task: Task }>,
+    ) {
+      if (!notify || transitions.length === 0) return;
       const addToast = useToastStore.getState().addToast;
 
-      for (const task of next) {
-        const previousTask = previousById.get(task.id);
-        if (!previousTask || previousTask.status === task.status) continue;
+      for (const { taskId, previousStatus, task } of transitions) {
+        if (previousStatus === task.status) continue;
         if (task.status !== "completed" && task.status !== "failed" && task.status !== "needs_attention") {
-          clearTaskStatusNotifications(notifiedStatuses.current, task.id);
+          clearTaskStatusNotifications(notifiedStatuses.current, taskId);
           continue;
         }
         const notificationKey = `${task.id}:${task.status}`;
@@ -170,6 +170,17 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
           });
         }
       }
+    }
+
+    function notifyTaskStatusChanges(previous: Task[], next: Task[]) {
+      if (!notify) return;
+      const previousById = new Map(previous.map((task) => [task.id, task]));
+      const transitions = next.flatMap((task) => {
+        const previousTask = previousById.get(task.id);
+        if (!previousTask || previousTask.status === task.status) return [];
+        return [{ taskId: task.id, previousStatus: previousTask.status, task }];
+      });
+      notifyTaskStatusTransitions(transitions);
     }
 
     function scheduleStatsRefresh(delay = 250) {
@@ -217,9 +228,9 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
 
       const payloads = pendingProgressPayloads;
       pendingProgressPayloads = [];
-      const previous = useTaskDataStore.getState().tasks;
-      useTaskDataStore.getState().patchTasksBatch(payloads);
-      notifyTaskStatusChanges(previous, useTaskDataStore.getState().tasks);
+      // PERF-03: toast work tracks statusTransitions from the patch, not the full loaded list.
+      const { statusTransitions } = useTaskDataStore.getState().patchTasksBatch(payloads);
+      notifyTaskStatusTransitions(statusTransitions);
       scheduleRecalculateStats(250);
     }
 
