@@ -270,17 +270,21 @@ pub async fn materialize_and_verify_backup_db(
                 format!("Could not open backup database: {e}"),
             )
         })?;
-    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+    let integrity: String = match sqlx::query_scalar("PRAGMA integrity_check")
         .fetch_one(&pool)
         .await
-        .map_err(|e| {
-            let _ = pool.close();
+    {
+        Ok(value) => value,
+        Err(e) => {
+            // Cannot use map_err here: SqlitePool::close must be awaited.
+            pool.close().await;
             let _ = std::fs::remove_file(&path);
-            engine_backup_error(
+            return Err(engine_backup_error(
                 "backup_invalid_database",
                 format!("Backup integrity check failed: {e}"),
-            )
-        })?;
+            ));
+        }
+    };
     if integrity != "ok" {
         pool.close().await;
         let _ = std::fs::remove_file(&path);
