@@ -944,13 +944,14 @@ pub async fn download_metalink_range_from_mirror(
     // FUN-09: part resume without this mirror's validators is cross-mirror
     // failover. Require a primary checksum or wipe the part and restart.
     let same_mirror_validators = metalink_if_range_value(mirror);
-    if already_downloaded > 0 && same_mirror_validators.is_none() {
-        if !file_has_trusted_primary_checksum(pool, &mirror.file_id).await? {
-            let _ = fs::remove_file(part_path).await;
-            already_downloaded = 0;
-            already_downloaded_i64 = 0;
-            effective_start = range_start;
-        }
+    if already_downloaded > 0
+        && same_mirror_validators.is_none()
+        && !file_has_trusted_primary_checksum(pool, &mirror.file_id).await?
+    {
+        let _ = fs::remove_file(part_path).await;
+        already_downloaded = 0;
+        already_downloaded_i64 = 0;
+        effective_start = range_start;
     }
 
     let started = Instant::now();
@@ -1240,11 +1241,12 @@ async fn download_from_resource(
     // (or pre-validator crash). Only continue when a primary checksum can
     // detect corruption; otherwise truncate and restart.
     let same_mirror_validators = metalink_if_range_value(resource);
-    if resume_from > 0 && same_mirror_validators.is_none() {
-        if !file_has_trusted_primary_checksum(pool, &file.id).await? {
-            fs::remove_file(temp_path).await.ok();
-            resume_from = 0;
-        }
+    if resume_from > 0
+        && same_mirror_validators.is_none()
+        && !file_has_trusted_primary_checksum(pool, &file.id).await?
+    {
+        fs::remove_file(temp_path).await.ok();
+        resume_from = 0;
     }
 
     let started = Instant::now();

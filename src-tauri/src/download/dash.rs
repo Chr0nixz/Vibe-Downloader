@@ -1553,7 +1553,7 @@ async fn fetch_mpd_text(
             .map_err(|_| "DASH MPD file path is invalid.".to_string())?;
         let bytes = read_local_file_limited(&path, CONTROL_PLANE_MAX_BYTES)
             .await
-            .map_err(|error| map_dash_limited_body_error(error))?;
+            .map_err(map_dash_limited_body_error)?;
         return String::from_utf8(bytes)
             .map_err(|_| "DASH MPD file is not valid UTF-8.".to_string());
     }

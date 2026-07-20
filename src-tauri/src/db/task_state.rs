@@ -12,6 +12,7 @@ use super::task_records::{error_state_from_message, recovery_actions_json, row_t
 /// UPDATE tasks: downloaded_bytes, speed_bps, connection_count, status.
 /// ARC-13: selected `task_files` are updated only when `update_files` is true.
 /// Aggregate task progress must not overwrite per-file bytes (BT/Metalink).
+#[allow(clippy::too_many_arguments)]
 async fn update_progress_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     task_id: &str,
