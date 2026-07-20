@@ -153,18 +153,26 @@ impl BtEngine {
 
     /// ARC-12: include `task_id` so each task owns its session limits. Sharing
     /// only by output folder caused the latest task to overwrite peers' rates.
-    fn compute_session_key(
+    ///
+    /// PERF-06: canonicalize/create_dir happen off the Tokio worker via
+    /// `spawn_blocking` / `tokio::fs` so a slow disk cannot stall the runtime.
+    async fn compute_session_key(
         output_folder: &str,
         task_proxy_config: &ResolvedProxyConfig,
         task_id: &str,
     ) -> String {
         let proxy_fingerprint = task_proxy_config.fingerprint();
-        let key = PathBuf::from(output_folder)
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(output_folder))
-            .to_string_lossy()
-            .to_string();
-        format!("{key}|proxy:{proxy_fingerprint}|task:{task_id}")
+        let folder = output_folder.to_string();
+        let canonical = tokio::task::spawn_blocking(move || {
+            PathBuf::from(&folder)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(folder))
+                .to_string_lossy()
+                .to_string()
+        })
+        .await
+        .unwrap_or_else(|_| output_folder.to_string());
+        format!("{canonical}|proxy:{proxy_fingerprint}|task:{task_id}")
     }
 
     async fn api_for_output_folder(
@@ -175,7 +183,7 @@ impl BtEngine {
         upload_limit_bps: Option<i64>,
         task_proxy_config: &ResolvedProxyConfig,
     ) -> Result<(Arc<Api>, String), String> {
-        let key = Self::compute_session_key(output_folder, task_proxy_config, task_id);
+        let key = Self::compute_session_key(output_folder, task_proxy_config, task_id).await;
 
         // Fast path: reuse under a short lock (no await while held).
         {
@@ -192,7 +200,8 @@ impl BtEngine {
 
         // ARC-12: create the librqbit session outside the registry mutex so
         // other BT registry operations are not blocked on DHT/bind work.
-        std::fs::create_dir_all(output_folder)
+        tokio::fs::create_dir_all(output_folder)
+            .await
             .map_err(|e| format!("Could not create the torrent download directory: {e}"))?;
         let output_path = output_folder.to_string();
         let mut options = SessionOptions::default();
@@ -1868,12 +1877,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
-    #[test]
-    fn session_key_includes_task_id_for_limit_isolation() {
+    #[tokio::test]
+    async fn session_key_includes_task_id_for_limit_isolation() {
         // ARC-12: same folder+proxy, different tasks → different keys.
         let proxy = crate::proxy::ResolvedProxyConfig::default();
-        let a = BtEngine::compute_session_key("/tmp/bt-out", &proxy, "task-a");
-        let b = BtEngine::compute_session_key("/tmp/bt-out", &proxy, "task-b");
+        let a = BtEngine::compute_session_key("/tmp/bt-out", &proxy, "task-a").await;
+        let b = BtEngine::compute_session_key("/tmp/bt-out", &proxy, "task-b").await;
         assert_ne!(a, b);
         assert!(a.contains("task:task-a"));
         assert!(b.contains("task:task-b"));

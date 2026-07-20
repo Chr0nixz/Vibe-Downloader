@@ -48,6 +48,112 @@ const HLS_LIVE_MAX_IDLE_POLLS: usize = 6;
 /// ARC-11: Clamp EXT-X-TARGETDURATION so a malicious/misconfigured playlist
 /// cannot pin a scheduler slot for hours between polls.
 const HLS_MAX_TARGET_DURATION_SECS: i64 = 60;
+
+/// PERF-04: coalesce AES-key / init-map fetches across concurrent segment workers.
+struct HlsTaskFetchCache {
+    keys: tokio::sync::Mutex<HashMap<String, KeyCacheEntry>>,
+    init_maps: tokio::sync::Mutex<HashMap<String, InitMapCacheEntry>>,
+}
+
+enum KeyCacheEntry {
+    Ready([u8; 16]),
+    InFlight(tokio::sync::watch::Receiver<Option<Result<[u8; 16], String>>>),
+}
+
+enum InitMapCacheEntry {
+    Ready,
+    InFlight(tokio::sync::watch::Receiver<Option<Result<(), String>>>),
+}
+
+impl HlsTaskFetchCache {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            keys: tokio::sync::Mutex::new(HashMap::new()),
+            init_maps: tokio::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn get_or_fetch_key<F, Fut>(&self, uri: &str, fetch: F) -> Result<[u8; 16], String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<[u8; 16], String>>,
+    {
+        let mut map = self.keys.lock().await;
+        match map.get(uri) {
+            Some(KeyCacheEntry::Ready(bytes)) => Ok(*bytes),
+            Some(KeyCacheEntry::InFlight(rx)) => {
+                let mut rx = rx.clone();
+                drop(map);
+                let _ = rx.changed().await;
+                let outcome = rx.borrow().clone();
+                match outcome {
+                    Some(Ok(bytes)) => Ok(bytes),
+                    Some(Err(error)) => Err(error),
+                    None => Err("HLS key fetch was cancelled.".to_string()),
+                }
+            }
+            None => {
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                map.insert(uri.to_string(), KeyCacheEntry::InFlight(rx));
+                drop(map);
+                let result = fetch().await;
+                let mut map = self.keys.lock().await;
+                match &result {
+                    Ok(bytes) => {
+                        map.insert(uri.to_string(), KeyCacheEntry::Ready(*bytes));
+                        let _ = tx.send(Some(Ok(*bytes)));
+                    }
+                    Err(error) => {
+                        // Do not cache failures — segment retries must re-coalesce.
+                        map.remove(uri);
+                        let _ = tx.send(Some(Err(error.clone())));
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    async fn get_or_fetch_init_map<F, Fut>(&self, cache_key: &str, fetch: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let mut map = self.init_maps.lock().await;
+        match map.get(cache_key) {
+            Some(InitMapCacheEntry::Ready) => Ok(()),
+            Some(InitMapCacheEntry::InFlight(rx)) => {
+                let mut rx = rx.clone();
+                drop(map);
+                let _ = rx.changed().await;
+                let outcome = rx.borrow().clone();
+                match outcome {
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(error)) => Err(error),
+                    None => Err("HLS init-map fetch was cancelled.".to_string()),
+                }
+            }
+            None => {
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                map.insert(cache_key.to_string(), InitMapCacheEntry::InFlight(rx));
+                drop(map);
+                let result = fetch().await;
+                let mut map = self.init_maps.lock().await;
+                match &result {
+                    Ok(()) => {
+                        map.insert(cache_key.to_string(), InitMapCacheEntry::Ready);
+                        let _ = tx.send(Some(Ok(())));
+                    }
+                    Err(error) => {
+                        map.remove(cache_key);
+                        let _ = tx.send(Some(Err(error.clone())));
+                    }
+                }
+                result
+            }
+        }
+    }
+}
 /// E-2: Maximum streamed size for a single HLS segment. This bounds disk and
 /// network abuse while encrypted payload memory stays fixed-size.
 const HLS_SEGMENT_MAX_BYTES: usize = 512 * 1024 * 1024;
@@ -425,6 +531,8 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     .await?;
     // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
     let client = engine.client_for_config(&proxy_config).await?;
+    // PERF-04: one coalescer per download session for shared AES keys / init maps.
+    let fetch_cache = HlsTaskFetchCache::new();
     // FUN-01 / C5: inject Basic Auth from encrypted task credentials at runtime.
     let credentials = db::resolve_task_credentials(&pool, &task.id).await?;
     let request_headers =
@@ -529,6 +637,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                     &track.url,
                     &track_dir,
                     media.segments,
+                    fetch_cache.clone(),
                 )
                 .await
                 {
@@ -607,6 +716,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                 &mut progress_gate,
                 first_segment_id.as_deref(),
                 &mut db_write_gate,
+                fetch_cache.clone(),
             )
             .await?;
             downloaded_total = downloaded;
@@ -627,6 +737,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                 connection_limit.max(1),
                 &task.id,
                 track,
+                fetch_cache.clone(),
             )
             .await?;
         }
@@ -823,6 +934,7 @@ async fn download_hls_segments(
     progress_gate: &mut TaskProgressEmitGate,
     first_segment_id: Option<&str>,
     db_write_gate: &mut DbWriteGate,
+    fetch_cache: Arc<HlsTaskFetchCache>,
 ) -> Result<i64, String> {
     let mut pending = plans.into_iter();
     let mut workers = JoinSet::new();
@@ -840,6 +952,7 @@ async fn download_hls_segments(
             let request_headers = request_headers.to_vec();
             let speed_limiter = speed_limiter.clone();
             let cancel_token = cancel_token.clone();
+            let fetch_cache = fetch_cache.clone();
             workers.spawn(async move {
                 download_hls_segment(
                     &pool,
@@ -848,6 +961,7 @@ async fn download_hls_segments(
                     speed_limiter,
                     cancel_token,
                     plan,
+                    fetch_cache,
                 )
                 .await
             });
@@ -904,6 +1018,7 @@ async fn download_hls_segments(
     Ok(downloaded_total)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_hls_segment(
     pool: &SqlitePool,
     client: &Client,
@@ -911,6 +1026,7 @@ async fn download_hls_segment(
     speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: tokio_util::sync::CancellationToken,
     plan: SegmentDownloadPlan,
+    fetch_cache: Arc<HlsTaskFetchCache>,
 ) -> SegmentDownloadResult {
     let retry_policy = RetryPolicy::hls_segment();
     let mut retry_count = 0;
@@ -924,6 +1040,7 @@ async fn download_hls_segment(
             &speed_limiter,
             &cancel_token,
             &plan,
+            &fetch_cache,
         )
         .await;
         crate::download::diagnostics::persist_engine_diagnostic(
@@ -1012,6 +1129,7 @@ async fn download_hls_segment(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_hls_segment_once(
     pool: &SqlitePool,
     client: &Client,
@@ -1019,6 +1137,7 @@ async fn download_hls_segment_once(
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: &tokio_util::sync::CancellationToken,
     plan: &SegmentDownloadPlan,
+    fetch_cache: &Arc<HlsTaskFetchCache>,
 ) -> Result<i64, String> {
     db::update_hls_segment_status(pool, &plan.id, 0, SegmentStatus::Downloading, 0, None).await?;
     if let Some(parent) = plan.local_path.parent() {
@@ -1034,6 +1153,7 @@ async fn download_hls_segment_once(
             speed_limiter,
             cancel_token,
             init_map,
+            fetch_cache,
         )
         .await?;
     }
@@ -1063,6 +1183,7 @@ async fn download_hls_segment_once(
             response,
             key,
             plan,
+            fetch_cache,
         )
         .await
     } else {
@@ -1130,51 +1251,96 @@ async fn download_hls_segment_once(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_hls_init_map(
     client: &Client,
     request_headers: &[(String, String)],
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: &tokio_util::sync::CancellationToken,
     init_map: &ResolvedHlsInitMap,
+    fetch_cache: &Arc<HlsTaskFetchCache>,
 ) -> Result<(), String> {
     if fs::try_exists(&init_map.local_path).await.unwrap_or(false) {
         return Ok(());
     }
-    let data = fetch_bytes(
-        client,
-        &init_map.uri,
-        request_headers,
-        init_map.byte_range.as_ref().map(byte_range_header),
-    )
-    .await?;
-    if cancel_token.is_cancelled() {
-        return Err("Download canceled.".to_string());
-    }
-    if speed_limiter
-        .throttle(data.len(), cancel_token)
+    let cache_key = match &init_map.byte_range {
+        Some(range) => format!(
+            "{}#{}-{}",
+            init_map.uri,
+            range.start.unwrap_or(0),
+            range.length
+        ),
+        None => init_map.uri.clone(),
+    };
+    let init_map = init_map.clone();
+    let client = client.clone();
+    let request_headers = request_headers.to_vec();
+    let speed_limiter = speed_limiter.clone();
+    let cancel_token = cancel_token.clone();
+    fetch_cache
+        .get_or_fetch_init_map(&cache_key, || async move {
+            if fs::try_exists(&init_map.local_path).await.unwrap_or(false) {
+                return Ok(());
+            }
+            let data = fetch_bytes(
+                &client,
+                &init_map.uri,
+                &request_headers,
+                init_map.byte_range.as_ref().map(byte_range_header),
+            )
+            .await?;
+            if cancel_token.is_cancelled() {
+                return Err("Download canceled.".to_string());
+            }
+            if speed_limiter
+                .throttle(data.len(), &cancel_token)
+                .await
+                .is_err()
+            {
+                return Err("Download canceled.".to_string());
+            }
+            if let Some(parent) = init_map.local_path.parent() {
+                fs::create_dir_all(parent).await.map_err(|e| {
+                    AppErrorPayload::disk_write_failed(format!(
+                        "Could not create HLS init map folder: {e}"
+                    ))
+                    .command_error()
+                })?;
+            }
+            let part_path = init_map
+                .local_path
+                .with_extension(format!("{}.part", Uuid::new_v4()));
+            let mut file = fs::File::create(&part_path).await.map_err(|e| {
+                AppErrorPayload::disk_write_failed(format!("Could not create HLS init map: {e}"))
+                    .command_error()
+            })?;
+            if let Err(error) = async {
+                file.write_all(&data).await.map_err(|e| {
+                    AppErrorPayload::disk_write_failed(format!("Could not write HLS init map: {e}"))
+                        .command_error()
+                })?;
+                file.flush().await.map_err(|e| {
+                    AppErrorPayload::disk_write_failed(format!("Could not flush HLS init map: {e}"))
+                        .command_error()
+                })?;
+                fs::rename(&part_path, &init_map.local_path)
+                    .await
+                    .map_err(|e| {
+                        AppErrorPayload::disk_write_failed(format!(
+                            "Could not publish HLS init map: {e}"
+                        ))
+                        .command_error()
+                    })?;
+                Ok::<(), String>(())
+            }
+            .await
+            {
+                let _ = fs::remove_file(&part_path).await;
+                return Err(error);
+            }
+            Ok(())
+        })
         .await
-        .is_err()
-    {
-        return Err("Download canceled.".to_string());
-    }
-    if let Some(parent) = init_map.local_path.parent() {
-        fs::create_dir_all(parent).await.map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!("Could not create HLS init map folder: {e}"))
-                .command_error()
-        })?;
-    }
-    let mut file = fs::File::create(&init_map.local_path).await.map_err(|e| {
-        AppErrorPayload::disk_write_failed(format!("Could not create HLS init map: {e}"))
-            .command_error()
-    })?;
-    file.write_all(&data).await.map_err(|e| {
-        AppErrorPayload::disk_write_failed(format!("Could not write HLS init map: {e}"))
-            .command_error()
-    })?;
-    file.flush().await.map_err(|e| {
-        AppErrorPayload::disk_write_failed(format!("Could not flush HLS init map: {e}"))
-            .command_error()
-    })
 }
 
 async fn hls_decryptor(
@@ -1182,6 +1348,7 @@ async fn hls_decryptor(
     request_headers: &[(String, String)],
     key: &HlsKey,
     media_sequence: i64,
+    fetch_cache: &Arc<HlsTaskFetchCache>,
 ) -> Result<StreamingAes128CbcDecryptor, String> {
     if !key.method.eq_ignore_ascii_case("AES-128") {
         return Err(engine_error(
@@ -1197,16 +1364,23 @@ async fn hls_decryptor(
             false,
         )
     })?;
-    let key_bytes: [u8; 16] = fetch_bytes(client, uri, request_headers, None)
-        .await?
-        .try_into()
-        .map_err(|_| {
-            engine_error(
-                "hls_unsupported_encryption",
-                "AES-128 HLS key must be 16 bytes.",
-                false,
-            )
-        })?;
+    let client = client.clone();
+    let request_headers = request_headers.to_vec();
+    let uri_owned = uri.to_string();
+    let key_bytes = fetch_cache
+        .get_or_fetch_key(uri, || async move {
+            fetch_bytes(&client, &uri_owned, &request_headers, None)
+                .await?
+                .try_into()
+                .map_err(|_| {
+                    engine_error(
+                        "hls_unsupported_encryption",
+                        "AES-128 HLS key must be 16 bytes.",
+                        false,
+                    )
+                })
+        })
+        .await?;
     let iv = key
         .iv
         .as_deref()
@@ -1216,6 +1390,7 @@ async fn hls_decryptor(
     Ok(StreamingAes128CbcDecryptor::new(key_bytes, iv))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_encrypted_hls_segment(
     client: &Client,
     request_headers: &[(String, String)],
@@ -1224,8 +1399,16 @@ async fn stream_encrypted_hls_segment(
     mut response: reqwest::Response,
     key: &HlsKey,
     plan: &SegmentDownloadPlan,
+    fetch_cache: &Arc<HlsTaskFetchCache>,
 ) -> Result<i64, String> {
-    let mut decryptor = hls_decryptor(client, request_headers, key, plan.media_sequence).await?;
+    let mut decryptor = hls_decryptor(
+        client,
+        request_headers,
+        key,
+        plan.media_sequence,
+        fetch_cache,
+    )
+    .await?;
     let file_name = plan
         .local_path
         .file_name()
@@ -1456,6 +1639,7 @@ async fn download_hls_rendition(
     media_url: &str,
     staging_dir: &Path,
     segments: Vec<HlsSegment>,
+    fetch_cache: Arc<HlsTaskFetchCache>,
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(staging_dir).await.map_err(|e| {
         AppErrorPayload::disk_write_failed(format!("Could not create HLS track folder: {e}"))
@@ -1477,6 +1661,7 @@ async fn download_hls_rendition(
         cancel_token,
         connection_limit,
         plans,
+        fetch_cache,
     )
     .await?;
     if cancel_token.is_cancelled() {
@@ -1495,6 +1680,7 @@ async fn poll_live_external_track(
     connection_limit: usize,
     task_id: &str,
     track: &mut LiveExternalTrack,
+    fetch_cache: Arc<HlsTaskFetchCache>,
 ) -> Result<(), String> {
     let body = fetch_text(client, &track.url, request_headers)
         .await
@@ -1540,12 +1726,14 @@ async fn poll_live_external_track(
         cancel_token,
         connection_limit,
         plans,
+        fetch_cache,
     )
     .await?;
     track.completed.extend(completed);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_hls_rendition_segments(
     pool: &SqlitePool,
     client: &Client,
@@ -1554,6 +1742,7 @@ async fn download_hls_rendition_segments(
     cancel_token: &tokio_util::sync::CancellationToken,
     connection_limit: usize,
     plans: Vec<SegmentDownloadPlan>,
+    fetch_cache: Arc<HlsTaskFetchCache>,
 ) -> Result<Vec<(String, i64)>, String> {
     let mut pending = plans.into_iter();
     let mut workers = JoinSet::new();
@@ -1571,6 +1760,7 @@ async fn download_hls_rendition_segments(
             let request_headers = request_headers.to_vec();
             let speed_limiter = speed_limiter.clone();
             let cancel_token = cancel_token.clone();
+            let fetch_cache = fetch_cache.clone();
             let duration_ms = plan.duration_ms;
             let local_name = plan
                 .local_path
@@ -1586,6 +1776,7 @@ async fn download_hls_rendition_segments(
                     speed_limiter,
                     cancel_token,
                     plan,
+                    fetch_cache,
                 )
                 .await;
                 (local_name, duration_ms, result)
@@ -2697,5 +2888,60 @@ seg1.ts\n\
 #EXT-X-ENDLIST\n";
         let tracks = parse_ext_x_media(media, "https://cdn.example/media.m3u8");
         assert!(tracks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn key_fetch_cache_coalesces_concurrent_lookups() {
+        let cache = HlsTaskFetchCache::new();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut joins = JoinSet::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let hits = hits.clone();
+            joins.spawn(async move {
+                cache
+                    .get_or_fetch_key("https://cdn.example/key.bin", || {
+                        let hits = hits.clone();
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            Ok([1_u8; 16])
+                        }
+                    })
+                    .await
+            });
+        }
+        while let Some(joined) = joins.join_next().await {
+            assert_eq!(joined.expect("join").expect("key"), [1_u8; 16]);
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn key_fetch_cache_does_not_cache_failures() {
+        let cache = HlsTaskFetchCache::new();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first = cache
+            .get_or_fetch_key("https://cdn.example/key.bin", || {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    Err("temporary".to_string())
+                }
+            })
+            .await;
+        assert!(first.is_err());
+        let second = cache
+            .get_or_fetch_key("https://cdn.example/key.bin", || {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    Ok([2_u8; 16])
+                }
+            })
+            .await
+            .expect("retry");
+        assert_eq!(second, [2_u8; 16]);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 }

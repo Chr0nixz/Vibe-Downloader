@@ -522,40 +522,40 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **改进**：先记录 10k、100k、1M 数据的 query plan 和 p50/p95；超预算后引入 FTS5 或规范化 search column。
 - **验收**：目标硬件上 100k 任务连续输入搜索不阻塞 UI，预算和数据分布写入性能基线。
 
-### PERF-02（P2，Open）：TaskDetails 在非相关子页持续轮询 segments
+### PERF-02（P2，Closed）：TaskDetails 在非相关子页持续轮询 segments
 
-- **证据**：[`TaskDetails.tsx`](../src/components/shell/TaskDetails.tsx#L377) 在 diagnostics 区域每 2 秒轮询 segments，即使用户位于 Requests 子页，也没有 in-flight guard。
-- **风险**：慢 IPC 可重叠，长期打开详情产生无意义 DB 和序列化负载。
-- **改进**：按可见 tab 订阅；上一次请求完成前不启动下一次；窗口隐藏或详情关闭时停止。
+- **证据**：[`TaskDetails.tsx`](../src/components/shell/TaskDetails.tsx) segments effect 曾仅门控 diagnostics 主 tab，Requests 子页仍每 2s 调用 `listSegmentsPage`，且无 in-flight / visibility 守卫。
+- **修复**：仅在 `diagSubTab === "segments"` 时订阅；上一请求未完成则跳过；`visibilitychange` 隐藏时停轮询。
+- **验证测试**：`TaskDetails.test.tsx`（Requests 子 tab 停止 segments 轮询；慢请求下并发 ≤ 1）。
 - **验收**：Requests、Logs 等子页不会请求 segments；慢请求下并发数始终为 1。
 
-### PERF-03（P2，Open）：进度批次通知仍做全列表 O(N) 扫描
+### PERF-03（P2，Closed）：进度批次通知仍做全列表 O(N) 扫描
 
-- **证据**：[`use-task-events.ts`](../src/hooks/use-task-events.ts#L86) 每次 flush 构造 previousById 并遍历全部任务。
-- **风险**：任务数增加时，高频进度事件放大 CPU 和 GC 压力。
-- **改进**：让 `patchTasksBatch` 返回状态变化 ID，通知只处理变化任务。
-- **验收**：1k 已加载任务、每批少量变化时工作量与变化 ID 数量近似线性，而不是与总任务数线性。
+- **证据**：[`use-task-events.ts`](../src/hooks/use-task-events.ts) 曾在 progress flush 后对全部已加载任务建 `previousById` 并扫描。
+- **修复**：`patchTasksBatch` 返回 `statusTransitions`；progress flush 仅对变化任务发 toast，工作量与变化数近似线性。
+- **验证测试**：`task-data-store.membership.test.ts`（status 变化返回 transitions；bytes-only patch 为空）。
+- **验收**：1k 已加载任务、每批少量变化时通知工作量与变化 ID 数量近似线性。
 
-### PERF-04（P2，Open）：HLS AES key 和 init map 缺少任务级去重缓存
+### PERF-04（P2，Closed）：HLS AES key 和 init map 缺少任务级去重缓存
 
-- **证据**：[`hls.rs`](../src-tauri/src/download/hls.rs#L883) 每个 segment worker 调用 init-map 检查；每个加密 segment 重新请求相同 key。
-- **风险**：额外网络请求、重复磁盘竞争和 check-then-create 竞态。
-- **改进**：key 按 URI 缓存，init map 使用 OnceCell、singleflight 或原子 staging 提交。
-- **验收**：N 个共享 key/map 的 segment 每个 URI 只请求和发布一次；失败可按策略重试且不缓存坏值。
+- **证据**：[`hls.rs`](../src-tauri/src/download/hls.rs) 每个 segment worker 曾独立拉取同一 key/init-map。
+- **修复**：任务级 `HlsTaskFetchCache` singleflight；失败不缓存；init-map 使用 `.part` + rename 发布。
+- **验证测试**：`hls` 单元测试（并发 coalesce + 失败不缓存）。
+- **验收**：N 个共享 key/map 的 segment 每个 URI 只成功请求一次；失败可重试。
 
-### PERF-05（P2，Open）：长期缓存和 task events 缺少完整生命周期上限
+### PERF-05（P2，Closed）：长期缓存和 task events 缺少完整生命周期上限
 
-- **证据**：`FILES_VERSION_CACHE` 对保留的 completed 任务长期占用条目；`task_events` 没有年龄或每任务条数清理，而 request diagnostics 已有保留策略。
-- **风险**：长时间使用和大量历史任务会持续增长内存和数据库。
-- **改进**：有界 LRU 或弱缓存；task events 增加按年龄和每任务数量的后台清理。
-- **验收**：长期 seed 和删除测试后缓存、事件表和 WAL 大小稳定在文档预算内。
+- **证据**：`FILES_VERSION_CACHE` 曾无上限；`task_events` 仅随任务删除清理。
+- **修复**：files-version 缓存上限 4096（简易 LRU）；`prune_task_events`（每任务 200 + 14 天 age，FUN-07 保护仍 paused 任务的最新 pause 事件）；启动与 6h 后台 prune。
+- **验证测试**：`events` 单元测试（缓存上限）；`task_events_retention.rs`（cap + pause 保护）。
+- **验收**：长跑后 cache 与事件表有上界；schedule-paused 语义在 prune 后仍可读。
 
-### PERF-06（P2，Open）：async 热路径仍有同步文件系统调用
+### PERF-06（P2，Closed）：async 热路径仍有同步文件系统调用
 
-- **证据**：任务准备、BT session key 和 ffmpeg 路径解析使用同步 exists、metadata 或 canonicalize。
-- **风险**：网络盘、不可用盘或异常文件系统会阻塞 Tokio worker。
-- **改进**：可用时改为 `tokio::fs`，必须同步的平台操作放入有界 `spawn_blocking`。
-- **验收**：慢文件系统故障注入不阻塞无关下载和调度心跳。
+- **证据**：`prepare_task_for_download`、BT `canonicalize`、`ffmpeg_path` PATH 扫描曾在 async 上下文同步阻塞。
+- **修复**：临时文件探测改 `tokio::fs`；BT session key canonicalize/`create_dir_all` 走 `spawn_blocking`/`tokio::fs`；ffmpeg 解析用 `try_exists` + PATH `spawn_blocking`。
+- **验证**：相关单元测试（BT session key、ffmpeg PATH）；完整慢盘故障注入记为后续 soak。
+- **验收**：上述三点不再在 Tokio worker 上同步 exists/metadata/canonicalize/PATH 扫描。
 
 ### PERF-07（P1，Closed）：完成动作用户命令同步阻塞且无超时
 
@@ -627,9 +627,9 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 ### 阶段 D：性能和可维护性
 
 1. `PERF-11`：已 Closed（1k/10k headless 基线）；50k+/UI soak 仍延期。
-2. 根据数据处理 `PERF-01`、`PERF-02`、`PERF-03`、`PERF-05` 和 `PERF-10`。
-3. 并行处理有明确收益的 `PERF-04`、`PERF-06` 和 `PERF-08`（`PERF-07` 已 Closed）。
-4. 只有基准证明有收益时才处理 `PERF-09`。
+2. 高价值热点已 Closed：`PERF-02`、`PERF-03`、`PERF-04`、`PERF-05`、`PERF-06`（`PERF-07` 亦已 Closed）。
+3. 仍 Open / Needs benchmark：`PERF-01`、`PERF-08`、`PERF-10`；`PERF-09` 先测再改。
+4. 可维护性：`ARC-16`、`ARC-17`。
 
 ## 十、发布验收定义
 

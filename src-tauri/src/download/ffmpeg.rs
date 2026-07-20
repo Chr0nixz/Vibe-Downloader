@@ -56,19 +56,20 @@ pub(crate) async fn run_cancellable(
 pub(crate) async fn ffmpeg_path(pool: Option<&SqlitePool>) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("VIBE_FFMPEG_PATH") {
         let path = PathBuf::from(path);
-        if path.exists() {
+        // PERF-06: avoid sync exists on the async hot path (HLS/DASH probe+download).
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             return Some(path);
         }
     }
     if let Some(pool) = pool {
         if let Some(path_str) = db::get_ffmpeg_path_setting(pool).await {
             let path = PathBuf::from(&path_str);
-            if path.exists() {
+            if tokio::fs::try_exists(&path).await.unwrap_or(false) {
                 return Some(path);
             }
         }
     }
-    executable_in_path("ffmpeg")
+    executable_in_path("ffmpeg").await
 }
 
 /// Ensure ffmpeg is available, returning the resolved [`PathBuf`] on success.
@@ -99,7 +100,7 @@ pub(crate) async fn ensure_ffmpeg_available(
 /// working ffmpeg binary. Returns the first line of `ffmpeg -version` output
 /// (e.g. `ffmpeg version 6.1.1 Copyright (c) 2000-2023 the FFmpeg developers`).
 pub(crate) async fn probe_ffmpeg_version_at_path(path: &Path) -> Result<String, String> {
-    if !path.exists() {
+    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
         return Err(format!(
             "ffmpeg binary not found at the configured path: {}",
             path.display()
@@ -127,22 +128,31 @@ pub(crate) async fn probe_ffmpeg_version_at_path(path: &Path) -> Result<String, 
 
 /// Locate an executable by name on `PATH`. Cross-platform: on Windows this
 /// also probes `name.exe`.
-fn executable_in_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let candidate = dir.join(format!("{name}.exe"));
+///
+/// PERF-06: PATH scanning runs in `spawn_blocking` so a slow/network PATH
+/// entry cannot stall the Tokio worker that resolves ffmpeg for HLS/DASH.
+async fn executable_in_path(name: &str) -> Option<PathBuf> {
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || {
+        let path_var = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(&name);
             if candidate.exists() {
                 return Some(candidate);
             }
+            #[cfg(target_os = "windows")]
+            {
+                let candidate = dir.join(format!("{name}.exe"));
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
         }
-    }
-    None
+        None
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
@@ -185,20 +195,20 @@ mod tests {
         }
     }
 
-    #[test]
-    fn executable_in_path_returns_none_for_unlikely_name() {
-        let result = executable_in_path("vibe-downloader-ffmpeg-nonexistent-xyz");
+    #[tokio::test]
+    async fn executable_in_path_returns_none_for_unlikely_name() {
+        let result = executable_in_path("vibe-downloader-ffmpeg-nonexistent-xyz").await;
         assert!(result.is_none(), "expected None for nonexistent binary");
     }
 
-    #[test]
-    fn executable_in_path_finds_common_binary() {
+    #[tokio::test]
+    async fn executable_in_path_finds_common_binary() {
         // `cmd` exists on Windows; `sh` exists on most Unix systems.
         #[cfg(target_os = "windows")]
         let target = "cmd";
         #[cfg(not(target_os = "windows"))]
         let target = "sh";
-        let result = executable_in_path(target);
+        let result = executable_in_path(target).await;
         assert!(
             result.is_some(),
             "expected to find {target} on PATH for this test environment"
@@ -326,7 +336,7 @@ mod tests {
         // Locate ffmpeg via PATH so the test runs only when ffmpeg is actually
         // installed. This keeps the test meaningful in CI environments that
         // install ffmpeg without making it the default assumption.
-        let Some(ffmpeg) = executable_in_path("ffmpeg") else {
+        let Some(ffmpeg) = executable_in_path("ffmpeg").await else {
             eprintln!("skipping probe_ffmpeg_version_at_path test: ffmpeg not on PATH");
             return;
         };
