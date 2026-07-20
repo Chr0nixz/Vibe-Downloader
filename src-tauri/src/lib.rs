@@ -554,6 +554,15 @@ async fn run_startup_init_inner(handle: &tauri::AppHandle) -> Result<(), String>
                 tracing::warn!(error = %error, "request diagnostics prune failed");
             }
         }
+        match db::prune_task_events(&pool).await {
+            Ok(0) => {}
+            Ok(removed) => {
+                tracing::info!(removed, "startup task events prune");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "task events prune failed");
+            }
+        }
         let default_dir = commands::settings::default_download_dir(handle)?;
         let settings = db::get_settings(&pool, default_dir).await?;
         db::reset_interrupted_tasks(&pool, settings.auto_resume_on_startup).await?;

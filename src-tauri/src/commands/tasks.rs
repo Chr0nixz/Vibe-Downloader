@@ -527,6 +527,15 @@ pub(crate) fn spawn_request_diagnostics_cleanup(app: AppHandle) {
                     tracing::warn!(error = %error, "request diagnostics prune failed");
                 }
             }
+            match db::prune_task_events(&state_ref.pool).await {
+                Ok(0) => {}
+                Ok(removed) => {
+                    tracing::info!(removed, "pruned stale task events");
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "task events prune failed");
+                }
+            }
         }
     });
 }
@@ -840,10 +849,11 @@ pub(crate) async fn prepare_task_for_download(
         .as_deref()
         .map(PathBuf::from)
         .ok_or_else(|| "Task is missing a temporary path.".to_string())?;
-    let temp_exists = temp_path.exists();
-    let temp_size = std::fs::metadata(&temp_path)
-        .map(|metadata| i64::try_from(metadata.len()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
+    let temp_exists = tokio::fs::try_exists(&temp_path).await.unwrap_or(false);
+    let temp_size = match tokio::fs::metadata(&temp_path).await {
+        Ok(metadata) => i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+        Err(_) => 0,
+    };
     if let Some(message) = segment_resume_error(
         &segments,
         task.downloaded_bytes,

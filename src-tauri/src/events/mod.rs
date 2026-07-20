@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -191,10 +191,64 @@ pub fn emit_task_updated<T: DownloadEventTarget + ?Sized>(target: &T, task: &Tas
 /// store preserves existing files when an incoming task has no files
 /// (see `mergedFiles` logic in upsertTask). This avoids a DB query on every
 /// status/progress transition where files haven't structurally changed.
-static FILES_VERSION_CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+///
+/// PERF-05: bounded so completed history cannot grow the process map without limit.
+const FILES_VERSION_CACHE_MAX_ENTRIES: usize = 4096;
 
-fn files_version_cache() -> &'static Mutex<HashMap<String, i64>> {
-    FILES_VERSION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+struct FilesVersionCache {
+    map: HashMap<String, i64>,
+    order: VecDeque<String>,
+}
+
+impl FilesVersionCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&self, task_id: &str) -> Option<i64> {
+        self.map.get(task_id).copied()
+    }
+
+    fn insert(&mut self, task_id: String, version: i64) {
+        if let Some(slot) = self.map.get_mut(&task_id) {
+            *slot = version;
+            return;
+        }
+        while self.map.len() >= FILES_VERSION_CACHE_MAX_ENTRIES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        self.order.push_back(task_id.clone());
+        self.map.insert(task_id, version);
+    }
+
+    fn remove(&mut self, task_id: &str) {
+        if self.map.remove(task_id).is_some() {
+            self.order.retain(|id| id != task_id);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+static FILES_VERSION_CACHE: OnceLock<Mutex<FilesVersionCache>> = OnceLock::new();
+
+fn files_version_cache() -> &'static Mutex<FilesVersionCache> {
+    FILES_VERSION_CACHE.get_or_init(|| Mutex::new(FilesVersionCache::new()))
 }
 
 pub fn evict_task_files_version(task_id: &str) {
@@ -216,7 +270,6 @@ pub fn clear_task_files_version_cache() {
         cache.clear();
     }
 }
-
 pub async fn emit_task_updated_record<T: DownloadEventTarget + ?Sized>(
     app: &T,
     pool: &SqlitePool,
@@ -230,7 +283,7 @@ pub async fn emit_task_updated_record<T: DownloadEventTarget + ?Sized>(
     // files when the incoming event has an empty files array.
     let cache_hit = {
         let cache = files_version_cache().lock().ok();
-        cache.is_some_and(|guard| guard.get(&task.id) == Some(&task.files_version))
+        cache.is_some_and(|guard| guard.get(&task.id) == Some(task.files_version))
     };
 
     let files = if cache_hit {
@@ -379,6 +432,23 @@ mod tests {
 
         let cache = files_version_cache().lock().expect("cache lock");
         assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get("keep"), Some(&1));
+        assert_eq!(cache.get("keep"), Some(1));
+    }
+
+    #[test]
+    fn task_file_version_cache_evicts_oldest_when_full() {
+        clear_task_files_version_cache();
+        {
+            let mut cache = files_version_cache().lock().expect("cache lock");
+            for i in 0..FILES_VERSION_CACHE_MAX_ENTRIES {
+                cache.insert(format!("t{i}"), i as i64);
+            }
+            assert_eq!(cache.len(), FILES_VERSION_CACHE_MAX_ENTRIES);
+            cache.insert("overflow".to_string(), 99);
+            assert_eq!(cache.len(), FILES_VERSION_CACHE_MAX_ENTRIES);
+            assert_eq!(cache.get("t0"), None);
+            assert_eq!(cache.get("overflow"), Some(99));
+        }
+        clear_task_files_version_cache();
     }
 }
