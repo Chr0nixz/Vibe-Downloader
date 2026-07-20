@@ -10,9 +10,9 @@
 
   "autoCapture": { "message": "自动捕获" },
   "cookiesHeaders": { "message": "Cookie 和标头" },
-  "forwardAsk": { "message": "每次询问" },
-  "forwardEnabled": { "message": "转发" },
-  "forwardDisabled": { "message": "不转发" },
+  "forwardAsk": { "message": "不转发（不提示）" },
+  "forwardEnabled": { "message": "始终转发" },
+  "forwardDisabled": { "message": "从不转发" },
 
   "sendCurrentPage": { "message": "发送当前页面" },
   "liveSection": { "message": "实时" },
@@ -42,9 +42,11 @@
   "autoInterceptHint": { "message": "自动将匹配的下载移交给 Vibe Downloader。" },
   "headersModeLabel": { "message": "Cookie 和标头转发" },
   "headersModeDisabled": { "message": "禁用" },
-  "headersModeAsk": { "message": "每次下载询问" },
+  "headersModeAsk": { "message": "不转发（不提示）" },
   "headersModeEnabled": { "message": "始终转发" },
-  "headersModeHint": { "message": "将浏览器 Cookie 和标头转发到下载引擎。" },
+  "headersModeHint": {
+    "message": "可选择始终转发浏览器 Cookie/标头、从不转发，或在不弹出确认对话框的情况下跳过转发。"
+  },
   "fileExtensionsLabel": { "message": "监控的文件扩展名" },
   "fileExtensionsHint": { "message": "逗号分隔列表。仅拦截匹配这些扩展名的下载。" },
   "minSizeLabel": { "message": "最小文件大小（字节）" },
@@ -62,7 +64,7 @@
   "ruleSubdomains": { "message": "包含子域" },
   "ruleMode": { "message": "模式" },
   "ruleModeAuto": { "message": "自动 — 拦截匹配的下载" },
-  "ruleModeAsk": { "message": "询问 — 拦截前提示" },
+  "ruleModeAsk": { "message": "不捕获（不提示）" },
   "ruleModeNever": { "message": "从不 — 跳过此站点" },
   "ruleExtensions": { "message": "文件扩展名（覆盖）" },
   "ruleExtensionsHint": { "message": "留空则使用全局扩展名列表。" },

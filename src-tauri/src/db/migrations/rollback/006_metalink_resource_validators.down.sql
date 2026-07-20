@@ -1,0 +1,6 @@
+-- Manual rollback for 006_metalink_resource_validators.sql
+-- sqlx::migrate! does NOT auto-execute files in migrations/rollback/.
+--
+-- SQLite cannot DROP COLUMN on older versions used historically; rebuild
+-- metalink_resources without etag/last_modified if emergency rollback is required.
+-- Then remove the 006 row from _sqlx_migrations.

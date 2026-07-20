@@ -184,6 +184,35 @@ pub async fn update_task_file_progress(
     Ok(())
 }
 
+/// ARC-13: apply librqbit (or other engine) per-file byte counts without
+/// copying the task aggregate onto every selected file.
+pub async fn update_task_files_progress_batch(
+    pool: &SqlitePool,
+    updates: &[(String, i64, crate::models::TaskStatus)],
+) -> Result<(), String> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    for (file_id, downloaded_bytes, status) in updates {
+        sqlx::query(
+            r#"
+            UPDATE task_files
+            SET downloaded_bytes = ?, status = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind((*downloaded_bytes).max(0))
+        .bind(status.as_str())
+        .bind(file_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub async fn bump_task_files_version(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
     sqlx::query("UPDATE tasks SET files_version = files_version + 1 WHERE id = ?")
         .bind(task_id)

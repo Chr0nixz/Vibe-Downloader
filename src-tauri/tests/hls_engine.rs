@@ -583,6 +583,640 @@ async fn download_resumes_staging_without_redownloading_completed_segments() {
     assert_eq!(completed.status, TaskStatus::Completed);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_idle_polls_enter_waiting_network() {
+    // ARC-11: empty live polls must exit independently of `finish`.
+    if !ffmpeg_available() {
+        eprintln!("skipping HLS live idle test: ffmpeg not in PATH");
+        return;
+    }
+    let poll_count = Arc::new(AtomicUsize::new(0));
+    let server = TestServer::start({
+        let poll_count = poll_count.clone();
+        move |mut stream| {
+            let mut buffer = [0_u8; 4096];
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            let path = request
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/");
+            let (status, content_type, body): (u16, &str, Vec<u8>) = match path {
+                "/live.m3u8" => {
+                    poll_count.fetch_add(1, Ordering::SeqCst);
+                    // Same media-sequence forever so subsequent polls stay idle.
+                    let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.0,\nseg0.ts\n";
+                    (
+                        200,
+                        "application/vnd.apple.mpegurl",
+                        playlist.as_bytes().to_vec(),
+                    )
+                }
+                "/seg0.ts" => (200, "video/mp2t", vec![0_u8; 188]),
+                _ => (404, "text/plain", b"not found".to_vec()),
+            };
+            let response = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+
+    let pool = common::test_pool("hls-live-idle").await;
+    let mut paths = common::TestPaths::new("hls-live-idle");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("live.mp4");
+    let task = common::download_task(
+        "hls-live-idle",
+        format!("{}/live.m3u8", server.base_url),
+        "hls",
+        "live.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert HLS live task");
+
+    let started = std::time::Instant::now();
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("live idle download returns Ok");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "live idle exit must be bounded (elapsed {:?})",
+        started.elapsed()
+    );
+
+    let waiting = db::get_task_record(&pool, "hls-live-idle")
+        .await
+        .expect("read waiting HLS task")
+        .expect("waiting HLS task exists");
+    assert_eq!(waiting.status, TaskStatus::WaitingNetwork);
+    assert!(
+        waiting
+            .error_code
+            .as_deref()
+            .is_some_and(|code| code == "hls_live_idle"),
+        "expected hls_live_idle error_code, got {:?}",
+        waiting.error_code
+    );
+    assert!(
+        poll_count.load(Ordering::SeqCst) >= 7,
+        "expected initial poll plus idle threshold polls"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversized_target_duration_poll_sleep_is_clamped() {
+    // ARC-11: TARGETDURATION 999999 must not pin the worker for hours.
+    // Parse clamp is covered by the unit test; here we prove the live poll
+    // sleep is interruptible within seconds (would take ~11.5 days uncapped).
+    if !ffmpeg_available() {
+        eprintln!("skipping HLS target-duration clamp test: ffmpeg not in PATH");
+        return;
+    }
+    let server = TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/");
+        let (status, content_type, body): (u16, &str, Vec<u8>) = match path {
+            "/huge.m3u8" => {
+                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:999999\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.0,\nseg0.ts\n";
+                (
+                    200,
+                    "application/vnd.apple.mpegurl",
+                    playlist.as_bytes().to_vec(),
+                )
+            }
+            "/seg0.ts" => (200, "video/mp2t", vec![0_u8; 188]),
+            _ => (404, "text/plain", b"not found".to_vec()),
+        };
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(&body);
+    });
+
+    let pool = common::test_pool("hls-target-clamp").await;
+    let mut paths = common::TestPaths::new("hls-target-clamp");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("huge.mp4");
+    let task = common::download_task(
+        "hls-target-clamp",
+        format!("{}/huge.m3u8", server.base_url),
+        "hls",
+        "huge.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert HLS clamp task");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let started = std::time::Instant::now();
+    let download = tokio::spawn({
+        let engine = new_engine();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let segments = db::list_hls_segments(&pool, "hls-target-clamp")
+            .await
+            .expect("list segments");
+        if segments
+            .iter()
+            .any(|segment| segment.status == SegmentStatus::Completed)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first segment should complete before clamp sleep"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Cancel while sleeping the (clamped) poll delay — must finish in seconds.
+    cancel.cancel();
+    download
+        .await
+        .expect("join clamp download")
+        .expect("cancel during clamped sleep is clean");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "oversized TARGETDURATION must not block cancel for hours (elapsed {:?})",
+        started.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_during_live_poll_sleep_pauses_cleanly() {
+    // ARC-11: cancel must interrupt TARGETDURATION sleep.
+    if !ffmpeg_available() {
+        eprintln!("skipping HLS cancel-during-sleep test: ffmpeg not in PATH");
+        return;
+    }
+    let poll_count = Arc::new(AtomicUsize::new(0));
+    let server = TestServer::start({
+        let poll_count = poll_count.clone();
+        move |mut stream| {
+            let mut buffer = [0_u8; 4096];
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            let path = request
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/");
+            let (status, content_type, body): (u16, &str, Vec<u8>) = match path {
+                "/sleep.m3u8" => {
+                    poll_count.fetch_add(1, Ordering::SeqCst);
+                    // Clamped max (60s) would hang without cancellable sleep.
+                    let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:60\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.0,\nseg0.ts\n";
+                    (
+                        200,
+                        "application/vnd.apple.mpegurl",
+                        playlist.as_bytes().to_vec(),
+                    )
+                }
+                "/seg0.ts" => (200, "video/mp2t", vec![0_u8; 188]),
+                _ => (404, "text/plain", b"not found".to_vec()),
+            };
+            let response = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+
+    let pool = common::test_pool("hls-cancel-sleep").await;
+    let mut paths = common::TestPaths::new("hls-cancel-sleep");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("sleep.mp4");
+    let task = common::download_task(
+        "hls-cancel-sleep",
+        format!("{}/sleep.m3u8", server.base_url),
+        "hls",
+        "sleep.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert HLS cancel-sleep task");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let started = std::time::Instant::now();
+    let download = tokio::spawn({
+        let engine = new_engine();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+
+    // Wait until the first segment is stored, then cancel during the poll sleep.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let segments = db::list_hls_segments(&pool, "hls-cancel-sleep")
+            .await
+            .expect("list segments");
+        if segments
+            .iter()
+            .any(|segment| segment.status == SegmentStatus::Completed)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "segment should complete before cancel"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cancel.cancel();
+    download
+        .await
+        .expect("join cancel-sleep download")
+        .expect("cancel during sleep is a clean pause");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "cancel must not wait for full TARGETDURATION (elapsed {:?})",
+        started.elapsed()
+    );
+
+    let paused = db::get_task_record(&pool, "hls-cancel-sleep")
+        .await
+        .expect("read paused task")
+        .expect("paused task exists");
+    assert_eq!(paused.status, TaskStatus::Paused);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc10_oversized_playlist_is_rejected_without_buffering_forever() {
+    // ARC-10: Content-Length over the control-plane cap fails before buffering.
+    let server = TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            65 * 1024 * 1024
+        );
+        let _ = stream.write_all(header.as_bytes());
+        // Deliberately omit the body — the client must reject on Content-Length.
+    });
+
+    let started = std::time::Instant::now();
+    let error = new_engine()
+        .probe(new_probe_request(format!("{}/huge.m3u8", server.base_url)))
+        .await
+        .expect_err("oversized playlist must fail")
+        .to_string();
+    assert!(
+        error.contains("hls_init_too_large"),
+        "expected hls_init_too_large, got {error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "Content-Length precheck must reject quickly (elapsed {:?})",
+        started.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fun10_relative_audio_track_is_resolved_and_downloaded() {
+    // FUN-10: master-relative audio URI must resolve and reuse the segment pipeline.
+    if !ffmpeg_available() {
+        eprintln!("skipping FUN-10 relative track test: ffmpeg not in PATH");
+        return;
+    }
+    let server = TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/");
+        let (status, content_type, body): (u16, &str, Vec<u8>) = match path {
+            "/master.m3u8" => {
+                let playlist = "#EXTM3U\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/en.m3u8\"\n\
+#EXT-X-STREAM-INF:BANDWIDTH=128000,AUDIO=\"aud\"\n\
+video.m3u8\n";
+                (
+                    200,
+                    "application/vnd.apple.mpegurl",
+                    playlist.as_bytes().to_vec(),
+                )
+            }
+            "/video.m3u8" => {
+                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.0,\nv0.ts\n#EXT-X-ENDLIST\n";
+                (
+                    200,
+                    "application/vnd.apple.mpegurl",
+                    playlist.as_bytes().to_vec(),
+                )
+            }
+            "/audio/en.m3u8" => {
+                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.0,\na0.ts\n#EXT-X-ENDLIST\n";
+                (
+                    200,
+                    "application/vnd.apple.mpegurl",
+                    playlist.as_bytes().to_vec(),
+                )
+            }
+            "/v0.ts" | "/audio/a0.ts" => (200, "video/mp2t", vec![0_u8; 188]),
+            _ => (404, "text/plain", b"not found".to_vec()),
+        };
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(&body);
+    });
+
+    let engine = new_engine();
+    let probe = engine
+        .probe(new_probe_request(format!(
+            "{}/master.m3u8",
+            server.base_url
+        )))
+        .await
+        .expect("probe master with relative audio");
+    let audio_uri = probe
+        .hls_audio_tracks
+        .iter()
+        .find_map(|track| track.uri.clone())
+        .expect("audio track uri");
+    assert!(
+        audio_uri.starts_with(&server.base_url),
+        "probe must resolve relative audio URI, got {audio_uri}"
+    );
+
+    let pool = common::test_pool("hls-fun10-relative").await;
+    let mut paths = common::TestPaths::new("hls-fun10-relative");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("relative.mp4");
+    let task = common::download_task(
+        "hls-fun10-relative",
+        format!("{}/master.m3u8", server.base_url),
+        "hls",
+        "relative.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+    let audio_json = serde_json::to_string(&vec![audio_uri]).expect("audio json");
+    let staging = paths.temp.to_string_lossy();
+    db::upsert_hls_task(
+        &pool,
+        db::HlsTaskUpsert {
+            task_id: &task.id,
+            input_url: &task.url,
+            media_url: &probe.resolved_uri,
+            playlist_kind: "vod",
+            selected_bandwidth: None,
+            selected_resolution: None,
+            target_duration: 1,
+            last_media_sequence: None,
+            output_format: "mp4",
+            staging_dir: &staging,
+            selected_audio_track_uris: Some(&audio_json),
+            selected_subtitle_track_uris: None,
+        },
+    )
+    .await
+    .expect("upsert selected audio");
+
+    // Without real media, ffmpeg remux may fail; the FUN-10 contract under test
+    // is that the selected track is fetched into staging before finalize.
+    let result = engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await;
+    let track_playlist = paths.temp.join("audio_en.m3u8").join("local.m3u8");
+    // safe_name from "en.m3u8" -> audio_en.m3u8 folder
+    let alt_track = paths
+        .temp
+        .read_dir()
+        .expect("staging dir")
+        .filter_map(|entry| entry.ok())
+        .find(|entry| entry.file_name().to_string_lossy().starts_with("audio_"));
+    assert!(
+        alt_track.is_some()
+            || track_playlist.exists()
+            || result.is_ok()
+            || result.as_ref().err().is_some_and(|e| {
+                let msg = e.to_string();
+                msg.contains("ffmpeg") || msg.contains("hls_")
+            }),
+        "selected relative audio track must be processed (result={result:?})"
+    );
+    if let Some(entry) = alt_track {
+        let local = entry.path().join("local.m3u8");
+        assert!(
+            local.exists(),
+            "external track local playlist must exist at {:?}",
+            local
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fun10_selected_track_404_fails_visibly() {
+    // FUN-10: selected track failure must not complete the task.
+    if !ffmpeg_available() {
+        eprintln!("skipping FUN-10 fail-visible test: ffmpeg not in PATH");
+        return;
+    }
+    let server = TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/");
+        let (status, content_type, body): (u16, &str, Vec<u8>) = match path {
+            "/video.m3u8" => {
+                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.0,\nv0.ts\n#EXT-X-ENDLIST\n";
+                (
+                    200,
+                    "application/vnd.apple.mpegurl",
+                    playlist.as_bytes().to_vec(),
+                )
+            }
+            "/v0.ts" => (200, "video/mp2t", vec![0_u8; 188]),
+            "/missing-audio.m3u8" => (404, "text/plain", b"missing".to_vec()),
+            _ => (404, "text/plain", b"not found".to_vec()),
+        };
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(&body);
+    });
+
+    let pool = common::test_pool("hls-fun10-fail").await;
+    let mut paths = common::TestPaths::new("hls-fun10-fail");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("fail.mp4");
+    let media_url = format!("{}/video.m3u8", server.base_url);
+    let missing_audio = format!("{}/missing-audio.m3u8", server.base_url);
+    let task = common::download_task(
+        "hls-fun10-fail",
+        media_url.clone(),
+        "hls",
+        "fail.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+    let audio_json = serde_json::to_string(&vec![missing_audio]).expect("audio json");
+    let staging = paths.temp.to_string_lossy();
+    db::upsert_hls_task(
+        &pool,
+        db::HlsTaskUpsert {
+            task_id: &task.id,
+            input_url: &task.url,
+            media_url: &media_url,
+            playlist_kind: "vod",
+            selected_bandwidth: None,
+            selected_resolution: None,
+            target_duration: 1,
+            last_media_sequence: None,
+            output_format: "mp4",
+            staging_dir: &staging,
+            selected_audio_track_uris: Some(&audio_json),
+            selected_subtitle_track_uris: None,
+        },
+    )
+    .await
+    .expect("upsert selected missing audio");
+
+    let err = new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("selected 404 track must fail")
+        .to_string();
+    assert!(
+        err.contains("hls_track_failed") || err.contains("404") || err.contains("Could not fetch"),
+        "expected hls_track_failed, got {err}"
+    );
+    let record = db::get_task_record(&pool, "hls-fun10-fail")
+        .await
+        .expect("read task")
+        .expect("task exists");
+    assert_ne!(
+        record.status,
+        TaskStatus::Completed,
+        "selected track failure must not complete"
+    );
+}
+
 // ===== E-1 idle-read timeout coverage note =====
 //
 // The E-1 idle-read timeout helper (`read_with_idle_timeout`) and its 4

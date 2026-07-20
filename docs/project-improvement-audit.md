@@ -61,7 +61,7 @@ Vibe Downloader 已经越过 HTTP 下载 MVP 阶段。HTTP 分段下载、SQLite
 
 | 维度 | 当前判断 | 首要任务 |
 | --- | --- | --- |
-| 用户交互便捷性 | 主界面基础扎实，但恢复、右键、规则编辑和操作范围存在断点 | UX-01 至 UX-11 |
+| 用户交互便捷性 | UX-01～UX-16 均已 Closed | — |
 | 功能丰富性和完整性 | 功能面宽，但多个已暴露设置和协议能力没有贯通 | FUN-01、FUN-02、FUN-03、FUN-08 至 FUN-11 |
 | 架构鲁棒性和稳定性 | 持久化与安全边界较强，但任务所有权、文件提交和查询缓存存在关键竞态 | ARC-01 至 ARC-13 |
 | 程序运行效率 | 已有分页、虚拟化和事件节流，但缺规模数据且仍有 O(N)、阻塞和重复 I/O | PERF-01 至 PERF-11 |
@@ -114,101 +114,117 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验证测试**：`set_failed_transitions_from_initializing`、`begin_retry_only_from_failed_and_blocks_while_in_flight`、`service_flags_are_sticky_for_idempotent_retry`（`startup.rs`）；`StartupGate.test.tsx` 成功/失败/重试/IPC 恢复。
 - **验收**：失败页显示本地化原因；Retry 可恢复到 ready；日志入口可用；不会重复启动 scheduler、clipboard 或 browser bridge。
 
-### UX-02（P1，Open）：全局捕获监听器破坏 Radix 自定义右键菜单
+### UX-02（P1，Closed）：全局捕获监听器破坏 Radix 自定义右键菜单
 
-- **证据**：[`src/components/shell/AppShell.tsx`](../src/components/shell/AppShell.tsx#L1217) 在 `window` 捕获阶段阻止所有 `contextmenu`；任务菜单依赖 [`TaskContextMenu.tsx`](../src/components/tasks/TaskContextMenu.tsx#L196) 的 Radix Trigger。
+- **证据**：[`src/components/shell/AppShell.tsx`](../src/components/shell/AppShell.tsx) 曾在 `window` 捕获阶段阻止所有 `contextmenu`；任务菜单依赖 Radix Trigger。
 - **影响**：任务、空白列表、侧栏、标题栏、状态栏和详情区域的右键入口可能全部无法打开。
-- **修复方向**：只在没有自定义菜单的明确区域抑制原生菜单，或在冒泡阶段处理并排除输入、文本选择和 Radix Trigger。
+- **修复**：改为冒泡阶段抑制；放行 `input/textarea/select/[contenteditable]`；保留 `defaultPrevented` 短路。
+- **验证测试**：`AppShell.contextmenu.test.tsx`（真实 `contextmenu` 事件）。
 - **验收**：全部自定义区域可右键打开；普通空白区域不出现 WebView 原生开发菜单；输入框和文本选择行为符合产品约束。
-- **测试**：使用真实 `contextmenu` 事件的组件集成测试，不能只调用回调。
 
-### UX-03（P1，Open）：浏览器接管设置每次击键保存并禁用整个表单
+### UX-03（P1，Closed）：浏览器接管设置每次击键保存并禁用整个表单
 
-- **证据**：[`BrowserCaptureControls.tsx`](../src/components/settings/BrowserCaptureControls.tsx#L90) 的输入 `onChange` 直接提交；[`SettingsPage.tsx`](../src/components/settings/SettingsPage.tsx#L976) 每次 IPC 保存期间禁用控件。
+- **证据**：[`BrowserCaptureControls.tsx`](../src/components/settings/BrowserCaptureControls.tsx) 的输入 `onChange` 曾直接提交；[`SettingsPage.tsx`](../src/components/settings/SettingsPage.tsx) 每次 IPC 保存期间禁用控件。
 - **影响**：域名、扩展名和数值编辑会逐字符卡顿，慢磁盘或忙碌 runtime 下接近不可用。
-- **修复方向**：使用本地 draft、300 至 800ms 防抖、顺序合并保存或显式 Save；保存失败保留草稿，不禁用正在编辑的字段。
+- **修复**：本地 draft + 500ms 防抖；`resolveCaptureDraftAfterSave` 防止旧 IPC 覆盖新草稿；保存中显示状态但不禁用编辑字段。
+- **验证测试**：`browser-capture-draft.test.ts`。
 - **验收**：连续快速输入只提交最终快照；旧响应不能覆盖新值；失败可重试且草稿不丢失。
 
-### UX-04（P1，Open）：导入 `.txt` 后没有进入批量模式
+### UX-04（P1，Closed）：导入 `.txt` 后没有进入批量模式
 
-- **证据**：[`NewDownloadDialog.tsx`](../src/components/shell/NewDownloadDialog.tsx#L666) 只设置 `batchInput` 和展开高级区，没有调用 `setMode("batch")`。
+- **证据**：[`NewDownloadDialog.tsx`](../src/components/shell/NewDownloadDialog.tsx) 曾只设置 `batchInput` 和展开高级区，没有调用 `setMode("batch")`。
 - **影响**：内容已读取但被隐藏，单任务 URL 为空，用户无法直接开始导入。
-- **修复方向**：读取成功后切换批量模式、聚焦输入并生成预览；读取失败保持原模式并显示就地错误。
+- **修复**：读取成功后 `setMode("batch")` 并 `runBatch(false, text)` 生成预览；失败保持原模式。
+- **验证测试**：`NewDownloadDialog.test.tsx` 导入 txt 用例。
 - **验收**：选择有效文本文件后立即看到 URL 列表和有效任务数，开始按钮状态正确。
 
-### UX-05（P1，Open）：暂停全部和恢复全部只处理当前已加载子集
+### UX-05（P1，Closed）：暂停全部和恢复全部只处理当前已加载子集
 
-- **证据**：[`Palette.tsx`](../src/components/shell/Palette.tsx#L907) 将当前 store 的 `allTasks` 传给批处理；任务 store 会被当前查询替换，首批页大小为 100。
+- **证据**：[`Palette.tsx`](../src/components/shell/Palette.tsx) 曾将当前 store 的 `allTasks` 传给批处理；首批页大小为 100。
 - **影响**：搜索、筛选或未加载更多页时，大量隐藏任务不会被处理，但文案声明为“全部”。
-- **修复方向**：新增后端按状态或全局批处理命令；若暂时只处理加载项，文案必须明确数量和范围。
+- **修复**：新增 `bulk_task_action_global`；DB 按状态选 ID；返回 `{ succeeded, skipped, failed }`；Palette 用 `globalTaskStats` 判定可用性。
+- **验证测试**：`bulk_task_action_global.rs`（>100 任务覆盖）。
 - **验收**：存在超过 100 个任务和活动筛选时，全局命令仍覆盖数据库中的目标集合，并返回成功、跳过和失败数量。
 
-### UX-06（P1，Open）：站点规则缺少草稿、校验和安全删除
+### UX-06（P1，Closed）：站点规则缺少草稿、校验和安全删除
 
-- **证据**：[`SiteRulesEditor.tsx`](../src/components/settings/SiteRulesEditor.tsx#L19) 点击 Add 即持久化空规则，每个字段变化立即提交，Done 只退出编辑，删除无确认或 Undo。
+- **证据**：[`SiteRulesEditor.tsx`](../src/components/settings/SiteRulesEditor.tsx) 曾点击 Add 即持久化空规则，字段变化立即提交，Done 只退出编辑，删除无确认或 Undo。
 - **影响**：空 host、半输入扩展名和误删规则会直接进入持久状态。
-- **修复方向**：本地 draft、Save/Cancel、host pattern 和扩展名校验；删除使用确认或 Undo toast。
+- **修复**：本地 draft；Save/Cancel；`validateSiteRule`；删除 Undo toast。
+- **验证测试**：`SiteRulesEditor.test.tsx`；`browser-capture-draft.test.ts`。
 - **验收**：Cancel 不产生 DB 变化；无效规则不能保存；保存失败保留草稿；删除可恢复。
 
-### UX-07（P1，Open）：Header 转发使用二态和三态两个控件表达同一字段
+### UX-07（P1，Closed）：Header 转发使用二态和三态两个控件表达同一字段
 
-- **证据**：[`BrowserCaptureControls.tsx`](../src/components/settings/BrowserCaptureControls.tsx#L49) 先用 Switch 压成 enabled/disabled，随后又用 Select 表达 ask/enabled/disabled。
+- **证据**：[`BrowserCaptureControls.tsx`](../src/components/settings/BrowserCaptureControls.tsx) 曾先用 Switch 压成 enabled/disabled，随后又用 Select 表达 ask/enabled/disabled。
 - **影响**：`ask` 在 Switch 中显示为关闭，点击会静默丢失原策略。
-- **修复方向**：只保留一个 Ask/Always/Never 三态控件，并明确每个状态的真实行为。
+- **修复**：只保留三态 Select；与 FUN-14 被动语义文案对齐。
+- **验证测试**：`BrowserCaptureControls.test.tsx`。
 - **验收**：界面只有一个事实源，三态 round-trip 不丢失。
 
-### UX-08（P1，Open）：桌面宽屏详情栏没有可见关闭按钮
+### UX-08（P1，Closed）：桌面宽屏详情栏没有可见关闭按钮
 
-- **证据**：[`TaskDetails.tsx`](../src/components/shell/TaskDetails.tsx#L281) 的宽屏 Header 只有标题和路径，关闭按钮只存在于紧凑抽屉。
+- **证据**：[`TaskDetails.tsx`](../src/components/shell/TaskDetails.tsx) 的宽屏 Header 曾只有标题和路径，关闭按钮只存在于紧凑抽屉。
 - **影响**：鼠标用户缺少直接退出路径，命令面板或隐藏快捷键变成必要路径。
-- **修复方向**：Header 右侧增加带 Tooltip 和 `aria-label` 的关闭按钮，并把焦点返回原任务行。
+- **修复**：宽屏 Header 增加带 Tooltip / `aria-label` 的关闭按钮；复用 AppShell 焦点回退。
+- **验证测试**：`TaskDetails.test.tsx` 宽屏关闭用例。
 - **验收**：鼠标、键盘和屏幕阅读器均可关闭，关闭后焦点位置稳定。
 
-### UX-09（P1，Open）：Toast 的“还有 N 条”会清空全部并提交待撤销删除
+### UX-09（P1，Closed）：Toast 的“还有 N 条”会清空全部并提交待撤销删除
 
-- **证据**：[`toast.tsx`](../src/components/ui/toast.tsx#L17) 的 more 按钮调用 `clearToasts()`；[`toast-store.ts`](../src/stores/toast-store.ts#L79) 清理时执行每条 `onAutoCommit`。
+- **证据**：[`toast.tsx`](../src/components/ui/toast.tsx) 的 more 按钮曾调用 `clearToasts()`；清理时执行每条 `onAutoCommit`。
 - **影响**：用户预期展开消息，实际失去全部 Undo 并立即提交软删除。
-- **修复方向**：more 只展开或折叠；Clear all 使用明确文案。带 Undo 的 Toast 应置顶，不能被普通消息挤出可访问区域。
+- **修复**：more 仅展开/折叠；独立 Clear all；Undo toast 置顶并始终可见。
+- **验证测试**：`toast-soft-delete.test.tsx`。
 - **验收**：展开不触发 commit；只有超时或明确关闭对应 Toast 才提交删除；多条 Undo 可独立执行。
 
-### UX-10（P1，Open）：Queue Center 的 ARIA 和键盘模型不完整
+### UX-10（P1，Closed）：Queue Center 的 ARIA 和键盘模型不完整
 
-- **证据**：[`QueueCenter.tsx`](../src/components/workspaces/QueueCenter.tsx#L199) 使用 `listbox`，每个 option 都可 Tab 聚焦，仅处理 Enter/Space，并内嵌多个按钮。
+- **证据**：[`QueueCenter.tsx`](../src/components/workspaces/QueueCenter.tsx) 曾使用 `listbox`，每个 option 都可 Tab 聚焦，仅处理 Enter/Space，并内嵌多个按钮。
 - **影响**：长队列产生大量 Tab 停靠点，缺少方向键导航，屏幕阅读器语义混乱。
-- **修复方向**：改用语义列表或表格，或实现完整 roving tabindex listbox；操作按钮与选中项使用 `aria-controls` 关联。
+- **修复**：语义 `list`/`listitem` + roving tabindex；Arrow/Home/End；行内按钮 `tabIndex={-1}` 并用 `aria-controls` 关联详情。
+- **验证测试**：`QueueCenter.a11y.test.tsx`。
 - **验收**：方向键、Home/End、Tab 顺序和按钮读屏语义通过自动化及人工检查。
 
-### UX-11（P1，Open）：结构化错误本地化覆盖不足
+### UX-11（P1，Closed）：结构化错误本地化覆盖不足
 
-- **证据**：[`src/lib/errors.ts`](../src/lib/errors.ts#L41) 只映射少量 HTTP、磁盘和恢复错误，未命中时直接显示后端 message。
+- **证据**：[`src/lib/errors.ts`](../src/lib/errors.ts) 曾只映射少量 HTTP、磁盘和恢复错误，未命中时直接显示后端 message。
 - **影响**：非 HTTP 协议的核心失败会显示英文或技术文本，与七语言完整性声明不一致。
-- **修复方向**：为稳定错误码建立穷尽映射；用户文案和恢复动作本地化，原始 code/message 放在诊断详情。
+- **修复**：`stable-error-codes.ts` 穷尽公开码映射；未知结构化码回退 `errors.unknownError`；`configure_ffmpeg` 纳入 recovery；原始 code/message 保留在诊断报告。
+- **验证测试**：`errors.test.ts` 穷尽断言禁止 backend English fallback。
 - **验收**：所有公开错误码在 7 个 locale 有映射；测试禁止稳定错误码走原始 message fallback。
 
-### UX-12（P2，Open）：窄窗口没有显式排序入口
+### UX-12（P2，Closed）：窄窗口没有显式排序入口
 
-- **证据**：[`CommandBar.tsx`](../src/components/shell/CommandBar.tsx#L224) 的排序控件在 `md` 以下隐藏，移动工具面板只有过滤项。
-- **修复与验收**：在移动工具面板增加排序菜单和当前排序摘要；320px 至 768px 均可通过鼠标和触控完成排序。
+- **证据**：[`CommandBar.tsx`](../src/components/shell/CommandBar.tsx) 的排序控件在 `md` 以下隐藏，移动工具面板只有过滤项。
+- **修复**：[`TaskList.tsx`](../src/components/tasks/TaskList.tsx) 工具面板增加排序 Select；窄屏显示当前排序摘要。
+- **验收**：320px 至 768px 均可通过鼠标和触控完成排序。
 
-### UX-13（P2，Open）：重置全部设置的文案与实际范围不一致
+### UX-13（P2，Closed）：重置全部设置的文案与实际范围不一致
 
-- **证据**：[`SettingsPage.tsx`](../src/components/settings/SettingsPage.tsx#L840) 未重置主题、语言、浏览器接管、站点规则和分类规则。
-- **修复与验收**：要么真正覆盖全部设置，要么更名并在确认对话框列出保留项；前后端默认值应由同一合同测试约束。
+- **证据**：[`SettingsPage.tsx`](../src/components/settings/SettingsPage.tsx) 未重置主题、语言、浏览器接管、站点规则和分类规则。
+- **修复**：重命名为「重置下载设置」；确认对话框列出保留项（7 locale）。
+- **验收**：文案与实际保留范围一致。
 
-### UX-14（P2，Open）：部分危险色类名没有对应 token
+### UX-14（P2，Closed）：部分危险色类名没有对应 token
 
-- **证据**：SiteRulesEditor、ClassificationRulesEditor 和 BrowserCaptureControls 使用 `text-text-danger` 或 `text-text-warning`，全局 token 实际是 `status-danger` 和 `status-warning`。
-- **修复与验收**：统一 token；亮色、暗色和 8 个强调色下危险操作仍有足够对比度，且不只依赖颜色表达。
+- **证据**：SiteRulesEditor、ClassificationRulesEditor 和 BrowserCaptureControls 曾使用 `text-text-danger` / `text-text-warning`。
+- **修复**：统一为 `text-status-danger` / `text-status-warning`；intranet 警告增加 `role="alert"`。
+- **验收**：危险操作使用正确 status token。
 
-### UX-15（P2，Open）：首次引导的任意关闭都会永久标记完成
+### UX-15（P2，Closed）：首次引导的任意关闭都会永久标记完成
 
-- **证据**：[`OnboardingDialog.tsx`](../src/components/shell/OnboardingDialog.tsx#L70) 将 Escape、遮罩和普通关闭都路由到 completed 写入。
-- **修复与验收**：区分稍后、跳过和完成；只有显式跳过或完成才持久化，普通关闭应在后续启动重新出现。
+- **证据**：[`OnboardingDialog.tsx`](../src/components/shell/OnboardingDialog.tsx) 将 Escape、遮罩和普通关闭都路由到 completed 写入。
+- **修复**：Escape/遮罩仅 dismiss；Skip / Get started / New download 才永久完成。
+- **验证测试**：`OnboardingDialog.test.tsx`。
+- **验收**：普通关闭后下次启动仍可再次出现引导。
 
-### UX-16（P2，Open）：React 启动等待动画不遵守 reduced-motion
+### UX-16（P2，Closed）：React 启动等待动画不遵守 reduced-motion
 
-- **证据**：[`StartupGate.tsx`](../src/components/shell/StartupGate.tsx#L55) 直接设置无限 animation；`index.html` 的 reduced-motion 规则不覆盖 React 版本。
-- **修复与验收**：使用统一 reduced-motion hook 或 CSS variant；开启减少动态效果后只保留静态状态文本。
+- **证据**：[`StartupGate.tsx`](../src/components/shell/StartupGate.tsx) 直接设置无限 animation；`index.html` 的 reduced-motion 规则不覆盖 React 版本。
+- **修复**：`useReducedMotion()` 时渲染静态 logo + `startup.initializing` 文案。
+- **验证测试**：`StartupGate.test.tsx` reduced-motion 用例。
+- **验收**：开启减少动态效果后只保留静态状态文本。
 
 ## 六、程序功能丰富性和完整性
 
@@ -228,33 +244,37 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验证测试**：`resolve_probe_proxy_config_supports_inherit_off_custom`（`task_proxy.rs`）；fingerprint 不含密码。
 - **验收**：Inherit/Off/Custom 解析正确；运行时 HTTP 系使用 task proxy。
 
-### FUN-03（P1，Open）：浏览器 Header 过期后的官方恢复路径是死路
+### FUN-03（P1，Closed）：浏览器 Header 过期后的官方恢复路径是死路
 
-- **证据**：[`request_headers.rs`](../src-tauri/src/db/request_headers.rs#L47) 删除过期 header 并返回 `auth_headers_expired`；[`browser.rs`](../src-tauri/src/commands/browser.rs#L230) 固定 `allow_duplicate=false`，重复检测覆盖 needs_attention 和 failed，不能把新 header 绑定到原任务。
+- **证据**：[`request_headers.rs`](../src-tauri/src/db/request_headers.rs) 删除过期 header 并返回 `auth_headers_expired`；handoff 曾固定 `allow_duplicate=false`，重复检测覆盖 needs_attention/failed。
 - **影响**：24 小时后或密钥不可用时，UI 提示“从浏览器重新发送”，但重新发送只会失败。
-- **修复方向**：handoff 命中同 URL 且原任务错误为 auth header 类错误时，原子替换 header、刷新 TTL 并重新入队同一任务。
+- **修复**：`try_recover_auth_header_task`：同 URL 且 `auth_headers_*` + NeedsAttention/Failed 时原子 upsert headers、requeue 原任务；活动任务仍拒绝。
+- **验证测试**：`browser_auth_recovery.rs`（`fun03_recovery_candidate_only_auth_attention_or_failed`、`fun03_expired_headers_refresh_and_requeue_same_task`）。
 - **验收**：expired 到 resend 到 same-task resume 全流程通过；不能借此覆盖正常活动任务或突破 duplicate 策略。
 
-### FUN-04（P1，Open）：认证 FTP、SFTP、WebDAV 目录探测不接收凭据或代理
+### FUN-04（P1，Closed）：认证 FTP、SFTP、WebDAV 目录探测不接收凭据或代理
 
-- **证据**：[`NewDownloadDialog.tsx`](../src/components/shell/NewDownloadDialog.tsx#L499) 只向目录探测传 URL；后端三个命令也只接收 URL。SFTP 私钥无法嵌入 URL。
+- **证据**：[`NewDownloadDialog.tsx`](../src/components/shell/NewDownloadDialog.tsx) 曾只向目录探测传 URL；后端三个命令也只接收 URL。SFTP 私钥无法嵌入 URL。
 - **影响**：认证目录无法使用推荐的加密凭据流程，FTP/WebDAV 临时嵌入 URL 后还可能在清洗后丢失凭据。
-- **修复方向**：建立统一 `DirectoryProbeInput`，包含 URL、用户名、密码、私钥和代理，并复用普通 probe 的安全解析与加密边界。
+- **修复**：新增统一 `DirectoryProbeInput`（URL、凭据、私钥、代理），三协议命令与引擎目录探测复用 create/probe 的凭据与 `resolve_probe_proxy_config`；新建对话框把当前草稿凭据/代理传入目录探测，返回候选不含明文凭据。
+- **验证测试**：`directory_probe.rs`（`fun04_webdav_directory_probe_uses_draft_password`、`fun04_ftp_directory_probe_uses_draft_password`、`fun04_sftp_directory_probe_uses_private_key_credentials`、`fun04_ftp_directory_probe_uses_socks5_proxy`）；`create-draft.test.ts`。
 - **验收**：三协议的密码目录、SFTP 私钥目录和 SOCKS5 代理目录均有端到端测试，返回候选不含明文凭据。
 
-### FUN-05（P1，Open）：自动 sidecar 校验和发现与任务完成存在竞态
+### FUN-05（P1，Closed）：自动 sidecar 校验和发现与任务完成存在竞态
 
-- **证据**：[`create.rs`](../src-tauri/src/commands/tasks/create.rs#L868) fire-and-forget 启动 sidecar 发现；scheduler 只在 worker 成功结束时执行一次校验。
+- **证据**：[`create.rs`](../src-tauri/src/commands/tasks/create.rs) 曾 fire-and-forget 启动 sidecar 发现；scheduler 只在 worker 成功结束时执行一次校验。
 - **影响**：小文件可能先完成为 NotRequested，随后新增 checksum 永久停在 Pending。
-- **修复方向**：在调度前完成发现，或插入 checksum 后检测 Completed 并触发幂等校验。
-- **验收**：延迟 sidecar 和小文件组合最终必须进入 Verified 或明确 Failed，不能永久 Pending。
+- **修复**：保留 create 后异步发现；sidecar 插入后若任务已是 `Completed` 且存在 Pending checksum，调用与 scheduler 相同的幂等 `verify_task_hash_with_pool`（`maybe_verify_completed_task_after_checksum_insert`）。
+- **验证测试**：`checksum_sidecar_race.rs`（`fun05_delayed_sidecar_on_completed_task_verifies`、`fun05_delayed_sidecar_mismatch_marks_failed`）。
+- **验收**：延迟 sidecar 和小文件组合最终进入 Verified 或明确 Failed，不能永久 Pending。
 
-### FUN-06（P1，Open）：MIME 分类规则在真实创建路径永远不命中
+### FUN-06（P1，Closed）：MIME 分类规则在真实创建路径永远不命中
 
-- **证据**：[`create.rs`](../src-tauri/src/commands/tasks/create.rs#L678) 调用分类器时传空 MIME，但 probe 的 content type 已可用；分类器依赖 `content_type.starts_with`。
+- **证据**：[`create.rs`](../src-tauri/src/commands/tasks/create.rs) 曾调用分类器时传空 MIME，但 probe 的 content type 已可用；分类器依赖 `content_type.starts_with`。
 - **影响**：用户配置的 MIME 分类规则看似可用，实际创建任务时不会触发。
-- **修复方向**：传递 probe content type 或所选文件 MIME，保持 extension、URL 和 MIME 规则同一优先级模型。
-- **验收**：通过真实 create_task 流程验证 MIME 命中、禁用规则和首条匹配行为。
+- **修复**：`classification_content_type` 传入 probe MIME（多文件时优先所选文件），保持 extension / URL / MIME 优先级不变。
+- **验证测试**：`create.rs` 单元测试（`fun06_create_path_mime_rule_hits_with_probe_content_type`、`fun06_create_path_disabled_mime_rule_skipped_first_match_wins`、`fun06_create_path_prefers_first_selected_file_mime`）。
+- **验收**：通过 create 路径合同验证 MIME 命中、禁用规则和首条匹配行为。
 
 ### FUN-07（P1，Open）：关闭计划下载功能不会恢复由计划窗口暂停的任务
 
@@ -263,57 +283,66 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **修复方向**：禁用时只恢复最新暂停原因为 schedule 的任务，不能恢复用户手工暂停的任务。
 - **验收**：enabled 到 disabled 状态转换测试覆盖 schedule pause、manual pause 和并发状态变化。
 
-### FUN-08（P1，Open）：Metalink strongest-hash 选择和完成汇总互相矛盾
+### FUN-08（P1，Closed）：Metalink strongest-hash 选择和完成汇总互相矛盾
 
-- **证据**：[`metalink.rs`](../src-tauri/src/download/metalink.rs#L1305) 的选择顺序先 SHA-256 后 SHA-512；持久化把 SHA-256 设 primary，而完成汇总要求所有 file hash Verified。
+- **证据**：[`metalink.rs`](../src-tauri/src/download/metalink.rs) 的选择顺序曾先 SHA-256 后 SHA-512；持久化把 SHA-256 设 primary，而完成汇总要求所有 file hash Verified。
 - **影响**：多 hash manifest 可能长期 Pending，也不符合“最强算法”声明。
-- **修复方向**：定义 SHA-512、SHA-256、SHA-1、MD5 的明确策略；完成汇总只检查 primary，或验证全部并定义冲突规则。
+- **修复**：统一强度序 `SHA-512 > SHA-256 > SHA-1 > MD5`；probe/`is_primary`、校验与 `complete_metalink_task` 只看 per-file primary。
+- **验证测试**：`download::metalink::tests`（`fun08_strongest_prefers_sha512_over_sha256`、`fun08_fallback_to_weak_when_no_stronger`、`fun08_complete_uses_primary_only_ignores_pending_secondary`、`fun08_complete_fails_when_primary_mismatches`、`fun08_strength_rank_order`）。
 - **验收**：多 hash、单 hash、冲突 hash 和弱算法 fallback 测试均有确定结果。
 
-### FUN-09（P1，Open）：Metalink 续传缺少远端一致性保护
+### FUN-09（P1，Closed）：Metalink 续传缺少远端一致性保护
 
-- **证据**：[`metalink.rs`](../src-tauri/src/download/metalink.rs#L1153) 仅按本地长度发送 Range，不保存镜像 ETag/Last-Modified，不使用 If-Range，也未严格验证 Content-Range 起点。
+- **证据**：[`metalink.rs`](../src-tauri/src/download/metalink.rs) 曾仅按本地长度发送 Range，不保存镜像 ETag/Last-Modified，不使用 If-Range，也未严格验证 Content-Range 起点。
 - **影响**：远端内容变化或镜像切换时可能拼接新旧内容；无 manifest hash 时无法发现静默损坏。
-- **修复方向**：持久化每镜像 validator；跨镜像续传必须有可信 checksum，否则重头；严格校验 206 和 Content-Range。
+- **修复**：迁移 `006_metalink_resource_validators`；同镜像续传带 If-Range 并校验 Content-Range；跨镜像无 primary checksum 则截断重头；并行 part 路径对齐。
+- **验证测试**：`metalink_engine.rs`（`fun09_same_mirror_resume_persists_validators`、`fun09_cross_mirror_without_checksum_restarts_part`、`fun09_cross_mirror_with_checksum_allows_resume`、`fun09_mismatched_content_range_rejects_resume`）；`download::metalink::tests::fun09_parse_content_range_and_if_range_prefers_strong_etag`。
 - **验收**：镜像内容变化、validator 变化、错误 Content-Range 和 failover 测试不会发布混合文件。
 
-### FUN-10（P1，Open）：HLS 外部音轨和字幕是非对称的部分实现
+### FUN-10（P1，Closed）：HLS 外部音轨和字幕是非对称的部分实现
 
-- **证据**：[`hls.rs`](../src-tauri/src/download/hls.rs#L1224) 直接请求原始 track URI，未相对 master URL 解析；失败只 warning 并继续。额外轨不复用主 pipeline 的 AES、byte range、EXT-X-MAP、live、重试、限速和续传能力。
+- **证据**：[`hls.rs`](../src-tauri/src/download/hls.rs) 曾直接请求原始 track URI，未相对 master URL 解析；失败只 warning 并继续。额外轨不复用主 pipeline 的 AES、byte range、EXT-X-MAP、live、重试、限速和续传能力。
 - **影响**：用户明确选择的轨道可能静默缺失，任务仍显示成功。
-- **修复方向**：probe 时把 URI 规范为绝对地址，额外轨复用主 HLS pipeline；已选轨失败应进入 Failed 或 NeedsAttention。
-- **验收**：相对 URI、加密、byte-range、init-map、字幕和多音轨端到端输出正确。
+- **修复**：probe/`parse_ext_x_media` 相对 master 解析为绝对 URI；`build_hls_segment_plans` + `download_hls_rendition` 复用主 pipeline；选中轨失败返回 `hls_track_failed`；live 选中轨进入同一 poll loop。
+- **验证测试**：`hls_engine.rs`（`fun10_relative_audio_track_is_resolved_and_downloaded`、`fun10_selected_track_404_fails_visibly`）；`download::hls::tests`（相对 URI resolve）。
+- **验收**：相对 URI、选中轨失败可见、外挂轨复用主 pipeline。
 
-### FUN-11（P1，Open）：BT 做种时间限制未执行，UI 还会清空策略
+### FUN-11（P1，Closed）：BT 做种时间限制未执行，UI 还会清空策略
 
-- **证据**：[`bt.rs`](../src-tauri/src/download/bt.rs#L767) 的做种循环只读取 ratio；[`TaskDetails.tsx`](../src/components/shell/TaskDetails.tsx#L1120) 切换时固定传两个 null。
+- **证据**：[`bt.rs`](../src-tauri/src/download/bt.rs) 的做种循环曾只读取 ratio；[`TaskDetails.tsx`](../src/components/shell/TaskDetails.tsx) 切换时固定传两个 null。
 - **影响**：可保存的时间限制实际无效，用户打开或关闭做种会丢失已有 ratio/time 设置。
-- **修复方向**：ratio 和 time 任一达到即停止；UI 暴露两者，未编辑字段保持原值。
-- **验收**：虚拟时钟测试覆盖 ratio、time、任一条件、无限做种和 UI round-trip。
+- **修复**：做种循环用 `seeding_limit_reached`（ratio **或** time 任一达标）；`update_torrent_seeding(..., update_limits)` 在 toggle 时只改 `seeding_enabled`；详情页暴露 ratio/time 编辑并在快照中回读。
+- **验证测试**：`download::bt::seeding_limit_tests`（ratio / time / either / unlimited）；`TaskDetails.test.tsx`（toggle 传 `updateLimits: false`）。
+- **验收**：ratio、time、任一条件、无限做种与 UI toggle 不丢策略。
 
-### FUN-12（P2，Boundary）：DASH 只支持较窄的静态 MPD 子集
+### FUN-12（P2，Closed）：DASH 只支持较窄的静态 MPD 子集
 
-- **证据**：[`dash.rs`](../src-tauri/src/download/dash.rs#L277) 拒绝 dynamic，拒绝 SegmentTimeline；AdaptationSet/Period 继承、模板变量、BaseURL 层级、多 Period 和轨道选择不完整。
-- **改进**：短期将 README 和 UI 明确为 static/VOD first-pass；中期采用成熟 parser 或 ffmpeg demuxer 兜底，并建立真实 MPD corpus。
-- **验收**：支持矩阵逐项有正向或明确拒绝测试，不能对未支持 manifest 生成不完整文件。
+- **证据**：[`dash.rs`](../src-tauri/src/download/dash.rs) 曾对 multi-Period / `$Time$` 等未实现模板静默降级；README/UI「无法恢复」与 `supports_resume: true` 矛盾。
+- **影响**：未支持的 MPD 可能生成残缺文件，或用户误解为完全不可暂停。
+- **修复**：文档/UI 对齐 static/VOD first-pass；明确拒绝 multi-Period（`dash_multi_period_unsupported`）、未实现模板变量（`dash_template_unsupported`）；保留 dynamic / SegmentTimeline 拒绝；corpus 落在 `tests/fixtures/dash/`。
+- **验证测试**：`download::dash::tests`（`rejects_multi_period_mpd`、`rejects_time_template_placeholder`）；`dash_engine.rs`（fixture corpus probe 拒绝）；README / `dashLimitationsDescription`。
+- **验收**：Boundary 合同已锁定——支持矩阵逐项有正向或明确拒绝测试，未支持 manifest 不生成残缺文件。
 
-### FUN-13（P2，Open）：浏览器正式发布能力与当前产品表述不一致
+### FUN-13（P2，Closed）：浏览器正式发布能力与当前产品表述不一致
 
-- **证据**：release 配置固定关闭 capture 并移除 downloads、cookies、webRequest；商店材料只承诺手动 handoff，但 README 将自动接管和 header 转发列为当前能力。
-- **改进**：交付经过权限审核的 capture 变体，或统一文案和设置，明确“仅开发包实验能力”。
+- **证据**：release 配置固定关闭 capture 并移除 downloads、cookies、webRequest；商店材料只承诺手动 handoff。
+- **修复**：统一 README / browser-integration / 扩展 locale 与 Settings banner；`verify-extension-manifest.mjs` 增加 `verifyProfileCopyBoundaries`。
+- **验证测试**：`pnpm verify:extensions`；`scripts/release-config.test.mjs`。
 - **验收**：每种发布 profile 的 UI、manifest 权限、文档和实际行为一致。
 
-### FUN-14（P2，Open）：站点规则的 Ask 实际不会询问
+### FUN-14（P2，Closed）：站点规则的 Ask 实际不会询问
 
-- **证据**：[`background.js`](../browser/extension-core/src/background.js#L697) 对 header ask 固定不转发，对 capture ask 固定不接管，没有 notification、popup queue 或桌面确认。
-- **改进**：实现明确确认流，或改名为 Never/Manual 并移除虚假 Ask 语义。
-- **验收**：扩展行为测试覆盖 Always、Never、Ask、规则优先级和超时。
+- **证据**：[`background.js`](../browser/extension-core/src/background.js) / [`capture-policy.js`](../browser/extension-core/src/capture-policy.js) 对 header ask 固定不转发，对 capture ask 固定不接管。
+- **修复**：改名对齐被动语义（不实现确认流）；桌面 7 locale + 扩展 en/zh_CN；文档同步。
+- **验证测试**：`scripts/extension-capture-policy.test.mjs`。
+- **验收**：扩展行为测试覆盖 Always、Never、Ask（被动）与规则优先级。
 
-### FUN-15（P2，Open）：BT tracker 和 peer 诊断数据不完整
+### FUN-15（P2，Closed）：BT tracker 和 peer 诊断数据不完整
 
 - **证据**：tracker 主要从 magnet URI 解析并固定为 configured，torrent URL 和本地 torrent 可能为空，seed count 多处固定为 0。
-- **改进**：接入 librqbit 真实运行时统计；不可获得时 UI 明示 configured-only，不宣称实时健康。
-- **验收**：magnet、远程 torrent、本地 torrent 的 tracker 来源和更新时间语义明确。
+- **修复**：magnet `tr=` 与 `.torrent` announce/announce-list 写入 `source=configured` + `updated_at`；UI 明示 configured-only；`seed_count` 在无可靠来源时为 `null`（不再展示假 0）。诊断合同已锁定——本批不强求 live announce 面板。
+- **验证测试**：`download::bt::tests`（`magnet_trackers_are_configured_only`、`torrent_bytes_announce_list_produces_configured_trackers`、`http_torrent_url_without_bytes_yields_empty_configured_trackers`）；`TaskDetails.test.tsx`（configured-only 文案 + 诚实 peers 展示）。
+- **验收**：magnet / 远程 torrent / 本地 torrent 的 tracker 来源与「非实时健康」语义明确。
 
 ### FUN-16（P2，Open）：数据导出、备份和恢复不闭环
 
@@ -321,16 +350,18 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **改进**：把现有能力命名为报表导出；另设计版本化、可校验、可回滚的备份和恢复格式，明确凭据处理策略。
 - **验收**：跨版本 export/import round-trip，损坏备份拒绝，恢复失败不破坏原库。
 
-### FUN-17（P2，Open）：新建和批量流程只覆盖后端创建能力的子集
+### FUN-17（P2，Closed）：新建和批量流程只覆盖后端创建能力的子集
 
-- **证据**：后端输入支持 task speed、priority 和 category，但新建窗口固定为 null；批量导入不支持凭据、代理、hash、优先级、分类、duplicate override 或媒体选择。
-- **改进**：建立统一“创建草稿”模型，单任务和批量预览共享字段、校验和覆盖操作。
-- **验收**：单任务和批量输入使用同一合同测试，不能出现后端支持而 UI 永远不可达的字段。
+- **证据**：后端输入支持 task speed、priority 和 category，但新建窗口曾固定为 null；批量导入不支持凭据、代理、hash、优先级、分类、duplicate override 或媒体选择。
+- **修复**：前端共享 `CreateDraft`（`src/lib/create-draft.ts`）覆盖凭据、proxy、expected hash、priority、category、taskSpeedLimit、allowDuplicate；单任务 UI 暴露这些字段；扩展 `ImportUrlsInput` 批量共享同一 draft；目录探测复用同一 auth/proxy 子集。不做完整「每 URL 独立 HLS 轨选择」向导。
+- **验证测试**：`create-draft.test.ts`（单/批字段一致、目录探测合同、hash 镜像）。
+- **验收**：单任务和批量输入使用同一合同；后端支持字段 UI 可达。
 
 ### FUN-18（P2，Open）：非 HTTP 协议尚未达到同等级可靠性
 
-- **证据**：[`docs/protocol-reliability-matrix.md`](protocol-reliability-matrix.md) 仍将多项 retry、proxy、credentials、checksum 和 diagnostics 标为 partial，缺跨进程重启和真实外部服务验收。
+- **证据**：[`docs/protocol-reliability-matrix.md`](protocol-reliability-matrix.md) 仍将 BT/HLS/DASH/Metalink 的多项 retry、proxy、credentials、checksum 和 diagnostics 标为 partial，缺跨进程重启和真实外部服务验收。
 - **改进**：按协议建立 create、download、pause、resume、retry、restart、delete、proxy、credentials、checksum、diagnostics 生命周期矩阵。
+- **C4 子集（Closed）**：FTP/SFTP/WebDAV 行的 Retry 与 Diagnostics 已升至 `automated`。证据见 `ftp_engine.rs` / `sftp_engine.rs` / `webdav_engine.rs` / `directory_probe.rs`（目录探测、凭据轮换、代理/权限失败稳定码、implicit FTPS+SOCKS5 拒绝、host-key forget→retry、引擎级 pause/resume）。FUN-18 整体仍保持 Open，待 C5 覆盖其余协议后再关闭。
 - **验收**：每个声称稳定的协议至少有本地真实服务或固定 fixture 的集成测试，不只验证路由入口。
 
 ### FUN-19（P3，Boundary）：中长期能力边界
@@ -411,46 +442,52 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验证测试**：`use-task-events.queue-debounce.test.ts`。
 - **验收**：快速多事件、重复 ID、超过 50 项和 full refresh 混合不丢任务。
 
-### ARC-10（P1，Open）：控制面响应缺少流式硬上限
+### ARC-10（P1，Closed）：控制面响应缺少流式硬上限
 
-- **证据**：DASH MPD、Metalink 和 WebDAV PROPFIND 使用整包 `.text()` 或 `.bytes()`；HLS 无 Content-Length 时先读取完整 body 再检查上限。
+- **证据**：DASH MPD、Metalink 和 WebDAV PROPFIND 曾使用整包 `.text()` 或 `.bytes()`；HLS 无 Content-Length 时先读取完整 body 再检查上限。
 - **影响**：异常或恶意服务器可造成 OOM，取消和 idle timeout 也无法及时生效。
-- **修复方向**：抽取共享 `read_body_limited`，逐 chunk 检查大小，支持 cancellation、总超时和 idle timeout；本地 manifest 先检查 metadata。
-- **验收**：缺 Content-Length 的超大和慢速响应在阈值处停止，内存保持有界，任务返回结构化错误。
+- **修复**：共享 `read_body_limited` / `read_local_file_limited`（64 MiB）；替换 HLS/DASH/Metalink/WebDAV 控制面读；新增 `dash_mpd_too_large` / `metalink_manifest_too_large` / `webdav_propfind_too_large`。
+- **验证测试**：`download::tests`（local oversize / under-cap）；`hls_engine.rs`（`arc10_oversized_playlist_is_rejected_without_buffering_forever`）。
+- **验收**：超大控制面响应在阈值处停止并返回结构化错误。
 
-### ARC-11（P1，Open）：HLS live 空闲退出条件实际无效
+### ARC-11（P1，Closed）：HLS live 空闲退出条件实际无效
 
-- **证据**：[`hls.rs`](../src-tauri/src/download/hls.rs#L513) 只在 `idle_polls >= 6 && finish == true` 时退出，但 finish 在循环顶部已独立退出；target duration 未 clamp，poll sleep 不可取消。
+- **证据**：[`hls.rs`](../src-tauri/src/download/hls.rs) 曾只在 `idle_polls >= 6 && finish == true` 时退出，但 finish 在循环顶部已独立退出；target duration 未 clamp，poll sleep 不可取消。
 - **影响**：源停止更新或声明超大 target duration 时永久占用任务槽。
-- **修复方向**：空闲阈值后进入 waiting_network 或有界重试；clamp target duration；sleep 同时等待 cancel 和 finish。
-- **验收**：停止更新、超大 duration、取消和恢复测试均在有界时间转换状态。
+- **修复**：live-like 空闲阈值独立进入 `WaitingNetwork`（`hls_live_idle`）；`HLS_MAX_TARGET_DURATION_SECS=60`；poll sleep 用 `select!` 等待 cancel/finish。
+- **验证测试**：`hls_engine.rs`（`live_idle_polls_enter_waiting_network`、`oversized_target_duration_poll_sleep_is_clamped`、`cancel_during_live_poll_sleep_pauses_cleanly`）；`download::hls::tests::clamps_oversized_target_duration`。
+- **验收**：停止更新、超大 duration、取消均在有界时间转换状态。
 
-### ARC-12（P1，Open）：BT 共享 session 的限速和引用计数所有权不清晰
+### ARC-12（P1，Closed）：BT 共享 session 的限速和引用计数所有权不清晰
 
-- **证据**：[`bt.rs`](../src-tauri/src/download/bt.rs#L155) 的 session key 只含输出目录和代理；复用时把 session 全局限速改成最新任务值。`delete_runtime_task` 和 `SessionRefGuard::drop` 都可能 decrement；创建 session 时还持 registry mutex 跨 await。
+- **证据**：[`bt.rs`](../src-tauri/src/download/bt.rs) 的 session key 曾只含输出目录和代理；复用时把 session 全局限速改成最新任务值。`delete_runtime_task` 和 `SessionRefGuard::drop` 都可能 decrement；创建 session 时还持 registry mutex 跨 await。
 - **影响**：一个 torrent 改变同 session 其他任务限速，引用计数可能提前归零，session 初始化阻塞其他 registry 操作。
-- **修复方向**：只由 guard 释放一次；不持 mutex 跨 await；若 librqbit 仅有 session 级限速，则按任务拆 session 或实现 torrent 级调度。
-- **验收**：多 torrent 不互改限速，删除任一任务不影响其余任务，session 在最后用户退出后才释放。
+- **修复**：引用计数仅由 `SessionRefGuard` 释放；`delete_runtime_task` 只 forget/delete；创建 session 不持 mutex 跨 await；session key 纳入 `task_id` 做限速隔离。
+- **验证测试**：`download::bt::tests`（`session_key_includes_task_id_for_limit_isolation`、`delete_runtime_task_does_not_decrement_session_refcount`、`session_evicted_when_ref_count_reaches_zero`）。
+- **验收**：多任务不互改限速合同（按任务拆 session）；删除不双减；refcount 归零才驱逐。
 
-### ARC-13（P1，Open）：任务总进度与多文件进度错误耦合
+### ARC-13（P1，Closed）：任务总进度与多文件进度错误耦合
 
-- **证据**：[`task_state.rs`](../src-tauri/src/db/task_state.rs#L39) 每次更新任务进度都把总下载量写给所有 selected task files；BT 调用该函数，前端每个 tick 又复制完整 files 数组。
+- **证据**：[`task_state.rs`](../src-tauri/src/db/task_state.rs) 每次更新任务进度都把总下载量写给所有 selected task files；BT 调用该函数，前端每个 tick 又复制完整 files 数组。
 - **影响**：每个 torrent 文件显示相同的总任务字节数，文件数很大时还产生 O(file_count) 分配。
-- **修复方向**：分离 task aggregate 和 file progress 更新；BT 从引擎快照发布真实 per-file progress，列表页不携带完整 files 数组。
-- **验收**：多文件 torrent 的单文件进度正确且总和一致；1k 文件任务的进度事件 payload 和前端分配保持有界。
+- **修复**：`update_progress_in_tx` 默认不写 `task_files`；BT 从 `stats.file_progress` 批量更新真实 per-file 字节（节流 `task_updated`）；前端 `applyProgressToTask` 不再改写 `files[]`。
+- **验证测试**：`download::bt::tests::bt_file_progress_updates_are_independent_per_file`；`task-data-store.membership.test.ts`（progress tick 不改 `files[].downloadedBytes`）。
+- **验收**：多文件进度各自独立且总和一致；列表 progress payload 保持轻量。
 
-### ARC-14（P1，Open）：启动期 browser handoff 可能被接受后丢失
+### ARC-14（P1，Closed）：启动期 browser handoff 可能被接受后丢失
 
-- **证据**：[`lib.rs`](../src-tauri/src/lib.rs#L604) 的 single-instance 回调在 AppState 管理前只记录 warning 并跳过；handoff 文件没有启动完成后的扫描。
+- **证据**：[`lib.rs`](../src-tauri/src/lib.rs) 的 single-instance 回调在 AppState 管理前只记录 warning 并跳过；handoff 文件没有启动完成后的扫描。
 - **影响**：native host 已向浏览器返回 accepted，但桌面应用没有创建任务。
-- **修复方向**：在 startup state 中排队路径，ready 后重放；或启动完成时扫描 handoff 目录并使用现有去重逻辑。
+- **修复**：ready 后扫描 handoff 目录并与 CLI args 合并去重；AppState 未就绪时保留文件并明确日志为 startup replay（不再声称扩展会 retry）；处理成功/`duplicate` 后删除文件。
+- **验证测试**：`browser_handoff.rs`（`arc14_collect_pending_handoff_single_file`、`arc14_collect_pending_handoff_multiple_files`、`arc14_merge_args_and_scan_dedupes_same_path`、`arc14_ready_replay_processes_all_and_dedupes_request_id`、`arc14_replay_retains_file_on_create_error`）。
 - **验收**：冷启动同时收到 1 个或多个 handoff 时全部最终处理且不重复。
 
-### ARC-15（P1，Open）：SFTP host-key 变化没有可完成的恢复路径
+### ARC-15（P1，Closed）：SFTP host-key 变化没有可完成的恢复路径
 
-- **证据**：[`db/sftp.rs`](../src-tauri/src/db/sftp.rs#L5) 要求用户明确清除 known-host 行，但没有 list/forget command 或 UI。
+- **证据**：[`db/sftp.rs`](../src-tauri/src/db/sftp.rs) 要求用户明确清除 known-host 行，但没有 list/forget command 或 UI。
 - **影响**：合法服务器密钥轮换后用户只能手工修改数据库或重建数据。
-- **修复方向**：提供显示 host、port、fingerprint 和首次见时间的管理 UI；forget 必须二次确认，下一次连接重新执行 TOFU。
+- **修复**：`list_sftp_known_hosts` / `forget_sftp_known_host`（DELETE only）+ Settings → Network `SftpKnownHostsEditor`（Dialog 二次确认）；`sftp_host_key_changed` 恢复动作含 `manage_sftp_host_keys` 与 `retry`；mismatch 仍 fail-closed。
+- **验证测试**：`sftp_engine.rs`（`arc15_list_and_forget_known_host_then_retofu`、`probe_fails_on_host_key_mismatch`）；`SftpKnownHostsEditor.test.tsx`。
 - **验收**：密钥不匹配默认 fail closed，显式 forget 后可接受新 key，不能静默覆盖旧 key。
 
 ### ARC-16（P2，Open）：下载错误类型化仍主要停留在边界包装
@@ -570,8 +607,9 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 1. 查询一致性批次：`ARC-07`、`ARC-08`、`ARC-09`。
 2. 浏览器设置与恢复批次：`UX-03`、`UX-06`、`UX-07`、`FUN-03`、`FUN-13`、`FUN-14`。
 3. 创建流程批次：`UX-04`、`FUN-04`、`FUN-05`、`FUN-06`、`FUN-17`。
-4. 媒体与清单完整性批次：`FUN-08`、`FUN-09`、`FUN-10`、`ARC-10`、`ARC-11`。
-5. BT 所有权批次：`FUN-11`、`ARC-12`、`ARC-13`。
+4. 恢复与可达性批次（B5，已 Closed）：`UX-02`、`UX-08`、`UX-09`、`UX-10`、`UX-11`、`ARC-14`、`ARC-15`。
+5. 媒体与清单完整性批次：`FUN-08`、`FUN-09`、`FUN-10`、`ARC-10`、`ARC-11`。
+6. BT 所有权批次：`FUN-11`、`ARC-12`、`ARC-13`。
 
 ### 阶段 C：协议验收、发布和数据迁移
 

@@ -681,6 +681,68 @@ pub async fn bulk_task_action(
     Ok(succeeded)
 }
 
+/// UX-05: Pause or resume every matching task in the database, ignoring the
+/// frontend's loaded page / search / filter. Returns succeeded/skipped/failed.
+#[tauri::command]
+#[specta::specta]
+pub async fn bulk_task_action_global(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    action: String,
+) -> Result<crate::models::BulkTaskActionResult, String> {
+    let normalized = action.trim().to_ascii_lowercase();
+    let statuses: &[&str] = match normalized.as_str() {
+        "pause" => &["downloading", "retrying", "queued"],
+        "resume" => &["paused", "failed", "waiting_network"],
+        other => return Err(format!("Unknown global bulk action: {other}")),
+    };
+    let ids = db::list_task_ids_by_statuses(&state.pool, statuses).await?;
+    tracing::info!(
+        count = ids.len(),
+        action = %normalized,
+        "bulk task action global"
+    );
+    let mut succeeded: u32 = 0;
+    let mut skipped: u32 = 0;
+    let mut failed: u32 = 0;
+    for id in &ids {
+        // Re-check status so a raced transition counts as skipped, not failed.
+        let current = db::get_task_record(&state.pool, id).await?;
+        let Some(task) = current else {
+            skipped += 1;
+            continue;
+        };
+        let status = task.status.as_str();
+        if !statuses.contains(&status) {
+            skipped += 1;
+            continue;
+        }
+        let result = match normalized.as_str() {
+            "pause" => pause_task(app.clone(), state.clone(), id.clone()).await,
+            "resume" => resume_task(app.clone(), state.clone(), id.clone()).await,
+            _ => unreachable!(),
+        };
+        match result {
+            Ok(_) => succeeded += 1,
+            Err(err) => {
+                let lower = err.to_ascii_lowercase();
+                if lower.contains("concurrently") || lower.contains("already") {
+                    tracing::info!(task_id = %id, error = %err, "bulk global action skipped");
+                    skipped += 1;
+                } else {
+                    tracing::warn!(task_id = %id, error = %err, "bulk global action failed");
+                    failed += 1;
+                }
+            }
+        }
+    }
+    Ok(crate::models::BulkTaskActionResult {
+        succeeded,
+        skipped,
+        failed,
+    })
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn resolve_task_attention(
@@ -766,7 +828,10 @@ pub async fn resolve_task_attention(
         RecoveryAction::OpenFolder
         | RecoveryAction::CheckUrl
         | RecoveryAction::FreeDiskSpace
-        | RecoveryAction::ConfigureFfmpeg => task_from_record_with_files(&state.pool, task).await,
+        | RecoveryAction::ConfigureFfmpeg
+        | RecoveryAction::ManageSftpHostKeys => {
+            task_from_record_with_files(&state.pool, task).await
+        }
     }
 }
 

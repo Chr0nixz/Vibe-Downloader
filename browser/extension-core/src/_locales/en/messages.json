@@ -10,9 +10,9 @@
 
   "autoCapture": { "message": "Auto capture" },
   "cookiesHeaders": { "message": "Cookies & headers" },
-  "forwardAsk": { "message": "Ask first" },
-  "forwardEnabled": { "message": "Forward" },
-  "forwardDisabled": { "message": "Do not forward" },
+  "forwardAsk": { "message": "Do not forward (no prompt)" },
+  "forwardEnabled": { "message": "Always forward" },
+  "forwardDisabled": { "message": "Never forward" },
 
   "sendCurrentPage": { "message": "Send current page" },
   "liveSection": { "message": "Live" },
@@ -42,9 +42,11 @@
   "autoInterceptHint": { "message": "Automatically hand off matching downloads to Vibe Downloader." },
   "headersModeLabel": { "message": "Cookie & header forwarding" },
   "headersModeDisabled": { "message": "Disabled" },
-  "headersModeAsk": { "message": "Ask per download" },
+  "headersModeAsk": { "message": "Do not forward (no prompt)" },
   "headersModeEnabled": { "message": "Always forward" },
-  "headersModeHint": { "message": "Forward browser cookies and headers to the download engine." },
+  "headersModeHint": {
+    "message": "Always forward browser cookies/headers, never forward them, or skip forwarding without showing a confirmation dialog."
+  },
   "fileExtensionsLabel": { "message": "Monitored file extensions" },
   "fileExtensionsHint": {
     "message": "Comma-separated list. Only downloads matching these extensions will be intercepted."
@@ -64,7 +66,7 @@
   "ruleSubdomains": { "message": "Include subdomains" },
   "ruleMode": { "message": "Mode" },
   "ruleModeAuto": { "message": "Auto — intercept matching downloads" },
-  "ruleModeAsk": { "message": "Ask — prompt before intercepting" },
+  "ruleModeAsk": { "message": "Do not capture (no prompt)" },
   "ruleModeNever": { "message": "Never — skip this site" },
   "ruleExtensions": { "message": "File extensions (override)" },
   "ruleExtensionsHint": { "message": "Leave empty to use global extensions list." },

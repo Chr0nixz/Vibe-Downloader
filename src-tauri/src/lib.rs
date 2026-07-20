@@ -189,6 +189,8 @@ macro_rules! vibe_commands_base {
             commands::tasks::list_task_requests_page,
             commands::settings::get_settings,
             commands::settings::update_settings,
+            commands::settings::list_sftp_known_hosts,
+            commands::settings::forget_sftp_known_host,
             commands::startup::get_startup_status,
             commands::startup::open_database_recovery_folder,
             commands::startup::open_startup_log_folder,
@@ -244,6 +246,7 @@ macro_rules! vibe_commands_base {
             commands::tasks::delete_task,
             commands::tasks::bulk_delete_tasks,
             commands::tasks::bulk_task_action,
+            commands::tasks::bulk_task_action_global,
             commands::tasks::open_task_file,
             commands::tasks::open_task_folder,
             $($extra)*
@@ -645,7 +648,7 @@ async fn run_post_app_state_services(
         startup.mark_tray_created();
     }
 
-    process_browser_handoff_files_from_args(handle, std::env::args().collect(), "initial-launch");
+    process_browser_handoffs_at_ready(handle, std::env::args().collect());
 
     if floating_window_enabled && !startup.floating_synced() {
         commands::floating::sync_floating_status_window(handle, true)?;
@@ -653,6 +656,22 @@ async fn run_post_app_state_services(
     }
 
     Ok(())
+}
+
+/// ARC-14: After AppState is ready, process CLI handoff args plus any leftover
+/// `*.json` files in the handoff directory (written during the AppState gap).
+fn process_browser_handoffs_at_ready(app: &tauri::AppHandle, args: Vec<String>) {
+    let arg_files = browser_handoff_files_from_args(args);
+    let scanned = commands::browser::collect_pending_handoff_files();
+    let files = commands::browser::merge_handoff_file_paths(arg_files, scanned);
+    if files.is_empty() {
+        return;
+    }
+    tracing::info!(
+        count = files.len(),
+        "browser handoff files ready for startup replay"
+    );
+    process_browser_handoff_files(app, files, "startup-replay");
 }
 
 fn process_browser_handoff_files_from_args(
@@ -669,91 +688,35 @@ fn process_browser_handoff_files_from_args(
         source,
         "browser handoff files received"
     );
+    process_browser_handoff_files(app, files, source);
+}
 
+fn process_browser_handoff_files(
+    app: &tauri::AppHandle,
+    files: Vec<std::path::PathBuf>,
+    source: &'static str,
+) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        // AppState may not be managed yet if a second instance launches
-        // during the background-init window. Skip handoff in that case —
-        // the browser extension will retry or the user can re-trigger.
+        // AppState may not be managed yet if a second instance launches during
+        // the background-init window. Keep handoff files on disk — ready-time
+        // directory scan (ARC-14) will replay them. Do not claim the extension
+        // will retry: native host already returned accepted.
         let Some(state) = handle.try_state::<AppState>() else {
             tracing::warn!(
                 source,
-                "browser handoff received before startup completed; skipping"
+                count = files.len(),
+                "browser handoff received before AppState ready; retaining files for startup replay"
             );
             return;
         };
-        for path in files {
-            match commands::browser::read_handoff_file(&path) {
-                Ok(input) => {
-                    let request_id = input.request_id.clone();
-                    tracing::info!(
-                        request_id = %request_id,
-                        path = %path.display(),
-                        source,
-                        "processing browser handoff file"
-                    );
-                    if let Err(error) = commands::browser::create_browser_handoff_task_with_state(
-                        handle.clone(),
-                        state.inner(),
-                        input,
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            request_id = %request_id,
-                            path = %path.display(),
-                            source,
-                            error = %error,
-                            "browser handoff task creation failed"
-                        );
-                    } else {
-                        // S-2.2: Re-validate that the path is still inside handoff_dir before deletion (TOCTOU protection).
-                        // Prevents the file from being replaced by a symlink to an arbitrary path after reading.
-                        if let Err(reason) = commands::browser::validate_handoff_file_path(&path) {
-                            tracing::warn!(
-                                request_id = %request_id,
-                                path = %path.display(),
-                                source,
-                                reason = %reason,
-                                "skip deleting handoff file: path validation failed"
-                            );
-                        } else if let Err(error) = std::fs::remove_file(&path) {
-                            tracing::warn!(
-                                request_id = %request_id,
-                                path = %path.display(),
-                                source,
-                                error = %error,
-                                "browser handoff file cleanup failed"
-                            );
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::error!(
-                        path = %path.display(),
-                        source,
-                        error = %error,
-                        "browser handoff file read failed"
-                    );
-                    // S-2.2: Even if reading fails, only delete when the path is still valid, to avoid deleting a substituted arbitrary file.
-                    if let Err(reason) = commands::browser::validate_handoff_file_path(&path) {
-                        tracing::warn!(
-                            path = %path.display(),
-                            source,
-                            reason = %reason,
-                            "skip deleting handoff file after read failure: path validation failed"
-                        );
-                    } else if let Err(cleanup_error) = std::fs::remove_file(&path) {
-                        tracing::warn!(
-                            path = %path.display(),
-                            source,
-                            error = %cleanup_error,
-                            "browser handoff file cleanup after read failure failed"
-                        );
-                    }
-                }
-            }
-        }
+        commands::browser::process_browser_handoff_paths(
+            handle.clone(),
+            state.inner(),
+            files,
+            source,
+        )
+        .await;
     });
 }
 

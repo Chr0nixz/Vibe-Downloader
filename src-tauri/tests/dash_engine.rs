@@ -20,51 +20,11 @@ use tauri_app_lib::{
     state_machine,
 };
 
-const TEMPLATE_MPD: &str = r#"
-<MPD type="static" mediaPresentationDuration="PT60S" xmlns="urn:mpeg:dash:schema:mpd:2011">
-  <Period>
-    <AdaptationSet mimeType="video/mp4" contentType="video">
-      <Representation id="v0" bandwidth="500000" codecs="avc1.42c01e">
-        <SegmentTemplate media="seg-$Number$.m4s" initialization="init.m4s" startNumber="1" duration="2" timescale="1" />
-      </Representation>
-      <Representation id="v1" bandwidth="1000000" codecs="avc1.42c01e">
-        <SegmentTemplate media="seg-$Number$.m4s" initialization="init.m4s" startNumber="1" duration="2" timescale="1" />
-      </Representation>
-    </AdaptationSet>
-    <AdaptationSet mimeType="audio/mp4" contentType="audio">
-      <Representation id="a0" bandwidth="128000" codecs="mp4a.40.2">
-        <SegmentTemplate media="aseg-$Number$.m4s" initialization="ainit.m4s" startNumber="1" duration="2" timescale="1" />
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>
-"#;
-
-const DYNAMIC_MPD: &str = r#"
-<MPD type="dynamic" xmlns="urn:mpeg:dash:schema:mpd:2011">
-  <Period>
-    <AdaptationSet mimeType="video/mp4" contentType="video">
-      <Representation id="v0" bandwidth="500000" />
-    </AdaptationSet>
-  </Period>
-</MPD>
-"#;
-
-const TIMELINE_MPD: &str = r#"
-<MPD type="static" mediaPresentationDuration="PT60S" xmlns="urn:mpeg:dash:schema:mpd:2011">
-  <Period>
-    <AdaptationSet mimeType="video/mp4" contentType="video">
-      <Representation id="v0" bandwidth="500000">
-        <SegmentTemplate media="seg-$Number$.m4s">
-          <SegmentTimeline>
-            <S t="0" d="2" />
-          </SegmentTimeline>
-        </SegmentTemplate>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>
-"#;
+const TEMPLATE_MPD: &str = include_str!("fixtures/dash/supported/template_static.mpd");
+const DYNAMIC_MPD: &str = include_str!("fixtures/dash/unsupported/dynamic.mpd");
+const TIMELINE_MPD: &str = include_str!("fixtures/dash/unsupported/segment_timeline.mpd");
+const MULTI_PERIOD_MPD: &str = include_str!("fixtures/dash/unsupported/multi_period.mpd");
+const TIME_TEMPLATE_MPD: &str = include_str!("fixtures/dash/unsupported/time_template.mpd");
 
 const LIST_MPD: &str = r#"
 <MPD type="static" mediaPresentationDuration="PT10S" xmlns="urn:mpeg:dash:schema:mpd:2011">
@@ -142,6 +102,8 @@ fn handle_connection(mut stream: TcpStream) {
         "/manifest.mpd" => (200, "application/dash+xml", TEMPLATE_MPD.as_bytes()),
         "/live.mpd" => (200, "application/dash+xml", DYNAMIC_MPD.as_bytes()),
         "/timeline.mpd" => (200, "application/dash+xml", TIMELINE_MPD.as_bytes()),
+        "/multi-period.mpd" => (200, "application/dash+xml", MULTI_PERIOD_MPD.as_bytes()),
+        "/time-template.mpd" => (200, "application/dash+xml", TIME_TEMPLATE_MPD.as_bytes()),
         "/list.mpd" => (200, "application/dash+xml", LIST_MPD.as_bytes()),
         "/base.mpd" => (200, "application/dash+xml", BASE_MPD.as_bytes()),
         _ => (404, "text/plain", b"not found" as &[u8]),
@@ -324,6 +286,48 @@ async fn probe_rejects_segment_timeline() {
     assert!(
         message.contains("dash_segment_timeline_unsupported"),
         "expected dash_segment_timeline_unsupported in error, got: {message}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_rejects_multi_period_mpd() {
+    if !ffmpeg_available() {
+        eprintln!("skipping DASH probe test: ffmpeg not in PATH");
+        return;
+    }
+    let server = start_test_server();
+    let error = new_engine()
+        .probe(new_probe_request(format!(
+            "{}/multi-period.mpd",
+            server.base_url
+        )))
+        .await
+        .expect_err("multi-Period MPD should be rejected")
+        .to_string();
+    assert!(
+        error.contains("dash_multi_period_unsupported"),
+        "expected dash_multi_period_unsupported, got: {error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_rejects_time_template_placeholder() {
+    if !ffmpeg_available() {
+        eprintln!("skipping DASH probe test: ffmpeg not in PATH");
+        return;
+    }
+    let server = start_test_server();
+    let error = new_engine()
+        .probe(new_probe_request(format!(
+            "{}/time-template.mpd",
+            server.base_url
+        )))
+        .await
+        .expect_err("$Time$ template should be rejected")
+        .to_string();
+    assert!(
+        error.contains("dash_template_unsupported"),
+        "expected dash_template_unsupported, got: {error}"
     );
 }
 

@@ -67,7 +67,12 @@ export function OnboardingDialog({
     };
   }, [open, step]);
 
-  const handleClose = () => {
+  // UX-15: Escape / overlay dismiss must not permanently suppress onboarding.
+  const dismissWithoutCompleting = () => {
+    onOpenChange(false);
+  };
+
+  const completeOnboarding = () => {
     markOnboardingCompleted();
     onOpenChange(false);
   };
@@ -76,7 +81,7 @@ export function OnboardingDialog({
     if (step < TOTAL_STEPS - 1) {
       setStep(step + 1);
     } else {
-      handleClose();
+      completeOnboarding();
     }
   };
 
@@ -85,8 +90,7 @@ export function OnboardingDialog({
   };
 
   const handleCreateDownload = () => {
-    markOnboardingCompleted();
-    onOpenChange(false);
+    completeOnboarding();
     onOpenNewDownload?.();
   };
 
@@ -100,7 +104,7 @@ export function OnboardingDialog({
     <Dialog
       open={open}
       onOpenChange={(v) => {
-        if (!v) handleClose();
+        if (!v) dismissWithoutCompleting();
         else onOpenChange(v);
       }}
     >
@@ -153,7 +157,7 @@ export function OnboardingDialog({
                   className="w-full"
                   onClick={() => {
                     onOpenSettings?.();
-                    handleClose();
+                    dismissWithoutCompleting();
                   }}
                 >
                   {t("onboarding.installExtension")}
@@ -163,7 +167,7 @@ export function OnboardingDialog({
           ) : null}
         </DialogBody>
         <DialogFooter className="flex-row justify-between gap-2">
-          <Button type="button" variant="ghost" onClick={handleClose}>
+          <Button type="button" variant="ghost" onClick={completeOnboarding}>
             {t("onboarding.skip")}
           </Button>
           <div className="flex gap-2">

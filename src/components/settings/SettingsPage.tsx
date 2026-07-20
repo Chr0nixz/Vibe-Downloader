@@ -28,6 +28,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { BrowserCaptureControls } from "@/components/settings/BrowserCaptureControls";
 import { ClassificationRulesEditor } from "@/components/settings/ClassificationRulesEditor";
+import { SftpKnownHostsEditor } from "@/components/settings/SftpKnownHostsEditor";
 import {
   type SettingsSearchSection,
   settingsSearchHasResults,
@@ -58,6 +59,12 @@ import type {
 } from "@/generated/bindings";
 import { useAppUpdater } from "@/hooks/use-app-updater";
 import { LOCALE_LABEL_KEYS, type Locale, STABLE_LOCALES, SUPPORTED_LOCALES, setLocale } from "@/i18n";
+import {
+  BROWSER_CAPTURE_SAVE_DEBOUNCE_MS,
+  captureSettingsEqual,
+  mergeBrowserCapturePatch,
+  resolveCaptureDraftAfterSave,
+} from "@/lib/browser-capture-draft";
 import { localizedErrorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import {
@@ -190,7 +197,10 @@ export function SettingsPage() {
   const [browserExporting, setBrowserExporting] = useState(false);
   const [browserExportResult, setBrowserExportResult] = useState<BrowserExtensionExportResult | null>(null);
   const [browserCapture, setBrowserCapture] = useState<BrowserCaptureSettings | null>(null);
+  const [browserCaptureDraft, setBrowserCaptureDraft] = useState<BrowserCaptureSettings | null>(null);
   const [browserCaptureSaving, setBrowserCaptureSaving] = useState(false);
+  const browserCaptureSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const browserCaptureSaveEpoch = useRef(0);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveVersion = useRef(0);
   const currentLocale = (
@@ -309,6 +319,9 @@ export function SettingsPage() {
           t("settings.proxyNoProxy"),
           t("settings.proxyUsername"),
           t("settings.proxyPassword"),
+          t("settings.sftpKnownHosts"),
+          t("settings.sftpKnownHostsTip"),
+          t("settings.sftpKnownHostsForget"),
         ],
       },
       {
@@ -448,6 +461,19 @@ export function SettingsPage() {
   );
   const settingsSearchHasMatch = settingsSearchHasResults(settingsSections, settingsSearch);
   const settingsSearchActive = settingsSearch.trim().length > 0;
+
+  // ARC-15: recovery action can request focusing the SFTP known-hosts editor.
+  useEffect(() => {
+    try {
+      const focus = sessionStorage.getItem("vibe-settings-focus");
+      if (focus === "sftp_known_hosts") {
+        sessionStorage.removeItem("vibe-settings-focus");
+        setSettingsSearch(t("settings.sftpKnownHosts"));
+      }
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [t]);
 
   // Scroll to and briefly highlight the first field matching the search query.
   useEffect(() => {
@@ -973,22 +999,45 @@ export function SettingsPage() {
     }
   }
 
-  async function updateBrowserCapture(patch: Partial<BrowserCaptureSettings>) {
+  function patchBrowserCaptureDraft(patch: Partial<BrowserCaptureSettings>) {
+    setBrowserCaptureDraft((current) => (current ? mergeBrowserCapturePatch(current, patch) : current));
+  }
+
+  // UX-03: persist the latest draft after debounce; never disable fields while saving.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: persistBrowserCaptureDraft reads latest draft via closure; epoch guards stale IPC.
+  useEffect(() => {
+    if (!browserCaptureDraft || !browserCapture) return;
+    if (captureSettingsEqual(browserCaptureDraft, browserCapture)) return;
+    if (browserCaptureSaveTimer.current) clearTimeout(browserCaptureSaveTimer.current);
+    const snapshot = browserCaptureDraft;
+    browserCaptureSaveTimer.current = setTimeout(() => {
+      void persistBrowserCaptureDraft(snapshot);
+    }, BROWSER_CAPTURE_SAVE_DEBOUNCE_MS);
+    return () => {
+      if (browserCaptureSaveTimer.current) clearTimeout(browserCaptureSaveTimer.current);
+    };
+  }, [browserCaptureDraft, browserCapture]);
+
+  async function persistBrowserCaptureDraft(snapshot: BrowserCaptureSettings) {
+    const epoch = ++browserCaptureSaveEpoch.current;
     setBrowserCaptureSaving(true);
     try {
       const next = await updateBrowserCaptureSettings({
-        experimentalCaptureEnabled: patch.experimentalCaptureEnabled ?? null,
-        autoIntercept: patch.autoIntercept ?? null,
-        forwardHeaders: patch.forwardHeaders ?? null,
-        forwardHeadersMode: patch.forwardHeadersMode ?? null,
-        minSizeBytes: patch.minSizeBytes ?? null,
-        fileExtensions: patch.fileExtensions ?? null,
-        siteRules: patch.siteRules ?? null,
-        allowIntranetHandoff: patch.allowIntranetHandoff ?? null,
+        experimentalCaptureEnabled: snapshot.experimentalCaptureEnabled,
+        autoIntercept: snapshot.autoIntercept,
+        forwardHeaders: snapshot.forwardHeaders,
+        forwardHeadersMode: snapshot.forwardHeadersMode,
+        minSizeBytes: snapshot.minSizeBytes,
+        fileExtensions: snapshot.fileExtensions,
+        siteRules: snapshot.siteRules,
+        allowIntranetHandoff: snapshot.allowIntranetHandoff,
       });
+      if (epoch !== browserCaptureSaveEpoch.current) return;
       setBrowserCapture(next);
+      setBrowserCaptureDraft((draft) => resolveCaptureDraftAfterSave(draft, snapshot, next));
       setBrowserStatus((current) => (current ? { ...current, capture: next } : current));
     } catch (err) {
+      if (epoch !== browserCaptureSaveEpoch.current) return;
       log.error("browser capture settings update failed", err);
       addToast({
         tone: "error",
@@ -996,7 +1045,9 @@ export function SettingsPage() {
         description: localizedErrorMessage(err, t),
       });
     } finally {
-      setBrowserCaptureSaving(false);
+      if (epoch === browserCaptureSaveEpoch.current) {
+        setBrowserCaptureSaving(false);
+      }
     }
   }
 
@@ -1028,7 +1079,9 @@ export function SettingsPage() {
     try {
       const status = await getBrowserIntegrationStatus();
       setBrowserStatus(status);
-      setBrowserCapture(status.capture ?? (await getBrowserCaptureSettings()));
+      const capture = status.capture ?? (await getBrowserCaptureSettings());
+      setBrowserCapture(capture);
+      setBrowserCaptureDraft(capture);
     } catch (err) {
       log.error("browser integration status refresh failed", err);
       addToast({
@@ -1602,6 +1655,10 @@ export function SettingsPage() {
                     </Button>
                   </div>
                 </SettingsRow>
+
+                <SettingsRow title={t("settings.sftpKnownHosts")} searchKey="sftp_known_hosts">
+                  <SftpKnownHostsEditor disabled={controlsDisabled} />
+                </SettingsRow>
               </SettingsSection>
 
               <SettingsSection {...getSectionProps("interface")}>
@@ -1745,12 +1802,13 @@ export function SettingsPage() {
                 <p className="border-b border-border-divider px-4 py-3 text-xs leading-5 text-text-muted">
                   {t("settings.browserIntegrationTip")}
                 </p>
-                {browserCapture ? (
+                {browserCaptureDraft ? (
                   <BrowserCaptureControls
-                    settings={browserCapture}
+                    settings={browserCaptureDraft}
                     available={browserStatus?.captureAvailable ?? false}
-                    disabled={browserLoading || browserCaptureSaving || !browserStatus?.captureAvailable}
-                    onUpdate={(patch) => void updateBrowserCapture(patch)}
+                    disabled={browserLoading || !browserStatus?.captureAvailable}
+                    saving={browserCaptureSaving}
+                    onUpdate={patchBrowserCaptureDraft}
                   />
                 ) : null}
                 <div className="grid">
@@ -2042,7 +2100,10 @@ export function SettingsPage() {
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>{t("settings.resetDefaultsTitle")}</DialogTitle>
-              <DialogDescription>{t("settings.resetDefaultsConfirm")}</DialogDescription>
+              <DialogDescription className="space-y-2">
+                <span className="block">{t("settings.resetDefaultsConfirm")}</span>
+                <span className="block text-text-muted">{t("settings.resetDefaultsPreserved")}</span>
+              </DialogDescription>
             </DialogHeader>
             <DialogBody />
             <DialogFooter className="gap-2 sm:gap-2">

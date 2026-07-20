@@ -234,16 +234,8 @@ function applyProgressToTask(task: Task, payload: TaskProgressPayload): Task {
     speedBps,
     connectionCount: payload.connectionCount,
     status: payload.status,
-    files: (task.files ?? []).map((file) =>
-      file.selected
-        ? {
-            ...file,
-            downloadedBytes,
-            totalSize,
-            status: payload.status,
-          }
-        : file,
-    ),
+    // ARC-13: progress ticks must not rewrite files[]. Per-file bytes come from
+    // task_updated (after engine file_progress sync), not the aggregate payload.
   };
 }
 

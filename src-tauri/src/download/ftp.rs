@@ -227,8 +227,17 @@ impl Default for FtpEngine {
 pub async fn probe_ftp_directory_url(
     input_url: &str,
     proxy_config: ResolvedProxyConfig,
+    credentials: Option<&db::TaskCredentials>,
 ) -> Result<FtpDirectoryProbe, String> {
-    let target = FtpTarget::parse_directory(input_url)?;
+    let mut target = FtpTarget::parse_directory(input_url)?;
+    if let Some(credentials) = credentials {
+        if !credentials.username.is_empty() {
+            target.username = credentials.username.clone();
+        }
+        if !credentials.password.is_empty() {
+            target.password = credentials.password.clone();
+        }
+    }
     let mut diagnostics = Vec::new();
     let mut session = connect_session(&target, &proxy_config).await?;
     session.transfer_type(FileType::Binary).await?;
@@ -1082,6 +1091,30 @@ mod tests {
         assert_eq!(implicit.port, 990);
     }
 
+    #[tokio::test]
+    async fn connect_rejects_implicit_ftps_over_socks5_before_network() {
+        // C4: unsupported combo must fail closed with a stable code — no TLS
+        // handshake and no silent fallback to plain FTP.
+        let target =
+            FtpTarget::parse("ftps://127.0.0.1:990/secret.bin").expect("implicit ftps target");
+        assert_eq!(target.mode, FtpSecurityMode::ImplicitTls);
+        let proxy = ResolvedProxyConfig {
+            mode: crate::proxy::AppProxyMode::Custom,
+            url: Some("socks5://127.0.0.1:1".into()),
+            no_proxy: None,
+            username: None,
+            password: None,
+        };
+        let error = match connect_session(&target, &proxy).await {
+            Ok(_) => panic!("implicit FTPS + SOCKS5 must be rejected"),
+            Err(error) => error,
+        };
+        let payload: crate::models::AppErrorPayload =
+            serde_json::from_str(&error).expect("structured error");
+        assert_eq!(payload.code, "ftp_proxy_unsupported_for_implicit_tls");
+        assert!(payload.recoverable);
+    }
+
     #[test]
     fn ftp_connect_error_mentions_ftps_mode() {
         let error = suppaftp::FtpError::ConnectionError(io::Error::new(
@@ -1417,7 +1450,19 @@ impl FtpSession {
                 .await
                 .map(SessionDataStream::Secure),
         }
-        .map_err(|e| format!("FTP RETR failed: {e}"))
+        .map_err(|e| {
+            let message = e.to_string();
+            // C4: surface permission/path denials as a stable code for recovery UI.
+            if message.contains("550") {
+                engine_error(
+                    "ftp_permission_denied",
+                    format!("FTP RETR failed: {message}"),
+                    true,
+                )
+            } else {
+                format!("FTP RETR failed: {message}")
+            }
+        })
     }
 
     async fn finalize_retr_stream(&mut self, stream: SessionDataStream) -> Result<(), String> {

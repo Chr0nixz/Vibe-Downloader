@@ -53,8 +53,8 @@ pub use self::metalink::{
     list_metalink_resources_for_task, mark_metalink_resource_attempted,
     mark_metalink_resource_completed, mark_metalink_resource_failed, mark_mirror_unsupported_range,
     promote_metalink_resource_for_retry, reset_metalink_resource_statuses,
-    set_metalink_mirror_cooldown, update_mirror_speed, upsert_metalink_task,
-    MetalinkResourceInsert, MetalinkResourceRecord, MetalinkTaskUpsert,
+    set_metalink_mirror_cooldown, update_metalink_resource_validators, update_mirror_speed,
+    upsert_metalink_task, MetalinkResourceInsert, MetalinkResourceRecord, MetalinkTaskUpsert,
 };
 pub use self::request_diagnostics::{
     insert_request_diagnostic, list_request_diagnostics_page, prune_request_diagnostics,
@@ -86,7 +86,9 @@ pub use self::settings::{
     normalize_proxy_optional, normalize_proxy_url, normalize_speed_limit_bps,
     parse_multi_connection_threshold_bytes, parse_speed_limit_bps, upsert_settings,
 };
-pub use self::sftp::verify_or_record_sftp_host_key;
+pub use self::sftp::{
+    forget_sftp_known_host, list_sftp_known_hosts, verify_or_record_sftp_host_key, SftpKnownHost,
+};
 pub use self::task_checksums::{
     insert_task_checksum_record, list_task_checksum_records, list_task_checksum_records_for_file,
     list_task_checksum_records_for_tasks, update_task_checksum_record,
@@ -99,6 +101,7 @@ pub use self::task_files::{
     bump_task_files_version, bump_task_files_version_in_tx, insert_task_file_record,
     insert_task_file_record_in_tx, list_task_file_records, list_task_file_records_for_tasks,
     update_task_file_progress, update_task_file_selection, update_task_file_selection_in_tx,
+    update_task_files_progress_batch,
 };
 pub use self::task_proxy::{
     get_task_proxy_settings, resolve_probe_proxy_config, resolve_task_proxy_config,
@@ -107,8 +110,8 @@ pub use self::task_proxy::{
 pub use self::task_records::{
     find_duplicate_task_record, get_task_record, get_task_record_in_tx, insert_task_record,
     insert_task_record_in_tx, list_browser_realtime_task_records, list_paused_schedulable_tasks,
-    list_queued_task_records, list_reserved_final_paths, list_task_records,
-    list_task_records_by_ids, list_task_records_cursor, list_task_records_page,
+    list_queued_task_records, list_reserved_final_paths, list_task_ids_by_statuses,
+    list_task_records, list_task_records_by_ids, list_task_records_cursor, list_task_records_page,
     next_queue_position, next_retry_after_at, reorder_queued_tasks, task_filter_options,
     task_stats_snapshot, update_task_transfer_options, TaskFilterOptions, TaskListPage,
     TaskListQuery, TaskTransferOptionsUpdate,
@@ -123,10 +126,11 @@ pub use self::task_state::{
     update_task_save_target, update_task_status, update_task_status_in_tx, TaskProgressCheckpoint,
 };
 pub use self::torrent::{
-    get_torrent_runtime_snapshot, torrent_seed_ratio_limit, torrent_seeding_enabled,
-    update_task_remote_metadata, update_task_torrent_metadata, update_torrent_seeding,
-    upsert_torrent_runtime_snapshot, upsert_torrent_task, TaskRemoteMetadataUpdate,
-    TaskTorrentMetadataUpdate, TorrentRuntimeSnapshotUpsert, TorrentTaskUpsert,
+    get_torrent_runtime_snapshot, torrent_seed_ratio_limit, torrent_seed_time_limit_seconds,
+    torrent_seeding_enabled, torrent_seeding_policy, update_task_remote_metadata,
+    update_task_torrent_metadata, update_torrent_seeding, upsert_torrent_runtime_snapshot,
+    upsert_torrent_task, TaskRemoteMetadataUpdate, TaskTorrentMetadataUpdate,
+    TorrentRuntimeSnapshotUpsert, TorrentTaskUpsert,
 };
 
 pub const DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;

@@ -6,9 +6,9 @@ This document describes the current experimental Cookie/header-forwarding implem
 
 ## Modes
 
-- `ask`: default for new installs. The extension does not read or send Cookie/header values. It only sends metadata such as URL, host, and `headersAvailable`. There is currently no prompt or deferred confirmation UI, so `ask` is passive rather than interactive.
-- `enabled`: the extension may read and forward allowlisted request headers for matching HTTP/HTTPS downloads.
-- `disabled`: no browser headers are read or sent. Disabling forwarding clears saved per-task headers and in-memory header cache.
+- `ask` (UI label: **Do not forward (no prompt)**): default for new installs. The extension does not read or send Cookie/header values. It only sends metadata such as URL, host, and `headersAvailable`. There is **no** confirmation dialog — `ask` is a passive skip, not an interactive prompt (`FUN-14`).
+- `enabled` (**Always forward**): the extension may read and forward allowlisted request headers for matching HTTP/HTTPS downloads.
+- `disabled` (**Never forward**): no browser headers are read or sent. Disabling forwarding clears saved per-task headers and in-memory header cache.
 
 Legacy boolean settings migrate as `true -> enabled` and `false -> disabled`.
 
@@ -17,12 +17,12 @@ Legacy boolean settings migrate as `true -> enabled` and `false -> disabled`.
 Settings includes a minimal site-rule editor:
 
 - host pattern, for example `example.com` or `*.example.com`
-- capture mode: `auto`, `ask`, or `never`
+- capture mode: `auto`, `ask` (UI: **Do not capture (no prompt)** — passive skip), or `never`
 - header override: inherit, forward, or block
 
 Site header permission is not reused across unrelated host patterns.
 
-The capture-rule value `ask` also has no prompt today. It behaves as “do not auto-capture.” This naming and behavior mismatch is tracked as `FUN-14` in [project-improvement-audit.md](project-improvement-audit.md).
+The capture-rule value `ask` does not prompt. It behaves as “do not auto-capture,” matching the passive header `ask` semantics.
 
 ## Allowlist
 

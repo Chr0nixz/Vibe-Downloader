@@ -44,7 +44,7 @@ Vibe Downloader 的目标是提供清晰、可靠、可诊断的大文件下载�
 | SFTP | 单文件、密码和 OpenSSH 私钥认证、加密凭据、本地临时文件续传、SOCKS5、TOFU host key | 认证目录探测未贯通；host key 变化没有 list/forget UI |
 | BitTorrent | magnet、远程和本地 `.torrent`、多文件选择、piece/peer/DHT/做种快照、SOCKS5 | tracker 多为配置快照；做种时间限制未执行；session 和调度槽仍需修复 |
 | HLS | 主变体选择、AES-128-CBC、EXT-X-MAP、byte range、并发分片、live 轮询、ffmpeg MP4 remux | 外部音轨/字幕只部分支持；live 空闲收敛存在缺陷；不支持 SAMPLE-AES/DRM |
-| DASH | 静态 MPD、分段下载、进度监控、ffmpeg MP4 remux | 不支持 dynamic/live、SegmentTimeline 和完整 MPD 继承/模板语义 |
+| DASH | 静态/VOD first-pass：单 Period、`$Number$` SegmentTemplate / SegmentList / SegmentBase、分段下载、进度监控、ffmpeg MP4 remux；任务可暂停后续传 | 明确拒绝 dynamic/live、SegmentTimeline、多 Period、未实现的模板变量（如 `$Time$`）；完整 MPD 继承语义与逐任务代理仍不完整 |
 | WebDAV | WebDAV/WebDAVS 映射、Basic Auth、Depth-1 PROPFIND、委托 HTTP 下载 | 认证目录探测和 HTTP 系逐任务代理存在缺口 |
 | Metalink4 | 本地/远程 manifest、多文件选择、HTTP/HTTPS 镜像 failover、文件级进度和 checksum | strongest-hash 汇总和跨镜像续传 validator 仍需修复 |
 
@@ -73,7 +73,7 @@ Vibe Downloader 的目标是提供清晰、可靠、可诊断的大文件下载�
 
 - `release` 和 `candidate`：最小权限手动交接，不包含 `downloads`、`cookies`、`webRequest` 或全站 host permissions。
 - `dev`：只有显式设置 `VIBE_BROWSER_EXPERIMENTAL_CAPTURE=true` 才包含自动接管和 Cookie/header 转发。
-- 站点规则中的 `ask` 当前不会弹出确认，实际表现为不自动接管或不转发。
+- 站点规则中的 `ask` 不会弹出确认；界面文案为「不接管/不转发（不提示）」，实际表现为被动跳过。
 - Header 过期后重新发送到原任务的恢复路径尚未闭环。
 
 更多说明见 [浏览器集成](docs/browser-integration.md) 和 [Header 转发](docs/browser-header-forwarding.md)。

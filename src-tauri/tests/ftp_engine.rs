@@ -71,6 +71,8 @@ struct FtpServerConfig {
     /// When `true`, the server omits `SIZE` (returns 550). Used to exercise
     /// the unknown-size probe branch where `total_size` falls back to 0.
     reject_size: bool,
+    /// When `true`, RETR returns 550 permission denied.
+    reject_retr: bool,
     /// Delays data chunks so cancellation can interrupt a live transfer.
     data_chunk_delay: Option<Duration>,
 }
@@ -190,6 +192,10 @@ fn handle_ftp_session(mut stream: TcpStream, config: FtpServerConfig) {
             }
         } else if upper.starts_with("RETR ") {
             let path = trimmed[5..].trim().to_string();
+            if config.reject_retr {
+                let _ = writeln!(stream, "550 Permission denied");
+                continue;
+            }
             let _ = writeln!(stream, "150 Opening data connection");
 
             // Pop the data listener set by the preceding PASV, accept one
@@ -262,6 +268,7 @@ fn config_with_file(path: &str, size: usize) -> FtpServerConfig {
         reject_auth: false,
         reject_rest: false,
         reject_size: false,
+        reject_retr: false,
         data_chunk_delay: None,
     }
 }
@@ -524,4 +531,156 @@ async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
         .expect("completed FTP task exists");
     assert_eq!(completed.status, TaskStatus::Completed);
     assert_eq!(completed.downloaded_bytes, payload.len() as i64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_uses_persisted_ftp_credentials() {
+    // C4: credentials stored at create must authorize the download path.
+    common::install_test_secret_key();
+    let payload = b"ftp-secret-payload".to_vec();
+    let mut files = HashMap::new();
+    files.insert("/protected.bin".to_string(), payload.clone());
+    let server = FtpTestServer::start(FtpServerConfig {
+        files,
+        ..FtpServerConfig::default()
+    });
+    let pool = common::test_pool("ftp-cred-rotation").await;
+    let paths = common::TestPaths::new("ftp-cred-rotation");
+    // URL has no embedded credentials — runtime must load encrypted DB row.
+    let task = common::download_task(
+        "ftp-cred-rotation",
+        server.url("protected.bin"),
+        "ftp",
+        "protected.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert FTP task");
+    db::upsert_task_credentials(&pool, &task.id, "ftp", "ftpuser", "ftppass", None, None)
+        .await
+        .expect("store FTP credentials");
+
+    let engine = new_engine();
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("authenticated FTP download");
+
+    assert_eq!(
+        std::fs::read(&paths.final_path).expect("read final"),
+        payload
+    );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_fails_when_server_returns_550_on_retr() {
+    let mut config = config_with_file("/denied.bin", 1024);
+    config.reject_retr = true;
+    let server = FtpTestServer::start(config);
+    let pool = common::test_pool("ftp-retr-denied").await;
+    let paths = common::TestPaths::new("ftp-retr-denied");
+    let task = common::download_task(
+        "ftp-retr-denied",
+        server.url("denied.bin"),
+        "ftp",
+        "denied.bin",
+        1024,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert FTP task");
+
+    let error = new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("RETR 550 must fail the download");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured FTP permission error");
+    assert_eq!(payload.code, "ftp_permission_denied");
+    assert!(payload.recoverable);
+    assert!(!paths.final_path.exists());
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_fails_when_socks5_proxy_is_unreachable() {
+    let mut files = HashMap::new();
+    files.insert("/via-proxy.bin".to_string(), b"x".to_vec());
+    let server = FtpTestServer::start(FtpServerConfig {
+        files,
+        ..FtpServerConfig::default()
+    });
+    let pool = common::test_pool("ftp-proxy-fail").await;
+    let paths = common::TestPaths::new("ftp-proxy-fail");
+    let task = common::download_task(
+        "ftp-proxy-fail",
+        server.url("via-proxy.bin"),
+        "ftp",
+        "via-proxy.bin",
+        1,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert FTP task");
+
+    let mut context = common::headless_download_context(
+        pool.clone(),
+        task,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    // Bound but nothing accepts — SOCKS5 handshake fails closed.
+    context.proxy_config = ResolvedProxyConfig {
+        mode: tauri_app_lib::proxy::AppProxyMode::Custom,
+        url: Some("socks5://127.0.0.1:1".into()),
+        no_proxy: None,
+        username: None,
+        password: None,
+    };
+
+    let error = new_engine()
+        .download(context)
+        .await
+        .expect_err("unreachable SOCKS5 must fail FTP download");
+    let message = error.to_string();
+    assert!(
+        message.contains("proxy_connection_failed") || message.contains("proxy"),
+        "expected proxy failure code, got: {message}"
+    );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn directory_probe_rejects_implicit_ftps_over_socks5() {
+    use tauri_app_lib::download::probe_ftp_directory_url;
+    use tauri_app_lib::proxy::AppProxyMode;
+
+    let proxy = ResolvedProxyConfig {
+        mode: AppProxyMode::Custom,
+        url: Some("socks5://127.0.0.1:1080".into()),
+        no_proxy: None,
+        username: None,
+        password: None,
+    };
+    let error = probe_ftp_directory_url("ftps://127.0.0.1:990/secret/", proxy, None)
+        .await
+        .expect_err("implicit FTPS + SOCKS5 must be rejected");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error).expect("structured unsupported-proxy error");
+    assert_eq!(payload.code, "ftp_proxy_unsupported_for_implicit_tls");
 }

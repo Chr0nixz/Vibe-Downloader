@@ -120,26 +120,90 @@ describe("toast soft-delete lifecycle", () => {
     expect(useToastStore.getState().toasts).toHaveLength(0);
   });
 
-  it("clearToasts commits pending soft-deletes", () => {
+  it("clearAll button commits pending soft-deletes", () => {
     const onAutoCommit = vi.fn();
     const onUndo = vi.fn();
 
+    render(<ToastViewport />);
     act(() => {
       useToastStore.getState().addToast({
         tone: "info",
-        title: "Deleted demo.zip",
+        title: "Deleted a.zip",
         durationMs: UNDO_TOAST_TIMEOUT_MS,
         onAutoCommit,
         action: { label: "toast.undo", onClick: onUndo },
       });
+      useToastStore.getState().addToast({
+        tone: "info",
+        title: "Ordinary notice",
+        durationMs: UNDO_TOAST_TIMEOUT_MS,
+      });
     });
 
-    act(() => {
-      useToastStore.getState().clearToasts();
-    });
+    fireEvent.click(screen.getByRole("button", { name: "toast.clearAll" }));
     expect(onAutoCommit).toHaveBeenCalledTimes(1);
     expect(onUndo).not.toHaveBeenCalled();
     expect(useToastStore.getState().toasts).toHaveLength(0);
+  });
+
+  it("showMore expands without committing Undo toasts", () => {
+    const onAutoCommit = vi.fn();
+
+    render(<ToastViewport />);
+    act(() => {
+      useToastStore.getState().addToast({
+        tone: "info",
+        title: "Undo toast",
+        durationMs: UNDO_TOAST_TIMEOUT_MS,
+        onAutoCommit,
+        action: { label: "toast.undo", onClick: vi.fn() },
+      });
+      for (let i = 0; i < 5; i += 1) {
+        useToastStore.getState().addToast({
+          tone: "info",
+          title: `Notice ${i}`,
+          durationMs: UNDO_TOAST_TIMEOUT_MS,
+        });
+      }
+    });
+
+    expect(screen.getByText("Undo toast")).toBeInTheDocument();
+    const showMore = screen.getByRole("button", { name: /toast\.showMore/ });
+    fireEvent.click(showMore);
+    expect(onAutoCommit).not.toHaveBeenCalled();
+    expect(screen.getByText("Notice 4")).toBeInTheDocument();
+    expect(useToastStore.getState().toasts.length).toBeGreaterThan(4);
+  });
+
+  it("keeps multiple Undo toasts independently actionable", () => {
+    const firstUndo = vi.fn();
+    const secondUndo = vi.fn();
+    const firstCommit = vi.fn();
+    const secondCommit = vi.fn();
+
+    render(<ToastViewport />);
+    act(() => {
+      useToastStore.getState().addToast({
+        tone: "info",
+        title: "Deleted first.zip",
+        durationMs: UNDO_TOAST_TIMEOUT_MS,
+        onAutoCommit: firstCommit,
+        action: { label: "undo-first", onClick: firstUndo },
+      });
+      useToastStore.getState().addToast({
+        tone: "info",
+        title: "Deleted second.zip",
+        durationMs: UNDO_TOAST_TIMEOUT_MS,
+        onAutoCommit: secondCommit,
+        action: { label: "undo-second", onClick: secondUndo },
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "undo-first" }));
+    expect(firstUndo).toHaveBeenCalledTimes(1);
+    expect(secondUndo).not.toHaveBeenCalled();
+    expect(firstCommit).not.toHaveBeenCalled();
+    expect(secondCommit).not.toHaveBeenCalled();
   });
 
   it("Undo settles once and blocks a later commit", () => {

@@ -129,4 +129,65 @@ describe("task-data-store membership (ARC-08)", () => {
     expect(useTaskDataStore.getState().taskIds).toEqual([]);
     expect(useTaskDataStore.getState().taskById.q1?.status).toBe("completed");
   });
+
+  it("does not rewrite per-file downloadedBytes on progress ticks", () => {
+    const files = [
+      {
+        id: "f1",
+        taskId: "multi",
+        relativePath: "a.bin",
+        fileName: "a.bin",
+        saveDir: "D:\\Downloads",
+        tempPath: null,
+        finalPath: null,
+        totalSize: 50,
+        downloadedBytes: 10,
+        selected: true,
+        status: "downloading" as const,
+        contentType: null,
+      },
+      {
+        id: "f2",
+        taskId: "multi",
+        relativePath: "b.bin",
+        fileName: "b.bin",
+        saveDir: "D:\\Downloads",
+        tempPath: null,
+        finalPath: null,
+        totalSize: 50,
+        downloadedBytes: 20,
+        selected: true,
+        status: "downloading" as const,
+        contentType: null,
+      },
+    ];
+    const task = makeTask({
+      id: "multi",
+      status: "downloading",
+      downloadedBytes: 30,
+      totalSize: 100,
+      files,
+    });
+    useTaskUIStore.setState({ nav: "all", search: "" });
+    useTaskDataStore.getState().setTaskCursorPage([task], 1, null, {
+      sources: [],
+      failureCategories: [],
+    });
+
+    useTaskDataStore.getState().patchTasksBatch([
+      {
+        taskId: "multi",
+        downloadedBytes: "60",
+        totalSize: "100",
+        speedBps: "1024",
+        connectionCount: 2,
+        status: "downloading",
+      },
+    ]);
+
+    const next = useTaskDataStore.getState().taskById.multi;
+    expect(next?.downloadedBytes).toBe(60);
+    expect(next?.files?.[0]?.downloadedBytes).toBe(10);
+    expect(next?.files?.[1]?.downloadedBytes).toBe(20);
+  });
 });

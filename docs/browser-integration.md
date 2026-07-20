@@ -10,7 +10,7 @@ Vibe Downloader 使用 Native Messaging 启动和引导浏览器集成，再通�
 
 - `candidate` 和 `release` 是最小权限手动交接包，不包含自动接管、Cookie/header 转发或全站 host permissions。
 - `dev` 默认同样是手动交接。只有显式设置 `VIBE_BROWSER_EXPERIMENTAL_CAPTURE=true` 才加入 `downloads`、`cookies`、`webRequest` 和 HTTP/HTTPS host permissions。
-- 当前站点规则中的 `ask` 不会弹出即时确认；capture ask 等同于不自动接管，header ask 等同于不读取或转发敏感 header。该行为由主审计 `FUN-14` 跟踪。
+- 当前站点规则中的 `ask`（界面文案为「不捕获/不转发（不提示）」）不会弹出确认；行为是被动跳过自动接管或 header 转发（`FUN-14`）。
 
 ## 当前状态
 
@@ -208,4 +208,4 @@ Native host 不向 stdout 写诊断日志，因为 stdout 属于 Native Messagin
 - 完成 Chrome/Edge/Firefox 的端到端验证矩阵。
 - Safari 需要单独 macOS wrapper 和签名/审核流程。
 - 保持商店包为最小权限手动交接；若未来发布 capture 变体，单独完成权限、隐私和商店审核。
-- 修复 `FUN-03` 的过期 Header 恢复路径和 `FUN-14` 的 Ask 语义后再扩展相关产品文案。
+- 修复 `FUN-03` 的过期 Header 恢复路径后再扩展相关产品文案。

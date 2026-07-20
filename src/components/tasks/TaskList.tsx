@@ -124,6 +124,7 @@ export const TaskList = memo(function TaskList({
   const selectionAnchorId = useTaskUIStore((s) => s.selectionAnchorId);
   const sortKey = useTaskUIStore((s) => s.sortKey);
   const sortDirection = useTaskUIStore((s) => s.sortDirection);
+  const setSort = useTaskUIStore((s) => s.setSort);
   const filters = useTaskUIStore((s) => s.filters);
   const pendingDeleteIds = useTaskUIStore((s) => s.pendingDeleteIds);
   const selectTask = useTaskUIStore((s) => s.selectTask);
@@ -664,9 +665,29 @@ export const TaskList = memo(function TaskList({
               aria-hidden="true"
             />
           </Button>
+          {/* UX-12: narrow viewports hide CommandBar sort; surface current order here. */}
+          <span className="ml-auto truncate text-[11px] text-text-muted md:hidden" title={t("taskList.sort")}>
+            {t(`taskList.${sortSummaryKey(sortKey, sortDirection)}`)}
+          </span>
         </div>
         {toolPanelOpen ? (
           <div id="task-list-tool-panel" className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <SelectControl
+              label={t("taskList.sort")}
+              value={`${sortKey}:${sortDirection}`}
+              onChange={(value) => {
+                const [key, direction] = value.split(":") as [typeof sortKey, typeof sortDirection];
+                setSort(key, direction);
+              }}
+              options={[
+                ["updated_at:desc", t("taskList.sortUpdatedDesc")],
+                ["created_at:desc", t("taskList.sortCreatedDesc")],
+                ["file_size:desc", t("taskList.sortSizeDesc")],
+                ["progress:desc", t("taskList.sortProgressDesc")],
+                ["speed:desc", t("taskList.sortSpeedDesc")],
+                ["status:asc", t("taskList.sortStatusAsc")],
+              ]}
+            />
             <SelectControl
               label={t("taskList.fileType")}
               value={filters.fileType}
@@ -913,6 +934,36 @@ function SelectControl({
       </Select>
     </div>
   );
+}
+
+function sortSummaryKey(
+  sortKey: string,
+  sortDirection: string,
+):
+  | "sortUpdatedDesc"
+  | "sortCreatedDesc"
+  | "sortSizeDesc"
+  | "sortProgressDesc"
+  | "sortSpeedDesc"
+  | "sortStatusAsc"
+  | "sort" {
+  const value = `${sortKey}:${sortDirection}`;
+  switch (value) {
+    case "updated_at:desc":
+      return "sortUpdatedDesc";
+    case "created_at:desc":
+      return "sortCreatedDesc";
+    case "file_size:desc":
+      return "sortSizeDesc";
+    case "progress:desc":
+      return "sortProgressDesc";
+    case "speed:desc":
+      return "sortSpeedDesc";
+    case "status:asc":
+      return "sortStatusAsc";
+    default:
+      return "sort";
+  }
 }
 
 function FilterChip({

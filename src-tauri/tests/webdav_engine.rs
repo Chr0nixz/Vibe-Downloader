@@ -45,7 +45,7 @@ use common::TestServer;
 use tauri_app_lib::{
     db,
     download::{DownloadEngine, HttpEngine, ProbeRequest, WebDavEngine},
-    models::{SegmentStatus, TaskStatus},
+    models::{AppErrorPayload, SegmentStatus, TaskStatus},
     proxy::ResolvedProxyConfig,
     state_machine,
 };
@@ -163,6 +163,7 @@ fn handle_connection(stream: &mut TcpStream, state: WebDavHandlerState) {
             true,
         ),
         "/missing" => write_response(stream, 404, &[], b"not found", false),
+        "/forbidden" => write_response(stream, 403, &[], b"forbidden", false),
         "/no-ranges" => respond_file(
             stream,
             method,
@@ -513,4 +514,126 @@ async fn download_pauses_mid_transfer_and_resumes_through_http_engine() {
         .expect("completed WebDAV task exists");
     assert_eq!(completed.status, TaskStatus::Completed);
     assert_eq!(completed.downloaded_bytes, payload.len() as i64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_uses_persisted_webdav_credentials() {
+    common::install_test_secret_key();
+    let state = WebDavHandlerState::with_required_auth("davuser", "davpass");
+    let observed = state.observed_authorization.clone();
+    let server = start_test_server(state);
+    let pool = common::test_pool("webdav-cred-rotation").await;
+    let paths = common::TestPaths::new("webdav-cred-rotation");
+    // No embedded credentials in the task URL.
+    let task = common::download_task(
+        "webdav-cred-rotation",
+        webdav_url(&server, "/file"),
+        "webdav",
+        "sample.bin",
+        SAMPLE.len() as i64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert WebDAV task");
+    db::upsert_task_credentials(&pool, &task.id, "webdav", "davuser", "davpass", None, None)
+        .await
+        .expect("store WebDAV credentials");
+
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("authenticated WebDAV download");
+
+    assert_eq!(
+        std::fs::read(&paths.final_path).expect("read final"),
+        SAMPLE
+    );
+    let auth = observed
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("Authorization header observed");
+    assert!(auth.starts_with("Basic "), "got: {auth}");
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_fails_when_server_returns_403() {
+    let server = start_test_server(WebDavHandlerState::new());
+    let error = new_engine()
+        .probe(new_probe_request(webdav_url(&server, "/forbidden")))
+        .await
+        .expect_err("403 must fail probe");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured http_denied");
+    assert_eq!(payload.code, "http_denied");
+    assert!(!payload.recoverable);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_fails_when_server_returns_401_with_stable_code() {
+    let server = start_test_server(WebDavHandlerState::with_required_auth("alice", "s3cret"));
+    let error = new_engine()
+        .probe(new_probe_request(webdav_url(&server, "/file")))
+        .await
+        .expect_err("401 without credentials must fail");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured http_denied");
+    assert_eq!(payload.code, "http_denied");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn directory_probe_fails_when_propfind_returns_403() {
+    use tauri_app_lib::download::probe_webdav_directory_url;
+
+    let server = start_test_server(WebDavHandlerState::new());
+    let url = webdav_url(&server, "/forbidden/");
+    let error = probe_webdav_directory_url(&url, ResolvedProxyConfig::default(), None)
+        .await
+        .expect_err("403 PROPFIND must fail");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error).expect("structured webdav_propfind_failed");
+    assert_eq!(payload.code, "webdav_propfind_failed");
+    assert!(payload.recoverable);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_fails_when_server_returns_403() {
+    let server = start_test_server(WebDavHandlerState::new());
+    let pool = common::test_pool("webdav-403-download").await;
+    let paths = common::TestPaths::new("webdav-403-download");
+    let task = common::download_task(
+        "webdav-403-download",
+        webdav_url(&server, "/forbidden"),
+        "webdav",
+        "forbidden.bin",
+        9,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert WebDAV task");
+
+    let error = new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("403 GET must fail download");
+    let message = error.to_string();
+    assert!(
+        message.contains("http_denied") || message.contains("403"),
+        "expected denial code, got: {message}"
+    );
+    assert!(!paths.final_path.exists());
+    pool.close().await;
 }

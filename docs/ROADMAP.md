@@ -127,9 +127,9 @@ Audit IDs: `UX-04`, `UX-05`, `FUN-04`, `FUN-05`, `FUN-06`, `FUN-17`
 - Make authenticated directory probes use the same secure credential and proxy path as task creation.
 - Remove checksum-discovery and MIME-classification races.
 
-### B5. Recovery And Accessibility
+### B5. Recovery And Accessibility — audit Closed
 
-Audit IDs: `UX-02`, `UX-08`, `UX-09`, `UX-10`, `UX-11`, `ARC-14`, `ARC-15`
+Audit IDs: `UX-02`, `UX-08`, `UX-09`, `UX-10`, `UX-11`, `ARC-14`, `ARC-15` (all Closed in the main audit)
 
 - Restore custom context menus without exposing unwanted WebView native menus.
 - Add a visible desktop detail close action and correct Queue Center keyboard semantics.
@@ -141,9 +141,9 @@ Audit IDs: `UX-02`, `UX-08`, `UX-09`, `UX-10`, `UX-11`, `ARC-14`, `ARC-15`
 
 Phase C raises each advertised protocol from “entry point exists” to a tested lifecycle.
 
-### C1. Metalink Integrity
+### C1. Metalink Integrity — audit Closed
 
-Audit IDs: `FUN-08`, `FUN-09`
+Audit IDs: `FUN-08`, `FUN-09` (both Closed in the main audit)
 
 - Define strongest-hash and multi-hash completion semantics.
 - Persist remote validators and validate Content-Range on resume.
@@ -151,7 +151,7 @@ Audit IDs: `FUN-08`, `FUN-09`
 
 ### C2. HLS And DASH
 
-Audit IDs: `FUN-10`, `FUN-12`, `ARC-10`, `ARC-11`
+Audit IDs: `FUN-10`, `FUN-12`, `ARC-10`, `ARC-11` — **Closed**
 
 - Reuse the main HLS pipeline for selected audio and subtitle tracks.
 - Resolve relative track URIs and fail visibly when selected tracks cannot be produced.
@@ -161,13 +161,15 @@ Audit IDs: `FUN-10`, `FUN-12`, `ARC-10`, `ARC-11`
 
 ### C3. BitTorrent
 
-Audit IDs: `FUN-11`, `FUN-15`, `ARC-12`, `ARC-13`
+Audit IDs: `FUN-11`, `FUN-15`, `ARC-12`, `ARC-13` — **Closed**
 
 - Enforce both seeding ratio and time limits without consuming ordinary download slots after completion.
 - Make session ownership, reference counting, and speed policy explicit.
 - Publish real per-file progress and clearly label configured-only tracker data.
 
-### C4. FTP, SFTP, And WebDAV
+### C4. FTP, SFTP, And WebDAV — audit Closed
+
+Audit ID: `FUN-18` C4 subset (FTP/SFTP/WebDAV Retry + Diagnostics) — **Closed**; FUN-18 overall remains Open until C5
 
 - Complete authenticated directory-probe workflows.
 - Add credential rotation, restart, proxy-failure, permission-denied, and host-key-recovery tests.

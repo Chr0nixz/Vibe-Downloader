@@ -27,12 +27,15 @@ use crate::{
         BrowserExtensionPackage, BrowserForwardHeadersMode, BrowserForwardedHeader,
         BrowserHandoffInput, BrowserHandoffResult, BrowserIntegrationEntry,
         BrowserIntegrationStatus, BrowserIntegrationUpdateInput, BrowserKind,
-        BrowserRealtimeStatus,
+        BrowserRealtimeStatus, TaskStatus,
     },
     AppState,
 };
 
-use super::tasks::{create_task_with_state_and_headers, CreateTaskInput};
+use super::tasks::{
+    create_task_with_state_and_headers, queue_task_for_retry_with_event,
+    task_from_record_with_files, CreateTaskInput,
+};
 
 const NATIVE_HOST_NAME: &str = "com.vibe_downloader.native_host";
 const CHROME_EXTENSION_ID: &str = env!("VIBE_CHROME_EXTENSION_ID_RESOLVED");
@@ -206,8 +209,9 @@ pub async fn create_browser_handoff_task_with_state(
     }
 
     let capture_settings = browser_capture_settings(&state.pool).await?;
+    let sanitized_headers = sanitize_forwarded_headers(input.forwarded_headers.as_deref());
     let forwarded_headers = if capture_settings.experimental_capture_enabled {
-        sanitize_forwarded_headers(input.forwarded_headers.as_deref())
+        sanitized_headers.clone()
     } else {
         Vec::new()
     };
@@ -291,6 +295,38 @@ pub async fn create_browser_handoff_task_with_state(
     )
     .await?;
 
+    // FUN-03: same-URL handoff can refresh auth headers on a recoverable task
+    // instead of failing duplicate_task. Active downloads are never overwritten.
+    // Use sanitized headers from the resend even when experimental capture is off,
+    // so an explicit browser resend can repair auth_headers_* tasks.
+    let recovery_headers = if !sanitized_headers.is_empty() {
+        sanitized_headers
+    } else {
+        request_headers.clone()
+    };
+    if let Some(recovered) = try_recover_auth_header_task(
+        &app,
+        state,
+        &create_input.url,
+        &recovery_headers,
+        input.browser,
+    )
+    .await?
+    {
+        tracing::info!(
+            request_id = %request_id,
+            task_id = %recovered.id,
+            "browser handoff recovered auth headers on existing task"
+        );
+        emit_browser_handoff_received(&app);
+        return Ok(BrowserHandoffResult {
+            request_id,
+            status: "received".to_string(),
+            task: Some(recovered),
+            error_message: None,
+        });
+    }
+
     match create_task_with_state_and_headers(
         app.clone(),
         state,
@@ -333,6 +369,65 @@ pub async fn create_browser_handoff_task_with_state(
     }
 }
 
+/// FUN-03: When a handoff hits the same URL as a task that failed with
+/// `auth_headers_expired` / `auth_headers_unavailable`, replace headers and
+/// requeue that task instead of creating a duplicate (which would be rejected).
+/// Returns `None` when no recoverable task matches, so normal create proceeds.
+async fn try_recover_auth_header_task(
+    app: &AppHandle,
+    state: &AppState,
+    url: &str,
+    headers: &[(String, String)],
+    browser: BrowserKind,
+) -> Result<Option<crate::models::Task>, String> {
+    let Some(existing) = db::find_duplicate_task_record(&state.pool, url, None, None).await? else {
+        return Ok(None);
+    };
+
+    // Never overwrite an in-flight or healthy queued download.
+    if matches!(
+        existing.status,
+        TaskStatus::Downloading | TaskStatus::Retrying | TaskStatus::Queued
+    ) {
+        return Ok(None);
+    }
+
+    let error_code = existing.error_code.as_deref().unwrap_or("");
+    if !is_auth_header_recovery_candidate(existing.status, error_code) {
+        return Ok(None);
+    }
+    if headers.is_empty() {
+        return Err(
+            "Browser authentication headers are required to resume this download. Send it from the browser again with headers enabled."
+                .to_string(),
+        );
+    }
+
+    db::upsert_task_request_headers(&state.pool, &existing.id, headers, Some(browser)).await?;
+    let record = queue_task_for_retry_with_event(
+        app,
+        state,
+        &existing.id,
+        "auth_headers_refreshed",
+        Some("Browser headers refreshed"),
+    )
+    .await?;
+    let task = task_from_record_with_files(&state.pool, record).await?;
+    Ok(Some(task))
+}
+
+/// FUN-03: only NeedsAttention/Failed tasks with auth header error codes are
+/// eligible for same-URL header refresh. Active and queued tasks stay protected.
+pub fn is_auth_header_recovery_candidate(status: TaskStatus, error_code: &str) -> bool {
+    matches!(
+        (status, error_code),
+        (
+            TaskStatus::NeedsAttention | TaskStatus::Failed,
+            "auth_headers_expired" | "auth_headers_unavailable"
+        )
+    )
+}
+
 /// S-2.1: Maximum handoff file size: 1 MiB (audit-recommended value). The JSON payload written by the native host
 /// is far smaller than this; 1 MiB is enough for any legitimate handoff while preventing memory pressure from large files.
 const HANDOFF_MAX_BYTES: u64 = 1024 * 1024;
@@ -343,11 +438,188 @@ const HANDOFF_FILE_NAME_MAX_LEN: usize = 128;
 /// S-2.1: Resolve the handoff directory. Reads the same environment variable as the native host
 /// `VIBE_DOWNLOADER_HANDOFF_DIR` first, falling back to `temp_dir/vibe-downloader-handoff` if unset.
 /// Tests isolate by setting this environment variable to a temp directory.
-fn resolve_handoff_dir() -> PathBuf {
+pub fn resolve_handoff_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("VIBE_DOWNLOADER_HANDOFF_DIR") {
         return PathBuf::from(dir);
     }
     std::env::temp_dir().join("vibe-downloader-handoff")
+}
+
+/// ARC-14: Scan the handoff directory for `*.json` files that pass path validation.
+/// Files written during the AppState gap are recovered at ready-time by this scan.
+pub fn collect_pending_handoff_files() -> Vec<PathBuf> {
+    let handoff_dir = resolve_handoff_dir();
+    let entries = match fs::read_dir(&handoff_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::debug!(
+                dir = %handoff_dir.display(),
+                error = %error,
+                "handoff directory not readable for startup replay"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        match validate_handoff_file_path(&path) {
+            Ok(canon) => files.push(canon),
+            Err(reason) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    reason = %reason,
+                    "skipping invalid pending handoff file during startup scan"
+                );
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// ARC-14: Merge CLI arg paths with a directory scan, keeping each canonical path once.
+/// Arg order is preserved first so initial-launch CLI paths stay ahead of scan-only files.
+pub fn merge_handoff_file_paths(arg_paths: Vec<PathBuf>, scanned: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+    for path in arg_paths.into_iter().chain(scanned) {
+        let resolved = validate_handoff_file_path(&path).unwrap_or_else(|_| path.clone());
+        let key = resolved.to_string_lossy().to_ascii_lowercase();
+        if seen.insert(key) {
+            merged.push(resolved);
+        }
+    }
+    merged
+}
+
+/// ARC-14: Process handoff JSON paths once AppState is available.
+/// Success (including `duplicate`) and unreadable payloads delete the file after
+/// re-validation; create failures leave the file for a later retry/replay.
+pub async fn process_browser_handoff_paths(
+    app: AppHandle,
+    state: &AppState,
+    paths: Vec<PathBuf>,
+    source: &'static str,
+) {
+    for path in paths {
+        match read_handoff_file(&path) {
+            Ok(input) => {
+                let request_id = input.request_id.clone();
+                tracing::info!(
+                    request_id = %request_id,
+                    path = %path.display(),
+                    source,
+                    "processing browser handoff file"
+                );
+                match create_browser_handoff_task_with_state(app.clone(), state, input).await {
+                    Ok(result) => {
+                        tracing::info!(
+                            request_id = %request_id,
+                            path = %path.display(),
+                            source,
+                            status = %result.status,
+                            "browser handoff processed"
+                        );
+                        cleanup_handoff_file(&path, Some(&request_id), source);
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            request_id = %request_id,
+                            path = %path.display(),
+                            source,
+                            error = %error,
+                            "browser handoff task creation failed"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    path = %path.display(),
+                    source,
+                    error = %error,
+                    "browser handoff file read failed"
+                );
+                cleanup_handoff_file(&path, None, source);
+            }
+        }
+    }
+}
+
+fn cleanup_handoff_file(path: &Path, request_id: Option<&str>, source: &'static str) {
+    // S-2.2: Re-validate before deletion (TOCTOU protection).
+    if let Err(reason) = validate_handoff_file_path(path) {
+        if let Some(request_id) = request_id {
+            tracing::warn!(
+                request_id = %request_id,
+                path = %path.display(),
+                source,
+                reason = %reason,
+                "skip deleting handoff file: path validation failed"
+            );
+        } else {
+            tracing::warn!(
+                path = %path.display(),
+                source,
+                reason = %reason,
+                "skip deleting handoff file after read failure: path validation failed"
+            );
+        }
+        return;
+    }
+    if let Err(error) = fs::remove_file(path) {
+        if let Some(request_id) = request_id {
+            tracing::warn!(
+                request_id = %request_id,
+                path = %path.display(),
+                source,
+                error = %error,
+                "browser handoff file cleanup failed"
+            );
+        } else {
+            tracing::warn!(
+                path = %path.display(),
+                source,
+                error = %error,
+                "browser handoff file cleanup after read failure failed"
+            );
+        }
+    }
+}
+
+/// ARC-14: Testable replay helper — read each path, invoke `on_input`, then delete on Ok
+/// (including duplicate). Create/`on_input` errors leave the file for a later pass.
+pub async fn replay_handoff_files_with<F, Fut>(
+    paths: Vec<PathBuf>,
+    mut on_input: F,
+) -> Vec<(PathBuf, Result<String, String>)>
+where
+    F: FnMut(BrowserHandoffInput) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    let mut outcomes = Vec::new();
+    for path in paths {
+        let outcome = match read_handoff_file(&path) {
+            Ok(input) => match on_input(input).await {
+                Ok(status) => {
+                    cleanup_handoff_file(&path, None, "test-replay");
+                    Ok(status)
+                }
+                Err(error) => Err(error),
+            },
+            Err(error) => {
+                cleanup_handoff_file(&path, None, "test-replay");
+                Err(error)
+            }
+        };
+        outcomes.push((path, outcome));
+    }
+    outcomes
 }
 
 /// S-2.1: Validate that the handoff file path is inside `handoff_dir`, the file name conforms to

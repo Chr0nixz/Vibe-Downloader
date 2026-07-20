@@ -171,11 +171,46 @@ async function verifyArtifacts() {
   }
 }
 
+async function verifyProfileCopyBoundaries() {
+  // FUN-13: release/candidate docs and UI strings must not claim interactive Ask
+  // or store capture as a shipped capability. Dev-only experimental capture stays
+  // gated by VIBE_BROWSER_EXPERIMENTAL_CAPTURE.
+  const enMessages = await readJson(
+    path.join(root, "browser", "extension-core", "src", "_locales", "en", "messages.json"),
+  );
+  for (const key of ["forwardAsk", "headersModeAsk", "ruleModeAsk"]) {
+    const message = enMessages[key]?.message ?? "";
+    if (/prompt before|Ask first|Ask per download/i.test(message) && !/no prompt/i.test(message)) {
+      fail(`Extension locale ${key} still claims an interactive Ask prompt: ${message}`);
+    }
+    if (!/no prompt/i.test(message)) {
+      fail(`Extension locale ${key} should state passive "no prompt" semantics: ${message}`);
+    }
+  }
+
+  const policySource = await readFile(
+    path.join(root, "browser", "extension-core", "src", "capture-policy.js"),
+    "utf8",
+  );
+  if (!policySource.includes("forward: false, state: \"ask\"")) {
+    fail("capture-policy.js must keep ask as a passive non-forwarding mode.");
+  }
+
+  const readme = await readFile(path.join(root, "README.md"), "utf8");
+  if (!readme.includes("VIBE_BROWSER_EXPERIMENTAL_CAPTURE=true")) {
+    fail("README must document that experimental capture is opt-in for dev builds.");
+  }
+  if (!readme.includes("candidate") || !readme.includes("release")) {
+    fail("README must distinguish candidate/release manual hand-off profiles.");
+  }
+}
+
 async function main() {
   await verifyVariantSetAndManifests();
   await verifyHeaderAllowlist();
   await verifyCompiledCandidateIdentity();
   await verifyArtifacts();
+  await verifyProfileCopyBoundaries();
 
   if (failures.length > 0) {
     console.error(`\nExtension verification failed (${failures.length} issue(s)):`);

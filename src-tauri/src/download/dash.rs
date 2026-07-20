@@ -23,10 +23,10 @@ use super::{
     engine::EngineFuture,
     file_ops::{finalize_download_file, persist_completed_path},
     http::HttpEngine,
-    read_with_idle_timeout,
+    read_body_limited, read_local_file_limited, read_with_idle_timeout,
     url_classify::is_dash_url,
-    DownloadContext, DownloadEngine, DownloadError, IdleReadOutcome, ProbeOutput, ProbeRequest,
-    READ_IDLE_TIMEOUT,
+    DownloadContext, DownloadEngine, DownloadError, IdleReadOutcome, LimitedBodyError, ProbeOutput,
+    ProbeRequest, CONTROL_PLANE_MAX_BYTES, READ_IDLE_TIMEOUT,
 };
 use crate::download::error::engine_error;
 use crate::download::retry::RetryPolicy;
@@ -341,6 +341,10 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                     "segmenttemplate" => {
                         let media_template = attr_value(&event, "media").unwrap_or_default();
                         let initialization = attr_value(&event, "initialization");
+                        reject_unsupported_segment_template(
+                            &media_template,
+                            initialization.as_deref(),
+                        )?;
                         let start_number = attr_value(&event, "startNumber")
                             .and_then(|v| v.parse::<i64>().ok())
                             .unwrap_or(1);
@@ -429,6 +433,10 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                     "segmenttemplate" => {
                         let media_template = attr_value(&event, "media").unwrap_or_default();
                         let initialization = attr_value(&event, "initialization");
+                        reject_unsupported_segment_template(
+                            &media_template,
+                            initialization.as_deref(),
+                        )?;
                         let start_number = attr_value(&event, "startNumber")
                             .and_then(|v| v.parse::<i64>().ok())
                             .unwrap_or(1);
@@ -536,6 +544,14 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
             false,
         ));
     }
+    // FUN-12: multi-Period MPDs are outside the static/VOD first-pass contract.
+    if periods.len() > 1 {
+        return Err(engine_error(
+            "dash_multi_period_unsupported",
+            "Multi-Period DASH manifests are not supported yet. Use a single-Period static/VOD MPD.",
+            false,
+        ));
+    }
     if periods.is_empty() || periods.iter().all(|p| p.adaptation_sets.is_empty()) {
         return Err(engine_error(
             "dash_invalid_manifest",
@@ -546,6 +562,44 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
 
     let _ = manifest_url; // retained for future relative-URL resolution at parse time
     Ok(ParsedMpd { periods })
+}
+
+/// FUN-12: only `$Number$` (optional printf width) is expanded today. Other
+/// DASH template variables must fail fast instead of producing partial files.
+fn reject_unsupported_segment_template(
+    media_template: &str,
+    initialization: Option<&str>,
+) -> Result<(), String> {
+    for value in std::iter::once(media_template).chain(initialization) {
+        if segment_template_has_unsupported_vars(value) {
+            return Err(engine_error(
+                "dash_template_unsupported",
+                format!(
+                    "SegmentTemplate uses unsupported placeholders in `{value}`. Only $Number$ is supported in this first-pass engine."
+                ),
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn segment_template_has_unsupported_vars(value: &str) -> bool {
+    let mut rest = value;
+    while let Some(start) = rest.find('$') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('$') else {
+            break;
+        };
+        let token = &after[..end];
+        // `$Number$` / `$Number%05d$` are the only expanded forms.
+        let base = token.split('%').next().unwrap_or(token);
+        if base != "Number" {
+            return true;
+        }
+        rest = &after[end + 1..];
+    }
+    false
 }
 
 fn select_tracks(
@@ -1497,9 +1551,11 @@ async fn fetch_mpd_text(
         let path = parsed
             .to_file_path()
             .map_err(|_| "DASH MPD file path is invalid.".to_string())?;
-        return fs::read_to_string(&path)
+        let bytes = read_local_file_limited(&path, CONTROL_PLANE_MAX_BYTES)
             .await
-            .map_err(|e| format!("Could not read DASH MPD file {}: {e}", path.display()));
+            .map_err(|error| map_dash_limited_body_error(error))?;
+        return String::from_utf8(bytes)
+            .map_err(|_| "DASH MPD file is not valid UTF-8.".to_string());
     }
     let response = apply_forwarded_headers(client.get(url), headers)
         .send()
@@ -1508,10 +1564,27 @@ async fn fetch_mpd_text(
     if !response.status().is_success() {
         return Err(format!("DASH MPD returned {}", response.status()));
     }
-    response
-        .text()
+    let bytes = read_body_limited(response, CONTROL_PLANE_MAX_BYTES, None, READ_IDLE_TIMEOUT)
         .await
-        .map_err(|e| format!("Could not read DASH MPD: {e}"))
+        .map_err(map_dash_limited_body_error)?;
+    String::from_utf8(bytes).map_err(|_| "DASH MPD response is not valid UTF-8.".to_string())
+}
+
+fn map_dash_limited_body_error(error: LimitedBodyError) -> String {
+    match error {
+        LimitedBodyError::TooLarge => engine_error(
+            "dash_mpd_too_large",
+            format!("DASH MPD exceeds the {CONTROL_PLANE_MAX_BYTES} byte safety limit."),
+            false,
+        ),
+        LimitedBodyError::Canceled => "Download canceled.".to_string(),
+        LimitedBodyError::IdleTimeout => engine_error(
+            "dash_segment_stalled",
+            "DASH MPD stalled while reading.",
+            true,
+        ),
+        LimitedBodyError::Read(message) => format!("Could not read DASH MPD: {message}"),
+    }
 }
 
 fn apply_forwarded_headers(
@@ -1719,6 +1792,47 @@ mod tests {
         "#;
         let error = parse_dash_manifest("https://example.com/video.mpd", mpd).unwrap_err();
         assert!(error.contains("dash_segment_timeline_unsupported"));
+    }
+
+    #[test]
+    fn rejects_multi_period_mpd() {
+        let mpd = r#"
+            <MPD type="static" mediaPresentationDuration="PT60S">
+              <Period id="p0">
+                <AdaptationSet mimeType="video/mp4">
+                  <Representation id="v0" bandwidth="500000">
+                    <SegmentTemplate media="seg-$Number$.m4s" startNumber="1" duration="2" timescale="1" />
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+              <Period id="p1">
+                <AdaptationSet mimeType="video/mp4">
+                  <Representation id="v1" bandwidth="500000">
+                    <SegmentTemplate media="seg-$Number$.m4s" startNumber="1" duration="2" timescale="1" />
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+        let error = parse_dash_manifest("https://example.com/multi.mpd", mpd).unwrap_err();
+        assert!(error.contains("dash_multi_period_unsupported"));
+    }
+
+    #[test]
+    fn rejects_time_template_placeholder() {
+        let mpd = r#"
+            <MPD type="static" mediaPresentationDuration="PT60S">
+              <Period>
+                <AdaptationSet mimeType="video/mp4">
+                  <Representation id="v0" bandwidth="500000">
+                    <SegmentTemplate media="seg-$Time$.m4s" startNumber="1" duration="2" timescale="1" />
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+        let error = parse_dash_manifest("https://example.com/time.mpd", mpd).unwrap_err();
+        assert!(error.contains("dash_template_unsupported"));
     }
 
     #[test]

@@ -141,7 +141,7 @@ export function TaskDetails({ taskId, open, onClose, onResolveAttention }: TaskD
         )}
         aria-labelledby="task-details-heading"
       >
-        <TaskDetailsHeader task={task} />
+        <TaskDetailsHeader task={task} onClose={onClose} />
         <TaskDetailsErrorBoundary taskId={task.id} onClose={onClose}>
           <TaskDetailsPanel task={task} onResolveAttention={onResolveAttention} onRefresh={onRefresh} />
         </TaskDetailsErrorBoundary>
@@ -278,7 +278,9 @@ function TaskDetailsDrawer({
   );
 }
 
-function TaskDetailsHeader({ task }: { task: Task }) {
+function TaskDetailsHeader({ task, onClose }: { task: Task; onClose?: () => void }) {
+  const { t } = useTranslation();
+
   return (
     <header className="flex shrink-0 items-start gap-2 border-b border-border-subtle px-4 py-3">
       <div className="min-w-0 flex-1">
@@ -289,6 +291,24 @@ function TaskDetailsHeader({ task }: { task: Task }) {
           {task.saveDir}
         </p>
       </div>
+      {onClose ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-10 w-10 shrink-0"
+              aria-label={t("taskDetails.close")}
+              data-task-details-close
+              onClick={onClose}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t("taskDetails.close")}</TooltipContent>
+        </Tooltip>
+      ) : null}
     </header>
   );
 }
@@ -1089,9 +1109,16 @@ function TorrentRuntimePanel({
     () => new Set(taskFiles.filter((file) => file.selected).map((file) => file.relativePath)),
   );
   const [saving, setSaving] = useState(false);
+  const [ratioLimitDraft, setRatioLimitDraft] = useState("");
+  const [timeLimitDraft, setTimeLimitDraft] = useState("");
   useEffect(() => {
     setSelectedFiles(new Set(taskFiles.filter((file) => file.selected).map((file) => file.relativePath)));
   }, [taskFiles]);
+  useEffect(() => {
+    if (!snapshot) return;
+    setRatioLimitDraft(snapshot.seedRatioLimit != null ? String(snapshot.seedRatioLimit) : "");
+    setTimeLimitDraft(snapshot.seedTimeLimitSeconds ?? "");
+  }, [snapshot]);
   if (task.protocol !== "bt" && task.protocol !== "magnet") return null;
 
   const canEditFiles = taskFiles.length > 1 && task.status !== "downloading" && task.status !== "retrying";
@@ -1120,7 +1147,30 @@ function TorrentRuntimePanel({
   async function toggleSeeding(enabled: boolean) {
     setSaving(true);
     try {
-      await updateTorrentSeeding({ taskId: task.id, enabled, ratioLimit: null, timeLimitSeconds: null });
+      // FUN-11: do not clear ratio/time policy when flipping the switch.
+      await updateTorrentSeeding({
+        taskId: task.id,
+        enabled,
+        ratioLimit: null,
+        timeLimitSeconds: null,
+        updateLimits: false,
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveSeedingLimits() {
+    setSaving(true);
+    try {
+      const ratio = ratioLimitDraft.trim() === "" ? null : Number(ratioLimitDraft);
+      await updateTorrentSeeding({
+        taskId: task.id,
+        enabled: snapshot?.seedingEnabled ?? false,
+        ratioLimit: ratio != null && Number.isFinite(ratio) && ratio > 0 ? ratio : null,
+        timeLimitSeconds: timeLimitDraft.trim() === "" ? null : timeLimitDraft.trim(),
+        updateLimits: true,
+      });
     } finally {
       setSaving(false);
     }
@@ -1168,7 +1218,14 @@ function TorrentRuntimePanel({
         />
         <Row
           label={t("taskDetails.btPeers")}
-          value={`${snapshot.peerCount} / ${snapshot.seedCount}`}
+          value={
+            snapshot.seedCount == null
+              ? t("taskDetails.btPeersOnly", { peers: snapshot.peerCount })
+              : t("taskDetails.btPeersAndSeeds", {
+                  peers: snapshot.peerCount,
+                  seeds: snapshot.seedCount,
+                })
+          }
           hint={t("taskDetails.btPeersHint")}
         />
         <Row
@@ -1213,13 +1270,14 @@ function TorrentRuntimePanel({
         {(snapshot.trackers ?? []).length > 0 ? (
           <div className="rounded-md bg-surface-root/50 px-3 py-2 text-xs">
             <div className="mb-1 font-medium text-text-muted">{t("taskDetails.btTrackers")}</div>
+            <p className="mb-2 text-[11px] text-text-muted">{t("taskDetails.btTrackersConfiguredOnly")}</p>
             <div className="space-y-1">
               {(snapshot.trackers ?? []).slice(0, 5).map((tracker) => (
                 <div key={tracker.url} className="flex items-center justify-between gap-2">
                   <span className="truncate text-text-secondary" title={tracker.url}>
                     {tracker.url}
                   </span>
-                  <span className="shrink-0 text-text-muted">{tracker.status}</span>
+                  <span className="shrink-0 text-text-muted">{tracker.source ?? tracker.status}</span>
                 </div>
               ))}
             </div>
@@ -1251,6 +1309,37 @@ function TorrentRuntimePanel({
             onCheckedChange={(checked) => void toggleSeeding(checked)}
             aria-labelledby="bt-seeding-label"
           />
+        </div>
+        <div className="space-y-2 rounded-md bg-surface-root/50 px-3 py-2">
+          <div className="text-xs font-medium text-text-muted">{t("taskDetails.btSeedingLimits")}</div>
+          <p className="text-[11px] text-text-muted">{t("taskDetails.btSeedingLimitsHint")}</p>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="space-y-1 text-xs text-text-muted" htmlFor="bt-seed-ratio-limit">
+              <span>{t("taskDetails.btSeedRatioLimit")}</span>
+              <Input
+                id="bt-seed-ratio-limit"
+                inputMode="decimal"
+                placeholder={t("taskDetails.btSeedLimitUnlimited")}
+                value={ratioLimitDraft}
+                disabled={saving}
+                onChange={(event) => setRatioLimitDraft(event.target.value)}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-text-muted" htmlFor="bt-seed-time-limit">
+              <span>{t("taskDetails.btSeedTimeLimit")}</span>
+              <Input
+                id="bt-seed-time-limit"
+                inputMode="numeric"
+                placeholder={t("taskDetails.btSeedLimitUnlimited")}
+                value={timeLimitDraft}
+                disabled={saving}
+                onChange={(event) => setTimeLimitDraft(event.target.value)}
+              />
+            </label>
+          </div>
+          <Button type="button" size="sm" variant="outline" disabled={saving} onClick={() => void saveSeedingLimits()}>
+            {t("taskDetails.btSaveSeedingLimits")}
+          </Button>
         </div>
         {taskFiles.length > 1 ? (
           <div className="rounded-md bg-surface-root/50 px-3 py-2">

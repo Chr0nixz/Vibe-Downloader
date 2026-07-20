@@ -292,27 +292,87 @@ pub async fn torrent_seed_ratio_limit(
     Ok(value.flatten())
 }
 
+/// FUN-11: Reads the configured seed time limit (seconds) for a torrent task.
+pub async fn torrent_seed_time_limit_seconds(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Option<i64>, String> {
+    let value: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT seed_time_limit_seconds FROM torrent_tasks WHERE task_id = ?")
+            .bind(task_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(value.flatten().filter(|seconds| *seconds > 0))
+}
+
+/// FUN-11: Returns both seeding policy fields so the UI can round-trip without
+/// clearing unread limits.
+pub async fn torrent_seeding_policy(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<(Option<f64>, Option<i64>), String> {
+    let row = sqlx::query(
+        r#"
+        SELECT seed_ratio_limit, seed_time_limit_seconds
+        FROM torrent_tasks
+        WHERE task_id = ?
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(row) = row else {
+        return Ok((None, None));
+    };
+    let ratio: Option<f64> = row.try_get("seed_ratio_limit").unwrap_or(None);
+    let time: Option<i64> = row
+        .try_get::<Option<i64>, _>("seed_time_limit_seconds")
+        .unwrap_or(None)
+        .filter(|seconds| *seconds > 0);
+    Ok((ratio, time))
+}
+
 pub async fn update_torrent_seeding(
     pool: &SqlitePool,
     task_id: &str,
     enabled: bool,
     ratio_limit: Option<f64>,
     time_limit_seconds: Option<i64>,
+    update_limits: bool,
 ) -> Result<(), String> {
-    sqlx::query(
-        r#"
-        UPDATE torrent_tasks
-        SET seeding_enabled = ?, seed_ratio_limit = ?, seed_time_limit_seconds = ?, updated_at = ?
-        WHERE task_id = ?
-        "#,
-    )
-    .bind(if enabled { 1 } else { 0 })
-    .bind(ratio_limit)
-    .bind(time_limit_seconds)
-    .bind(crate::models::task::now_iso())
-    .bind(task_id)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    // FUN-11: toggle-only updates must not wipe existing ratio/time policy.
+    if update_limits {
+        sqlx::query(
+            r#"
+            UPDATE torrent_tasks
+            SET seeding_enabled = ?, seed_ratio_limit = ?, seed_time_limit_seconds = ?, updated_at = ?
+            WHERE task_id = ?
+            "#,
+        )
+        .bind(if enabled { 1 } else { 0 })
+        .bind(ratio_limit)
+        .bind(time_limit_seconds)
+        .bind(crate::models::task::now_iso())
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE torrent_tasks
+            SET seeding_enabled = ?, updated_at = ?
+            WHERE task_id = ?
+            "#,
+        )
+        .bind(if enabled { 1 } else { 0 })
+        .bind(crate::models::task::now_iso())
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }

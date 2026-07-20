@@ -10,6 +10,8 @@ use super::task_records::{error_state_from_message, recovery_actions_json, row_t
 // ---------------------------------------------------------------------------
 
 /// UPDATE tasks: downloaded_bytes, speed_bps, connection_count, status.
+/// ARC-13: selected `task_files` are updated only when `update_files` is true.
+/// Aggregate task progress must not overwrite per-file bytes (BT/Metalink).
 async fn update_progress_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     task_id: &str,
@@ -18,6 +20,7 @@ async fn update_progress_in_tx(
     connection_count: i32,
     status: TaskStatus,
     updated_at: &str,
+    update_files: bool,
 ) -> Result<(), String> {
     sqlx::query(
         r#"
@@ -36,19 +39,21 @@ async fn update_progress_in_tx(
     .await
     .map_err(|e| e.to_string())?;
 
-    sqlx::query(
-        r#"
-        UPDATE task_files
-        SET downloaded_bytes = ?, status = ?
-        WHERE task_id = ? AND selected = 1
-        "#,
-    )
-    .bind(downloaded_bytes)
-    .bind(status.as_str())
-    .bind(task_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| e.to_string())?;
+    if update_files {
+        sqlx::query(
+            r#"
+            UPDATE task_files
+            SET downloaded_bytes = ?, status = ?
+            WHERE task_id = ? AND selected = 1
+            "#,
+        )
+        .bind(downloaded_bytes)
+        .bind(status.as_str())
+        .bind(task_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }
@@ -212,6 +217,7 @@ pub async fn update_task_progress(
         connection_count,
         status,
         &updated_at,
+        false,
     )
     .await?;
 
@@ -294,6 +300,7 @@ pub async fn update_task_and_segment_progress(
         connection_count,
         status,
         &updated_at,
+        false,
     )
     .await?;
 

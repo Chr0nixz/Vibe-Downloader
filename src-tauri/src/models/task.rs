@@ -125,6 +125,17 @@ impl ChecksumAlgorithm {
     pub fn is_weak(self) -> bool {
         matches!(self, Self::Sha1 | Self::Md5)
     }
+
+    /// FUN-08: Metalink strongest-hash order. Lower rank is stronger
+    /// (`SHA-512 > SHA-256 > SHA-1 > MD5`).
+    pub fn metalink_strength_rank(self) -> u8 {
+        match self {
+            Self::Sha512 => 0,
+            Self::Sha256 => 1,
+            Self::Sha1 => 2,
+            Self::Md5 => 3,
+        }
+    }
 }
 
 impl TaskStatus {
@@ -508,6 +519,15 @@ pub struct BatchImportResult {
     pub duplicate_count: i32,
 }
 
+/// UX-05: Result of a global pause/resume that selects targets from the DB.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkTaskActionResult {
+    pub succeeded: u32,
+    pub skipped: u32,
+    pub failed: u32,
+}
+
 impl From<TaskSegmentRecord> for TaskSegment {
     fn from(record: TaskSegmentRecord) -> Self {
         Self {
@@ -823,7 +843,8 @@ pub struct TorrentRuntimeSnapshot {
     pub piece_count: String,
     pub piece_bitfield_base64: Option<String>,
     pub peer_count: String,
-    pub seed_count: String,
+    /// FUN-15: `None` when no reliable seed count is available (do not treat as 0 seeds).
+    pub seed_count: Option<String>,
     pub dht_status: Option<String>,
     pub trackers: Vec<TorrentTrackerStatus>,
     pub upload_bytes: String,
@@ -831,6 +852,10 @@ pub struct TorrentRuntimeSnapshot {
     pub ratio: f64,
     pub seeding_enabled: bool,
     pub seeding_state: String,
+    /// FUN-11: configured seed ratio limit from torrent_tasks (None = unlimited).
+    pub seed_ratio_limit: Option<f64>,
+    /// FUN-11: configured seed time limit in seconds (None = unlimited).
+    pub seed_time_limit_seconds: Option<String>,
     pub last_error_code: Option<String>,
     pub last_error_message: Option<String>,
     pub updated_at: String,
@@ -840,8 +865,19 @@ pub struct TorrentRuntimeSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct TorrentTrackerStatus {
     pub url: String,
+    /// FUN-15: currently always "configured" — announce health is not live yet.
     pub status: String,
+    /// FUN-15: tracker provenance (`configured` from magnet tr= / torrent announce).
+    #[serde(default = "default_tracker_source")]
+    pub source: String,
+    /// Optional ISO timestamp when this configured entry was last refreshed.
+    #[serde(default)]
+    pub updated_at: Option<String>,
     pub last_error: Option<String>,
+}
+
+fn default_tracker_source() -> String {
+    "configured".to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -876,7 +912,8 @@ impl From<TorrentRuntimeSnapshotRecord> for TorrentRuntimeSnapshot {
             piece_count: record.piece_count.to_string(),
             piece_bitfield_base64: record.piece_bitfield_base64,
             peer_count: record.peer_count.to_string(),
-            seed_count: record.seed_count.to_string(),
+            // FUN-15: peer_stats do not expose a trustworthy seed count yet.
+            seed_count: None,
             dht_status: record.dht_status,
             trackers: record
                 .trackers_json
@@ -888,6 +925,8 @@ impl From<TorrentRuntimeSnapshotRecord> for TorrentRuntimeSnapshot {
             ratio: record.ratio,
             seeding_enabled: record.seeding_enabled,
             seeding_state: record.seeding_state,
+            seed_ratio_limit: None,
+            seed_time_limit_seconds: None,
             last_error_code: record.last_error_code,
             last_error_message: record.last_error_message,
             updated_at: record.updated_at,
@@ -1091,6 +1130,7 @@ pub enum RecoveryAction {
     CheckUrl,
     FreeDiskSpace,
     ConfigureFfmpeg,
+    ManageSftpHostKeys,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1151,6 +1191,7 @@ impl RecoveryAction {
             Self::CheckUrl => "check_url",
             Self::FreeDiskSpace => "free_disk_space",
             Self::ConfigureFfmpeg => "configure_ffmpeg",
+            Self::ManageSftpHostKeys => "manage_sftp_host_keys",
         }
     }
 }
@@ -1169,6 +1210,7 @@ impl std::str::FromStr for RecoveryAction {
             "check_url" => Ok(Self::CheckUrl),
             "free_disk_space" => Ok(Self::FreeDiskSpace),
             "configure_ffmpeg" => Ok(Self::ConfigureFfmpeg),
+            "manage_sftp_host_keys" => Ok(Self::ManageSftpHostKeys),
             _ => Err(()),
         }
     }
@@ -1234,7 +1276,7 @@ impl AppErrorPayload {
     pub fn auth_headers_expired() -> Self {
         Self::new(
             "auth_headers_expired",
-            "Browser authentication headers expired. Send this download from the browser again or restart it.",
+            "Browser authentication headers expired. Send this download from the browser again to refresh headers on the same task.",
             true,
             vec!["check_url", "restart"],
         )

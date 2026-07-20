@@ -44,7 +44,7 @@ const SOURCE_ERROR_CODES = new Set([
 const RETRY_ERROR_CODES = new Set(["server_rate_limited"]);
 const STORAGE_ACTIONS = new Set<RecoveryAction>(["choose_another_name", "choose_another_folder", "free_disk_space"]);
 const SOURCE_ACTIONS = new Set<RecoveryAction>(["check_url"]);
-const RUNTIME_ACTIONS = new Set<RecoveryAction>(["configure_ffmpeg", "restart"]);
+const RUNTIME_ACTIONS = new Set<RecoveryAction>(["configure_ffmpeg", "manage_sftp_host_keys", "restart"]);
 const RETRY_ACTIONS = new Set<RecoveryAction>(["retry", "retry_later"]);
 
 function actionsForTask(task: Task): RecoveryAction[] {

@@ -10,6 +10,7 @@ import type {
   CompletionActionRequestedPayload,
   CreateTaskInput,
   CursorPageInput,
+  DirectoryProbeInput,
   FtpDirectoryProbe,
   HashVerificationState,
   ImportUrlsInput,
@@ -994,14 +995,24 @@ export async function getTorrentRuntimeSnapshot(taskId: string): Promise<Torrent
     pieceCount: String(Math.max(1, Math.ceil(task.totalSize / (4 * 1024 * 1024)))),
     pieceBitfieldBase64: null,
     peerCount: live ? "12" : "0",
-    seedCount: live ? "4" : "0",
+    seedCount: null,
     dhtStatus: JSON.stringify({ routing_table_size: live ? 128 : 0 }),
-    trackers: [{ url: "udp://tracker.example:6969/announce", status: "configured", lastError: null }],
+    trackers: [
+      {
+        url: "udp://tracker.example:6969/announce",
+        status: "configured",
+        source: "configured",
+        updatedAt: task.updatedAt,
+        lastError: null,
+      },
+    ],
     uploadBytes: String(uploaded),
     uploadSpeedBps: String(uploadSpeedBps),
     ratio: task.downloadedBytes > 0 ? uploaded / task.downloadedBytes : 0,
     seedingEnabled: false,
     seedingState: "disabled",
+    seedRatioLimit: null,
+    seedTimeLimitSeconds: null,
     lastErrorCode: null,
     lastErrorMessage: null,
     updatedAt: task.updatedAt,
@@ -1061,10 +1072,10 @@ export async function updateTorrentSeeding(input: UpdateTorrentSeedingInput): Pr
   return task;
 }
 
-export async function probeFtpDirectory(url: string): Promise<FtpDirectoryProbe> {
-  const base = url.replace(/\/?$/, "/");
+export async function probeFtpDirectory(input: DirectoryProbeInput): Promise<FtpDirectoryProbe> {
+  const base = input.url.replace(/\/?$/, "/");
   return {
-    inputUrl: url,
+    inputUrl: input.url,
     directoryUrl: base,
     currentDirectory: "/",
     entries: [
@@ -1075,10 +1086,10 @@ export async function probeFtpDirectory(url: string): Promise<FtpDirectoryProbe>
   };
 }
 
-export async function probeSftpDirectory(url: string): Promise<SftpDirectoryProbe> {
-  const base = url.replace(/\/?$/, "/");
+export async function probeSftpDirectory(input: DirectoryProbeInput): Promise<SftpDirectoryProbe> {
+  const base = input.url.replace(/\/?$/, "/");
   return {
-    inputUrl: url,
+    inputUrl: input.url,
     directoryUrl: base,
     currentDirectory: "/",
     entries: [
@@ -1093,10 +1104,10 @@ export async function probeSftpDirectory(url: string): Promise<SftpDirectoryProb
   };
 }
 
-export async function probeWebdavDirectory(url: string): Promise<WebDavDirectoryProbe> {
-  const base = url.replace(/\/?$/, "/");
+export async function probeWebdavDirectory(input: DirectoryProbeInput): Promise<WebDavDirectoryProbe> {
+  const base = input.url.replace(/\/?$/, "/");
   return {
-    inputUrl: url,
+    inputUrl: input.url,
     directoryUrl: base,
     entries: [
       {
@@ -1198,6 +1209,14 @@ export async function getAppVersion(): Promise<string> {
 
 export async function getSettings(): Promise<AppSettings> {
   return { ...settings };
+}
+
+export async function listSftpKnownHosts(): Promise<import("@/generated/bindings").SftpKnownHost[]> {
+  return [];
+}
+
+export async function forgetSftpKnownHost(_host: string, _port: number): Promise<boolean> {
+  return false;
 }
 
 export async function updateSettings(input: UpdateSettingsInput): Promise<AppSettings> {
@@ -1522,16 +1541,16 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
       ? null
       : await probeTask({
           url: normalized,
-          username: null,
-          password: null,
-          privateKeyData: null,
-          privateKeyPassphrase: null,
+          username: input.username ?? null,
+          password: input.password ?? null,
+          privateKeyData: input.privateKeyData ?? null,
+          privateKeyPassphrase: input.privateKeyPassphrase ?? null,
           requestId: null,
-          proxyMode: null,
-          proxyUrl: null,
-          proxyUsername: null,
-          proxyPassword: null,
-          proxyNoProxy: null,
+          proxyMode: input.proxyMode ?? null,
+          proxyUrl: input.proxyUrl ?? null,
+          proxyUsername: input.proxyUsername ?? null,
+          proxyPassword: input.proxyPassword ?? null,
+          proxyNoProxy: input.proxyNoProxy ?? null,
         });
     const existingTask = !duplicate && probe ? duplicateTaskForProbe(normalized, probe) : null;
     const isDuplicate = duplicate || Boolean(existingTask);
@@ -1541,27 +1560,27 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
             url: normalized,
             saveDir: input.saveDir,
             fileName: probe?.fileName ?? null,
-            expectedHashSha256: null,
-            expectedHash: null,
-            expectedHashAlgorithm: null,
-            taskSpeedLimitBps: null,
-            priority: null,
-            categoryKey: null,
+            expectedHashSha256: input.expectedHashSha256 ?? null,
+            expectedHash: input.expectedHash ?? null,
+            expectedHashAlgorithm: input.expectedHashAlgorithm ?? null,
+            taskSpeedLimitBps: input.taskSpeedLimitBps ?? null,
+            priority: input.priority ?? null,
+            categoryKey: input.categoryKey ?? null,
             probeSnapshot: probe,
             selectedFilePaths: null,
-            allowDuplicate: false,
-            username: null,
-            password: null,
-            privateKeyData: null,
-            privateKeyPassphrase: null,
+            allowDuplicate: input.allowDuplicate ?? false,
+            username: input.username ?? null,
+            password: input.password ?? null,
+            privateKeyData: input.privateKeyData ?? null,
+            privateKeyPassphrase: input.privateKeyPassphrase ?? null,
             selectedHlsVariantUri: null,
             selectedHlsAudioTrackUris: null,
             selectedHlsSubtitleTrackUris: null,
-            proxyMode: null,
-            proxyUrl: null,
-            proxyUsername: null,
-            proxyPassword: null,
-            proxyNoProxy: null,
+            proxyMode: input.proxyMode ?? null,
+            proxyUrl: input.proxyUrl ?? null,
+            proxyUsername: input.proxyUsername ?? null,
+            proxyPassword: input.proxyPassword ?? null,
+            proxyNoProxy: input.proxyNoProxy ?? null,
           })
         : null;
     items.push({

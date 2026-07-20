@@ -70,7 +70,8 @@ export const commands = {
 	pieceCount: string,
 	pieceBitfieldBase64: string | null,
 	peerCount: string,
-	seedCount: string,
+	/**  FUN-15: `None` when no reliable seed count is available (do not treat as 0 seeds). */
+	seedCount: string | null,
 	dhtStatus: string | null,
 	trackers: TorrentTrackerStatus[],
 	uploadBytes: string,
@@ -78,6 +79,10 @@ export const commands = {
 	ratio: number | null,
 	seedingEnabled: boolean,
 	seedingState: string,
+	/**  FUN-11: configured seed ratio limit from torrent_tasks (None = unlimited). */
+	seedRatioLimit: number | null,
+	/**  FUN-11: configured seed time limit in seconds (None = unlimited). */
+	seedTimeLimitSeconds: string | null,
 	lastErrorCode: string | null,
 	lastErrorMessage: string | null,
 	updatedAt: string,
@@ -87,6 +92,8 @@ export const commands = {
 	listTaskRequestsPage: (input: CursorPageInput) => typedError<TaskRequestsPageResult, string>(__TAURI_INVOKE("list_task_requests_page", { input })),
 	getSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("get_settings")),
 	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
+	listSftpKnownHosts: () => typedError<SftpKnownHost[], string>(__TAURI_INVOKE("list_sftp_known_hosts")),
+	forgetSftpKnownHost: (host: string, port: number) => typedError<boolean, string>(__TAURI_INVOKE("forget_sftp_known_host", { host, port })),
 	getStartupStatus: () => typedError<StartupStatus, string>(__TAURI_INVOKE("get_startup_status")),
 	openDatabaseRecoveryFolder: () => typedError<null, string>(__TAURI_INVOKE("open_database_recovery_folder")),
 	openStartupLogFolder: () => typedError<null, string>(__TAURI_INVOKE("open_startup_log_folder")),
@@ -147,9 +154,9 @@ export const commands = {
 	 */
 	extractSystemFileIcon: (fileName: string) => typedError<SystemFileIcon, string>(__TAURI_INVOKE("extract_system_file_icon", { fileName })),
 	probeTask: (input: ProbeTaskInput) => typedError<ProbeTaskPayload, string>(__TAURI_INVOKE("probe_task", { input })),
-	probeFtpDirectory: (url: string) => typedError<FtpDirectoryProbe, string>(__TAURI_INVOKE("probe_ftp_directory", { url })),
-	probeSftpDirectory: (url: string) => typedError<SftpDirectoryProbe, string>(__TAURI_INVOKE("probe_sftp_directory", { url })),
-	probeWebdavDirectory: (url: string) => typedError<WebDavDirectoryProbe, string>(__TAURI_INVOKE("probe_webdav_directory", { url })),
+	probeFtpDirectory: (input: DirectoryProbeInput) => typedError<FtpDirectoryProbe, string>(__TAURI_INVOKE("probe_ftp_directory", { input })),
+	probeSftpDirectory: (input: DirectoryProbeInput) => typedError<SftpDirectoryProbe, string>(__TAURI_INVOKE("probe_sftp_directory", { input })),
+	probeWebdavDirectory: (input: DirectoryProbeInput) => typedError<WebDavDirectoryProbe, string>(__TAURI_INVOKE("probe_webdav_directory", { input })),
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
 	importUrls: (input: ImportUrlsInput) => typedError<BatchImportResult, string>(__TAURI_INVOKE("import_urls", { input })),
 	updateTaskTransferOptions: (input: UpdateTaskTransferOptionsInput) => typedError<Task, string>(__TAURI_INVOKE("update_task_transfer_options", { input })),
@@ -183,6 +190,11 @@ export const commands = {
 	 *  fatal error occurs before the loop.
 	 */
 	bulkTaskAction: (ids: string[], action: string) => typedError<number, string>(__TAURI_INVOKE("bulk_task_action", { ids, action })),
+	/**
+	 *  UX-05: Pause or resume every matching task in the database, ignoring the
+	 *  frontend's loaded page / search / filter. Returns succeeded/skipped/failed.
+	 */
+	bulkTaskActionGlobal: (action: string) => typedError<BulkTaskActionResult, string>(__TAURI_INVOKE("bulk_task_action_global", { action })),
 	openTaskFile: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_file", { id })),
 	openTaskFolder: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_folder", { id })),
 	seedMockTasks: () => typedError<Task[], string>(__TAURI_INVOKE("seed_mock_tasks")),
@@ -382,6 +394,13 @@ export type BrowserSiteRule = {
 
 export type BrowserSiteRuleMode = "auto" | "ask" | "never";
 
+/**  UX-05: Result of a global pause/resume that selects targets from the DB. */
+export type BulkTaskActionResult = {
+	succeeded: number,
+	skipped: number,
+	failed: number,
+};
+
 export type ChecksumAlgorithm = "sha256" | "sha512" | "sha1" | "md5";
 
 export type ClassificationMatchKind = 
@@ -477,6 +496,20 @@ export type CursorPageInput = {
 	pageSize: number | null,
 };
 
+/**  FUN-04: Directory probe input aligned with probe/create credential and proxy fields. */
+export type DirectoryProbeInput = {
+	url: string,
+	username: string | null,
+	password: string | null,
+	privateKeyData: string | null,
+	privateKeyPassphrase: string | null,
+	proxyMode: TaskProxyMode | null,
+	proxyUrl: string | null,
+	proxyUsername: string | null,
+	proxyPassword: string | null,
+	proxyNoProxy: string | null,
+};
+
 export type DiskSpaceInfo = {
 	path: string,
 	total_bytes: string,
@@ -552,6 +585,23 @@ export type ImportUrlsInput = {
 	saveDir: string | null,
 	probe: boolean | null,
 	create: boolean | null,
+	/**  FUN-17: shared create-draft overrides applied to every created URL. */
+	expectedHashSha256: string | null,
+	expectedHash: string | null,
+	expectedHashAlgorithm: ChecksumAlgorithm | null,
+	taskSpeedLimitBps: string | null,
+	priority: TaskPriority | null,
+	categoryKey: string | null,
+	allowDuplicate: boolean | null,
+	username: string | null,
+	password: string | null,
+	privateKeyData: string | null,
+	privateKeyPassphrase: string | null,
+	proxyMode: TaskProxyMode | null,
+	proxyUrl: string | null,
+	proxyUsername: string | null,
+	proxyPassword: string | null,
+	proxyNoProxy: string | null,
 };
 
 export type ListSegmentsInput = {
@@ -692,7 +742,7 @@ export type QueueTaskDecision = {
 
 export type QueueWaitReason = "ready" | "retry_delay" | "active_limit" | "schedule_window" | "host_limit";
 
-export type RecoveryAction = "retry" | "retry_later" | "choose_another_name" | "choose_another_folder" | "restart" | "open_folder" | "check_url" | "free_disk_space" | "configure_ffmpeg";
+export type RecoveryAction = "retry" | "retry_later" | "choose_another_name" | "choose_another_folder" | "restart" | "open_folder" | "check_url" | "free_disk_space" | "configure_ffmpeg" | "manage_sftp_host_keys";
 
 export type RequestDiagnostic = {
 	id: string,
@@ -773,6 +823,15 @@ export type SftpDirectoryProbe = {
 	currentDirectory: string | null,
 	entries: SftpDirectoryEntry[],
 	diagnostics: string[],
+};
+
+export type SftpKnownHost = {
+	host: string,
+	port: number,
+	algorithm: string,
+	fingerprintSha256: string,
+	firstSeenAt: string,
+	lastSeenAt: string,
 };
 
 export type StartupStatus = {
@@ -986,7 +1045,8 @@ export type TorrentRuntimeSnapshot = {
 	pieceCount: string,
 	pieceBitfieldBase64: string | null,
 	peerCount: string,
-	seedCount: string,
+	/**  FUN-15: `None` when no reliable seed count is available (do not treat as 0 seeds). */
+	seedCount: string | null,
 	dhtStatus: string | null,
 	trackers: TorrentTrackerStatus[],
 	uploadBytes: string,
@@ -994,6 +1054,10 @@ export type TorrentRuntimeSnapshot = {
 	ratio: number | null,
 	seedingEnabled: boolean,
 	seedingState: string,
+	/**  FUN-11: configured seed ratio limit from torrent_tasks (None = unlimited). */
+	seedRatioLimit: number | null,
+	/**  FUN-11: configured seed time limit in seconds (None = unlimited). */
+	seedTimeLimitSeconds: string | null,
 	lastErrorCode: string | null,
 	lastErrorMessage: string | null,
 	updatedAt: string,
@@ -1001,7 +1065,12 @@ export type TorrentRuntimeSnapshot = {
 
 export type TorrentTrackerStatus = {
 	url: string,
+	/**  FUN-15: currently always "configured" — announce health is not live yet. */
 	status: string,
+	/**  FUN-15: tracker provenance (`configured` from magnet tr= / torrent announce). */
+	source?: string,
+	/**  Optional ISO timestamp when this configured entry was last refreshed. */
+	updatedAt?: string | null,
 	lastError: string | null,
 };
 
@@ -1071,6 +1140,11 @@ export type UpdateTorrentSeedingInput = {
 	enabled: boolean,
 	ratioLimit: number | null,
 	timeLimitSeconds: string | null,
+	/**
+	 *  FUN-11: when false, only `enabled` is written; ratio/time stay unchanged.
+	 *  Toggle UI must pass false so opening/closing seeding cannot wipe policy.
+	 */
+	updateLimits?: boolean,
 };
 
 export type WebDavDirectoryEntry = {

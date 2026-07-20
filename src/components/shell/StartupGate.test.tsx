@@ -23,6 +23,10 @@ vi.mock("react-i18next", async (importOriginal) => {
   };
 });
 
+vi.mock("motion/react", () => ({
+  useReducedMotion: () => true,
+}));
+
 vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: () => relaunch(),
 }));
@@ -183,5 +187,31 @@ describe("StartupGate", () => {
     // Transient IPC errors retry polling without calling backend retry_startup_init.
     expect(retryStartupInit).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByText("App ready")).toBeInTheDocument());
+  });
+
+  it("shows static initializing copy when reduced motion is preferred", async () => {
+    getStartupStatus.mockResolvedValue({
+      mode: "initializing",
+      reason: null,
+      message: null,
+      code: null,
+      databasePath: null,
+      backupPath: null,
+      backupVerified: false,
+      canReset: false,
+      logPath: null,
+      dataPath: null,
+    });
+
+    render(
+      <StartupGate>
+        <p>App ready</p>
+      </StartupGate>,
+    );
+
+    await waitFor(() => expect(screen.getByText("startup.initializing")).toBeInTheDocument());
+    const logo = screen.getByRole("status").querySelector("img");
+    expect(logo).toBeTruthy();
+    expect(logo?.getAttribute("style") ?? "").not.toContain("animation:");
   });
 });

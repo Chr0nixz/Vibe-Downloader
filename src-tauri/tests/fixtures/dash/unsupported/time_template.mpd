@@ -1,0 +1,9 @@
+<MPD type="static" mediaPresentationDuration="PT60S" xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4" contentType="video">
+      <Representation id="v0" bandwidth="500000">
+        <SegmentTemplate media="seg-$Time$.m4s" initialization="init.m4s" startNumber="1" duration="2" timescale="1" />
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>

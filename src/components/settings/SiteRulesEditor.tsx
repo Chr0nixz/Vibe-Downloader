@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { BrowserSiteRule, BrowserSiteRuleMode } from "@/generated/bindings";
+import { normalizeSiteRule, validateSiteRule } from "@/lib/browser-capture-draft";
+import { UNDO_TOAST_TIMEOUT_MS, useToastStore } from "@/stores/toast-store";
 
 interface SiteRulesEditorProps {
   rules: BrowserSiteRule[];
@@ -12,11 +14,23 @@ interface SiteRulesEditorProps {
   onUpdate: (rules: BrowserSiteRule[]) => void;
 }
 
+/**
+ * UX-06: edits stay in a local draft until Save; Cancel never calls onUpdate.
+ * Deletes update the parent draft immediately and offer Undo via toast.
+ */
 export function SiteRulesEditor({ rules, disabled, onUpdate }: SiteRulesEditorProps) {
   const { t } = useTranslation();
+  const addToast = useToastStore((state) => state.addToast);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<BrowserSiteRule | null>(null);
+  const [isNew, setIsNew] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const rulesRef = useRef(rules);
+  useEffect(() => {
+    rulesRef.current = rules;
+  }, [rules]);
 
-  function addRule() {
+  function beginAdd() {
     const newRule: BrowserSiteRule = {
       id: crypto.randomUUID(),
       hostPattern: "",
@@ -26,18 +40,71 @@ export function SiteRulesEditor({ rules, disabled, onUpdate }: SiteRulesEditorPr
       fileExtensions: [],
       forwardHeaders: null,
     };
-    onUpdate([...rules, newRule]);
+    setDraft(newRule);
+    setIsNew(true);
     setEditingId(newRule.id);
+    setValidationError(null);
   }
 
-  function updateRule(id: string, patch: Partial<BrowserSiteRule>) {
-    onUpdate(rules.map((rule) => (rule.id === id ? { ...rule, ...patch } : rule)));
+  function beginEdit(rule: BrowserSiteRule) {
+    setDraft({ ...rule, fileExtensions: [...rule.fileExtensions] });
+    setIsNew(false);
+    setEditingId(rule.id);
+    setValidationError(null);
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setDraft(null);
+    setIsNew(false);
+    setValidationError(null);
+  }
+
+  function saveEdit() {
+    if (!draft) return;
+    const normalized = normalizeSiteRule(draft);
+    const errorKey = validateSiteRule(normalized);
+    if (errorKey) {
+      setValidationError(errorKey);
+      setDraft(normalized);
+      return;
+    }
+    if (isNew) {
+      onUpdate([...rulesRef.current, normalized]);
+    } else {
+      onUpdate(rulesRef.current.map((rule) => (rule.id === normalized.id ? normalized : rule)));
+    }
+    cancelEdit();
   }
 
   function deleteRule(id: string) {
-    onUpdate(rules.filter((rule) => rule.id !== id));
-    if (editingId === id) setEditingId(null);
+    const current = rulesRef.current;
+    const index = current.findIndex((rule) => rule.id === id);
+    const removed = current[index];
+    if (!removed) return;
+    onUpdate(current.filter((rule) => rule.id !== id));
+    if (editingId === id) cancelEdit();
+    addToast({
+      tone: "info",
+      title: t("settings.siteRuleDeleted"),
+      description: t("common.undoHint"),
+      durationMs: UNDO_TOAST_TIMEOUT_MS,
+      action: {
+        label: t("common.undo"),
+        onClick: () => {
+          // Rebuild from the latest parent list without the removed id, then
+          // re-insert. Do not early-return when the parent has not yet applied
+          // the delete (rulesRef may still contain the removed rule).
+          const without = rulesRef.current.filter((rule) => rule.id !== removed.id);
+          const restored = [...without];
+          restored.splice(Math.min(index, restored.length), 0, removed);
+          onUpdate(restored);
+        },
+      },
+    });
   }
+
+  const showNewEditor = isNew && draft && editingId === draft.id;
 
   return (
     <div className="grid gap-3 border-t border-border-divider px-4 py-4">
@@ -48,37 +115,58 @@ export function SiteRulesEditor({ rules, disabled, onUpdate }: SiteRulesEditorPr
         </div>
         <button
           type="button"
-          onClick={addRule}
-          disabled={disabled}
+          onClick={beginAdd}
+          disabled={disabled || editingId !== null}
           className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-primary hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.addSiteRule")}
         </button>
       </div>
-      {rules.length === 0 ? (
+      {rules.length === 0 && !showNewEditor ? (
         <p className="text-xs text-text-muted">{t("settings.noSiteRules")}</p>
       ) : (
         <ul className="grid gap-2">
           {rules.map((rule) => (
             <li key={rule.id} className="grid gap-2 rounded-md border border-border-divider p-3">
-              {editingId === rule.id ? (
+              {editingId === rule.id && draft && !isNew ? (
                 <RuleEditForm
-                  rule={rule}
+                  rule={draft}
                   disabled={disabled}
-                  onChange={(patch) => updateRule(rule.id, patch)}
-                  onDone={() => setEditingId(null)}
+                  validationError={validationError}
+                  onChange={(patch) => {
+                    setDraft((current) => (current ? { ...current, ...patch } : current));
+                    setValidationError(null);
+                  }}
+                  onCancel={cancelEdit}
+                  onSave={saveEdit}
                   onDelete={() => deleteRule(rule.id)}
                 />
               ) : (
                 <RuleRow
                   rule={rule}
-                  disabled={disabled}
-                  onEdit={() => setEditingId(rule.id)}
+                  disabled={disabled || editingId !== null}
+                  onEdit={() => beginEdit(rule)}
                   onDelete={() => deleteRule(rule.id)}
                 />
               )}
             </li>
           ))}
+          {showNewEditor && draft ? (
+            <li className="grid gap-2 rounded-md border border-border-divider p-3">
+              <RuleEditForm
+                rule={draft}
+                disabled={disabled}
+                validationError={validationError}
+                onChange={(patch) => {
+                  setDraft((current) => (current ? { ...current, ...patch } : current));
+                  setValidationError(null);
+                }}
+                onCancel={cancelEdit}
+                onSave={saveEdit}
+                onDelete={cancelEdit}
+              />
+            </li>
+          ) : null}
         </ul>
       )}
     </div>
@@ -119,7 +207,7 @@ function RuleRow({
           type="button"
           onClick={onDelete}
           disabled={disabled}
-          className="rounded px-2 py-1 text-xs text-text-danger hover:bg-surface-hover disabled:opacity-50"
+          className="rounded px-2 py-1 text-xs text-status-danger hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.deleteRule")}
         </button>
@@ -131,14 +219,18 @@ function RuleRow({
 function RuleEditForm({
   rule,
   disabled,
+  validationError,
   onChange,
-  onDone,
+  onCancel,
+  onSave,
   onDelete,
 }: {
   rule: BrowserSiteRule;
   disabled?: boolean;
+  validationError: string | null;
   onChange: (patch: Partial<BrowserSiteRule>) => void;
-  onDone: () => void;
+  onCancel: () => void;
+  onSave: () => void;
   onDelete: () => void;
 }) {
   const { t } = useTranslation();
@@ -233,23 +325,38 @@ function RuleEditForm({
           </SelectContent>
         </Select>
       </Field>
-      <div className="flex justify-between">
+      {validationError ? (
+        <p role="alert" className="text-xs text-status-danger">
+          {t(validationError)}
+        </p>
+      ) : null}
+      <div className="flex justify-between gap-2">
         <button
           type="button"
           onClick={onDelete}
           disabled={disabled}
-          className="rounded px-3 py-1.5 text-xs text-text-danger hover:bg-surface-hover disabled:opacity-50"
+          className="rounded px-3 py-1.5 text-xs text-status-danger hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.deleteRule")}
         </button>
-        <button
-          type="button"
-          onClick={onDone}
-          disabled={disabled}
-          className="rounded-md bg-accent-primary px-3 py-1.5 text-xs text-text-on-accent hover:opacity-90 disabled:opacity-50"
-        >
-          {t("settings.saveRule")}
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={disabled}
+            className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
+          >
+            {t("settings.cancelRule")}
+          </button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={disabled}
+            className="rounded-md bg-accent-primary px-3 py-1.5 text-xs text-text-on-accent hover:opacity-90 disabled:opacity-50"
+          >
+            {t("settings.saveRule")}
+          </button>
+        </div>
       </div>
     </div>
   );

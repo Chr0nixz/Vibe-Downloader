@@ -14,10 +14,18 @@ interface BrowserCaptureControlsProps {
   settings: BrowserCaptureSettings;
   available: boolean;
   disabled?: boolean;
+  /** UX-03: show save progress without locking editable fields. */
+  saving?: boolean;
   onUpdate: (patch: Partial<BrowserCaptureSettings>) => void;
 }
 
-export function BrowserCaptureControls({ settings, available, disabled, onUpdate }: BrowserCaptureControlsProps) {
+export function BrowserCaptureControls({
+  settings,
+  available,
+  disabled,
+  saving,
+  onUpdate,
+}: BrowserCaptureControlsProps) {
   const { t } = useTranslation();
   const experimental = settings.experimentalCaptureEnabled;
 
@@ -37,6 +45,11 @@ export function BrowserCaptureControls({ settings, available, disabled, onUpdate
 
   return (
     <div className="grid border-b border-border-divider">
+      {saving ? (
+        <p role="status" className="border-b border-border-divider px-4 py-2 text-xs text-text-muted">
+          {t("settings.browserCaptureSaving")}
+        </p>
+      ) : null}
       <CaptureToggle
         title={t("settings.browserExperimentalCapture")}
         description={t("settings.browserExperimentalCaptureDescription")}
@@ -53,28 +66,21 @@ export function BrowserCaptureControls({ settings, available, disabled, onUpdate
             disabled={disabled}
             onChange={(autoIntercept) => onUpdate({ autoIntercept })}
           />
-          <CaptureToggle
-            title={t("settings.browserForwardHeaders")}
-            description={t("settings.browserForwardHeadersDescription")}
-            checked={settings.forwardHeadersMode === "enabled"}
-            disabled={disabled}
-            onChange={(forwardHeaders) =>
-              onUpdate({
-                forwardHeadersMode: forwardHeaders ? "enabled" : "disabled",
-              })
-            }
-          />
+          {/* UX-07: single three-state control — do not pair with a binary Switch
+              that collapses ask → disabled and silently drops the ask policy. */}
           <CaptureField
             label={t("settings.browserForwardHeadersMode")}
             description={t("settings.browserForwardHeadersModeDescription")}
           >
             <Select
               value={settings.forwardHeadersMode}
-              onValueChange={(value) =>
+              onValueChange={(value) => {
+                const forwardHeadersMode = value as BrowserForwardHeadersMode;
                 onUpdate({
-                  forwardHeadersMode: value as BrowserForwardHeadersMode,
-                })
-              }
+                  forwardHeadersMode,
+                  forwardHeaders: forwardHeadersMode === "enabled",
+                });
+              }}
               disabled={disabled}
             >
               <SelectTrigger aria-label={t("settings.browserForwardHeadersMode")} className="w-full max-w-xs">
@@ -130,7 +136,7 @@ export function BrowserCaptureControls({ settings, available, disabled, onUpdate
             onChange={(allowIntranetHandoff) => onUpdate({ allowIntranetHandoff })}
           />
           {settings.allowIntranetHandoff ? (
-            <p className="border-t border-border-divider px-4 py-2 text-xs leading-5 text-text-warning">
+            <p role="alert" className="border-t border-border-divider px-4 py-2 text-xs leading-5 text-status-warning">
               {t("settings.browserAllowIntranetWarning")}
             </p>
           ) : null}

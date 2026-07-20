@@ -88,6 +88,8 @@ function RecoveryIcon({ action }: { action: RecoveryAction }) {
       return <Link className="h-4 w-4" aria-hidden />;
     case "configure_ffmpeg":
       return <Wrench className="h-4 w-4" aria-hidden />;
+    case "manage_sftp_host_keys":
+      return <Wrench className="h-4 w-4" aria-hidden />;
     case "retry_later":
       return <Clock className="h-4 w-4" aria-hidden />;
     default:

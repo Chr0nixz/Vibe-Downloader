@@ -511,9 +511,15 @@ pub async fn get_torrent_runtime_snapshot(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<Option<TorrentRuntimeSnapshot>, String> {
-    db::get_torrent_runtime_snapshot(&state.pool, &task_id)
-        .await
-        .map(|snapshot| snapshot.map(TorrentRuntimeSnapshot::from))
+    let mut snapshot = db::get_torrent_runtime_snapshot(&state.pool, &task_id)
+        .await?
+        .map(TorrentRuntimeSnapshot::from);
+    if let Some(snapshot) = snapshot.as_mut() {
+        let (ratio_limit, time_limit) = db::torrent_seeding_policy(&state.pool, &task_id).await?;
+        snapshot.seed_ratio_limit = ratio_limit;
+        snapshot.seed_time_limit_seconds = time_limit.map(|seconds| seconds.to_string());
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]

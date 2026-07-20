@@ -1,11 +1,24 @@
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { type AppToast, TOAST_TIMEOUT_MS, useToastStore } from "@/stores/toast-store";
+
+const COLLAPSED_VISIBLE = 4;
+
+function orderToasts(toasts: AppToast[]): AppToast[] {
+  // UX-09: Undo toasts stay reachable — pin them above ordinary messages.
+  const undo: AppToast[] = [];
+  const rest: AppToast[] = [];
+  for (const toast of toasts) {
+    if (toast.onAutoCommit) undo.push(toast);
+    else rest.push(toast);
+  }
+  return [...undo, ...rest];
+}
 
 export function ToastViewport() {
   const { t } = useTranslation();
@@ -13,9 +26,18 @@ export function ToastViewport() {
   const dismissToast = useToastStore((s) => s.dismissToast);
   const clearToasts = useToastStore((s) => s.clearToasts);
   const reduceMotion = useReducedMotion();
+  const [expanded, setExpanded] = useState(false);
 
-  const visible = toasts.slice(0, 4);
-  const hiddenCount = toasts.length - visible.length;
+  const ordered = useMemo(() => orderToasts(toasts), [toasts]);
+  const undoCount = ordered.filter((toast) => toast.onAutoCommit).length;
+  // Always keep every Undo toast visible even when collapsed.
+  const collapsedLimit = Math.max(COLLAPSED_VISIBLE, undoCount);
+  const visible = expanded ? ordered : ordered.slice(0, collapsedLimit);
+  const hiddenCount = ordered.length - visible.length;
+
+  useEffect(() => {
+    if (hiddenCount === 0 && expanded) setExpanded(false);
+  }, [expanded, hiddenCount]);
 
   return (
     <div
@@ -34,14 +56,27 @@ export function ToastViewport() {
           />
         ))}
       </AnimatePresence>
-      {hiddenCount > 0 ? (
-        <button
-          type="button"
-          onClick={() => clearToasts()}
-          className="pointer-events-auto self-center rounded-full border border-border-subtle bg-surface-overlay px-3 py-1 text-xs text-text-secondary shadow-md transition-colors hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
-        >
-          {t("toast.moreCount", { count: hiddenCount })}
-        </button>
+      {hiddenCount > 0 || expanded || ordered.length > 1 ? (
+        <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2">
+          {hiddenCount > 0 || expanded ? (
+            <button
+              type="button"
+              onClick={() => setExpanded((value) => !value)}
+              className="rounded-full border border-border-subtle bg-surface-overlay px-3 py-1 text-xs text-text-secondary shadow-md transition-colors hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+            >
+              {expanded ? t("toast.showLess") : t("toast.showMore", { count: hiddenCount })}
+            </button>
+          ) : null}
+          {ordered.length > 1 ? (
+            <button
+              type="button"
+              onClick={() => clearToasts()}
+              className="rounded-full border border-border-subtle bg-surface-overlay px-3 py-1 text-xs text-text-secondary shadow-md transition-colors hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+            >
+              {t("toast.clearAll")}
+            </button>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );

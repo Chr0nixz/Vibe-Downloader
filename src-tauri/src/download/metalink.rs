@@ -5,7 +5,10 @@ use std::{
 };
 
 use quick_xml::{events::Event, Reader};
-use reqwest::{header::RANGE, Client, StatusCode};
+use reqwest::{
+    header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE},
+    Client, StatusCode,
+};
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 use tokio::{
@@ -15,9 +18,10 @@ use tokio::{
 };
 
 use super::{
-    engine::EngineFuture, file_ops::finalize_download_file, http::HttpEngine,
-    url_classify::is_metalink_url, DownloadContext, DownloadEngine, DownloadError, ProbeOutput,
-    ProbeRequest,
+    engine::EngineFuture, file_ops::finalize_download_file, http::HttpEngine, read_body_limited,
+    read_local_file_limited, url_classify::is_metalink_url, DownloadContext, DownloadEngine,
+    DownloadError, LimitedBodyError, ProbeOutput, ProbeRequest, CONTROL_PLANE_MAX_BYTES,
+    READ_IDLE_TIMEOUT,
 };
 use crate::{
     db,
@@ -29,7 +33,7 @@ use crate::{
     models::{
         AppErrorPayload, ChecksumAlgorithm, EngineCapabilities, HashVerificationStatus,
         MetalinkChecksum, MetalinkFile, MetalinkProbeData, MetalinkResource, ProbedFile,
-        TaskFileRecord, TaskKind, TaskProgressPayload, TaskRecord, TaskStatus,
+        TaskChecksumRecord, TaskFileRecord, TaskKind, TaskProgressPayload, TaskRecord, TaskStatus,
     },
 };
 
@@ -826,6 +830,8 @@ impl MetalinkRangeWorker {
                 cooldown_until: None,
                 avg_speed_bps: 0,
                 supports_range: false,
+                etag: None,
+                last_modified: None,
             }
         });
         loop {
@@ -922,8 +928,8 @@ pub async fn download_metalink_range_from_mirror(
     let expected = (range_end - range_start + 1) as i64;
 
     // F-2: Resume — stat the existing part file to get `already_downloaded`.
-    let already_downloaded: u64 = fs::metadata(part_path).await.map(|m| m.len()).unwrap_or(0);
-    let already_downloaded_i64 = i64::try_from(already_downloaded).unwrap_or(i64::MAX);
+    let mut already_downloaded: u64 = fs::metadata(part_path).await.map(|m| m.len()).unwrap_or(0);
+    let mut already_downloaded_i64 = i64::try_from(already_downloaded).unwrap_or(i64::MAX);
     if already_downloaded_i64 >= expected {
         // Range already complete — skip download. Report final byte count
         // so the coordinator's `worker_bytes` is accurate.
@@ -934,13 +940,30 @@ pub async fn download_metalink_range_from_mirror(
         return Ok(already_downloaded_i64);
     }
 
-    let effective_start = range_start + already_downloaded;
+    let mut effective_start = range_start + already_downloaded;
+    // FUN-09: part resume without this mirror's validators is cross-mirror
+    // failover. Require a primary checksum or wipe the part and restart.
+    let same_mirror_validators = metalink_if_range_value(mirror);
+    if already_downloaded > 0 && same_mirror_validators.is_none() {
+        if !file_has_trusted_primary_checksum(pool, &mirror.file_id).await? {
+            let _ = fs::remove_file(part_path).await;
+            already_downloaded = 0;
+            already_downloaded_i64 = 0;
+            effective_start = range_start;
+        }
+    }
+
     let started = Instant::now();
     let mut request = client.get(&mirror.url);
     for (name, value) in request_headers {
         request = request.header(name, value);
     }
     request = request.header(RANGE, format!("bytes={effective_start}-{range_end}"));
+    if already_downloaded > 0 {
+        if let Some(if_range) = same_mirror_validators.as_deref() {
+            request = request.header(IF_RANGE, if_range);
+        }
+    }
     let mut response = request
         .send()
         .await
@@ -976,6 +999,34 @@ pub async fn download_metalink_range_from_mirror(
             false,
         ));
     }
+    if already_downloaded > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
+        let _ = fs::remove_file(part_path).await;
+        already_downloaded = 0;
+        already_downloaded_i64 = 0;
+        effective_start = range_start;
+        let mut retry = client.get(&mirror.url);
+        for (name, value) in request_headers {
+            retry = retry.header(name, value);
+        }
+        retry = retry.header(RANGE, format!("bytes={effective_start}-{range_end}"));
+        response = retry
+            .send()
+            .await
+            .map_err(|e| format!("Metalink mirror restart failed: {e}"))?;
+        if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            db::mark_mirror_unsupported_range(pool, &mirror.id)
+                .await
+                .ok();
+            return Err(engine_error(
+                "metalink_mirror_unsupported_range",
+                format!(
+                    "Mirror {} returned 416 Range Not Satisfiable for bytes={effective_start}-{range_end}.",
+                    sanitize_url(&mirror.url)
+                ),
+                false,
+            ));
+        }
+    }
     if !response.status().is_success() {
         return Err(format!(
             "Metalink mirror {} returned {} for range {}-{}",
@@ -985,6 +1036,11 @@ pub async fn download_metalink_range_from_mirror(
             range_end
         ));
     }
+
+    if already_downloaded > 0 {
+        validate_metalink_content_range(&response, i64::try_from(effective_start).unwrap_or(0))?;
+    }
+    persist_metalink_resource_validators(pool, mirror, &response).await?;
 
     if let Some(parent) = part_path.parent() {
         fs::create_dir_all(parent).await.map_err(|e| {
@@ -1179,6 +1235,18 @@ async fn download_from_resource(
         .await
         .map(|metadata| i64::try_from(metadata.len()).unwrap_or(i64::MAX))
         .unwrap_or(0);
+
+    // FUN-09: local bytes without this mirror's validators means cross-mirror
+    // (or pre-validator crash). Only continue when a primary checksum can
+    // detect corruption; otherwise truncate and restart.
+    let same_mirror_validators = metalink_if_range_value(resource);
+    if resume_from > 0 && same_mirror_validators.is_none() {
+        if !file_has_trusted_primary_checksum(pool, &file.id).await? {
+            fs::remove_file(temp_path).await.ok();
+            resume_from = 0;
+        }
+    }
+
     let started = Instant::now();
     let mut request = client.get(&resource.url);
     for (name, value) in request_headers {
@@ -1186,6 +1254,9 @@ async fn download_from_resource(
     }
     if resume_from > 0 {
         request = request.header(RANGE, format!("bytes={resume_from}-"));
+        if let Some(if_range) = same_mirror_validators.as_deref() {
+            request = request.header(IF_RANGE, if_range);
+        }
     }
     let response = request
         .send()
@@ -1208,6 +1279,8 @@ async fn download_from_resource(
     .await;
 
     let mut response = if resume_from > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
+        // If-Range miss or non-range server: never append a full body onto
+        // existing temp bytes.
         fs::remove_file(temp_path).await.ok();
         resume_from = 0;
         let mut retry = client.get(&resource.url);
@@ -1224,6 +1297,11 @@ async fn download_from_resource(
     if !response.status().is_success() {
         return Err(format!("Metalink mirror returned {}", response.status()));
     }
+
+    if resume_from > 0 {
+        validate_metalink_content_range(&response, resume_from)?;
+    }
+    persist_metalink_resource_validators(pool, resource, &response).await?;
 
     let out = if resume_from > 0 {
         fs::OpenOptions::new()
@@ -1336,24 +1414,8 @@ async fn verify_metalink_file(
     if checksums.is_empty() {
         return Ok(());
     }
-    let checksum = checksums
-        .iter()
-        .find(|checksum| checksum.algorithm == ChecksumAlgorithm::Sha256)
-        .or_else(|| {
-            checksums
-                .iter()
-                .find(|checksum| checksum.algorithm == ChecksumAlgorithm::Sha512)
-        })
-        .or_else(|| {
-            checksums
-                .iter()
-                .find(|checksum| checksum.algorithm == ChecksumAlgorithm::Sha1)
-        })
-        .or_else(|| {
-            checksums
-                .iter()
-                .find(|checksum| checksum.algorithm == ChecksumAlgorithm::Md5)
-        })
+    // FUN-08: verify only the primary (strongest) checksum for this file.
+    let checksum = select_primary_metalink_checksum(&checksums)
         .ok_or_else(|| "No supported Metalink checksum is available.".to_string())?;
     let actual = hash_file(path, checksum.algorithm).await?;
     let status = if actual.eq_ignore_ascii_case(&checksum.expected_hash) {
@@ -1465,22 +1527,8 @@ async fn complete_metalink_task(
     downloaded: i64,
 ) -> Result<(), String> {
     let checksums = db::list_task_checksum_records(pool, &task.id).await?;
-    let hash_status = if checksums.is_empty() {
-        HashVerificationStatus::NotRequested
-    } else if checksums
-        .iter()
-        .any(|checksum| checksum.status == HashVerificationStatus::Failed)
-    {
-        HashVerificationStatus::Failed
-    } else if checksums
-        .iter()
-        .filter(|checksum| checksum.file_id.is_some())
-        .all(|checksum| checksum.status == HashVerificationStatus::Verified)
-    {
-        HashVerificationStatus::Verified
-    } else {
-        HashVerificationStatus::Pending
-    };
+    // FUN-08: task hash status depends only on per-file primary checksums.
+    let hash_status = summarize_metalink_hash_status(&checksums);
     db::update_hash_verification(pool, &task.id, None, hash_status, None).await?;
     db::update_task_runtime_progress(
         pool,
@@ -1509,9 +1557,9 @@ async fn fetch_manifest_bytes(
         let path = parsed
             .to_file_path()
             .map_err(|_| "Metalink file path is invalid.".to_string())?;
-        return fs::read(&path)
+        return read_local_file_limited(&path, CONTROL_PLANE_MAX_BYTES)
             .await
-            .map_err(|e| format!("Could not read Metalink file {}: {e}", path.display()));
+            .map_err(map_metalink_limited_body_error);
     }
     let mut request = client.get(url);
     for (name, value) in request_headers {
@@ -1524,11 +1572,28 @@ async fn fetch_manifest_bytes(
     if !response.status().is_success() {
         return Err(format!("Metalink manifest returned {}", response.status()));
     }
-    response
-        .bytes()
+    read_body_limited(response, CONTROL_PLANE_MAX_BYTES, None, READ_IDLE_TIMEOUT)
         .await
-        .map(|bytes| bytes.to_vec())
-        .map_err(|e| format!("Could not read Metalink manifest: {e}"))
+        .map_err(map_metalink_limited_body_error)
+}
+
+fn map_metalink_limited_body_error(error: LimitedBodyError) -> String {
+    match error {
+        LimitedBodyError::TooLarge => engine_error(
+            "metalink_manifest_too_large",
+            format!("Metalink manifest exceeds the {CONTROL_PLANE_MAX_BYTES} byte safety limit."),
+            false,
+        ),
+        LimitedBodyError::Canceled => "Download canceled.".to_string(),
+        LimitedBodyError::IdleTimeout => engine_error(
+            "network_error",
+            "Metalink manifest stalled while reading.",
+            true,
+        ),
+        LimitedBodyError::Read(message) => {
+            format!("Could not read Metalink manifest: {message}")
+        }
+    }
 }
 
 fn parse_metalink_manifest(manifest_url: &str, text: &str) -> Result<MetalinkProbeData, String> {
@@ -1751,6 +1816,160 @@ fn valid_checksum(value: &str, algorithm: ChecksumAlgorithm) -> bool {
     value.len() == len && value.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+fn metalink_if_range_value(resource: &db::MetalinkResourceRecord) -> Option<String> {
+    resource
+        .etag
+        .as_deref()
+        .map(str::trim)
+        .filter(|etag| !etag.is_empty())
+        .filter(|etag| {
+            let trimmed = etag.trim_start();
+            !(trimmed.starts_with("W/") || trimmed.starts_with("w/"))
+        })
+        .map(str::to_string)
+        .or_else(|| {
+            resource
+                .last_modified
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn parse_metalink_content_range(value: &str) -> Option<(i64, i64, i64)> {
+    let value = value.trim();
+    let (unit, value) = value.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (range, total) = value.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    Some((
+        start.trim().parse::<i64>().ok()?,
+        end.trim().parse::<i64>().ok()?,
+        total.trim().parse::<i64>().ok()?,
+    ))
+}
+
+fn validate_metalink_content_range(
+    response: &reqwest::Response,
+    expected_start: i64,
+) -> Result<(), String> {
+    let header = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            "Resume unavailable. Metalink mirror omitted Content-Range on a partial response."
+                .to_string()
+        })?;
+    let (start, _end, _total) = parse_metalink_content_range(header).ok_or_else(|| {
+        format!("Resume unavailable. Metalink mirror returned invalid Content-Range: {header}")
+    })?;
+    if start != expected_start {
+        return Err(format!(
+            "Resume unavailable. Metalink Content-Range start {start} does not match local offset {expected_start}."
+        ));
+    }
+    Ok(())
+}
+
+async fn persist_metalink_resource_validators(
+    pool: &SqlitePool,
+    resource: &db::MetalinkResourceRecord,
+    response: &reqwest::Response,
+) -> Result<(), String> {
+    let etag = response
+        .headers()
+        .get(ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let last_modified = response
+        .headers()
+        .get(LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if etag.is_none() && last_modified.is_none() {
+        return Ok(());
+    }
+    db::update_metalink_resource_validators(pool, &resource.id, etag, last_modified).await
+}
+
+async fn file_has_trusted_primary_checksum(
+    pool: &SqlitePool,
+    file_id: &str,
+) -> Result<bool, String> {
+    let checksums = db::list_task_checksum_records_for_file(pool, file_id).await?;
+    Ok(select_primary_metalink_checksum(&checksums).is_some())
+}
+
+/// FUN-08: Prefer `is_primary`, otherwise the strongest algorithm for the file.
+fn select_primary_metalink_checksum(
+    checksums: &[TaskChecksumRecord],
+) -> Option<&TaskChecksumRecord> {
+    checksums
+        .iter()
+        .find(|checksum| checksum.is_primary)
+        .or_else(|| {
+            checksums
+                .iter()
+                .min_by_key(|checksum| checksum.algorithm.metalink_strength_rank())
+        })
+}
+
+/// FUN-08: One primary checksum per file_id (explicit primary, else strongest).
+fn primary_metalink_checksums_by_file(
+    checksums: &[TaskChecksumRecord],
+) -> Vec<&TaskChecksumRecord> {
+    use std::collections::HashMap;
+    let mut by_file: HashMap<&str, Vec<&TaskChecksumRecord>> = HashMap::new();
+    for checksum in checksums
+        .iter()
+        .filter(|checksum| checksum.file_id.is_some())
+    {
+        let file_id = checksum.file_id.as_deref().expect("filtered");
+        by_file.entry(file_id).or_default().push(checksum);
+    }
+    by_file
+        .into_values()
+        .filter_map(|group| {
+            group
+                .iter()
+                .copied()
+                .find(|checksum| checksum.is_primary)
+                .or_else(|| {
+                    group
+                        .into_iter()
+                        .min_by_key(|checksum| checksum.algorithm.metalink_strength_rank())
+                })
+        })
+        .collect()
+}
+
+/// FUN-08: Task-level hash status from per-file primary checksums only.
+fn summarize_metalink_hash_status(checksums: &[TaskChecksumRecord]) -> HashVerificationStatus {
+    let primaries = primary_metalink_checksums_by_file(checksums);
+    if primaries.is_empty() {
+        return HashVerificationStatus::NotRequested;
+    }
+    if primaries
+        .iter()
+        .any(|checksum| checksum.status == HashVerificationStatus::Failed)
+    {
+        return HashVerificationStatus::Failed;
+    }
+    if primaries
+        .iter()
+        .all(|checksum| checksum.status == HashVerificationStatus::Verified)
+    {
+        return HashVerificationStatus::Verified;
+    }
+    HashVerificationStatus::Pending
+}
+
 impl ChecksumAlgorithm {
     fn from_metalink_type(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().replace('-', "").as_str() {
@@ -1867,6 +2086,186 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(md5, "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    fn checksum_record(
+        id: &str,
+        file_id: &str,
+        algorithm: ChecksumAlgorithm,
+        is_primary: bool,
+        status: HashVerificationStatus,
+    ) -> TaskChecksumRecord {
+        TaskChecksumRecord {
+            id: id.to_string(),
+            task_id: "task".to_string(),
+            file_id: Some(file_id.to_string()),
+            algorithm,
+            expected_hash: "ab".repeat(match algorithm {
+                ChecksumAlgorithm::Md5 => 16,
+                ChecksumAlgorithm::Sha1 => 20,
+                ChecksumAlgorithm::Sha256 => 32,
+                ChecksumAlgorithm::Sha512 => 64,
+            }),
+            actual_hash: None,
+            status,
+            source_kind: "metalink".to_string(),
+            source_url: None,
+            source_label: None,
+            is_primary,
+            weak: algorithm.is_weak(),
+            error_message: None,
+            discovered_at: None,
+            verified_at: None,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
+    }
+
+    #[test]
+    fn fun08_strongest_prefers_sha512_over_sha256() {
+        let checksums = vec![
+            checksum_record(
+                "c1",
+                "f1",
+                ChecksumAlgorithm::Sha256,
+                false,
+                HashVerificationStatus::Pending,
+            ),
+            checksum_record(
+                "c2",
+                "f1",
+                ChecksumAlgorithm::Sha512,
+                true,
+                HashVerificationStatus::Pending,
+            ),
+            checksum_record(
+                "c3",
+                "f1",
+                ChecksumAlgorithm::Md5,
+                false,
+                HashVerificationStatus::Pending,
+            ),
+        ];
+        let selected = select_primary_metalink_checksum(&checksums).expect("primary");
+        assert_eq!(selected.id, "c2");
+        assert_eq!(selected.algorithm, ChecksumAlgorithm::Sha512);
+    }
+
+    #[test]
+    fn fun08_fallback_to_weak_when_no_stronger() {
+        let checksums = vec![checksum_record(
+            "c1",
+            "f1",
+            ChecksumAlgorithm::Md5,
+            true,
+            HashVerificationStatus::Pending,
+        )];
+        let selected = select_primary_metalink_checksum(&checksums).expect("primary");
+        assert_eq!(selected.algorithm, ChecksumAlgorithm::Md5);
+    }
+
+    #[test]
+    fn fun08_complete_uses_primary_only_ignores_pending_secondary() {
+        let checksums = vec![
+            checksum_record(
+                "c1",
+                "f1",
+                ChecksumAlgorithm::Sha512,
+                true,
+                HashVerificationStatus::Verified,
+            ),
+            checksum_record(
+                "c2",
+                "f1",
+                ChecksumAlgorithm::Sha256,
+                false,
+                HashVerificationStatus::Pending,
+            ),
+        ];
+        assert_eq!(
+            summarize_metalink_hash_status(&checksums),
+            HashVerificationStatus::Verified
+        );
+    }
+
+    #[test]
+    fn fun08_complete_fails_when_primary_mismatches() {
+        let checksums = vec![
+            checksum_record(
+                "c1",
+                "f1",
+                ChecksumAlgorithm::Sha512,
+                true,
+                HashVerificationStatus::Failed,
+            ),
+            checksum_record(
+                "c2",
+                "f1",
+                ChecksumAlgorithm::Sha256,
+                false,
+                HashVerificationStatus::Verified,
+            ),
+        ];
+        assert_eq!(
+            summarize_metalink_hash_status(&checksums),
+            HashVerificationStatus::Failed
+        );
+    }
+
+    #[test]
+    fn fun08_strength_rank_order() {
+        assert!(
+            ChecksumAlgorithm::Sha512.metalink_strength_rank()
+                < ChecksumAlgorithm::Sha256.metalink_strength_rank()
+        );
+        assert!(
+            ChecksumAlgorithm::Sha256.metalink_strength_rank()
+                < ChecksumAlgorithm::Sha1.metalink_strength_rank()
+        );
+        assert!(
+            ChecksumAlgorithm::Sha1.metalink_strength_rank()
+                < ChecksumAlgorithm::Md5.metalink_strength_rank()
+        );
+    }
+
+    #[test]
+    fn fun09_parse_content_range_and_if_range_prefers_strong_etag() {
+        assert_eq!(
+            parse_metalink_content_range("bytes 5-9/10"),
+            Some((5, 9, 10))
+        );
+        assert!(parse_metalink_content_range("bytes 5-9/*").is_none());
+
+        let with_etag = db::MetalinkResourceRecord {
+            id: "r".into(),
+            task_id: "t".into(),
+            file_id: "f".into(),
+            url: "http://example/x".into(),
+            priority: 1,
+            location: None,
+            status: "pending".into(),
+            failure_count: 0,
+            last_error: None,
+            last_attempt_at: None,
+            cooldown_until: None,
+            avg_speed_bps: 0,
+            supports_range: true,
+            etag: Some("\"abc\"".into()),
+            last_modified: Some("Wed, 01 Jan 2020 00:00:00 GMT".into()),
+        };
+        assert_eq!(
+            metalink_if_range_value(&with_etag).as_deref(),
+            Some("\"abc\"")
+        );
+
+        let weak_etag = db::MetalinkResourceRecord {
+            etag: Some("W/\"abc\"".into()),
+            ..with_etag.clone()
+        };
+        assert_eq!(
+            metalink_if_range_value(&weak_etag).as_deref(),
+            Some("Wed, 01 Jan 2020 00:00:00 GMT")
+        );
     }
 }
 

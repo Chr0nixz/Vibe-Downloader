@@ -13,6 +13,7 @@ import type {
   CompletionActionRequestedPayload,
   CreateTaskInput,
   CursorPageInput,
+  DirectoryProbeInput,
   DiskSpaceInfo,
   FtpDirectoryProbe,
   HashVerificationState,
@@ -31,6 +32,7 @@ import type {
   SchedulerSnapshot,
   SegmentSummary,
   SftpDirectoryProbe,
+  SftpKnownHost,
   StartupStatus,
   SystemFileIcon,
   TaskEvent,
@@ -339,6 +341,22 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
   return runCommand("updateSettings", () => commands.updateSettings(input));
 }
 
+export async function listSftpKnownHosts(): Promise<SftpKnownHost[]> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listSftpKnownHosts();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("listSftpKnownHosts", () => commands.listSftpKnownHosts());
+}
+
+export async function forgetSftpKnownHost(host: string, port: number): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).forgetSftpKnownHost(host, port);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("forgetSftpKnownHost", () => commands.forgetSftpKnownHost(host, port));
+}
+
 export async function probeFfmpegVersion(path?: string | null): Promise<string> {
   if (!isTauriRuntime()) {
     // Browser preview: report missing so the Settings UI shows the "not detected" badge.
@@ -348,28 +366,28 @@ export async function probeFfmpegVersion(path?: string | null): Promise<string> 
   return runCommand("probeFfmpegVersion", () => commands.probeFfmpegVersion(path ?? null));
 }
 
-export async function probeFtpDirectory(url: string): Promise<FtpDirectoryProbe> {
+export async function probeFtpDirectory(input: DirectoryProbeInput): Promise<FtpDirectoryProbe> {
   if (!isTauriRuntime()) {
-    return (await loadBrowserAdapter()).probeFtpDirectory(url);
+    return (await loadBrowserAdapter()).probeFtpDirectory(input);
   }
   const commands = await loadNativeCommands();
-  return runCommand("probeFtpDirectory", () => commands.probeFtpDirectory(url));
+  return runCommand("probeFtpDirectory", () => commands.probeFtpDirectory(input));
 }
 
-export async function probeSftpDirectory(url: string): Promise<SftpDirectoryProbe> {
+export async function probeSftpDirectory(input: DirectoryProbeInput): Promise<SftpDirectoryProbe> {
   if (!isTauriRuntime()) {
-    return (await loadBrowserAdapter()).probeSftpDirectory(url);
+    return (await loadBrowserAdapter()).probeSftpDirectory(input);
   }
   const commands = await loadNativeCommands();
-  return runCommand("probeSftpDirectory", () => commands.probeSftpDirectory(url));
+  return runCommand("probeSftpDirectory", () => commands.probeSftpDirectory(input));
 }
 
-export async function probeWebdavDirectory(url: string): Promise<WebDavDirectoryProbe> {
+export async function probeWebdavDirectory(input: DirectoryProbeInput): Promise<WebDavDirectoryProbe> {
   if (!isTauriRuntime()) {
-    return (await loadBrowserAdapter()).probeWebdavDirectory(url);
+    return (await loadBrowserAdapter()).probeWebdavDirectory(input);
   }
   const commands = await loadNativeCommands();
-  return runCommand("probeWebdavDirectory", () => commands.probeWebdavDirectory(url));
+  return runCommand("probeWebdavDirectory", () => commands.probeWebdavDirectory(input));
 }
 
 export async function openDirectoryPicker(): Promise<string | null> {
@@ -767,6 +785,34 @@ export async function bulkTaskAction(ids: string[], action: "pause" | "resume" |
   }
   const commands = await loadNativeCommands();
   return runCommand("bulkTaskAction", () => commands.bulkTaskAction(ids, action));
+}
+
+export async function bulkTaskActionGlobal(
+  action: "pause" | "resume",
+): Promise<{ succeeded: number; skipped: number; failed: number }> {
+  if (!isTauriRuntime()) {
+    const adapter = await loadBrowserAdapter();
+    const tasks = await adapter.listTasks();
+    const statuses =
+      action === "pause"
+        ? new Set(["downloading", "retrying", "queued"])
+        : new Set(["paused", "failed", "waiting_network"]);
+    const ids = tasks.filter((task) => statuses.has(task.status)).map((task) => task.id);
+    let succeeded = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        if (action === "pause") await adapter.pauseTask(id);
+        else await adapter.resumeTask(id);
+        succeeded += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return { succeeded, skipped: 0, failed };
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("bulkTaskActionGlobal", () => commands.bulkTaskActionGlobal(action));
 }
 
 export async function openTaskFile(id: string): Promise<void> {

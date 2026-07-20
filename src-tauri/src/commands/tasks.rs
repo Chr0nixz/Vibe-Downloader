@@ -48,6 +48,14 @@ pub struct UpdateTorrentSeedingInput {
     pub enabled: bool,
     pub ratio_limit: Option<f64>,
     pub time_limit_seconds: Option<String>,
+    /// FUN-11: when false, only `enabled` is written; ratio/time stay unchanged.
+    /// Toggle UI must pass false so opening/closing seeding cannot wipe policy.
+    #[serde(default = "default_update_torrent_limits")]
+    pub update_limits: bool,
+}
+
+fn default_update_torrent_limits() -> bool {
+    true
 }
 
 mod create;
@@ -144,6 +152,7 @@ pub async fn update_torrent_seeding(
         input.enabled,
         input.ratio_limit.filter(|value| *value > 0.0),
         time_limit_seconds,
+        input.update_limits,
     )
     .await?;
     db::insert_task_event(
@@ -210,30 +219,96 @@ pub async fn update_task_proxy_settings(
 #[specta::specta]
 pub async fn probe_ftp_directory(
     state: tauri::State<'_, AppState>,
-    url: String,
+    input: DirectoryProbeInput,
 ) -> Result<FtpDirectoryProbe, String> {
-    let proxy_config = state.engine_registry.proxy_config().await;
-    crate::download::ftp::probe_ftp_directory_url(&url, proxy_config).await
+    let url = input.url.trim();
+    if url.is_empty() {
+        return Err("Enter a directory URL.".to_string());
+    }
+    let global_proxy = state.engine_registry.proxy_config().await;
+    let proxy_config = db::resolve_probe_proxy_config(
+        &global_proxy,
+        "ftp",
+        input.proxy_mode,
+        input.proxy_url.as_deref(),
+        input.proxy_username.as_deref(),
+        input.proxy_password.as_deref(),
+        input.proxy_no_proxy.as_deref(),
+    )?;
+    let credentials = directory_probe_credentials(&input);
+    crate::download::ftp::probe_ftp_directory_url(url, proxy_config, credentials.as_ref()).await
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn probe_sftp_directory(
     state: tauri::State<'_, AppState>,
-    url: String,
+    input: DirectoryProbeInput,
 ) -> Result<SftpDirectoryProbe, String> {
-    let proxy_config = state.engine_registry.proxy_config().await;
-    crate::download::sftp::probe_sftp_directory_url(&state.pool, &url, proxy_config).await
+    let url = input.url.trim();
+    if url.is_empty() {
+        return Err("Enter a directory URL.".to_string());
+    }
+    let global_proxy = state.engine_registry.proxy_config().await;
+    let proxy_config = db::resolve_probe_proxy_config(
+        &global_proxy,
+        "sftp",
+        input.proxy_mode,
+        input.proxy_url.as_deref(),
+        input.proxy_username.as_deref(),
+        input.proxy_password.as_deref(),
+        input.proxy_no_proxy.as_deref(),
+    )?;
+    let credentials = directory_probe_credentials(&input);
+    crate::download::sftp::probe_sftp_directory_url(
+        &state.pool,
+        url,
+        proxy_config,
+        credentials.as_ref(),
+    )
+    .await
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn probe_webdav_directory(
     state: tauri::State<'_, AppState>,
-    url: String,
+    input: DirectoryProbeInput,
 ) -> Result<WebDavDirectoryProbe, String> {
-    let proxy_config = state.engine_registry.proxy_config().await;
-    crate::download::webdav::probe_webdav_directory_url(&url, proxy_config).await
+    let url = input.url.trim();
+    if url.is_empty() {
+        return Err("Enter a directory URL.".to_string());
+    }
+    let global_proxy = state.engine_registry.proxy_config().await;
+    let proxy_config = db::resolve_probe_proxy_config(
+        &global_proxy,
+        "webdav",
+        input.proxy_mode,
+        input.proxy_url.as_deref(),
+        input.proxy_username.as_deref(),
+        input.proxy_password.as_deref(),
+        input.proxy_no_proxy.as_deref(),
+    )?;
+    let credentials = directory_probe_credentials(&input);
+    crate::download::webdav::probe_webdav_directory_url(url, proxy_config, credentials.as_ref())
+        .await
+}
+
+fn directory_probe_credentials(input: &DirectoryProbeInput) -> Option<db::TaskCredentials> {
+    if input.username.is_some()
+        || input.password.is_some()
+        || input.private_key_data.is_some()
+        || input.private_key_passphrase.is_some()
+    {
+        Some(db::TaskCredentials {
+            username: input.username.clone().unwrap_or_default(),
+            password: input.password.clone().unwrap_or_default(),
+            private_key_data: input.private_key_data.clone(),
+            private_key_passphrase: input.private_key_passphrase.clone(),
+        })
+    } else {
+        None
+    }
 }
 
 // --- migrated scheduler functions removed (see crate::scheduler) ---
@@ -466,7 +541,7 @@ pub(crate) async fn resolve_task_request_headers(
     Ok(persisted)
 }
 
-async fn queue_task_for_retry_with_event(
+pub(crate) async fn queue_task_for_retry_with_event(
     app: &AppHandle,
     state: &AppState,
     id: &str,
@@ -870,7 +945,7 @@ async fn tasks_from_records_with_files(
         .collect())
 }
 
-async fn task_from_record_with_files(
+pub(crate) async fn task_from_record_with_files(
     pool: &sqlx::SqlitePool,
     record: TaskRecord,
 ) -> Result<Task, String> {

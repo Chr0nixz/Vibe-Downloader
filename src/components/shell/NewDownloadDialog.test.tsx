@@ -151,7 +151,7 @@ describe("NewDownloadDialog probe flow", () => {
 
     await startAutomaticProbe("https://slow.example.com/archive.zip");
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Probe timed out");
+    expect(screen.getByRole("alert")).toHaveTextContent("errors.timeout");
     expect(screen.getByRole("alert")).toHaveTextContent("newDownload.probeErrorTimeout");
     expect(screen.getByLabelText("newDownload.url")).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByLabelText("newDownload.url")).not.toBeDisabled();
@@ -202,5 +202,60 @@ describe("NewDownloadDialog probe flow", () => {
     view.unmount();
 
     expect(mocks.unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("enters batch mode after importing a text URL list", async () => {
+    const { readFileAsText } = await import("@/lib/local-file");
+    vi.mocked(readFileAsText).mockResolvedValue("https://example.com/a.zip\nhttps://example.com/b.zip\n");
+    mocks.openFilePicker.mockResolvedValue({ path: "C:/urls.txt", name: "urls.txt" });
+    mocks.importUrls.mockResolvedValue({
+      items: [
+        {
+          inputUrl: "https://example.com/a.zip",
+          normalizedUrl: "https://example.com/a.zip",
+          duplicate: false,
+          valid: true,
+          fileName: "a.zip",
+          totalSize: "1",
+          contentType: null,
+          supportsResume: true,
+          errorMessage: null,
+          task: null,
+        },
+        {
+          inputUrl: "https://example.com/b.zip",
+          normalizedUrl: "https://example.com/b.zip",
+          duplicate: false,
+          valid: true,
+          fileName: "b.zip",
+          totalSize: "1",
+          contentType: null,
+          supportsResume: true,
+          errorMessage: null,
+          task: null,
+        },
+      ],
+      createdCount: 0,
+      failedCount: 0,
+      duplicateCount: 0,
+    });
+
+    renderDialog();
+    await act(async () => {});
+
+    fireEvent.click(screen.getByTitle("newDownload.chooseFile"));
+
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(mocks.importUrls).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.stringContaining("https://example.com/a.zip"),
+        probe: true,
+        create: false,
+      }),
+    );
+    expect(screen.getByDisplayValue(/https:\/\/example\.com\/a\.zip/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "newDownload.createBatch" })).toBeInTheDocument();
   });
 });

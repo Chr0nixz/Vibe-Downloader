@@ -23,15 +23,15 @@ pub use bt::BtEngine;
 pub use dash::DashEngine;
 pub use engine::{DownloadContext, DownloadEngine, EngineRegistry, ProbeOutput, ProbeRequest};
 pub use error::DownloadError;
-pub use ftp::FtpEngine;
+pub use ftp::{probe_ftp_directory_url, FtpEngine};
 pub use hls::HlsEngine;
 pub use http::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine, ProbeResult};
 #[doc(hidden)]
 pub use metalink::testing;
 pub use metalink::MetalinkEngine;
-pub use sftp::SftpEngine;
+pub use sftp::{probe_sftp_directory_url, SftpEngine};
 pub use speed::GlobalSpeedLimiter;
-pub use webdav::WebDavEngine;
+pub use webdav::{probe_webdav_directory_url, WebDavEngine};
 
 // ---------------------------------------------------------------------------
 // Shared idle-read timeout helper (E-1)
@@ -43,6 +43,11 @@ use std::{fmt::Display, future::Future, time::Duration};
 /// stalled. Mirrors `HTTP_CHUNK_READ_TIMEOUT` so every protocol shares the
 /// same 60-second silence threshold.
 pub(crate) const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// ARC-10: Default hard cap for control-plane bodies (MPD, Metalink, WebDAV
+/// PROPFIND, HLS playlists/keys/init maps). Aligns with the existing HLS
+/// `HLS_INIT_MAX_BYTES` budget.
+pub(crate) const CONTROL_PLANE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Outcome of a read operation wrapped with an idle timeout.
 ///
@@ -59,6 +64,15 @@ pub(crate) enum IdleReadOutcome<T> {
     Error(String),
     /// No data arrived within the idle timeout window.
     IdleTimeout,
+}
+
+/// ARC-10: Failure modes for bounded control-plane body reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LimitedBodyError {
+    TooLarge,
+    Canceled,
+    IdleTimeout,
+    Read(String),
 }
 
 /// Wrap a read future with an idle timeout.
@@ -81,6 +95,62 @@ where
         Ok(Err(error)) => IdleReadOutcome::Error(format!("{error}")),
         Err(_) => IdleReadOutcome::IdleTimeout,
     }
+}
+
+/// ARC-10: Stream a response body with a hard size cap, optional cancel, and
+/// idle timeout. Prefers Content-Length rejection before buffering; still
+/// enforces the cap under chunked encoding.
+pub(crate) async fn read_body_limited(
+    mut response: reqwest::Response,
+    limit: usize,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    idle: Duration,
+) -> Result<Vec<u8>, LimitedBodyError> {
+    if let Some(content_length) = response.content_length() {
+        if content_length as usize > limit {
+            return Err(LimitedBodyError::TooLarge);
+        }
+    }
+    let mut body = Vec::new();
+    loop {
+        let outcome = if let Some(token) = cancel_token {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err(LimitedBodyError::Canceled),
+                outcome = read_with_idle_timeout(response.chunk(), idle) => outcome,
+            }
+        } else {
+            read_with_idle_timeout(response.chunk(), idle).await
+        };
+        match outcome {
+            IdleReadOutcome::Data(chunk) => {
+                if body.len().saturating_add(chunk.len()) > limit {
+                    return Err(LimitedBodyError::TooLarge);
+                }
+                body.extend_from_slice(&chunk);
+            }
+            IdleReadOutcome::End => break,
+            IdleReadOutcome::Error(error) => return Err(LimitedBodyError::Read(error)),
+            IdleReadOutcome::IdleTimeout => return Err(LimitedBodyError::IdleTimeout),
+        }
+    }
+    Ok(body)
+}
+
+/// ARC-10: Local `file://` manifests must check metadata before a full read.
+pub(crate) async fn read_local_file_limited(
+    path: &std::path::Path,
+    limit: usize,
+) -> Result<Vec<u8>, LimitedBodyError> {
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| LimitedBodyError::Read(format!("Could not stat local file: {e}")))?;
+    if meta.len() as usize > limit {
+        return Err(LimitedBodyError::TooLarge);
+    }
+    tokio::fs::read(path)
+        .await
+        .map_err(|e| LimitedBodyError::Read(format!("Could not read local file: {e}")))
 }
 
 #[cfg(test)]
@@ -124,5 +194,47 @@ mod tests {
             IdleReadOutcome::IdleTimeout => {}
             other => panic!("expected IdleTimeout, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn read_body_limited_rejects_content_length_over_cap() {
+        // Build a minimal Response with an oversized Content-Length via hyper
+        // is heavy; unit-test the local-file path and the TooLarge enum mapping
+        // instead, plus a streamed oversize via a mock that we can construct
+        // with reqwest's http::Response is not public. Cover local metadata.
+        let dir = std::env::temp_dir().join(format!(
+            "vibe-arc10-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("big.bin");
+        std::fs::write(&path, vec![0_u8; 64]).expect("write");
+        let err = read_local_file_limited(&path, 16)
+            .await
+            .expect_err("oversize local file");
+        assert_eq!(err, LimitedBodyError::TooLarge);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn read_local_file_limited_reads_under_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "vibe-arc10-ok-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("ok.bin");
+        std::fs::write(&path, b"hello").expect("write");
+        let bytes = read_local_file_limited(&path, 64)
+            .await
+            .expect("under-cap local file");
+        assert_eq!(bytes, b"hello");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

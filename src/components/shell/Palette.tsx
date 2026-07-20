@@ -113,6 +113,8 @@ export function Palette({
   onBulkRetry,
   onBulkDelete,
   onBulkOpenFolder,
+  onPauseAll,
+  onResumeAll,
   onSetNav,
 }: {
   open: boolean;
@@ -131,6 +133,8 @@ export function Palette({
   onBulkRetry: (tasks: Task[]) => void;
   onBulkDelete: (tasks: Task[]) => void;
   onBulkOpenFolder: (tasks: Task[]) => void;
+  onPauseAll: () => void;
+  onResumeAll: () => void;
   onSetNav: (nav: NavFilter) => void;
 }) {
   const { t } = useTranslation();
@@ -145,6 +149,8 @@ export function Palette({
   // current page view, so off-view matches remain discoverable.
   const taskById = useTaskDataStore((s) => s.taskById);
   const entities = useMemo(() => Object.values(taskById), [taskById]);
+  // UX-05: pause/resume-all eligibility uses global stats, not the loaded page.
+  const globalStats = useTaskDataStore((s) => s.globalTaskStats ?? s.taskStats);
   // Derive selectedTask from the store so AppShell doesn't need to subscribe
   // to the task object (which changes every progress tick). Palette already
   // re-renders on progress ticks via the `tasks` subscription above, so this
@@ -200,8 +206,8 @@ export function Palette({
         selectedTask,
         selectedTasks,
         selectedCount: selectedIds.length,
-        allTasks: tasks,
         visibleTasks,
+        globalStats,
         nav,
         sortKey,
         sortDirection,
@@ -222,6 +228,8 @@ export function Palette({
         onBulkRetry,
         onBulkDelete,
         onBulkOpenFolder,
+        onPauseAll,
+        onResumeAll,
         onSetNav,
         setSelectedIds,
         clearSelectedIds,
@@ -238,6 +246,7 @@ export function Palette({
       detailOpen,
       failureOptions,
       filters,
+      globalStats,
       nav,
       onBulkDelete,
       onBulkOpenFolder,
@@ -249,6 +258,8 @@ export function Palette({
       onOpenFile,
       onOpenFolder,
       onPause,
+      onPauseAll,
+      onResumeAll,
       onRetry,
       onSetNav,
       onStart,
@@ -526,8 +537,8 @@ function buildCommands({
   selectedTask,
   selectedTasks,
   selectedCount,
-  allTasks,
   visibleTasks,
+  globalStats,
   nav,
   sortKey,
   sortDirection,
@@ -548,6 +559,8 @@ function buildCommands({
   onBulkRetry,
   onBulkDelete,
   onBulkOpenFolder,
+  onPauseAll,
+  onResumeAll,
   onSetNav,
   setSelectedIds,
   clearSelectedIds,
@@ -564,8 +577,8 @@ function buildCommands({
   selectedTask: Task | null;
   selectedTasks: Task[];
   selectedCount: number;
-  allTasks: Task[];
   visibleTasks: Task[];
+  globalStats: { active: number; queued: number; paused: number; failed: number };
   nav: NavFilter;
   sortKey: TaskSortKey;
   sortDirection: TaskSortDirection;
@@ -586,6 +599,8 @@ function buildCommands({
   onBulkRetry: (tasks: Task[]) => void;
   onBulkDelete: (tasks: Task[]) => void;
   onBulkOpenFolder: (tasks: Task[]) => void;
+  onPauseAll: () => void;
+  onResumeAll: () => void;
   onSetNav: (nav: NavFilter) => void;
   setSelectedIds: (ids: string[]) => void;
   clearSelectedIds: () => void;
@@ -621,12 +636,9 @@ function buildCommands({
     (task) => task.status === "paused" || task.status === "failed" || task.status === "waiting_network",
   );
   const canBulkRetry = selectedTasks.some((task) => task.status !== "completed");
-  const canPauseAll = allTasks.some(
-    (task) => task.status === "downloading" || task.status === "retrying" || task.status === "queued",
-  );
-  const canResumeAll = allTasks.some(
-    (task) => task.status === "paused" || task.status === "failed" || task.status === "waiting_network",
-  );
+  // UX-05: gate on DB-wide stats, not the loaded page subset.
+  const canPauseAll = globalStats.active + globalStats.queued > 0;
+  const canResumeAll = globalStats.paused + globalStats.failed > 0;
   const filtersActive =
     filters.fileType !== DEFAULT_FILTERS.fileType ||
     filters.source !== DEFAULT_FILTERS.source ||
@@ -921,7 +933,7 @@ function buildCommands({
     keywords: keyword("pause", "all", "global", "全部", "暂停"),
     enabled: canPauseAll,
     disabledReason: t("palette.disabled.noPauseableTasks"),
-    run: () => onBulkPause(allTasks),
+    run: () => onPauseAll(),
   });
   push({
     id: "bulk.resume-all",
@@ -932,7 +944,7 @@ function buildCommands({
     keywords: keyword("resume", "start", "all", "global", "全部", "继续", "开始"),
     enabled: canResumeAll,
     disabledReason: t("palette.disabled.noResumableTasks"),
-    run: () => onBulkResume(allTasks),
+    run: () => onResumeAll(),
   });
 
   (["all", "downloading", "queue", "attention", "paused", "completed", "failed", "settings"] as const).forEach(

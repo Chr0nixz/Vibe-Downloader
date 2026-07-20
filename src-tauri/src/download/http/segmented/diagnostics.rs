@@ -147,13 +147,13 @@ pub(in crate::download::http::segmented) fn error_diagnostic_record(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::download::http) struct ParsedContentRange {
-    pub(in crate::download::http) start: i64,
-    pub(in crate::download::http) end: i64,
-    pub(in crate::download::http) total: i64,
+pub(crate) struct ParsedContentRange {
+    pub(crate) start: i64,
+    pub(crate) end: i64,
+    pub(crate) total: i64,
 }
 
-pub(in crate::download::http) fn parse_content_range(value: &str) -> Option<ParsedContentRange> {
+pub(crate) fn parse_content_range(value: &str) -> Option<ParsedContentRange> {
     let value = value.trim();
     let (unit, value) = value.split_once(' ')?;
     if !unit.eq_ignore_ascii_case("bytes") {
@@ -174,7 +174,7 @@ pub(in crate::download::http::segmented) fn if_range_header_value(
     if_range_header_from(task.etag.as_deref(), task.last_modified.as_deref())
 }
 
-pub(in crate::download::http) fn if_range_header_from(
+pub(crate) fn if_range_header_from(
     etag: Option<&str>,
     last_modified: Option<&str>,
 ) -> Option<String> {

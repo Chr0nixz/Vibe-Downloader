@@ -13,7 +13,7 @@ import {
   RefreshCcw,
   Server,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 
@@ -101,6 +101,40 @@ export function QueueCenter({
     priority,
     tasks: tasks.filter((task) => task.priority === priority),
   })).filter((group) => group.tasks.length > 0);
+
+  // UX-10: single flat order for roving tabindex across priority sections.
+  const focusTask = (taskId: string) => {
+    selectTask(taskId);
+    requestAnimationFrame(() => {
+      document.getElementById(`queue-task-${taskId}`)?.focus();
+    });
+  };
+
+  const handleQueueListKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (tasks.length === 0) return;
+    const currentIndex = Math.max(
+      0,
+      tasks.findIndex((task) => task.id === selectedTask?.id),
+    );
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      nextIndex = Math.min(tasks.length - 1, currentIndex + 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      nextIndex = Math.max(0, currentIndex - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      event.preventDefault();
+      nextIndex = tasks.length - 1;
+    } else {
+      return;
+    }
+    const next = tasks[nextIndex];
+    if (next) focusTask(next.id);
+  };
 
   const updateOptions = async (task: Task, patch: { priority?: TaskPriority; obeySchedule?: boolean }) => {
     setUpdatingTaskId(task.id);
@@ -196,7 +230,13 @@ export function QueueCenter({
                     </h2>
                     <span className="font-mono text-xs text-text-muted">{group.tasks.length}</span>
                   </div>
-                  <div role="listbox" aria-label={t(`queueCenter.priority.${group.priority}`)}>
+                  {/* biome-ignore lint/a11y/useSemanticElements: Keyboard reorder handlers attach to a focusable grid of task rows; native ul/li would fight the existing layout and key handling. */}
+                  <div
+                    role="list"
+                    aria-label={t(`queueCenter.priority.${group.priority}`)}
+                    aria-controls={selectedTask ? `queue-details-${selectedTask.id}` : undefined}
+                    onKeyDown={handleQueueListKeyDown}
+                  >
                     {group.tasks.map((task) => (
                       <QueueTaskRow
                         key={task.id}
@@ -204,7 +244,7 @@ export function QueueCenter({
                         position={tasks.findIndex((candidate) => candidate.id === task.id) + 1}
                         selected={selectedTask?.id === task.id}
                         decision={decisions.get(task.id) ?? null}
-                        onSelect={() => selectTask(task.id)}
+                        onSelect={() => focusTask(task.id)}
                         onPause={() => onPause(task)}
                         onMoveUp={() => onReorder?.(task, "move_up")}
                         onMoveDown={() => onReorder?.(task, "move_down")}
@@ -326,11 +366,12 @@ function QueueTaskRow({
 }) {
   const { t } = useTranslation();
   return (
+    // biome-ignore lint/a11y/useSemanticElements: Rows are interactive grid cells with nested buttons; listitem role preserves the parent list semantics without invalid li nesting.
     <div
       id={`queue-task-${task.id}`}
-      role="option"
-      aria-selected={selected}
-      tabIndex={0}
+      role="listitem"
+      aria-current={selected ? "true" : undefined}
+      tabIndex={selected ? 0 : -1}
       onClick={onSelect}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -354,14 +395,19 @@ function QueueTaskRow({
         <span className="block font-mono text-xs text-text-muted">{formatBytes(task.totalSize)}</span>
       </span>
       <QueueReason decision={decision} retryAfterAt={task.retryAfterAt} />
-      <span className="flex justify-end gap-0.5">
-        <QueueIconButton label={t("queueCenter.moveUp")} onClick={onMoveUp}>
+      <span className="flex justify-end gap-0.5" aria-controls={`queue-task-${task.id}`}>
+        <QueueIconButton label={t("queueCenter.moveUp")} onClick={onMoveUp} tabIndex={-1}>
           <ArrowUp className="h-3.5 w-3.5" aria-hidden />
         </QueueIconButton>
-        <QueueIconButton label={t("queueCenter.moveDown")} onClick={onMoveDown}>
+        <QueueIconButton label={t("queueCenter.moveDown")} onClick={onMoveDown} tabIndex={-1}>
           <ArrowDown className="h-3.5 w-3.5" aria-hidden />
         </QueueIconButton>
-        <QueueIconButton label={t("queueCenter.pauseTask")} onClick={onPause} className="hidden sm:inline-flex">
+        <QueueIconButton
+          label={t("queueCenter.pauseTask")}
+          onClick={onPause}
+          className="hidden sm:inline-flex"
+          tabIndex={-1}
+        >
           <Pause className="h-3.5 w-3.5" aria-hidden />
         </QueueIconButton>
       </span>
@@ -432,7 +478,11 @@ function SchedulerDetails({
   }
   return (
     <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-1">
-      <section className="min-w-0" aria-labelledby={`${idPrefix}-selected-title`}>
+      <section
+        className="min-w-0"
+        id={selectedTask ? `queue-details-${selectedTask.id}` : undefined}
+        aria-labelledby={`${idPrefix}-selected-title`}
+      >
         <h2 id={`${idPrefix}-selected-title`} className="text-xs font-medium text-text-muted">
           {t("queueCenter.selectedTask")}
         </h2>
@@ -603,11 +653,13 @@ function QueueIconButton({
   onClick,
   children,
   className = "",
+  tabIndex,
 }: {
   label: string;
   onClick: () => void;
   children: React.ReactNode;
   className?: string;
+  tabIndex?: number;
 }) {
   return (
     <Tooltip>
@@ -617,6 +669,7 @@ function QueueIconButton({
           variant="ghost"
           size="icon"
           className={`h-8 w-8 p-0 ${className}`}
+          tabIndex={tabIndex}
           onClick={(event) => {
             event.stopPropagation();
             onClick();

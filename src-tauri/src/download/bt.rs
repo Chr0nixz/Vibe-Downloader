@@ -115,11 +115,12 @@ impl BtEngine {
             return;
         };
 
+        // ARC-12: only forget/delete the torrent here. Session refcount is owned
+        // exclusively by `SessionRefGuard` so cancel/delete + Drop never double-decrement.
         let touched_keys: Vec<String> = {
             let sessions = self.sessions.lock().await;
             sessions.keys().cloned().collect()
         };
-        let mut success_key: Option<String> = None;
         for key in &touched_keys {
             let api = {
                 let sessions = self.sessions.lock().await;
@@ -132,12 +133,8 @@ impl BtEngine {
                 api.api_torrent_action_forget(id).await
             };
             if result.is_ok() {
-                success_key = Some(key.clone());
                 break;
             }
-        }
-        if let Some(key) = success_key {
-            self.release_session_ref(&key).await;
         }
     }
 
@@ -152,35 +149,47 @@ impl BtEngine {
         }
     }
 
-    fn compute_session_key(output_folder: &str, task_proxy_config: &ResolvedProxyConfig) -> String {
+    /// ARC-12: include `task_id` so each task owns its session limits. Sharing
+    /// only by output folder caused the latest task to overwrite peers' rates.
+    fn compute_session_key(
+        output_folder: &str,
+        task_proxy_config: &ResolvedProxyConfig,
+        task_id: &str,
+    ) -> String {
         let proxy_fingerprint = task_proxy_config.fingerprint();
         let key = PathBuf::from(output_folder)
             .canonicalize()
             .unwrap_or_else(|_| PathBuf::from(output_folder))
             .to_string_lossy()
             .to_string();
-        format!("{key}|proxy:{proxy_fingerprint}")
+        format!("{key}|proxy:{proxy_fingerprint}|task:{task_id}")
     }
 
     async fn api_for_output_folder(
         &self,
         output_folder: &str,
+        task_id: &str,
         download_limit_bps: Option<i64>,
         upload_limit_bps: Option<i64>,
         task_proxy_config: &ResolvedProxyConfig,
     ) -> Result<(Arc<Api>, String), String> {
-        let key = Self::compute_session_key(output_folder, task_proxy_config);
+        let key = Self::compute_session_key(output_folder, task_proxy_config, task_id);
 
-        let mut sessions = self.sessions.lock().await;
-        if let Some(entry) = sessions.get_mut(&key) {
-            entry.active_task_count += 1;
-            sync_session_download_limit(&entry.api, download_limit_bps);
-            // F-7: Re-apply the global upload limit on session reuse so settings
-            // changes take effect for the next task without a restart.
-            sync_session_upload_limit(&entry.api, upload_limit_bps);
-            return Ok((entry.api.clone(), key));
+        // Fast path: reuse under a short lock (no await while held).
+        {
+            let mut sessions = self.sessions.lock().await;
+            if let Some(entry) = sessions.get_mut(&key) {
+                entry.active_task_count += 1;
+                sync_session_download_limit(&entry.api, download_limit_bps);
+                // F-7: Re-apply the global upload limit on session reuse so settings
+                // changes take effect for the next acquire without a restart.
+                sync_session_upload_limit(&entry.api, upload_limit_bps);
+                return Ok((entry.api.clone(), key));
+            }
         }
 
+        // ARC-12: create the librqbit session outside the registry mutex so
+        // other BT registry operations are not blocked on DHT/bind work.
         std::fs::create_dir_all(output_folder)
             .map_err(|e| format!("Could not create the torrent download directory: {e}"))?;
         let output_path = output_folder.to_string();
@@ -200,6 +209,15 @@ impl BtEngine {
             .await
             .map_err(|e| format!("Could not start BitTorrent session: {e:#}"))?;
         let api = Arc::new(Api::new(session, None));
+
+        let mut sessions = self.sessions.lock().await;
+        // Another worker may have inserted the same key while we awaited.
+        if let Some(entry) = sessions.get_mut(&key) {
+            entry.active_task_count += 1;
+            sync_session_download_limit(&entry.api, download_limit_bps);
+            sync_session_upload_limit(&entry.api, upload_limit_bps);
+            return Ok((entry.api.clone(), key));
+        }
         sessions.insert(
             key.clone(),
             BtSessionEntry {
@@ -264,7 +282,7 @@ async fn probe_torrent(
     }
 
     crate::download::engine::emit_probe_phase(app, request_id, "fetching_torrent", Some("bt"));
-    let (add, _) = add_torrent_source(uri, &ResolvedProxyConfig::default()).await?;
+    let (add, _, _) = add_torrent_source(uri, &ResolvedProxyConfig::default()).await?;
     crate::download::engine::emit_probe_phase(app, request_id, "inspecting_metadata", Some("bt"));
     let probe_dir = std::env::temp_dir().join("vibe-downloader-bt-probe");
     std::fs::create_dir_all(&probe_dir)
@@ -385,6 +403,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     let (api, session_key) = engine
         .api_for_output_folder(
             &task.save_dir,
+            &task.id,
             speed_limiter.current_limit_bps(),
             bt_upload_limit_bps,
             &proxy_config,
@@ -416,7 +435,9 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         },
     )
     .await;
-    let (add, private_flag) = source_result?;
+    let (add, private_flag, configured_trackers) = source_result?;
+    let configured_trackers_json = tracker_status_json_from_statuses(&configured_trackers)
+        .or_else(|| torrent_tracker_status_json(&task.url));
     let had_file_selection = !db::list_task_file_records(&pool, &task.id)
         .await?
         .is_empty();
@@ -488,6 +509,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         &response,
         selected_paths.as_ref(),
         private_flag,
+        &configured_trackers,
     )
     .await?;
 
@@ -555,6 +577,9 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     let mut last_progress = 0_i64;
     let mut last_health_summary = Some("Fetching torrent metadata".to_string());
     let mut last_tick = Instant::now();
+    let mut last_file_progress_emit = Instant::now()
+        .checked_sub(Duration::from_secs(10))
+        .unwrap_or_else(Instant::now);
 
     loop {
         if cancel_token.is_cancelled() {
@@ -641,7 +666,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             .unwrap_or(0);
         let (piece_bitfield_base64, piece_count) = torrent_piece_bitfield(&api, torrent_id);
         let dht_status = torrent_dht_status(&api);
-        let trackers_json = torrent_tracker_status_json(&task.url);
+        let trackers_json = configured_trackers_json.clone();
         let seeding_enabled = db::torrent_seeding_enabled(&pool, &task.id)
             .await
             .unwrap_or(false);
@@ -673,6 +698,16 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             TaskStatus::Downloading,
         )
         .await?;
+        // ARC-13: persist real per-file have-bytes from librqbit.
+        let file_progress_changed =
+            sync_bt_task_file_progress(&pool, &task.id, &stats.file_progress).await?;
+        if file_progress_changed && last_file_progress_emit.elapsed() >= Duration::from_secs(2) {
+            crate::events::evict_task_files_version(&task.id);
+            if let Some(current) = db::get_task_record(&pool, &task.id).await? {
+                emit_task_updated_record(&app, &pool, &current).await;
+            }
+            last_file_progress_emit = Instant::now();
+        }
         if last_health_summary.as_deref() != Some(health_summary.as_str()) {
             db::update_task_health_summary(&pool, &task.id, Some(health_summary.as_str())).await?;
             if let Some(current) = db::get_task_record(&pool, &task.id).await? {
@@ -764,10 +799,9 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 }
                 progress_gate.flush(&app);
 
-                // F-1: Seeding monitoring loop — re-check seed ratio limit
-                // periodically. When the limit is reached, forget the torrent
-                // and mark seeding as completed. If no limit is set, seed
-                // indefinitely until cancelled.
+                // F-1 / FUN-11: Seeding monitoring — ratio OR time limit stops
+                // seeding. When neither is set, seed until cancelled.
+                let seeding_started = Instant::now();
                 loop {
                     tokio::time::sleep(BT_SEEDING_TICK_INTERVAL).await;
                     if cancel_token.is_cancelled() {
@@ -792,9 +826,16 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                     let seed_ratio_limit = db::torrent_seed_ratio_limit(&pool, &task.id)
                         .await
                         .unwrap_or(None);
-                    let limit_reached = seed_ratio_limit
-                        .map(|limit| seed_ratio >= limit)
-                        .unwrap_or(false);
+                    let seed_time_limit = db::torrent_seed_time_limit_seconds(&pool, &task.id)
+                        .await
+                        .unwrap_or(None)
+                        .map(|seconds| Duration::from_secs(u64::try_from(seconds).unwrap_or(0)));
+                    let limit_reached = seeding_limit_reached(
+                        seed_ratio,
+                        seed_ratio_limit,
+                        seeding_started.elapsed(),
+                        seed_time_limit,
+                    );
 
                     if limit_reached {
                         let _ = api.api_torrent_action_forget(torrent_id).await;
@@ -887,6 +928,82 @@ fn non_zero_u32(limit_bps: Option<i64>) -> Option<NonZeroU32> {
     }
     let value = u32::try_from(value).unwrap_or(u32::MAX);
     NonZeroU32::new(value)
+}
+
+/// FUN-11: pure seeding-stop predicate for ratio and/or time limits.
+fn seeding_limit_reached(
+    ratio: f64,
+    ratio_limit: Option<f64>,
+    seeded_for: Duration,
+    time_limit: Option<Duration>,
+) -> bool {
+    let ratio_hit = ratio_limit.is_some_and(|limit| ratio >= limit);
+    let time_hit = time_limit.is_some_and(|limit| seeded_for >= limit);
+    ratio_hit || time_hit
+}
+
+#[cfg(test)]
+mod seeding_limit_tests {
+    use super::seeding_limit_reached;
+    use std::time::Duration;
+
+    #[test]
+    fn ratio_alone_stops_seeding() {
+        assert!(seeding_limit_reached(
+            1.0,
+            Some(1.0),
+            Duration::from_secs(0),
+            None
+        ));
+        assert!(!seeding_limit_reached(
+            0.9,
+            Some(1.0),
+            Duration::from_secs(0),
+            None
+        ));
+    }
+
+    #[test]
+    fn time_alone_stops_seeding() {
+        assert!(seeding_limit_reached(
+            0.0,
+            None,
+            Duration::from_secs(3600),
+            Some(Duration::from_secs(3600))
+        ));
+        assert!(!seeding_limit_reached(
+            0.0,
+            None,
+            Duration::from_secs(3599),
+            Some(Duration::from_secs(3600))
+        ));
+    }
+
+    #[test]
+    fn either_limit_stops_seeding() {
+        assert!(seeding_limit_reached(
+            2.0,
+            Some(1.5),
+            Duration::from_secs(1),
+            Some(Duration::from_secs(3600))
+        ));
+        assert!(seeding_limit_reached(
+            0.1,
+            Some(1.5),
+            Duration::from_secs(3600),
+            Some(Duration::from_secs(3600))
+        ));
+    }
+
+    #[test]
+    fn neither_limit_means_unlimited() {
+        assert!(!seeding_limit_reached(
+            100.0,
+            None,
+            Duration::from_secs(86_400),
+            None
+        ));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1169,19 +1286,106 @@ fn torrent_tracker_status_json(uri: &str) -> Option<String> {
 }
 
 fn tracker_statuses_from_uri(uri: &str) -> Vec<TorrentTrackerStatus> {
+    if uri.trim().starts_with("magnet:") {
+        return tracker_statuses_from_magnet(uri);
+    }
+    Vec::new()
+}
+
+fn tracker_statuses_from_magnet(uri: &str) -> Vec<TorrentTrackerStatus> {
     let Ok(magnet) = Magnet::parse(uri) else {
         return Vec::new();
     };
+    let updated_at = crate::models::task::now_iso();
     // librqbit's `trackers` field is already percent-decoded via `url::Url::query_pairs()`.
     magnet
         .trackers
         .iter()
-        .map(|url| TorrentTrackerStatus {
-            url: url.clone(),
-            status: "configured".to_string(),
-            last_error: None,
-        })
+        .map(|url| configured_tracker_status(url.clone(), &updated_at))
         .collect()
+}
+
+/// FUN-15: announce list from a .torrent metainfo (announce + announce-list).
+fn tracker_statuses_from_torrent_bytes(bytes: &[u8]) -> Vec<TorrentTrackerStatus> {
+    let Ok(meta) = librqbit::torrent_from_bytes(bytes) else {
+        return Vec::new();
+    };
+    let updated_at = crate::models::task::now_iso();
+    let mut seen = HashSet::new();
+    let mut trackers = Vec::new();
+    for announce in meta.iter_announce() {
+        let url = String::from_utf8_lossy(announce.as_ref()).to_string();
+        if url.is_empty() || !seen.insert(url.clone()) {
+            continue;
+        }
+        trackers.push(configured_tracker_status(url, &updated_at));
+    }
+    trackers
+}
+
+fn configured_tracker_status(url: String, updated_at: &str) -> TorrentTrackerStatus {
+    TorrentTrackerStatus {
+        url,
+        status: "configured".to_string(),
+        source: "configured".to_string(),
+        updated_at: Some(updated_at.to_string()),
+        last_error: None,
+    }
+}
+
+fn tracker_status_json_from_statuses(trackers: &[TorrentTrackerStatus]) -> Option<String> {
+    if trackers.is_empty() {
+        None
+    } else {
+        serde_json::to_string(trackers).ok()
+    }
+}
+
+/// ARC-13: map librqbit file_progress indices onto persisted task_files rows
+/// (same order as `torrent_files_from_details` / insert). Returns whether any
+/// selected file byte count changed.
+async fn sync_bt_task_file_progress(
+    pool: &sqlx::SqlitePool,
+    task_id: &str,
+    file_progress: &[u64],
+) -> Result<bool, String> {
+    if file_progress.is_empty() {
+        return Ok(false);
+    }
+    let files = db::list_task_file_records(pool, task_id).await?;
+    if files.is_empty() {
+        return Ok(false);
+    }
+    let updates = bt_file_progress_updates(&files, file_progress, TaskStatus::Downloading);
+    if updates.is_empty() {
+        return Ok(false);
+    }
+    db::update_task_files_progress_batch(pool, &updates).await?;
+    Ok(true)
+}
+
+fn bt_file_progress_updates(
+    files: &[TaskFileRecord],
+    file_progress: &[u64],
+    status: TaskStatus,
+) -> Vec<(String, i64, TaskStatus)> {
+    let mut updates = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        let Some(&have_bytes) = file_progress.get(index) else {
+            break;
+        };
+        let downloaded = i64::try_from(have_bytes).unwrap_or(i64::MAX);
+        if downloaded == file.downloaded_bytes {
+            continue;
+        }
+        let file_status = if file.total_size > 0 && downloaded >= file.total_size {
+            TaskStatus::Completed
+        } else {
+            status
+        };
+        updates.push((file.id.clone(), downloaded, file_status));
+    }
+    updates
 }
 
 async fn persist_torrent_details(
@@ -1190,6 +1394,7 @@ async fn persist_torrent_details(
     response: &ApiAddTorrentResponse,
     selected_paths: Option<&HashSet<String>>,
     private_flag: Option<bool>,
+    configured_trackers: &[TorrentTrackerStatus],
 ) -> Result<(), String> {
     let details = &response.details;
     let files = torrent_files_from_details(details);
@@ -1213,7 +1418,9 @@ async fn persist_torrent_details(
         },
     )
     .await?;
-    let trackers_json = torrent_tracker_status_json(&task.url);
+    // FUN-15: prefer metainfo/magnet-configured trackers; fall back to URI parse.
+    let trackers_json = tracker_status_json_from_statuses(configured_trackers)
+        .or_else(|| torrent_tracker_status_json(&task.url));
     db::upsert_torrent_task(
         pool,
         &task.id,
@@ -1345,10 +1552,14 @@ fn selected_torrent_total_size(
 async fn add_torrent_source(
     uri: &str,
     proxy_config: &ResolvedProxyConfig,
-) -> Result<(AddTorrent<'static>, Option<bool>), String> {
+) -> Result<(AddTorrent<'static>, Option<bool>, Vec<TorrentTrackerStatus>), String> {
     let trimmed = uri.trim();
     if trimmed.starts_with("magnet:") {
-        return Ok((AddTorrent::from_url(trimmed.to_string()), None));
+        return Ok((
+            AddTorrent::from_url(trimmed.to_string()),
+            None,
+            tracker_statuses_from_magnet(trimmed),
+        ));
     }
 
     let parsed = Url::parse(trimmed).map_err(|_| "Torrent URL is invalid.".to_string())?;
@@ -1362,9 +1573,10 @@ async fn add_torrent_source(
             match download_torrent_bytes(trimmed, proxy_config).await {
                 Ok(bytes) => {
                     let private = parse_torrent_private_flag(&bytes);
-                    Ok((AddTorrent::from_bytes(bytes), private))
+                    let trackers = tracker_statuses_from_torrent_bytes(&bytes);
+                    Ok((AddTorrent::from_bytes(bytes), private, trackers))
                 }
-                Err(_) => Ok((AddTorrent::from_url(trimmed.to_string()), None)),
+                Err(_) => Ok((AddTorrent::from_url(trimmed.to_string()), None, Vec::new())),
             }
         }
         "file" => {
@@ -1378,7 +1590,8 @@ async fn add_torrent_source(
             // persisted accurately. librqbit handles DHT/PEX disabling internally
             // based on this flag, but TorrentDetailsResponse does not expose it.
             let private = parse_torrent_private_flag(&bytes);
-            Ok((AddTorrent::from_bytes(bytes), private))
+            let trackers = tracker_statuses_from_torrent_bytes(&bytes);
+            Ok((AddTorrent::from_bytes(bytes), private, trackers))
         }
         scheme => Err(format!(
             "The {scheme} protocol is not supported for torrent tasks."
@@ -1539,10 +1752,12 @@ mod tests {
         // and the second call looks up with the canonical path — a cache miss
         // that triggers a duplicate Session::new_with_opts DHT bind failure.
         std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let task_id = "task-arc12-shared";
 
         let (_api1, key1) = engine
             .api_for_output_folder(
                 temp_dir.to_str().unwrap(),
+                task_id,
                 None,
                 None,
                 &crate::proxy::ResolvedProxyConfig::default(),
@@ -1551,15 +1766,20 @@ mod tests {
             .expect("session 1");
         assert_eq!(engine.sessions.lock().await.len(), 1);
 
-        let (_api2, _key2) = engine
+        // Same task_id reuses the session (refcount 2). Different task_ids would
+        // create separate sessions — skipped here because librqbit DHT binds a
+        // fixed UDP port and two sessions conflict in-process.
+        let (_api2, key2) = engine
             .api_for_output_folder(
                 temp_dir.to_str().unwrap(),
+                task_id,
                 None,
                 None,
                 &crate::proxy::ResolvedProxyConfig::default(),
             )
             .await
             .expect("session 2");
+        assert_eq!(key1, key2);
         assert_eq!(engine.sessions.lock().await.len(), 1);
         assert_eq!(
             engine
@@ -1578,6 +1798,69 @@ mod tests {
         engine.release_session_ref(&key1).await;
         assert_eq!(engine.sessions.lock().await.len(), 0);
 
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn session_key_includes_task_id_for_limit_isolation() {
+        // ARC-12: same folder+proxy, different tasks → different keys.
+        let proxy = crate::proxy::ResolvedProxyConfig::default();
+        let a = BtEngine::compute_session_key("/tmp/bt-out", &proxy, "task-a");
+        let b = BtEngine::compute_session_key("/tmp/bt-out", &proxy, "task-b");
+        assert_ne!(a, b);
+        assert!(a.contains("task:task-a"));
+        assert!(b.contains("task:task-b"));
+    }
+
+    #[tokio::test]
+    async fn delete_runtime_task_does_not_decrement_session_refcount() {
+        // ARC-12: forget/delete must not race SessionRefGuard on refcount.
+        let _guard = BT_TEST_LOCK.lock().await;
+        let engine = BtEngine::new(crate::proxy::ResolvedProxyConfig::shared_default());
+        let temp_dir =
+            std::env::temp_dir().join(format!("vibe-bt-delete-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let task_id = "task-arc12-delete";
+
+        let (_api, key) = engine
+            .api_for_output_folder(
+                temp_dir.to_str().unwrap(),
+                task_id,
+                None,
+                None,
+                &crate::proxy::ResolvedProxyConfig::default(),
+            )
+            .await
+            .expect("session");
+        assert_eq!(
+            engine
+                .sessions
+                .lock()
+                .await
+                .get(&key)
+                .unwrap()
+                .active_task_count,
+            1
+        );
+
+        // No matching torrent — delete is a no-op for the API, and must not
+        // release the session ref that the Guard still owns.
+        engine
+            .delete_runtime_task("bt:0000000000000000000000000000000000000000", false)
+            .await;
+        assert_eq!(
+            engine
+                .sessions
+                .lock()
+                .await
+                .get(&key)
+                .map(|e| e.active_task_count),
+            Some(1),
+            "delete_runtime_task must not decrement session refcount"
+        );
+
+        engine.release_session_ref(&key).await;
+        assert_eq!(engine.sessions.lock().await.len(), 0);
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
@@ -1606,7 +1889,7 @@ mod tests {
         let url = Url::from_file_path(&path).expect("file url").to_string();
 
         let proxy_config = crate::proxy::ResolvedProxyConfig::default();
-        let (add, private_flag) = add_torrent_source(&url, &proxy_config)
+        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config)
             .await
             .expect("local torrent source");
 
@@ -1617,6 +1900,7 @@ mod tests {
         // The test bytes (b"d4:infode") are a truncated torrent without a private
         // field, so parsing returns None.
         assert_eq!(private_flag, None);
+        assert!(trackers.is_empty());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1703,7 +1987,7 @@ mod tests {
         });
 
         let proxy_config = crate::proxy::ResolvedProxyConfig::default();
-        let (add, private_flag) = add_torrent_source(&url, &proxy_config)
+        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config)
             .await
             .expect("http torrent source");
 
@@ -1712,6 +1996,7 @@ mod tests {
             AddTorrent::Url(value) => panic!("expected torrent bytes, got URL {value}"),
         }
         assert_eq!(private_flag, Some(true));
+        assert!(trackers.is_empty());
 
         server.await.unwrap();
     }
@@ -1733,7 +2018,7 @@ mod tests {
         });
 
         let proxy_config = crate::proxy::ResolvedProxyConfig::default();
-        let (add, private_flag) = add_torrent_source(&url, &proxy_config)
+        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config)
             .await
             .expect("http torrent source with fallback");
 
@@ -1743,7 +2028,76 @@ mod tests {
             AddTorrent::TorrentFileBytes(_) => panic!("expected URL fallback, got bytes"),
         }
         assert_eq!(private_flag, None);
+        assert!(trackers.is_empty());
 
         server.await.unwrap();
+    }
+
+    #[test]
+    fn magnet_trackers_are_configured_only() {
+        let magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=udp%3A%2F%2Ftracker.example%3A6969%2Fannounce&tr=http%3A%2F%2Fbackup.example%2Fannounce";
+        let trackers = tracker_statuses_from_magnet(magnet);
+        assert_eq!(trackers.len(), 2);
+        assert!(trackers
+            .iter()
+            .all(|t| t.status == "configured" && t.source == "configured"));
+        assert!(trackers.iter().all(|t| t.updated_at.is_some()));
+        assert!(trackers.iter().any(|t| t.url.contains("tracker.example")));
+    }
+
+    #[test]
+    fn torrent_bytes_announce_list_produces_configured_trackers() {
+        // announce only (no announce-list) — length prefix must match URL bytes.
+        let bytes = b"d8:announce31:http://tracker.example/announce4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1eee";
+        let trackers = tracker_statuses_from_torrent_bytes(bytes);
+        assert_eq!(trackers.len(), 1);
+        assert!(trackers[0].url.contains("tracker.example"));
+        assert_eq!(trackers[0].source, "configured");
+    }
+
+    #[test]
+    fn http_torrent_url_without_bytes_yields_empty_configured_trackers() {
+        assert!(tracker_statuses_from_uri("http://example.com/a.torrent").is_empty());
+        assert!(tracker_statuses_from_uri("file:///tmp/a.torrent").is_empty());
+    }
+
+    #[test]
+    fn bt_file_progress_updates_are_independent_per_file() {
+        let files = vec![
+            TaskFileRecord {
+                id: "f1".into(),
+                task_id: "t1".into(),
+                relative_path: "a.bin".into(),
+                file_name: "a.bin".into(),
+                save_dir: "/tmp".into(),
+                temp_path: None,
+                final_path: None,
+                total_size: 100,
+                downloaded_bytes: 0,
+                selected: true,
+                status: TaskStatus::Downloading,
+                content_type: None,
+            },
+            TaskFileRecord {
+                id: "f2".into(),
+                task_id: "t1".into(),
+                relative_path: "b.bin".into(),
+                file_name: "b.bin".into(),
+                save_dir: "/tmp".into(),
+                temp_path: None,
+                final_path: None,
+                total_size: 200,
+                downloaded_bytes: 0,
+                selected: true,
+                status: TaskStatus::Downloading,
+                content_type: None,
+            },
+        ];
+        let updates = bt_file_progress_updates(&files, &[40, 200], TaskStatus::Downloading);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0], ("f1".into(), 40, TaskStatus::Downloading));
+        assert_eq!(updates[1], ("f2".into(), 200, TaskStatus::Completed));
+        let sum: i64 = updates.iter().map(|(_, bytes, _)| *bytes).sum();
+        assert_eq!(sum, 240);
     }
 }

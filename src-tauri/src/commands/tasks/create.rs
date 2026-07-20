@@ -95,6 +95,39 @@ pub struct ImportUrlsInput {
     pub save_dir: Option<String>,
     pub probe: Option<bool>,
     pub create: Option<bool>,
+    /// FUN-17: shared create-draft overrides applied to every created URL.
+    pub expected_hash_sha256: Option<String>,
+    pub expected_hash: Option<String>,
+    pub expected_hash_algorithm: Option<ChecksumAlgorithm>,
+    pub task_speed_limit_bps: Option<String>,
+    pub priority: Option<TaskPriority>,
+    pub category_key: Option<String>,
+    pub allow_duplicate: Option<bool>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub private_key_data: Option<String>,
+    pub private_key_passphrase: Option<String>,
+    pub proxy_mode: Option<TaskProxyMode>,
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+    pub proxy_no_proxy: Option<String>,
+}
+
+/// FUN-04: Directory probe input aligned with probe/create credential and proxy fields.
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryProbeInput {
+    pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub private_key_data: Option<String>,
+    pub private_key_passphrase: Option<String>,
+    pub proxy_mode: Option<TaskProxyMode>,
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+    pub proxy_no_proxy: Option<String>,
 }
 
 #[tauri::command]
@@ -392,6 +425,22 @@ pub async fn import_urls(
     let mut duplicate_count = 0_i32;
     let should_probe = input.probe.unwrap_or(true);
     let should_create = input.create.unwrap_or(false);
+    let batch_request_headers =
+        basic_auth_headers(input.username.as_deref(), input.password.as_deref());
+    let batch_credentials = if input.username.is_some()
+        || input.password.is_some()
+        || input.private_key_data.is_some()
+        || input.private_key_passphrase.is_some()
+    {
+        Some(db::TaskCredentials {
+            username: input.username.clone().unwrap_or_default(),
+            password: input.password.clone().unwrap_or_default(),
+            private_key_data: input.private_key_data.clone(),
+            private_key_passphrase: input.private_key_passphrase.clone(),
+        })
+    } else {
+        None
+    };
 
     for raw_url in input
         .input
@@ -480,20 +529,35 @@ pub async fn import_urls(
 
         if should_probe {
             let probe_result = match state.engine_registry.engine_for_uri(&normalized_url) {
-                Ok(engine) => engine
-                    .probe(ProbeRequest {
-                        uri: normalized_url.clone(),
-                        source: None,
-                        request_headers: Vec::new(),
-                        pool: Some(state.pool.clone()),
-                        task_id: None,
-                        credentials: None,
-                        proxy_config: None,
-                        app: None,
-                        request_id: None,
-                    })
-                    .await
-                    .map_err(|e| ensure_structured_error(e.to_string())),
+                Ok(engine) => {
+                    let global_proxy = state.engine_registry.proxy_config().await;
+                    let proxy_config = db::resolve_probe_proxy_config(
+                        &global_proxy,
+                        engine.id(),
+                        input.proxy_mode,
+                        input.proxy_url.as_deref(),
+                        input.proxy_username.as_deref(),
+                        input.proxy_password.as_deref(),
+                        input.proxy_no_proxy.as_deref(),
+                    );
+                    match proxy_config {
+                        Ok(proxy_config) => engine
+                            .probe(ProbeRequest {
+                                uri: normalized_url.clone(),
+                                source: None,
+                                request_headers: batch_request_headers.clone(),
+                                pool: Some(state.pool.clone()),
+                                task_id: None,
+                                credentials: batch_credentials.clone(),
+                                proxy_config: Some(proxy_config),
+                                app: None,
+                                request_id: None,
+                            })
+                            .await
+                            .map_err(|e| ensure_structured_error(e.to_string())),
+                        Err(error) => Err(ensure_structured_error(error)),
+                    }
+                }
                 Err(error) => Err(ensure_structured_error(error)),
             };
             match probe_result {
@@ -540,27 +604,27 @@ pub async fn import_urls(
                     url: normalized_url,
                     save_dir: input.save_dir.clone(),
                     file_name: item.file_name.clone(),
-                    expected_hash_sha256: None,
-                    expected_hash: None,
-                    expected_hash_algorithm: None,
-                    task_speed_limit_bps: None,
-                    priority: None,
-                    category_key: None,
+                    expected_hash_sha256: input.expected_hash_sha256.clone(),
+                    expected_hash: input.expected_hash.clone(),
+                    expected_hash_algorithm: input.expected_hash_algorithm,
+                    task_speed_limit_bps: input.task_speed_limit_bps.clone(),
+                    priority: input.priority,
+                    category_key: input.category_key.clone(),
                     probe_snapshot: None,
                     selected_file_paths: None,
-                    allow_duplicate: Some(false),
-                    username: None,
-                    password: None,
-                    private_key_data: None,
-                    private_key_passphrase: None,
+                    allow_duplicate: input.allow_duplicate.or(Some(false)),
+                    username: input.username.clone(),
+                    password: input.password.clone(),
+                    private_key_data: input.private_key_data.clone(),
+                    private_key_passphrase: input.private_key_passphrase.clone(),
                     selected_hls_variant_uri: None,
                     selected_hls_audio_track_uris: None,
                     selected_hls_subtitle_track_uris: None,
-                    proxy_mode: None,
-                    proxy_url: None,
-                    proxy_username: None,
-                    proxy_password: None,
-                    proxy_no_proxy: None,
+                    proxy_mode: input.proxy_mode,
+                    proxy_url: input.proxy_url.clone(),
+                    proxy_username: input.proxy_username.clone(),
+                    proxy_password: input.proxy_password.clone(),
+                    proxy_no_proxy: input.proxy_no_proxy.clone(),
                 },
             )
             .await
@@ -734,11 +798,20 @@ pub(crate) async fn create_task_with_state_and_headers(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     // Auto-classification: when the user has not explicitly specified a category_key, match by classification rules
+    // FUN-06: pass probe MIME (or first selected file MIME) so Mime rules can match.
     if category_key.is_none() {
         if let Ok(rules) = db::list_classification_rules(&state.pool).await {
-            if let Some(target_subdir) =
-                db::apply_classification_rules(&storage_url, requested_file_name, "", &rules)
-            {
+            let classification_mime = classification_content_type(
+                probe.content_type.as_deref(),
+                &probe_files,
+                selected_relative_paths.as_ref(),
+            );
+            if let Some(target_subdir) = db::apply_classification_rules(
+                &storage_url,
+                requested_file_name,
+                &classification_mime,
+                &rules,
+            ) {
                 category_key = Some(target_subdir);
             }
         }
@@ -901,16 +974,39 @@ pub(crate) async fn create_task_with_state_and_headers(
     // The COALESCE in the ON CONFLICT clause preserves these values when
     // `run_hls_download` passes `None`.
     if probe.protocol == "hls" {
+        // FUN-10: persist absolute track URIs so download never sees relative
+        // paths even if an older client submitted them.
+        let resolve_track_uris = |uris: &Vec<String>| -> Vec<String> {
+            uris.iter()
+                .map(|uri| {
+                    reqwest::Url::parse(uri)
+                        .map(|url| url.to_string())
+                        .or_else(|_| {
+                            reqwest::Url::parse(&probe.resolved_uri)
+                                .and_then(|base| base.join(uri))
+                                .map(|url| url.to_string())
+                        })
+                        .or_else(|_| {
+                            reqwest::Url::parse(&record.url)
+                                .and_then(|base| base.join(uri))
+                                .map(|url| url.to_string())
+                        })
+                        .unwrap_or_else(|_| uri.clone())
+                })
+                .collect()
+        };
         let audio_json = input
             .selected_hls_audio_track_uris
             .as_ref()
             .filter(|uris| !uris.is_empty())
-            .and_then(|uris| serde_json::to_string(uris).ok());
+            .map(resolve_track_uris)
+            .and_then(|uris| serde_json::to_string(&uris).ok());
         let subtitle_json = input
             .selected_hls_subtitle_track_uris
             .as_ref()
             .filter(|uris| !uris.is_empty())
-            .and_then(|uris| serde_json::to_string(uris).ok());
+            .map(resolve_track_uris)
+            .and_then(|uris| serde_json::to_string(&uris).ok());
         if audio_json.is_some() || subtitle_json.is_some() {
             let staging = temp_path.to_string_lossy();
             db::upsert_hls_task(
@@ -1148,6 +1244,19 @@ fn spawn_checksum_sidecar_discovery(
             Some(&inserted.to_string()),
         )
         .await;
+
+        // FUN-05: sidecar discovery is async; small files may already be Completed
+        // with NotRequested before Pending checksums land. Re-run the same
+        // idempotent verify path the scheduler uses at worker end.
+        if let Err(error) = maybe_verify_completed_task_after_checksum_insert(&pool, &task_id).await
+        {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %error,
+                "failed to verify checksums discovered after completion"
+            );
+        }
+
         if let Some(app_state) = app.try_state::<crate::AppState>() {
             match super::task_payload(&app_state.pool, &task_id).await {
                 Ok(task) => crate::events::emit_task_updated(&app, &task),
@@ -1159,6 +1268,31 @@ fn spawn_checksum_sidecar_discovery(
             }
         }
     });
+}
+
+/// FUN-05: when a Completed task gains Pending checksums after the worker exit
+/// verify window, run `verify_task_hash_with_pool` so status cannot stay Pending.
+pub async fn maybe_verify_completed_task_after_checksum_insert(
+    pool: &sqlx::SqlitePool,
+    task_id: &str,
+) -> Result<(), String> {
+    let Some(task) = db::get_task_record(pool, task_id).await? else {
+        return Ok(());
+    };
+    if task.status != TaskStatus::Completed {
+        return Ok(());
+    }
+    let has_pending = db::list_task_checksum_records(pool, task_id)
+        .await?
+        .into_iter()
+        .any(|checksum| {
+            checksum.file_id.is_none() && checksum.status == HashVerificationStatus::Pending
+        });
+    if !has_pending {
+        return Ok(());
+    }
+    let _ = super::verify_task_hash_with_pool(pool, task_id).await?;
+    Ok(())
 }
 
 async fn persist_metalink_probe(
@@ -1200,12 +1334,8 @@ async fn persist_metalink_probe(
             .await?;
         }
         let mut checksums = file.checksums.clone();
-        checksums.sort_by_key(|checksum| match checksum.algorithm {
-            ChecksumAlgorithm::Sha256 => 0,
-            ChecksumAlgorithm::Sha512 => 1,
-            ChecksumAlgorithm::Sha1 => 2,
-            ChecksumAlgorithm::Md5 => 3,
-        });
+        // FUN-08: strongest first so index 0 becomes is_primary.
+        checksums.sort_by_key(|checksum| checksum.algorithm.metalink_strength_rank());
         for (index, checksum) in checksums.iter().enumerate() {
             db::insert_task_checksum_record(
                 pool,
@@ -1332,6 +1462,43 @@ fn is_final_path_unique_conflict(error: &str) -> bool {
         && (lower.contains("final_path")
             || lower.contains("idx_tasks_final_path_active")
             || lower.contains("idx_task_files_final_path_selected"))
+}
+
+/// FUN-06: MIME for classification — prefer first selected file, else probe, else first file.
+pub(crate) fn classification_content_type(
+    probe_content_type: Option<&str>,
+    probe_files: &[crate::models::ProbedFile],
+    selected_relative_paths: Option<&HashSet<String>>,
+) -> String {
+    if let Some(paths) = selected_relative_paths {
+        // HashSet iteration order is unstable; pick a deterministic first path.
+        let mut ordered = paths.iter().collect::<Vec<_>>();
+        ordered.sort();
+        if let Some(first_path) = ordered.first().copied() {
+            if let Some(content_type) = probe_files
+                .iter()
+                .find(|file| &file.relative_path == first_path)
+                .and_then(|file| file.content_type.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return content_type.to_string();
+            }
+        }
+    }
+    if let Some(content_type) = probe_content_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return content_type.to_string();
+    }
+    probe_files
+        .first()
+        .and_then(|file| file.content_type.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -1505,5 +1672,90 @@ mod tests {
             hls_subtitle_tracks: Vec::new(),
             metalink: None,
         }
+    }
+
+    // FUN-06: create-path MIME wiring — same call shape as create_task_with_state.
+    #[test]
+    fn fun06_create_path_mime_rule_hits_with_probe_content_type() {
+        use crate::models::{ClassificationMatchKind, ClassificationRule};
+
+        let mime = classification_content_type(Some("video/mp4"), &[], None);
+        assert_eq!(mime, "video/mp4");
+
+        let rules = vec![ClassificationRule {
+            id: "1".into(),
+            name: "videos".into(),
+            enabled: true,
+            position: 0,
+            match_kind: ClassificationMatchKind::Mime,
+            pattern: "video/".into(),
+            target_subdir: "videos".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        }];
+        assert_eq!(
+            db::apply_classification_rules("https://example.com/stream", "stream", &mime, &rules),
+            Some("videos".into())
+        );
+    }
+
+    #[test]
+    fn fun06_create_path_disabled_mime_rule_skipped_first_match_wins() {
+        use crate::models::{ClassificationMatchKind, ClassificationRule};
+
+        let mime = classification_content_type(Some("video/mp4"), &[], None);
+        let rules = vec![
+            ClassificationRule {
+                id: "1".into(),
+                name: "disabled".into(),
+                enabled: false,
+                position: 0,
+                match_kind: ClassificationMatchKind::Mime,
+                pattern: "video/".into(),
+                target_subdir: "disabled-videos".into(),
+                created_at: "now".into(),
+                updated_at: "now".into(),
+            },
+            ClassificationRule {
+                id: "2".into(),
+                name: "videos".into(),
+                enabled: true,
+                position: 1,
+                match_kind: ClassificationMatchKind::Mime,
+                pattern: "video/".into(),
+                target_subdir: "videos".into(),
+                created_at: "now".into(),
+                updated_at: "now".into(),
+            },
+        ];
+        assert_eq!(
+            db::apply_classification_rules("https://example.com/stream", "stream", &mime, &rules),
+            Some("videos".into())
+        );
+    }
+
+    #[test]
+    fn fun06_create_path_prefers_first_selected_file_mime() {
+        let files = vec![
+            ProbedFile {
+                relative_path: "a.bin".into(),
+                size: "1".into(),
+                content_type: Some("application/octet-stream".into()),
+            },
+            ProbedFile {
+                relative_path: "clip.mp4".into(),
+                size: "2".into(),
+                content_type: Some("video/mp4".into()),
+            },
+        ];
+        let selected = HashSet::from(["clip.mp4".to_string()]);
+        assert_eq!(
+            classification_content_type(Some("application/zip"), &files, Some(&selected)),
+            "video/mp4"
+        );
+        assert_eq!(
+            classification_content_type(Some("video/webm"), &files, None),
+            "video/webm"
+        );
     }
 }

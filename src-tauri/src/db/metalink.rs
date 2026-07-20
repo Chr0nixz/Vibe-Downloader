@@ -39,6 +39,10 @@ pub struct MetalinkResourceRecord {
     /// response proves it does not. Once 0, the parallel path will
     /// route this mirror only to full-file fallback work units.
     pub supports_range: bool,
+    /// FUN-09: Last observed strong ETag for this mirror (resume If-Range).
+    pub etag: Option<String>,
+    /// FUN-09: Last observed Last-Modified for this mirror (If-Range fallback).
+    pub last_modified: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +119,7 @@ pub async fn list_metalink_resources_for_file(
         r#"
         SELECT id, task_id, file_id, url, priority, location, status,
                failure_count, last_error, last_attempt_at, cooldown_until,
-               avg_speed_bps, supports_range
+               avg_speed_bps, supports_range, etag, last_modified
         FROM metalink_resources
         WHERE file_id = ?
         ORDER BY priority ASC, rowid ASC
@@ -273,7 +277,7 @@ pub async fn list_healthy_mirrors_for_file(
         r#"
         SELECT id, task_id, file_id, url, priority, location, status,
                failure_count, last_error, last_attempt_at, cooldown_until,
-               avg_speed_bps, supports_range
+               avg_speed_bps, supports_range, etag, last_modified
         FROM metalink_resources
         WHERE file_id = ?
           AND supports_range = 1
@@ -331,7 +335,36 @@ fn row_to_resource(row: sqlx::sqlite::SqliteRow) -> MetalinkResourceRecord {
         cooldown_until: row.get("cooldown_until"),
         avg_speed_bps: row.get("avg_speed_bps"),
         supports_range: row.get::<i64, _>("supports_range") != 0,
+        etag: row.get("etag"),
+        last_modified: row.get("last_modified"),
     }
+}
+
+/// FUN-09: Persist validators observed on a successful mirror response.
+pub async fn update_metalink_resource_validators(
+    pool: &SqlitePool,
+    id: &str,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> Result<(), String> {
+    let now = now_iso();
+    sqlx::query(
+        r#"
+        UPDATE metalink_resources
+        SET etag = COALESCE(?, etag),
+            last_modified = COALESCE(?, last_modified),
+            updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(etag)
+    .bind(last_modified)
+    .bind(&now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub async fn list_metalink_resources_for_task(
@@ -342,7 +375,7 @@ pub async fn list_metalink_resources_for_task(
         r#"
         SELECT id, task_id, file_id, url, priority, location, status,
                failure_count, last_error, last_attempt_at, cooldown_until,
-               avg_speed_bps, supports_range
+               avg_speed_bps, supports_range, etag, last_modified
         FROM metalink_resources
         WHERE task_id = ?
         ORDER BY priority ASC, rowid ASC

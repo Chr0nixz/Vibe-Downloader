@@ -39,6 +39,7 @@ import { isSupportedLocalFile, resolveLocalFile } from "@/lib/local-file";
 import {
   bulkDeleteTasks,
   bulkTaskAction,
+  bulkTaskActionGlobal,
   deleteTask,
   type FileDropDragState,
   finishLiveRecording,
@@ -452,6 +453,83 @@ export function AppShell() {
     [runBulkTransferAction, t],
   );
 
+  // UX-05: pause/resume every matching task in the DB, not the loaded page.
+  const pauseAll = useCallback(async () => {
+    const label = t("taskList.bulkPause");
+    const toastKey = "bulk-pause-all";
+    const toastId = addToast({
+      tone: "info",
+      title: t("toast.bulkProgress", { action: label, done: 0, total: "…" }),
+      key: toastKey,
+    });
+    try {
+      const result = await bulkTaskActionGlobal("pause");
+      const total = result.succeeded + result.skipped + result.failed;
+      await refreshTasks();
+      if (result.failed === 0) {
+        updateToast(toastId, {
+          tone: "success",
+          title: t("toast.bulkComplete", { action: label, done: result.succeeded, total }),
+          description: result.skipped > 0 ? t("toast.bulkSkippedDetail", { skipped: result.skipped }) : undefined,
+        });
+      } else {
+        updateToast(toastId, {
+          tone: "error",
+          title: t("toast.bulkPartialFailure", {
+            action: label,
+            failed: result.failed,
+            total,
+          }),
+          description: t("toast.bulkSkippedDetail", { skipped: result.skipped }),
+        });
+      }
+    } catch (err) {
+      updateToast(toastId, {
+        tone: "error",
+        title: t("toast.bulkFailed", { action: label }),
+        description: localizedErrorMessage(err, t),
+      });
+    }
+  }, [addToast, updateToast, refreshTasks, t]);
+
+  const resumeAll = useCallback(async () => {
+    const label = t("taskList.bulkResume");
+    const toastKey = "bulk-resume-all";
+    const toastId = addToast({
+      tone: "info",
+      title: t("toast.bulkProgress", { action: label, done: 0, total: "…" }),
+      key: toastKey,
+    });
+    try {
+      const result = await bulkTaskActionGlobal("resume");
+      const total = result.succeeded + result.skipped + result.failed;
+      await refreshTasks();
+      if (result.failed === 0) {
+        updateToast(toastId, {
+          tone: "success",
+          title: t("toast.bulkComplete", { action: label, done: result.succeeded, total }),
+          description: result.skipped > 0 ? t("toast.bulkSkippedDetail", { skipped: result.skipped }) : undefined,
+        });
+      } else {
+        updateToast(toastId, {
+          tone: "error",
+          title: t("toast.bulkPartialFailure", {
+            action: label,
+            failed: result.failed,
+            total,
+          }),
+          description: t("toast.bulkSkippedDetail", { skipped: result.skipped }),
+        });
+      }
+    } catch (err) {
+      updateToast(toastId, {
+        tone: "error",
+        title: t("toast.bulkFailed", { action: label }),
+        description: localizedErrorMessage(err, t),
+      });
+    }
+  }, [addToast, updateToast, refreshTasks, t]);
+
   const bulkOpenFolder = useCallback(
     (selectedTasks: Task[]) => {
       const first = selectedTasks[0];
@@ -768,6 +846,23 @@ export function AppShell() {
           tone: "info",
           title: t("settings.ffmpegPath.label"),
           description: t("settings.ffmpegPath.notDetected"),
+        });
+        return;
+      }
+
+      if (action === "manage_sftp_host_keys") {
+        // ARC-15: jump to Settings → Network so the user can explicitly forget
+        // the stale TOFU row, then retry the SFTP task.
+        try {
+          sessionStorage.setItem("vibe-settings-focus", "sftp_known_hosts");
+        } catch {
+          // sessionStorage may be unavailable in locked-down environments.
+        }
+        setNav("settings");
+        addToast({
+          tone: "info",
+          title: t("settings.sftpKnownHosts"),
+          description: t("recovery.manageSftpHostKeysToast"),
         });
         return;
       }
@@ -1218,21 +1313,23 @@ export function AppShell() {
     toggleTransfer,
   ]);
 
-  // ── Global native context-menu suppression ──
-  // WebView2/WebKit ship a default context menu (Inspect, Properties, Copy,
-  // etc.) on any element that doesn't preventDefault. Radix-owned triggers
-  // already call preventDefault when they open our custom menu; for every
-  // other surface (sidebar, status bar, title bar, settings, about, blank
-  // gaps) we suppress the native menu here. Custom region menus added in
-  // later phases will still work because they render via Radix, which calls
-  // preventDefault on the trigger before this listener runs.
+  // UX-02: Suppress WebView native context menus on bubble phase so Radix
+  // triggers can preventDefault first. Capture-phase listeners ran before
+  // Trigger handlers and broke every custom right-click menu.
   useEffect(() => {
     const onContextMenu = (event: MouseEvent) => {
       if (event.defaultPrevented) return;
+      const target = event.target;
+      if (target instanceof Element) {
+        // Keep native cut/copy/paste menus for text editing surfaces.
+        if (target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) {
+          return;
+        }
+      }
       event.preventDefault();
     };
-    window.addEventListener("contextmenu", onContextMenu, { capture: true });
-    return () => window.removeEventListener("contextmenu", onContextMenu, { capture: true } as AddEventListenerOptions);
+    window.addEventListener("contextmenu", onContextMenu);
+    return () => window.removeEventListener("contextmenu", onContextMenu);
   }, []);
 
   return (
@@ -1336,6 +1433,8 @@ export function AppShell() {
             onBulkRetry={bulkRetry}
             onBulkDelete={bulkDelete}
             onBulkOpenFolder={bulkOpenFolder}
+            onPauseAll={() => void pauseAll()}
+            onResumeAll={() => void resumeAll()}
             onSetNav={(nextNav) => {
               useTaskUIStore.getState().setNav(nextNav);
               if (nextNav === "settings") {

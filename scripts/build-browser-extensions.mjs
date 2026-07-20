@@ -112,6 +112,7 @@ for (const variant of variants) {
   );
   for (const file of [
     "logger.js",
+    "capture-policy.js",
     "popup.html",
     "popup.js",
     "popup.css",

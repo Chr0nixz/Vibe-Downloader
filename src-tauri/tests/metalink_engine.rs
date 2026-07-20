@@ -49,8 +49,8 @@ use tauri_app_lib::{
         DownloadEngine, GlobalSpeedLimiter, HttpEngine, MetalinkEngine, ProbeRequest,
     },
     models::{
-        task::now_iso, HashVerificationStatus, TaskFileRecord, TaskKind, TaskPriority, TaskRecord,
-        TaskStatus,
+        task::now_iso, ChecksumAlgorithm, HashVerificationStatus, TaskChecksumRecord,
+        TaskFileRecord, TaskKind, TaskPriority, TaskRecord, TaskStatus,
     },
     proxy::ResolvedProxyConfig,
 };
@@ -1154,6 +1154,16 @@ async fn f4_parallel_download_resumes_from_existing_part_files() {
     let mirror = &mirrors[0];
     let task_id = "metalink-test-task-f4-resume".to_string();
 
+    // FUN-09: same-mirror resume requires persisted validators (or a primary
+    // checksum). Seed an ETag so the pre-written part is treated as trusted.
+    db::update_metalink_resource_validators(&pool, &mirror.id, Some("\"resume-v1\""), None)
+        .await
+        .expect("seed validators");
+    let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("reload mirrors");
+    let mirror = &mirrors[0];
+
     let client = test_client();
     let speed_limiter = GlobalSpeedLimiter::disabled();
     let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -1454,4 +1464,316 @@ async fn g1_metalink_worker_returns_error_when_all_mirrors_fail() {
     let _ = tokio::fs::remove_file(&temp_path).await;
     let _ = tokio::fs::remove_file(&part_path).await;
     pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun09_same_mirror_resume_persists_validators() {
+    let payload: Vec<u8> = (0..10u8).collect();
+    let payload = Arc::new(payload);
+    let range_log = Arc::new(Mutex::new(Vec::new()));
+    let server = start_mirror_server_with_etag(payload.clone(), range_log.clone(), "\"etag-1\"");
+
+    let pool = test_pool("fun09-validators").await;
+    let mirror_url = format!("{}/payload.bin", server.base_url);
+    let (file_id, resource_ids) = seed_mirrors(&pool, "fun09-validators", &[&mirror_url]).await;
+    let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("list");
+    let mirror = &mirrors[0];
+
+    let client = test_client();
+    let speed_limiter = GlobalSpeedLimiter::disabled();
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let temp_path = unique_temp_path("fun09-validators");
+    let part_path = part_file_path(&temp_path, 0);
+    let (progress_tx, _progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<MetalinkWorkerProgress>();
+
+    download_metalink_range_from_mirror(
+        &pool,
+        "metalink-test-task-fun09-validators",
+        &client,
+        &[],
+        &speed_limiter,
+        &cancel_token,
+        0,
+        &progress_tx,
+        0,
+        9,
+        mirror,
+        &part_path,
+    )
+    .await
+    .expect("download");
+
+    let updated = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("reload")
+        .into_iter()
+        .find(|row| row.id == resource_ids[0])
+        .expect("resource");
+    assert_eq!(updated.etag.as_deref(), Some("\"etag-1\""));
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+    let _ = tokio::fs::remove_file(&part_path).await;
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun09_cross_mirror_without_checksum_restarts_part() {
+    let payload: Vec<u8> = (0..10u8).collect();
+    let payload = Arc::new(payload);
+    let range_log = Arc::new(Mutex::new(Vec::new()));
+    let server = start_mirror_server(payload.clone(), range_log.clone(), None, false);
+
+    let pool = test_pool("fun09-cross-nohash").await;
+    let mirror_url = format!("{}/payload.bin", server.base_url);
+    let (file_id, _) = seed_mirrors(&pool, "fun09-cross-nohash", &[&mirror_url]).await;
+    let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("list");
+    let mirror = &mirrors[0];
+
+    let client = test_client();
+    let speed_limiter = GlobalSpeedLimiter::disabled();
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let temp_path = unique_temp_path("fun09-cross-nohash");
+    let part_path = part_file_path(&temp_path, 0);
+    tokio::fs::write(&part_path, &payload[0..5])
+        .await
+        .expect("pre-write");
+
+    let (progress_tx, _progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<MetalinkWorkerProgress>();
+    let downloaded = download_metalink_range_from_mirror(
+        &pool,
+        "metalink-test-task-fun09-cross-nohash",
+        &client,
+        &[],
+        &speed_limiter,
+        &cancel_token,
+        0,
+        &progress_tx,
+        0,
+        9,
+        mirror,
+        &part_path,
+    )
+    .await
+    .expect("restart download");
+
+    assert_eq!(downloaded, 10);
+    let ranges = range_log.lock().expect("range log").clone();
+    assert!(
+        ranges.iter().any(|r| r.contains("bytes=0-9")),
+        "without checksum/validators, part must restart from 0; got {ranges:?}"
+    );
+    let part_data = tokio::fs::read(&part_path).await.expect("read part");
+    assert_eq!(part_data, *payload);
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+    let _ = tokio::fs::remove_file(&part_path).await;
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun09_cross_mirror_with_checksum_allows_resume() {
+    let payload: Vec<u8> = (0..10u8).collect();
+    let payload = Arc::new(payload);
+    let range_log = Arc::new(Mutex::new(Vec::new()));
+    let server = start_mirror_server(payload.clone(), range_log.clone(), None, false);
+
+    let pool = test_pool("fun09-cross-hash").await;
+    let mirror_url = format!("{}/payload.bin", server.base_url);
+    let (file_id, _) = seed_mirrors(&pool, "fun09-cross-hash", &[&mirror_url]).await;
+    let now = now_iso();
+    db::insert_task_checksum_record(
+        &pool,
+        &TaskChecksumRecord {
+            id: "fun09-cross-hash-ck".to_string(),
+            task_id: "metalink-test-task-fun09-cross-hash".to_string(),
+            file_id: Some(file_id.clone()),
+            algorithm: ChecksumAlgorithm::Sha256,
+            expected_hash: "ab".repeat(32),
+            actual_hash: None,
+            status: HashVerificationStatus::Pending,
+            source_kind: "metalink".to_string(),
+            source_url: None,
+            source_label: None,
+            is_primary: true,
+            weak: false,
+            error_message: None,
+            discovered_at: Some(now.clone()),
+            verified_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+        },
+    )
+    .await
+    .expect("insert checksum");
+
+    let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("list");
+    let mirror = &mirrors[0];
+
+    let client = test_client();
+    let speed_limiter = GlobalSpeedLimiter::disabled();
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let temp_path = unique_temp_path("fun09-cross-hash");
+    let part_path = part_file_path(&temp_path, 0);
+    tokio::fs::write(&part_path, &payload[0..5])
+        .await
+        .expect("pre-write");
+
+    let (progress_tx, _progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<MetalinkWorkerProgress>();
+    let downloaded = download_metalink_range_from_mirror(
+        &pool,
+        "metalink-test-task-fun09-cross-hash",
+        &client,
+        &[],
+        &speed_limiter,
+        &cancel_token,
+        0,
+        &progress_tx,
+        0,
+        9,
+        mirror,
+        &part_path,
+    )
+    .await
+    .expect("checksum-gated resume");
+
+    assert_eq!(downloaded, 10);
+    let ranges = range_log.lock().expect("range log").clone();
+    assert!(
+        ranges.iter().any(|r| r.contains("bytes=5-9")),
+        "with primary checksum, cross-mirror resume may continue; got {ranges:?}"
+    );
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+    let _ = tokio::fs::remove_file(&part_path).await;
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun09_mismatched_content_range_rejects_resume() {
+    let payload: Vec<u8> = (0..10u8).collect();
+    let payload = Arc::new(payload);
+    let server = TestServer::start({
+        let payload = payload.clone();
+        move |mut stream| {
+            let mut buffer = [0u8; 8192];
+            let Some(_request) = common::http::read_request_text(&mut stream, &mut buffer) else {
+                return;
+            };
+            let body = &payload[5..];
+            let response = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-4/10\r\nETag: \"bad\"\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+
+    let pool = test_pool("fun09-bad-range").await;
+    let mirror_url = format!("{}/payload.bin", server.base_url);
+    let (file_id, resource_ids) = seed_mirrors(&pool, "fun09-bad-range", &[&mirror_url]).await;
+    db::update_metalink_resource_validators(&pool, &resource_ids[0], Some("\"bad\""), None)
+        .await
+        .expect("validators");
+    let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("list");
+    let mirror = &mirrors[0];
+
+    let client = test_client();
+    let speed_limiter = GlobalSpeedLimiter::disabled();
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let temp_path = unique_temp_path("fun09-bad-range");
+    let part_path = part_file_path(&temp_path, 0);
+    tokio::fs::write(&part_path, &payload[0..5])
+        .await
+        .expect("pre-write");
+
+    let (progress_tx, _progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<MetalinkWorkerProgress>();
+    let error = download_metalink_range_from_mirror(
+        &pool,
+        "metalink-test-task-fun09-bad-range",
+        &client,
+        &[],
+        &speed_limiter,
+        &cancel_token,
+        0,
+        &progress_tx,
+        0,
+        9,
+        mirror,
+        &part_path,
+    )
+    .await
+    .expect_err("mismatched Content-Range must fail");
+    assert!(
+        error.contains("Content-Range") || error.contains("Resume unavailable"),
+        "got: {error}"
+    );
+    let part_data = tokio::fs::read(&part_path).await.expect("read part");
+    assert_eq!(part_data, payload[0..5]);
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+    let _ = tokio::fs::remove_file(&part_path).await;
+    pool.close().await;
+}
+
+fn start_mirror_server_with_etag(
+    payload: Arc<Vec<u8>>,
+    range_log: Arc<Mutex<Vec<String>>>,
+    etag: &'static str,
+) -> TestServer {
+    TestServer::start(move |mut stream| {
+        let payload = payload.clone();
+        let log = range_log.clone();
+        let mut buffer = [0u8; 8192];
+        let Some(request) = common::http::read_request_text(&mut stream, &mut buffer) else {
+            return;
+        };
+        let request_line = request.lines().next().unwrap_or_default();
+        let method = request_line.split_whitespace().next().unwrap_or("GET");
+        let range_header = common::http::extract_header(&request, "range")
+            .unwrap_or("")
+            .to_string();
+        {
+            let mut guard = log.lock().expect("range log");
+            guard.push(range_header);
+        }
+        let byte_range = common::http::extract_byte_range(&request);
+        let start = byte_range.map(|r| r.start).unwrap_or(0).min(payload.len());
+        let end = byte_range
+            .and_then(|r| r.end)
+            .unwrap_or_else(|| payload.len().saturating_sub(1))
+            .min(payload.len().saturating_sub(1));
+        let body = if method == "HEAD" || start > end {
+            &[][..]
+        } else {
+            &payload[start..=end]
+        };
+        let status = if byte_range.is_some() { 206 } else { 200 };
+        let content_range = format!("bytes {start}-{end}/{}", payload.len());
+        let response = if status == 206 {
+            format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: {content_range}\r\nETag: {etag}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+        } else {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: {etag}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+        };
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(body);
+    })
 }

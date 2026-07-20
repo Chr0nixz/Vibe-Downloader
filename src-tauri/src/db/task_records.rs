@@ -688,6 +688,42 @@ pub async fn list_queued_task_records(
     rows.iter().map(row_to_task).collect()
 }
 
+/// Lists task IDs whose status is in `statuses` (order stable by updated_at DESC).
+/// Used by global pause/resume-all so the action covers the full DB set, not the
+/// currently loaded frontend page.
+pub async fn list_task_ids_by_statuses(
+    pool: &SqlitePool,
+    statuses: &[&str],
+) -> Result<Vec<String>, String> {
+    // Fixed status sets only — keep SQL literal so sqlx injection audit stays happy.
+    let sql = match statuses {
+        ["downloading", "retrying", "queued"] => {
+            r#"
+            SELECT id FROM tasks
+            WHERE status IN ('downloading', 'retrying', 'queued')
+            ORDER BY updated_at DESC, id ASC
+            "#
+        }
+        ["paused", "failed", "waiting_network"] => {
+            r#"
+            SELECT id FROM tasks
+            WHERE status IN ('paused', 'failed', 'waiting_network')
+            ORDER BY updated_at DESC, id ASC
+            "#
+        }
+        _ => {
+            return Err(format!(
+                "Unsupported status filter for list_task_ids_by_statuses: {statuses:?}"
+            ));
+        }
+    };
+    let rows = sqlx::query(sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.iter().map(|row| row.get::<String, _>("id")).collect())
+}
+
 /// Lists task IDs that are paused and obey the schedule (replaces raw SQL in check_schedule_preemption).
 pub async fn list_paused_schedulable_tasks(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
     let rows = sqlx::query(

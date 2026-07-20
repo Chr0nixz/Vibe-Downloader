@@ -1,5 +1,6 @@
 import { relaunch } from "@tauri-apps/plugin-process";
 import { FolderOpen, RefreshCcw, ShieldAlert } from "lucide-react";
+import { useReducedMotion } from "motion/react";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -85,9 +86,16 @@ export function StartupGate({ children }: { children: ReactNode }) {
   // from index.html splash to React is seamless. The @keyframes and the
   // --vibe-splash-accent variable are defined inline in index.html and
   // remain available after React mounts.
+  return <StartupInitializingSplash />;
+}
+
+function StartupInitializingSplash() {
+  const { t } = useTranslation();
+  const reduceMotion = useReducedMotion();
+
   return (
     <main className="flex min-h-screen items-center justify-center bg-surface-root">
-      <div role="status" className="flex flex-col items-center gap-5">
+      <div role="status" className="flex flex-col items-center gap-5" aria-live="polite">
         <img
           src={LOGO_64_DATA_URI}
           alt=""
@@ -95,32 +103,37 @@ export function StartupGate({ children }: { children: ReactNode }) {
             width: 56,
             height: 56,
             borderRadius: 14,
-            animation: "vibe-splash-breathe 1.8s ease-in-out infinite",
+            // UX-16: honor prefers-reduced-motion (index.html covers the pre-React splash only).
+            ...(reduceMotion ? { opacity: 1 } : { animation: "vibe-splash-breathe 1.8s ease-in-out infinite" }),
           }}
         />
-        <div
-          style={{
-            width: 180,
-            height: 2,
-            borderRadius: 999,
-            background: "var(--surface-track)",
-            overflow: "hidden",
-            position: "relative",
-          }}
-        >
+        {reduceMotion ? (
+          <p className="text-sm text-text-secondary">{t("startup.initializing")}</p>
+        ) : (
           <div
             style={{
-              position: "absolute",
-              top: 0,
-              left: "-40%",
-              width: "40%",
-              height: "100%",
-              borderRadius: "inherit",
-              background: "var(--vibe-splash-accent, oklch(0.4 0.18 235))",
-              animation: "vibe-splash-slide 1.1s cubic-bezier(0.65, 0.05, 0.36, 1) infinite",
+              width: 180,
+              height: 2,
+              borderRadius: 999,
+              background: "var(--surface-track)",
+              overflow: "hidden",
+              position: "relative",
             }}
-          />
-        </div>
+          >
+            <div
+              style={{
+                position: "absolute",
+                top: 0,
+                left: "-40%",
+                width: "40%",
+                height: "100%",
+                borderRadius: "inherit",
+                background: "var(--vibe-splash-accent, oklch(0.4 0.18 235))",
+                animation: "vibe-splash-slide 1.1s cubic-bezier(0.65, 0.05, 0.36, 1) infinite",
+              }}
+            />
+          </div>
+        )}
       </div>
     </main>
   );

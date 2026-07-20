@@ -207,6 +207,8 @@ async fn probe_fails_on_authentication_failure() {
         reject_auth: true,
         fail_on_read: None,
         stall_on_read: false,
+        read_chunk_delay: None,
+        deny_open: false,
     })
     .await;
     let pool = test_pool("probe-auth-fail").await;
@@ -255,6 +257,66 @@ async fn probe_fails_on_host_key_mismatch() {
         still_present, 1,
         "mismatched record must remain for user review"
     );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc15_list_and_forget_known_host_then_retofu() {
+    let mut files = HashMap::new();
+    files.insert("/file.bin".to_string(), vec![0x44u8; 1024]);
+    let server = start_sftp_server_with_files(files).await;
+    let pool = test_pool("arc15-list-forget").await;
+    let host = server.addr.ip().to_string();
+    let port = server.addr.port();
+    seed_mismatched_host_key(&pool, &host, port).await;
+
+    let listed = db::list_sftp_known_hosts(&pool).await.expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].host, host.to_ascii_lowercase());
+    assert_eq!(listed[0].port, port);
+    assert_ne!(listed[0].fingerprint_sha256, server.host_key_fingerprint);
+
+    // Mismatch must still fail closed and must not overwrite the row.
+    let engine = new_engine();
+    let error = engine
+        .probe(probe_request(
+            sftp_url(server.addr, "file.bin"),
+            pool.clone(),
+        ))
+        .await
+        .expect_err("probe should fail on host key mismatch");
+    assert_eq!(error_code(&error), "sftp_host_key_changed");
+    let DownloadError::Other(message) = &error else {
+        panic!("expected Other");
+    };
+    assert!(
+        message.contains("manage_sftp_host_keys") && message.contains("retry"),
+        "recovery actions should include manage_sftp_host_keys and retry: {message}"
+    );
+
+    assert!(
+        db::forget_sftp_known_host(&pool, &host.to_ascii_uppercase(), port)
+            .await
+            .expect("forget"),
+        "forget should delete the row (host lowercased)"
+    );
+    assert!(db::list_sftp_known_hosts(&pool)
+        .await
+        .expect("list empty")
+        .is_empty());
+
+    // After explicit forget, TOFU INSERT succeeds with the live fingerprint.
+    engine
+        .probe(probe_request(
+            sftp_url(server.addr, "file.bin"),
+            pool.clone(),
+        ))
+        .await
+        .expect("probe after forget");
+    let after = db::list_sftp_known_hosts(&pool).await.expect("list after");
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].fingerprint_sha256, server.host_key_fingerprint);
+
     pool.close().await;
 }
 
@@ -420,6 +482,8 @@ async fn concurrent_read_failure_isolates_per_session() {
         reject_auth: false,
         fail_on_read: Some(0), // first read call fails
         stall_on_read: false,
+        read_chunk_delay: None,
+        deny_open: false,
     })
     .await;
 
@@ -492,6 +556,8 @@ async fn sftp_stalled_read_is_detectable_via_idle_timeout() {
         reject_auth: false,
         fail_on_read: None,
         stall_on_read: true,
+        read_chunk_delay: None,
+        deny_open: false,
     })
     .await;
 
@@ -511,4 +577,515 @@ async fn sftp_stalled_read_is_detectable_via_idle_timeout() {
     );
 
     let _ = session.close().await;
+}
+
+// ===== C4: credentials, permission, host-key download, restart =====
+
+async fn seed_matching_host_key(pool: &sqlx::SqlitePool, host: &str, port: u16, fingerprint: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO sftp_known_hosts (host, port, algorithm, fingerprint_sha256, first_seen_at, last_seen_at)
+        VALUES (?, ?, 'ssh-ed25519', ?, ?, ?)
+        "#,
+    )
+    .bind(host.to_ascii_lowercase())
+    .bind(i64::from(port))
+    .bind(fingerprint)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .expect("seed known host");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_uses_persisted_sftp_credentials() {
+    common::install_test_secret_key();
+    let payload = b"sftp-cred-payload".to_vec();
+    let mut files = HashMap::new();
+    files.insert("/protected.bin".to_string(), payload.clone());
+    let server = start_sftp_server_with_files(files).await;
+    let pool = common::test_pool("sftp-cred-rotation").await;
+    seed_matching_host_key(
+        &pool,
+        &server.addr.ip().to_string(),
+        server.addr.port(),
+        &server.host_key_fingerprint,
+    )
+    .await;
+
+    let paths = common::TestPaths::new("sftp-cred-rotation");
+    let url = format!(
+        "sftp://{}:{}/protected.bin",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let task = common::download_task(
+        "sftp-cred-rotation",
+        url,
+        "sftp",
+        "protected.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert SFTP task");
+    db::upsert_task_credentials(&pool, &task.id, "sftp", "sftpuser", "sftppass", None, None)
+        .await
+        .expect("store SFTP credentials");
+
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("authenticated SFTP download");
+
+    assert_eq!(
+        std::fs::read(&paths.final_path).expect("read final"),
+        payload
+    );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_uses_persisted_sftp_private_key_credentials() {
+    common::install_test_secret_key();
+    let payload = b"sftp-key-payload".to_vec();
+    let mut files = HashMap::new();
+    files.insert("/key-protected.bin".to_string(), payload.clone());
+    let server = start_sftp_server_with_files(files).await;
+    let pool = common::test_pool("sftp-key-cred-rotation").await;
+    seed_matching_host_key(
+        &pool,
+        &server.addr.ip().to_string(),
+        server.addr.port(),
+        &server.host_key_fingerprint,
+    )
+    .await;
+
+    let key = russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+        .expect("client key");
+    let key_pem = key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .expect("pem")
+        .to_string();
+
+    let paths = common::TestPaths::new("sftp-key-cred-rotation");
+    let url = format!(
+        "sftp://{}:{}/key-protected.bin",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let task = common::download_task(
+        "sftp-key-cred-rotation",
+        url,
+        "sftp",
+        "key-protected.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert SFTP task");
+    db::upsert_task_credentials(
+        &pool,
+        &task.id,
+        "sftp",
+        "sftpuser",
+        "",
+        Some(key_pem.as_str()),
+        None,
+    )
+    .await
+    .expect("store SFTP private-key credentials");
+
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("private-key authenticated SFTP download");
+
+    assert_eq!(
+        std::fs::read(&paths.final_path).expect("read final"),
+        payload
+    );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_fails_on_permission_denied_open() {
+    common::install_test_secret_key();
+    let mut files = HashMap::new();
+    files.insert("/denied.bin".to_string(), vec![0u8; 64]);
+    let server = start_sftp_server(SftpServerConfig {
+        files,
+        deny_open: true,
+        ..Default::default()
+    })
+    .await;
+    let pool = common::test_pool("sftp-perm-denied").await;
+    seed_matching_host_key(
+        &pool,
+        &server.addr.ip().to_string(),
+        server.addr.port(),
+        &server.host_key_fingerprint,
+    )
+    .await;
+    let paths = common::TestPaths::new("sftp-perm-denied");
+    let url = format!(
+        "sftp://{}:{}/denied.bin",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let task = common::download_task(
+        "sftp-perm-denied",
+        url,
+        "sftp",
+        "denied.bin",
+        64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert SFTP task");
+    db::upsert_task_credentials(&pool, &task.id, "sftp", "u", "p", None, None)
+        .await
+        .expect("store credentials");
+
+    let error = new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("permission denied must fail download");
+    assert_eq!(error_code(&error), "sftp_permission_denied");
+    assert!(!paths.final_path.exists());
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_host_key_mismatch_then_forget_and_retry() {
+    common::install_test_secret_key();
+    let payload = b"after-forget".to_vec();
+    let mut files = HashMap::new();
+    files.insert("/file.bin".to_string(), payload.clone());
+    let server = start_sftp_server_with_files(files).await;
+    let pool = common::test_pool("sftp-hostkey-download").await;
+    let host = server.addr.ip().to_string();
+    let port = server.addr.port();
+    seed_mismatched_host_key(&pool, &host, port).await;
+
+    let paths = common::TestPaths::new("sftp-hostkey-download");
+    let url = format!("sftp://{host}:{port}/file.bin");
+    let task = common::download_task(
+        "sftp-hostkey-download",
+        url,
+        "sftp",
+        "file.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert SFTP task");
+    db::upsert_task_credentials(&pool, &task.id, "sftp", "u", "p", None, None)
+        .await
+        .expect("store credentials");
+
+    let engine = new_engine();
+    let error = engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            task.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("host-key mismatch must fail closed");
+    assert_eq!(error_code(&error), "sftp_host_key_changed");
+    let DownloadError::Other(message) = &error else {
+        panic!("expected Other");
+    };
+    assert!(
+        message.contains("manage_sftp_host_keys") && message.contains("retry"),
+        "recovery actions missing: {message}"
+    );
+
+    assert!(
+        db::forget_sftp_known_host(&pool, &host, port)
+            .await
+            .expect("forget"),
+        "forget should delete mismatched row"
+    );
+
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("download after forget should TOFU and succeed");
+    assert_eq!(
+        std::fs::read(&paths.final_path).expect("read final"),
+        payload
+    );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
+    common::install_test_secret_key();
+    let payload: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let mut files = HashMap::new();
+    files.insert("/resume.bin".to_string(), payload.clone());
+    let server = start_sftp_server(SftpServerConfig {
+        files,
+        read_chunk_delay: Some(std::time::Duration::from_millis(50)),
+        ..Default::default()
+    })
+    .await;
+    let pool = common::test_pool("sftp-pause-resume").await;
+    seed_matching_host_key(
+        &pool,
+        &server.addr.ip().to_string(),
+        server.addr.port(),
+        &server.host_key_fingerprint,
+    )
+    .await;
+    let paths = common::TestPaths::new("sftp-pause-resume");
+    let url = format!(
+        "sftp://{}:{}/resume.bin",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let task = common::download_task(
+        "sftp-pause-resume",
+        url,
+        "sftp",
+        "resume.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert SFTP task");
+    db::upsert_task_credentials(&pool, &task.id, "sftp", "u", "p", None, None)
+        .await
+        .expect("store credentials");
+
+    let engine = new_engine();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let first = tokio::spawn({
+        let engine = engine.clone();
+        let context = common::headless_download_context(pool.clone(), task.clone(), cancel.clone());
+        async move { engine.download(context).await }
+    });
+
+    let partial = loop {
+        let segments = db::list_segment_records(&pool, "sftp-pause-resume")
+            .await
+            .expect("list segments");
+        if let Some(downloaded) = segments
+            .first()
+            .map(|segment| segment.downloaded_until)
+            .filter(|downloaded| *downloaded > 0)
+        {
+            break downloaded;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+    assert!(partial < payload.len() as i64);
+    cancel.cancel();
+    first
+        .await
+        .expect("join")
+        .expect("SFTP cancellation is a clean pause boundary");
+
+    let current = db::get_task_record(&pool, "sftp-pause-resume")
+        .await
+        .expect("read")
+        .expect("exists");
+    let no_app = Option::<tauri::AppHandle>::None;
+    tauri_app_lib::state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &current.id,
+        tauri_app_lib::models::TaskStatus::Paused,
+        current.downloaded_bytes,
+        0,
+        Some("Paused"),
+        Some("paused"),
+        None,
+        tauri_app_lib::models::SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist pause");
+    let resumed = tauri_app_lib::state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &current.id,
+        tauri_app_lib::models::TaskStatus::Downloading,
+        current.downloaded_bytes,
+        1,
+        Some("Downloading"),
+        Some("resumed"),
+        None,
+        tauri_app_lib::models::SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist resume");
+
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("resume download");
+
+    assert_eq!(
+        std::fs::read(&paths.final_path).expect("read final"),
+        payload
+    );
+    assert!(!paths.temp.exists());
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_fails_when_socks5_proxy_is_unreachable() {
+    common::install_test_secret_key();
+    let mut files = HashMap::new();
+    files.insert("/via-proxy.bin".to_string(), b"x".to_vec());
+    let server = start_sftp_server_with_files(files).await;
+    let pool = common::test_pool("sftp-proxy-fail").await;
+    seed_matching_host_key(
+        &pool,
+        &server.addr.ip().to_string(),
+        server.addr.port(),
+        &server.host_key_fingerprint,
+    )
+    .await;
+    let paths = common::TestPaths::new("sftp-proxy-fail");
+    let url = format!(
+        "sftp://{}:{}/via-proxy.bin",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let task = common::download_task(
+        "sftp-proxy-fail",
+        url,
+        "sftp",
+        "via-proxy.bin",
+        1,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert SFTP task");
+    db::upsert_task_credentials(&pool, &task.id, "sftp", "u", "p", None, None)
+        .await
+        .expect("store credentials");
+
+    let mut context = common::headless_download_context(
+        pool.clone(),
+        task,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    context.proxy_config = ResolvedProxyConfig {
+        mode: tauri_app_lib::proxy::AppProxyMode::Custom,
+        url: Some("socks5://127.0.0.1:1".into()),
+        no_proxy: None,
+        username: None,
+        password: None,
+    };
+
+    let error = new_engine()
+        .download(context)
+        .await
+        .expect_err("unreachable SOCKS5 must fail SFTP download");
+    let code = error_code(&error);
+    assert!(
+        code == "proxy_connection_failed" || code.contains("proxy"),
+        "expected proxy failure code, got: {code}"
+    );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_rejects_non_socks5_custom_proxy() {
+    common::install_test_secret_key();
+    let mut files = HashMap::new();
+    files.insert("/file.bin".to_string(), vec![1u8; 8]);
+    let server = start_sftp_server_with_files(files).await;
+    let pool = common::test_pool("sftp-proxy-unsupported").await;
+    seed_matching_host_key(
+        &pool,
+        &server.addr.ip().to_string(),
+        server.addr.port(),
+        &server.host_key_fingerprint,
+    )
+    .await;
+    let paths = common::TestPaths::new("sftp-proxy-unsupported");
+    let url = format!(
+        "sftp://{}:{}/file.bin",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let task = common::download_task(
+        "sftp-proxy-unsupported",
+        url,
+        "sftp",
+        "file.bin",
+        8,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert SFTP task");
+    db::upsert_task_credentials(&pool, &task.id, "sftp", "u", "p", None, None)
+        .await
+        .expect("store credentials");
+
+    let mut context = common::headless_download_context(
+        pool.clone(),
+        task,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    // Probe uses the engine SharedProxyConfig; download uses context.proxy_config.
+    context.proxy_config = ResolvedProxyConfig {
+        mode: tauri_app_lib::proxy::AppProxyMode::Custom,
+        url: Some("http://127.0.0.1:8080".into()),
+        no_proxy: None,
+        username: None,
+        password: None,
+    };
+
+    let error = new_engine()
+        .download(context)
+        .await
+        .expect_err("HTTP custom proxy must be rejected for SFTP");
+    assert_eq!(error_code(&error), "sftp_proxy_unsupported");
+    pool.close().await;
 }

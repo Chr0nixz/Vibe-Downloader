@@ -1,5 +1,6 @@
 import type { TFunction } from "i18next";
 import type { RecoveryAction } from "@/generated/bindings";
+import { ERROR_CODE_I18N_MAP } from "@/lib/stable-error-codes";
 
 export interface AppErrorPayload {
   code: string;
@@ -17,6 +18,8 @@ const SUPPORTED_RECOVERY_ACTIONS = new Set<RecoveryAction>([
   "open_folder",
   "check_url",
   "free_disk_space",
+  "configure_ffmpeg",
+  "manage_sftp_host_keys",
 ]);
 
 export function parseAppError(error: unknown): AppErrorPayload | null {
@@ -38,20 +41,6 @@ export function errorMessage(error: unknown): string {
   return String(error);
 }
 
-const ERROR_CODE_I18N_MAP: Record<string, string> = {
-  duplicate_task: "errors.duplicateTask",
-  final_path_conflict: "errors.finalPathConflict",
-  remote_changed: "errors.remoteChanged",
-  resume_unavailable: "errors.resumeUnavailable",
-  temp_file_missing: "errors.tempFileMissing",
-  temp_file_smaller_than_progress: "errors.tempFileSmaller",
-  disk_write_failed: "errors.diskWriteFailed",
-  auth_headers_expired: "errors.authHeadersExpired",
-  http_denied: "errors.httpDenied",
-  http_not_found: "errors.httpNotFound",
-  server_rate_limited: "errors.serverRateLimited",
-};
-
 export function errorCodeToI18nKey(code: string): string | null {
   return ERROR_CODE_I18N_MAP[code] ?? null;
 }
@@ -72,6 +61,8 @@ export function localizedErrorMessage(error: unknown, t: TFunction): string {
     }
     const i18nKey = errorCodeToI18nKey(payload.code);
     if (i18nKey) return t(i18nKey);
+    // UX-11: never surface raw English backend messages for structured codes.
+    return t("errors.unknownError");
   }
   return localizedMessage(errorMessage(error), t) ?? "";
 }
@@ -137,18 +128,27 @@ function fallbackActionsForCode(code: string): RecoveryAction[] {
       return ["choose_another_name", "choose_another_folder", "retry"];
     case "remote_changed":
     case "resume_unavailable":
+    case "resume_mismatch":
     case "temp_file_missing":
     case "temp_file_smaller_than_progress":
       return ["restart", "open_folder"];
     case "disk_write_failed":
       return ["free_disk_space", "choose_another_folder", "retry"];
     case "auth_headers_expired":
+    case "auth_headers_unavailable":
       return ["check_url", "restart"];
     case "http_denied":
     case "http_not_found":
       return ["check_url", "retry"];
     case "server_rate_limited":
       return ["retry_later"];
+    case "hls_ffmpeg_missing":
+    case "dash_ffmpeg_missing":
+    case "ffmpeg_missing":
+    case "ffmpeg_not_found":
+      return ["configure_ffmpeg"];
+    case "sftp_host_key_changed":
+      return ["manage_sftp_host_keys", "retry"];
     default:
       return [];
   }

@@ -27,12 +27,13 @@ async fn full_migration_on_fresh_database() {
 
     // Baseline consolidation: the original 14 incremental migrations were
     // merged into a single `001_init.sql`, followed by metalink health, HLS track
-    // selection, ARC-01 source_key unique drop, and ARC-02 final_path unique.
+    // selection, ARC-01 source_key unique drop, ARC-02 final_path unique, and
+    // FUN-09 metalink resource validators.
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await
         .expect("count migrations");
-    assert_eq!(count, 5, "expected exactly 5 migrations, got {count}");
+    assert_eq!(count, 6, "expected exactly 6 migrations, got {count}");
 
     pool.close().await;
 }
@@ -469,6 +470,8 @@ async fn migration_002_adds_metalink_health_columns() {
         "cooldown_until",
         "avg_speed_bps",
         "supports_range",
+        "etag",
+        "last_modified",
     ] {
         assert!(
             columns.iter().any(|c| c == expected),
@@ -613,8 +616,8 @@ async fn migration_idempotent_on_reconnect() {
         .await
         .expect("count");
     assert_eq!(
-        count, 5,
-        "expected exactly 5 migrations on reconnect, got {count}"
+        count, 6,
+        "expected exactly 6 migrations on reconnect, got {count}"
     );
     pool2.close().await;
 
@@ -807,6 +810,8 @@ async fn explicit_reset_after_dirty_produces_clean_schema() {
         "cooldown_until",
         "avg_speed_bps",
         "supports_range",
+        "etag",
+        "last_modified",
     ] {
         assert!(
             columns.iter().any(|c| c == expected),

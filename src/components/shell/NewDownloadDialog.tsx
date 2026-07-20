@@ -34,10 +34,21 @@ import type {
   ProbedFile,
   ProbeTaskPayload,
   SftpDirectoryProbe,
+  TaskPriority,
+  TaskProxyMode,
   WebDavDirectoryProbe,
 } from "@/generated/bindings";
+import {
+  applyDraftToCreateTaskInput,
+  type CreateDraftShared,
+  draftHashFields,
+  toDirectoryProbeInput,
+  toImportUrlsInput,
+  toProbeTaskInput,
+} from "@/lib/create-draft";
 import { localizedErrorMessage, parseAppError } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
+import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput } from "@/lib/speed-limit";
 import {
   createTask,
   importUrls,
@@ -371,6 +382,39 @@ export function NewDownloadDialog({
   // state is preserved across toggles so a user can hide/show without losing
   // their input; submit/detect pass null when this is false.
   const [useCredentials, setUseCredentials] = useState(false);
+  // FUN-17: shared create-draft fields reachable from both single and batch modes.
+  const [priority, setPriority] = useState<TaskPriority>("normal");
+  const [categoryKey, setCategoryKey] = useState("");
+  const [speedAmount, setSpeedAmount] = useState("");
+  const [speedUnit, setSpeedUnit] = useState("1048576");
+  const [proxyMode, setProxyMode] = useState<TaskProxyMode>("inherit");
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [proxyUsername, setProxyUsername] = useState("");
+  const [proxyPassword, setProxyPassword] = useState("");
+  const [proxyNoProxy, setProxyNoProxy] = useState("");
+
+  function buildSharedDraft(options?: { allowDuplicate?: boolean; skipHash?: boolean }): CreateDraftShared {
+    const skipHash = options?.skipHash ?? false;
+    const hashFields = draftHashFields(expectedHash, expectedHashAlgorithm, skipHash);
+    const speedBytes = speedLimitBytesFromInput(speedAmount, speedUnit);
+    const taskSpeedLimitBps = speedBytes === undefined || speedBytes == null ? null : String(speedBytes);
+    return {
+      username: useCredentials ? username.trim() || null : null,
+      password: useCredentials ? password || null : null,
+      privateKeyData: useCredentials ? privateKeyData || null : null,
+      privateKeyPassphrase: useCredentials ? privateKeyPassphrase || null : null,
+      ...hashFields,
+      taskSpeedLimitBps,
+      priority,
+      categoryKey: categoryKey.trim() || null,
+      allowDuplicate: options?.allowDuplicate ?? null,
+      proxyMode: proxyMode === "inherit" ? null : proxyMode,
+      proxyUrl: proxyMode === "custom" ? proxyUrl.trim() || null : null,
+      proxyUsername: proxyMode === "custom" ? proxyUsername.trim() || null : null,
+      proxyPassword: proxyMode === "custom" ? proxyPassword || null : null,
+      proxyNoProxy: proxyMode === "custom" ? proxyNoProxy.trim() || null : null,
+    };
+  }
 
   function setFormError(err: unknown) {
     setError(localizedErrorMessage(err, t));
@@ -448,20 +492,8 @@ export function NewDownloadDialog({
     setProbeUrl("");
     setRemoteDirectoryProbe(null);
     try {
-      const nextProbe = await probeTask({
-        url: nextUrl,
-        username: useCredentials ? username.trim() || null : null,
-        password: useCredentials ? password || null : null,
-        privateKeyData: useCredentials ? privateKeyData || null : null,
-        privateKeyPassphrase: useCredentials ? privateKeyPassphrase || null : null,
-        requestId: String(requestId),
-        // FUN-02: inherit global proxy at probe time until create dialog exposes overrides.
-        proxyMode: null,
-        proxyUrl: null,
-        proxyUsername: null,
-        proxyPassword: null,
-        proxyNoProxy: null,
-      });
+      const draft = buildSharedDraft({ skipHash: true });
+      const nextProbe = await probeTask(toProbeTaskInput(nextUrl, draft, String(requestId)));
       if (requestId !== probeRequestId.current) return;
       setProbe(nextProbe);
       setProbeUrl(nextUrl);
@@ -507,12 +539,14 @@ export function NewDownloadDialog({
     setRemoteDirectoryLoading(true);
     setError(null);
     try {
+      const draft = buildSharedDraft({ skipHash: true });
+      const input = toDirectoryProbeInput(nextUrl, draft);
       setRemoteDirectoryProbe(
         /^webdavs?:\/\//i.test(nextUrl)
-          ? await probeWebdavDirectory(nextUrl)
+          ? await probeWebdavDirectory(input)
           : /^sftp:\/\//i.test(nextUrl)
-            ? await probeSftpDirectory(nextUrl)
-            : await probeFtpDirectory(nextUrl),
+            ? await probeSftpDirectory(input)
+            : await probeFtpDirectory(input),
       );
     } catch (err) {
       setError(localizedErrorMessage(err, t));
@@ -585,49 +619,27 @@ export function NewDownloadDialog({
     setDuplicateOverrideAvailable(false);
     setSubmitStatus(currentProbe ? t("newDownload.usingProbe") : t("newDownload.revalidating"));
     try {
-      const task = await createTask({
-        url: currentUrl,
-        saveDir: saveDir.trim() || null,
-        fileName: fileName.trim() || null,
-        // F-5: prefer multi-algorithm fields. Legacy `expectedHashSha256` is
-        // kept null — backend falls back to it only for older callers. When
-        // the chosen algorithm is sha256, also mirror to `expectedHashSha256`
-        // so older backend builds (if any) still pick up the digest.
-        expectedHash:
-          currentIsTorrentProbe || currentIsMetalinkProbe || currentIsHlsProbe || currentIsDashProbe
-            ? null
-            : expectedHash.trim() || null,
-        expectedHashAlgorithm,
-        expectedHashSha256:
-          currentIsTorrentProbe ||
-          currentIsMetalinkProbe ||
-          currentIsHlsProbe ||
-          currentIsDashProbe ||
-          expectedHashAlgorithm !== "sha256"
-            ? null
-            : expectedHash.trim() || null,
-        taskSpeedLimitBps: null,
-        priority: null,
-        categoryKey: null,
-        probeSnapshot: currentProbe,
-        selectedFilePaths,
+      const draft = buildSharedDraft({
         allowDuplicate,
-        username: useCredentials ? username.trim() || null : null,
-        password: useCredentials ? password || null : null,
-        privateKeyData: useCredentials ? privateKeyData || null : null,
-        privateKeyPassphrase: useCredentials ? privateKeyPassphrase || null : null,
-        selectedHlsVariantUri: currentIsHlsProbe && selectedHlsVariantUri ? selectedHlsVariantUri : null,
-        selectedHlsAudioTrackUris:
-          currentIsHlsProbe && selectedHlsAudioTrackUris.length > 0 ? selectedHlsAudioTrackUris : null,
-        selectedHlsSubtitleTrackUris:
-          currentIsHlsProbe && selectedHlsSubtitleTrackUris.length > 0 ? selectedHlsSubtitleTrackUris : null,
-        // FUN-02: inherit global proxy; TaskDetails can override after create.
-        proxyMode: null,
-        proxyUrl: null,
-        proxyUsername: null,
-        proxyPassword: null,
-        proxyNoProxy: null,
+        skipHash: currentIsTorrentProbe || currentIsMetalinkProbe || currentIsHlsProbe || currentIsDashProbe,
       });
+      const task = await createTask(
+        applyDraftToCreateTaskInput(
+          {
+            url: currentUrl,
+            saveDir: saveDir.trim() || null,
+            fileName: fileName.trim() || null,
+            probeSnapshot: currentProbe,
+            selectedFilePaths,
+            selectedHlsVariantUri: currentIsHlsProbe && selectedHlsVariantUri ? selectedHlsVariantUri : null,
+            selectedHlsAudioTrackUris:
+              currentIsHlsProbe && selectedHlsAudioTrackUris.length > 0 ? selectedHlsAudioTrackUris : null,
+            selectedHlsSubtitleTrackUris:
+              currentIsHlsProbe && selectedHlsSubtitleTrackUris.length > 0 ? selectedHlsSubtitleTrackUris : null,
+          },
+          draft,
+        ),
+      );
       onCreated(task);
       resetForm();
       onOpenChange(false);
@@ -668,6 +680,15 @@ export function NewDownloadDialog({
     setSelectedHlsSubtitleTrackUris([]);
     setMode("single");
     setUseCredentials(false);
+    setPriority("normal");
+    setCategoryKey("");
+    setSpeedAmount("");
+    setSpeedUnit("1048576");
+    setProxyMode("inherit");
+    setProxyUrl("");
+    setProxyUsername("");
+    setProxyPassword("");
+    setProxyNoProxy("");
   }
 
   async function chooseDirectory() {
@@ -696,8 +717,11 @@ export function NewDownloadDialog({
       } else {
         try {
           const text = await readFileAsText(picked.path);
+          // UX-04: enter batch mode and preview immediately, matching handoff.
           setBatchInput(text);
+          setMode("batch");
           setAdvancedOpen(true);
+          void runBatch(false, text);
         } catch (err) {
           log.warn("failed to read text file", err);
           setError(localizedErrorMessage(err, t));
@@ -744,12 +768,8 @@ export function NewDownloadDialog({
     setSubmitting(create);
     setError(null);
     try {
-      const result = await importUrls({
-        input,
-        saveDir: saveDir.trim() || null,
-        probe: true,
-        create,
-      });
+      const draft = buildSharedDraft({ allowDuplicate: false });
+      const result = await importUrls(toImportUrlsInput(input, saveDir.trim() || null, create, draft));
       setBatchResult(result);
       for (const item of result.items) {
         if (item.task) onCreated(normalizeTask(item.task));
@@ -1445,6 +1465,27 @@ export function NewDownloadDialog({
                         />
                       </div>
                     ) : null}
+
+                    <SharedCreateDraftFields
+                      priority={priority}
+                      setPriority={setPriority}
+                      categoryKey={categoryKey}
+                      setCategoryKey={setCategoryKey}
+                      speedAmount={speedAmount}
+                      setSpeedAmount={setSpeedAmount}
+                      speedUnit={speedUnit}
+                      setSpeedUnit={setSpeedUnit}
+                      proxyMode={proxyMode}
+                      setProxyMode={setProxyMode}
+                      proxyUrl={proxyUrl}
+                      setProxyUrl={setProxyUrl}
+                      proxyUsername={proxyUsername}
+                      setProxyUsername={setProxyUsername}
+                      proxyPassword={proxyPassword}
+                      setProxyPassword={setProxyPassword}
+                      proxyNoProxy={proxyNoProxy}
+                      setProxyNoProxy={setProxyNoProxy}
+                    />
                   </div>
                 ) : null}
               </>
@@ -1513,6 +1554,77 @@ export function NewDownloadDialog({
                     </Button>
                   </div>
                 </label>
+
+                {/* FUN-17: batch shares the same create-draft overrides as single create. */}
+                <div className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3">
+                  <label htmlFor="new-download-use-credentials-batch" className="flex cursor-pointer items-start gap-2">
+                    <Checkbox
+                      id="new-download-use-credentials-batch"
+                      checked={useCredentials}
+                      onChange={(event) => setUseCredentials(event.target.checked)}
+                      aria-label={t("newDownload.useCredentials")}
+                    />
+                    <span>
+                      <span className="block text-xs font-medium text-text-secondary">
+                        {t("newDownload.useCredentials")}
+                      </span>
+                      <span className="block text-[11px] leading-4 text-text-muted">
+                        {t("newDownload.useCredentialsHint")}
+                      </span>
+                    </span>
+                  </label>
+                  {useCredentials ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <label
+                        htmlFor="new-download-username-batch"
+                        className="flex flex-col gap-1 text-xs text-text-muted"
+                      >
+                        {t("newDownload.authUsername")}
+                        <Input
+                          id="new-download-username-batch"
+                          value={username}
+                          onChange={(event) => setUsername(event.target.value)}
+                          className="h-8"
+                          autoComplete="username"
+                        />
+                      </label>
+                      <label
+                        htmlFor="new-download-password-batch"
+                        className="flex flex-col gap-1 text-xs text-text-muted"
+                      >
+                        {t("newDownload.authPassword")}
+                        <Input
+                          id="new-download-password-batch"
+                          type="password"
+                          value={password}
+                          onChange={(event) => setPassword(event.target.value)}
+                          className="h-8"
+                          autoComplete="current-password"
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+                  <SharedCreateDraftFields
+                    priority={priority}
+                    setPriority={setPriority}
+                    categoryKey={categoryKey}
+                    setCategoryKey={setCategoryKey}
+                    speedAmount={speedAmount}
+                    setSpeedAmount={setSpeedAmount}
+                    speedUnit={speedUnit}
+                    setSpeedUnit={setSpeedUnit}
+                    proxyMode={proxyMode}
+                    setProxyMode={setProxyMode}
+                    proxyUrl={proxyUrl}
+                    setProxyUrl={setProxyUrl}
+                    proxyUsername={proxyUsername}
+                    setProxyUsername={setProxyUsername}
+                    proxyPassword={proxyPassword}
+                    setProxyPassword={setProxyPassword}
+                    proxyNoProxy={proxyNoProxy}
+                    setProxyNoProxy={setProxyNoProxy}
+                  />
+                </div>
               </>
             )}
 
@@ -1640,6 +1752,151 @@ function FileRow({
         {formatBytes(size)}
       </span>
     </label>
+  );
+}
+
+function SharedCreateDraftFields({
+  priority,
+  setPriority,
+  categoryKey,
+  setCategoryKey,
+  speedAmount,
+  setSpeedAmount,
+  speedUnit,
+  setSpeedUnit,
+  proxyMode,
+  setProxyMode,
+  proxyUrl,
+  setProxyUrl,
+  proxyUsername,
+  setProxyUsername,
+  proxyPassword,
+  setProxyPassword,
+  proxyNoProxy,
+  setProxyNoProxy,
+}: {
+  priority: TaskPriority;
+  setPriority: (value: TaskPriority) => void;
+  categoryKey: string;
+  setCategoryKey: (value: string) => void;
+  speedAmount: string;
+  setSpeedAmount: (value: string) => void;
+  speedUnit: string;
+  setSpeedUnit: (value: string) => void;
+  proxyMode: TaskProxyMode;
+  setProxyMode: (value: TaskProxyMode) => void;
+  proxyUrl: string;
+  setProxyUrl: (value: string) => void;
+  proxyUsername: string;
+  setProxyUsername: (value: string) => void;
+  proxyPassword: string;
+  setProxyPassword: (value: string) => void;
+  proxyNoProxy: string;
+  setProxyNoProxy: (value: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-col gap-3 border-t border-border-subtle pt-3">
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex flex-col gap-1 text-xs text-text-muted">
+          <span id="new-download-priority-label">{t("newDownload.priority")}</span>
+          <Select value={priority} onValueChange={(value) => setPriority(value as TaskPriority)}>
+            <SelectTrigger aria-labelledby="new-download-priority-label" className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="high">{t("taskDetails.priorityHigh")}</SelectItem>
+              <SelectItem value="normal">{t("taskDetails.priorityNormal")}</SelectItem>
+              <SelectItem value="low">{t("taskDetails.priorityLow")}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <label htmlFor="new-download-category" className="flex flex-col gap-1 text-xs text-text-muted">
+          {t("newDownload.category")}
+          <Input
+            id="new-download-category"
+            value={categoryKey}
+            onChange={(event) => setCategoryKey(event.target.value)}
+            placeholder={t("newDownload.categoryPlaceholder")}
+            className="h-8"
+          />
+        </label>
+      </div>
+      <div className="flex flex-col gap-1 text-xs text-text-muted">
+        <span>{t("newDownload.taskSpeedLimit")}</span>
+        <div className="flex gap-2">
+          <Input
+            value={speedAmount}
+            onChange={(event) => setSpeedAmount(event.target.value)}
+            placeholder={t("speedLimit.unlimited")}
+            className="h-8"
+            inputMode="decimal"
+          />
+          <Select value={speedUnit} onValueChange={setSpeedUnit}>
+            <SelectTrigger aria-label={t("newDownload.taskSpeedLimit")} className="h-8 w-28 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SPEED_LIMIT_UNITS.map((unit) => (
+                <SelectItem key={unit.value} value={unit.value}>
+                  {unit.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-1 text-xs text-text-muted">
+          <span id="new-download-proxy-mode-label">{t("settings.proxyMode")}</span>
+          <Select value={proxyMode} onValueChange={(value) => setProxyMode(value as TaskProxyMode)}>
+            <SelectTrigger aria-labelledby="new-download-proxy-mode-label" className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inherit">{t("taskDetails.proxyInherit")}</SelectItem>
+              <SelectItem value="off">{t("taskDetails.proxyOff")}</SelectItem>
+              <SelectItem value="custom">{t("taskDetails.proxyCustom")}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        {proxyMode === "custom" ? (
+          <div className="grid gap-2">
+            <Input
+              value={proxyUrl}
+              onChange={(event) => setProxyUrl(event.target.value)}
+              placeholder={t("settings.proxyUrlPlaceholder")}
+              className="h-8 font-mono text-xs"
+              aria-label={t("settings.proxyUrl")}
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <Input
+                value={proxyUsername}
+                onChange={(event) => setProxyUsername(event.target.value)}
+                placeholder={t("settings.proxyUsername")}
+                className="h-8"
+                aria-label={t("settings.proxyUsername")}
+              />
+              <Input
+                type="password"
+                value={proxyPassword}
+                onChange={(event) => setProxyPassword(event.target.value)}
+                placeholder={t("settings.proxyPassword")}
+                className="h-8"
+                aria-label={t("settings.proxyPassword")}
+              />
+            </div>
+            <Input
+              value={proxyNoProxy}
+              onChange={(event) => setProxyNoProxy(event.target.value)}
+              placeholder={t("settings.proxyNoProxyPlaceholder")}
+              className="h-8 font-mono text-xs"
+              aria-label={t("settings.proxyNoProxy")}
+            />
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 

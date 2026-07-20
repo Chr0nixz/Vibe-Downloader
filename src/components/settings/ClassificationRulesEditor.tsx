@@ -243,7 +243,7 @@ function RuleRow({
           type="button"
           onClick={onDelete}
           disabled={disabled}
-          className="rounded px-2 py-1 text-xs text-text-danger hover:bg-surface-hover disabled:opacity-50"
+          className="rounded px-2 py-1 text-xs text-status-danger hover:bg-surface-hover disabled:opacity-50"
         >
           {t("settings.deleteClassificationRule")}
         </button>

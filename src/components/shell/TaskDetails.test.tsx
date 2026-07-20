@@ -130,6 +130,12 @@ describe("TaskDetails", () => {
     mocks.listTaskEventsPage.mockResolvedValue({ items: [], nextCursor: null });
     mocks.listTaskRequestsPage.mockResolvedValue({ items: [], nextCursor: null });
     mocks.onTaskUpdated.mockResolvedValue(mocks.unlisten);
+    // ScrollArea (Radix) needs ResizeObserver in jsdom.
+    globalThis.ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
   });
 
   it("loads only the data required by the selected detail tab", async () => {
@@ -190,5 +196,76 @@ describe("TaskDetails", () => {
     await waitFor(() => expect(close).toHaveFocus());
     await user.click(close);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a close button in the wide detail sidebar", async () => {
+    const user = userEvent.setup();
+    layout.compact = false;
+    const task = makeTask("task-wide-close", "wide.zip");
+    seedTasks([task]);
+    const { onClose } = renderDetails(task.id);
+
+    expect(screen.getByRole("complementary")).toBeInTheDocument();
+    const close = screen.getByRole("button", { name: "taskDetails.close" });
+    await user.click(close);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("toggles torrent seeding without clearing ratio/time limits", async () => {
+    const user = userEvent.setup();
+    const task = {
+      ...makeTask("task-bt-seed", "seed.torrent"),
+      protocol: "bt" as const,
+      url: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+    };
+    seedTasks([task]);
+    mocks.getTorrentRuntimeSnapshot.mockResolvedValue({
+      taskId: task.id,
+      metadataStatus: "ready",
+      completedPieces: "1",
+      verifiedPieces: "1",
+      pieceCount: "2",
+      pieceBitfieldBase64: null,
+      peerCount: "3",
+      seedCount: null,
+      dhtStatus: null,
+      trackers: [
+        {
+          url: "udp://tracker.example:6969/announce",
+          status: "configured",
+          source: "configured",
+          updatedAt: task.updatedAt,
+          lastError: null,
+        },
+      ],
+      uploadBytes: "0",
+      uploadSpeedBps: "0",
+      ratio: 0,
+      seedingEnabled: false,
+      seedingState: "disabled",
+      seedRatioLimit: 1.5,
+      seedTimeLimitSeconds: "3600",
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      updatedAt: task.updatedAt,
+    });
+    mocks.updateTorrentSeeding.mockResolvedValue(task);
+
+    renderDetails(task.id);
+
+    await waitFor(() => expect(screen.getByText("taskDetails.btTrackersConfiguredOnly")).toBeInTheDocument());
+    expect(screen.getByText("taskDetails.btPeersOnly")).toBeInTheDocument();
+
+    const seedingSwitch = screen.getByRole("switch", { name: "taskDetails.btSeeding" });
+    await user.click(seedingSwitch);
+
+    await waitFor(() => expect(mocks.updateTorrentSeeding).toHaveBeenCalled());
+    expect(mocks.updateTorrentSeeding).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: task.id,
+        enabled: true,
+        updateLimits: false,
+      }),
+    );
   });
 });

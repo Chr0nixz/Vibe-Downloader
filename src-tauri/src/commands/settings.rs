@@ -286,6 +286,24 @@ pub async fn update_settings(
     Ok(settings)
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn list_sftp_known_hosts(
+    state: State<'_, AppState>,
+) -> Result<Vec<db::SftpKnownHost>, String> {
+    db::list_sftp_known_hosts(&state.pool).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn forget_sftp_known_host(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+) -> Result<bool, String> {
+    db::forget_sftp_known_host(&state.pool, &host, port).await
+}
+
 pub fn default_download_dir(app: &AppHandle) -> Result<String, String> {
     app.path()
         .download_dir()

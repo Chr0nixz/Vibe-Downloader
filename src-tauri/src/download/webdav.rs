@@ -8,8 +8,9 @@ use reqwest::{
 };
 
 use super::{
-    engine::EngineFuture, http::HttpEngine, DownloadContext, DownloadEngine, DownloadError,
-    ProbeOutput, ProbeRequest,
+    engine::EngineFuture, http::HttpEngine, read_body_limited, DownloadContext, DownloadEngine,
+    DownloadError, LimitedBodyError, ProbeOutput, ProbeRequest, CONTROL_PLANE_MAX_BYTES,
+    READ_IDLE_TIMEOUT,
 };
 use crate::{
     db,
@@ -169,8 +170,20 @@ impl DownloadEngine for WebDavEngine {
 pub async fn probe_webdav_directory_url(
     input_url: &str,
     proxy_config: ResolvedProxyConfig,
+    credentials: Option<&crate::db::TaskCredentials>,
 ) -> Result<WebDavDirectoryProbe, String> {
-    let target = WebDavTarget::parse_directory(input_url)?;
+    let mut target = WebDavTarget::parse_directory(input_url)?;
+    // FUN-04: prefer URL-embedded credentials; otherwise apply draft credentials.
+    if target.credentials.is_none() {
+        if let Some(creds) = credentials {
+            if !creds.username.is_empty() || !creds.password.is_empty() {
+                target.credentials = Some(WebDavCredentials {
+                    username: creds.username.clone(),
+                    password: creds.password.clone(),
+                });
+            }
+        }
+    }
     let client = super::http::build_client(&proxy_config)?;
     let credentials = target.credentials.clone();
     let headers = webdav_request_headers(&[], credentials.as_ref());
@@ -201,10 +214,32 @@ pub async fn probe_webdav_directory_url(
         )
     })?;
     let status = response.status();
-    let text = response
-        .text()
+    let text = match read_body_limited(response, CONTROL_PLANE_MAX_BYTES, None, READ_IDLE_TIMEOUT)
         .await
-        .map_err(|e| format!("Could not read WebDAV directory response: {e}"))?;
+    {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map_err(|_| "WebDAV PROPFIND response is not valid UTF-8.".to_string())?,
+        Err(LimitedBodyError::TooLarge) => {
+            return Err(engine_error(
+                "webdav_propfind_too_large",
+                format!(
+                    "WebDAV PROPFIND response exceeds the {CONTROL_PLANE_MAX_BYTES} byte safety limit."
+                ),
+                false,
+            ));
+        }
+        Err(LimitedBodyError::Canceled) => return Err("Download canceled.".to_string()),
+        Err(LimitedBodyError::IdleTimeout) => {
+            return Err(engine_error(
+                "webdav_propfind_failed",
+                "WebDAV PROPFIND stalled while reading.",
+                true,
+            ));
+        }
+        Err(LimitedBodyError::Read(error)) => {
+            return Err(format!("Could not read WebDAV directory response: {error}"));
+        }
+    };
     if !status.is_success() {
         return Err(engine_error(
             "webdav_propfind_failed",

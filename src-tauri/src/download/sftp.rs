@@ -360,8 +360,21 @@ pub async fn probe_sftp_directory_url(
     pool: &SqlitePool,
     input_url: &str,
     proxy_config: ResolvedProxyConfig,
+    credentials: Option<&db::TaskCredentials>,
 ) -> Result<SftpDirectoryProbe, String> {
-    let target = SftpTarget::parse_directory(input_url)?;
+    let mut target = SftpTarget::parse_directory(input_url)?;
+    if let Some(creds) = credentials {
+        if !creds.username.is_empty() {
+            target.username = creds.username.clone();
+        }
+        if !creds.password.is_empty() {
+            target.password = creds.password.clone();
+        }
+        if creds.private_key_data.is_some() {
+            target.private_key_data = creds.private_key_data.clone();
+            target.private_key_passphrase = creds.private_key_passphrase.clone();
+        }
+    }
     let mut diagnostics = Vec::new();
     let connection = connect_sftp(pool, &target, &proxy_config).await?;
     let canonical = connection.session.canonicalize(&target.path).await.ok();
@@ -852,11 +865,13 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
     .await?;
 
     let mut remote = session.open(&request.target.path).await.map_err(|e| {
-        engine_error(
-            "sftp_open_failed",
-            format!("Could not open SFTP file: {e}"),
-            true,
-        )
+        let message = e.to_string();
+        let code = if message.to_ascii_lowercase().contains("permission") {
+            "sftp_permission_denied"
+        } else {
+            "sftp_open_failed"
+        };
+        engine_error(code, format!("Could not open SFTP file: {message}"), true)
     })?;
     if offset > 0 {
         remote
@@ -884,6 +899,15 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
             AppErrorPayload::disk_write_failed(format!("Could not open SFTP temp file: {e}"))
                 .command_error()
         })?;
+    // Seek local temp to the resume offset. Without this, resume writes from
+    // byte 0 while the remote stream starts at `offset`, corrupting the file.
+    let mut file = file;
+    file.seek(SeekFrom::Start(u64::try_from(offset).unwrap_or(0)))
+        .await
+        .map_err(|e| {
+            AppErrorPayload::disk_write_failed(format!("Could not seek SFTP temp file: {e}"))
+                .command_error()
+        })?;
     let mut file = BufWriter::with_capacity(SFTP_WORKER_BUFFER_SIZE, file);
 
     let mut buffer = vec![0_u8; SFTP_READ_BUFFER_SIZE];
@@ -893,6 +917,15 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
     loop {
         if request.cancel_token.is_cancelled() {
             let _ = file.flush().await;
+            // Persist the exact resume offset before exiting so the next
+            // engine entry seeks both remote and local temp correctly.
+            let _ = db::update_segment_progress(
+                &request.pool,
+                &request.segment.id,
+                offset,
+                SegmentStatus::Pending,
+            )
+            .await;
             let _ = connection.session.close().await;
             return Err("Download canceled.".to_string());
         }
@@ -922,6 +955,13 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
         let outcome = tokio::select! {
             _ = request.cancel_token.cancelled() => {
                 let _ = file.flush().await;
+                let _ = db::update_segment_progress(
+                    &request.pool,
+                    &request.segment.id,
+                    offset,
+                    SegmentStatus::Pending,
+                )
+                .await;
                 let _ = connection.session.close().await;
                 return Err("Download canceled.".to_string());
             }
