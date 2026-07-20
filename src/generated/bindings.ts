@@ -94,6 +94,9 @@ export const commands = {
 	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
 	listSftpKnownHosts: () => typedError<SftpKnownHost[], string>(__TAURI_INVOKE("list_sftp_known_hosts")),
 	forgetSftpKnownHost: (host: string, port: number) => typedError<boolean, string>(__TAURI_INVOKE("forget_sftp_known_host", { host, port })),
+	createAppBackup: (destinationPath: string) => typedError<BackupCreateResult, string>(__TAURI_INVOKE("create_app_backup", { destinationPath })),
+	validateAppBackup: (backupPath: string) => typedError<BackupValidateResult, string>(__TAURI_INVOKE("validate_app_backup", { backupPath })),
+	restoreAppBackup: (backupPath: string) => typedError<BackupRestoreResult, string>(__TAURI_INVOKE("restore_app_backup", { backupPath })),
 	getStartupStatus: () => typedError<StartupStatus, string>(__TAURI_INVOKE("get_startup_status")),
 	openDatabaseRecoveryFolder: () => typedError<null, string>(__TAURI_INVOKE("open_database_recovery_folder")),
 	openStartupLogFolder: () => typedError<null, string>(__TAURI_INVOKE("open_startup_log_folder")),
@@ -255,6 +258,28 @@ export type AppSettings = {
 	 *  unlimited. Applied to every BT session at creation and synced on reuse.
 	 */
 	btUploadLimitBps: string | null,
+};
+
+export type BackupCreateResult = {
+	path: string,
+	schemaVersion: string,
+	credentialsPolicy: string,
+};
+
+export type BackupRestoreResult = {
+	requiresRestart: boolean,
+	preRestoreBackupPath: string,
+	pendingRestorePath: string,
+	credentialsPolicy: string,
+};
+
+export type BackupValidateResult = {
+	path: string,
+	schemaVersion: string,
+	appVersion: string,
+	createdAt: string,
+	credentialsPolicy: string,
+	databaseBytes: string,
 };
 
 export type BatchImportItem = {

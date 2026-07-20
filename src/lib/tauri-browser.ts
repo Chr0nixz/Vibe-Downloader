@@ -1399,6 +1399,34 @@ export async function exportBrowserExtensionPackages(): Promise<BrowserExtension
   };
 }
 
+export async function createAppBackup(destinationPath: string) {
+  return {
+    path: destinationPath,
+    schemaVersion: "6",
+    credentialsPolicy: "machine_bound_ciphertext",
+  };
+}
+
+export async function validateAppBackup(backupPath: string) {
+  return {
+    path: backupPath,
+    schemaVersion: "6",
+    appVersion: "0.3.0",
+    createdAt: nowIso(),
+    credentialsPolicy: "machine_bound_ciphertext",
+    databaseBytes: "0",
+  };
+}
+
+export async function restoreAppBackup(backupPath: string) {
+  return {
+    requiresRestart: true,
+    preRestoreBackupPath: `${backupPath}.pre-restore`,
+    pendingRestorePath: `${backupPath}.pending`,
+    credentialsPolicy: "machine_bound_ciphertext",
+  };
+}
+
 export async function createTask(input: CreateTaskInput): Promise<Task> {
   const now = nowIso();
   const normalizedUrl = input.url.trim();

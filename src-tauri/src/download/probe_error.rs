@@ -31,7 +31,10 @@ pub(crate) fn reqwest_error_to_structured(error: &reqwest::Error) -> String {
         "network_error"
     };
 
-    let recoverable = matches!(code, "timeout" | "network_error" | "connection_refused");
+    let recoverable = matches!(
+        code,
+        "timeout" | "network_error" | "connection_refused" | "proxy_connection_failed"
+    );
     let actions: Vec<&str> = if recoverable {
         vec!["retry", "check_url"]
     } else {
@@ -55,6 +58,11 @@ fn classify_connect_error(error: &reqwest::Error) -> &'static str {
             || msg.contains("nodename nor servname")
         {
             return "dns_failure";
+        }
+        // Prefer proxy-tagged failures over generic connection_refused so
+        // SOCKS/HTTP proxy misconfig does not look like a direct-origin outage.
+        if msg.contains("socks") || msg.contains("proxy") {
+            return "proxy_connection_failed";
         }
         if msg.contains("connection refused") || msg.contains("actively refused") {
             return "connection_refused";
@@ -90,6 +98,8 @@ pub(crate) fn classify_error_message(message: &str) -> Option<String> {
     } else if lower.contains("timeout") || lower.contains("timed out") || lower.contains("deadline")
     {
         "timeout"
+    } else if lower.contains("socks") || lower.contains("proxy") {
+        "proxy_connection_failed"
     } else if lower.contains("connection refused") || lower.contains("actively refused") {
         "connection_refused"
     } else if lower.contains("certificate") || lower.contains("ssl") || lower.contains("tls") {
@@ -102,7 +112,7 @@ pub(crate) fn classify_error_message(message: &str) -> Option<String> {
 
     let recoverable = matches!(
         code,
-        "timeout" | "connection_refused" | "network_unreachable"
+        "timeout" | "connection_refused" | "network_unreachable" | "proxy_connection_failed"
     );
     let actions: Vec<&str> = if recoverable {
         vec!["retry", "check_url"]

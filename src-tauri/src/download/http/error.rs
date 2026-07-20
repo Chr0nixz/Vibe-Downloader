@@ -2,7 +2,7 @@ use reqwest::StatusCode;
 
 use crate::models::AppErrorPayload;
 
-pub(super) fn format_http_status(status: StatusCode) -> String {
+pub(crate) fn format_http_status(status: StatusCode) -> String {
     match status.as_u16() {
         401 | 403 => AppErrorPayload::http_status(
             "http_denied",

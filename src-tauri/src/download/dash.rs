@@ -130,11 +130,24 @@ impl DownloadEngine for DashEngine {
         request: ProbeRequest,
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
+            let credentials = if request.credentials.is_some() {
+                request.credentials.clone()
+            } else if let (Some(pool), Some(task_id)) = (&request.pool, &request.task_id) {
+                db::resolve_task_credentials(pool, task_id)
+                    .await
+                    .map_err(DownloadError::Other)?
+            } else {
+                None
+            };
+            let headers = super::http::merge_basic_auth_headers(
+                &request.request_headers,
+                credentials.as_ref(),
+            );
             let pool = request.pool.as_ref();
             let summary = self
                 .probe_dash(
                     &request.uri,
-                    &request.request_headers,
+                    &headers,
                     pool,
                     &request.app,
                     &request.request_id,
@@ -864,6 +877,10 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
 
     // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
     let client = engine.client_for_config(&proxy_config).await?;
+    // FUN-01 / C5: inject Basic Auth from encrypted task credentials at runtime.
+    let credentials = db::resolve_task_credentials(&pool, &task.id).await?;
+    let request_headers =
+        super::http::merge_basic_auth_headers(&request_headers, credentials.as_ref());
     let mpd_text = fetch_mpd_text(&client, &manifest_url, &request_headers).await?;
     let parsed = parse_dash_manifest(&manifest_url, &mpd_text)?;
     let (video_rep, audio_rep) = select_tracks(&parsed)?;
@@ -1229,7 +1246,7 @@ async fn download_dash_segment_once(
         .await
         .map_err(|e| format!("Could not request DASH segment: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("server returned {}", response.status()));
+        return Err(super::http::format_http_status_error(response.status()));
     }
     if plan.byte_range.is_some() && response.status() != StatusCode::PARTIAL_CONTENT {
         return Err("server did not honor DASH byte range request".to_string());
@@ -1562,7 +1579,7 @@ async fn fetch_mpd_text(
         .await
         .map_err(|e| format!("Could not request DASH MPD: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("DASH MPD returned {}", response.status()));
+        return Err(super::http::format_http_status_error(response.status()));
     }
     let bytes = read_body_limited(response, CONTROL_PLANE_MAX_BYTES, None, READ_IDLE_TIMEOUT)
         .await

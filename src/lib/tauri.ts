@@ -455,6 +455,34 @@ export async function uninstallBrowserIntegration(
   return runCommand("uninstallBrowserIntegration", () => commands.uninstallBrowserIntegration(input));
 }
 
+export async function createAppBackup(destinationPath: string) {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).createAppBackup(destinationPath);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("createAppBackup", () => commands.createAppBackup(destinationPath));
+}
+
+export async function validateAppBackup(backupPath: string) {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).validateAppBackup(backupPath);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("validateAppBackup", () => commands.validateAppBackup(backupPath));
+}
+
+export async function restoreAppBackup(backupPath: string) {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).restoreAppBackup(backupPath);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("restoreAppBackup", () => commands.restoreAppBackup(backupPath));
+}
+
+export type BackupCreateResult = Awaited<ReturnType<typeof createAppBackup>>;
+export type BackupValidateResult = Awaited<ReturnType<typeof validateAppBackup>>;
+export type BackupRestoreResult = Awaited<ReturnType<typeof restoreAppBackup>>;
+
 export async function exportBrowserExtensionPackages(): Promise<BrowserExtensionExportResult> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).exportBrowserExtensionPackages();

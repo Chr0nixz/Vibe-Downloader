@@ -12,10 +12,7 @@ pub use super::task_resume::{
 use crate::{
     db,
     download::{EngineRegistry, ProbeRequest},
-    events::{
-        emit_queue_changed, emit_queue_changed_with_ids, emit_task_progress,
-        emit_task_updated_record,
-    },
+    events::{emit_queue_changed_with_ids, emit_task_progress, emit_task_updated_record},
     models::{
         AppErrorPayload, FtpDirectoryProbe, RecoveryAction, SftpDirectoryProbe, Task,
         TaskChecksumRecord, TaskFileRecord, TaskProxySettings, TaskProxySettingsInput, TaskRecord,
@@ -313,6 +310,83 @@ fn directory_probe_credentials(input: &DirectoryProbeInput) -> Option<db::TaskCr
 
 // --- migrated scheduler functions removed (see crate::scheduler) ---
 
+/// Lists paused tasks whose latest pause reason is schedule auto-pause.
+///
+/// FUN-07: used both when the download window re-opens and when schedule
+/// downloads are disabled, so manually paused tasks are never auto-resumed.
+pub async fn list_tasks_paused_by_schedule(pool: &sqlx::SqlitePool) -> Result<Vec<String>, String> {
+    let paused_ids = db::list_paused_schedulable_tasks(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut schedule_paused = Vec::new();
+    for task_id in paused_ids {
+        let latest_pause = db::get_latest_pause_event_type(pool, &task_id).await?;
+        if latest_pause.as_deref() == Some("paused_by_schedule") {
+            schedule_paused.push(task_id);
+        }
+    }
+    Ok(schedule_paused)
+}
+
+/// Queues schedule-paused tasks back into the download queue.
+///
+/// When `app` is `None` (integration tests), transitions still persist but
+/// queue/progress events and scheduler dispatch are skipped.
+pub async fn resume_schedule_paused_tasks(
+    app: Option<&AppHandle>,
+    pool: &sqlx::SqlitePool,
+    scheduler: Option<std::sync::Arc<crate::scheduler::Scheduler>>,
+) -> Result<Vec<String>, String> {
+    let paused_ids = list_tasks_paused_by_schedule(pool).await?;
+    let mut resumed = Vec::new();
+    let app_handle = app.cloned();
+    for task_id in &paused_ids {
+        tracing::info!(task_id = %task_id, "resuming task: schedule pause cleared");
+        match crate::state_machine::transition_task_with_runtime_state(
+            &app_handle,
+            pool,
+            task_id,
+            TaskStatus::Queued,
+            0,
+            0,
+            Some("Queued"),
+            Some("resumed"),
+            None,
+            crate::models::SegmentStatus::Pending,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(_) => {
+                resumed.push(task_id.clone());
+            }
+            Err(TransitionError::Conflict { .. }) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "schedule auto-resume skipped: concurrent state change"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(task_id = %task_id, error = %error, "schedule auto-resume failed");
+            }
+        }
+    }
+    if !resumed.is_empty() {
+        if let Some(app) = app {
+            emit_queue_changed_with_ids(app, Some(resumed.clone()));
+            if let Some(scheduler) = scheduler {
+                let dispatch_app = app.clone();
+                let dispatch_pool = pool.clone();
+                tauri::async_runtime::spawn(async move {
+                    scheduler.dispatch(dispatch_app, dispatch_pool).await;
+                });
+            }
+        }
+    }
+    Ok(resumed)
+}
+
 /// Enforces the configured download-window schedule by pausing active tasks
 /// when the window is closed and resuming previously schedule-paused tasks
 /// when it opens.  Called periodically by the background monitor and
@@ -323,7 +397,10 @@ pub(crate) async fn check_schedule_preemption(
 ) -> Result<(), String> {
     let default_dir = super::settings::default_download_dir(&app).unwrap_or_default();
     let settings = db::get_settings(&state.pool, default_dir).await?;
+    // FUN-07: disabling schedule downloads must still clear schedule auto-pauses.
     if !settings.schedule_download_window_enabled {
+        resume_schedule_paused_tasks(Some(&app), &state.pool, Some(state.scheduler.clone()))
+            .await?;
         return Ok(());
     }
 
@@ -360,27 +437,8 @@ pub(crate) async fn check_schedule_preemption(
         }
     } else {
         // Window just opened — resume tasks that were paused by schedule.
-        let paused_ids = db::list_paused_schedulable_tasks(&state.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let mut resumed_any = false;
-        for task_id in &paused_ids {
-            let latest_pause = db::get_latest_pause_event_type(&state.pool, task_id).await?;
-            if latest_pause.as_deref() != Some("paused_by_schedule") {
-                continue;
-            }
-            tracing::info!(task_id = %task_id, "resuming task: schedule window opened");
-            if let Err(err) =
-                queue_task_for_retry_with_event(&app, state.inner(), task_id, "resumed", None).await
-            {
-                tracing::warn!(task_id = %task_id, error = %err, "schedule auto-resume failed");
-            }
-            resumed_any = true;
-        }
-        if resumed_any {
-            emit_queue_changed(&app);
-        }
+        resume_schedule_paused_tasks(Some(&app), &state.pool, Some(state.scheduler.clone()))
+            .await?;
     }
 
     Ok(())

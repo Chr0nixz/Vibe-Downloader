@@ -44,7 +44,19 @@ pub async fn begin_immediate(
     pool.begin_with("BEGIN IMMEDIATE").await
 }
 
+async fn run_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
+    sqlx::migrate!("./src/db/migrations").run(pool).await
+}
+
+/// FUN-16: migrate a materialized backup DB (same migrator as live connect).
+pub(crate) async fn run_migrations_for_backup(pool: &SqlitePool) -> Result<(), String> {
+    run_migrations(pool).await.map_err(|e| format!("{e}"))
+}
+
 pub async fn connect_for_startup(db_path: &Path) -> Result<DatabaseConnectOutcome, String> {
+    // FUN-16: apply a staged restore before opening the live pool so an open
+    // handle never blocks replacing the database file on Windows.
+    crate::db::backup::apply_pending_restore_if_any(db_path)?;
     let pool = open_pool(db_path).await?;
 
     match run_migrations(&pool).await {
@@ -140,10 +152,6 @@ async fn open_pool(db_path: &Path) -> Result<SqlitePool, String> {
         .map_err(|e| format!("Database connection failed: {e}"))
 }
 
-async fn run_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
-    sqlx::migrate!("./src/db/migrations").run(pool).await
-}
-
 fn requires_database_recovery(error: &MigrateError) -> bool {
     // History mismatches and interrupted migrations are recoverable only after
     // the original file is preserved and the user explicitly approves reset.
@@ -171,7 +179,10 @@ pub fn reset_database_files(db_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-async fn create_verified_backup(pool: &SqlitePool, db_path: &Path) -> Result<PathBuf, String> {
+pub(crate) async fn create_verified_backup(
+    pool: &SqlitePool,
+    db_path: &Path,
+) -> Result<PathBuf, String> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

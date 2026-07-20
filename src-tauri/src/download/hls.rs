@@ -335,10 +335,24 @@ impl DownloadEngine for HlsEngine {
         request: ProbeRequest,
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
+            // FUN-01 / C5: prefer ProbeRequest credentials; otherwise load from DB.
+            let credentials = if request.credentials.is_some() {
+                request.credentials.clone()
+            } else if let (Some(pool), Some(task_id)) = (&request.pool, &request.task_id) {
+                db::resolve_task_credentials(pool, task_id)
+                    .await
+                    .map_err(DownloadError::Other)?
+            } else {
+                None
+            };
+            let headers = super::http::merge_basic_auth_headers(
+                &request.request_headers,
+                credentials.as_ref(),
+            );
             let plan = self
                 .probe_hls(
                     &request.uri,
-                    &request.request_headers,
+                    &headers,
                     request.pool.as_ref(),
                     &request.app,
                     &request.request_id,
@@ -411,6 +425,10 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     .await?;
     // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
     let client = engine.client_for_config(&proxy_config).await?;
+    // FUN-01 / C5: inject Basic Auth from encrypted task credentials at runtime.
+    let credentials = db::resolve_task_credentials(&pool, &task.id).await?;
+    let request_headers =
+        super::http::merge_basic_auth_headers(&request_headers, credentials.as_ref());
     let staging_dir = task
         .temp_path
         .as_deref()
@@ -1029,7 +1047,7 @@ async fn download_hls_segment_once(
         .await
         .map_err(|e| format!("Could not request HLS segment: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("server returned {}", response.status()));
+        return Err(super::http::format_http_status_error(response.status()));
     }
     if plan.byte_range.is_some() && response.status() != StatusCode::PARTIAL_CONTENT {
         return Err("server did not honor HLS byte range request".to_string());
@@ -2012,7 +2030,7 @@ async fn fetch_bytes(
         .await
         .map_err(|e| format!("Could not request HLS resource: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("HLS resource returned {}", response.status()));
+        return Err(super::http::format_http_status_error(response.status()));
     }
     // ARC-10: stream with a hard cap so chunked bodies cannot OOM the worker.
     match read_body_limited(response, HLS_INIT_MAX_BYTES, None, READ_IDLE_TIMEOUT).await {

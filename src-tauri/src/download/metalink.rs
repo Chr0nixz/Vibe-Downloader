@@ -27,6 +27,7 @@ use crate::{
     db,
     download::checksum::hash_file,
     download::error::engine_error,
+    download::probe_error::reqwest_error_to_structured,
     download::retry::RetryPolicy,
     events::{emit_task_updated_record, TaskProgressEmitGate},
     logging::sanitize_url,
@@ -143,10 +144,23 @@ impl DownloadEngine for MetalinkEngine {
         request: ProbeRequest,
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
+            let credentials = if request.credentials.is_some() {
+                request.credentials.clone()
+            } else if let (Some(pool), Some(task_id)) = (&request.pool, &request.task_id) {
+                db::resolve_task_credentials(pool, task_id)
+                    .await
+                    .map_err(DownloadError::Other)?
+            } else {
+                None
+            };
+            let headers = super::http::merge_basic_auth_headers(
+                &request.request_headers,
+                credentials.as_ref(),
+            );
             let data = self
                 .probe_metalink(
                     &request.uri,
-                    &request.request_headers,
+                    &headers,
                     &request.app,
                     &request.request_id,
                     request.proxy_config.as_ref(),
@@ -220,6 +234,10 @@ async fn run_metalink_download(
     } = context;
     // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
     let client = engine.client_for_config(&proxy_config).await?;
+    // FUN-01 / C5: inject Basic Auth from encrypted task credentials at runtime.
+    let credentials = db::resolve_task_credentials(&pool, &task.id).await?;
+    let request_headers =
+        super::http::merge_basic_auth_headers(&request_headers, credentials.as_ref());
     let files = db::list_task_file_records(&pool, &task.id)
         .await?
         .into_iter()
@@ -968,7 +986,7 @@ pub async fn download_metalink_range_from_mirror(
     let mut response = request
         .send()
         .await
-        .map_err(|e| format!("Metalink mirror request failed: {e}"))?;
+        .map_err(|e| reqwest_error_to_structured(&e))?;
     crate::download::diagnostics::persist_engine_diagnostic(
         crate::download::diagnostics::EngineDiagnosticContext {
             pool,
@@ -1013,7 +1031,7 @@ pub async fn download_metalink_range_from_mirror(
         response = retry
             .send()
             .await
-            .map_err(|e| format!("Metalink mirror restart failed: {e}"))?;
+            .map_err(|e| reqwest_error_to_structured(&e))?;
         if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
             db::mark_mirror_unsupported_range(pool, &mirror.id)
                 .await
@@ -1029,13 +1047,7 @@ pub async fn download_metalink_range_from_mirror(
         }
     }
     if !response.status().is_success() {
-        return Err(format!(
-            "Metalink mirror {} returned {} for range {}-{}",
-            sanitize_url(&mirror.url),
-            response.status(),
-            effective_start,
-            range_end
-        ));
+        return Err(super::http::format_http_status_error(response.status()));
     }
 
     if already_downloaded > 0 {
@@ -1263,7 +1275,7 @@ async fn download_from_resource(
     let response = request
         .send()
         .await
-        .map_err(|e| format!("Could not request Metalink mirror: {e}"))?;
+        .map_err(|e| reqwest_error_to_structured(&e))?;
     crate::download::diagnostics::persist_engine_diagnostic(
         crate::download::diagnostics::EngineDiagnosticContext {
             pool,
@@ -1292,12 +1304,12 @@ async fn download_from_resource(
         retry
             .send()
             .await
-            .map_err(|e| format!("Could not restart Metalink mirror: {e}"))?
+            .map_err(|e| reqwest_error_to_structured(&e))?
     } else {
         response
     };
     if !response.status().is_success() {
-        return Err(format!("Metalink mirror returned {}", response.status()));
+        return Err(super::http::format_http_status_error(response.status()));
     }
 
     if resume_from > 0 {
@@ -1570,9 +1582,9 @@ async fn fetch_manifest_bytes(
     let response = request
         .send()
         .await
-        .map_err(|e| format!("Could not request Metalink manifest: {e}"))?;
+        .map_err(|e| reqwest_error_to_structured(&e))?;
     if !response.status().is_success() {
-        return Err(format!("Metalink manifest returned {}", response.status()));
+        return Err(super::http::format_http_status_error(response.status()));
     }
     read_body_limited(response, CONTROL_PLANE_MAX_BYTES, None, READ_IDLE_TIMEOUT)
         .await

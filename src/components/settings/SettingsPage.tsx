@@ -102,6 +102,7 @@ const SECTION_IDS = [
   "desktop-integration",
   "browser-integration",
   "external-tools",
+  "data-backup",
   "about-updates",
 ] as const;
 
@@ -183,6 +184,7 @@ export function SettingsPage() {
   const [ffmpegPath, setFfmpegPath] = useState("");
   const [ffmpegVersion, setFfmpegVersion] = useState<string | null>(null);
   const [ffmpegProbeError, setFfmpegProbeError] = useState<string | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
   const [ffmpegProbing, setFfmpegProbing] = useState(false);
   // F-7: Global BitTorrent upload speed limit (bytes/sec). Empty = unlimited.
   const [btUploadLimitBps, setBtUploadLimitBps] = useState("");
@@ -392,6 +394,18 @@ export function SettingsPage() {
           t("settings.browserExtensionPath"),
           t("settings.browserExportPackages"),
           ...(browserStatus?.browsers.map((browser) => browser.displayName) ?? []),
+        ],
+      },
+      {
+        id: "data-backup",
+        title: t("settings.dataBackup"),
+        description: t("settings.dataBackupDescription"),
+        summary: t("settings.dataBackupSummary"),
+        terms: [
+          t("settings.dataBackupExport"),
+          t("settings.dataBackupValidate"),
+          t("settings.dataBackupRestore"),
+          t("settings.dataBackupCredentialsNote"),
         ],
       },
       {
@@ -1110,6 +1124,90 @@ export function SettingsPage() {
       });
     } finally {
       setBrowserAction(null);
+    }
+  }
+
+  async function handleExportBackup() {
+    if (!isTauriRuntime()) {
+      addToast({ tone: "error", title: t("settings.dataBackupUnavailable") });
+      return;
+    }
+    setBackupBusy(true);
+    try {
+      const { exportAppBackup } = await import("@/lib/backup");
+      const result = await exportAppBackup();
+      if (!result) return;
+      addToast({
+        tone: "success",
+        title: t("settings.dataBackupExportSuccess", { path: result.path }),
+      });
+    } catch (err) {
+      log.error("backup export failed", err);
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: localizedErrorMessage(err, t),
+      });
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function handleValidateBackup() {
+    if (!isTauriRuntime()) {
+      addToast({ tone: "error", title: t("settings.dataBackupUnavailable") });
+      return;
+    }
+    setBackupBusy(true);
+    try {
+      const { validateSelectedAppBackup } = await import("@/lib/backup");
+      const result = await validateSelectedAppBackup();
+      if (!result) return;
+      addToast({
+        tone: "success",
+        title: t("settings.dataBackupValidateSuccess", {
+          schema: result.schemaVersion,
+          bytes: result.databaseBytes,
+        }),
+      });
+    } catch (err) {
+      log.error("backup validate failed", err);
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: localizedErrorMessage(err, t),
+      });
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function handleRestoreBackup() {
+    if (!isTauriRuntime()) {
+      addToast({ tone: "error", title: t("settings.dataBackupUnavailable") });
+      return;
+    }
+    if (!window.confirm(t("settings.dataBackupRestoreConfirm"))) return;
+    setBackupBusy(true);
+    try {
+      const { restoreSelectedAppBackup } = await import("@/lib/backup");
+      const result = await restoreSelectedAppBackup();
+      if (!result) return;
+      addToast({
+        tone: "success",
+        title: t("settings.dataBackupRestoreSuccess", {
+          path: result.preRestoreBackupPath,
+        }),
+      });
+    } catch (err) {
+      log.error("backup restore failed", err);
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: localizedErrorMessage(err, t),
+      });
+    } finally {
+      setBackupBusy(false);
     }
   }
 
@@ -1989,6 +2087,43 @@ export function SettingsPage() {
                         <span>{t("settings.ffmpegPath.notDetected")}</span>
                       </div>
                     ) : null}
+                  </div>
+                </SettingsRow>
+              </SettingsSection>
+
+              <SettingsSection {...getSectionProps("data-backup")}>
+                <SettingsRow title={t("settings.dataBackup")} tip={t("settings.dataBackupCredentialsNote")}>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-11 md:h-8"
+                      disabled={controlsDisabled || backupBusy}
+                      onClick={() => void handleExportBackup()}
+                    >
+                      {backupBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />}
+                      {t("settings.dataBackupExport")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-11 md:h-8"
+                      disabled={controlsDisabled || backupBusy}
+                      onClick={() => void handleValidateBackup()}
+                    >
+                      <Check className="h-4 w-4" />
+                      {t("settings.dataBackupValidate")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-11 md:h-8"
+                      disabled={controlsDisabled || backupBusy}
+                      onClick={() => void handleRestoreBackup()}
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                      {t("settings.dataBackupRestore")}
+                    </Button>
                   </div>
                 </SettingsRow>
               </SettingsSection>

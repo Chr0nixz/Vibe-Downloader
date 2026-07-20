@@ -317,9 +317,9 @@ const es = {
     pauseAll: "Pausar todas",
     resumeAll: "Reanudar todas",
     bulkOpenFolder: "Abrir carpeta",
-    exportJson: "Exportar como JSON",
-    exportCsv: "Exportar como CSV",
-    exportSuccess: "{{count}} tareas exportadas",
+    exportJson: "Exportar informe como JSON",
+    exportCsv: "Exportar informe como CSV",
+    exportSuccess: "Informe exportado para {{count}} tareas",
     bulkDelete: "Eliminar {{count}}",
     more: "Más",
     moreBulkActions: "Más acciones en lote",
@@ -628,6 +628,23 @@ const es = {
     aboutUpdates: "Acerca de y actualizaciones",
     aboutUpdatesDescription: "Versión de la aplicación y comprobaciones automáticas de actualizaciones.",
     aboutUpdatesSummary: "v{{version}}",
+    dataBackup: "Copia de seguridad de datos",
+    dataBackupDescription:
+      "Exporta una copia de seguridad versionada de la base de datos o restáurala tras la validación. La exportación de informes de tareas permanece en la lista de tareas.",
+    dataBackupSummary: "Credenciales vinculadas al equipo",
+    dataBackupCredentialsNote:
+      "Las copias de seguridad conservan las credenciales cifradas de este equipo. Restaurar en otro PC mantiene las tareas pero requiere volver a introducir las contraseñas. La contraseña del proxy global no se incluye.",
+    dataBackupExport: "Exportar copia de seguridad",
+    dataBackupValidate: "Validar copia de seguridad",
+    dataBackupRestore: "Restaurar copia de seguridad",
+    dataBackupExportSuccess: "Copia de seguridad guardada en {{path}}",
+    dataBackupValidateSuccess: "La copia de seguridad es válida (esquema {{schema}}, {{bytes}} bytes)",
+    dataBackupRestoreConfirm:
+      "La restauración reemplazará la base de datos actual tras reiniciar. Las descargas activas deben estar en pausa. ¿Continuar?",
+    dataBackupRestoreSuccess:
+      "Restauración preparada. Reinicia la aplicación para aplicarla. Se guardó una instantánea previa a la restauración en {{path}}.",
+    dataBackupBusy: "Pausa las descargas activas antes de restaurar.",
+    dataBackupUnavailable: "Las herramientas de copia de seguridad requieren la aplicación de escritorio.",
     currentVersion: "Versión actual",
     autoUpdateCheck: "Comprobar actualizaciones automáticamente",
     autoUpdateCheckDescription:

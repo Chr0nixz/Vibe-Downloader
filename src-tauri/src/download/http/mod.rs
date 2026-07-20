@@ -27,6 +27,9 @@ use self::{
     segmented::run_segmented_download,
 };
 
+pub(crate) use error::format_http_status as format_http_status_error;
+pub(crate) use request::merge_basic_auth_headers;
+
 use super::engine::EngineFuture;
 use super::{DownloadContext, DownloadEngine, DownloadError, ProbeOutput, ProbeRequest};
 

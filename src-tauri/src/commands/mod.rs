@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod browser;
 pub mod classification;
 pub mod ffmpeg;

@@ -15,7 +15,7 @@ use common::TestServer;
 use tauri_app_lib::{
     db,
     download::{DashEngine, DownloadEngine, HttpEngine, ProbeRequest},
-    models::{SegmentStatus, TaskStatus},
+    models::{AppErrorPayload, SegmentStatus, TaskStatus},
     proxy::ResolvedProxyConfig,
     state_machine,
 };
@@ -512,4 +512,336 @@ async fn download_resumes_staging_without_redownloading_completed_segments() {
         .expect("read completed DASH task")
         .expect("completed DASH task exists");
     assert_eq!(completed.status, TaskStatus::Completed);
+}
+
+fn b64_basic(user: &str, pass: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_fails_when_mpd_returns_401() {
+    let server = TestServer::start(|mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let body = b"auth required";
+        let _ = write!(
+            stream,
+            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"dash\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(body);
+    });
+    let error = new_engine()
+        .probe(new_probe_request(format!("{}/secure.mpd", server.base_url)))
+        .await
+        .expect_err("401 must fail probe");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured http_denied");
+    assert_eq!(payload.code, "http_denied");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_uses_persisted_dash_credentials() {
+    common::install_test_secret_key();
+    let expected = b64_basic("dashuser", "dashpass");
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let server = TestServer::start({
+        let expected = expected.clone();
+        let observed = observed.clone();
+        move |mut stream| {
+            let mut buffer = [0_u8; 8192];
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            let path = request
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/");
+            let authorization = request.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("authorization") {
+                    Some(value.trim().to_string())
+                } else {
+                    None
+                }
+            });
+            if let Some(auth) = &authorization {
+                *observed.lock().expect("lock") = Some(auth.clone());
+            }
+            let provided = authorization
+                .as_deref()
+                .and_then(|value| value.strip_prefix("Basic ").map(str::trim));
+            if provided != Some(expected.as_str()) {
+                let body = b"auth required";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+                return;
+            }
+            let (status, content_type, body) = match path {
+                "/secure.mpd" => (200, "application/dash+xml", LIST_MPD.as_bytes()),
+                _ => (200, "video/mp4", b"seg" as &[u8]),
+            };
+            let response = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+
+    let pool = common::test_pool("dash-cred-rotation").await;
+    let mut paths = common::TestPaths::new("dash-cred-rotation");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("temp.mp4");
+    paths.final_path = root.join("secure.mp4");
+    let task = common::download_task(
+        "dash-cred-rotation",
+        format!("{}/secure.mpd", server.base_url),
+        "dash",
+        "secure.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task).await.expect("insert");
+    db::upsert_task_credentials(&pool, &task.id, "dash", "dashuser", "dashpass", None, None)
+        .await
+        .expect("creds");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let download = tokio::spawn({
+        let engine = new_engine();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+    let started = std::time::Instant::now();
+    loop {
+        if observed.lock().expect("lock").is_some() {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(5) {
+            cancel.cancel();
+            let _ = download.await;
+            panic!("timed out waiting for Authorization");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    cancel.cancel();
+    let _ = download.await;
+    let auth = observed.lock().expect("lock").clone().expect("auth");
+    assert!(auth.starts_with("Basic "));
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_retries_transient_segment_failures() {
+    if !ffmpeg_available() {
+        eprintln!("skipping DASH segment retry test: ffmpeg not in PATH");
+        return;
+    }
+    let payload = Arc::new(generate_test_mp4());
+    let fail_budget = Arc::new(AtomicUsize::new(2));
+    let server = TestServer::start({
+        let payload = payload.clone();
+        let fail_budget = fail_budget.clone();
+        move |mut stream| {
+            let mut buffer = [0_u8; 4096];
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            let path = request
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/");
+            if path == "/retry.mpd" {
+                let body = RECOVERY_MPD.as_bytes();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/dash+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body);
+                return;
+            }
+            if path.contains("recovery-0") {
+                let remaining = fail_budget.fetch_sub(1, Ordering::SeqCst);
+                if remaining > 0 {
+                    let body = b"temporary";
+                    let response = format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.write_all(body);
+                    return;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&payload);
+        }
+    });
+
+    let pool = common::test_pool("dash-segment-retry").await;
+    let mut paths = common::TestPaths::new("dash-segment-retry");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("temp.mp4");
+    paths.final_path = root.join("retry.mp4");
+    let task = common::download_task(
+        "dash-segment-retry",
+        format!("{}/retry.mpd", server.base_url),
+        "dash",
+        "retry.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task).await.expect("insert");
+    db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments");
+
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("DASH download should succeed after transient 500s");
+
+    let segments = db::list_dash_segments(&pool, "dash-segment-retry")
+        .await
+        .expect("list");
+    assert!(
+        segments.iter().any(|segment| segment.retry_count > 0),
+        "expected retry_count > 0 after transient failures, got {:?}",
+        segments
+            .iter()
+            .map(|s| (s.segment_index, s.retry_count))
+            .collect::<Vec<_>>()
+    );
+    assert!(paths.final_path.exists());
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_reenters_after_reset_interrupted_tasks() {
+    if !ffmpeg_available() {
+        eprintln!("skipping DASH process-restart reentry test: ffmpeg not in PATH");
+        return;
+    }
+    let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let server = start_recovery_server(Arc::new(generate_test_mp4()), requests.clone());
+    let pool = common::test_pool("dash-process-restart").await;
+    let mut paths = common::TestPaths::new("dash-process-restart");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("temp.mp4");
+    paths.final_path = root.join("restart.mp4");
+    let task = common::download_task(
+        "dash-process-restart",
+        format!("{}/recovery.mpd", server.base_url),
+        "dash",
+        "restart.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task).await.expect("insert");
+    db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let first = tokio::spawn({
+        let engine = new_engine();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+    loop {
+        let segments = db::list_dash_segments(&pool, "dash-process-restart")
+            .await
+            .expect("list");
+        if segments
+            .iter()
+            .any(|segment| segment.segment_index == 0 && segment.status == SegmentStatus::Completed)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cancel.cancel();
+    first.abort();
+    let _ = first.await;
+
+    sqlx::query("UPDATE tasks SET status = 'downloading', updated_at = ? WHERE id = ?")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind("dash-process-restart")
+        .execute(&pool)
+        .await
+        .expect("force downloading");
+    db::reset_interrupted_tasks(&pool, true)
+        .await
+        .expect("reset");
+    let queued = db::get_task_record(&pool, "dash-process-restart")
+        .await
+        .expect("read")
+        .expect("exists");
+    assert_eq!(queued.status, TaskStatus::Queued);
+    let no_app = Option::<tauri::AppHandle>::None;
+    let resumed = state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &queued.id,
+        TaskStatus::Downloading,
+        queued.downloaded_bytes,
+        1,
+        Some("Downloading"),
+        Some("startup_resume"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("Downloading");
+
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("cold reentry");
+    assert!(paths.final_path.exists());
+    pool.close().await;
 }

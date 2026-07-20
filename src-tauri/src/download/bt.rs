@@ -16,8 +16,10 @@ use reqwest::Url;
 use tokio::sync::Mutex;
 
 use super::engine::{DownloadContext, DownloadEngine, EngineFuture, ProbeOutput, ProbeRequest};
+use super::probe_error::reqwest_error_to_structured;
 use super::url_classify::is_torrent_url;
 use super::DownloadError;
+use crate::download::error::engine_error;
 use crate::{
     db,
     events::{emit_task_updated_record, TaskProgressEmitGate},
@@ -253,9 +255,15 @@ impl DownloadEngine for BtEngine {
         request: ProbeRequest,
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
-            probe_torrent(&request.uri, &request.app, &request.request_id)
-                .await
-                .map_err(DownloadError::Other)
+            let proxy_config = request.proxy_config.clone().unwrap_or_default();
+            probe_torrent(
+                &request.uri,
+                &request.app,
+                &request.request_id,
+                &proxy_config,
+            )
+            .await
+            .map_err(DownloadError::Other)
         })
     }
 
@@ -275,6 +283,7 @@ async fn probe_torrent(
     uri: &str,
     app: &Option<tauri::AppHandle>,
     request_id: &Option<String>,
+    proxy_config: &ResolvedProxyConfig,
 ) -> Result<ProbeOutput, String> {
     if uri.trim_start().starts_with("magnet:") {
         crate::download::engine::emit_probe_phase(app, request_id, "parsing_magnet", Some("bt"));
@@ -282,7 +291,9 @@ async fn probe_torrent(
     }
 
     crate::download::engine::emit_probe_phase(app, request_id, "fetching_torrent", Some("bt"));
-    let (add, _, _) = add_torrent_source(uri, &ResolvedProxyConfig::default()).await?;
+    // Probe must not fall back to AddTorrent::from_url when HTTP fetch fails; that
+    // would bypass SOCKS5 and hide proxy misconfiguration during create-time probe.
+    let (add, _, _) = add_torrent_source(uri, proxy_config, false).await?;
     crate::download::engine::emit_probe_phase(app, request_id, "inspecting_metadata", Some("bt"));
     let probe_dir = std::env::temp_dir().join("vibe-downloader-bt-probe");
     std::fs::create_dir_all(&probe_dir)
@@ -302,19 +313,32 @@ async fn probe_torrent(
             }),
         )
         .await
-        .map_err(|e| format!("Could not inspect torrent metadata: {e:#}"))?;
+        .map_err(|e| {
+            engine_error(
+                "bt_torrent_probe_failed",
+                format!("Could not inspect torrent metadata: {e:#}"),
+                true,
+            )
+        })?;
     Ok(probe_from_torrent_details(uri, &response.details))
 }
 
 fn probe_magnet(uri: &str) -> Result<ProbeOutput, String> {
-    let magnet = Magnet::parse(uri).map_err(|_| "Magnet link is invalid.".to_string())?;
+    let magnet = Magnet::parse(uri)
+        .map_err(|_| engine_error("bt_magnet_invalid", "Magnet link is invalid.", false))?;
     // `as_string()` returns lowercase hex (40 chars for v1 btih, 64 for v2 btmh).
     // librqbit accepts both hex and base32 on parse, but normalizes to hex here.
     let hash = magnet
         .as_id20()
         .map(|id| id.as_string())
         .or_else(|| magnet.as_id32().map(|id| id.as_string()))
-        .ok_or_else(|| "Magnet link must include a BitTorrent info hash.".to_string())?;
+        .ok_or_else(|| {
+            engine_error(
+                "bt_magnet_invalid",
+                "Magnet link must include a BitTorrent info hash.",
+                false,
+            )
+        })?;
     // librqbit's `name` field is already percent-decoded via `url::Url::query_pairs()`.
     // `xl` (exact length) is not exposed by librqbit; magnet total size is usually
     // unknown before metadata, so we fall back to 0.
@@ -411,10 +435,10 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         .await?;
     let _session_guard = SessionRefGuard::new(engine.clone(), session_key);
     let source_started = Instant::now();
-    let source_result = add_torrent_source(&task.url, &proxy_config)
+    let source_result = add_torrent_source(&task.url, &proxy_config, true)
         .await
         .map_err(|error| {
-            crate::download::error::engine_error(
+            engine_error(
                 "bt_source_failed",
                 format!("Could not load the torrent source: {error}"),
                 true,
@@ -1552,6 +1576,7 @@ fn selected_torrent_total_size(
 async fn add_torrent_source(
     uri: &str,
     proxy_config: &ResolvedProxyConfig,
+    allow_http_url_fallback: bool,
 ) -> Result<(AddTorrent<'static>, Option<bool>, Vec<TorrentTrackerStatus>), String> {
     let trimmed = uri.trim();
     if trimmed.starts_with("magnet:") {
@@ -1576,7 +1601,10 @@ async fn add_torrent_source(
                     let trackers = tracker_statuses_from_torrent_bytes(&bytes);
                     Ok((AddTorrent::from_bytes(bytes), private, trackers))
                 }
-                Err(_) => Ok((AddTorrent::from_url(trimmed.to_string()), None, Vec::new())),
+                Err(_error) if allow_http_url_fallback => {
+                    Ok((AddTorrent::from_url(trimmed.to_string()), None, Vec::new()))
+                }
+                Err(error) => Err(bt_torrent_fetch_failed(error)),
             }
         }
         "file" => {
@@ -1599,6 +1627,35 @@ async fn add_torrent_source(
     }
 }
 
+fn bt_torrent_fetch_failed(detail: String) -> String {
+    let message = if detail.starts_with('{') {
+        serde_json::from_str::<crate::models::AppErrorPayload>(&detail)
+            .map(|payload| payload.message)
+            .unwrap_or(detail)
+    } else {
+        detail
+    };
+    engine_error(
+        "bt_torrent_fetch_failed",
+        format!("Could not download torrent file: {message}"),
+        true,
+    )
+}
+
+fn classify_torrent_download_error(
+    error: &reqwest::Error,
+    proxy_config: &ResolvedProxyConfig,
+) -> String {
+    if proxy_config.custom_socks5_url_with_auth().is_some() && error.is_connect() {
+        return engine_error(
+            "proxy_connection_failed",
+            format!("BitTorrent SOCKS5 proxy connection failed: {error}"),
+            true,
+        );
+    }
+    reqwest_error_to_structured(error)
+}
+
 /// Download .torrent file bytes via HTTP/HTTPS with optional SOCKS5 proxy.
 /// Used to pre-parse the private flag before submitting to librqbit.
 async fn download_torrent_bytes(
@@ -1616,9 +1673,19 @@ async fn download_torrent_bytes(
         .get(url)
         .send()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|error| classify_torrent_download_error(&error, proxy_config))?
         .error_for_status()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            if error.is_status() {
+                engine_error(
+                    "bt_torrent_fetch_failed",
+                    format!("HTTP error fetching torrent: {error}"),
+                    true,
+                )
+            } else {
+                classify_torrent_download_error(&error, proxy_config)
+            }
+        })?;
     // E-3: Pre-check Content-Length if the server provided it.
     if let Some(content_length) = response.content_length() {
         if content_length as usize > TORRENT_MAX_BYTES {
@@ -1889,7 +1956,7 @@ mod tests {
         let url = Url::from_file_path(&path).expect("file url").to_string();
 
         let proxy_config = crate::proxy::ResolvedProxyConfig::default();
-        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config)
+        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config, true)
             .await
             .expect("local torrent source");
 
@@ -1987,7 +2054,7 @@ mod tests {
         });
 
         let proxy_config = crate::proxy::ResolvedProxyConfig::default();
-        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config)
+        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config, true)
             .await
             .expect("http torrent source");
 
@@ -2018,7 +2085,7 @@ mod tests {
         });
 
         let proxy_config = crate::proxy::ResolvedProxyConfig::default();
-        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config)
+        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config, true)
             .await
             .expect("http torrent source with fallback");
 

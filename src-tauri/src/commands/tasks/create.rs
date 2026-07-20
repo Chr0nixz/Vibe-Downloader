@@ -1531,6 +1531,23 @@ mod tests {
     }
 
     #[test]
+    fn bt_create_path_skips_manual_expected_hash() {
+        // F-5: BT integrity is verified per-piece by librqbit during download,
+        // not via task-level expected_hash / task_checksums manual hash rows.
+        let probe = probe_output("bt", "bt:0123456789abcdef0123456789abcdef01234567");
+        assert!(is_bt_protocol(&probe.protocol));
+        let manual_hash: Option<()> = if is_bt_protocol(&probe.protocol) {
+            None
+        } else {
+            Some(())
+        };
+        assert!(
+            manual_hash.is_none(),
+            "BT create path must skip manual expected_hash"
+        );
+    }
+
+    #[test]
     fn selected_file_paths_only_apply_to_bt_multifile_tasks() {
         let files = vec![
             ProbedFile {

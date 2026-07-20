@@ -14,7 +14,7 @@ use common::TestServer;
 use tauri_app_lib::{
     db,
     download::{DownloadEngine, HlsEngine, HttpEngine, ProbeRequest},
-    models::{SegmentStatus, TaskStatus},
+    models::{AppErrorPayload, SegmentStatus, TaskStatus},
     proxy::ResolvedProxyConfig,
     state_machine,
 };
@@ -1232,3 +1232,248 @@ async fn fun10_selected_track_404_fails_visibly() {
 //    family; HTTP chunk uses the same helper with a compatible future.
 // 2. Waiting for the production timeout would make the normal suite slow;
 //    staging cancellation and restart are covered by the test above.
+
+fn b64_basic(user: &str, pass: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"))
+}
+
+fn start_auth_hls_server(
+    expected: String,
+    observed: Arc<std::sync::Mutex<Option<String>>>,
+) -> TestServer {
+    TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 8192];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let request_line = request.lines().next().unwrap_or_default();
+        let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+        let authorization = request.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("authorization") {
+                Some(value.trim().to_string())
+            } else {
+                None
+            }
+        });
+        if let Some(auth) = &authorization {
+            *observed.lock().expect("lock") = Some(auth.clone());
+        }
+        let provided = authorization
+            .as_deref()
+            .and_then(|value| value.strip_prefix("Basic ").map(str::trim));
+        if provided != Some(expected.as_str()) {
+            let body = b"auth required";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"hls\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(body);
+            return;
+        }
+        let (status, content_type, body): (u16, &str, &[u8]) = match path {
+            "/secure.m3u8" => (
+                200,
+                "application/vnd.apple.mpegurl",
+                VOD_MEDIA_PLAYLIST.as_bytes(),
+            ),
+            "/seg0.ts" | "/seg1.ts" => (200, "video/mp2t", b"ts-payload"),
+            _ => (404, "text/plain", b"not found"),
+        };
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(body);
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_uses_persisted_hls_credentials() {
+    common::install_test_secret_key();
+    let expected = b64_basic("hlsuser", "hlspass");
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let server = start_auth_hls_server(expected, observed.clone());
+    let pool = common::test_pool("hls-cred-rotation").await;
+    let mut paths = common::TestPaths::new("hls-cred-rotation");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("secure.mp4");
+    let task = common::download_task(
+        "hls-cred-rotation",
+        format!("{}/secure.m3u8", server.base_url),
+        "hls",
+        "secure.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert HLS task");
+    db::upsert_task_credentials(&pool, &task.id, "hls", "hlsuser", "hlspass", None, None)
+        .await
+        .expect("store credentials");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let download = tokio::spawn({
+        let engine = new_engine();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+
+    // Wait until Authorization is observed on playlist or segment fetch.
+    let started = std::time::Instant::now();
+    loop {
+        if observed.lock().expect("lock").is_some() {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(5) {
+            cancel.cancel();
+            let _ = download.await;
+            panic!("timed out waiting for Authorization header");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    cancel.cancel();
+    let _ = download.await;
+
+    let auth = observed
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("Authorization header observed");
+    assert!(auth.starts_with("Basic "), "got: {auth}");
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_fails_when_playlist_returns_401() {
+    let expected = b64_basic("alice", "secret");
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let server = start_auth_hls_server(expected, observed);
+    let error = new_engine()
+        .probe(new_probe_request(format!(
+            "{}/secure.m3u8",
+            server.base_url
+        )))
+        .await
+        .expect_err("401 must fail probe");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured http_denied");
+    assert_eq!(payload.code, "http_denied");
+    assert!(!payload.recoverable);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_reenters_after_reset_interrupted_tasks() {
+    if !ffmpeg_available() {
+        eprintln!("skipping HLS process-restart reentry test: ffmpeg not in PATH");
+        return;
+    }
+    let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let server =
+        start_recovery_server(Arc::new(generate_test_transport_stream()), requests.clone());
+    let pool = common::test_pool("hls-process-restart").await;
+    let mut paths = common::TestPaths::new("hls-process-restart");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("restart.mp4");
+    let task = common::download_task(
+        "hls-process-restart",
+        format!("{}/recovery.m3u8", server.base_url),
+        "hls",
+        "restart.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert HLS task");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let first = tokio::spawn({
+        let engine = new_engine();
+        let context = common::headless_download_context(pool.clone(), task.clone(), cancel.clone());
+        async move { engine.download(context).await }
+    });
+    loop {
+        let segments = db::list_hls_segments(&pool, "hls-process-restart")
+            .await
+            .expect("list HLS segments");
+        let first_completed = segments.iter().any(|segment| {
+            segment.media_sequence == 0 && segment.status == SegmentStatus::Completed
+        });
+        if first_completed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cancel.cancel();
+    // Abort without waiting for clean pause so DB can still look like a crashed
+    // Downloading worker (process-interrupt contract).
+    first.abort();
+    let _ = first.await;
+
+    sqlx::query("UPDATE tasks SET status = 'downloading', updated_at = ? WHERE id = ?")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind("hls-process-restart")
+        .execute(&pool)
+        .await
+        .expect("force downloading status");
+
+    db::reset_interrupted_tasks(&pool, true)
+        .await
+        .expect("reset interrupted");
+    let queued = db::get_task_record(&pool, "hls-process-restart")
+        .await
+        .expect("read")
+        .expect("exists");
+    assert_eq!(queued.status, TaskStatus::Queued);
+
+    let no_app = Option::<tauri::AppHandle>::None;
+    let resumed = state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &queued.id,
+        TaskStatus::Downloading,
+        queued.downloaded_bytes,
+        1,
+        Some("Downloading"),
+        Some("startup_resume"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist Downloading after reset");
+
+    // Cold engine re-entry (new instance) after process-style interrupt reset.
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("resume after reset_interrupted");
+    assert!(paths.final_path.exists(), "final MP4 must exist");
+    assert!(
+        requests[0].load(Ordering::SeqCst) >= 1,
+        "first segment should have been fetched at least once"
+    );
+    pool.close().await;
+}

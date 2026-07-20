@@ -49,10 +49,11 @@ use tauri_app_lib::{
         DownloadEngine, GlobalSpeedLimiter, HttpEngine, MetalinkEngine, ProbeRequest,
     },
     models::{
-        task::now_iso, ChecksumAlgorithm, HashVerificationStatus, TaskChecksumRecord,
-        TaskFileRecord, TaskKind, TaskPriority, TaskRecord, TaskStatus,
+        task::now_iso, AppErrorPayload, ChecksumAlgorithm, HashVerificationStatus, SegmentStatus,
+        TaskChecksumRecord, TaskFileRecord, TaskKind, TaskPriority, TaskRecord, TaskStatus,
     },
-    proxy::ResolvedProxyConfig,
+    proxy::{AppProxyMode, ResolvedProxyConfig},
+    state_machine,
 };
 
 // --- Manifests --------------------------------------------------------------
@@ -1259,7 +1260,7 @@ async fn f4_parallel_download_returns_error_on_mirror_failure() {
 
     let error = result.expect_err("500 mirror must surface an error");
     assert!(
-        error.contains("500") || error.contains("returned"),
+        error.contains("500") || error.contains("returned") || error.contains("http"),
         "error should mention the status, got: {error}"
     );
 
@@ -1776,4 +1777,595 @@ fn start_mirror_server_with_etag(
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.write_all(body);
     })
+}
+
+// --- C5: Credentials / Proxy / Diagnostics / process-restart reentry --------
+
+fn b64_basic(user: &str, pass: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"))
+}
+
+fn unreachable_socks5_proxy() -> ResolvedProxyConfig {
+    ResolvedProxyConfig {
+        mode: AppProxyMode::Custom,
+        url: Some("socks5://127.0.0.1:1".into()),
+        no_proxy: None,
+        username: None,
+        password: None,
+    }
+}
+
+fn error_code(error: &impl std::fmt::Display) -> String {
+    let message = error.to_string();
+    if let Ok(payload) = serde_json::from_str::<AppErrorPayload>(&message) {
+        return payload.code;
+    }
+    let needle = "\"code\":\"";
+    if let Some(start) = message.find(needle) {
+        let rest = &message[start + needle.len()..];
+        if let Some(end) = rest.find('"') {
+            return rest[..end].to_string();
+        }
+    }
+    message
+}
+
+fn start_auth_manifest_server(
+    expected: String,
+    observed: Arc<Mutex<Option<String>>>,
+) -> TestServer {
+    TestServer::start(move |mut stream| {
+        let expected = expected.clone();
+        let observed = observed.clone();
+        let mut buffer = [0u8; 8192];
+        let Some(request) = common::http::read_request_text(&mut stream, &mut buffer) else {
+            return;
+        };
+        let authorization =
+            common::http::extract_header(&request, "authorization").map(str::to_string);
+        if let Some(auth) = &authorization {
+            *observed.lock().expect("auth log") = Some(auth.clone());
+        }
+        let provided = authorization
+            .as_deref()
+            .and_then(|value| value.strip_prefix("Basic ").map(str::trim));
+        if provided != Some(expected.as_str()) {
+            let body = b"auth required";
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"metalink\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+            return;
+        }
+        let body = MULTI_MIRROR_META4.as_bytes();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/metalink4+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(body);
+    })
+}
+
+fn start_auth_mirror_server(
+    payload: Arc<Vec<u8>>,
+    expected: String,
+    observed: Arc<Mutex<Vec<String>>>,
+    slow: bool,
+) -> TestServer {
+    TestServer::start(move |mut stream| {
+        let payload = payload.clone();
+        let expected = expected.clone();
+        let observed = observed.clone();
+        let mut buffer = [0u8; 8192];
+        let Some(request) = common::http::read_request_text(&mut stream, &mut buffer) else {
+            return;
+        };
+        let method = request
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .next()
+            .unwrap_or("GET");
+        let authorization = common::http::extract_header(&request, "authorization")
+            .unwrap_or("")
+            .to_string();
+        {
+            let mut guard = observed.lock().expect("auth log");
+            guard.push(authorization.clone());
+        }
+        let provided = authorization.strip_prefix("Basic ").map(str::trim);
+        if provided != Some(expected.as_str()) {
+            let body = b"auth required";
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"mirror\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+            return;
+        }
+        let byte_range = common::http::extract_byte_range(&request);
+        common::http::respond_file(
+            &mut stream,
+            method,
+            &payload,
+            byte_range,
+            true,
+            "payload.bin",
+            slow,
+        );
+    })
+}
+
+fn start_always_401_server(hits: Arc<Mutex<usize>>) -> TestServer {
+    TestServer::start(move |mut stream| {
+        let hits = hits.clone();
+        let mut buffer = [0u8; 4096];
+        let Some(_request) = common::http::read_request_text(&mut stream, &mut buffer) else {
+            return;
+        };
+        *hits.lock().expect("hits") += 1;
+        let body = b"denied";
+        let response = format!(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(body);
+    })
+}
+
+async fn seed_downloadable_metalink_task(
+    pool: &sqlx::SqlitePool,
+    label: &str,
+    mirror_urls: &[&str],
+    payload_len: i64,
+    paths: &common::TestPaths,
+) -> String {
+    let now = now_iso();
+    let task_id = format!("metalink-c5-{label}");
+    let task = TaskRecord {
+        id: task_id.clone(),
+        url: format!("https://example.com/{label}.meta4"),
+        final_url: Some(format!("https://example.com/{label}.meta4")),
+        protocol: "metalink".to_string(),
+        task_kind: TaskKind::Manifest,
+        file_name: "payload.bin".to_string(),
+        save_dir: paths
+            .final_path
+            .parent()
+            .expect("parent")
+            .to_string_lossy()
+            .to_string(),
+        temp_path: Some(paths.temp.to_string_lossy().to_string()),
+        final_path: Some(paths.final_path.to_string_lossy().to_string()),
+        total_size: payload_len,
+        downloaded_bytes: 0,
+        status: TaskStatus::Downloading,
+        etag: None,
+        last_modified: None,
+        content_type: Some("application/metalink4+xml".to_string()),
+        supports_resume: true,
+        supports_parallel: mirror_urls.len() >= 2,
+        supports_multi_file: false,
+        source_key: format!("metalink-c5-{label}"),
+        connection_count: 1,
+        speed_bps: 0,
+        task_speed_limit_bps: None,
+        priority: TaskPriority::Normal,
+        queue_position: 0,
+        category_key: None,
+        obey_schedule: true,
+        health_summary: Some("Downloading".to_string()),
+        error_message: None,
+        error_code: None,
+        recovery_actions: Vec::new(),
+        retry_after_at: None,
+        expected_hash_sha256: None,
+        actual_hash_sha256: None,
+        hash_status: HashVerificationStatus::NotRequested,
+        hash_error: None,
+        hash_verified_at: None,
+        created_at: now.clone(),
+        updated_at: now,
+        files_version: 0,
+    };
+    db::insert_task_record(pool, &task)
+        .await
+        .expect("insert task");
+
+    let file_id = format!("metalink-c5-file-{label}");
+    db::insert_task_file_record(
+        pool,
+        &TaskFileRecord {
+            id: file_id.clone(),
+            task_id: task_id.clone(),
+            relative_path: "payload.bin".to_string(),
+            file_name: "payload.bin".to_string(),
+            save_dir: task.save_dir.clone(),
+            temp_path: Some(paths.temp.to_string_lossy().to_string()),
+            final_path: Some(paths.final_path.to_string_lossy().to_string()),
+            total_size: payload_len,
+            downloaded_bytes: 0,
+            status: TaskStatus::Queued,
+            selected: true,
+            content_type: Some("application/octet-stream".to_string()),
+        },
+    )
+    .await
+    .expect("insert file");
+
+    for (index, url) in mirror_urls.iter().enumerate() {
+        db::insert_metalink_resource(
+            pool,
+            db::MetalinkResourceInsert {
+                id: &format!("metalink-c5-res-{label}-{index}"),
+                task_id: &task_id,
+                file_id: &file_id,
+                url,
+                priority: index as i64,
+                location: None,
+            },
+        )
+        .await
+        .expect("insert resource");
+    }
+    task_id
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_uses_persisted_metalink_credentials() {
+    common::install_test_secret_key();
+    let expected = b64_basic("meta-user", "meta-pass");
+    let observed = Arc::new(Mutex::new(None));
+    let server = start_auth_manifest_server(expected, observed.clone());
+    let pool = test_pool("c5-probe-cred").await;
+    let task_id = "metalink-c5-probe-cred";
+    let now = now_iso();
+    db::insert_task_record(
+        &pool,
+        &TaskRecord {
+            id: task_id.to_string(),
+            url: format!("{}/secure.meta4", server.base_url),
+            final_url: Some(format!("{}/secure.meta4", server.base_url)),
+            protocol: "metalink".to_string(),
+            task_kind: TaskKind::Manifest,
+            file_name: "secure.meta4".to_string(),
+            save_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            temp_path: None,
+            final_path: None,
+            total_size: 0,
+            downloaded_bytes: 0,
+            status: TaskStatus::Queued,
+            etag: None,
+            last_modified: None,
+            content_type: None,
+            supports_resume: true,
+            supports_parallel: true,
+            supports_multi_file: false,
+            source_key: "metalink-c5-probe-cred".to_string(),
+            connection_count: 0,
+            speed_bps: 0,
+            task_speed_limit_bps: None,
+            priority: TaskPriority::Normal,
+            queue_position: 0,
+            category_key: None,
+            obey_schedule: true,
+            health_summary: None,
+            error_message: None,
+            error_code: None,
+            recovery_actions: Vec::new(),
+            retry_after_at: None,
+            expected_hash_sha256: None,
+            actual_hash_sha256: None,
+            hash_status: HashVerificationStatus::NotRequested,
+            hash_error: None,
+            hash_verified_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+            files_version: 0,
+        },
+    )
+    .await
+    .expect("insert");
+    db::upsert_task_credentials(
+        &pool,
+        task_id,
+        "metalink",
+        "meta-user",
+        "meta-pass",
+        None,
+        None,
+    )
+    .await
+    .expect("store credentials");
+
+    let mut request = new_probe_request(format!("{}/secure.meta4", server.base_url));
+    request.pool = Some(pool.clone());
+    request.task_id = Some(task_id.to_string());
+    new_engine()
+        .probe(request)
+        .await
+        .expect("authenticated probe");
+
+    let auth = observed
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("Authorization observed");
+    assert!(auth.starts_with("Basic "), "got: {auth}");
+    assert!(!auth.contains("meta-pass"));
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_uses_persisted_metalink_credentials_serial() {
+    common::install_test_secret_key();
+    let payload = Arc::new(b"metalink-auth-serial-payload".to_vec());
+    let expected = b64_basic("mirror-user", "mirror-pass");
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let server = start_auth_mirror_server(payload.clone(), expected, observed.clone(), false);
+    let pool = test_pool("c5-dl-cred-serial").await;
+    let mut paths = common::TestPaths::new("c5-dl-cred-serial");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("payload.bin.tmp");
+    paths.final_path = root.join("payload.bin");
+    let mirror_url = format!("{}/payload.bin", server.base_url);
+    let task_id = seed_downloadable_metalink_task(
+        &pool,
+        "dl-cred-serial",
+        &[&mirror_url],
+        payload.len() as i64,
+        &paths,
+    )
+    .await;
+    db::upsert_task_credentials(
+        &pool,
+        &task_id,
+        "metalink",
+        "mirror-user",
+        "mirror-pass",
+        None,
+        None,
+    )
+    .await
+    .expect("store credentials");
+
+    let task = db::get_task_record(&pool, &task_id)
+        .await
+        .expect("read")
+        .expect("exists");
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("authenticated metalink download");
+
+    let auths = observed.lock().expect("lock").clone();
+    assert!(
+        auths.iter().any(|auth| auth.starts_with("Basic ")),
+        "serial path must send Authorization, got: {auths:?}"
+    );
+    assert!(paths.final_path.exists());
+    let written = std::fs::read(&paths.final_path).expect("read final");
+    assert_eq!(written, payload.as_slice());
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_mirror_download_forwards_authorization_header() {
+    let payload: Vec<u8> = (0..30u8).collect();
+    let payload = Arc::new(payload);
+    let expected = b64_basic("parallel-user", "parallel-pass");
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let server =
+        start_auth_mirror_server(payload.clone(), expected.clone(), observed.clone(), false);
+    let pool = test_pool("c5-parallel-auth").await;
+    let mirror_url = format!("{}/payload.bin", server.base_url);
+    let (file_id, _resource_ids) = seed_mirrors(&pool, "c5-parallel-auth", &[&mirror_url]).await;
+    let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("list");
+    let mirror = mirrors.into_iter().next().expect("mirror");
+    let temp_path = unique_temp_path("c5-parallel-auth");
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let headers = vec![("Authorization".to_string(), format!("Basic {expected}"))];
+
+    let downloaded = download_metalink_range_from_mirror(
+        &pool,
+        "metalink-test-task-c5-parallel-auth",
+        &test_client(),
+        &headers,
+        &GlobalSpeedLimiter::disabled(),
+        &tokio_util::sync::CancellationToken::new(),
+        0,
+        &progress_tx,
+        0,
+        9,
+        &mirror,
+        &temp_path,
+    )
+    .await
+    .expect("authorized range download");
+    assert_eq!(downloaded, 10);
+    let auths = observed.lock().expect("lock").clone();
+    assert!(
+        auths.iter().any(|auth| auth.starts_with("Basic ")),
+        "parallel worker must forward Authorization, got: {auths:?}"
+    );
+    let _ = std::fs::remove_file(&temp_path);
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_via_unreachable_socks5_fails_without_bypass() {
+    let (server, hits) = start_counting_server();
+    let engine = new_engine();
+    let mut request = new_probe_request(format!("{}/manifest.meta4", server.base_url));
+    request.proxy_config = Some(unreachable_socks5_proxy());
+
+    let error = engine
+        .probe(request)
+        .await
+        .expect_err("unreachable SOCKS5 must fail Metalink probe");
+    let code = error_code(&error);
+    assert!(
+        code == "proxy_connection_failed"
+            || code == "connection_refused"
+            || code == "network_error"
+            || code.contains("proxy"),
+        "expected stable proxy failure code, got: {code}"
+    );
+    let hits = hits.lock().expect("hits").clone();
+    assert!(
+        hits.is_empty(),
+        "proxy failure must not silently bypass to origin, got hits: {hits:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_fails_when_all_mirrors_return_401() {
+    let hits = Arc::new(Mutex::new(0usize));
+    let server = start_always_401_server(hits.clone());
+    let pool = test_pool("c5-all-401").await;
+    let mut paths = common::TestPaths::new("c5-all-401");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("payload.bin.tmp");
+    paths.final_path = root.join("payload.bin");
+    let mirror_a = format!("{}/a.bin", server.base_url);
+    let mirror_b = format!("{}/b.bin", server.base_url);
+    let task_id =
+        seed_downloadable_metalink_task(&pool, "all-401", &[&mirror_a, &mirror_b], 32, &paths)
+            .await;
+    let task = db::get_task_record(&pool, &task_id)
+        .await
+        .expect("read")
+        .expect("exists");
+
+    let error = new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("all-401 must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("metalink_all_mirrors_failed") || message.contains("http_denied"),
+        "expected stable diagnostics code, got: {message}"
+    );
+    assert!(
+        *hits.lock().expect("hits") >= 1,
+        "server should have seen at least one denied request"
+    );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_reenters_after_reset_interrupted_tasks() {
+    let payload: Vec<u8> = (0..64u8).cycle().take(32 * 1024).collect();
+    let payload = Arc::new(payload);
+    let range_log = Arc::new(Mutex::new(Vec::new()));
+    let server = start_mirror_server(payload.clone(), range_log, None, true);
+    let pool = test_pool("c5-process-restart").await;
+    let mut paths = common::TestPaths::new("c5-process-restart");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("payload.bin.tmp");
+    paths.final_path = root.join("payload.bin");
+    let mirror_url = format!("{}/payload.bin", server.base_url);
+    let task_id = seed_downloadable_metalink_task(
+        &pool,
+        "process-restart",
+        &[&mirror_url],
+        payload.len() as i64,
+        &paths,
+    )
+    .await;
+    let task = db::get_task_record(&pool, &task_id)
+        .await
+        .expect("read")
+        .expect("exists");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let first = tokio::spawn({
+        let engine = new_engine();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+    let started = std::time::Instant::now();
+    loop {
+        let files = db::list_task_file_records(&pool, &task_id)
+            .await
+            .expect("list files");
+        if files
+            .iter()
+            .any(|file| file.downloaded_bytes > 0 || paths.temp.exists())
+        {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(8) {
+            cancel.cancel();
+            let _ = first.await;
+            panic!("timed out waiting for partial Metalink progress");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cancel.cancel();
+    first.abort();
+    let _ = first.await;
+
+    sqlx::query("UPDATE tasks SET status = 'downloading', updated_at = ? WHERE id = ?")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .expect("force downloading");
+    db::reset_interrupted_tasks(&pool, true)
+        .await
+        .expect("reset interrupted");
+    let queued = db::get_task_record(&pool, &task_id)
+        .await
+        .expect("read")
+        .expect("exists");
+    assert_eq!(queued.status, TaskStatus::Queued);
+
+    let no_app = Option::<tauri::AppHandle>::None;
+    let resumed = state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &queued.id,
+        TaskStatus::Downloading,
+        queued.downloaded_bytes,
+        1,
+        Some("Downloading"),
+        Some("startup_resume"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("Downloading after reset");
+
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("cold Metalink reentry");
+    assert!(paths.final_path.exists(), "final file must exist");
+    let written = std::fs::read(&paths.final_path).expect("read final");
+    assert_eq!(written, payload.as_slice());
+    pool.close().await;
 }

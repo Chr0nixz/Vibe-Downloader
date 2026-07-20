@@ -1,3 +1,4 @@
+mod backup;
 mod browser_messages;
 mod classification_rules;
 mod connection;
@@ -19,6 +20,12 @@ mod task_proxy;
 mod task_records;
 mod task_state;
 mod torrent;
+pub use self::backup::{
+    apply_pending_restore_if_any, current_schema_version, materialize_and_verify_backup_db,
+    pack_backup_file, parse_backup_bytes, pending_restore_path, read_backup_file,
+    snapshot_database_to_path, write_backup_file, BackupManifest, BACKUP_FORMAT_VERSION,
+    CREDENTIALS_POLICY_MACHINE_BOUND,
+};
 pub use self::browser_messages::{
     browser_message_exists, insert_browser_message, latest_browser_error,
     update_browser_message_status,

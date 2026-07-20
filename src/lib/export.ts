@@ -1,3 +1,5 @@
+//! Report export for task list (JSON/CSV). Not a database backup — see settings Data backup.
+
 import { createLogger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
 import type { Task } from "@/types/task";
