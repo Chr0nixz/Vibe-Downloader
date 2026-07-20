@@ -703,10 +703,6 @@ function shouldIntercept(download, settings) {
   return VibeCapturePolicy.shouldIntercept(download, settings);
 }
 
-function matchingRule(hostname, rules) {
-  return VibeCapturePolicy.matchingRule(hostname, rules);
-}
-
 async function popupStatus() {
   const stored = await api.storage.local.get(RECENT_KEY);
   return {
@@ -774,10 +770,4 @@ function fileNameFromPath(value) {
     .filter(Boolean)
     .at(-1);
   return name || null;
-}
-
-function extensionFromUrl(url, filename) {
-  const name = fileNameFromPath(filename) ?? suggestedFileNameFromUrl(url) ?? "";
-  const match = name.toLowerCase().match(/\.([a-z0-9_-]{1,12})(?:$|\?)/);
-  return match?.[1] ?? null;
 }

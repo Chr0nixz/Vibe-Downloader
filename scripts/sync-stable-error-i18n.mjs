@@ -1,7 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 
 // Load TS module via vitest/tsx isn't available; duplicate the minimal maps here
 // by importing the compiled source through dynamic import of the .ts via jiti-less parse.
@@ -17,9 +15,7 @@ function extractArray(name) {
 }
 
 function extractEnMessages() {
-  const match = stableSrc.match(
-    /export const STABLE_ERROR_MESSAGES_EN[^=]*= \{([\s\S]*?)\n\};/,
-  );
+  const match = stableSrc.match(/export const STABLE_ERROR_MESSAGES_EN[^=]*= \{([\s\S]*?)\n\};/);
   if (!match) throw new Error("Missing STABLE_ERROR_MESSAGES_EN");
   const obj = {};
   for (const m of match[1].matchAll(/^\s*([a-z0-9_]+):\s*"((?:\\.|[^"\\])*)"/gm)) {
@@ -229,7 +225,7 @@ for (const locale of Object.keys(messageSets)) {
   // Normalize CRLF so the errors-block regex matches on Windows checkouts.
   text = text.replace(/\r\n/g, "\n");
   const block = buildBlock(locale, messageSets[locale]);
-  const replaced = text.replace(/  errors: \{[\s\S]*?\n  \},\n\} as const;/, `${block}\n} as const;`);
+  const replaced = text.replace(/ {2}errors: \{[\s\S]*?\n {2}\},\n\} as const;/, `${block}\n} as const;`);
   if (replaced === text) {
     // Already synced (identical block) or regex miss — distinguish by presence of a new key.
     if (text.includes("tempFileSmallerThanProgress:")) {

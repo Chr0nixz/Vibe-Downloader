@@ -193,6 +193,9 @@ export const TaskList = memo(function TaskList({
   }, [t]);
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  // filters/nav/sort are read inside taskCursorInput via the UI store; listing
+  // them in deps keeps loadPage identity tied to query changes so the effect below reloads.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: store-backed query fields must invalidate this callback
   const loadPage = useCallback(
     async (cursor: string | null, append = false) => {
       const begin = beginListLoad(loadFlightRef.current, append);

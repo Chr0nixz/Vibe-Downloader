@@ -20,14 +20,8 @@ const policy = loadPolicy();
 
 test("FUN-14: always / never / ask header modes", () => {
   const url = "https://cdn.example.com/video.mp4";
-  assert.equal(
-    policy.headerForwardingDecision(url, { forwardHeadersMode: "enabled", siteRules: [] }).forward,
-    true,
-  );
-  assert.equal(
-    policy.headerForwardingDecision(url, { forwardHeadersMode: "disabled", siteRules: [] }).forward,
-    false,
-  );
+  assert.equal(policy.headerForwardingDecision(url, { forwardHeadersMode: "enabled", siteRules: [] }).forward, true);
+  assert.equal(policy.headerForwardingDecision(url, { forwardHeadersMode: "disabled", siteRules: [] }).forward, false);
   const ask = policy.headerForwardingDecision(url, { forwardHeadersMode: "ask", siteRules: [] });
   assert.equal(ask.forward, false);
   assert.equal(ask.state, "ask");

@@ -154,7 +154,9 @@ export function Palette({
   // Derive selectedTask from the store so AppShell doesn't need to subscribe
   // to the task object (which changes every progress tick). Palette already
   // re-renders on progress ticks via the `tasks` subscription above, so this
-  // adds no new re-renders.
+  // adds no new re-renders. Keep the binding live so the subscription is not
+  // tree-shaken as unused.
+  void tasks;
   const selectedTask = useTaskDataStore((s) => (selectedId ? (s.taskById[selectedId] ?? null) : null));
   const selectedIds = useTaskUIStore((s) => s.selectedIds);
   const nav = useTaskUIStore((s) => s.nav);
@@ -280,7 +282,6 @@ export function Palette({
       sortKey,
       sourceOptions,
       t,
-      tasks,
       visibleTasks,
     ],
   );

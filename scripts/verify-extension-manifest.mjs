@@ -188,11 +188,8 @@ async function verifyProfileCopyBoundaries() {
     }
   }
 
-  const policySource = await readFile(
-    path.join(root, "browser", "extension-core", "src", "capture-policy.js"),
-    "utf8",
-  );
-  if (!policySource.includes("forward: false, state: \"ask\"")) {
+  const policySource = await readFile(path.join(root, "browser", "extension-core", "src", "capture-policy.js"), "utf8");
+  if (!policySource.includes('forward: false, state: "ask"')) {
     fail("capture-policy.js must keep ask as a passive non-forwarding mode.");
   }
 

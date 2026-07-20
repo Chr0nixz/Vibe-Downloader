@@ -78,6 +78,7 @@ function extensionFromUrl(url, filename) {
 }
 
 // Service worker / importScripts global surface.
+// biome-ignore lint/correctness/noUnusedVariables: exposed via importScripts for background.js and tests
 var VibeCapturePolicy = {
   headerForwardingDecision,
   shouldForwardHeaders,

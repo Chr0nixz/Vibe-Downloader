@@ -22,6 +22,8 @@ export function StartupGate({ children }: { children: ReactNode }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pollKey, setPollKey] = useState(0);
 
+  // pollKey intentionally retriggers this effect when the user taps Retry.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: pollKey is the retry latch; the effect body only writes status/timer state.
   useEffect(() => {
     // The backend runs heavy init (DB, migrations, settings, scheduler) on a
     // background task after showing the window. Poll get_startup_status until
