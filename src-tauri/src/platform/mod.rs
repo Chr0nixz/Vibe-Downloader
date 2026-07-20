@@ -233,7 +233,11 @@ const SHELL_METACHARACTERS: &[char] = &[
     '!', '~',
 ];
 
-pub fn run_user_command(command: &str) -> Result<(), String> {
+/// Default wall-clock budget for completion-action user commands (PERF-07).
+pub const USER_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// S-4: Validate and tokenize a completion-action command without executing it.
+pub fn validate_user_command(command: &str) -> Result<Vec<String>, String> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return Err("No command configured for the Run command completion action.".to_string());
@@ -263,33 +267,79 @@ pub fn run_user_command(command: &str) -> Result<(), String> {
     if parts.is_empty() {
         return Err("No command configured for the Run command completion action.".to_string());
     }
+    Ok(parts)
+}
+
+/// PERF-07: Run a validated completion-action command without blocking Tokio.
+///
+/// Uses `tokio::process::Command` with kill-on-drop and a wall-clock timeout so
+/// a hung user script cannot pin a download-worker thread or stall dispatch.
+pub async fn run_user_command(command: &str) -> Result<(), String> {
+    run_user_command_with_timeout(command, USER_COMMAND_TIMEOUT).await
+}
+
+/// Same as [`run_user_command`] with an explicit timeout (used by tests).
+pub async fn run_user_command_with_timeout(
+    command: &str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let parts = validate_user_command(command)?;
     tracing::info!(
         executable = %parts[0],
         arg_count = parts.len() - 1,
+        timeout_secs = timeout.as_secs(),
         "user command requested by confirmed completion action"
     );
 
-    let mut cmd = Command::new(&parts[0]);
+    let mut cmd = tokio::process::Command::new(&parts[0]);
     cmd.args(&parts[1..]);
-    let status = cmd
-        .status()
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    cmd.kill_on_drop(true);
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to execute command: {e}"))?;
 
-    if status.success() {
-        tracing::info!(
-            executable = %parts[0],
-            exit_code = status.code().unwrap_or(-1),
-            "user command completed successfully"
-        );
-        Ok(())
-    } else {
-        let code = status.code().unwrap_or(-1);
-        tracing::warn!(
-            executable = %parts[0],
-            exit_code = code,
-            "user command exited with non-zero status"
-        );
-        Err(format!("Command exited with status {code}."))
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => {
+            if status.success() {
+                tracing::info!(
+                    executable = %parts[0],
+                    exit_code = status.code().unwrap_or(-1),
+                    "user command completed successfully"
+                );
+                Ok(())
+            } else {
+                let code = status.code().unwrap_or(-1);
+                tracing::warn!(
+                    executable = %parts[0],
+                    exit_code = code,
+                    "user command exited with non-zero status"
+                );
+                Err(format!("Command exited with status {code}."))
+            }
+        }
+        Ok(Err(error)) => Err(format!("Failed to wait for command: {error}")),
+        Err(_elapsed) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            tracing::warn!(
+                executable = %parts[0],
+                timeout_secs = timeout.as_secs(),
+                "user command timed out and was killed"
+            );
+            Err(crate::models::AppErrorPayload::new(
+                "completion_command_timeout",
+                format!(
+                    "The completion command did not exit within {} seconds and was terminated.",
+                    timeout.as_secs()
+                ),
+                true,
+                vec!["check_url", "retry"],
+            )
+            .command_error())
+        }
     }
 }
 
@@ -297,61 +347,52 @@ pub fn run_user_command(command: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn run_user_command_rejects_empty_string() {
-        let err = run_user_command("").unwrap_err();
+    #[tokio::test]
+    async fn run_user_command_rejects_empty_string() {
+        let err = run_user_command("").await.unwrap_err();
         assert!(err.contains("No command configured"));
     }
 
-    #[test]
-    fn run_user_command_rejects_whitespace_only() {
-        let err = run_user_command("   ").unwrap_err();
+    #[tokio::test]
+    async fn run_user_command_rejects_whitespace_only() {
+        let err = run_user_command("   ").await.unwrap_err();
         assert!(err.contains("No command configured"));
     }
 
-    #[test]
-    fn run_user_command_rejects_shell_metacharacters() {
-        let err = run_user_command("echo hello & rm -rf /").unwrap_err();
+    #[tokio::test]
+    async fn run_user_command_rejects_shell_metacharacters() {
+        let err = run_user_command("echo hello & rm -rf /").await.unwrap_err();
         assert!(err.contains("disallowed character"));
     }
 
-    #[test]
-    fn run_user_command_rejects_pipe() {
-        let err = run_user_command("echo hello | cat").unwrap_err();
+    #[tokio::test]
+    async fn run_user_command_rejects_pipe() {
+        let err = run_user_command("echo hello | cat").await.unwrap_err();
         assert!(err.contains("disallowed character"));
     }
 
-    #[test]
-    fn run_user_command_rejects_redirect() {
-        let err = run_user_command("echo hello > /tmp/file").unwrap_err();
+    #[tokio::test]
+    async fn run_user_command_rejects_redirect() {
+        let err = run_user_command("echo hello > /tmp/file")
+            .await
+            .unwrap_err();
         assert!(err.contains("disallowed character"));
     }
 
-    #[test]
-    fn run_user_command_rejects_unclosed_quote() {
-        // shlex::split returns None for unclosed quotes.
-        let err = run_user_command("echo \"unclosed").unwrap_err();
+    #[tokio::test]
+    async fn run_user_command_rejects_unclosed_quote() {
+        let err = run_user_command("echo \"unclosed").await.unwrap_err();
         assert!(err.contains("invalid quoting syntax"));
     }
 
-    #[test]
-    fn run_user_command_executes_simple_command() {
-        // Use a cross-platform no-op command. `cmd /c verify` on Windows
-        // is not suitable (we no longer use shell). Instead, use the
-        // platform-specific exit-zero command directly.
-        //
-        // On Windows: `where where` (finds the `where` command, exits 0)
-        // On Unix: `true` (always exits 0)
-        //
-        // We only verify that run_user_command returns Ok — the actual
-        // command output is irrelevant.
+    #[tokio::test]
+    async fn run_user_command_executes_simple_command() {
         let cmd = if cfg!(target_os = "windows") {
             "where where"
         } else {
             "true"
         };
-        // These commands contain no metacharacters and should succeed.
-        let result = run_user_command(cmd);
+        let result = run_user_command(cmd).await;
         assert!(
             result.is_ok(),
             "expected simple command to succeed, got: {:?}",
@@ -359,15 +400,36 @@ mod tests {
         );
     }
 
-    #[test]
-    fn run_user_command_reports_non_zero_exit() {
-        // A command that exits with non-zero status. No metacharacters.
+    #[tokio::test]
+    async fn run_user_command_reports_non_zero_exit() {
         let cmd = if cfg!(target_os = "windows") {
             "where nonexistent-program-xyz-12345"
         } else {
             "false"
         };
-        let err = run_user_command(cmd).unwrap_err();
+        let err = run_user_command(cmd).await.unwrap_err();
         assert!(err.contains("exited with status"));
+    }
+
+    #[tokio::test]
+    async fn run_user_command_times_out_hanging_process() {
+        let cmd = if cfg!(target_os = "windows") {
+            // ping waits ~1s per echo; 60 echoes >> 2s timeout.
+            "ping -n 60 127.0.0.1"
+        } else {
+            "sleep 60"
+        };
+        let started = std::time::Instant::now();
+        let err = run_user_command_with_timeout(cmd, std::time::Duration::from_secs(2))
+            .await
+            .expect_err("hanging command must time out");
+        assert!(
+            err.contains("completion_command_timeout"),
+            "expected structured timeout, got: {err}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "timeout path must not wait for the full hanging command"
+        );
     }
 }

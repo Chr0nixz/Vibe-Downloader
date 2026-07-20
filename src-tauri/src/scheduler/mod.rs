@@ -595,7 +595,7 @@ impl Scheduler {
             return;
         }
         if settings.completion_action == CompletionAction::RunCommand {
-            if let Err(error) = platform::run_user_command(&settings.completion_run_command) {
+            if let Err(error) = platform::run_user_command(&settings.completion_run_command).await {
                 tracing::warn!(error = %error, "completion run_command failed");
             }
             return;
