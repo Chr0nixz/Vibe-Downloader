@@ -20,6 +20,8 @@
     "test:frontend": "vitest run",
     "test": "pnpm test:frontend && pnpm test:rust",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "perf:baseline": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/perf/run-baseline.ps1",
+    "perf:baseline:10k": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/perf/run-baseline.ps1 -Include10k",
     "check:bindings": "pnpm specta && git diff --exit-code src/generated/bindings.ts",
     "prepare:native-host": "node scripts/native-host-build.mjs",
     "prepare:updater-rehearsal": "node scripts/write-updater-rehearsal-config.mjs",

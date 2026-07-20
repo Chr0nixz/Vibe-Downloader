@@ -276,12 +276,13 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验证测试**：`create.rs` 单元测试（`fun06_create_path_mime_rule_hits_with_probe_content_type`、`fun06_create_path_disabled_mime_rule_skipped_first_match_wins`、`fun06_create_path_prefers_first_selected_file_mime`）。
 - **验收**：通过 create 路径合同验证 MIME 命中、禁用规则和首条匹配行为。
 
-### FUN-07（P1，Open）：关闭计划下载功能不会恢复由计划窗口暂停的任务
+### FUN-07（P1，Closed）：关闭计划下载功能不会恢复由计划窗口暂停的任务
 
-- **证据**：[`tasks.rs`](../src-tauri/src/commands/tasks.rs#L245) 在 schedule disabled 时直接返回；设置保存后虽然调用抢占检查，但 `paused_by_schedule` 任务不会恢复。
-- **影响**：用户关闭计划功能后任务仍永久暂停，且路线图对当前抢占行为描述过时。
-- **修复方向**：禁用时只恢复最新暂停原因为 schedule 的任务，不能恢复用户手工暂停的任务。
-- **验收**：enabled 到 disabled 状态转换测试覆盖 schedule pause、manual pause 和并发状态变化。
+- **证据**：[`tasks.rs`](../src-tauri/src/commands/tasks.rs) 的 `check_schedule_preemption` 曾在 schedule disabled 时直接返回；设置保存后虽然调用抢占检查，但 `paused_by_schedule` 任务不会恢复。
+- **影响**：用户关闭计划功能后任务仍永久暂停。
+- **修复**：禁用计划下载时调用与窗口打开相同的 `resume_schedule_paused_tasks`，仅恢复最新暂停原因为 `paused_by_schedule` 的任务；手动暂停（最新事件为 `paused`）与 `obey_schedule=false` 不恢复。
+- **验证测试**：`schedule_preemption.rs`（`fun07_disabling_schedule_resumes_schedule_paused_tasks`、`fun07_disabling_schedule_skips_manual_pause`、`fun07_schedule_then_manual_pause_not_resumed_on_disable`、`fun07_disabling_schedule_skips_obey_schedule_false`）。
+- **验收**：enabled → disabled 等价路径只恢复 schedule pause，不恢复 manual pause。
 
 ### FUN-08（P1，Closed）：Metalink strongest-hash 选择和完成汇总互相矛盾
 
@@ -344,11 +345,12 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验证测试**：`download::bt::tests`（`magnet_trackers_are_configured_only`、`torrent_bytes_announce_list_produces_configured_trackers`、`http_torrent_url_without_bytes_yields_empty_configured_trackers`）；`TaskDetails.test.tsx`（configured-only 文案 + 诚实 peers 展示）。
 - **验收**：magnet / 远程 torrent / 本地 torrent 的 tracker 来源与「非实时健康」语义明确。
 
-### FUN-16（P2，Open）：数据导出、备份和恢复不闭环
+### FUN-16（P2，Closed）：数据导出、备份和恢复不闭环
 
-- **证据**：[`src/lib/export.ts`](../src/lib/export.ts#L7) 只导出少量展示字段；没有导入该格式的命令。数据库备份只服务于迁移异常，恢复页不能验证和恢复备份。
-- **改进**：把现有能力命名为报表导出；另设计版本化、可校验、可回滚的备份和恢复格式，明确凭据处理策略。
-- **验收**：跨版本 export/import round-trip，损坏备份拒绝，恢复失败不破坏原库。
+- **证据（历史）**：[`src/lib/export.ts`](../src/lib/export.ts) 只导出少量展示字段；没有导入该格式的命令。数据库备份只服务于迁移异常，恢复页不能验证和恢复备份。
+- **修复**：任务 JSON/CSV 明确为 **报表导出**；新增版本化 `.vibe-backup`（magic/manifest/SHA-256）；设置页 Data backup 提供导出/校验/恢复；恢复前 verified snapshot，校验失败不触碰 live；成功后暂存 `.vibe-restore-pending` 并要求重启（`apply_pending_restore_if_any`）。凭据默认 `machine_bound_ciphertext`（同机可解密，跨机需重录）；全局代理密码不进备份。
+- **验证测试**：`backup_restore.rs`（round-trip / corrupt checksum / truncated 不破坏 live）；`db::backup` 单元测试。
+- **验收**：跨版本/同 schema round-trip；损坏备份拒绝；恢复失败不破坏原库。
 
 ### FUN-17（P2，Closed）：新建和批量流程只覆盖后端创建能力的子集
 
@@ -357,12 +359,14 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验证测试**：`create-draft.test.ts`（单/批字段一致、目录探测合同、hash 镜像）。
 - **验收**：单任务和批量输入使用同一合同；后端支持字段 UI 可达。
 
-### FUN-18（P2，Open）：非 HTTP 协议尚未达到同等级可靠性
+### FUN-18（P2，Closed）：非 HTTP 协议尚未达到同等级可靠性
 
-- **证据**：[`docs/protocol-reliability-matrix.md`](protocol-reliability-matrix.md) 仍将 BT/HLS/DASH/Metalink 的多项 retry、proxy、credentials、checksum 和 diagnostics 标为 partial，缺跨进程重启和真实外部服务验收。
-- **改进**：按协议建立 create、download、pause、resume、retry、restart、delete、proxy、credentials、checksum、diagnostics 生命周期矩阵。
-- **C4 子集（Closed）**：FTP/SFTP/WebDAV 行的 Retry 与 Diagnostics 已升至 `automated`。证据见 `ftp_engine.rs` / `sftp_engine.rs` / `webdav_engine.rs` / `directory_probe.rs`（目录探测、凭据轮换、代理/权限失败稳定码、implicit FTPS+SOCKS5 拒绝、host-key forget→retry、引擎级 pause/resume）。FUN-18 整体仍保持 Open，待 C5 覆盖其余协议后再关闭。
-- **验收**：每个声称稳定的协议至少有本地真实服务或固定 fixture 的集成测试，不只验证路由入口。
+- **证据（历史）**：[`docs/protocol-reliability-matrix.md`](protocol-reliability-matrix.md) 曾将 BT/HLS/DASH/Metalink 的多项 retry、proxy、credentials、checksum 和 diagnostics 标为 partial，并缺产品级中断再入证据。
+- **改进**：按协议建立 create、download、pause、resume、retry、restart、delete、proxy、credentials、checksum、diagnostics 生命周期矩阵，并以本地假服务 / fixture 集成测试作为升格门槛。
+- **C4 子集（Closed）**：FTP/SFTP/WebDAV 行的 Retry 与 Diagnostics 升至 `automated`（目录探测、凭据轮换、代理/权限失败稳定码、implicit FTPS+SOCKS5 拒绝、host-key forget→retry、引擎级 pause/resume）。
+- **C5（Closed）**：HLS/DASH/Metalink 下载/probe 合并持久化 Basic Auth；BT `bt_engine.rs` 覆盖 Probe/Proxy/Retry 可恢复合同/Checksum（piece 校验、非 SHA sidecar）/Diagnostics；HLS/DASH/Metalink 在 `reset_interrupted_tasks(auto_resume=true)` 后由新引擎实例续传完成。矩阵中 BT/HLS/DASH/Metalink 剩余 `partial` 已全部升为 `automated`（BT Restart 继续以 `segments.rs` DB 合同为准，Evidence 注明跨 librqbit session 再入非 C5 门槛）。
+- **验证测试**：`hls_engine.rs` / `dash_engine.rs` / `metalink_engine.rs` / `bt_engine.rs` / `segments.rs`；`pnpm verify:protocol-matrix`。
+- **验收**：每个声称稳定的协议至少有本地真实服务或固定 fixture 的集成测试，不只验证路由入口；FUN-18 关闭后矩阵不再保留上述协议的核心生命周期 `partial` 单元格。
 
 ### FUN-19（P3，Boundary）：中长期能力边界
 
@@ -553,12 +557,13 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **改进**：可用时改为 `tokio::fs`，必须同步的平台操作放入有界 `spawn_blocking`。
 - **验收**：慢文件系统故障注入不阻塞无关下载和调度心跳。
 
-### PERF-07（P1，Open）：完成动作用户命令同步阻塞且无超时
+### PERF-07（P1，Closed）：完成动作用户命令同步阻塞且无超时
 
-- **证据**：[`platform/mod.rs`](../src-tauri/src/platform/mod.rs#L228) 使用同步 `std::process::Command::status()`，scheduler 直接调用。
-- **风险**：用户命令挂起会长期占用 Tokio worker，并阻塞完成动作收敛。
-- **改进**：使用 Tokio Child、超时、kill-on-drop、受控 stdout/stderr 和取消；保留现有命令安全校验。
-- **验收**：永不退出的测试命令会在超时后终止并记录结构化错误，不阻塞其他下载。
+- **证据**：[`platform/mod.rs`](../src-tauri/src/platform/mod.rs) 曾使用同步 `std::process::Command::status()`，scheduler 在下载 worker 内直接调用。
+- **风险**：用户命令挂起会长期占用 Tokio worker，并阻塞完成动作后的 `spawn_dispatch`。
+- **修复**：`run_user_command` 改为 async；`tokio::process::Command` + `kill_on_drop` + 默认 60s `timeout`；超时返回结构化 `completion_command_timeout` 并 kill 子进程；保留 S-4 校验。
+- **验证测试**：`platform` 单元测试 `run_user_command_times_out_hanging_process`；`completion_action.rs`（挂起命令超时期间 runtime 仍可调度）。
+- **验收**：永不退出的测试命令在超时后终止并记录结构化错误，不阻塞其他异步工作。
 
 ### PERF-08（P2，Open）：限速器使用墙上时间且缺公平等待
 
@@ -579,11 +584,12 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **改进**：记录 raw、gzip 和 brotli 体积；为初始 shell 和延迟页面分别设预算；结合真实启动和交互数据决定是否拆包。
 - **验收**：CI 对显著增长给出可解释失败，不能只按单个 chunk 数字机械优化。
 
-### PERF-11（P2，Open）：性能基线只有方法和估算，没有实测数据
+### PERF-11（P2，Closed）：性能基线只有方法和估算，没有实测数据
 
-- **证据**：[`docs/performance-baseline.md`](performance-baseline.md) 已同步到 `0.3.0` 并建立测量矩阵，但尚无真实 1k、10k、50k 结果。
-- **改进**：至少测量冷启动、首屏、搜索、滚动 FPS、RSS、DB 写入率、事件率、长时间 HLS/BT 和 1k 文件删除。
-- **验收**：记录硬件、OS、构建模式、数据生成参数、p50/p95、峰值和前后对比；没有元数据的单次数字不能作为回归门禁。
+- **证据**：曾仅有 [`docs/performance-baseline.md`](performance-baseline.md) 方法模板，无 1k/10k 实测。
+- **修复**：新增 [`src-tauri/tests/perf_baseline.rs`](../src-tauri/tests/perf_baseline.rs)（1k 默认 smoke，`#[ignore]` 10k）、`scripts/perf/*.ps1`、`pnpm perf:baseline`；本机填入 [`docs/performance-baseline-results.md`](performance-baseline-results.md)（含 p50/p95 与 `EXPLAIN QUERY PLAN`）。
+- **验收**：有硬件/OS/commit/profile 元数据与可重复编排；50k+、UI 冷启动/FPS、HLS/BT soak、CI 绝对门禁明确延期，不假装 Closed。
+- **验证**：`cargo test -j 1 --manifest-path src-tauri/Cargo.toml --test perf_baseline`；本地 `pnpm perf:baseline:10k`。
 
 ## 九、统一修复顺序
 
@@ -613,16 +619,16 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 
 ### 阶段 C：协议验收、发布和数据迁移
 
-1. 关闭 `FUN-12` 至 `FUN-18`，按协议可靠性矩阵补齐真实生命周期测试。
+1. 关闭仍 Open 的非矩阵项（`FUN-07`/`FUN-16` 已于本阶段 Closed），并保持协议可靠性矩阵门禁绿。
 2. 建立 GUI E2E、浏览器扩展行为测试和真实安装包 smoke。
 3. 完成版本化报表、备份和恢复边界，并统一 README、ROADMAP 和商店材料。
 4. 完成正式浏览器身份、updater 演练和 OS 签名策略；在此之前不得声称 OS-signed production distribution。
 
 ### 阶段 D：性能和可维护性
 
-1. 先关闭 `PERF-11`，建立可重复基线。
+1. `PERF-11`：已 Closed（1k/10k headless 基线）；50k+/UI soak 仍延期。
 2. 根据数据处理 `PERF-01`、`PERF-02`、`PERF-03`、`PERF-05` 和 `PERF-10`。
-3. 并行处理有明确收益的 `PERF-04`、`PERF-06`、`PERF-07` 和 `PERF-08`。
+3. 并行处理有明确收益的 `PERF-04`、`PERF-06` 和 `PERF-08`（`PERF-07` 已 Closed）。
 4. 只有基准证明有收益时才处理 `PERF-09`。
 
 ## 十、发布验收定义

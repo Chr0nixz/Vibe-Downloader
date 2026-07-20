@@ -29,7 +29,11 @@ browser/dist
 _temp_*
 _*.ps1
 *.ps1
+!scripts/perf/*.ps1
 hls_*.txt
+
+# PERF-11 local baseline artifacts (checked-in summaries live under docs/)
+artifacts/perf/
 *.suo
 *.ntvs*
 *.njsproj

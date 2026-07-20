@@ -169,24 +169,26 @@ Audit IDs: `FUN-11`, `FUN-15`, `ARC-12`, `ARC-13` — **Closed**
 
 ### C4. FTP, SFTP, And WebDAV — audit Closed
 
-Audit ID: `FUN-18` C4 subset (FTP/SFTP/WebDAV Retry + Diagnostics) — **Closed**; FUN-18 overall remains Open until C5
+Audit ID: `FUN-18` C4 subset (FTP/SFTP/WebDAV Retry + Diagnostics) — **Closed**
 
 - Complete authenticated directory-probe workflows.
 - Add credential rotation, restart, proxy-failure, permission-denied, and host-key-recovery tests.
 - Keep implicit FTPS over SOCKS5 explicitly unsupported until a safe implementation exists.
 
-### C5. Protocol Acceptance Matrix
+### C5. Protocol Acceptance Matrix — audit Closed
 
-Every stable protocol must have evidence for:
+Audit ID: `FUN-18` — **Closed**
+
+Every stable protocol now has automated evidence for:
 
 - create and probe;
 - download and completion;
 - pause and resume;
 - retry and network recovery;
-- process restart;
+- process-interrupt restart (`reset_interrupted_tasks` + cold engine reentry for HLS/DASH/Metalink; BT Restart via `segments.rs` DB contract);
 - delete and cleanup;
 - proxy and credentials where applicable;
-- checksum and remote-change protection where applicable;
+- checksum and remote-change protection where applicable (BT: piece verification contract, not task SHA sidecar);
 - stable diagnostics and recovery actions.
 
 The source of truth for current cells is [protocol-reliability-matrix.md](protocol-reliability-matrix.md).
@@ -206,25 +208,25 @@ The source of truth for current cells is [protocol-reliability-matrix.md](protoc
 - Verify installation, first launch, database migration, update, relaunch, browser manifest, and uninstall behavior.
 - Continue to label packages unsigned until Apple Developer ID and Windows Authenticode signing are configured and verified.
 
-### D3. Backup And Restore
+### D3. Backup And Restore — audit Closed
 
-Audit ID: `FUN-16`
+Audit ID: `FUN-16` — **Closed**
 
-- Rename the current JSON/CSV output as report export.
-- Design a versioned, checksummed, rollback-safe backup and restore format.
-- Define whether and how encrypted credentials can be migrated between installations.
+- Renamed the task list JSON/CSV output as report export.
+- Added a versioned, checksummed `.vibe-backup` format with rollback-safe staged restore.
+- Credentials policy: machine-bound ciphertext in the DB backup; global proxy password stays in the OS keyring and is not exported.
 
 ## Phase E: Performance And Maintainability
 
 Performance work must start with measurements rather than assumptions.
 
-### E1. Reproducible Baseline
+### E1. Reproducible Baseline — audit Closed
 
-Audit ID: `PERF-11`
+Audit ID: `PERF-11` — **Closed**（50k+ / UI 冷启动·FPS / HLS·BT soak / CI 绝对门禁 **deferred**）
 
-- Record cold start, first interactive frame, search, filter, scroll FPS, RSS, DB write rate, event rate, long-running HLS/BT growth, and bulk deletion.
-- Run at 1k, 10k, 50k, and at least one larger task history.
-- Record hardware, OS, build profile, data distribution, p50/p95, peak values, and query plans.
+- Headless harness：`perf_baseline.rs` + `scripts/perf` + `pnpm perf:baseline`（1k smoke，可选 10k）。
+- 本机 1k/10k search/filter/list cursor p50/p95 与 `EXPLAIN QUERY PLAN` 见 [performance-baseline-results.md](performance-baseline-results.md)。
+- 仍延期：50k+ 全矩阵、release UI 冷启动/滚动 FPS/RSS 实测填表、HLS/BT 长跑、1k 批量删除 soak、CI 绝对数值门禁。
 
 ### E2. Known Hotspots
 

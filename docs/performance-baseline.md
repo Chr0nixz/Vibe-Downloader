@@ -4,7 +4,7 @@
 
 适用版本：Vibe Downloader `0.3.0`
 
-状态：测量方法和数据模板已建立，尚未形成可用于回归门禁的生产规模实测基线。
+状态：已落地可重复 headless harness（1k CI smoke + 可选 10k），并完成本机 1k/10k 实测摘要，见 [performance-baseline-results.md](performance-baseline-results.md)。50k+、UI 冷启动/FPS、HLS/BT 长跑与 CI 绝对数值门禁仍未建立。
 
 本文只记录可重复的性能测量。当前风险优先级见 [project-improvement-audit.md](project-improvement-audit.md) 的 `PERF-01` 至 `PERF-11`；没有硬件、OS、构建模式、数据分布和重复次数的单次数字不能作为性能结论。
 
@@ -19,13 +19,14 @@
 
 当前没有以下实测数据：
 
-- 1k、10k、50k、100k 或更大任务库的冷启动与首屏时间。
-- 搜索、筛选和排序的 p50/p95 与 SQLite query plan。
+- 50k、100k 或更大任务库的冷启动与首屏时间（1k/10k 的 headless search/filter/list 已有，见 results）。
+- 搜索、筛选在 50k+ 上的 p50/p95（1k/10k 已记录）。
 - 长时间 HLS、BT、事件表、WAL、缓存和文件句柄增长曲线。
 - 100 个活动任务的 CPU、RSS、DB write rate、事件率和 UI FPS。
 - 1k 文件删除、1k 文件 torrent 和大量分段任务的响应时间。
 - release `opt-level="s"` 与 `opt-level="3"` 在 hash、AES、XML 和 BT 热点上的对比。
 - 前端 chunk 的 raw、gzip、brotli 预算及其与启动时间的关系。
+- release UI：冷启动、滚动 FPS、稳态 RSS（清单已写入 results，数值待测）。
 
 ## 2. 当前待测热点
 
