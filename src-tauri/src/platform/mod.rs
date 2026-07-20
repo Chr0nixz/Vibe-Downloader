@@ -293,6 +293,8 @@ pub async fn run_user_command_with_timeout(
 
     let mut cmd = tokio::process::Command::new(&parts[0]);
     cmd.args(&parts[1..]);
+    // Detach all stdio so console tools cannot block waiting for a pipe/parent console.
+    cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
     cmd.kill_on_drop(true);
@@ -387,8 +389,10 @@ mod tests {
 
     #[tokio::test]
     async fn run_user_command_executes_simple_command() {
+        // Prefer direct-exec fixtures that exit immediately. On Windows CI,
+        // PATH helpers like `where` can hang when stdio is detached.
         let cmd = if cfg!(target_os = "windows") {
-            "where where"
+            "cmd /C exit 0"
         } else {
             "true"
         };
@@ -403,12 +407,15 @@ mod tests {
     #[tokio::test]
     async fn run_user_command_reports_non_zero_exit() {
         let cmd = if cfg!(target_os = "windows") {
-            "where nonexistent-program-xyz-12345"
+            "cmd /C exit 1"
         } else {
             "false"
         };
         let err = run_user_command(cmd).await.unwrap_err();
-        assert!(err.contains("exited with status"));
+        assert!(
+            err.contains("exited with status"),
+            "expected non-zero exit status error, got: {err}"
+        );
     }
 
     #[tokio::test]
