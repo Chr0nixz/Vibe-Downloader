@@ -81,28 +81,34 @@ async fn test_pool(label: &str) -> sqlx::SqlitePool {
 }
 
 /// Mirrors ARC-05 lock-held reservation: pending control + conditional start.
+///
+/// The downloads map check+insert is atomic (same as production's per-task
+/// runtime lock + vacant insert). Without that, two racers can both insert and
+/// the losing `update_task_status` path removes the winner's pending control.
 async fn reserve_task_under_lock(
     downloads: &Mutex<HashMap<String, DownloadControl>>,
     pool: &sqlx::SqlitePool,
     task: &TaskRecord,
     connection_slots: usize,
 ) -> Result<(), String> {
-    if downloads.lock().await.contains_key(&task.id) {
-        return Ok(());
-    }
-
     let finish = Arc::new(AtomicBool::new(false));
     let cancel_token = tokio_util::sync::CancellationToken::new();
-    downloads.lock().await.insert(
-        task.id.clone(),
-        DownloadControl {
-            cancel_token,
-            finish,
-            handle: None,
-            source_key: task.source_key.clone(),
-            connection_slots,
-        },
-    );
+    {
+        let mut downloads = downloads.lock().await;
+        if downloads.contains_key(&task.id) {
+            return Ok(());
+        }
+        downloads.insert(
+            task.id.clone(),
+            DownloadControl {
+                cancel_token,
+                finish: finish.clone(),
+                handle: None,
+                source_key: task.source_key.clone(),
+                connection_slots,
+            },
+        );
+    }
 
     match db::update_task_status(
         pool,
@@ -118,11 +124,24 @@ async fn reserve_task_under_lock(
     {
         Ok(Some(_)) => Ok(()),
         Ok(None) => {
-            downloads.lock().await.remove(&task.id);
+            // Only drop our own pending control — another racer may already own the slot.
+            let mut downloads = downloads.lock().await;
+            if downloads
+                .get(&task.id)
+                .is_some_and(|control| Arc::ptr_eq(&control.finish, &finish))
+            {
+                downloads.remove(&task.id);
+            }
             Ok(())
         }
         Err(error) => {
-            downloads.lock().await.remove(&task.id);
+            let mut downloads = downloads.lock().await;
+            if downloads
+                .get(&task.id)
+                .is_some_and(|control| Arc::ptr_eq(&control.finish, &finish))
+            {
+                downloads.remove(&task.id);
+            }
             Err(error)
         }
     }
