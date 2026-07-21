@@ -379,6 +379,15 @@ async fn download_segment_once(
             .await
             .is_err()
         {
+            // Pause/cancel during limiter wait must still flush buffered bytes so
+            // checkpointed downloaded_until cannot race ahead of durable disk state.
+            file.flush().await.map_err(|e| {
+                non_retryable(segment_failure(
+                    segment,
+                    offset,
+                    &format!("Could not flush the temporary file: {e}"),
+                ))
+            })?;
             send_segment_progress(progress_tx, &segment.id, offset, 0)
                 .await
                 .map_err(non_retryable_attempt)?;

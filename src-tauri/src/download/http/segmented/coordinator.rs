@@ -414,6 +414,56 @@ impl<'a> SegmentCoordinator<'a> {
         }
 
         if self.cancel_token.is_cancelled() {
+            // ARC-03 / resume integrity: wait for workers to observe cancel and flush
+            // BufWriters before checkpointing. Dropping JoinSet here would abort them and
+            // leave downloaded_until ahead of durable bytes (preallocated zero gaps).
+            while worker_pool.active_workers > 0 {
+                tokio::select! {
+                    Some(message) = progress_rx.recv() => {
+                        handle_segment_message(
+                            SegmentMessageContext {
+                                app: &self.app,
+                                pool: &self.pool,
+                                task_id: &self.task.id,
+                                total_size: self.task.total_size,
+                                connection_count: active_connection_count,
+                                update_task: false,
+                            },
+                            &mut runtime_progress,
+                            &mut progress_gate,
+                            message,
+                        )
+                        .await?;
+                    }
+                    Some(result) = worker_pool.workers.join_next() => {
+                        worker_pool.active_workers = worker_pool.active_workers.saturating_sub(1);
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(failure)) => {
+                                runtime_progress
+                                    .update_progress(failure.segment_id, failure.downloaded_until, 0);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+            }
+            while let Ok(message) = progress_rx.try_recv() {
+                handle_segment_message(
+                    SegmentMessageContext {
+                        app: &self.app,
+                        pool: &self.pool,
+                        task_id: &self.task.id,
+                        total_size: self.task.total_size,
+                        connection_count: active_connection_count,
+                        update_task: false,
+                    },
+                    &mut runtime_progress,
+                    &mut progress_gate,
+                    message,
+                )
+                .await?;
+            }
             checkpoint_runtime_progress(
                 &self.pool,
                 &self.task.id,
