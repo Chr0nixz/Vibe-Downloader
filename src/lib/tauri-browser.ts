@@ -967,6 +967,14 @@ export async function listSegmentsPage(input: CursorPageInput) {
   return { items, nextCursor: next < all.length ? String(next) : null };
 }
 
+export async function listHlsSegmentsPage(_input: CursorPageInput) {
+  return { items: [], nextCursor: null };
+}
+
+export async function listDashSegmentsPage(_input: CursorPageInput) {
+  return { items: [], nextCursor: null };
+}
+
 export async function getSegmentSummary(taskId: string): Promise<SegmentSummary> {
   const segments = await mockTaskSegmentsForTask(taskId);
   return {

@@ -182,6 +182,8 @@ macro_rules! vibe_commands_base {
             commands::tasks::get_scheduler_snapshot,
             commands::tasks::list_segments,
             commands::tasks::list_segments_page,
+            commands::tasks::list_hls_segments_page,
+            commands::tasks::list_dash_segments_page,
             commands::tasks::get_segment_summary,
             commands::tasks::get_torrent_runtime_snapshot,
             commands::tasks::get_task_proxy_settings,
@@ -306,6 +308,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<commands::tasks::TaskEventsPageResult>()
         .typ::<commands::tasks::TaskRequestsPageResult>()
         .typ::<commands::tasks::TaskSegmentsPageResult>()
+        .typ::<commands::tasks::HlsSegmentsPageResult>()
+        .typ::<commands::tasks::HlsSegmentView>()
         .typ::<models::RequestDiagnostic>()
         .typ::<models::SegmentSummary>()
         .typ::<models::HashVerificationState>()

@@ -15,10 +15,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type {
   ChecksumAlgorithm,
+  DashSegmentView,
   HashVerificationState,
+  HlsSegmentView,
   MetalinkMirrorView,
   RecoveryAction,
   RequestDiagnostic,
+  SegmentSummary,
+  SftpKnownHost,
   TaskChecksum,
   TaskEvent,
   TaskPriority,
@@ -27,17 +31,28 @@ import type {
   TorrentRuntimeSnapshot,
 } from "@/generated/bindings";
 import { useIsCompactShell } from "@/hooks/use-shell-layout";
+import { type TaskDetailDiagSubTab, useTaskDetailQueries } from "@/hooks/use-task-detail-queries";
 import { errorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput, speedLimitInputFromBytes } from "@/lib/speed-limit";
 import {
+  defaultDiagSubTab,
+  diagnosticsConnectionsEmptyKey,
+  diagnosticsRequestsEmptyKey,
+  diagnosticsSegmentsEmptyKey,
+  ftpTlsModeLabel,
+  isDashProtocol,
+  isHlsProtocol,
+  isHttpLikeProtocol,
+  isTorrentProtocol,
+  parseUrlHostPort,
+  showsHttpRequestFields,
+} from "@/lib/task-diagnostics";
+import {
   computeFileHash,
+  finishLiveRecording,
   getTaskProxySettings,
-  getTorrentRuntimeSnapshot,
   listMetalinkMirrors,
-  listSegmentsPage,
-  listTaskEventsPage,
-  listTaskRequestsPage,
   onTaskUpdated,
   retryTaskWithMirror,
   updateTaskProxySettings,
@@ -54,8 +69,6 @@ import type { TaskSegment } from "@/types/task-segment";
 
 const log = createLogger("task-details");
 
-const SEGMENT_REFRESH_MS = 2_000;
-const DETAIL_REFRESH_MS = 30_000;
 const EMPTY_TASK_FILES: Task["files"] = [];
 
 interface TaskDetailsProps {
@@ -324,44 +337,59 @@ function TaskDetailsPanel({
 }) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("overview");
-  const [diagSubTab, setDiagSubTab] = useState<"segments" | "requests">("segments");
+  const [diagSubTab, setDiagSubTab] = useState<TaskDetailDiagSubTab>("segments");
   const [segmentViewMode, setSegmentViewMode] = useState<"ranges" | "connections">("ranges");
-  const [segments, setSegments] = useState<TaskSegment[]>([]);
-  const [segmentsCursor, setSegmentsCursor] = useState<string | null>(null);
-  const [segmentError, setSegmentError] = useState<string | null>(null);
-  const [events, setEvents] = useState<TaskEvent[]>([]);
-  const [eventsCursor, setEventsCursor] = useState<string | null>(null);
-  const [eventsError, setEventsError] = useState<string | null>(null);
-  const [requests, setRequests] = useState<RequestDiagnostic[]>([]);
-  const [requestsCursor, setRequestsCursor] = useState<string | null>(null);
-  const [requestsError, setRequestsError] = useState<string | null>(null);
   const [hashState, setHashState] = useState<HashVerificationState | null>(null);
   const [verifyingHash, setVerifyingHash] = useState(false);
   const [checksumResults, setChecksumResults] = useState<Record<string, { actual: string; match: boolean }>>({});
   const [verifyingChecksums, setVerifyingChecksums] = useState<Set<string>>(new Set());
-  const [torrentSnapshot, setTorrentSnapshot] = useState<TorrentRuntimeSnapshot | null>(null);
-  const [torrentSnapshotError, setTorrentSnapshotError] = useState<string | null>(null);
   const [mirrors, setMirrors] = useState<MetalinkMirrorView[]>([]);
-  const isTorrentTask = task.protocol === "bt" || task.protocol === "magnet";
+  const [finishingLive, setFinishingLive] = useState(false);
   const isMetalinkTask = task.protocol === "metalink";
+  const isTorrentTask = isTorrentProtocol(task.protocol);
+  const isHlsTask = isHlsProtocol(task.protocol);
+  const isDashTask = isDashProtocol(task.protocol);
+  const canFinishLiveRecording = isHlsTask && (task.status === "downloading" || task.status === "retrying");
+
+  const {
+    segments,
+    segmentsCursor,
+    segmentError,
+    hlsSegments,
+    hlsSegmentsCursor,
+    hlsSegmentError,
+    dashSegments,
+    dashSegmentsCursor,
+    dashSegmentError,
+    events,
+    eventsCursor,
+    eventsError,
+    requests,
+    requestsCursor,
+    requestsError,
+    torrentSnapshot,
+    torrentSnapshotError,
+    segmentSummary,
+    segmentSummaryError,
+    ftpSftpEvents,
+    sftpKnownHosts,
+    loadMoreSegments,
+    loadMoreHlsSegments,
+    loadMoreDashSegments,
+    loadMoreEvents,
+    loadMoreRequests,
+  } = useTaskDetailQueries({ task, activeTab, diagSubTab });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: task identity resets the panel; later status updates must preserve the selected tab.
   useEffect(() => {
     setActiveTab(task.status === "failed" || task.status === "needs_attention" ? "diagnostics" : "overview");
-    setDiagSubTab("segments");
+    setDiagSubTab(defaultDiagSubTab(task.protocol));
     setSegmentViewMode("ranges");
     setHashState(null);
     setChecksumResults({});
     setVerifyingChecksums(new Set());
-    setTorrentSnapshot(null);
-    setTorrentSnapshotError(null);
     setMirrors([]);
-    setSegments([]);
-    setSegmentsCursor(null);
-    setEvents([]);
-    setEventsCursor(null);
-    setRequests([]);
-    setRequestsCursor(null);
+    setFinishingLive(false);
   }, [task.id]);
 
   // Event-driven refresh: re-fetch detail data when this task's status/metadata changes,
@@ -393,167 +421,6 @@ function TaskDetailsPanel({
     };
   }, [task.id, onRefresh]);
 
-  useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
-    let inFlight = false;
-
-    // PERF-02: only poll while the Segments sub-tab is visible (Requests has its own effect).
-    if (activeTab !== "diagnostics" || diagSubTab !== "segments") {
-      setSegments([]);
-      setSegmentError(null);
-      return;
-    }
-
-    const loadSegments = () => {
-      if (cancelled || inFlight) return;
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      inFlight = true;
-      void listSegmentsPage({ taskId: task.id, cursor: null, pageSize: 100 })
-        .then((result) => {
-          if (!cancelled) {
-            // id-diff: skip setState if segment id set + key fields are unchanged
-            setSegments((prev) => {
-              if (
-                prev.length === result.items.length &&
-                prev.every(
-                  (s, i) =>
-                    s.id === result.items[i].id &&
-                    s.status === result.items[i].status &&
-                    s.downloadedUntil === result.items[i].downloadedUntil,
-                )
-              ) {
-                return prev;
-              }
-              return result.items;
-            });
-            setSegmentsCursor(result.nextCursor);
-            setSegmentError(null);
-          }
-        })
-        .catch((error) => {
-          if (!cancelled) setSegmentError(errorMessage(error));
-        })
-        .finally(() => {
-          inFlight = false;
-        });
-    };
-
-    const startPolling = () => {
-      if (intervalId) return;
-      const isLive = task.status === "downloading" || task.status === "retrying";
-      if (isLive) {
-        intervalId = setInterval(loadSegments, SEGMENT_REFRESH_MS);
-      }
-    };
-
-    const stopPolling = () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-        intervalId = undefined;
-      }
-    };
-
-    const onVisibilityChange = () => {
-      if (typeof document === "undefined") return;
-      if (document.visibilityState === "hidden") {
-        stopPolling();
-        return;
-      }
-      loadSegments();
-      startPolling();
-    };
-
-    loadSegments();
-    if (typeof document === "undefined" || document.visibilityState !== "hidden") {
-      startPolling();
-    }
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", onVisibilityChange);
-    }
-
-    return () => {
-      cancelled = true;
-      stopPolling();
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", onVisibilityChange);
-      }
-    };
-  }, [activeTab, diagSubTab, task.id, task.status]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
-
-    if (activeTab !== "diagnostics" || diagSubTab !== "requests") {
-      setRequests([]);
-      setRequestsError(null);
-      return;
-    }
-
-    const loadRequests = () => {
-      void listTaskRequestsPage({ taskId: task.id, cursor: null, pageSize: 100 })
-        .then((result) => {
-          if (!cancelled) {
-            setRequests(result.items);
-            setRequestsCursor(result.nextCursor);
-            setRequestsError(null);
-          }
-        })
-        .catch((error) => {
-          if (!cancelled) setRequestsError(errorMessage(error));
-        });
-    };
-
-    loadRequests();
-
-    const isLive = task.status === "downloading" || task.status === "retrying" || task.status === "queued";
-    if (isLive) {
-      intervalId = setInterval(loadRequests, DETAIL_REFRESH_MS);
-    }
-
-    return () => {
-      cancelled = true;
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [activeTab, diagSubTab, task.id, task.status]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
-
-    if (!isTorrentTask || activeTab !== "overview") {
-      setTorrentSnapshot(null);
-      setTorrentSnapshotError(null);
-      return;
-    }
-
-    const loadSnapshot = () => {
-      void getTorrentRuntimeSnapshot(task.id)
-        .then((snapshot) => {
-          if (!cancelled) {
-            setTorrentSnapshot(snapshot);
-            setTorrentSnapshotError(null);
-          }
-        })
-        .catch((error) => {
-          if (!cancelled) setTorrentSnapshotError(errorMessage(error));
-        });
-    };
-
-    loadSnapshot();
-
-    const isLive = task.status === "downloading" || task.status === "retrying" || task.status === "queued";
-    if (isLive) {
-      intervalId = setInterval(loadSnapshot, DETAIL_REFRESH_MS);
-    }
-
-    return () => {
-      cancelled = true;
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [activeTab, isTorrentTask, task.id, task.status]);
-
   // Load Metalink mirrors
   useEffect(() => {
     if (!isMetalinkTask || activeTab !== "overview") {
@@ -578,6 +445,17 @@ function TaskDetailsPanel({
       await retryTaskWithMirror(task.id, mirrorUrl);
     } catch (err) {
       log.warn("retry with mirror failed", err);
+    }
+  }
+
+  async function handleFinishLiveRecording() {
+    setFinishingLive(true);
+    try {
+      await finishLiveRecording(task.id);
+    } catch (err) {
+      log.warn("finish live recording failed", err);
+    } finally {
+      setFinishingLive(false);
     }
   }
 
@@ -616,91 +494,6 @@ function TaskDetailsPanel({
     }
   }
 
-  async function loadMoreSegments() {
-    if (!segmentsCursor) return;
-    try {
-      const result = await listSegmentsPage({
-        taskId: task.id,
-        cursor: segmentsCursor,
-        pageSize: 100,
-      });
-      setSegments((current) => mergeById(current, result.items));
-      setSegmentsCursor(result.nextCursor);
-      setSegmentError(null);
-    } catch (error) {
-      setSegmentError(errorMessage(error));
-    }
-  }
-
-  async function loadMoreEvents() {
-    if (!eventsCursor) return;
-    try {
-      const result = await listTaskEventsPage({
-        taskId: task.id,
-        cursor: eventsCursor,
-        pageSize: 100,
-      });
-      setEvents((current) => mergeById(current, result.items));
-      setEventsCursor(result.nextCursor);
-      setEventsError(null);
-    } catch (error) {
-      setEventsError(errorMessage(error));
-    }
-  }
-
-  async function loadMoreRequests() {
-    if (!requestsCursor) return;
-    try {
-      const result = await listTaskRequestsPage({
-        taskId: task.id,
-        cursor: requestsCursor,
-        pageSize: 100,
-      });
-      setRequests((current) => mergeById(current, result.items));
-      setRequestsCursor(result.nextCursor);
-      setRequestsError(null);
-    } catch (error) {
-      setRequestsError(errorMessage(error));
-    }
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
-
-    if (activeTab !== "logs") {
-      setEvents([]);
-      setEventsError(null);
-      return;
-    }
-
-    const loadEvents = () => {
-      void listTaskEventsPage({ taskId: task.id, cursor: null, pageSize: 100 })
-        .then((result) => {
-          if (!cancelled) {
-            setEvents(result.items);
-            setEventsCursor(result.nextCursor);
-            setEventsError(null);
-          }
-        })
-        .catch((error) => {
-          if (!cancelled) setEventsError(errorMessage(error));
-        });
-    };
-
-    loadEvents();
-
-    const isLive = task.status === "downloading" || task.status === "retrying" || task.status === "queued";
-    if (isLive) {
-      intervalId = setInterval(loadEvents, DETAIL_REFRESH_MS);
-    }
-
-    return () => {
-      cancelled = true;
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [activeTab, task.id, task.status]);
-
   const isFailedOrAttention = task.status === "failed" || task.status === "needs_attention";
   const isCompleted = task.status === "completed";
 
@@ -727,9 +520,9 @@ function TaskDetailsPanel({
       </TabsList>
 
       <TabsContent value="diagnostics" className="flex min-h-0 flex-1 flex-col">
-        <Tabs value={diagSubTab} onValueChange={(v) => setDiagSubTab(v as "segments" | "requests")}>
+        <Tabs value={diagSubTab} onValueChange={(v) => setDiagSubTab(v as TaskDetailDiagSubTab)}>
           <TabsList aria-label={t("taskDetails.diagnostics")} className="mb-2 flex h-auto gap-1 bg-transparent p-0">
-            {(["segments", "requests"] as const).map((key) => (
+            {(isTorrentTask ? (["requests"] as const) : (["segments", "requests"] as const)).map((key) => (
               <TabsTrigger
                 key={key}
                 value={key}
@@ -745,47 +538,81 @@ function TaskDetailsPanel({
           </TabsList>
 
           <ScrollArea className="min-h-0 flex-1">
-            <TabsContent value="segments" id="panel-segments">
-              <SegmentViewToggle
-                value={segmentViewMode}
-                onChange={(mode) => setSegmentViewMode(mode)}
-                rangesLabel={t("taskDetails.segmentViewRanges")}
-                connectionsLabel={t("taskDetails.segmentViewConnections")}
-                ariaLabel={t("taskDetails.segmentViewAria")}
-              />
-              {segmentViewMode === "ranges" ? (
-                <ChunkList
-                  segments={segments}
-                  error={segmentError}
-                  emptyLabel={t("taskDetails.noChunks")}
-                  rangeLabel={t("taskDetails.chunkRange")}
-                  progressLabel={t("taskDetails.chunkProgress")}
-                  retryLabel={t("taskDetails.chunkRetries")}
-                  hasMore={Boolean(segmentsCursor)}
-                  loadMoreLabel={t("taskDetails.loadMore")}
-                  onLoadMore={() => void loadMoreSegments()}
-                />
-              ) : (
-                <ConnectionList
-                  segments={segments}
-                  taskSpeedBps={task.speedBps}
-                  error={segmentError}
-                  emptyLabel={t("taskDetails.noConnections")}
-                  connectionLabel={t("taskDetails.connection")}
-                  rangeLabel={t("taskDetails.connectionRange")}
-                  progressLabel={t("taskDetails.connectionProgress")}
-                  speedLabel={t("taskDetails.connectionSpeed")}
-                  hasMore={Boolean(segmentsCursor)}
-                  loadMoreLabel={t("taskDetails.loadMore")}
-                  onLoadMore={() => void loadMoreSegments()}
-                />
-              )}
-            </TabsContent>
+            {!isTorrentTask ? (
+              <TabsContent value="segments" id="panel-segments">
+                {isHlsTask ? (
+                  <HlsSegmentList
+                    segments={hlsSegments}
+                    error={hlsSegmentError}
+                    emptyLabel={t(diagnosticsSegmentsEmptyKey(task.protocol))}
+                    sequenceLabel={t("taskDetails.hlsSequence")}
+                    statusLabel={t("taskDetails.hlsStatus")}
+                    durationLabel={t("taskDetails.hlsDuration")}
+                    retriesLabel={t("taskDetails.chunkRetries")}
+                    hasMore={Boolean(hlsSegmentsCursor)}
+                    loadMoreLabel={t("taskDetails.loadMore")}
+                    onLoadMore={() => void loadMoreHlsSegments()}
+                  />
+                ) : isDashTask ? (
+                  <DashSegmentList
+                    segments={dashSegments}
+                    error={dashSegmentError}
+                    emptyLabel={t(diagnosticsSegmentsEmptyKey(task.protocol))}
+                    trackLabel={t("taskDetails.dashTrack")}
+                    indexLabel={t("taskDetails.dashIndex")}
+                    statusLabel={t("taskDetails.dashStatus")}
+                    retriesLabel={t("taskDetails.chunkRetries")}
+                    hasMore={Boolean(dashSegmentsCursor)}
+                    loadMoreLabel={t("taskDetails.loadMore")}
+                    onLoadMore={() => void loadMoreDashSegments()}
+                  />
+                ) : (
+                  <>
+                    {isHttpLikeProtocol(task.protocol) ? (
+                      <SegmentViewToggle
+                        value={segmentViewMode}
+                        onChange={(mode) => setSegmentViewMode(mode)}
+                        rangesLabel={t("taskDetails.segmentViewRanges")}
+                        connectionsLabel={t("taskDetails.segmentViewConnections")}
+                        ariaLabel={t("taskDetails.segmentViewAria")}
+                      />
+                    ) : null}
+                    {segmentViewMode === "connections" && isHttpLikeProtocol(task.protocol) ? (
+                      <ConnectionList
+                        segments={segments}
+                        taskSpeedBps={task.speedBps}
+                        error={segmentError}
+                        emptyLabel={t(diagnosticsConnectionsEmptyKey(task.protocol))}
+                        connectionLabel={t("taskDetails.connection")}
+                        rangeLabel={t("taskDetails.connectionRange")}
+                        progressLabel={t("taskDetails.connectionProgress")}
+                        speedLabel={t("taskDetails.connectionSpeed")}
+                        hasMore={Boolean(segmentsCursor)}
+                        loadMoreLabel={t("taskDetails.loadMore")}
+                        onLoadMore={() => void loadMoreSegments()}
+                      />
+                    ) : (
+                      <ChunkList
+                        segments={segments}
+                        error={segmentError}
+                        emptyLabel={t(diagnosticsSegmentsEmptyKey(task.protocol))}
+                        rangeLabel={t("taskDetails.chunkRange")}
+                        progressLabel={t("taskDetails.chunkProgress")}
+                        retryLabel={t("taskDetails.chunkRetries")}
+                        hasMore={Boolean(segmentsCursor)}
+                        loadMoreLabel={t("taskDetails.loadMore")}
+                        onLoadMore={() => void loadMoreSegments()}
+                      />
+                    )}
+                  </>
+                )}
+              </TabsContent>
+            ) : null}
             <TabsContent value="requests" id="panel-requests">
               <RequestList
                 requests={requests}
                 error={requestsError}
-                emptyLabel={t("taskDetails.noRequests")}
+                emptyLabel={t(diagnosticsRequestsEmptyKey(task.protocol))}
                 hasMore={Boolean(requestsCursor)}
                 loadMoreLabel={t("taskDetails.loadMore")}
                 onLoadMore={() => void loadMoreRequests()}
@@ -816,15 +643,36 @@ function TaskDetailsPanel({
             <Row label={t("taskDetails.speed")} value={formatSpeed(task.speedBps)} />
             <Row label={t("taskDetails.eta")} value={formatEta(task.downloadedBytes, task.totalSize, task.speedBps)} />
           </div>
+          {canFinishLiveRecording ? (
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={finishingLive}
+                onClick={() => void handleFinishLiveRecording()}
+              >
+                {finishingLive ? t("taskDetails.finishingRecording") : t("actions.finishRecording")}
+              </Button>
+            </div>
+          ) : null}
           {/* Status-priority panel: failed → recovery first; completed → hash first */}
           {isFailedOrAttention ? recoveryActions : null}
           {isCompleted && !isFailedOrAttention ? hashPanel : null}
           {/* Protocol runtime panels */}
           <TorrentRuntimePanel task={task} snapshot={torrentSnapshot} error={torrentSnapshotError} />
+          <MetalinkFilesPanel task={task} />
           <MetalinkMirrorPanel
             mirrors={mirrors}
             taskStatus={task.status}
             onRetryMirror={(url) => void handleRetryWithMirror(url)}
+          />
+          <FtpSftpOverviewPanel
+            task={task}
+            summary={segmentSummary}
+            summaryError={segmentSummaryError}
+            events={ftpSftpEvents}
+            knownHosts={sftpKnownHosts}
           />
           {/* Non-priority hash/recovery */}
           {!isCompleted || isFailedOrAttention ? hashPanel : null}
@@ -1070,6 +918,50 @@ function mirrorTone(status: string): string {
   }
 }
 
+function MetalinkFilesPanel({ task }: { task: Task }) {
+  const { t } = useTranslation();
+  if (task.protocol !== "metalink") return null;
+  const files = Array.isArray(task.files) ? task.files : EMPTY_TASK_FILES;
+  if (files.length === 0) return null;
+
+  return (
+    <div className="rounded-md border border-border-subtle bg-surface-raised/40 p-3 text-xs">
+      <div className="text-text-muted">{t("taskDetails.metalinkFilesHeader", { count: files.length })}</div>
+      <div className="mt-2 grid gap-2">
+        {files.map((file) => {
+          const total = file.totalSize > 0 ? file.totalSize : 0;
+          const progress = total > 0 ? file.downloadedBytes / total : 0;
+          return (
+            <div key={file.id} className="border-t border-border-divider py-2 first:border-t-0 first:pt-0">
+              <div className="flex items-start justify-between gap-2">
+                <div
+                  className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-secondary"
+                  title={file.relativePath}
+                >
+                  {file.relativePath || file.fileName}
+                </div>
+                <span className="shrink-0 text-[11px] text-text-muted">{t(`task.status.${file.status}`)}</span>
+              </div>
+              <ProgressBar
+                value={progress}
+                label={formatPercent(file.downloadedBytes, total)}
+                active={file.status === "downloading" || file.status === "retrying"}
+                className="mt-1.5"
+              />
+              <div className="mt-1 flex justify-between font-mono text-[10px] text-text-muted">
+                <span>{formatPercent(file.downloadedBytes, total)}</span>
+                <span>
+                  {formatBytes(file.downloadedBytes)} / {formatBytes(total)}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function MetalinkMirrorPanel({
   mirrors,
   taskStatus,
@@ -1126,6 +1018,89 @@ function MetalinkMirrorPanel({
             ) : null}
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function FtpSftpOverviewPanel({
+  task,
+  summary,
+  summaryError,
+  events,
+  knownHosts,
+}: {
+  task: Task;
+  summary: SegmentSummary | null;
+  summaryError: string | null;
+  events: TaskEvent[];
+  knownHosts: SftpKnownHost[];
+}) {
+  const { t } = useTranslation();
+  if (task.protocol !== "ftp" && task.protocol !== "ftps" && task.protocol !== "sftp") return null;
+
+  const tlsMode = ftpTlsModeLabel(task.protocol, task.url);
+  const accelerationDisabled = events.some(
+    (event) => event.eventType === "ftp_acceleration_disabled" || event.eventType === "sftp_acceleration_disabled",
+  );
+  const defaultPort = task.protocol === "sftp" ? 22 : task.protocol === "ftps" ? 990 : 21;
+  const hostPort = parseUrlHostPort(task.url, defaultPort);
+  const matchedHost =
+    task.protocol === "sftp" && hostPort
+      ? knownHosts.find(
+          (host) => host.host.toLowerCase() === hostPort.host.toLowerCase() && host.port === hostPort.port,
+        )
+      : undefined;
+
+  return (
+    <div className="rounded-md border border-border-subtle bg-surface-raised/40 p-3 text-xs">
+      <div className="text-text-muted">{t("taskDetails.ftpSftpRuntime")}</div>
+      <div className="mt-2 space-y-0.5">
+        <Row label={t("taskDetails.protocol")} value={task.protocol.toUpperCase()} />
+        {tlsMode ? <Row label={t("taskDetails.ftpTlsMode")} value={t(`taskDetails.ftpTls.${tlsMode}`)} /> : null}
+        <Row label={t("taskDetails.connections")} value={String(task.connectionCount)} />
+        <Row
+          label={t("taskDetails.resumeSupport")}
+          value={task.supportsResume ? t("taskDetails.capabilityYes") : t("taskDetails.capabilityNo")}
+        />
+        <Row
+          label={t("taskDetails.parallelSupport")}
+          value={task.supportsParallel ? t("taskDetails.capabilityYes") : t("taskDetails.capabilityNo")}
+        />
+        {summaryError ? (
+          <p
+            role="alert"
+            className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-status-danger"
+          >
+            {summaryError}
+          </p>
+        ) : summary ? (
+          <Row
+            label={t("taskDetails.segmentSummaryLabel")}
+            value={t("taskDetails.ftpSegmentSummary", {
+              completed: summary.completed,
+              total: summary.total,
+              active: summary.active,
+              failed: summary.failed,
+            })}
+          />
+        ) : null}
+        <Row
+          label={t("taskDetails.acceleration")}
+          value={accelerationDisabled ? t("taskDetails.accelerationDisabled") : t("taskDetails.accelerationAvailable")}
+        />
+        {task.protocol === "sftp" ? (
+          <Row
+            label={t("taskDetails.sftpHostKey")}
+            value={
+              matchedHost
+                ? `${matchedHost.algorithm} ${matchedHost.fingerprintSha256}`
+                : t("taskDetails.sftpHostKeyUnknown")
+            }
+            mono={Boolean(matchedHost)}
+            hint={t("taskDetails.sftpHostKeyHint")}
+          />
+        ) : null}
       </div>
     </div>
   );
@@ -2068,41 +2043,205 @@ function RequestList({
   return (
     <div className="space-y-2 text-xs">
       <ol className="space-y-2">
-        {requests.map((request) => (
-          <li key={request.id} className="rounded-md border border-border-subtle bg-surface-raised/50 px-3 py-2">
+        {requests.map((request) => {
+          const httpFields = showsHttpRequestFields(request.method);
+          return (
+            <li key={request.id} className="rounded-md border border-border-subtle bg-surface-raised/50 px-3 py-2">
+              <div className="flex items-start justify-between gap-3">
+                <span className="font-mono text-text-primary">
+                  <span className="mr-2 inline-flex rounded bg-surface-hover px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-text-secondary">
+                    {request.method}
+                  </span>
+                  {request.statusCode ?? t("taskDetails.requestFailed")}
+                </span>
+                <time className="shrink-0 font-mono text-[11px] text-text-muted">
+                  {formatEventTime(request.createdAt)}
+                </time>
+              </div>
+              <p className="mt-1 break-all font-mono text-[11px] text-text-secondary">{request.url}</p>
+              <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-text-muted">
+                <span>{t("taskDetails.requestRange")}</span>
+                <span className="truncate text-right font-mono text-text-secondary" title={request.rangeHeader ?? "-"}>
+                  {request.rangeHeader ?? "-"}
+                </span>
+                {httpFields ? (
+                  <>
+                    <span>{t("taskDetails.requestIfRange")}</span>
+                    <span
+                      className="truncate text-right font-mono text-text-secondary"
+                      title={request.ifRangeHeader ?? "-"}
+                    >
+                      {request.ifRangeHeader ?? "-"}
+                    </span>
+                  </>
+                ) : null}
+                <span>{t("taskDetails.requestLength")}</span>
+                <span className="text-right font-mono text-text-secondary">
+                  {request.contentLength ? formatBytes(Number(request.contentLength)) : "-"}
+                </span>
+                <span>{t("taskDetails.requestDuration")}</span>
+                <span className="text-right font-mono text-text-secondary">{request.durationMs} ms</span>
+                <span>{t("taskDetails.requestRetries")}</span>
+                <span className="text-right font-mono text-text-secondary">{request.retryCount}</span>
+              </div>
+              {httpFields && request.etag ? (
+                <p className="mt-2 break-all font-mono text-[11px] text-text-muted">ETag {request.etag}</p>
+              ) : null}
+              {request.errorMessage ? (
+                <p role="alert" className="mt-2 text-status-danger">
+                  {request.errorMessage}
+                </p>
+              ) : null}
+            </li>
+          );
+        })}
+      </ol>
+      <LoadMoreButton visible={hasMore} label={loadMoreLabel} onClick={onLoadMore} />
+    </div>
+  );
+}
+
+function HlsSegmentList({
+  segments,
+  error,
+  emptyLabel,
+  sequenceLabel,
+  statusLabel,
+  durationLabel,
+  retriesLabel,
+  hasMore,
+  loadMoreLabel,
+  onLoadMore,
+}: {
+  segments: HlsSegmentView[];
+  error: string | null;
+  emptyLabel: string;
+  sequenceLabel: string;
+  statusLabel: string;
+  durationLabel: string;
+  retriesLabel: string;
+  hasMore: boolean;
+  loadMoreLabel: string;
+  onLoadMore: () => void;
+}) {
+  const { t } = useTranslation();
+
+  if (error) {
+    return (
+      <p
+        role="alert"
+        className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+      >
+        {error}
+      </p>
+    );
+  }
+
+  if (segments.length === 0) {
+    return <p className="text-xs text-text-secondary">{emptyLabel}</p>;
+  }
+
+  return (
+    <div className="space-y-2 text-xs">
+      <ol className="space-y-2">
+        {segments.map((segment) => (
+          <li key={segment.id} className="rounded-md border border-border-subtle bg-surface-raised/50 px-3 py-2">
             <div className="flex items-start justify-between gap-3">
               <span className="font-mono text-text-primary">
-                {request.method} {request.statusCode ?? t("taskDetails.requestFailed")}
+                #{segment.mediaSequence}
+                {Number(segment.discontinuitySequence) > 0 ? ` (d${segment.discontinuitySequence})` : ""}
               </span>
-              <time className="shrink-0 font-mono text-[11px] text-text-muted">
-                {formatEventTime(request.createdAt)}
-              </time>
+              <span className="shrink-0 text-text-secondary">{t(`segment.status.${segment.status}`)}</span>
             </div>
-            <p className="mt-1 break-all font-mono text-[11px] text-text-secondary">{request.url}</p>
+            <p className="mt-1 break-all font-mono text-[11px] text-text-secondary">{segment.uri}</p>
             <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-text-muted">
-              <span>{t("taskDetails.requestRange")}</span>
-              <span className="truncate text-right font-mono text-text-secondary" title={request.rangeHeader ?? "-"}>
-                {request.rangeHeader ?? "-"}
-              </span>
-              <span>{t("taskDetails.requestIfRange")}</span>
-              <span className="truncate text-right font-mono text-text-secondary" title={request.ifRangeHeader ?? "-"}>
-                {request.ifRangeHeader ?? "-"}
-              </span>
-              <span>{t("taskDetails.requestLength")}</span>
-              <span className="text-right font-mono text-text-secondary">
-                {request.contentLength ? formatBytes(Number(request.contentLength)) : "-"}
-              </span>
-              <span>{t("taskDetails.requestDuration")}</span>
-              <span className="text-right font-mono text-text-secondary">{request.durationMs} ms</span>
-              <span>{t("taskDetails.requestRetries")}</span>
-              <span className="text-right font-mono text-text-secondary">{request.retryCount}</span>
+              <span>{sequenceLabel}</span>
+              <span className="text-right font-mono text-text-secondary">{segment.mediaSequence}</span>
+              <span>{statusLabel}</span>
+              <span className="text-right font-mono text-text-secondary">{segment.status}</span>
+              <span>{durationLabel}</span>
+              <span className="text-right font-mono text-text-secondary">{segment.durationMs} ms</span>
+              <span>{retriesLabel}</span>
+              <span className="text-right font-mono text-text-secondary">{segment.retryCount}</span>
             </div>
-            {request.etag ? (
-              <p className="mt-2 break-all font-mono text-[11px] text-text-muted">ETag {request.etag}</p>
-            ) : null}
-            {request.errorMessage ? (
+            {segment.lastError ? (
               <p role="alert" className="mt-2 text-status-danger">
-                {request.errorMessage}
+                {segment.lastError}
+              </p>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+      <LoadMoreButton visible={hasMore} label={loadMoreLabel} onClick={onLoadMore} />
+    </div>
+  );
+}
+
+function DashSegmentList({
+  segments,
+  error,
+  emptyLabel,
+  trackLabel,
+  indexLabel,
+  statusLabel,
+  retriesLabel,
+  hasMore,
+  loadMoreLabel,
+  onLoadMore,
+}: {
+  segments: DashSegmentView[];
+  error: string | null;
+  emptyLabel: string;
+  trackLabel: string;
+  indexLabel: string;
+  statusLabel: string;
+  retriesLabel: string;
+  hasMore: boolean;
+  loadMoreLabel: string;
+  onLoadMore: () => void;
+}) {
+  const { t } = useTranslation();
+
+  if (error) {
+    return (
+      <p
+        role="alert"
+        className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+      >
+        {error}
+      </p>
+    );
+  }
+
+  if (segments.length === 0) {
+    return <p className="text-xs text-text-secondary">{emptyLabel}</p>;
+  }
+
+  return (
+    <div className="space-y-2 text-xs">
+      <ol className="space-y-2">
+        {segments.map((segment) => (
+          <li key={segment.id} className="rounded-md border border-border-subtle bg-surface-raised/50 px-3 py-2">
+            <div className="flex items-start justify-between gap-3">
+              <span className="font-mono text-text-primary">
+                {segment.trackKind} #{segment.segmentIndex}
+              </span>
+              <span className="shrink-0 text-text-secondary">{t(`segment.status.${segment.status}`)}</span>
+            </div>
+            <p className="mt-1 break-all font-mono text-[11px] text-text-secondary">{segment.uri}</p>
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-text-muted">
+              <span>{trackLabel}</span>
+              <span className="text-right font-mono text-text-secondary">{segment.trackKind}</span>
+              <span>{indexLabel}</span>
+              <span className="text-right font-mono text-text-secondary">{segment.segmentIndex}</span>
+              <span>{statusLabel}</span>
+              <span className="text-right font-mono text-text-secondary">{segment.status}</span>
+              <span>{retriesLabel}</span>
+              <span className="text-right font-mono text-text-secondary">{segment.retryCount}</span>
+            </div>
+            {segment.lastError ? (
+              <p role="alert" className="mt-2 text-status-danger">
+                {segment.lastError}
               </p>
             ) : null}
           </li>
@@ -2120,16 +2259,6 @@ function LoadMoreButton({ visible, label, onClick }: { visible: boolean; label: 
       {label}
     </Button>
   );
-}
-
-function mergeById<T extends { id: string }>(current: T[], incoming: T[]): T[] {
-  const byId = new Map(current.map((item) => [item.id, item] as const));
-  const order = current.map((item) => item.id);
-  for (const item of incoming) {
-    if (!byId.has(item.id)) order.push(item.id);
-    byId.set(item.id, item);
-  }
-  return order.map((id) => byId.get(id)).filter((item): item is T => Boolean(item));
 }
 
 function formatEventTime(value: string): string {

@@ -328,26 +328,121 @@ pub async fn list_dash_segments(
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
-    Ok(rows
-        .into_iter()
-        .map(|row| DashSegmentRecord {
-            id: row.get("id"),
-            task_id: row.get("task_id"),
-            track_kind: row.get("track_kind"),
-            segment_index: row.get("segment_index"),
-            uri: row.get("uri"),
-            local_path: row.get("local_path"),
-            byte_range_start: row.get("byte_range_start"),
-            byte_range_length: row.get("byte_range_length"),
-            init_segment_uri: row.get("init_segment_uri"),
-            init_segment_local_path: row.get("init_segment_local_path"),
-            duration_ms: row.get("duration_ms"),
-            downloaded_bytes: row.get("downloaded_bytes"),
-            status: SegmentStatus::from_db_str(row.get::<String, _>("status").as_str()),
-            retry_count: row.get("retry_count"),
-            last_error: row.get("last_error"),
-        })
-        .collect())
+    Ok(rows.into_iter().map(row_to_dash_segment).collect())
+}
+
+/// Cursor is `track_kind:segment_index` of the last returned row.
+pub async fn list_dash_segments_page(
+    pool: &SqlitePool,
+    task_id: &str,
+    cursor: Option<&str>,
+    limit: i64,
+) -> Result<Vec<DashSegmentRecord>, String> {
+    let limit = limit.max(1);
+    let (after_track, after_index) = parse_dash_segment_cursor(cursor);
+    let rows = sqlx::query(
+        r#"
+        SELECT id, task_id, track_kind, segment_index, uri, local_path,
+               byte_range_start, byte_range_length,
+               init_segment_uri, init_segment_local_path,
+               duration_ms, downloaded_bytes, status, retry_count, last_error
+        FROM dash_segments
+        WHERE task_id = ?
+          AND (
+            ? IS NULL
+            OR track_kind > ?
+            OR (track_kind = ? AND segment_index > ?)
+          )
+        ORDER BY track_kind ASC, segment_index ASC
+        LIMIT ?
+        "#,
+    )
+    .bind(task_id)
+    .bind(after_track.as_deref())
+    .bind(after_track.as_deref())
+    .bind(after_track.as_deref())
+    .bind(after_index)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(row_to_dash_segment).collect())
+}
+
+fn row_to_dash_segment(row: sqlx::sqlite::SqliteRow) -> DashSegmentRecord {
+    DashSegmentRecord {
+        id: row.get("id"),
+        task_id: row.get("task_id"),
+        track_kind: row.get("track_kind"),
+        segment_index: row.get("segment_index"),
+        uri: row.get("uri"),
+        local_path: row.get("local_path"),
+        byte_range_start: row.get("byte_range_start"),
+        byte_range_length: row.get("byte_range_length"),
+        init_segment_uri: row.get("init_segment_uri"),
+        init_segment_local_path: row.get("init_segment_local_path"),
+        duration_ms: row.get("duration_ms"),
+        downloaded_bytes: row.get("downloaded_bytes"),
+        status: SegmentStatus::from_db_str(row.get::<String, _>("status").as_str()),
+        retry_count: row.get("retry_count"),
+        last_error: row.get("last_error"),
+    }
+}
+
+fn parse_dash_segment_cursor(cursor: Option<&str>) -> (Option<String>, i64) {
+    let Some(raw) = cursor.map(str::trim).filter(|value| !value.is_empty()) else {
+        return (None, -1);
+    };
+    if let Some((track, index)) = raw.split_once(':') {
+        let index = index.parse::<i64>().unwrap_or(-1);
+        return (Some(track.to_string()), index);
+    }
+    (Some(raw.to_string()), -1)
+}
+
+pub fn dash_segment_cursor(record: &DashSegmentRecord) -> String {
+    format!("{}:{}", record.track_kind, record.segment_index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::SegmentStatus;
+
+    #[test]
+    fn parse_dash_segment_cursor_accepts_composite() {
+        assert_eq!(parse_dash_segment_cursor(None), (None, -1));
+        assert_eq!(
+            parse_dash_segment_cursor(Some("video:10")),
+            (Some("video".into()), 10)
+        );
+        assert_eq!(
+            parse_dash_segment_cursor(Some("audio")),
+            (Some("audio".into()), -1)
+        );
+    }
+
+    #[test]
+    fn dash_segment_cursor_formats_pair() {
+        let record = DashSegmentRecord {
+            id: "s1".into(),
+            task_id: "t1".into(),
+            track_kind: "video".into(),
+            segment_index: 42,
+            uri: "https://cdn.example/v42.m4s".into(),
+            local_path: "v42.m4s".into(),
+            byte_range_start: None,
+            byte_range_length: None,
+            init_segment_uri: None,
+            init_segment_local_path: None,
+            duration_ms: 0,
+            downloaded_bytes: 0,
+            status: SegmentStatus::Pending,
+            retry_count: 0,
+            last_error: None,
+        };
+        assert_eq!(dash_segment_cursor(&record), "video:42");
+    }
 }
 
 pub async fn update_dash_segment_status(

@@ -367,31 +367,129 @@ pub async fn list_hls_segments(
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
-    Ok(rows
-        .into_iter()
-        .map(|row| HlsSegmentRecord {
-            id: row.get("id"),
-            task_id: row.get("task_id"),
-            media_sequence: row.get("media_sequence"),
-            discontinuity_sequence: row.get("discontinuity_sequence"),
-            uri: row.get("uri"),
-            local_path: row.get("local_path"),
-            duration_ms: row.get("duration_ms"),
-            byte_range_start: row.get("byte_range_start"),
-            byte_range_length: row.get("byte_range_length"),
-            init_map_uri: row.get("init_map_uri"),
-            init_map_local_path: row.get("init_map_local_path"),
-            init_map_byte_range_start: row.get("init_map_byte_range_start"),
-            init_map_byte_range_length: row.get("init_map_byte_range_length"),
-            key_method: row.get("key_method"),
-            key_uri: row.get("key_uri"),
-            key_iv: row.get("key_iv"),
-            downloaded_bytes: row.get("downloaded_bytes"),
-            status: SegmentStatus::from_db_str(row.get::<String, _>("status").as_str()),
-            retry_count: row.get("retry_count"),
-            last_error: row.get("last_error"),
-        })
-        .collect())
+    Ok(rows.into_iter().map(row_to_hls_segment).collect())
+}
+
+/// Cursor is `discontinuity_sequence:media_sequence` of the last returned row.
+pub async fn list_hls_segments_page(
+    pool: &SqlitePool,
+    task_id: &str,
+    cursor: Option<&str>,
+    limit: i64,
+) -> Result<Vec<HlsSegmentRecord>, String> {
+    let limit = limit.max(1);
+    let (after_disc, after_seq) = parse_hls_segment_cursor(cursor);
+    let rows = sqlx::query(
+        r#"
+        SELECT id, task_id, media_sequence, discontinuity_sequence, uri, local_path,
+               duration_ms, byte_range_start, byte_range_length,
+               init_map_uri, init_map_local_path, init_map_byte_range_start, init_map_byte_range_length,
+               key_method, key_uri, key_iv, downloaded_bytes, status, retry_count, last_error
+        FROM hls_segments
+        WHERE task_id = ?
+          AND (
+            ? IS NULL
+            OR discontinuity_sequence > ?
+            OR (discontinuity_sequence = ? AND media_sequence > ?)
+          )
+        ORDER BY discontinuity_sequence ASC, media_sequence ASC
+        LIMIT ?
+        "#,
+    )
+    .bind(task_id)
+    .bind(after_disc)
+    .bind(after_disc)
+    .bind(after_disc)
+    .bind(after_seq)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(row_to_hls_segment).collect())
+}
+
+fn row_to_hls_segment(row: sqlx::sqlite::SqliteRow) -> HlsSegmentRecord {
+    HlsSegmentRecord {
+        id: row.get("id"),
+        task_id: row.get("task_id"),
+        media_sequence: row.get("media_sequence"),
+        discontinuity_sequence: row.get("discontinuity_sequence"),
+        uri: row.get("uri"),
+        local_path: row.get("local_path"),
+        duration_ms: row.get("duration_ms"),
+        byte_range_start: row.get("byte_range_start"),
+        byte_range_length: row.get("byte_range_length"),
+        init_map_uri: row.get("init_map_uri"),
+        init_map_local_path: row.get("init_map_local_path"),
+        init_map_byte_range_start: row.get("init_map_byte_range_start"),
+        init_map_byte_range_length: row.get("init_map_byte_range_length"),
+        key_method: row.get("key_method"),
+        key_uri: row.get("key_uri"),
+        key_iv: row.get("key_iv"),
+        downloaded_bytes: row.get("downloaded_bytes"),
+        status: SegmentStatus::from_db_str(row.get::<String, _>("status").as_str()),
+        retry_count: row.get("retry_count"),
+        last_error: row.get("last_error"),
+    }
+}
+
+fn parse_hls_segment_cursor(cursor: Option<&str>) -> (Option<i64>, i64) {
+    let Some(raw) = cursor.map(str::trim).filter(|value| !value.is_empty()) else {
+        return (None, -1);
+    };
+    if let Some((disc, seq)) = raw.split_once(':') {
+        let disc = disc.parse::<i64>().ok();
+        let seq = seq.parse::<i64>().unwrap_or(-1);
+        return (disc, seq);
+    }
+    (Some(0), raw.parse::<i64>().unwrap_or(-1))
+}
+
+pub fn hls_segment_cursor(record: &HlsSegmentRecord) -> String {
+    format!(
+        "{}:{}",
+        record.discontinuity_sequence, record.media_sequence
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::SegmentStatus;
+
+    #[test]
+    fn parse_hls_segment_cursor_accepts_composite_and_legacy() {
+        assert_eq!(parse_hls_segment_cursor(None), (None, -1));
+        assert_eq!(parse_hls_segment_cursor(Some("2:10")), (Some(2), 10));
+        assert_eq!(parse_hls_segment_cursor(Some("7")), (Some(0), 7));
+    }
+
+    #[test]
+    fn hls_segment_cursor_formats_pair() {
+        let record = HlsSegmentRecord {
+            id: "s1".into(),
+            task_id: "t1".into(),
+            media_sequence: 42,
+            discontinuity_sequence: 1,
+            uri: "https://cdn.example/a.ts".into(),
+            local_path: "a.ts".into(),
+            duration_ms: 1000,
+            byte_range_start: None,
+            byte_range_length: None,
+            init_map_uri: None,
+            init_map_local_path: None,
+            init_map_byte_range_start: None,
+            init_map_byte_range_length: None,
+            key_method: None,
+            key_uri: None,
+            key_iv: None,
+            downloaded_bytes: 0,
+            status: SegmentStatus::Pending,
+            retry_count: 0,
+            last_error: None,
+        };
+        assert_eq!(hls_segment_cursor(&record), "1:42");
+    }
 }
 
 pub async fn update_hls_segment_status(

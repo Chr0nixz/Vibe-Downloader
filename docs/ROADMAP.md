@@ -266,7 +266,7 @@ These items remain intentionally deferred until Phase A through C are substantia
 - plugin protocols;
 - advanced site-rule runtime hit telemetry (settings UI now covers conflict analysis, import/export, and URL try-run);
 - classification create-dialog live preview and dynamic `{host}/{date}` subdir templates (settings try-run is available);
-- TaskDetails Phase 2 protocol diagnostics (DASH staging segment list, Metalink per-file Overview, FTP/SFTP mini panels);
+- TaskDetails Phase 3 protocol diagnostics (BT live tracker status and related runtime depth);
 - Safari WebExtension distribution.
 
 ## Stable Product Boundaries

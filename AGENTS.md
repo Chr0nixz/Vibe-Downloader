@@ -38,7 +38,7 @@ Not implemented yet:
 
 - Cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols.
 - Safari wrapper, browser store submission IDs, production extension signing, and final browser permission review copy.
-- BT/FTP/SFTP/Metalink/HLS/DASH/WebDAV reliability and diagnostics parity with the HTTP/HTTPS path.
+- BT/FTP/SFTP/Metalink/HLS/DASH/WebDAV reliability gaps vs HTTP/HTTPS. TaskDetails Phase 1–2 diagnostics parity is in place (protocol-aware Requests/Logs, BT hides placeholder Segments, HLS/DASH real segment lists, Metalink per-file Overview, FTP/SFTP mini panels); Phase 3 items such as BT live tracker status remain deferred.
 - Site-rule runtime hit telemetry (settings already cover conflict analysis, import/export, and URL try-run). Classification create-dialog live preview and dynamic subdir templates (settings try-run is available).
 - OS code-signed production distribution.
 

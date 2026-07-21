@@ -534,6 +534,10 @@ async fn download_metalink_file_parallel(
     let mut progress_gate = TaskProgressEmitGate::default();
     let mut last_emit = Instant::now();
     let mut last_checkpoint = Instant::now();
+    // ARC-13: progress ticks omit files[]; throttle task_updated so Overview can refresh per-file bytes.
+    let mut last_files_emit = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or_else(Instant::now);
     // F-3: When resuming, persist the already-downloaded byte count so the
     // initial `update_task_file_progress` does not regress the persisted
     // value to 0. Workers will report their per-range `already_downloaded`
@@ -604,6 +608,7 @@ async fn download_metalink_file_parallel(
                         completed_before_file,
                         downloaded_total,
                         &mut progress_gate,
+                        &mut last_files_emit,
                         false,
                         TaskStatus::Downloading,
                     )
@@ -655,6 +660,7 @@ async fn download_metalink_file_parallel(
             completed_before_file,
             downloaded_total,
             &mut progress_gate,
+            &mut last_files_emit,
             true,
             TaskStatus::Downloading,
         )
@@ -703,6 +709,7 @@ async fn download_metalink_file_parallel(
         completed_before_file,
         total_size,
         &mut progress_gate,
+        &mut last_files_emit,
         true,
         TaskStatus::Completed,
     )
@@ -1334,6 +1341,10 @@ async fn download_from_resource(
 
     let mut downloaded = resume_from;
     let mut last_emit = Instant::now();
+    // ARC-13: progress ticks omit files[]; throttle task_updated so Overview can refresh per-file bytes.
+    let mut last_files_emit = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or_else(Instant::now);
     db::update_task_file_progress(pool, &file.id, downloaded, TaskStatus::Downloading).await?;
     while let Some(chunk) = response
         .chunk()
@@ -1354,6 +1365,7 @@ async fn download_from_resource(
                 completed_before_file,
                 downloaded,
                 &mut progress_gate,
+                &mut last_files_emit,
                 true,
                 TaskStatus::Downloading,
             )
@@ -1385,6 +1397,7 @@ async fn download_from_resource(
                 completed_before_file,
                 downloaded,
                 &mut progress_gate,
+                &mut last_files_emit,
                 false,
                 TaskStatus::Downloading,
             )
@@ -1411,6 +1424,7 @@ async fn download_from_resource(
         completed_before_file,
         downloaded,
         &mut progress_gate,
+        &mut last_files_emit,
         true,
         TaskStatus::Completed,
     )
@@ -1456,6 +1470,7 @@ async fn emit_metalink_progress(
     completed_before_file: i64,
     file_downloaded: i64,
     progress_gate: &mut TaskProgressEmitGate,
+    last_files_emit: &mut Instant,
     force: bool,
     file_status: TaskStatus,
 ) -> Result<(), String> {
@@ -1483,6 +1498,14 @@ async fn emit_metalink_progress(
         },
         force,
     );
+    // ARC-13: progress payloads omit files[]; throttle full task_updated for Overview.
+    if force || last_files_emit.elapsed() >= Duration::from_secs(2) {
+        crate::events::evict_task_files_version(&task.id);
+        if let Some(current) = db::get_task_record(pool, &task.id).await? {
+            emit_task_updated_record(app, pool, &current).await;
+        }
+        *last_files_emit = Instant::now();
+    }
     Ok(())
 }
 

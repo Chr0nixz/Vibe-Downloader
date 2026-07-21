@@ -43,6 +43,8 @@ pub struct MetalinkMirrorView {
     pub status: String,
     pub failure_count: i32,
     pub last_error: Option<String>,
+    /// Task file this mirror belongs to (multi-file Metalink manifests).
+    pub file_id: Option<String>,
 }
 
 // Four workers keep slow recycle-bin/network-volume calls off Tokio without
@@ -98,6 +100,7 @@ impl MetalinkMirrorView {
             status: r.status,
             failure_count: r.failure_count as i32,
             last_error: r.last_error,
+            file_id: Some(r.file_id).filter(|id| !id.is_empty()),
         }
     }
 }

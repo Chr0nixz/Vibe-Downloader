@@ -40,10 +40,11 @@ pub use self::connection::{
     wal_file_size_bytes, DatabaseConnectOutcome, DatabaseRecovery, DbConnection,
 };
 pub use self::dash::{
-    bulk_upsert_dash_segments, dash_finish_requested, existing_dash_downloaded_bytes,
-    existing_dash_segment_keys, get_dash_task, list_dash_segments, request_dash_finish,
-    reset_dash_segments_for_task, update_dash_segment_status, upsert_dash_segment,
-    upsert_dash_task, DashSegmentRecord, DashSegmentUpsert, DashTaskRecord, DashTaskUpsert,
+    bulk_upsert_dash_segments, dash_finish_requested, dash_segment_cursor,
+    existing_dash_downloaded_bytes, existing_dash_segment_keys, get_dash_task, list_dash_segments,
+    list_dash_segments_page, request_dash_finish, reset_dash_segments_for_task,
+    update_dash_segment_status, upsert_dash_segment, upsert_dash_task, DashSegmentRecord,
+    DashSegmentUpsert, DashTaskRecord, DashTaskUpsert,
 };
 pub use self::events::{
     get_latest_pause_event_type, insert_task_event, insert_task_event_in_tx, list_task_events_page,
@@ -51,10 +52,10 @@ pub use self::events::{
 };
 pub use self::hash::update_hash_verification;
 pub use self::hls::{
-    bulk_upsert_hls_segments, get_hls_task, hls_finish_requested, list_hls_segments,
-    request_hls_finish, reset_hls_segments_for_task, update_hls_last_media_sequence,
-    update_hls_segment_status, upsert_hls_segment, upsert_hls_task, HlsSegmentRecord,
-    HlsSegmentUpsert, HlsTaskRecord, HlsTaskUpsert,
+    bulk_upsert_hls_segments, get_hls_task, hls_finish_requested, hls_segment_cursor,
+    list_hls_segments, list_hls_segments_page, request_hls_finish, reset_hls_segments_for_task,
+    update_hls_last_media_sequence, update_hls_segment_status, upsert_hls_segment, upsert_hls_task,
+    HlsSegmentRecord, HlsSegmentUpsert, HlsTaskRecord, HlsTaskUpsert,
 };
 pub use self::metalink::{
     insert_metalink_resource, list_healthy_mirrors_for_file, list_metalink_resources_for_file,

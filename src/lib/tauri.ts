@@ -13,6 +13,7 @@ import type {
   CompletionActionRequestedPayload,
   CreateTaskInput,
   CursorPageInput,
+  DashSegmentView,
   DirectoryProbeInput,
   DiskSpaceInfo,
   EnvironmentFixInput,
@@ -20,6 +21,7 @@ import type {
   EnvironmentHealthReport,
   FtpDirectoryProbe,
   HashVerificationState,
+  HlsSegmentView,
   ImportUrlsInput,
   ListTasksCursorInput,
   ListTasksCursorResult,
@@ -250,6 +252,22 @@ export async function listSegmentsPage(input: CursorPageInput): Promise<CursorPa
     items: result.items.map(normalizeTaskSegment),
     nextCursor: result.nextCursor,
   };
+}
+
+export async function listHlsSegmentsPage(input: CursorPageInput): Promise<CursorPage<HlsSegmentView>> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listHlsSegmentsPage(input);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("listHlsSegmentsPage", () => commands.listHlsSegmentsPage(input));
+}
+
+export async function listDashSegmentsPage(input: CursorPageInput): Promise<CursorPage<DashSegmentView>> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listDashSegmentsPage(input);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("listDashSegmentsPage", () => commands.listDashSegmentsPage(input));
 }
 
 export async function getSegmentSummary(taskId: string): Promise<SegmentSummary> {

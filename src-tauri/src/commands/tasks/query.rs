@@ -7,7 +7,7 @@ use tauri::{AppHandle, State};
 use crate::{
     db,
     models::{
-        RequestDiagnostic, SegmentSummary, Task, TaskEvent, TaskRecord, TaskSegment,
+        RequestDiagnostic, SegmentStatus, SegmentSummary, Task, TaskEvent, TaskRecord, TaskSegment,
         TaskStatsSnapshot, TaskStatus, TorrentRuntimeSnapshot,
     },
     AppState,
@@ -51,6 +51,47 @@ pub struct TaskRequestsPageResult {
 #[serde(rename_all = "camelCase")]
 pub struct TaskSegmentsPageResult {
     pub items: Vec<TaskSegment>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HlsSegmentView {
+    pub id: String,
+    pub media_sequence: String,
+    pub discontinuity_sequence: String,
+    pub uri: String,
+    pub duration_ms: String,
+    pub status: SegmentStatus,
+    pub retry_count: i32,
+    pub last_error: Option<String>,
+    pub downloaded_bytes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HlsSegmentsPageResult {
+    pub items: Vec<HlsSegmentView>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DashSegmentView {
+    pub id: String,
+    pub track_kind: String,
+    pub segment_index: String,
+    pub uri: String,
+    pub status: SegmentStatus,
+    pub retry_count: i32,
+    pub last_error: Option<String>,
+    pub downloaded_bytes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DashSegmentsPageResult {
+    pub items: Vec<DashSegmentView>,
     pub next_cursor: Option<String>,
 }
 
@@ -494,6 +535,91 @@ pub async fn list_segments_page(
         items: records.into_iter().map(TaskSegment::from).collect(),
         next_cursor,
     })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_hls_segments_page(
+    state: State<'_, AppState>,
+    input: CursorPageInput,
+) -> Result<HlsSegmentsPageResult, String> {
+    let page_size = input.page_size.unwrap_or(100).clamp(1, 500);
+    let fetch_size = i64::from(page_size).saturating_add(1);
+    let mut records = db::list_hls_segments_page(
+        &state.pool,
+        &input.task_id,
+        input.cursor.as_deref(),
+        fetch_size,
+    )
+    .await?;
+    let next_cursor = if records.len() > usize::try_from(page_size).unwrap_or(100) {
+        records.pop();
+        records.last().map(db::hls_segment_cursor)
+    } else {
+        None
+    };
+    Ok(HlsSegmentsPageResult {
+        items: records.into_iter().map(HlsSegmentView::from).collect(),
+        next_cursor,
+    })
+}
+
+impl From<db::HlsSegmentRecord> for HlsSegmentView {
+    fn from(record: db::HlsSegmentRecord) -> Self {
+        Self {
+            id: record.id,
+            media_sequence: record.media_sequence.to_string(),
+            discontinuity_sequence: record.discontinuity_sequence.to_string(),
+            uri: record.uri,
+            duration_ms: record.duration_ms.to_string(),
+            status: record.status,
+            retry_count: record.retry_count,
+            last_error: record.last_error,
+            downloaded_bytes: record.downloaded_bytes.to_string(),
+        }
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_dash_segments_page(
+    state: State<'_, AppState>,
+    input: CursorPageInput,
+) -> Result<DashSegmentsPageResult, String> {
+    let page_size = input.page_size.unwrap_or(100).clamp(1, 500);
+    let fetch_size = i64::from(page_size).saturating_add(1);
+    let mut records = db::list_dash_segments_page(
+        &state.pool,
+        &input.task_id,
+        input.cursor.as_deref(),
+        fetch_size,
+    )
+    .await?;
+    let next_cursor = if records.len() > usize::try_from(page_size).unwrap_or(100) {
+        records.pop();
+        records.last().map(db::dash_segment_cursor)
+    } else {
+        None
+    };
+    Ok(DashSegmentsPageResult {
+        items: records.into_iter().map(DashSegmentView::from).collect(),
+        next_cursor,
+    })
+}
+
+impl From<db::DashSegmentRecord> for DashSegmentView {
+    fn from(record: db::DashSegmentRecord) -> Self {
+        Self {
+            id: record.id,
+            track_kind: record.track_kind,
+            segment_index: record.segment_index.to_string(),
+            uri: record.uri,
+            status: record.status,
+            retry_count: record.retry_count,
+            last_error: record.last_error,
+            downloaded_bytes: record.downloaded_bytes.to_string(),
+        }
+    }
 }
 
 #[tauri::command]

@@ -61,6 +61,8 @@ export const commands = {
 	getSchedulerSnapshot: (taskIds: string[]) => typedError<SchedulerSnapshot, string>(__TAURI_INVOKE("get_scheduler_snapshot", { taskIds })),
 	listSegments: (input: ListSegmentsInput) => typedError<TaskSegment[], string>(__TAURI_INVOKE("list_segments", { input })),
 	listSegmentsPage: (input: CursorPageInput) => typedError<TaskSegmentsPageResult, string>(__TAURI_INVOKE("list_segments_page", { input })),
+	listHlsSegmentsPage: (input: CursorPageInput) => typedError<HlsSegmentsPageResult, string>(__TAURI_INVOKE("list_hls_segments_page", { input })),
+	listDashSegmentsPage: (input: CursorPageInput) => typedError<DashSegmentsPageResult, string>(__TAURI_INVOKE("list_dash_segments_page", { input })),
 	getSegmentSummary: (taskId: string) => typedError<SegmentSummary, string>(__TAURI_INVOKE("get_segment_summary", { taskId })),
 	getTorrentRuntimeSnapshot: (taskId: string) => typedError<{
 	taskId: string,
@@ -525,6 +527,22 @@ export type CursorPageInput = {
 	pageSize: number | null,
 };
 
+export type DashSegmentView = {
+	id: string,
+	trackKind: string,
+	segmentIndex: string,
+	uri: string,
+	status: SegmentStatus,
+	retryCount: number,
+	lastError: string | null,
+	downloadedBytes: string,
+};
+
+export type DashSegmentsPageResult = {
+	items: DashSegmentView[],
+	nextCursor: string | null,
+};
+
 /**  FUN-04: Directory probe input aligned with probe/create credential and proxy fields. */
 export type DirectoryProbeInput = {
 	url: string,
@@ -650,6 +668,23 @@ export type HlsMediaTrack = {
 	uri: string | null,
 };
 
+export type HlsSegmentView = {
+	id: string,
+	mediaSequence: string,
+	discontinuitySequence: string,
+	uri: string,
+	durationMs: string,
+	status: SegmentStatus,
+	retryCount: number,
+	lastError: string | null,
+	downloadedBytes: string,
+};
+
+export type HlsSegmentsPageResult = {
+	items: HlsSegmentView[],
+	nextCursor: string | null,
+};
+
 export type HlsVariant = {
 	uri: string,
 	bandwidth: string,
@@ -740,6 +775,8 @@ export type MetalinkMirrorView = {
 	status: string,
 	failureCount: number,
 	lastError: string | null,
+	/**  Task file this mirror belongs to (multi-file Metalink manifests). */
+	fileId: string | null,
 };
 
 export type PreviewClassificationInput = {

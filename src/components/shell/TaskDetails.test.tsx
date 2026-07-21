@@ -10,10 +10,15 @@ import { TaskDetails } from "./TaskDetails";
 const layout = vi.hoisted(() => ({ compact: false }));
 const mocks = vi.hoisted(() => ({
   computeFileHash: vi.fn(),
+  finishLiveRecording: vi.fn(),
+  getSegmentSummary: vi.fn(),
   getTaskProxySettings: vi.fn(),
   getTorrentRuntimeSnapshot: vi.fn(),
+  listDashSegmentsPage: vi.fn(),
+  listHlsSegmentsPage: vi.fn(),
   listMetalinkMirrors: vi.fn(),
   listSegmentsPage: vi.fn(),
+  listSftpKnownHosts: vi.fn(),
   listTaskEventsPage: vi.fn(),
   listTaskRequestsPage: vi.fn(),
   onTaskUpdated: vi.fn(),
@@ -42,10 +47,15 @@ vi.mock("@/hooks/use-shell-layout", () => ({
 
 vi.mock("@/lib/tauri", () => ({
   computeFileHash: mocks.computeFileHash,
+  finishLiveRecording: mocks.finishLiveRecording,
+  getSegmentSummary: mocks.getSegmentSummary,
   getTaskProxySettings: mocks.getTaskProxySettings,
   getTorrentRuntimeSnapshot: mocks.getTorrentRuntimeSnapshot,
+  listDashSegmentsPage: mocks.listDashSegmentsPage,
+  listHlsSegmentsPage: mocks.listHlsSegmentsPage,
   listMetalinkMirrors: mocks.listMetalinkMirrors,
   listSegmentsPage: mocks.listSegmentsPage,
+  listSftpKnownHosts: mocks.listSftpKnownHosts,
   listTaskEventsPage: mocks.listTaskEventsPage,
   listTaskRequestsPage: mocks.listTaskRequestsPage,
   onTaskUpdated: mocks.onTaskUpdated,
@@ -128,8 +138,20 @@ describe("TaskDetails", () => {
     vi.clearAllMocks();
     layout.compact = false;
     mocks.listSegmentsPage.mockResolvedValue({ items: [], nextCursor: null });
+    mocks.listHlsSegmentsPage.mockResolvedValue({ items: [], nextCursor: null });
+    mocks.listDashSegmentsPage.mockResolvedValue({ items: [], nextCursor: null });
     mocks.listTaskEventsPage.mockResolvedValue({ items: [], nextCursor: null });
     mocks.listTaskRequestsPage.mockResolvedValue({ items: [], nextCursor: null });
+    mocks.getSegmentSummary.mockResolvedValue({
+      total: 0,
+      active: 0,
+      completed: 0,
+      failed: 0,
+      downloadedBytes: "0",
+      speedBps: "0",
+    });
+    mocks.listSftpKnownHosts.mockResolvedValue([]);
+    mocks.finishLiveRecording.mockResolvedValue({});
     mocks.onTaskUpdated.mockResolvedValue(mocks.unlisten);
     // ScrollArea (Radix) needs ResizeObserver in jsdom.
     globalThis.ResizeObserver = class {
@@ -156,6 +178,199 @@ describe("TaskDetails", () => {
     await user.click(screen.getByRole("tab", { name: "taskDetails.logs" }));
     await waitFor(() => expect(mocks.listTaskEventsPage).toHaveBeenCalledTimes(1));
     expect(screen.getByText("taskDetails.noLogs")).toBeInTheDocument();
+  });
+
+  it("loads torrent runtime snapshot only on the overview tab", async () => {
+    const user = userEvent.setup();
+    const task = makeTask("task-bt", "bt.torrent", { protocol: "bt", status: "downloading" });
+    mocks.getTorrentRuntimeSnapshot.mockResolvedValue({
+      taskId: task.id,
+      metadataStatus: "ready",
+      completedPieces: "0",
+      verifiedPieces: "0",
+      pieceCount: "1",
+      pieceBitfieldBase64: null,
+      peerCount: "0",
+      seedCount: null,
+      dhtStatus: null,
+      trackers: [],
+      uploadBytes: "0",
+      uploadSpeedBps: "0",
+      ratio: 0,
+      seedingEnabled: false,
+      seedingState: "disabled",
+      seedRatioLimit: null,
+      seedTimeLimitSeconds: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      updatedAt: task.updatedAt,
+    });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    await waitFor(() => expect(mocks.getTorrentRuntimeSnapshot).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole("tab", { name: "taskDetails.diagnostics" }));
+    expect(screen.queryByRole("tab", { name: "taskDetails.segments" })).not.toBeInTheDocument();
+    await waitFor(() => expect(mocks.listTaskRequestsPage).toHaveBeenCalled());
+    expect(mocks.listSegmentsPage).not.toHaveBeenCalled();
+    const callsAfterLeave = mocks.getTorrentRuntimeSnapshot.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(mocks.getTorrentRuntimeSnapshot).toHaveBeenCalledTimes(callsAfterLeave);
+  });
+
+  it("loads HLS segments instead of placeholder task_segments", async () => {
+    const user = userEvent.setup();
+    const task = makeTask("task-hls", "live.m3u8", {
+      protocol: "hls",
+      status: "downloading",
+      url: "https://cdn.example.com/live.m3u8",
+    });
+    mocks.listHlsSegmentsPage.mockResolvedValue({
+      items: [
+        {
+          id: "hs-1",
+          mediaSequence: "10",
+          discontinuitySequence: "0",
+          uri: "https://cdn.example.com/seg10.ts",
+          durationMs: "4000",
+          status: "completed",
+          retryCount: 0,
+          lastError: null,
+          downloadedBytes: "1000",
+        },
+      ],
+      nextCursor: null,
+    });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    expect(screen.getByRole("button", { name: "actions.finishRecording" })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "taskDetails.diagnostics" }));
+    await waitFor(() => expect(mocks.listHlsSegmentsPage).toHaveBeenCalled());
+    expect(mocks.listSegmentsPage).not.toHaveBeenCalled();
+    expect(screen.getByText("#10")).toBeInTheDocument();
+  });
+
+  it("loads DASH segments instead of placeholder task_segments", async () => {
+    const user = userEvent.setup();
+    const task = makeTask("task-dash", "movie.mpd", {
+      protocol: "dash",
+      status: "downloading",
+      url: "https://cdn.example.com/movie.mpd",
+    });
+    mocks.listDashSegmentsPage.mockResolvedValue({
+      items: [
+        {
+          id: "ds-1",
+          trackKind: "video",
+          segmentIndex: "3",
+          uri: "https://cdn.example.com/v3.m4s",
+          status: "failed",
+          retryCount: 1,
+          lastError: "HTTP 404",
+          downloadedBytes: "0",
+        },
+      ],
+      nextCursor: null,
+    });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    await user.click(screen.getByRole("tab", { name: "taskDetails.diagnostics" }));
+    await waitFor(() => expect(mocks.listDashSegmentsPage).toHaveBeenCalled());
+    expect(mocks.listSegmentsPage).not.toHaveBeenCalled();
+    expect(mocks.listHlsSegmentsPage).not.toHaveBeenCalled();
+    expect(screen.getByText("video #3")).toBeInTheDocument();
+    expect(screen.getByText("HTTP 404")).toBeInTheDocument();
+  });
+
+  it("shows Metalink file progress on Overview", async () => {
+    const task = makeTask("task-metalink", "pack.meta4", {
+      protocol: "metalink",
+      status: "downloading",
+      url: "https://cdn.example.com/pack.meta4",
+      files: [
+        {
+          id: "file-1",
+          taskId: "task-metalink",
+          relativePath: "docs/readme.txt",
+          fileName: "readme.txt",
+          saveDir: "D:\\Downloads",
+          tempPath: null,
+          finalPath: null,
+          totalSize: 200,
+          downloadedBytes: 50,
+          selected: true,
+          status: "downloading",
+          contentType: null,
+        },
+      ],
+    });
+    mocks.listMetalinkMirrors.mockResolvedValue([]);
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    await waitFor(() => expect(screen.getByText("docs/readme.txt")).toBeInTheDocument());
+    expect(screen.getByText("taskDetails.metalinkFilesHeader")).toBeInTheDocument();
+  });
+
+  it("shows FTP/SFTP overview panel and loads segment summary", async () => {
+    const task = makeTask("task-ftp", "file.bin", {
+      protocol: "ftp",
+      status: "paused",
+      url: "ftp://example.com/file.bin",
+      connectionCount: 2,
+      supportsResume: true,
+      supportsParallel: true,
+    });
+    mocks.getSegmentSummary.mockResolvedValue({
+      total: 4,
+      active: 1,
+      completed: 2,
+      failed: 1,
+      downloadedBytes: "100",
+      speedBps: "0",
+    });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    await waitFor(() => expect(mocks.getSegmentSummary).toHaveBeenCalledWith(task.id));
+    expect(screen.getByText("taskDetails.ftpSftpRuntime")).toBeInTheDocument();
+    expect(screen.getByText("taskDetails.ftpSegmentSummary")).toBeInTheDocument();
+  });
+
+  it("hides If-Range for non-HTTP request methods", async () => {
+    const user = userEvent.setup();
+    const task = makeTask("task-ftp-req", "file.bin", { protocol: "ftp", status: "paused" });
+    mocks.listTaskRequestsPage.mockResolvedValue({
+      items: [
+        {
+          id: "req-1",
+          taskId: task.id,
+          method: "FTP RETR",
+          url: "ftp://example.com/file.bin",
+          statusCode: 226,
+          rangeHeader: "REST 0-99",
+          ifRangeHeader: "should-hide",
+          contentLength: "100",
+          durationMs: "12",
+          retryCount: 0,
+          etag: "etag-should-hide",
+          errorMessage: null,
+          createdAt: task.createdAt,
+          lastModified: null,
+        },
+      ],
+      nextCursor: null,
+    });
+    seedTasks([task]);
+    renderDetails(task.id);
+    await user.click(screen.getByRole("tab", { name: "taskDetails.diagnostics" }));
+    await user.click(screen.getByRole("tab", { name: "taskDetails.requests" }));
+    await waitFor(() => expect(screen.getByText("FTP RETR")).toBeInTheDocument());
+    expect(screen.queryByText("taskDetails.requestIfRange")).not.toBeInTheDocument();
+    expect(screen.queryByText(/ETag/)).not.toBeInTheDocument();
   });
 
   it("stops segment polling when switching to the Requests sub-tab", async () => {
