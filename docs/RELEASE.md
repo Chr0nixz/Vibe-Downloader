@@ -113,7 +113,7 @@ base64 -i vibe-downloader.key
 
 ## 手动发布
 
-GitHub Actions -> `Release` -> `Run workflow`，输入 tag，例如 `v0.3.0`，并选择是否 draft。手动触发不绕过主审计、签名、浏览器身份或 updater 演练门禁。
+GitHub Actions -> `Release` -> `Run workflow`，输入 tag，例如 `v0.4.0`，并选择是否 draft。手动触发不绕过主审计、签名、浏览器身份或 updater 演练门禁。
 
 ## 自动更新行为
 
