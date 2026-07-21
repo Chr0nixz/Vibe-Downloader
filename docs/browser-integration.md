@@ -20,6 +20,7 @@ Vibe Downloader 使用 Native Messaging 启动和引导浏览器集成，再通�
 - 扩展开发包构建：`pnpm build:extensions`。
 - 独立 Rust native host：`vibe-native-host`。
 - Settings 页面展示浏览器检测、manifest 路径、安装/卸载状态。
+- Settings → Environment 聚合诊断（Native Host、浏览器清单、实时桥接摘要）；完整环境报告可从该分区复制。
 - Tauri 命令：获取集成状态、安装/卸载 manifest、创建 HTTP/HTTPS browser handoff task。
 - 单实例转发：应用已运行时，第二次启动参数会转发给现有实例。
 - SQLite `browser_messages` 表：request id 去重和错误诊断。

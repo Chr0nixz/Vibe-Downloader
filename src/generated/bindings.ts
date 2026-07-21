@@ -114,6 +114,8 @@ export const commands = {
 	 *  Returns the first line of `ffmpeg -version` output on success.
 	 */
 	probeFfmpegVersion: (path: string | null) => typedError<string, string>(__TAURI_INVOKE("probe_ffmpeg_version", { path })),
+	getEnvironmentHealth: () => typedError<EnvironmentHealthReport, string>(__TAURI_INVOKE("get_environment_health")),
+	runEnvironmentFix: (input: EnvironmentFixInput) => typedError<EnvironmentFixResult, string>(__TAURI_INVOKE("run_environment_fix", { input })),
 	getBrowserIntegrationStatus: () => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("get_browser_integration_status")),
 	installBrowserIntegration: (input: BrowserIntegrationUpdateInput) => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("install_browser_integration", { input })),
 	uninstallBrowserIntegration: (input: BrowserIntegrationUpdateInput) => typedError<BrowserIntegrationStatus, string>(__TAURI_INVOKE("uninstall_browser_integration", { input })),
@@ -548,6 +550,55 @@ export type EngineCapabilities = {
 	supportsParallel: boolean,
 	supportsMultiFile: boolean,
 };
+
+/**  Suggested recovery action. Frontend localizes labels by `kind`. */
+export type EnvironmentFixAction = {
+	kind: EnvironmentFixKind,
+	/**  Optional browser target for `install_native_host`. */
+	browser: BrowserKind | null,
+	/**  Path kind for `open_path`: `save_dir` | `data` | `log`. */
+	pathKind: string | null,
+	/**  Settings section id for `focus_setting`. */
+	section: string | null,
+};
+
+export type EnvironmentFixInput = {
+	kind: EnvironmentFixKind,
+	browser: BrowserKind | null,
+	pathKind: string | null,
+	section: string | null,
+};
+
+export type EnvironmentFixKind = "install_native_host" | "open_path" | "focus_setting" | "export_backup" | "check_for_update";
+
+export type EnvironmentFixResult = {
+	ok: boolean,
+	message: string,
+	/**  When set, the frontend should scroll/expand this Settings section. */
+	focusSection: string | null,
+	/**  True when the caller should re-run `get_environment_health`. */
+	refresh: boolean,
+};
+
+export type EnvironmentHealthItem = {
+	/**  Stable id: `native_host` | `browser` | `ffmpeg` | `proxy` | `save_dir` | `disk` | `database`. */
+	id: string,
+	status: EnvironmentHealthStatus,
+	/**  English machine-facing summary for the copyable report. */
+	summary: string,
+	detail: string | null,
+	suggestedActions: EnvironmentFixAction[],
+};
+
+export type EnvironmentHealthReport = {
+	/**  Unix epoch milliseconds as a decimal string (avoids Specta BigInt ban). */
+	checkedAtMs: string,
+	appVersion: string,
+	platform: string,
+	items: EnvironmentHealthItem[],
+};
+
+export type EnvironmentHealthStatus = "ok" | "warn" | "error" | "unknown";
 
 export type FtpDirectoryEntry = {
 	name: string,

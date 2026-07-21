@@ -1,6 +1,6 @@
 # Vibe Downloader Roadmap
 
-Last updated: 2026-07-19
+Last updated: 2026-07-21
 
 Current baseline: `0.3.0`
 
@@ -216,6 +216,12 @@ Audit ID: `FUN-16` — **Closed**
 - Added a versioned, checksummed `.vibe-backup` format with rollback-safe staged restore.
 - Credentials policy: machine-bound ciphertext in the DB backup; global proxy password stays in the OS keyring and is not exported.
 
+### D4. Environment Health Check — shipped (lightweight)
+
+- Settings → Environment aggregates native host, browser manifests, ffmpeg, proxy handshake (custom only; no external business URL), save-dir writability, disk space, database integrity/bak scan, and updater (frontend plugin).
+- Supports copyable diagnostic report and safe one-click fixes only (install Native Messaging manifests, open folders, focus settings, export backup, check for updates).
+- Does not claim to fix full disks, bad proxy credentials, or a missing host binary without reinstalling the desktop app.
+
 ## Phase E: Performance And Maintainability
 
 Performance work must start with measurements rather than assumptions.
@@ -260,6 +266,7 @@ These items remain intentionally deferred until Phase A through C are substantia
 - plugin protocols;
 - advanced site-rule runtime hit telemetry (settings UI now covers conflict analysis, import/export, and URL try-run);
 - classification create-dialog live preview and dynamic `{host}/{date}` subdir templates (settings try-run is available);
+- TaskDetails Phase 2 protocol diagnostics (DASH staging segment list, Metalink per-file Overview, FTP/SFTP mini panels);
 - Safari WebExtension distribution.
 
 ## Stable Product Boundaries

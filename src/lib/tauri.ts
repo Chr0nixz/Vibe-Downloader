@@ -15,6 +15,9 @@ import type {
   CursorPageInput,
   DirectoryProbeInput,
   DiskSpaceInfo,
+  EnvironmentFixInput,
+  EnvironmentFixResult,
+  EnvironmentHealthReport,
   FtpDirectoryProbe,
   HashVerificationState,
   ImportUrlsInput,
@@ -366,6 +369,22 @@ export async function probeFfmpegVersion(path?: string | null): Promise<string> 
   }
   const commands = await loadNativeCommands();
   return runCommand("probeFfmpegVersion", () => commands.probeFfmpegVersion(path ?? null));
+}
+
+export async function getEnvironmentHealth(): Promise<EnvironmentHealthReport> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getEnvironmentHealth();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("getEnvironmentHealth", () => commands.getEnvironmentHealth());
+}
+
+export async function runEnvironmentFix(input: EnvironmentFixInput): Promise<EnvironmentFixResult> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).runEnvironmentFix(input);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("runEnvironmentFix", () => commands.runEnvironmentFix(input));
 }
 
 export async function probeFtpDirectory(input: DirectoryProbeInput): Promise<FtpDirectoryProbe> {

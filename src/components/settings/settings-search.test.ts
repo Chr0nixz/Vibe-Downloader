@@ -22,12 +22,19 @@ const sections: SettingsSearchSection[] = [
     summary: "Chrome/Edge installed",
     terms: ["Native host", "Extension packages"],
   },
+  {
+    id: "environment",
+    title: "Environment",
+    summary: "Health check",
+    terms: ["ffmpeg", "proxy", "disk", "Native Messaging"],
+  },
 ];
 
 describe("settings search helpers", () => {
   it("matches terms inside collapsed settings sections", () => {
     expect(settingsSectionMatchesQuery(sections[1], "proxy password")).toBe(true);
     expect(settingsSectionMatchesQuery(sections[2], "chrome")).toBe(true);
+    expect(settingsSectionMatchesQuery(sections[3], "ffmpeg")).toBe(true);
   });
 
   it("reports an empty state when the query does not match any section context", () => {

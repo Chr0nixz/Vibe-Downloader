@@ -201,6 +201,8 @@ macro_rules! vibe_commands_base {
             commands::startup::reset_database_for_recovery,
             commands::startup::retry_startup_init,
             commands::ffmpeg::probe_ffmpeg_version,
+            commands::environment::get_environment_health,
+            commands::environment::run_environment_fix,
             commands::browser::get_browser_integration_status,
             commands::browser::install_browser_integration,
             commands::browser::uninstall_browser_integration,
@@ -319,6 +321,13 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::BrowserExtensionPackage>()
         .typ::<models::BrowserExtensionExportResult>()
         .typ::<models::BrowserHandoffResult>()
+        .typ::<models::EnvironmentHealthReport>()
+        .typ::<models::EnvironmentHealthItem>()
+        .typ::<models::EnvironmentHealthStatus>()
+        .typ::<models::EnvironmentFixAction>()
+        .typ::<models::EnvironmentFixKind>()
+        .typ::<models::EnvironmentFixInput>()
+        .typ::<models::EnvironmentFixResult>()
         .typ::<commands::tray::TrayMenuAction>()
 }
 

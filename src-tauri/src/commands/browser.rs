@@ -966,7 +966,7 @@ async fn export_extension_packages(
     })
 }
 
-async fn integration_status(
+pub(crate) async fn integration_status(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<BrowserIntegrationStatus, String> {
@@ -1398,7 +1398,7 @@ fn sanitize_suggested_file_name(value: Option<&str>) -> Option<String> {
     }
 }
 
-fn install_manifest(app: &AppHandle, browser: BrowserKind) -> Result<(), String> {
+pub(crate) fn install_manifest(app: &AppHandle, browser: BrowserKind) -> Result<(), String> {
     let native_host_path = native_host_path()?;
     let manifest = manifest_json(browser, &native_host_path)?;
     let manifest_path = manifest_path(app, browser)?;
@@ -1585,7 +1585,7 @@ fn manifest_path(app: &AppHandle, browser: BrowserKind) -> Result<PathBuf, Strin
     }
 }
 
-fn browser_supported_on_platform(browser: BrowserKind) -> bool {
+pub(crate) fn browser_supported_on_platform(browser: BrowserKind) -> bool {
     !(matches!(browser, BrowserKind::Safari)
         || matches!(browser, BrowserKind::Opera) && integration_profile() != "dev")
 }

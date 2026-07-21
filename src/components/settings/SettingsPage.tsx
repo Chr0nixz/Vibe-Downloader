@@ -28,6 +28,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { BrowserCaptureControls } from "@/components/settings/BrowserCaptureControls";
 import { ClassificationRulesEditor } from "@/components/settings/ClassificationRulesEditor";
+import { EnvironmentPanel } from "@/components/settings/EnvironmentPanel";
 import { SftpKnownHostsEditor } from "@/components/settings/SftpKnownHostsEditor";
 import {
   type SettingsSearchSection,
@@ -101,6 +102,7 @@ const SECTION_IDS = [
   "interface",
   "desktop-integration",
   "browser-integration",
+  "environment",
   "external-tools",
   "data-backup",
   "about-updates",
@@ -397,31 +399,27 @@ export function SettingsPage() {
         ],
       },
       {
-        id: "data-backup",
-        title: t("settings.dataBackup"),
-        description: t("settings.dataBackupDescription"),
-        summary: t("settings.dataBackupSummary"),
+        id: "environment",
+        title: t("settings.environment"),
+        description: t("settings.environmentDescription"),
+        summary: t("settings.environmentSectionSummary"),
         terms: [
-          t("settings.dataBackupExport"),
-          t("settings.dataBackupValidate"),
-          t("settings.dataBackupRestore"),
-          t("settings.dataBackupCredentialsNote"),
-        ],
-      },
-      {
-        id: "about-updates",
-        title: t("settings.aboutUpdates"),
-        description: t("settings.aboutUpdatesDescription"),
-        summary: updater.currentVersion
-          ? t("settings.aboutUpdatesSummary", { version: updater.currentVersion })
-          : undefined,
-        terms: [
-          t("settings.currentVersion"),
-          t("settings.autoUpdateCheck"),
-          t("settings.autoUpdateCheckDescription"),
-          t("settings.checkForUpdates"),
-          t("settings.upToDate"),
-          t("settings.installAndRestart"),
+          t("settings.environmentRunCheck"),
+          t("settings.environmentCopyReport"),
+          t("settings.environmentFixSafe"),
+          t("settings.environmentItemNativeHost"),
+          t("settings.environmentItemBrowser"),
+          t("settings.environmentItemFfmpeg"),
+          t("settings.environmentItemProxy"),
+          t("settings.environmentItemSaveDir"),
+          t("settings.environmentItemDisk"),
+          t("settings.environmentItemDatabase"),
+          t("settings.environmentItemUpdater"),
+          t("settings.browserCopyDiagnostics"),
+          "ffmpeg",
+          "proxy",
+          "disk",
+          "Native Messaging",
         ],
       },
       {
@@ -447,6 +445,34 @@ export function SettingsPage() {
           t("settings.ffmpegPath.detected", { version: "" }),
           t("settings.ffmpegPath.invalid", { error: "" }),
           t("settings.ffmpegPath.notDetected"),
+        ],
+      },
+      {
+        id: "data-backup",
+        title: t("settings.dataBackup"),
+        description: t("settings.dataBackupDescription"),
+        summary: t("settings.dataBackupSummary"),
+        terms: [
+          t("settings.dataBackupExport"),
+          t("settings.dataBackupValidate"),
+          t("settings.dataBackupRestore"),
+          t("settings.dataBackupCredentialsNote"),
+        ],
+      },
+      {
+        id: "about-updates",
+        title: t("settings.aboutUpdates"),
+        description: t("settings.aboutUpdatesDescription"),
+        summary: updater.currentVersion
+          ? t("settings.aboutUpdatesSummary", { version: updater.currentVersion })
+          : undefined,
+        terms: [
+          t("settings.currentVersion"),
+          t("settings.autoUpdateCheck"),
+          t("settings.autoUpdateCheckDescription"),
+          t("settings.checkForUpdates"),
+          t("settings.upToDate"),
+          t("settings.installAndRestart"),
         ],
       },
     ],
@@ -2029,6 +2055,10 @@ export function SettingsPage() {
                 ) : null}
               </SettingsSection>
 
+              <SettingsSection {...getSectionProps("environment")}>
+                <EnvironmentPanel onFocusSection={scrollToSection} />
+              </SettingsSection>
+
               <SettingsSection {...getSectionProps("external-tools")}>
                 <SettingsRow
                   title={t("settings.ffmpegPath.label")}
@@ -2314,7 +2344,7 @@ function SettingsSection({
   const panelId = id ? `${id}-settings-section-panel` : undefined;
 
   return (
-    <section id={id} className="scroll-mt-12 border-t border-border-subtle py-4 first:border-t-0 first:pt-0">
+    <section id={id} className="scroll-mt-28 border-t border-border-subtle py-4 first:border-t-0 first:pt-0">
       <div className="flex w-full items-start justify-between gap-3 rounded-md px-1 py-2">
         <h2 className="grid min-w-0 flex-1 gap-1 text-sm font-semibold text-text-primary">
           <span className="flex min-w-0 flex-wrap items-center gap-2">
@@ -2658,6 +2688,7 @@ function UpdateProgressBar({ updater }: { updater: UpdaterSnapshot }) {
       <div
         className="h-1.5 w-full overflow-hidden rounded-full bg-surface-root"
         role="progressbar"
+        aria-label={label}
         aria-valuenow={percent ?? 0}
         aria-valuemin={0}
         aria-valuemax={100}

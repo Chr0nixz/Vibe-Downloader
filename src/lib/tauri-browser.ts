@@ -1336,6 +1336,97 @@ export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationS
   };
 }
 
+export async function getEnvironmentHealth(): Promise<import("@/generated/bindings").EnvironmentHealthReport> {
+  return {
+    checkedAtMs: String(Date.now()),
+    appVersion: "0.3.0-browser",
+    platform: "browser-preview",
+    items: [
+      {
+        id: "native_host",
+        status: "ok",
+        summary: "Native Messaging host binary is ready (browser preview mock).",
+        detail: null,
+        suggestedActions: [],
+      },
+      {
+        id: "browser",
+        status: "warn",
+        summary: "Browser preview mocks integration status.",
+        detail: null,
+        suggestedActions: [
+          {
+            kind: "focus_setting",
+            browser: null,
+            pathKind: null,
+            section: "browser-integration",
+          },
+        ],
+      },
+      {
+        id: "ffmpeg",
+        status: "error",
+        summary: "ffmpeg is not available in browser preview mode.",
+        detail: null,
+        suggestedActions: [
+          {
+            kind: "focus_setting",
+            browser: null,
+            pathKind: null,
+            section: "external-tools",
+          },
+        ],
+      },
+      {
+        id: "proxy",
+        status: "ok",
+        summary: "Proxy is disabled.",
+        detail: null,
+        suggestedActions: [],
+      },
+      {
+        id: "save_dir",
+        status: "ok",
+        summary: "Default save directory is writable (browser preview mock).",
+        detail: settings.defaultSaveDir,
+        suggestedActions: [],
+      },
+      {
+        id: "disk",
+        status: "unknown",
+        summary: "Disk space is not queried in browser preview mode.",
+        detail: null,
+        suggestedActions: [],
+      },
+      {
+        id: "database",
+        status: "warn",
+        summary: "Database checks are mocked in browser preview mode.",
+        detail: null,
+        suggestedActions: [
+          {
+            kind: "export_backup",
+            browser: null,
+            pathKind: null,
+            section: "data-backup",
+          },
+        ],
+      },
+    ],
+  };
+}
+
+export async function runEnvironmentFix(
+  input: import("@/generated/bindings").EnvironmentFixInput,
+): Promise<import("@/generated/bindings").EnvironmentFixResult> {
+  return {
+    ok: true,
+    message: `Browser preview acknowledged fix: ${input.kind}`,
+    focusSection: input.section,
+    refresh: input.kind === "install_native_host",
+  };
+}
+
 export async function getBrowserCaptureSettings(): Promise<BrowserCaptureSettings> {
   return { ...browserCaptureSettings };
 }

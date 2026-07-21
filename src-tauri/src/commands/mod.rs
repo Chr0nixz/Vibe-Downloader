@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod browser;
 pub mod classification;
+pub mod environment;
 pub mod ffmpeg;
 pub mod floating;
 pub mod settings;

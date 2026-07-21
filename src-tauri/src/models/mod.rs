@@ -1,5 +1,6 @@
 pub mod browser;
 pub mod classification;
+pub mod environment;
 pub mod task;
 
 pub use browser::{
@@ -12,6 +13,10 @@ pub use browser::{
 pub use classification::{
     ClassificationMatchKind, ClassificationRule, ClassificationRuleInput,
     PreviewClassificationInput, PreviewClassificationInputsUsed, PreviewClassificationResult,
+};
+pub use environment::{
+    EnvironmentFixAction, EnvironmentFixInput, EnvironmentFixKind, EnvironmentFixResult,
+    EnvironmentHealthItem, EnvironmentHealthReport, EnvironmentHealthStatus,
 };
 pub use task::{
     AppAccentColor, AppErrorPayload, AppSettings, BatchImportItem, BatchImportResult,
