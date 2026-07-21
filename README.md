@@ -1,6 +1,6 @@
 # Vibe Downloader
 
-Vibe Downloader 是一个使用 Tauri 2、React 19、TypeScript、Rust 和 SQLite 构建的桌面下载管理器。项目当前版本为 `0.3.0`，HTTP/HTTPS 是最成熟的路径；FTP/FTPS、SFTP、BitTorrent、HLS、DASH、WebDAV 和 Metalink 已有可运行入口，但成熟度和诊断覆盖不一致。
+Vibe Downloader 是一个使用 Tauri 2、React 19、TypeScript、Rust 和 SQLite 构建的桌面下载管理器。项目当前版本为 `0.4.0`，HTTP/HTTPS 是最成熟的路径；FTP/FTPS、SFTP、BitTorrent、HLS、DASH、WebDAV 和 Metalink 已有可运行入口，但成熟度和诊断覆盖不一致。
 
 项目仍处于积极开发阶段，不是已经完整替代 IDM 的稳定成品。当前代码存在若干发布阻断问题，开发和试用前请先阅读 [项目改进审计](docs/project-improvement-audit.md)。
 

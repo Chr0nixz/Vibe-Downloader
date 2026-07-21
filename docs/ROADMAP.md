@@ -2,7 +2,7 @@
 
 Last updated: 2026-07-21
 
-Current baseline: `0.3.0`
+Current baseline: `0.4.0`
 
 This document is the forward plan. It is not a changelog or a complete inventory of implemented features. Current user-facing capabilities live in [README.md](../README.md), active risks and acceptance criteria live in [project-improvement-audit.md](project-improvement-audit.md), and protocol evidence lives in [protocol-reliability-matrix.md](protocol-reliability-matrix.md).
 

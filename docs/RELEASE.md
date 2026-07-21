@@ -93,12 +93,12 @@ base64 -i vibe-downloader.key
 
 正式发布前先按 [updater-rehearsal.md](updater-rehearsal.md) 创建至少两个 candidate tag，完成 `rc.0 → rc.1` 三平台升级。Candidate 使用仓库内非秘密测试公钥和确定性扩展 ID，只用于验收，不能作为商店正式版本。
 
-1. 确认 [project-improvement-audit.md](project-improvement-audit.md) 中所有 P0/P1 已关闭，主分支 CI 和 Tauri Build 全绿。当前 `0.3.0` 工作区仍有发布阻断，不能仅凭 workflow 成功发布稳定版。
+1. 确认 [project-improvement-audit.md](project-improvement-audit.md) 中所有 P0/P1 已关闭，主分支 CI 和 Tauri Build 全绿。
 2. 创建并推送 semver tag：
 
    ```bash
-   git tag v0.3.0
-   git push origin v0.3.0
+   git tag v0.4.0
+   git push origin v0.4.0
    ```
 
 3. Release workflow 会执行：
