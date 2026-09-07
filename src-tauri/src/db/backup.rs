@@ -8,7 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 
 use super::connection::{create_verified_backup, wal_checkpoint};
 
@@ -170,6 +170,19 @@ pub fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedBackup, String> {
             "Backup manifest format field is not vibe-backup.",
         ));
     }
+    // SEC-02: the policy was previously parsed and handed to the UI without ever
+    // being checked, so a crafted manifest could declare anything (or nothing).
+    // Validating here rather than in the restore command means `validate_app_backup`
+    // rejects it too, before the user is offered a restore.
+    if manifest.credentials_policy != CREDENTIALS_POLICY_MACHINE_BOUND {
+        return Err(engine_backup_error(
+            "backup_invalid_manifest",
+            format!(
+                "Unsupported credentials policy '{}'; expected '{CREDENTIALS_POLICY_MACHINE_BOUND}'.",
+                manifest.credentials_policy
+            ),
+        ));
+    }
     let expected_db_checksum = sha256_hex(&[database]);
     if !manifest
         .checksum
@@ -303,6 +316,161 @@ pub async fn materialize_and_verify_backup_db(
     }
     pool.close().await;
     Ok(path)
+}
+
+/// SEC-02: Normalize a path for prefix comparison.
+///
+/// Deliberately textual: the paths in a backup usually do not exist yet, so
+/// `canonicalize` is not an option. Windows comparisons are case-insensitive.
+fn normalize_for_compare(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        text.to_ascii_lowercase()
+    } else {
+        text
+    }
+}
+
+/// SEC-02: True when `candidate` is `root` itself or sits underneath it.
+///
+/// Compares on a trailing separator so `/data/dl-evil` is not accepted as being
+/// inside `/data/dl`.
+fn is_within_root(candidate: &Path, root: &Path) -> bool {
+    let candidate = normalize_for_compare(candidate);
+    let root = normalize_for_compare(root);
+    let root_trimmed = root.trim_end_matches('/');
+    if root_trimmed.is_empty() {
+        return false;
+    }
+    candidate == root_trimmed || candidate.starts_with(&format!("{root_trimmed}/"))
+}
+
+/// SEC-02: Reject a stored path that restore would later write to or delete.
+fn stored_path_is_allowed(value: Option<&str>, allowed_roots: &[PathBuf]) -> bool {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        // NULL / empty is not a write target.
+        return true;
+    };
+    let path = Path::new(value);
+    // A relative path would be resolved against the process working directory
+    // at download time, so it is never acceptable from an untrusted backup.
+    if !path.is_absolute() {
+        return false;
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    allowed_roots.iter().any(|root| is_within_root(path, root))
+}
+
+/// SEC-02: Record every stored path in `rows` that restore must not be allowed
+/// to write to or delete.
+fn collect_path_offenders(
+    table: &str,
+    rows: Vec<sqlx::sqlite::SqliteRow>,
+    allowed_roots: &[PathBuf],
+    offenders: &mut Vec<String>,
+) {
+    for row in rows {
+        let row_id: String = row.try_get("row_id").unwrap_or_default();
+        for column in ["save_dir", "temp_path", "final_path"] {
+            let value: Option<String> = row.try_get(column).unwrap_or(None);
+            if !stored_path_is_allowed(value.as_deref(), allowed_roots) {
+                offenders.push(format!(
+                    "{table}.{column} of row {row_id} ({})",
+                    value.unwrap_or_default()
+                ));
+            }
+        }
+    }
+}
+
+/// SEC-02: Reject a backup whose task rows point outside the allowed roots.
+///
+/// Restore consumes these strings verbatim. `prepare_task_for_download` does
+/// `PathBuf::from(task.temp_path)` with no re-sanitization, the engine then runs
+/// `create_dir_all(parent)` and writes the file, and deleting the task later
+/// feeds `final_path` straight to the file remover. Nothing re-enters
+/// `unique_final_path`, so without this check a crafted `.vibe-backup` is an
+/// arbitrary-write *and* arbitrary-delete primitive - and because
+/// `auto_resume_on_startup` also lives in the backup, it needs no user action
+/// beyond accepting the restore.
+///
+/// Fails closed on the entire backup instead of rewriting offending rows:
+/// rewriting can collide with `idx_tasks_final_path_active` and would hand the
+/// user a silently altered restore.
+///
+/// `allowed_roots` must come from the *live* configuration. Sourcing it from the
+/// backup's own `settings.default_save_dir` would let the attacker bootstrap
+/// their way around the policy.
+pub async fn enforce_backup_path_policy(
+    verified_db: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<(), String> {
+    if allowed_roots.is_empty() {
+        return Err(engine_backup_error(
+            "backup_unsafe_paths",
+            "No allowed download root is configured, so the backup cannot be validated.",
+        ));
+    }
+    let url = format!("sqlite:{}?mode=ro", verified_db.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .map_err(|e| {
+            engine_backup_error(
+                "backup_invalid_database",
+                format!("Could not open the backup database for validation: {e}"),
+            )
+        })?;
+
+    // Static SQL only - sqlx's injection audit rejects `format!`-built queries,
+    // and keeping the strings literal preserves that guarantee here too.
+    let fetched = async {
+        let tasks = sqlx::query("SELECT id AS row_id, save_dir, temp_path, final_path FROM tasks")
+            .fetch_all(&pool)
+            .await?;
+        let files =
+            sqlx::query("SELECT id AS row_id, save_dir, temp_path, final_path FROM task_files")
+                .fetch_all(&pool)
+                .await?;
+        Ok::<_, sqlx::Error>((tasks, files))
+    }
+    .await;
+    pool.close().await;
+    let (task_rows, file_rows) = fetched.map_err(|e| {
+        engine_backup_error(
+            "backup_invalid_database",
+            format!("Could not read task paths from the backup: {e}"),
+        )
+    })?;
+
+    let mut offenders: Vec<String> = Vec::new();
+    collect_path_offenders("tasks", task_rows, allowed_roots, &mut offenders);
+    collect_path_offenders("task_files", file_rows, allowed_roots, &mut offenders);
+
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    // Only the first few are reported: the message reaches the UI and a hostile
+    // backup could otherwise pad it arbitrarily.
+    let shown = offenders
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(engine_backup_error(
+        "backup_unsafe_paths",
+        format!(
+            "This backup contains {} file path(s) outside your download folders and was rejected: {shown}",
+            offenders.len()
+        ),
+    ))
 }
 
 pub fn pending_restore_path(db_path: &Path) -> PathBuf {

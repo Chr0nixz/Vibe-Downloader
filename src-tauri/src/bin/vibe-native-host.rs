@@ -65,12 +65,19 @@ fn main() {
         return;
     }
 
-    if let Err(error) = init_standalone_logging() {
-        let _ = writeln!(
-            io::stderr(),
-            "failed to initialize native host logging: {error}"
-        );
-    }
+    // PERF-12: keep the writer guard alive until `main` returns. The host is a
+    // short-lived process, so dropping it early (or leaking it, as before) loses
+    // the buffered tail of the log - typically the error we most need.
+    let _log_guard = match init_standalone_logging() {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = writeln!(
+                io::stderr(),
+                "failed to initialize native host logging: {error}"
+            );
+            None
+        }
+    };
 
     let response = match read_native_message().and_then(handle_message) {
         Ok(response) => response,

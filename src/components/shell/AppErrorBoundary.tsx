@@ -7,11 +7,11 @@ import { Button } from "@/components/ui/button";
 // Defensive fallbacks: the error boundary fires when the app is broken,
 // so the i18n bundle may not be initialized. Always have English strings ready.
 const FALLBACK = {
-  title: "Something went wrong",
-  description: "The app hit an unexpected error. Try reloading, or copy the error details to report.",
+  title: "The interface hit an unexpected error",
+  description: "Reload the app, or copy the error details to report.",
   reload: "Reload",
   copyError: "Copy error",
-  home: "Go home",
+  home: "Back to task list",
 } as const;
 
 function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {

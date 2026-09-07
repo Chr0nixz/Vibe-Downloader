@@ -859,13 +859,28 @@ pub(crate) async fn create_task_with_state_and_headers(
     // ARC-02: reserve final/temp paths inside the create transaction so concurrent
     // same-name tasks cannot share an output path. Partial UNIQUE indexes enforce
     // the reservation; retry when a concurrent creator wins the same path.
-    let (record, final_path, temp_path, file_name) = {
+    // `final_path` / `file_name` are not unpacked here: after ARC-20 moved the
+    // file-row planning inside the transaction, the only remaining consumers
+    // read them from `record`.
+    let (record, temp_path, file_records) = {
         const MAX_PATH_RESERVE_ATTEMPTS: usize = 32;
         let mut last_error = None;
         let mut outcome = None;
+        // ARC-21: BUSY retries get their own budget. Sharing the path-conflict
+        // budget would let a contended database burn through the attempts that
+        // exist for genuine name collisions.
+        let mut busy_attempts = 0u32;
         for _ in 0..MAX_PATH_RESERVE_ATTEMPTS {
-            let mut tx = state.pool.begin().await.map_err(|e| e.to_string())?;
-            let reserved = db::list_reserved_final_paths(&mut *tx).await?;
+            // ARC-20 / ARC-21: read the reservation snapshot and plan every path
+            // *before* opening the transaction. `task_file_records_from_probe`
+            // creates a directory and stats the filesystem once per file; doing
+            // that while holding the write lock would serialize every concurrent
+            // create and trade an occasional conflict for permanent contention.
+            //
+            // The snapshot can be stale by the time we insert. That is intended:
+            // the partial UNIQUE indexes reject the loser, the whole transaction
+            // rolls back, and the next attempt re-plans against a fresh snapshot.
+            let mut reserved = db::list_reserved_final_paths(&state.pool).await?;
             let final_path =
                 unique_final_path_among(&effective_save_dir, requested_file_name, &reserved);
             let file_name = final_path
@@ -920,6 +935,28 @@ pub(crate) async fn create_task_with_state_and_headers(
                 files_version: 0,
             };
 
+            // ARC-20: plan the file rows here so they can be inserted in the same
+            // transaction as the task row. This still touches the filesystem, so
+            // it deliberately runs before `begin_immediate` below.
+            let file_records = task_file_records_from_probe(
+                &record,
+                &probe_files,
+                &save_dir,
+                &final_path,
+                &temp_path,
+                &file_name,
+                selected_relative_paths.as_ref(),
+                &mut reserved,
+            )?;
+
+            // ARC-21: IMMEDIATE takes the write lock up front. The duplicate
+            // lookup below reads before we write, which under a DEFERRED
+            // transaction is exactly the snapshot-upgrade pattern that fails with
+            // SQLITE_BUSY_SNAPSHOT - an error `busy_timeout` does not retry.
+            let mut tx = db::begin_immediate(&state.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
             if !input.allow_duplicate.unwrap_or(false) {
                 let bt_source_key = if record.source_key.starts_with("bt:") {
                     Some(record.source_key.as_str())
@@ -940,27 +977,40 @@ pub(crate) async fn create_task_with_state_and_headers(
                 }
             }
 
-            match db::insert_task_record_in_tx(&mut tx, &record).await {
+            // ARC-20: the task row and every file row commit together, so a
+            // conflict part-way through can no longer leave a committed task
+            // with a truncated file list.
+            let inserted = db::insert_task_with_files_in_tx(&mut tx, &record, &file_records).await;
+            let error = match inserted {
                 Ok(()) => match tx.commit().await {
                     Ok(()) => {
-                        outcome = Some((record, final_path, temp_path, file_name));
+                        outcome = Some((record, temp_path, file_records));
                         break;
                     }
-                    Err(error) => {
-                        let message = error.to_string();
-                        if is_final_path_unique_conflict(&message) {
-                            last_error = Some(message);
-                            continue;
-                        }
-                        return Err(message);
-                    }
+                    Err(error) => error.to_string(),
                 },
-                Err(error) if is_final_path_unique_conflict(&error) => {
-                    last_error = Some(error);
-                    continue;
-                }
-                Err(error) => return Err(error),
+                // Dropping `tx` here rolls the whole attempt back.
+                Err(error) => error,
+            };
+            if is_final_path_unique_conflict(&error) {
+                last_error = Some(error);
+                continue;
             }
+            if db::is_sqlite_busy_message(&error) && busy_attempts < db::SQLITE_BUSY_MAX_ATTEMPTS {
+                busy_attempts += 1;
+                let delay = db::sqlite_busy_backoff(busy_attempts);
+                tracing::warn!(
+                    task_id = %task_id,
+                    attempt = busy_attempts,
+                    delay_ms = delay.as_millis(),
+                    error = %error,
+                    "task creation hit SQLITE_BUSY; retrying"
+                );
+                tokio::time::sleep(delay).await;
+                last_error = Some(error);
+                continue;
+            }
+            return Err(error);
         }
         outcome.ok_or_else(|| {
             last_error.unwrap_or_else(|| {
@@ -1100,20 +1150,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         .await?;
     }
     db::insert_task_event(&state.pool, &record.id, "created", None).await?;
-    let mut reserved_final_paths = db::list_reserved_final_paths(&state.pool).await?;
-    let file_records = task_file_records_from_probe(
-        &record,
-        &probe_files,
-        &save_dir,
-        &final_path,
-        &temp_path,
-        &file_name,
-        selected_relative_paths.as_ref(),
-        &mut reserved_final_paths,
-    )?;
-    for file_record in &file_records {
-        db::insert_task_file_record(&state.pool, file_record).await?;
-    }
+    // ARC-20: `file_records` were inserted atomically with the task row above.
     if let Some(metalink) = probe.metalink.as_ref() {
         persist_metalink_probe(&state.pool, &record, &file_records, metalink).await?;
     }

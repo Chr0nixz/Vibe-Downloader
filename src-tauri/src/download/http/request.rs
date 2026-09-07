@@ -38,39 +38,6 @@ pub(crate) fn merge_basic_auth_headers(
     headers
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn merge_basic_auth_injects_when_missing() {
-        let creds = TaskCredentials {
-            username: "alice".to_string(),
-            password: "s3cret".to_string(),
-            private_key_data: None,
-            private_key_passphrase: None,
-        };
-        let headers = merge_basic_auth_headers(&[], Some(&creds));
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers[0].0, "Authorization");
-        assert!(headers[0].1.starts_with("Basic "));
-        assert!(!headers[0].1.contains("s3cret"));
-    }
-
-    #[test]
-    fn merge_basic_auth_preserves_existing_authorization() {
-        let creds = TaskCredentials {
-            username: "alice".to_string(),
-            password: "s3cret".to_string(),
-            private_key_data: None,
-            private_key_passphrase: None,
-        };
-        let base = vec![("Authorization".to_string(), "Bearer token".to_string())];
-        let headers = merge_basic_auth_headers(&base, Some(&creds));
-        assert_eq!(headers, base);
-    }
-}
-
 pub(super) async fn send_head_with_retry(
     client: &Client,
     url: &str,
@@ -152,4 +119,37 @@ pub(super) fn retry_after_duration(response: &Response) -> Option<Duration> {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
         .map(|duration| duration.min(Duration::from_secs(60)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_basic_auth_injects_when_missing() {
+        let creds = TaskCredentials {
+            username: "alice".to_string(),
+            password: "s3cret".to_string(),
+            private_key_data: None,
+            private_key_passphrase: None,
+        };
+        let headers = merge_basic_auth_headers(&[], Some(&creds));
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "Authorization");
+        assert!(headers[0].1.starts_with("Basic "));
+        assert!(!headers[0].1.contains("s3cret"));
+    }
+
+    #[test]
+    fn merge_basic_auth_preserves_existing_authorization() {
+        let creds = TaskCredentials {
+            username: "alice".to_string(),
+            password: "s3cret".to_string(),
+            private_key_data: None,
+            private_key_passphrase: None,
+        };
+        let base = vec![("Authorization".to_string(), "Bearer token".to_string())];
+        let headers = merge_basic_auth_headers(&base, Some(&creds));
+        assert_eq!(headers, base);
+    }
 }

@@ -338,6 +338,7 @@ function UpdateProgressBar({ updater }: { updater: UpdaterSnapshot }) {
       <div
         className="h-1.5 w-full overflow-hidden rounded-full bg-surface-root"
         role="progressbar"
+        aria-label={label}
         aria-valuenow={percent ?? 0}
         aria-valuemin={0}
         aria-valuemax={100}

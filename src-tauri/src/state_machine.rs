@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use sqlx::SqlitePool;
 
 use crate::{
@@ -8,10 +6,10 @@ use crate::{
     models::{SegmentStatus, TaskRecord, TaskStatus},
 };
 
-/// Bounded retries for SQLITE_BUSY / BUSY_SNAPSHOT (ARC-06).
-/// Backoff: 20/40/80/160ms — stays well under the 5s busy_timeout budget.
-const TRANSITION_BUSY_MAX_ATTEMPTS: u32 = 5;
-const TRANSITION_BUSY_BASE_DELAY_MS: u64 = 20;
+/// ARC-21: the retry budget and the BUSY predicate now live in `db` so the
+/// create path can reuse exactly the same policy. Kept as a local alias to
+/// avoid churn in the call sites below.
+use db::SQLITE_BUSY_MAX_ATTEMPTS as TRANSITION_BUSY_MAX_ATTEMPTS;
 
 /// State transition error.
 #[derive(Debug, thiserror::Error)]
@@ -57,9 +55,7 @@ fn is_retryable_sqlite_busy(error: &TransitionError) -> bool {
     let TransitionError::Database(message) = error else {
         return false;
     };
-    let lower = message.to_ascii_lowercase();
-    // SQLITE_BUSY (5), SQLITE_BUSY_SNAPSHOT (517), and sqlx "database is locked".
-    lower.contains("busy") || lower.contains("database is locked") || lower.contains("(code: 5)")
+    db::is_sqlite_busy_message(message)
 }
 
 /// Unified state transition entry point.
@@ -174,15 +170,15 @@ async fn transition_task_inner<T: DownloadEventTarget + ?Sized>(
             Err(error)
                 if is_retryable_sqlite_busy(&error) && attempt < TRANSITION_BUSY_MAX_ATTEMPTS =>
             {
-                let delay_ms = TRANSITION_BUSY_BASE_DELAY_MS << (attempt - 1);
+                let delay = db::sqlite_busy_backoff(attempt);
                 tracing::warn!(
                     task_id = %task_id,
                     attempt,
-                    delay_ms,
+                    delay_ms = delay.as_millis(),
                     error = %error,
                     "state transition hit SQLITE_BUSY; retrying"
                 );
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                tokio::time::sleep(delay).await;
             }
             Err(error) => return Err(error),
         }

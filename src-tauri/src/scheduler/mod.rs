@@ -614,15 +614,15 @@ impl Scheduler {
 /// Internal to the scheduler module.
 async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str, error: String) {
     tracing::error!(task_id = %task_id, error = %error, "download failed");
-    let payload = serde_json::from_str::<crate::models::AppErrorPayload>(&error).ok();
-    // These errors are recoverable with user action (resolve a file conflict, re-auth
-    // the browser) → NeedsAttention, not Failed. Keep this list in sync with
-    // AppErrorPayload code constants.
-    let status = match payload.as_ref().map(|payload| payload.code.as_str()) {
-        Some("final_path_conflict" | "auth_headers_expired" | "auth_headers_unavailable") => {
-            TaskStatus::NeedsAttention
-        }
-        _ => TaskStatus::Failed,
+    // ARC-16: dispatch only on structured code — never on human message text.
+    let code = crate::models::AppErrorPayload::code_from_stored(None, Some(&error));
+    let status = if code
+        .as_deref()
+        .is_some_and(crate::models::AppErrorPayload::is_needs_attention_code)
+    {
+        TaskStatus::NeedsAttention
+    } else {
+        TaskStatus::Failed
     };
     // R-2.4: Conditional UPDATE — only mark failed if still Downloading/Retrying.
     // If the user paused/canceled/deleted while the worker was erroring out,

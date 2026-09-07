@@ -845,6 +845,24 @@ async fn download_sftp_segment(request: WorkerRequest) -> Result<i64, String> {
     result
 }
 
+/// ARC-19: Publish a worker's authoritative offset to the coordinator.
+///
+/// The coordinator force-checkpoints `downloaded_until` from its in-memory map,
+/// so a worker that only writes `task_work_units` directly has its value
+/// overwritten by the last periodic report. Call this only after a *successful*
+/// flush: publishing an offset whose bytes are not durable is exactly the
+/// corruption this guards against.
+///
+/// ARC-31: `ftp.rs` carries a byte-identical twin. Both collapse into one when
+/// the FTP/SFTP coordinators are merged.
+fn report_sftp_worker_offset(request: &WorkerRequest, offset: i64, speed_bps: i64) {
+    let _ = request.progress_tx.send(WorkerProgress {
+        segment_id: request.segment.id.clone(),
+        downloaded_until: offset,
+        speed_bps,
+    });
+}
+
 async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, String> {
     // Each worker establishes its own SSH channel + SFTP subsystem so that
     // multiple segments can transfer in parallel (Path A from the PoC).
@@ -916,16 +934,23 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
 
     loop {
         if request.cancel_token.is_cancelled() {
-            let _ = file.flush().await;
-            // Persist the exact resume offset before exiting so the next
-            // engine entry seeks both remote and local temp correctly.
-            let _ = db::update_segment_progress(
-                &request.pool,
-                &request.segment.id,
-                offset,
-                SegmentStatus::Pending,
-            )
-            .await;
+            // ARC-19: only publish the offset once the bytes are durable. A
+            // failed flush previously went unnoticed (`let _ =`) and the offset
+            // was persisted anyway, putting the checkpoint ahead of the file.
+            if file.flush().await.is_ok() {
+                // Tell the coordinator too, otherwise its force-checkpoint on
+                // cancel overwrites the row we persist just below.
+                report_sftp_worker_offset(request, offset, 0);
+                // Persist the exact resume offset before exiting so the next
+                // engine entry seeks both remote and local temp correctly.
+                let _ = db::update_segment_progress(
+                    &request.pool,
+                    &request.segment.id,
+                    offset,
+                    SegmentStatus::Pending,
+                )
+                .await;
+            }
             let _ = connection.session.close().await;
             return Err("Download canceled.".to_string());
         }
@@ -954,14 +979,18 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
         };
         let outcome = tokio::select! {
             _ = request.cancel_token.cancelled() => {
-                let _ = file.flush().await;
-                let _ = db::update_segment_progress(
-                    &request.pool,
-                    &request.segment.id,
-                    offset,
-                    SegmentStatus::Pending,
-                )
-                .await;
+                // ARC-19: same contract as the loop-top cancel branch - durable
+                // first, then report, then persist.
+                if file.flush().await.is_ok() {
+                    report_sftp_worker_offset(request, offset, 0);
+                    let _ = db::update_segment_progress(
+                        &request.pool,
+                        &request.segment.id,
+                        offset,
+                        SegmentStatus::Pending,
+                    )
+                    .await;
+                }
                 let _ = connection.session.close().await;
                 return Err("Download canceled.".to_string());
             }
@@ -1004,6 +1033,12 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
             .await
             .is_err()
         {
+            // ARC-19: a third cancel exit that used to return without flushing
+            // or reporting, leaving buffered bytes unwritten while the
+            // coordinator held a newer in-memory offset.
+            if file.flush().await.is_ok() {
+                report_sftp_worker_offset(request, offset, 0);
+            }
             let _ = connection.session.close().await;
             return Err("Download canceled.".to_string());
         }
@@ -1014,13 +1049,20 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
         offset += i64::try_from(read).unwrap_or(0);
 
         if last_emit.elapsed() >= SFTP_PROGRESS_INTERVAL {
+            // ARC-19: flush *before* publishing so "reported" can never exceed
+            // "durable". The coordinator checkpoints downloaded_until straight
+            // from these messages; an offset still held in the 256 KB BufWriter
+            // would let the database run ahead of the file, and resume would
+            // then seek past a zero-filled hole.
+            file.flush().await.map_err(|e| {
+                AppErrorPayload::disk_write_failed(format!(
+                    "Could not flush the SFTP temp file: {e}"
+                ))
+                .command_error()
+            })?;
             let elapsed = last_emit.elapsed().as_secs_f64().max(0.001);
             let speed = ((offset - last_emit_bytes).max(0) as f64 / elapsed).round() as i64;
-            let _ = request.progress_tx.send(WorkerProgress {
-                segment_id: request.segment.id.clone(),
-                downloaded_until: offset,
-                speed_bps: speed,
-            });
+            report_sftp_worker_offset(request, offset, speed);
             last_emit = Instant::now();
             last_emit_bytes = offset;
         }

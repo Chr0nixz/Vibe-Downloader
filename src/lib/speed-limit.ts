@@ -1,8 +1,18 @@
 /**
- * Shared speed-limit input helpers. Both the global speed-limit popover in the
- * CommandBar and the per-task speed-limit control in TaskDetails use the same
+ * Shared speed-limit input helpers. Both the global speed-limit panel in the
+ * status bar and the per-task speed-limit control in TaskDetails use the same
  * amount + unit model so users learn one input pattern across the app.
  */
+
+/** Preset caps offered by the global speed-limit panel and the command palette.
+ * `null` means unlimited. Kept here so the two surfaces cannot drift apart. */
+export const SPEED_LIMIT_PRESETS = [
+  { id: "unlimited", label: "Unlimited", value: null },
+  { id: "512k", label: "512 KB/s", value: 512 * 1024 },
+  { id: "1m", label: "1 MB/s", value: 1024 * 1024 },
+  { id: "5m", label: "5 MB/s", value: 5 * 1024 * 1024 },
+  { id: "10m", label: "10 MB/s", value: 10 * 1024 * 1024 },
+] as const;
 
 export const SPEED_LIMIT_UNITS = [
   { value: "1", label: "B/s" },

@@ -14,6 +14,8 @@
   --color-surface-overlay: var(--surface-overlay);
   --color-surface-scrim: var(--surface-scrim);
   --color-surface-hover: var(--surface-hover);
+  --color-surface-list-well: var(--surface-list-well);
+  --color-surface-row: var(--surface-row);
   --color-border-subtle: var(--border-subtle);
   --color-border-divider: var(--border-divider);
   --color-border-panel: var(--border-panel);
@@ -30,6 +32,8 @@
   --color-border-accent: var(--border-accent);
   --color-border-accent-subtle: var(--border-accent-subtle);
   --color-border-hover: var(--border-hover);
+  --color-row-border: var(--row-border);
+  --color-row-border-hover: var(--row-border-hover);
   --color-text-primary: var(--text-primary);
   --color-text-secondary: var(--text-secondary);
   --color-text-muted: var(--text-muted);
@@ -56,10 +60,12 @@
     @apply border-border-subtle;
   }
 
+  /* clip (not hidden): overflow:hidden boxes stay programmatically scrollable,
+     so scrollIntoView can jump the whole app chrome. */
   html,
   body,
   #root {
-    @apply h-full overflow-hidden;
+    @apply h-full overflow-clip;
   }
 
   body {
@@ -116,17 +122,19 @@
 @keyframes completion-glow {
   0% {
     box-shadow: 0 0 0 0 transparent;
-    border-color: var(--border-subtle);
+    border-color: var(--row-border);
   }
-  20% {
+  18% {
     box-shadow:
-      0 0 0 3px color-mix(in oklch, var(--status-success) 30%, transparent),
-      0 0 16px color-mix(in oklch, var(--status-success) 20%, transparent);
-    border-color: var(--status-success);
+      0 0 0 2px color-mix(in oklch, var(--status-success) 22%, transparent),
+      0 0 10px color-mix(in oklch, var(--status-success) 14%, transparent);
+    border-color: color-mix(in oklch, var(--status-success) 55%, var(--row-border));
   }
+  /* Must return to the neutral border: the animation uses fill-mode `both`, so
+     whatever this frame holds becomes the row's permanent state. */
   100% {
     box-shadow: 0 0 0 0 transparent;
-    border-color: var(--status-success);
+    border-color: var(--row-border);
   }
 }
 
@@ -135,7 +143,7 @@
     filter: brightness(1);
   }
   30% {
-    filter: brightness(1.6);
+    filter: brightness(1.22);
   }
   100% {
     filter: brightness(1);
@@ -143,11 +151,11 @@
 }
 
 .completion-flash {
-  animation: completion-glow 1.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: completion-glow 1.1s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .completion-flash-progress {
-  animation: progress-burst 1.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: progress-burst 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -155,6 +163,24 @@
   .completion-flash-progress {
     animation: none;
     transition: none;
+  }
+
+  /* Tailwind animate-pulse is used by a few skeletons; disable globally. */
+  .animate-pulse {
+    /* biome-ignore lint/complexity/noImportantStyles: Tailwind's own animate-pulse
+       utility applies the animation at equal specificity and later in the cascade,
+       so !important is the only way to honor prefers-reduced-motion. Removing it
+       (Biome's suggested fix) silently breaks the DESIGN.md reduced-motion contract. */
+    animation: none !important;
+  }
+
+  .animate-spin {
+    /* biome-ignore lint/complexity/noImportantStyles: same cascade fight as animate-pulse. */
+    animation: none !important;
+  }
+
+  .skeleton-shimmer {
+    animation: none;
   }
 
   .floating-ball-glow {
@@ -189,11 +215,6 @@
     animation: none;
   }
 
-  .nav-dot-pulse {
-    animation: none;
-    background-color: var(--accent-primary);
-  }
-
   .skeleton-shimmer {
     animation: none;
     background-image: none;
@@ -202,25 +223,6 @@
   .toast-countdown-bar {
     animation: none;
     transition: none;
-  }
-}
-
-/* ── Sidebar navigation ── */
-
-/* Nav dot: opacity+scale breath, plus a slow hue cycle between
-   accent-primary (rest) and accent-energy (active download).
-   The hue shift is the "vivid" cue — same 3-hue system, deployed subtly. */
-@keyframes nav-dot-pulse {
-  0%,
-  100% {
-    opacity: 0.55;
-    transform: scale(0.85);
-    background-color: var(--accent-primary);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1);
-    background-color: var(--accent-energy);
   }
 }
 
@@ -361,17 +363,6 @@
     inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 50%, transparent),
     0 0 14px color-mix(in oklch, var(--accent-primary) 20%, transparent),
     0 0 5px color-mix(in oklch, var(--accent-energy) 10%, transparent);
-}
-
-/* Hover: widen slightly so the narrow bar is easier to grab */
-.floating-bar-left,
-.floating-bar-right {
-  transform: none;
-}
-
-.floating-bar-left:hover,
-.floating-bar-right:hover {
-  transform: scaleX(1.25);
 }
 
 @keyframes detail-enter {

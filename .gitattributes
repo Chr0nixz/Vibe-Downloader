@@ -1,0 +1,50 @@
+# ENG-02: make line-ending handling explicit. Without this file the result
+# depends on each contributor's core.autocrlf setting, which is what produced
+# the recurring "LF will be replaced by CRLF" noise and the mojibake incidents
+# in RELEASE.md and download/hls/engine.rs.
+#
+# Existing files are intentionally left alone: adding this file does not
+# rewrite anything. Run `git add --renormalize .` only in a dedicated commit
+# with a clean working tree.
+
+* text=auto
+
+# Shell scripts must keep LF even when checked out on Windows, otherwise
+# git-bash, WSL and the Linux CI runners fail with "bad interpreter".
+*.sh text eol=lf
+
+# Source and config: store LF, let git convert on checkout.
+*.rs text
+*.ts text
+*.tsx text
+*.js text
+*.mjs text
+*.json text
+*.css text
+*.html text
+*.md text
+*.toml text
+*.yml text
+*.yaml text
+*.sql text
+
+# Binary assets: never convert line endings, never attempt a text diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.dll binary
+*.exe binary
+*.torrent binary
+
+# Generated lockfile: still tracked, but excluded from diffs to keep reviews
+# readable. Cargo.lock is deliberately NOT listed - dependency changes there
+# must stay reviewable.
+pnpm-lock.yaml -diff

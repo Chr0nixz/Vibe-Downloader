@@ -14,6 +14,25 @@ use tauri_app_lib::{
 };
 
 async fn seed_task(pool: &sqlx::SqlitePool, id: &str) {
+    seed_task_with_paths(
+        pool,
+        id,
+        &std::env::temp_dir().to_string_lossy(),
+        None,
+        None,
+    )
+    .await;
+}
+
+/// SEC-02: seed a task whose stored output paths are caller-controlled, so a
+/// test can build the exact backup an attacker would ship.
+async fn seed_task_with_paths(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+    save_dir: &str,
+    temp_path: Option<&str>,
+    final_path: Option<&str>,
+) {
     let now = chrono::Utc::now().to_rfc3339();
     db::insert_task_record(
         pool,
@@ -24,9 +43,9 @@ async fn seed_task(pool: &sqlx::SqlitePool, id: &str) {
             protocol: "http".to_string(),
             task_kind: TaskKind::SingleFile,
             file_name: format!("{id}.bin"),
-            save_dir: std::env::temp_dir().to_string_lossy().to_string(),
-            temp_path: None,
-            final_path: None,
+            save_dir: save_dir.to_string(),
+            temp_path: temp_path.map(str::to_string),
+            final_path: final_path.map(str::to_string),
             total_size: 10,
             downloaded_bytes: 10,
             status: TaskStatus::Completed,
@@ -183,4 +202,138 @@ async fn fun16_failed_restore_staging_leaves_live_integrity_ok() {
         .expect("exists");
     assert_eq!(task.id, "still-here");
     pool.close().await;
+}
+
+/// SEC-02: a backup whose task paths point outside the allowed roots must be
+/// rejected, and the pre-existing integrity checks must be shown to accept it.
+///
+/// This is the whole point of the fix: magic, checksum, schema and
+/// `PRAGMA integrity_check` are all things the attacker controls or can
+/// recompute, so none of them stop a crafted `.vibe-backup` from pointing
+/// `final_path` at, say, a Startup folder. Restore writes those strings
+/// verbatim once the scheduler resumes the task.
+#[tokio::test]
+async fn sec02_backup_with_out_of_root_paths_is_rejected() {
+    let live = unique_path("sec02-live.sqlite");
+    let backup = unique_path("sec02-evil.vibe-backup");
+    let allowed_root = unique_path("sec02-downloads");
+    std::fs::create_dir_all(&allowed_root).expect("create allowed root");
+
+    let pool = db::connect(&live).await.expect("connect").pool;
+    let outside = std::env::temp_dir()
+        .join("vibe-sec02-outside")
+        .join("evil.bin");
+    seed_task_with_paths(
+        &pool,
+        "evil",
+        &allowed_root.to_string_lossy(),
+        None,
+        Some(&outside.to_string_lossy()),
+    )
+    .await;
+    make_backup_from_pool(&pool, &live, &backup).await;
+
+    // Every pre-existing check accepts it - the attacker computes a valid
+    // checksum for their own payload.
+    let parsed = read_backup_file(&backup).expect("integrity checks still accept a crafted backup");
+    let current = db::current_schema_version(&pool).await.expect("schema");
+    let verified = db::materialize_and_verify_backup_db(
+        &parsed.database,
+        parsed.manifest.schema_version,
+        current,
+    )
+    .await
+    .expect("structural verification still accepts a crafted backup");
+
+    // Only the content policy stops it.
+    let error = db::enforce_backup_path_policy(&verified, std::slice::from_ref(&allowed_root))
+        .await
+        .expect_err("SEC-02: an out-of-root final_path must be rejected");
+    assert!(
+        error.contains("backup_unsafe_paths"),
+        "expected backup_unsafe_paths, got: {error}"
+    );
+
+    // The live database must be untouched by a rejected restore.
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await
+        .expect("integrity");
+    assert_eq!(integrity, "ok");
+    assert!(
+        !pending_restore_path(&live).exists(),
+        "a rejected backup must not stage a pending restore"
+    );
+
+    let _ = std::fs::remove_file(&verified);
+    let _ = std::fs::remove_dir_all(&allowed_root);
+    pool.close().await;
+}
+
+/// SEC-02: the policy must not over-reject. Paths inside an allowed root, and
+/// NULL paths, stay acceptable.
+#[tokio::test]
+async fn sec02_backup_with_in_root_paths_is_accepted() {
+    let live = unique_path("sec02-ok-live.sqlite");
+    let backup = unique_path("sec02-ok.vibe-backup");
+    let allowed_root = unique_path("sec02-ok-downloads");
+    std::fs::create_dir_all(&allowed_root).expect("create allowed root");
+
+    let pool = db::connect(&live).await.expect("connect").pool;
+    let inside = allowed_root.join("nested").join("movie.mkv");
+    seed_task_with_paths(
+        &pool,
+        "good",
+        &allowed_root.to_string_lossy(),
+        Some(&allowed_root.join("movie.mkv.part").to_string_lossy()),
+        Some(&inside.to_string_lossy()),
+    )
+    .await;
+    // A task with no output path yet must not trip the policy either.
+    seed_task(&pool, "no-paths-yet").await;
+    make_backup_from_pool(&pool, &live, &backup).await;
+
+    let parsed = read_backup_file(&backup).expect("read backup");
+    let current = db::current_schema_version(&pool).await.expect("schema");
+    let verified = db::materialize_and_verify_backup_db(
+        &parsed.database,
+        parsed.manifest.schema_version,
+        current,
+    )
+    .await
+    .expect("verify");
+
+    // `seed_task` uses the temp dir, so it has to be an allowed root here too.
+    db::enforce_backup_path_policy(&verified, &[allowed_root.clone(), std::env::temp_dir()])
+        .await
+        .expect("SEC-02: in-root and NULL paths must be accepted");
+
+    let _ = std::fs::remove_file(&verified);
+    let _ = std::fs::remove_dir_all(&allowed_root);
+    pool.close().await;
+}
+
+/// SEC-02: `credentials_policy` was parsed and forwarded to the UI without ever
+/// being checked. Anything other than the machine-bound policy must be refused
+/// at parse time so `validate_app_backup` rejects it as well.
+#[test]
+fn sec02_unexpected_credentials_policy_is_rejected() {
+    let manifest = BackupManifest {
+        format: "vibe-backup".into(),
+        format_version: BACKUP_FORMAT_VERSION,
+        app_version: "0.4.0".into(),
+        schema_version: 1,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        credentials_policy: "plaintext".into(),
+        includes_global_proxy_password: true,
+        checksum_algorithm: "sha256".into(),
+        checksum: String::new(),
+        database_bytes: 0,
+    };
+    let packed = pack_backup_file(&manifest, b"not-a-real-database").expect("pack");
+    let error = parse_backup_bytes(&packed).expect_err("a foreign credentials policy is refused");
+    assert!(
+        error.contains("backup_invalid_manifest"),
+        "expected backup_invalid_manifest, got: {error}"
+    );
 }

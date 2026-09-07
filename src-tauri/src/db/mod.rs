@@ -21,10 +21,10 @@ mod task_records;
 mod task_state;
 mod torrent;
 pub use self::backup::{
-    apply_pending_restore_if_any, current_schema_version, materialize_and_verify_backup_db,
-    pack_backup_file, parse_backup_bytes, pending_restore_path, read_backup_file,
-    snapshot_database_to_path, write_backup_file, BackupManifest, BACKUP_FORMAT_VERSION,
-    CREDENTIALS_POLICY_MACHINE_BOUND,
+    apply_pending_restore_if_any, current_schema_version, enforce_backup_path_policy,
+    materialize_and_verify_backup_db, pack_backup_file, parse_backup_bytes, pending_restore_path,
+    read_backup_file, snapshot_database_to_path, write_backup_file, BackupManifest,
+    BACKUP_FORMAT_VERSION, CREDENTIALS_POLICY_MACHINE_BOUND,
 };
 pub use self::browser_messages::{
     browser_message_exists, insert_browser_message, latest_browser_error,
@@ -36,8 +36,9 @@ pub use self::classification_rules::{
     reorder_classification_rules, update_classification_rule,
 };
 pub use self::connection::{
-    begin_immediate, connect, connect_for_startup, reset_database_files, wal_checkpoint,
-    wal_file_size_bytes, DatabaseConnectOutcome, DatabaseRecovery, DbConnection,
+    begin_immediate, connect, connect_for_startup, is_sqlite_busy_message, reset_database_files,
+    sqlite_busy_backoff, wal_checkpoint, wal_file_size_bytes, DatabaseConnectOutcome,
+    DatabaseRecovery, DbConnection, SQLITE_BUSY_MAX_ATTEMPTS,
 };
 pub use self::dash::{
     bulk_upsert_dash_segments, dash_finish_requested, dash_segment_cursor,
@@ -118,9 +119,10 @@ pub use self::task_proxy::{
 };
 pub use self::task_records::{
     find_duplicate_task_record, get_task_record, get_task_record_in_tx, insert_task_record,
-    insert_task_record_in_tx, list_browser_realtime_task_records, list_paused_schedulable_tasks,
-    list_queued_task_records, list_reserved_final_paths, list_task_ids_by_statuses,
-    list_task_records, list_task_records_by_ids, list_task_records_cursor, list_task_records_page,
+    insert_task_record_in_tx, insert_task_with_files, insert_task_with_files_in_tx,
+    list_browser_realtime_task_records, list_paused_schedulable_tasks, list_queued_task_records,
+    list_reserved_final_paths, list_task_ids_by_statuses, list_task_records,
+    list_task_records_by_ids, list_task_records_cursor, list_task_records_page,
     next_queue_position, next_retry_after_at, reorder_queued_tasks, task_filter_options,
     task_stats_snapshot, update_task_transfer_options, TaskFilterOptions, TaskListPage,
     TaskListQuery, TaskTransferOptionsUpdate,

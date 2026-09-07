@@ -1,20 +1,23 @@
 use std::{
     sync::{
-        atomic::{AtomicI64, AtomicU64, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-/// Returns the current time as milliseconds since the Unix epoch.
-/// Used for atomic timestamp storage without requiring a Mutex.
+/// Process-monotonic millisecond clock (PERF-08).
+/// Anchored once so wall-clock jumps cannot stall token refill.
+fn mono_anchor() -> Instant {
+    static ANCHOR: OnceLock<Instant> = OnceLock::new();
+    *ANCHOR.get_or_init(Instant::now)
+}
+
 fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    mono_anchor().elapsed().as_millis() as u64
 }
 
 fn bucket_capacity_milli(limit_bps: i64) -> i64 {
@@ -29,6 +32,9 @@ fn refill_tokens(tokens: &AtomicI64, refill_milli: i64, max_milli: i64) {
     });
 }
 
+/// PERF-08: centralized refill cadence shared by all waiters on this limiter.
+const TICK_INTERVAL_MS: u64 = 25;
+
 /// Lock-free token bucket speed limiter.
 ///
 /// Uses atomic operations instead of a Mutex to avoid lock contention
@@ -39,9 +45,14 @@ pub struct GlobalSpeedLimiter {
     limit_bps: AtomicI64,
     /// Token balance in milli-bytes (bytes × 1000) for sub-integer precision.
     tokens_milli: AtomicI64,
-    /// Last refill timestamp in milliseconds since Unix epoch.
+    /// Last refill timestamp in process-monotonic milliseconds.
     last_refill_millis: AtomicU64,
     parent: Option<Arc<GlobalSpeedLimiter>>,
+    /// Shared wake signal when the ticker refills tokens.
+    notify: Notify,
+    ticker_started: AtomicBool,
+    /// Holds the JoinHandle so Drop / set_limit(0) can abort the ticker.
+    ticker_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl GlobalSpeedLimiter {
@@ -52,6 +63,9 @@ impl GlobalSpeedLimiter {
             tokens_milli: AtomicI64::new(bucket_capacity_milli(limit)),
             last_refill_millis: AtomicU64::new(now_millis()),
             parent: None,
+            notify: Notify::new(),
+            ticker_started: AtomicBool::new(false),
+            ticker_handle: Mutex::new(None),
         }
     }
 
@@ -66,6 +80,9 @@ impl GlobalSpeedLimiter {
                 tokens_milli: AtomicI64::new(bucket_capacity_milli(limit)),
                 last_refill_millis: AtomicU64::new(now_millis()),
                 parent: Some(parent),
+                notify: Notify::new(),
+                ticker_started: AtomicBool::new(false),
+                ticker_handle: Mutex::new(None),
             }),
             _ => parent,
         }
@@ -78,6 +95,73 @@ impl GlobalSpeedLimiter {
             .store(bucket_capacity_milli(limit), Ordering::Relaxed);
         self.last_refill_millis
             .store(now_millis(), Ordering::Relaxed);
+        if limit <= 0 {
+            self.stop_ticker();
+        }
+        self.notify.notify_waiters();
+    }
+
+    fn stop_ticker(&self) {
+        self.ticker_started.store(false, Ordering::Relaxed);
+        if let Ok(mut guard) = self.ticker_handle.lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    /// Lazy-start a shared ticker so waiters wake together on refill (PERF-08).
+    fn ensure_ticker(self: &Arc<Self>) {
+        if self.limit_bps.load(Ordering::Relaxed) <= 0 {
+            return;
+        }
+        if self
+            .ticker_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let this = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(TICK_INTERVAL_MS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if this.limit_bps.load(Ordering::Relaxed) <= 0 {
+                    this.ticker_started.store(false, Ordering::Relaxed);
+                    break;
+                }
+                this.refill_now();
+                this.notify.notify_waiters();
+            }
+        });
+        if let Ok(mut guard) = self.ticker_handle.lock() {
+            *guard = Some(handle);
+        }
+    }
+
+    fn refill_now(&self) {
+        let limit = self.limit_bps.load(Ordering::Relaxed);
+        if limit <= 0 {
+            return;
+        }
+        let now = now_millis();
+        let last = self.last_refill_millis.load(Ordering::Relaxed);
+        if now > last
+            && self
+                .last_refill_millis
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            let elapsed_millis = (now - last) as i64;
+            let refill_milli = elapsed_millis.saturating_mul(limit);
+            refill_tokens(
+                &self.tokens_milli,
+                refill_milli,
+                bucket_capacity_milli(limit),
+            );
+        }
     }
 
     /// Hierarchical limiting: each byte is charged to BOTH the per-task child and the global
@@ -105,7 +189,11 @@ impl GlobalSpeedLimiter {
     ///
     /// ARC-04: waits are cancellable so pause/delete/exit can converge under
     /// very low limits (e.g. 1 B/s) instead of sleeping for hours.
-    pub async fn throttle(&self, bytes: usize, cancel: &CancellationToken) -> Result<(), ()> {
+    pub async fn throttle(
+        self: &Arc<Self>,
+        bytes: usize,
+        cancel: &CancellationToken,
+    ) -> Result<(), ()> {
         if let Some(parent) = &self.parent {
             self.throttle_self(bytes, cancel).await?;
             parent.throttle_self(bytes, cancel).await?;
@@ -115,7 +203,11 @@ impl GlobalSpeedLimiter {
         Ok(())
     }
 
-    async fn throttle_self(&self, bytes: usize, cancel: &CancellationToken) -> Result<(), ()> {
+    async fn throttle_self(
+        self: &Arc<Self>,
+        bytes: usize,
+        cancel: &CancellationToken,
+    ) -> Result<(), ()> {
         let mut remaining = bytes as i64;
         let mut spin_count = 0u32;
 
@@ -129,30 +221,14 @@ impl GlobalSpeedLimiter {
                 return Ok(());
             }
 
-            // Only the thread that wins the `last_refill_millis` CAS performs the refill;
-            // losers observe the updated timestamp and skip. This avoids a Mutex while
-            // preventing double-refill. Tokens are capped at `limit × 1000` milli-bytes
-            // (1 second's worth) so idle periods don't accumulate a burst.
-            let now = now_millis();
-            let last = self.last_refill_millis.load(Ordering::Relaxed);
-            if now > last
-                && self
-                    .last_refill_millis
-                    .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            {
-                let elapsed_millis = (now - last) as i64;
-                // Refill in milli-bytes: limit (bytes/sec) × elapsed_ms = milli-bytes
-                let refill_milli = elapsed_millis.saturating_mul(limit);
-                refill_tokens(
-                    &self.tokens_milli,
-                    refill_milli,
-                    bucket_capacity_milli(limit),
-                );
-            }
+            self.ensure_ticker();
+            self.refill_now();
 
-            // Consume: try to take tokens via CAS.
-            let request_bytes = remaining.min(limit);
+            // Cap each CAS take to ~one tick of bandwidth so concurrent waiters
+            // interleave instead of one connection draining the whole bucket.
+            let fair_quantum =
+                ((limit as u64).saturating_mul(TICK_INTERVAL_MS) / 1000).max(1) as i64;
+            let request_bytes = remaining.min(limit).min(fair_quantum);
             let request_milli = request_bytes * 1000;
             let current = self.tokens_milli.load(Ordering::Relaxed);
 
@@ -169,17 +245,22 @@ impl GlobalSpeedLimiter {
                 {
                     remaining -= request_bytes;
                     spin_count = 0;
+                    // Always yield after a take so sibling waiters can interleave
+                    // even when each throttle() call fits in one quantum.
+                    self.notify.notify_waiters();
+                    tokio::task::yield_now().await;
                     continue;
                 }
                 // CAS failed — another thread raced us, retry.
             } else {
-                // Not enough tokens — sleep until we have enough.
-                let deficit_milli = request_milli - current;
-                // wait_ms = deficit_milli / limit (milli-bytes / bytes-per-sec = ms)
-                let wait_ms = (((deficit_milli as f64) / (limit as f64)) as u64).clamp(1, 250);
+                // PERF-08: wait for shared ticker notify instead of a private long sleep.
+                let notified = self.notify.notified();
+                tokio::pin!(notified);
+                // Register before checking cancel/tokens again to avoid missed wakeups.
+                notified.as_mut().enable();
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(()),
-                    _ = tokio::time::sleep(Duration::from_millis(wait_ms)) => {}
+                    _ = notified => {}
                 }
                 spin_count = 0;
                 continue;
@@ -189,12 +270,18 @@ impl GlobalSpeedLimiter {
             if spin_count >= 4 {
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(()),
-                    _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+                    _ = tokio::task::yield_now() => {}
                 }
                 spin_count = 0;
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for GlobalSpeedLimiter {
+    fn drop(&mut self) {
+        self.stop_ticker();
     }
 }
 
@@ -204,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_throttle_no_limit() {
-        let limiter = GlobalSpeedLimiter::new(None);
+        let limiter = Arc::new(GlobalSpeedLimiter::new(None));
         let cancel = CancellationToken::new();
         // With no limit (0), throttle should return immediately.
         limiter
@@ -215,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_throttle_with_limit() {
-        let limiter = GlobalSpeedLimiter::new(Some(1_000_000)); // 1 MB/s
+        let limiter = Arc::new(GlobalSpeedLimiter::new(Some(1_000_000))); // 1 MB/s
         let cancel = CancellationToken::new();
         // Should be able to consume up to the limit immediately (tokens pre-filled).
         limiter
@@ -229,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_limit_resets_tokens() {
-        let limiter = GlobalSpeedLimiter::new(Some(1_000_000));
+        let limiter = Arc::new(GlobalSpeedLimiter::new(Some(1_000_000)));
         let cancel = CancellationToken::new();
         // Consume some tokens.
         limiter
@@ -245,7 +332,7 @@ mod tests {
     #[tokio::test]
     async fn throttle_cancels_during_low_rate_wait() {
         // ARC-04: 1 B/s wait must exit promptly when cancelled.
-        let limiter = GlobalSpeedLimiter::new(Some(1));
+        let limiter = Arc::new(GlobalSpeedLimiter::new(Some(1)));
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
         let handle = tokio::spawn(async move { limiter.throttle(10_000, &cancel_clone).await });
@@ -294,5 +381,75 @@ mod tests {
             worker.join().expect("speed limiter worker");
         }
         assert_eq!(tokens.load(Ordering::Relaxed), 1_000_000);
+    }
+
+    #[tokio::test]
+    async fn refill_uses_monotonic_clock_not_wall_time() {
+        // PERF-08: even if SystemTime were to jump backward, Instant-based
+        // now_millis still advances and refill continues.
+        let limiter = Arc::new(GlobalSpeedLimiter::new(Some(10_000)));
+        let cancel = CancellationToken::new();
+        limiter
+            .throttle(10_000, &cancel)
+            .await
+            .expect("drain bucket");
+        let before = limiter.tokens_milli.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        limiter.refill_now();
+        let after = limiter.tokens_milli.load(Ordering::Relaxed);
+        assert!(
+            after > before,
+            "monotonic refill should add tokens after sleep (before={before}, after={after})"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_waiter_throughput_stays_within_fairness_band() {
+        // PERF-08: shared Notify should keep multi-waiter byte counts close.
+        let limiter = Arc::new(GlobalSpeedLimiter::new(Some(50_000))); // 50 KB/s
+        let cancel = CancellationToken::new();
+        let mut handles = Vec::new();
+        let counts = Arc::new(AtomicU64::new(0));
+        let per_waiter = Arc::new([
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+        ]);
+
+        for i in 0..4 {
+            let limiter = Arc::clone(&limiter);
+            let cancel = cancel.clone();
+            let counts = Arc::clone(&counts);
+            let per_waiter = Arc::clone(&per_waiter);
+            handles.push(tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_millis(400);
+                while tokio::time::Instant::now() < deadline {
+                    if limiter.throttle(1_000, &cancel).await.is_err() {
+                        break;
+                    }
+                    per_waiter[i].fetch_add(1_000, Ordering::Relaxed);
+                    counts.fetch_add(1_000, Ordering::Relaxed);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("waiter join");
+        }
+        let mut values = [0u64; 4];
+        for (i, slot) in per_waiter.iter().enumerate() {
+            values[i] = slot.load(Ordering::Relaxed);
+        }
+        let min = *values.iter().min().unwrap();
+        let max = *values.iter().max().unwrap();
+        assert!(
+            min > 0,
+            "each waiter should acquire some tokens: {values:?}"
+        );
+        // Allow 2.5× spread under CAS contention; documents fairness tolerance.
+        assert!(
+            max <= ((min as f64) * 2.5) as u64 + 4_000,
+            "waiter throughput variance too high: {values:?}"
+        );
     }
 }

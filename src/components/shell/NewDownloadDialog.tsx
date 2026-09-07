@@ -716,7 +716,7 @@ export function NewDownloadDialog({
         setRemoteDirectoryProbe(null);
       } else {
         try {
-          const text = await readFileAsText(picked.path);
+          const text = await readFileAsText(picked.path, "batch_text");
           // UX-04: enter batch mode and preview immediately, matching handoff.
           setBatchInput(text);
           setMode("batch");
@@ -741,7 +741,7 @@ export function NewDownloadDialog({
         { name: "SSH Private Key", extensions: ["pem", "key", "id_rsa", "id_ed25519", "id_ecdsa", ""] },
       ]);
       if (!picked) return;
-      const content = await readFileAsText(picked.path);
+      const content = await readFileAsText(picked.path, "ssh_key");
       setPrivateKeyData(content);
     } catch (err) {
       log.error("SSH key file picker failed", err);
@@ -1823,17 +1823,19 @@ function SharedCreateDraftFields({
         </label>
       </div>
       <div className="flex flex-col gap-1 text-xs text-text-muted">
-        <span>{t("newDownload.taskSpeedLimit")}</span>
+        <span id="new-download-speed-limit-label">{t("newDownload.taskSpeedLimit")}</span>
         <div className="flex gap-2">
           <Input
+            id="new-download-speed-limit"
             value={speedAmount}
             onChange={(event) => setSpeedAmount(event.target.value)}
             placeholder={t("speedLimit.unlimited")}
             className="h-8"
             inputMode="decimal"
+            aria-labelledby="new-download-speed-limit-label"
           />
           <Select value={speedUnit} onValueChange={setSpeedUnit}>
-            <SelectTrigger aria-label={t("newDownload.taskSpeedLimit")} className="h-8 w-28 text-xs">
+            <SelectTrigger aria-labelledby="new-download-speed-limit-label" className="h-8 w-28 text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

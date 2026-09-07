@@ -1235,6 +1235,33 @@ impl AppErrorPayload {
         serde_json::to_string(self).unwrap_or_else(|_| self.message.clone())
     }
 
+    /// ARC-16: codes that must land in NeedsAttention (user action), not Failed.
+    pub const NEEDS_ATTENTION_CODES: &'static [&'static str] = &[
+        "final_path_conflict",
+        "auth_headers_expired",
+        "auth_headers_unavailable",
+        "remote_changed",
+    ];
+
+    pub fn is_needs_attention_code(code: &str) -> bool {
+        Self::NEEDS_ATTENTION_CODES.contains(&code)
+    }
+
+    /// Resolve a stable error code from the dedicated column or JSON payload only.
+    /// Historical plain-English rows return None — never infer codes from substrings.
+    pub fn code_from_stored(
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Option<String> {
+        if let Some(code) = error_code.map(str::trim).filter(|code| !code.is_empty()) {
+            return Some(code.to_string());
+        }
+        let message = error_message?;
+        serde_json::from_str::<AppErrorPayload>(message)
+            .ok()
+            .map(|payload| payload.code)
+    }
+
     pub fn final_path_conflict(path: &str) -> Self {
         Self::new(
             "final_path_conflict",

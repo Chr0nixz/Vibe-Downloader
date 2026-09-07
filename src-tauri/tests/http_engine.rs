@@ -5,7 +5,10 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpStream,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::Duration,
 };
@@ -726,7 +729,9 @@ async fn probe_maps_401_as_denied() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_download_cancel_mid_stream_returns_partial() {
-    let server = start_test_server();
+    let payload = slow_payload();
+    let served = Arc::new(AtomicUsize::new(0));
+    let server = start_counting_slow_server(payload.clone(), served.clone());
     let engine = HttpEngine::new().expect("engine");
     let paths = TestPaths::new("cancel-mid");
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -737,7 +742,7 @@ async fn direct_download_cancel_mid_stream_returns_partial() {
         url: format!("{}/slow", server.base_url),
         temp_path: paths.temp.clone(),
         final_path: paths.final_path.clone(),
-        total_size: slow_payload().len() as i64,
+        total_size: payload.len() as i64,
         supports_resume: true,
         supports_parallel: true,
         etag: None,
@@ -747,8 +752,19 @@ async fn direct_download_cancel_mid_stream_returns_partial() {
     let handle =
         tokio::spawn(async move { engine_clone.download_direct(request, cancel_clone).await });
 
-    // Let some data flow, then cancel
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Cancel on a real progress signal, not a timer or the temp file. A fixed
+    // sleep races task startup under full-suite load (cancel can fire before the
+    // first chunk arrives -> `downloaded == 0`), and the temp file never grows
+    // mid-stream because `download_direct` buffers through a 256 KiB BufWriter
+    // that is flushed only on cancel/completion. The server's served-bytes counter
+    // is the one thing guaranteed to move while the stream is still in flight, so
+    // waiting on it proves bytes were pushed before we stop the download.
+    for _ in 0..300 {
+        if served.load(Ordering::SeqCst) >= 8 * 1024 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     cancel.cancel();
 
     let result = handle.await.expect("join");
@@ -758,7 +774,7 @@ async fn direct_download_cancel_mid_stream_returns_partial() {
         "should have downloaded some bytes before cancel"
     );
     assert!(
-        downloaded < slow_payload().len() as i64,
+        downloaded < payload.len() as i64,
         "should not have completed the full download"
     );
     // Temp file should still exist (not finalized)
@@ -767,6 +783,40 @@ async fn direct_download_cancel_mid_stream_returns_partial() {
         !paths.final_path.exists(),
         "final file should not exist after cancel"
     );
+}
+
+/// Single-route server that streams `payload` for any GET in paced 1 KiB chunks,
+/// recording how many bytes it has pushed into the socket via `served`. This gives
+/// the cancel test an observable in-flight progress signal that neither a fixed
+/// sleep nor the (buffered, never mid-stream-flushed) temp file can provide.
+fn start_counting_slow_server(payload: Vec<u8>, served: Arc<AtomicUsize>) -> TestServer {
+    TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        // The Drop guard opens a dummy connection to wake the accept loop; it sends
+        // no request, so bail before streaming anything for it.
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let total = payload.len();
+        let head = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Connection: close\r\n\
+             Content-Length: {total}\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Accept-Ranges: bytes\r\n\
+             Content-Disposition: attachment; filename=\"slow.bin\"\r\n\r\n"
+        );
+        let _ = stream.write_all(head.as_bytes());
+        for chunk in payload.chunks(1024) {
+            let _ = stream.write_all(chunk);
+            let _ = stream.flush();
+            served.fetch_add(chunk.len(), Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(10));
+        }
+    })
 }
 
 fn start_test_server() -> TestServer {

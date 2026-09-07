@@ -1,9 +1,19 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 
 import { AppShell } from "@/components/shell/AppShell";
-import { FloatingStatusWindow } from "@/components/shell/FloatingStatusWindow";
 import { StartupGate } from "@/components/shell/StartupGate";
-import { TrayMenu } from "@/components/shell/TrayMenu";
+
+const FloatingStatusWindow = lazy(() =>
+  import("@/components/shell/FloatingStatusWindow").then((module) => ({
+    default: module.FloatingStatusWindow,
+  })),
+);
+
+const TrayMenu = lazy(() =>
+  import("@/components/shell/TrayMenu").then((module) => ({
+    default: module.TrayMenu,
+  })),
+);
 
 export default function App() {
   const surface = typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("surface");
@@ -21,11 +31,19 @@ export default function App() {
   }, [surface]);
 
   if (surface === "tray-menu") {
-    return <TrayMenu />;
+    return (
+      <Suspense fallback={null}>
+        <TrayMenu />
+      </Suspense>
+    );
   }
 
   if (surface === "floating-status") {
-    return <FloatingStatusWindow />;
+    return (
+      <Suspense fallback={null}>
+        <FloatingStatusWindow />
+      </Suspense>
+    );
   }
 
   return (

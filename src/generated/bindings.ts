@@ -99,6 +99,8 @@ export const commands = {
 	createAppBackup: (destinationPath: string) => typedError<BackupCreateResult, string>(__TAURI_INVOKE("create_app_backup", { destinationPath })),
 	validateAppBackup: (backupPath: string) => typedError<BackupValidateResult, string>(__TAURI_INVOKE("validate_app_backup", { backupPath })),
 	restoreAppBackup: (backupPath: string) => typedError<BackupRestoreResult, string>(__TAURI_INVOKE("restore_app_backup", { backupPath })),
+	readLocalTextFile: (path: string, kind: LocalTextFileKind) => typedError<string, string>(__TAURI_INVOKE("read_local_text_file", { path, kind })),
+	writeExportFile: (path: string, contents: string) => typedError<null, string>(__TAURI_INVOKE("write_export_file", { path, contents })),
 	getStartupStatus: () => typedError<StartupStatus, string>(__TAURI_INVOKE("get_startup_status")),
 	openDatabaseRecoveryFolder: () => typedError<null, string>(__TAURI_INVOKE("open_database_recovery_folder")),
 	openStartupLogFolder: () => typedError<null, string>(__TAURI_INVOKE("open_startup_log_folder")),
@@ -766,6 +768,8 @@ export type ListTasksResult = {
 	page: number,
 	pageSize: number,
 };
+
+export type LocalTextFileKind = "batch_text" | "ssh_key";
 
 export type MetalinkMirrorView = {
 	id: string,

@@ -64,7 +64,6 @@ export async function exportTasks(tasks: Task[], format: ExportFormat): Promise<
   const mimeType = getMimeType(format);
 
   if (!isTauriRuntime()) {
-    // Browser fallback: trigger download via blob
     const blob = new Blob([content], { type: mimeType });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -78,20 +77,15 @@ export async function exportTasks(tasks: Task[], format: ExportFormat): Promise<
     return true;
   }
 
-  try {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const path = await save({
-      defaultPath: `vibe-tasks.${extension}`,
-      filters: [{ name: format === "json" ? "JSON" : "CSV", extensions: [extension] }],
-    });
-    if (!path) return false;
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const path = await save({
+    defaultPath: `vibe-tasks.${extension}`,
+    filters: [{ name: format === "json" ? "JSON" : "CSV", extensions: [extension] }],
+  });
+  if (!path) return false;
 
-    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-    await writeTextFile(path, content);
-    log.info("exported", { count: tasks.length, format, path });
-    return true;
-  } catch (err) {
-    log.warn("export failed", err);
-    return false;
-  }
+  const { writeExportFile } = await import("@/lib/tauri");
+  await writeExportFile(path, content);
+  log.info("exported", { count: tasks.length, format, path });
+  return true;
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { type FloatingLiveMemory, shouldAnnounceFloatingStatus } from "@/components/shell/floating-live-status";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import { createLogger } from "@/lib/logger";
 import {
@@ -19,7 +20,7 @@ const log = createLogger("floating-status");
 const RING_R = 28;
 const RING_C = 2 * Math.PI * RING_R;
 const BALL_SIZE = 84;
-const BAR_WIDTH = 18;
+const BAR_WIDTH = 32;
 const BAR_HEIGHT = 160;
 const EDGE_THRESHOLD = 40;
 const UNDOCK_THRESHOLD = 80;
@@ -134,6 +135,19 @@ export function FloatingStatusWindow() {
   }, [idle, stats.totalSpeed]);
 
   const compact = speedText.length > 6;
+  const [liveStatus, setLiveStatus] = useState("");
+  const liveMemoryRef = useRef<FloatingLiveMemory | null>(null);
+
+  useEffect(() => {
+    const result = shouldAnnounceFloatingStatus(idle, percent, Date.now(), liveMemoryRef.current);
+    liveMemoryRef.current = result.next;
+    if (!result.announce) return;
+    setLiveStatus(
+      idle
+        ? t("floatingStatus.idle")
+        : t("floatingStatus.progressStatus", { percent: Math.round(percent), speed: speedText }),
+    );
+  }, [idle, percent, speedText, t]);
 
   // ── Edge snapping ──
   // Mirror dockedEdge in a ref so the `onMoved` listener can read the latest
@@ -247,9 +261,7 @@ export function FloatingStatusWindow() {
       >
         {/* Screen-reader live region for progress updates */}
         <span className="sr-only" aria-live="polite">
-          {idle
-            ? t("floatingStatus.idle")
-            : t("floatingStatus.progressStatus", { percent: Math.round(percent), speed: speedText })}
+          {liveStatus}
         </span>
         {/* Tooltip — appears beside the bar */}
         <div
@@ -307,9 +319,7 @@ export function FloatingStatusWindow() {
     >
       {/* Screen-reader live region for progress updates */}
       <span className="sr-only" aria-live="polite">
-        {idle
-          ? t("floatingStatus.idle")
-          : t("floatingStatus.progressStatus", { percent: Math.round(percent), speed: speedText })}
+        {liveStatus}
       </span>
       {/* Tooltip */}
       <div className="pointer-events-none absolute -top-9 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-surface-overlay px-2.5 py-1 text-[0.65rem] leading-4 text-text-secondary opacity-0 shadow-lg ring-1 ring-border-container transition-opacity duration-200 group-hover:opacity-100">

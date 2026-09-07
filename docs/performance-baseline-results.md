@@ -56,10 +56,21 @@
 | `filter_completed` | 2.84 | 2.96 | `SEARCH tasks USING COVERING INDEX idx_tasks_status_updated_at_id (status=?)` |
 | `filter_failed_sort_size` | 4.33 | 4.81 | `SEARCH ... idx_tasks_queue_order (status=?)` + `USE TEMP B-TREE FOR ORDER BY` |
 
-### 3.3 观察（非门禁）
+### 3.3 50k tasks（PERF-01）
 
-- 状态筛选走 covering index，1k→10k 几乎持平。
-- 三字段 `LOWER(...) LIKE '%term%'` 搜索在 10k 仍为全表相关 SCAN（对齐 `PERF-01`）；p95 ≈ 9.5 ms，低于暂定预算「10k 搜索 p95 < 100ms」，但预算是 DB 目标而非 SLA，且本机 debug profile 不能外推 release/慢盘。
+| Case | p50 (ms) | p95 (ms) | EXPLAIN QUERY PLAN |
+| --- | ---: | ---: | --- |
+| `list_all_updated_at` | 3.79 | 7.49 | `SCAN tasks USING COVERING INDEX idx_tasks_updated_at_id` |
+| `search_filename_prefix`（`scale-file-1`） | 5.64 | 6.90 | `SCAN tasks USING INDEX idx_tasks_updated_at_id` |
+| `filter_completed` | 2.58 | 2.59 | `SEARCH tasks USING COVERING INDEX idx_tasks_status_updated_at_id (status=?)` |
+| `filter_failed_sort_size` | 7.22 | 8.56 | `SEARCH ... idx_tasks_queue_order (status=?)` + `USE TEMP B-TREE FOR ORDER BY` |
+
+seed 耗时 ≈ 182 s（debug）。**决策**：50k search p95 = 6.90 ms ≪ 100 ms 预算 → **保持三字段 `LOWER LIKE`，不引入 FTS5**。支持规模记录为「本机 debug harness 上至少 50k 任务搜索可接受」；慢盘/低内存设备仍可能更慢，不假装已有 FTS。
+
+### 3.4 观察（非门禁）
+
+- 状态筛选走 covering index，1k→50k 几乎持平。
+- 三字段 `LOWER(...) LIKE '%term%'` 搜索在 50k 仍为全表相关 SCAN（对齐原 `PERF-01` 证据）；p95 仍远低于预算，故不引入 FTS。
 - `file_size` 排序对 failed 子集使用临时 B-Tree。
 
 ## 4. 手动 release UI 清单（本批未测）
@@ -80,15 +91,34 @@ pnpm perf:baseline
 pnpm perf:baseline:10k
 ```
 
-## 5. 明确延期
+## 5. Bundle 体积门禁（PERF-10）
 
-- 50k / 100k 全矩阵
+CI 在 `pnpm build` 后运行 `pnpm check:bundle`（[`scripts/check-bundle-budget.mjs`](../scripts/check-bundle-budget.mjs) + [`scripts/bundle-budget.json`](../scripts/bundle-budget.json)）。只对 **initial shell 聚合**设硬上限，不对单个 vendor chunk 设硬上限；超限时打印 per-chunk raw/gzip/brotli。
+
+本机实测（`2026-07-20`，`pnpm build`）：
+
+| 指标 | 实测 | 预算 | 状态 |
+| --- | ---: | ---: | --- |
+| Initial shell JS raw | 896.4 kB | ≤ 1126.4 kB (1.10 MB) | OK |
+| Initial shell JS gzip | 280.3 kB | ≤ 340.0 kB | OK |
+| Initial shell JS brotli | 234.6 kB | ≤ 290.0 kB | OK（报告项，同预算表） |
+| Initial shell CSS gzip | 14.6 kB | ≤ 18.0 kB | OK |
+
+Initial shell 包含：`index`、`react-vendor`、`radix-ui`、`utils`、`motion`、`i18n`、`lucide`、`tauri`、`bindings`、runtime/preload helpers、主 CSS。Settings / TaskDetails / Palette / 语言包等为 deferred，不计入门禁。
+
+```bash
+pnpm build
+pnpm check:bundle
+```
+
+## 6. 明确延期
+
+- 100k 全矩阵
 - HLS / BT 30min–8h soak
 - 1k 批量删除 soak
-- CI 绝对数值门禁（保留 1k smoke 防 harness 损坏）
-- `PERF-01`–`PERF-08` / `PERF-10` 热修复（见审计阶段 E）
+- CI 绝对数值门禁（DB harness；bundle 门禁已启用）
 
-## 6. 复现命令
+## 7. 复现命令
 
 ```bash
 # CI / 日常 smoke（仅 1k）
@@ -96,4 +126,10 @@ cargo test -j 1 --manifest-path src-tauri/Cargo.toml --test perf_baseline
 
 # 完整本地 1k + 10k + metadata
 pnpm perf:baseline:10k
+
+# Bundle budget
+pnpm build && pnpm check:bundle
+
+# PERF-01 50k search（ignore）
+pnpm perf:baseline:50k
 ```

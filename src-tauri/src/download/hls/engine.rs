@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
@@ -10,7 +9,6 @@ use aes::{
     cipher::{Array, BlockCipherDecrypt, KeyInit},
     Aes128,
 };
-use hls_m3u8::{MasterPlaylist as ParsedMasterPlaylist, MediaPlaylist as ParsedMediaPlaylist};
 use reqwest::{
     header::{HeaderName, HeaderValue, ACCEPT_ENCODING, RANGE},
     Client, RequestBuilder, StatusCode,
@@ -25,13 +23,19 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use super::{
+use super::playlist::{
+    choose_master_variant, clamp_hls_target_duration, hls_variants_from_master,
+    init_map_local_name, is_master_playlist, parse_ext_x_media, parse_media_playlist,
+    reject_unsupported_media_playlist, resolve_url, validate_playlist_syntax, ByteRange, HlsKey,
+    HlsSegment, PlaylistKind,
+};
+use crate::download::error::engine_error;
+use crate::download::retry::RetryPolicy;
+use crate::download::{
     engine::EngineFuture, http::HttpEngine, read_body_limited, read_with_idle_timeout,
     url_classify::is_hls_url, DownloadContext, DownloadEngine, DownloadError, IdleReadOutcome,
     LimitedBodyError, ProbeOutput, ProbeRequest, CONTROL_PLANE_MAX_BYTES, READ_IDLE_TIMEOUT,
 };
-use crate::download::error::engine_error;
-use crate::download::retry::RetryPolicy;
 use crate::{
     db,
     events::{emit_task_updated_record, DbWriteGate, TaskProgressEmitGate},
@@ -45,9 +49,6 @@ const PROTOCOL_HLS: &str = "hls";
 const HLS_CONTENT_TYPE: &str = "application/vnd.apple.mpegurl";
 const HLS_SEGMENT_RETRIES: i32 = 2;
 const HLS_LIVE_MAX_IDLE_POLLS: usize = 6;
-/// ARC-11: Clamp EXT-X-TARGETDURATION so a malicious/misconfigured playlist
-/// cannot pin a scheduler slot for hours between polls.
-const HLS_MAX_TARGET_DURATION_SECS: i64 = 60;
 
 /// PERF-04: coalesce AES-key / init-map fetches across concurrent segment workers.
 struct HlsTaskFetchCache {
@@ -104,7 +105,7 @@ impl HlsTaskFetchCache {
                         let _ = tx.send(Some(Ok(*bytes)));
                     }
                     Err(error) => {
-                        // Do not cache failures — segment retries must re-coalesce.
+                        // Do not cache failures - segment retries must re-coalesce.
                         map.remove(uri);
                         let _ = tx.send(Some(Err(error.clone())));
                     }
@@ -161,82 +162,10 @@ const HLS_SEGMENT_MAX_BYTES: usize = 512 * 1024 * 1024;
 /// fetched via `fetch_bytes`. Uses the shared control-plane budget.
 const HLS_INIT_MAX_BYTES: usize = CONTROL_PLANE_MAX_BYTES;
 
-fn clamp_hls_target_duration(value: i64) -> i64 {
-    value.clamp(1, HLS_MAX_TARGET_DURATION_SECS)
-}
-
 #[derive(Debug, Clone)]
 pub struct HlsEngine {
     /// E-4: Shares the `HttpEngine` client cache to avoid creating a new Client on every probe/download.
     http: Arc<HttpEngine>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PlaylistKind {
-    Vod,
-    Event,
-    Live,
-}
-
-impl PlaylistKind {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Vod => "vod",
-            Self::Event => "event",
-            Self::Live => "live",
-        }
-    }
-
-    fn is_live_like(&self) -> bool {
-        !matches!(self, Self::Vod)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct MasterVariant {
-    uri: String,
-    bandwidth: i64,
-    resolution: Option<(i64, i64)>,
-    codecs: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct MediaPlaylist {
-    kind: PlaylistKind,
-    target_duration: i64,
-    media_sequence: i64,
-    end_list: bool,
-    segments: Vec<HlsSegment>,
-}
-
-#[derive(Debug, Clone)]
-struct HlsSegment {
-    media_sequence: i64,
-    discontinuity_sequence: i64,
-    uri: String,
-    duration_ms: i64,
-    byte_range: Option<ByteRange>,
-    init_map: Option<HlsInitMap>,
-    key: Option<HlsKey>,
-}
-
-#[derive(Debug, Clone)]
-struct HlsInitMap {
-    uri: String,
-    byte_range: Option<ByteRange>,
-}
-
-#[derive(Debug, Clone)]
-struct ByteRange {
-    start: Option<i64>,
-    length: i64,
-}
-
-#[derive(Debug, Clone)]
-struct HlsKey {
-    method: String,
-    uri: Option<String>,
-    iv: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -349,7 +278,7 @@ impl HlsEngine {
         proxy_config: Option<&crate::proxy::ResolvedProxyConfig>,
     ) -> Result<ProbePlan, String> {
         crate::download::engine::emit_probe_phase(app, request_id, "checking_ffmpeg", Some("hls"));
-        super::ffmpeg::ensure_ffmpeg_available(
+        crate::download::ffmpeg::ensure_ffmpeg_available(
             pool,
             "hls_ffmpeg_missing",
             "ffmpeg was not found. Install ffmpeg or configure its path in Settings before creating HLS tasks.",
@@ -451,7 +380,7 @@ impl DownloadEngine for HlsEngine {
             } else {
                 None
             };
-            let headers = super::http::merge_basic_auth_headers(
+            let headers = crate::download::http::merge_basic_auth_headers(
                 &request.request_headers,
                 credentials.as_ref(),
             );
@@ -523,7 +452,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         proxy_config,
     } = context;
     // Resolve once so a settings change cannot switch binaries midway through a task.
-    let ffmpeg = super::ffmpeg::ensure_ffmpeg_available(
+    let ffmpeg = crate::download::ffmpeg::ensure_ffmpeg_available(
         Some(&pool),
         "hls_ffmpeg_missing",
         "ffmpeg was not found. Install ffmpeg or configure its path in Settings before creating HLS tasks.",
@@ -536,7 +465,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     // FUN-01 / C5: inject Basic Auth from encrypted task credentials at runtime.
     let credentials = db::resolve_task_credentials(&pool, &task.id).await?;
     let request_headers =
-        super::http::merge_basic_auth_headers(&request_headers, credentials.as_ref());
+        crate::download::http::merge_basic_auth_headers(&request_headers, credentials.as_ref());
     let staging_dir = task
         .temp_path
         .as_deref()
@@ -585,7 +514,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
 
     // FUN-10: Selected external audio/subtitle tracks reuse the main HLS
     // segment pipeline (AES / Range / EXT-X-MAP / retry / limiter). Failures
-    // are visible — never warn-and-complete with missing tracks.
+    // are visible - never warn-and-complete with missing tracks.
     let mut extra_inputs: Vec<PathBuf> = Vec::new();
     let mut live_tracks: Vec<LiveExternalTrack> = Vec::new();
     if let Ok(Some(hls_task)) = db::get_hls_task(&pool, &task.id).await {
@@ -657,7 +586,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         return Ok(());
     }
 
-    // E-5a: Single scan of completed HLS segments — derive both the
+    // E-5a: Single scan of completed HLS segments - derive both the
     // cumulative downloaded byte count and the (disc_seq, media_seq) set
     // from one `list_hls_segments` round-trip instead of two.
     let (mut downloaded_total, mut seen) = existing_hls_progress(&pool, &task.id).await?;
@@ -1167,7 +1096,9 @@ async fn download_hls_segment_once(
         .await
         .map_err(|e| format!("Could not request HLS segment: {e}"))?;
     if !response.status().is_success() {
-        return Err(super::http::format_http_status_error(response.status()));
+        return Err(crate::download::http::format_http_status_error(
+            response.status(),
+        ));
     }
     if plan.byte_range.is_some() && response.status() != StatusCode::PARTIAL_CONTENT {
         return Err("server did not honor HLS byte range request".to_string());
@@ -1187,7 +1118,7 @@ async fn download_hls_segment_once(
         )
         .await
     } else {
-        // E-1 + E-2: Unencrypted segment — stream directly to disk with an
+        // E-1 + E-2: Unencrypted segment - stream directly to disk with an
         // idle timeout (prevents stalled servers from holding a worker) and a
         // safety size limit (prevents malicious/malformed playlists from
         // causing unbounded memory growth).
@@ -2016,7 +1947,7 @@ async fn run_ffmpeg(
         }
     }
     cmd.arg(output);
-    match super::ffmpeg::run_cancellable(cmd, cancel_token).await {
+    match crate::download::ffmpeg::run_cancellable(cmd, cancel_token).await {
         Ok(()) => Ok(()),
         Err(error) => {
             let _ = fs::remove_file(output).await;
@@ -2048,7 +1979,7 @@ async fn pause_hls_task(
     Ok(())
 }
 
-/// ARC-11: live playlist stopped publishing segments — release the active
+/// ARC-11: live playlist stopped publishing segments - release the active
 /// slot into WaitingNetwork so the queue can schedule other work. Resume
 /// re-enters the poll loop with a fresh idle counter.
 async fn waiting_network_hls_task(
@@ -2078,7 +2009,7 @@ async fn waiting_network_hls_task(
         Some(TaskStatus::WaitingNetwork),
         0,
         0,
-        Some("Live playlist idle — waiting for new segments"),
+        Some("Live playlist idle - waiting for new segments"),
         Some(&error),
     )
     .await?;
@@ -2221,7 +2152,9 @@ async fn fetch_bytes(
         .await
         .map_err(|e| format!("Could not request HLS resource: {e}"))?;
     if !response.status().is_success() {
-        return Err(super::http::format_http_status_error(response.status()));
+        return Err(crate::download::http::format_http_status_error(
+            response.status(),
+        ));
     }
     // ARC-10: stream with a hard cap so chunked bodies cannot OOM the worker.
     match read_body_limited(response, HLS_INIT_MAX_BYTES, None, READ_IDLE_TIMEOUT).await {
@@ -2255,351 +2188,6 @@ fn apply_forwarded_headers(
         request = request.header(name, value);
     }
     request
-}
-
-fn is_master_playlist(body: &str) -> bool {
-    body.lines()
-        .any(|line| line.trim_start().starts_with("#EXT-X-STREAM-INF"))
-}
-
-fn validate_playlist_syntax(body: &str) -> Result<(), String> {
-    let parsed = if is_master_playlist(body) {
-        ParsedMasterPlaylist::try_from(body).map(|_| ())
-    } else {
-        ParsedMediaPlaylist::try_from(body).map(|_| ())
-    };
-    parsed.map_err(|error| {
-        engine_error(
-            "hls_invalid_playlist",
-            format!("HLS playlist could not be parsed: {error}"),
-            false,
-        )
-    })
-}
-
-fn choose_master_variant(body: &str) -> Result<MasterVariant, String> {
-    let variants = parse_master_variants(body);
-    variants
-        .into_iter()
-        .max_by_key(|variant| {
-            (
-                variant.bandwidth,
-                variant
-                    .resolution
-                    .map(|(width, height)| width.saturating_mul(height))
-                    .unwrap_or(0),
-            )
-        })
-        .ok_or_else(|| {
-            engine_error(
-                "hls_invalid_playlist",
-                "HLS master playlist does not contain a playable variant.",
-                false,
-            )
-        })
-}
-
-fn hls_variants_from_master(body: &str, selected_uri: &str) -> Vec<HlsVariant> {
-    parse_master_variants(body)
-        .into_iter()
-        .map(|variant| HlsVariant {
-            selected: variant.uri == selected_uri,
-            uri: variant.uri,
-            bandwidth: variant.bandwidth.to_string(),
-            resolution: variant
-                .resolution
-                .map(|(width, height)| format!("{width}x{height}")),
-            codecs: variant.codecs,
-        })
-        .collect()
-}
-
-fn parse_master_variants(body: &str) -> Vec<MasterVariant> {
-    let mut variants = Vec::new();
-    let mut pending_attrs: Option<HashMap<String, String>> = None;
-    for raw in body.lines() {
-        let line = raw.trim();
-        if line.starts_with("#EXT-X-STREAM-INF:") {
-            pending_attrs = Some(parse_attributes(
-                line.trim_start_matches("#EXT-X-STREAM-INF:"),
-            ));
-            continue;
-        }
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(attrs) = pending_attrs.take() {
-            let bandwidth = attrs
-                .get("BANDWIDTH")
-                .and_then(|value| value.parse::<i64>().ok())
-                .unwrap_or(0);
-            let resolution = attrs.get("RESOLUTION").and_then(|value| {
-                let (w, h) = value.split_once('x')?;
-                Some((w.parse().ok()?, h.parse().ok()?))
-            });
-            variants.push(MasterVariant {
-                uri: line.to_string(),
-                bandwidth,
-                resolution,
-                codecs: attrs.get("CODECS").cloned(),
-            });
-        }
-    }
-    variants
-}
-
-fn parse_media_playlist(body: &str) -> Result<MediaPlaylist, String> {
-    if !body.lines().any(|line| line.trim() == "#EXTM3U") {
-        return Err(engine_error(
-            "hls_invalid_playlist",
-            "HLS playlist is missing #EXTM3U.",
-            false,
-        ));
-    }
-    let mut playlist_type = None;
-    let mut target_duration = 6_i64;
-    let mut media_sequence = 0_i64;
-    let mut discontinuity_sequence = 0_i64;
-    let mut next_duration = None;
-    let mut current_key: Option<HlsKey> = None;
-    let mut current_init_map: Option<HlsInitMap> = None;
-    let mut current_byte_range: Option<ByteRange> = None;
-    let mut next_byte_range_start: Option<i64> = None;
-    let mut segments = Vec::new();
-    let mut end_list = false;
-    let mut segment_index = 0_i64;
-
-    for raw in body.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
-            // ARC-11: clamp at parse time so probe UI and sleep share one bound.
-            target_duration =
-                clamp_hls_target_duration(value.trim().parse::<i64>().unwrap_or(target_duration));
-        } else if let Some(value) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
-            media_sequence = value.trim().parse::<i64>().unwrap_or(0).max(0);
-        } else if let Some(value) = line.strip_prefix("#EXT-X-PLAYLIST-TYPE:") {
-            playlist_type = Some(value.trim().to_ascii_uppercase());
-        } else if let Some(value) = line.strip_prefix("#EXT-X-KEY:") {
-            current_key = parse_key(value)?;
-        } else if let Some(value) = line.strip_prefix("#EXT-X-BYTERANGE:") {
-            current_byte_range = parse_byte_range(value);
-        } else if let Some(value) = line.strip_prefix("#EXTINF:") {
-            next_duration = parse_extinf_duration(value);
-        } else if line == "#EXT-X-DISCONTINUITY" {
-            discontinuity_sequence += 1;
-            next_byte_range_start = None;
-        } else if line == "#EXT-X-ENDLIST" {
-            end_list = true;
-        } else if let Some(value) = line.strip_prefix("#EXT-X-MAP:") {
-            current_init_map = Some(parse_init_map(value)?);
-        } else if !line.starts_with('#') {
-            let sequence = media_sequence + segment_index;
-            let byte_range = current_byte_range.take().map(|range| {
-                let start = range.start.or(next_byte_range_start).unwrap_or(0);
-                next_byte_range_start = Some(start.saturating_add(range.length));
-                ByteRange {
-                    start: Some(start),
-                    length: range.length,
-                }
-            });
-            if byte_range.is_none() {
-                next_byte_range_start = None;
-            }
-            segments.push(HlsSegment {
-                media_sequence: sequence,
-                discontinuity_sequence,
-                uri: line.to_string(),
-                duration_ms: next_duration.take().unwrap_or(0),
-                byte_range,
-                init_map: current_init_map.clone(),
-                key: current_key.clone(),
-            });
-            segment_index += 1;
-        }
-    }
-
-    let kind = match playlist_type.as_deref() {
-        Some("VOD") => PlaylistKind::Vod,
-        Some("EVENT") => PlaylistKind::Event,
-        _ if end_list => PlaylistKind::Vod,
-        _ => PlaylistKind::Live,
-    };
-    Ok(MediaPlaylist {
-        kind,
-        target_duration,
-        media_sequence,
-        end_list,
-        segments,
-    })
-}
-
-fn reject_unsupported_media_playlist(body: &str) -> Result<(), String> {
-    for line in body.lines().map(str::trim) {
-        if line.starts_with("#EXT-X-KEY:") {
-            let attrs = parse_attributes(line.trim_start_matches("#EXT-X-KEY:"));
-            let method = attrs.get("METHOD").map(String::as_str).unwrap_or("NONE");
-            if !matches!(method, "NONE" | "AES-128") {
-                return Err(engine_error(
-                    "hls_unsupported_encryption",
-                    format!("Unsupported HLS encryption method: {method}"),
-                    false,
-                ));
-            }
-            if attrs
-                .get("KEYFORMAT")
-                .is_some_and(|value| value != "identity" && value != "\"identity\"")
-            {
-                return Err(engine_error(
-                    "hls_unsupported_encryption",
-                    "Only identity HLS AES-128 keys are supported.",
-                    false,
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn parse_key(value: &str) -> Result<Option<HlsKey>, String> {
-    let attrs = parse_attributes(value);
-    let method = attrs
-        .get("METHOD")
-        .cloned()
-        .unwrap_or_else(|| "NONE".to_string());
-    if method == "NONE" {
-        return Ok(None);
-    }
-    if method != "AES-128" {
-        return Err(engine_error(
-            "hls_unsupported_encryption",
-            format!("Unsupported HLS encryption method: {method}"),
-            false,
-        ));
-    }
-    Ok(Some(HlsKey {
-        method,
-        uri: attrs.get("URI").cloned(),
-        iv: attrs.get("IV").cloned(),
-    }))
-}
-
-fn parse_init_map(value: &str) -> Result<HlsInitMap, String> {
-    let attrs = parse_attributes(value);
-    let uri = attrs.get("URI").cloned().ok_or_else(|| {
-        engine_error(
-            "hls_invalid_playlist",
-            "HLS EXT-X-MAP is missing a URI.",
-            false,
-        )
-    })?;
-    Ok(HlsInitMap {
-        uri,
-        byte_range: attrs
-            .get("BYTERANGE")
-            .and_then(|value| parse_byte_range(value)),
-    })
-}
-
-fn parse_ext_x_media(body: &str, base_url: &str) -> Vec<HlsMediaTrack> {
-    body.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let rest = line.strip_prefix("#EXT-X-MEDIA:")?;
-            let attrs = parse_attributes(rest);
-            let kind = attrs.get("TYPE").cloned()?;
-            // Skip CLOSED-CAPTIONS — we don't handle CEA-608/708 embedded in video.
-            if kind.eq_ignore_ascii_case("CLOSED-CAPTIONS") {
-                return None;
-            }
-            // FUN-10: resolve relative rendition URIs against the master so
-            // create/download never see opaque relative paths.
-            let uri = attrs
-                .get("URI")
-                .map(|value| resolve_url(base_url, value).unwrap_or_else(|_| value.clone()));
-            Some(HlsMediaTrack {
-                kind,
-                group_id: attrs.get("GROUP-ID").cloned().unwrap_or_default(),
-                name: attrs.get("NAME").cloned().unwrap_or_default(),
-                language: attrs.get("LANGUAGE").cloned(),
-                default: attrs
-                    .get("DEFAULT")
-                    .is_some_and(|v| v.eq_ignore_ascii_case("YES")),
-                auto_select: attrs
-                    .get("AUTOSELECT")
-                    .is_some_and(|v| v.eq_ignore_ascii_case("YES")),
-                uri,
-            })
-        })
-        .collect()
-}
-
-fn parse_attributes(value: &str) -> HashMap<String, String> {
-    let mut attrs = HashMap::new();
-    let mut key = String::new();
-    let mut current = String::new();
-    let mut in_key = true;
-    let mut in_quote = false;
-    for ch in value.chars() {
-        match ch {
-            '=' if in_key => {
-                key = current.trim().to_ascii_uppercase();
-                current.clear();
-                in_key = false;
-            }
-            '"' => {
-                in_quote = !in_quote;
-            }
-            ',' if !in_key && !in_quote => {
-                attrs.insert(key.clone(), current.trim().trim_matches('"').to_string());
-                key.clear();
-                current.clear();
-                in_key = true;
-            }
-            ch => current.push(ch),
-        }
-    }
-    if !key.is_empty() {
-        attrs.insert(key, current.trim().trim_matches('"').to_string());
-    }
-    attrs
-}
-
-fn parse_extinf_duration(value: &str) -> Option<i64> {
-    let duration = value.split(',').next()?.trim().parse::<f64>().ok()?;
-    Some((duration.max(0.0) * 1000.0).round() as i64)
-}
-
-fn parse_byte_range(value: &str) -> Option<ByteRange> {
-    let (length, start) = value
-        .trim()
-        .split_once('@')
-        .map_or((value.trim(), None), |(l, s)| (l.trim(), Some(s.trim())));
-    Some(ByteRange {
-        length: length.parse::<i64>().ok()?.max(0),
-        start: start
-            .and_then(|value| value.parse::<i64>().ok())
-            .map(|value| value.max(0)),
-    })
-}
-
-fn init_map_local_name(uri: &str, byte_range: Option<&ByteRange>) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    uri.hash(&mut hasher);
-    if let Some(range) = byte_range {
-        range.start.hash(&mut hasher);
-        range.length.hash(&mut hasher);
-    }
-    format!("init-{:016x}.mp4", hasher.finish())
-}
-
-fn resolve_url(base: &str, value: &str) -> Result<String, String> {
-    let base = reqwest::Url::parse(base).map_err(|_| "HLS base URL is invalid.".to_string())?;
-    base.join(value)
-        .map(|url| url.to_string())
-        .map_err(|_| "HLS playlist contains an invalid relative URL.".to_string())
 }
 
 fn hls_output_name(url: &str) -> String {
@@ -2665,87 +2253,6 @@ mod tests {
     use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
 
     #[test]
-    fn chooses_highest_bandwidth_variant() {
-        let variant = choose_master_variant(
-            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100,RESOLUTION=640x360\nlow.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=200,RESOLUTION=1280x720\nhi.m3u8\n",
-        )
-        .expect("variant");
-        assert_eq!(variant.uri, "hi.m3u8");
-        assert_eq!(variant.resolution, Some((1280, 720)));
-    }
-
-    #[test]
-    fn parses_live_media_sequence_and_segments() {
-        let media = parse_media_playlist(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:42\n#EXTINF:5.5,\nseg42.ts\n#EXTINF:5,\nseg43.ts\n",
-        )
-        .expect("media");
-        assert_eq!(media.kind, PlaylistKind::Live);
-        assert_eq!(media.media_sequence, 42);
-        assert_eq!(media.segments[0].media_sequence, 42);
-        assert_eq!(media.segments[0].duration_ms, 5500);
-    }
-
-    #[test]
-    fn clamps_oversized_target_duration() {
-        // ARC-11: huge TARGETDURATION must not survive parse.
-        let media = parse_media_playlist(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:999999\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\nseg0.ts\n",
-        )
-        .expect("media");
-        assert_eq!(media.target_duration, HLS_MAX_TARGET_DURATION_SECS);
-        assert_eq!(clamp_hls_target_duration(0), 1);
-        assert_eq!(clamp_hls_target_duration(-5), 1);
-        assert_eq!(clamp_hls_target_duration(30), 30);
-    }
-
-    #[test]
-    fn resolves_relative_hls_byte_ranges() {
-        let media = parse_media_playlist(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-BYTERANGE:100@50\n#EXTINF:5,\nfile.ts\n#EXT-X-BYTERANGE:75\n#EXTINF:5,\nfile.ts\n",
-        )
-        .expect("media");
-        assert_eq!(
-            media.segments[0]
-                .byte_range
-                .as_ref()
-                .map(|range| range.start),
-            Some(Some(50))
-        );
-        assert_eq!(
-            media.segments[0]
-                .byte_range
-                .as_ref()
-                .map(|range| range.length),
-            Some(100)
-        );
-        assert_eq!(
-            media.segments[1]
-                .byte_range
-                .as_ref()
-                .map(|range| range.start),
-            Some(Some(150))
-        );
-        assert_eq!(
-            media.segments[1]
-                .byte_range
-                .as_ref()
-                .map(|range| range.length),
-            Some(75)
-        );
-    }
-
-    #[test]
-    fn tracks_hls_discontinuity_sequences() {
-        let media = parse_media_playlist(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:5,\nseg0.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:5,\nseg1.ts\n",
-        )
-        .expect("media");
-        assert_eq!(media.segments[0].discontinuity_sequence, 0);
-        assert_eq!(media.segments[1].discontinuity_sequence, 1);
-    }
-
-    #[test]
     fn derives_aes_iv_from_sequence() {
         let iv = sequence_iv(258);
         assert_eq!(&iv[14..], &[1, 2]);
@@ -2801,19 +2308,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_sample_aes() {
-        let error = reject_unsupported_media_playlist(
-            "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key\"\n",
-        )
-        .unwrap_err();
-        assert!(error.contains("hls_unsupported_encryption"));
-    }
-
-    // E-2: Safety-limit constants must stay pinned at their documented values.
-    // Accidentally raising or removing these caps would reintroduce the
-    // unbounded-memory-growth risk the caps are meant to prevent.
-
-    #[test]
     fn hls_segment_max_bytes_is_512_mib() {
         assert_eq!(HLS_SEGMENT_MAX_BYTES, 512 * 1024 * 1024);
     }
@@ -2821,73 +2315,6 @@ mod tests {
     #[test]
     fn hls_init_max_bytes_is_64_mib() {
         assert_eq!(HLS_INIT_MAX_BYTES, 64 * 1024 * 1024);
-    }
-
-    #[test]
-    fn parse_ext_x_media_extracts_audio_and_subtitle_tracks() {
-        let master = "#EXTM3U\n\
-#EXT-X-VERSION:3\n\
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud1\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,URI=\"en.m3u8\"\n\
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud1\",NAME=\"Spanish\",LANGUAGE=\"es\",DEFAULT=NO,AUTOSELECT=YES,URI=\"es.m3u8\"\n\
-#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"sub1\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,URI=\"en-subs.m3u8\"\n\
-#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"cc1\",NAME=\"CC\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES\n\
-#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"aud1\",SUBTITLES=\"sub1\"\n\
-video.m3u8\n";
-        let tracks = parse_ext_x_media(master, "https://cdn.example/master.m3u8");
-        assert_eq!(
-            tracks.len(),
-            3,
-            "should parse 3 tracks (2 audio + 1 subtitle, skip CLOSED-CAPTIONS)"
-        );
-        let audio: Vec<_> = tracks.iter().filter(|t| t.kind == "AUDIO").collect();
-        let subs: Vec<_> = tracks.iter().filter(|t| t.kind == "SUBTITLES").collect();
-        assert_eq!(audio.len(), 2);
-        assert_eq!(subs.len(), 1);
-        // English audio (default) — FUN-10 resolves relative URIs against master.
-        assert_eq!(audio[0].group_id, "aud1");
-        assert_eq!(audio[0].name, "English");
-        assert_eq!(audio[0].language.as_deref(), Some("en"));
-        assert!(audio[0].default);
-        assert!(audio[0].auto_select);
-        assert_eq!(audio[0].uri.as_deref(), Some("https://cdn.example/en.m3u8"));
-        // Spanish audio (not default)
-        assert_eq!(audio[1].name, "Spanish");
-        assert!(!audio[1].default);
-        assert_eq!(audio[1].uri.as_deref(), Some("https://cdn.example/es.m3u8"));
-        // Subtitles
-        assert_eq!(subs[0].kind, "SUBTITLES");
-        assert_eq!(
-            subs[0].uri.as_deref(),
-            Some("https://cdn.example/en-subs.m3u8")
-        );
-        assert!(subs[0].default);
-    }
-
-    #[test]
-    fn parse_ext_x_media_handles_embedded_tracks_with_null_uri() {
-        let master = "#EXTM3U\n\
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud1\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES\n\
-#EXT-X-STREAM-INF:BANDWIDTH=500000,AUDIO=\"aud1\"\n\
-video.m3u8\n";
-        let tracks = parse_ext_x_media(master, "https://cdn.example/master.m3u8");
-        assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].kind, "AUDIO");
-        assert!(
-            tracks[0].uri.is_none(),
-            "embedded track should have null URI"
-        );
-    }
-
-    #[test]
-    fn parse_ext_x_media_returns_empty_for_media_playlist() {
-        let media = "#EXTM3U\n\
-#EXT-X-VERSION:3\n\
-#EXT-X-TARGETDURATION:6\n\
-#EXTINF:6.0,\n\
-seg1.ts\n\
-#EXT-X-ENDLIST\n";
-        let tracks = parse_ext_x_media(media, "https://cdn.example/media.m3u8");
-        assert!(tracks.is_empty());
     }
 
     #[tokio::test]

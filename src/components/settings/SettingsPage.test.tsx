@@ -179,6 +179,14 @@ describe("SettingsPage", () => {
     mocks.updateSettings.mockImplementation(async (input: Partial<AppSettings>) => ({ ...SETTINGS, ...input }));
     mocks.getBrowserIntegrationStatus.mockResolvedValue(BROWSER_STATUS);
     mocks.onBrowserIntegrationChanged.mockResolvedValue(() => {});
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockReturnValue({
+        matches: false,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }),
+    );
     useSettingsStore.setState({ settings: SETTINGS, loading: false, error: null });
   });
 
@@ -273,6 +281,20 @@ describe("SettingsPage", () => {
 
     expect(screen.getByRole("combobox", { name: "settings.sectionsNav" })).toBeInTheDocument();
     expect(screen.getByText("settings.autoSave")).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("jumps to a later settings section by scrolling only the settings container", async () => {
+    renderSettings();
+    await act(async () => {});
+
+    const container = document.querySelector("[data-settings-scroll]");
+    expect(container).toBeInstanceOf(HTMLElement);
+    const scrollTo = vi.fn();
+    (container as HTMLElement).scrollTo = scrollTo;
+
+    fireEvent.click(screen.getByRole("button", { name: "settings.aboutUpdates", hidden: true }));
+
+    expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: expect.any(Number) }));
   });
 
   it("has no automated accessibility violations in the default settings surface", async () => {

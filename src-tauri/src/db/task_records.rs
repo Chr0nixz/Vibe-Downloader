@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use sqlx::{Executor, QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::models::{
-    AppErrorPayload, HashVerificationStatus, RecoveryAction, TaskKind, TaskPriority, TaskRecord,
-    TaskStatsSnapshot, TaskStatus,
+    AppErrorPayload, HashVerificationStatus, RecoveryAction, TaskFileRecord, TaskKind,
+    TaskPriority, TaskRecord, TaskStatsSnapshot, TaskStatus,
 };
 
 use super::MAX_TASK_PAGE_SIZE;
@@ -946,6 +946,7 @@ pub(super) fn error_state_from_message(
     let Some(error) = error_message else {
         return (None, Vec::new());
     };
+    // ARC-16: only JSON AppErrorPayload carries a code; plain legacy strings stay unknown.
     if let Ok(payload) = serde_json::from_str::<AppErrorPayload>(error) {
         let actions = payload
             .actions
@@ -954,39 +955,7 @@ pub(super) fn error_state_from_message(
             .collect();
         return (Some(payload.code), actions);
     }
-    (legacy_error_code(error), Vec::new())
-}
-
-fn legacy_error_code(error: &str) -> Option<String> {
-    if error.contains("Remote file changed") {
-        return Some("remote_changed".to_string());
-    }
-    if error.contains("Server no longer supports resume") || error.contains("Resume unavailable") {
-        return Some("resume_unavailable".to_string());
-    }
-    if error.contains("Temporary file is missing") {
-        return Some("temp_file_missing".to_string());
-    }
-    if error.contains("Temporary file is smaller") {
-        return Some("temp_file_smaller_than_progress".to_string());
-    }
-    if error.contains("disk")
-        || error.contains("Disk")
-        || error.contains("write")
-        || error.contains("Write")
-    {
-        return Some("disk_write_failed".to_string());
-    }
-    if error.contains("403") {
-        return Some("http_denied".to_string());
-    }
-    if error.contains("404") {
-        return Some("http_not_found".to_string());
-    }
-    if error.contains("429") {
-        return Some("server_rate_limited".to_string());
-    }
-    None
+    (None, Vec::new())
 }
 
 pub async fn insert_task_record<'e, E>(executor: E, task: &TaskRecord) -> Result<(), String>
@@ -1113,6 +1082,47 @@ pub async fn insert_task_record_in_tx(
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// ARC-20: Insert a task row together with every one of its file rows.
+///
+/// These have to land atomically. The create path used to commit the task and
+/// only then insert `task_files` one row at a time on the pool, so a UNIQUE
+/// conflict on `idx_task_files_final_path_selected` part-way through the loop
+/// left a committed task with a truncated file list. Nothing rolled that back,
+/// and the scheduler would go on to download the partial set and report
+/// success - silent data loss rather than a visible failure.
+pub async fn insert_task_with_files_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task: &TaskRecord,
+    files: &[TaskFileRecord],
+) -> Result<(), String> {
+    insert_task_record_in_tx(tx, task).await?;
+    for file in files {
+        super::task_files::insert_task_file_record_in_tx(tx, file).await?;
+    }
+    Ok(())
+}
+
+/// ARC-20 / ARC-21: Pool-level wrapper around [`insert_task_with_files_in_tx`].
+///
+/// Uses `BEGIN IMMEDIATE` so the write lock is taken up front. A DEFERRED
+/// transaction that reads before writing can fail with `SQLITE_BUSY_SNAPSHOT`,
+/// which `busy_timeout` does **not** retry.
+///
+/// Callers that also need to read inside the same transaction (the create path
+/// checks for duplicates) should use the `_in_tx` variant with their own
+/// [`super::begin_immediate`] transaction instead.
+pub async fn insert_task_with_files(
+    pool: &SqlitePool,
+    task: &TaskRecord,
+    files: &[TaskFileRecord],
+) -> Result<(), String> {
+    let mut tx = super::begin_immediate(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    insert_task_with_files_in_tx(&mut tx, task, files).await?;
+    tx.commit().await.map_err(|e| e.to_string())
 }
 
 pub async fn task_filter_options(pool: &SqlitePool) -> Result<TaskFilterOptions, String> {

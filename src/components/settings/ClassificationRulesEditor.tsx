@@ -2,6 +2,7 @@ import type { ReactElement, ReactNode } from "react";
 import { cloneElement, isValidElement, useCallback, useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -120,18 +121,19 @@ export function ClassificationRulesEditor() {
     <div className="grid gap-3 px-4 py-4">
       <div className="flex items-center justify-between">
         <div>
-          <h4 className="text-sm font-medium text-text-primary">{t("settings.classificationSection")}</h4>
+          <h3 className="text-sm font-medium text-text-primary">{t("settings.classificationSection")}</h3>
           <p className="mt-1 text-xs leading-5 text-text-muted">{t("settings.classificationHint")}</p>
         </div>
         {editingId !== "new" ? (
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
             onClick={() => setEditingId("new")}
             disabled={saving || loading}
-            className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-primary hover:bg-surface-hover disabled:opacity-50"
           >
             {t("settings.addClassificationRule")}
-          </button>
+          </Button>
         ) : null}
       </div>
       {loading ? (
@@ -274,14 +276,9 @@ function ClassificationTryPanel({ disabled }: { disabled?: boolean }) {
         />
       </Field>
       <div className="flex justify-end">
-        <button
-          type="button"
-          onClick={() => void runPreview()}
-          disabled={disabled || busy || !url.trim()}
-          className="rounded-md bg-accent-primary px-3 py-1.5 text-xs text-text-on-accent hover:opacity-90 disabled:opacity-50"
-        >
+        <Button type="button" size="sm" onClick={() => void runPreview()} disabled={disabled || busy || !url.trim()}>
           {t("settings.classificationTryRun")}
-        </button>
+        </Button>
       </div>
       {result ? (
         <dl className="grid gap-1 text-xs text-text-secondary">
@@ -343,39 +340,19 @@ function RuleRow({
           {t(`settings.matchKind${capitalize(rule.matchKind)}`)}: {rule.pattern} → {rule.targetSubdir}
         </div>
       </div>
-      <div className="flex gap-1">
-        <button
-          type="button"
-          onClick={onMoveUp}
-          disabled={disabled || !canMoveUp}
-          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
-        >
+      <div className="flex flex-wrap gap-1">
+        <Button type="button" variant="ghost" size="sm" onClick={onMoveUp} disabled={disabled || !canMoveUp}>
           {t("settings.moveUp")}
-        </button>
-        <button
-          type="button"
-          onClick={onMoveDown}
-          disabled={disabled || !canMoveDown}
-          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
-        >
+        </Button>
+        <Button type="button" variant="ghost" size="sm" onClick={onMoveDown} disabled={disabled || !canMoveDown}>
           {t("settings.moveDown")}
-        </button>
-        <button
-          type="button"
-          onClick={onEdit}
-          disabled={disabled}
-          className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
-        >
+        </Button>
+        <Button type="button" variant="ghost" size="sm" onClick={onEdit} disabled={disabled}>
           {t("settings.editClassificationRule")}
-        </button>
-        <button
-          type="button"
-          onClick={onDelete}
-          disabled={disabled}
-          className="rounded px-2 py-1 text-xs text-status-danger hover:bg-surface-hover disabled:opacity-50"
-        >
+        </Button>
+        <Button type="button" variant="danger" size="sm" onClick={onDelete} disabled={disabled}>
           {t("settings.deleteClassificationRule")}
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -455,22 +432,17 @@ function RuleEditForm({
         <Switch checked={enabled} disabled={disabled} onCheckedChange={setEnabled} />
       </Field>
       <div className="flex justify-end gap-2">
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={disabled}
-          className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
-        >
+        <Button type="button" variant="outline" size="sm" onClick={onCancel} disabled={disabled}>
           {t("settings.ruleCancel")}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          size="sm"
           onClick={handleSubmit}
           disabled={disabled || !name.trim() || !pattern.trim() || !targetSubdir.trim()}
-          className="rounded-md bg-accent-primary px-3 py-1.5 text-xs text-text-on-accent hover:opacity-90 disabled:opacity-50"
         >
           {t("settings.saveClassificationRule")}
-        </button>
+        </Button>
       </div>
     </div>
   );

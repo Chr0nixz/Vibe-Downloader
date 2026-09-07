@@ -9,6 +9,7 @@ import {
   FolderOpen,
   Gauge,
   Info,
+  LayoutList,
   ListChecks,
   ListOrdered,
   Moon,
@@ -16,6 +17,7 @@ import {
   Play,
   Plus,
   RotateCcw,
+  Rows3,
   Search,
   Settings,
   SlidersHorizontal,
@@ -26,6 +28,7 @@ import { useTheme } from "next-themes";
 import { type ComponentType, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
+import { navShortcutDigit } from "@/components/shell/nav-shortcuts";
 import {
   Dialog,
   DialogBody,
@@ -40,6 +43,7 @@ import { errorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import type { Platform } from "@/lib/platform";
 import { applyGlobalSpeedLimit } from "@/lib/settings";
+import { SPEED_LIMIT_PRESETS } from "@/lib/speed-limit";
 
 const log = createLogger("palette");
 
@@ -52,6 +56,7 @@ import {
   filterTasks,
   type NavFilter,
   type ResumeFilter,
+  type RowDensity,
   type TaskFilters,
   type TaskSortDirection,
   type TaskSortKey,
@@ -80,14 +85,6 @@ interface PaletteCommand {
 }
 
 const GROUP_ORDER: PaletteGroup[] = ["app", "task", "bulk", "views", "sort", "filters", "speed", "development"];
-
-const SPEED_LIMIT_PRESETS = [
-  { id: "unlimited", label: "Unlimited", value: null },
-  { id: "512k", label: "512 KB/s", value: 512 * 1024 },
-  { id: "1m", label: "1 MB/s", value: 1024 * 1024 },
-  { id: "5m", label: "5 MB/s", value: 5 * 1024 * 1024 },
-  { id: "10m", label: "10 MB/s", value: 10 * 1024 * 1024 },
-] as const;
 
 const DEFAULT_FILTERS = {
   fileType: "all" as FileTypeFilter,
@@ -172,11 +169,16 @@ export function Palette({
   const setSort = useTaskUIStore((s) => s.setSort);
   const setFilters = useTaskUIStore((s) => s.setFilters);
   const setDetailOpen = useTaskUIStore((s) => s.setDetailOpen);
+  const rowDensity = useTaskUIStore((s) => s.rowDensity);
+  const setRowDensity = useTaskUIStore((s) => s.setRowDensity);
+  const requestSpeedLimitPanel = useTaskUIStore((s) => s.requestSpeedLimitPanel);
 
   const settings = useSettingsStore((s) => s.settings);
   const setSettings = useSettingsStore((s) => s.setSettings);
   const addToast = useToastStore((s) => s.addToast);
-  const { setTheme } = useTheme();
+  // resolvedTheme (not theme) because "system" says nothing about which command
+  // would actually change what the user is looking at.
+  const { setTheme, resolvedTheme } = useTheme();
 
   // E-12: useDeferredValue lets the command palette's derived computation run during idle time,
   // not blocking the main list's progress tick rendering (tasks change every 250ms).
@@ -242,6 +244,10 @@ export function Palette({
         setTasks,
         setError,
         setTheme,
+        themeIsDark: resolvedTheme === "dark",
+        rowDensity,
+        setRowDensity,
+        requestSpeedLimitPanel,
       }),
     [
       clearSelectedIds,
@@ -266,12 +272,16 @@ export function Palette({
       onSetNav,
       onStart,
       platform,
+      requestSpeedLimitPanel,
+      resolvedTheme,
+      rowDensity,
       selectedIds.length,
       selectedTask,
       selectedTasks,
       setDetailOpen,
       setError,
       setFilters,
+      setRowDensity,
       setSelectedIds,
       setSettings,
       setSort,
@@ -572,6 +582,10 @@ function buildCommands({
   setTasks,
   setError,
   setTheme,
+  themeIsDark,
+  rowDensity,
+  setRowDensity,
+  requestSpeedLimitPanel,
 }: {
   t: TFunction;
   platform: Platform;
@@ -612,6 +626,10 @@ function buildCommands({
   setTasks: (tasks: Task[]) => void;
   setError: (error: string | null) => void;
   setTheme: (theme: string) => void;
+  themeIsDark: boolean;
+  rowDensity: RowDensity;
+  setRowDensity: (density: RowDensity) => void;
+  requestSpeedLimitPanel: () => void;
 }): PaletteCommand[] {
   const noTask = t("palette.disabled.noTask");
   const noSelection = t("palette.disabled.noSelection");
@@ -723,28 +741,31 @@ function buildCommands({
     featured: false,
     run: () => onSetNav("about"),
   });
-  push({
-    id: "app.theme.dark",
-    label: t("palette.commands.themeDark"),
-    description: t("palette.descriptions.themeDark"),
-    group: "app",
-    icon: Moon,
-    keywords: keyword("dark", "theme", "深色", "暗夜", "模式"),
-    enabled: true,
-    active: false,
-    run: () => setTheme("dark"),
-  });
-  push({
-    id: "app.theme.light",
-    label: t("palette.commands.themeLight"),
-    description: t("palette.descriptions.themeLight"),
-    group: "app",
-    icon: Sun,
-    keywords: keyword("light", "theme", "浅色", "亮色", "模式"),
-    enabled: true,
-    active: false,
-    run: () => setTheme("light"),
-  });
+  // One toggle instead of a dark/light pair: listing both meant one entry was
+  // always a no-op, and users could not tell which was live.
+  push(
+    themeIsDark
+      ? {
+          id: "app.theme.light",
+          label: t("palette.commands.themeLight"),
+          description: t("palette.descriptions.themeLight"),
+          group: "app",
+          icon: Sun,
+          keywords: keyword("light", "theme", "浅色", "亮色", "模式"),
+          enabled: true,
+          run: () => setTheme("light"),
+        }
+      : {
+          id: "app.theme.dark",
+          label: t("palette.commands.themeDark"),
+          description: t("palette.descriptions.themeDark"),
+          group: "app",
+          icon: Moon,
+          keywords: keyword("dark", "theme", "深色", "暗夜", "模式"),
+          enabled: true,
+          run: () => setTheme("dark"),
+        },
+  );
 
   push({
     id: "task.start",
@@ -950,6 +971,7 @@ function buildCommands({
 
   (["all", "downloading", "queue", "attention", "paused", "completed", "failed", "settings"] as const).forEach(
     (nextNav) => {
+      const digit = navShortcutDigit(nextNav);
       push({
         id: `view.${nextNav}`,
         label: t(`nav.${nextNav}`),
@@ -957,6 +979,7 @@ function buildCommands({
         group: "views",
         icon: nextNav === "settings" ? Settings : ListChecks,
         keywords: keyword("view", "filter", nextNav, "视图", "导航"),
+        shortcut: digit ? `${mod}${digit}` : undefined,
         enabled: true,
         active: nav === nextNav,
         featured: nextNav !== "settings",
@@ -964,6 +987,27 @@ function buildCommands({
       });
     },
   );
+
+  // Density lives in the tool panel, which collapses below `md`; the palette is
+  // the only route to it on a narrow window.
+  (
+    [
+      { density: "comfortable", icon: LayoutList },
+      { density: "compact", icon: Rows3 },
+    ] as const
+  ).forEach(({ density, icon }) => {
+    push({
+      id: `density.${density}`,
+      label: t(`taskList.density${density === "compact" ? "Compact" : "Comfortable"}`),
+      description: t("palette.descriptions.rowDensity"),
+      group: "views",
+      icon,
+      keywords: keyword("density", "compact", "comfortable", "row", "行高", "密度", "紧凑", "宽松"),
+      enabled: true,
+      active: rowDensity === density,
+      run: () => setRowDensity(density),
+    });
+  });
 
   const sortCommands: Array<{
     id: string;
@@ -1155,6 +1199,20 @@ function buildCommands({
         setSettings(await applyGlobalSpeedLimit(settings, preset.value));
       },
     });
+  });
+
+  push({
+    id: "speed.custom",
+    label: t("palette.commands.setCustomSpeedLimit"),
+    description: t("palette.descriptions.speedCustom"),
+    group: "speed",
+    icon: SlidersHorizontal,
+    keywords: keyword("speed", "limit", "custom", "throttle", "自定义", "限速", t("palette.keywords.speedLimit")),
+    enabled: !!settings,
+    disabledReason: settingsUnavailable,
+    // Featured: below `md` the tool panel that hosts the throttle is collapsed, so
+    // this has to be findable without typing a query first.
+    run: () => requestSpeedLimitPanel(),
   });
 
   if (canSeedMockTasks) {

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "distDir": "dist/assets",
+  "initialShell": {
+    "include": [
+      "^index-.*\\.js$",
+      "^react-vendor-.*\\.js$",
+      "^radix-ui-.*\\.js$",
+      "^utils-.*\\.js$",
+      "^motion-.*\\.js$",
+      "^i18n-.*\\.js$",
+      "^lucide-.*\\.js$",
+      "^tauri-.*\\.js$",
+      "^bindings-.*\\.js$",
+      "^rolldown-runtime-.*\\.js$",
+      "^preload-helper-.*\\.js$",
+      "^use-reduced-motion-.*\\.js$",
+      "^index-.*\\.css$"
+    ],
+    "exclude": [
+      "^SettingsPage-.*\\.js$",
+      "^TaskDetails-.*\\.js$",
+      "^NewDownloadDialog-.*\\.js$",
+      "^Palette-.*\\.js$",
+      "^QueueCenter-.*\\.js$",
+      "^AttentionCenter-.*\\.js$",
+      "^tauri-browser-.*\\.js$",
+      "^zh-TW-.*\\.js$",
+      "^ja-.*\\.js$",
+      "^ko-.*\\.js$",
+      "^ru-.*\\.js$",
+      "^es-.*\\.js$"
+    ]
+  },
+  "budgets": {
+    "initialShellJsRawBytes": 1153434,
+    "initialShellJsGzipBytes": 348160,
+    "initialShellJsBrotliBytes": 296960,
+    "initialShellCssGzipBytes": 18432
+  }
+}

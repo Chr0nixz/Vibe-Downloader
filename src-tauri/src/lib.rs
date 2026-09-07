@@ -196,6 +196,8 @@ macro_rules! vibe_commands_base {
             commands::backup::create_app_backup,
             commands::backup::validate_app_backup,
             commands::backup::restore_app_backup,
+            commands::local_files::read_local_text_file,
+            commands::local_files::write_export_file,
             commands::startup::get_startup_status,
             commands::startup::open_database_recovery_folder,
             commands::startup::open_startup_log_folder,
@@ -379,6 +381,13 @@ pub fn run() {
                 } else {
                     log::LevelFilter::Info
                 })
+                // PERF-12: the plugin defaults to a 40 KB cap with KeepOne, which
+                // discards earlier content. A download manager running several
+                // concurrent tasks fills that in minutes, so by the time a user
+                // reports a problem the relevant lines are already gone -- which
+                // also defeats the "open log directory" recovery entry from UX-01.
+                .max_file_size(5_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
                 .build(),
         )
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -388,7 +397,6 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_os::init())

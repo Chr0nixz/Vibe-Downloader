@@ -29,6 +29,11 @@ export const useSpeedHistoryStore = create<SpeedHistoryState>((set, get) => ({
     set({ history: { ...current, [taskId]: updated } });
   },
 
+  // Only create new arrays for tasks that actually have new samples.
+  // Tasks without samples keep their original array reference (structural sharing),
+  // so per-task selectors like `s.history[taskId]` skip re-renders on untouched rows.
+  // A full Map rewrite would still be O(N) for the key set; this keeps the same bound
+  // while avoiding array allocations for idle tasks.
   appendBatch: (entries) => {
     if (entries.length === 0) return;
     const current = get().history;

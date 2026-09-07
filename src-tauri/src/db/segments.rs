@@ -378,7 +378,13 @@ pub async fn split_largest_remaining_segment(
     min_remaining_bytes: i64,
     max_segments: usize,
 ) -> Result<Option<SegmentSplit>, String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    // ARC-21: two SELECTs run before the UPDATE + INSERT below, which is the
+    // read-then-write shape that fails with SQLITE_BUSY_SNAPSHOT under WAL -
+    // an error `busy_timeout` does not retry. Auto-acceleration calls this from
+    // download workers, so the contention is real rather than theoretical.
+    let mut tx = super::begin_immediate(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_work_units WHERE task_id = ?")
         .bind(task_id)
         .fetch_one(&mut *tx)

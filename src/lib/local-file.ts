@@ -11,6 +11,7 @@
  */
 
 export type LocalFileKind = "torrent" | "metalink" | "dash" | "text";
+export type LocalTextFileKind = "batch_text" | "ssh_key";
 
 const MANIFEST_EXTENSIONS = ["torrent", "meta4", "metalink", "mpd", "txt"];
 
@@ -52,9 +53,9 @@ export function pathToFileUrl(filePath: string): string {
   return `file://${encodePathSegments(normalized.startsWith("/") ? normalized : `/${normalized}`)}`;
 }
 
-/** Read a local file as UTF-8 text via the Tauri fs plugin. */
-export function readFileAsText(filePath: string): Promise<string> {
-  return import("@tauri-apps/plugin-fs").then(({ readTextFile }) => readTextFile(filePath));
+/** Read a local file as UTF-8 text via the scoped Rust command (SEC-01). */
+export function readFileAsText(filePath: string, kind: LocalTextFileKind): Promise<string> {
+  return import("@/lib/tauri").then(({ readLocalTextFile }) => readLocalTextFile(filePath, kind));
 }
 
 /** Resolve a dropped/picked local file into inputs the New Download dialog understands. */
@@ -66,6 +67,6 @@ export async function resolveLocalFile(
   if (kind === "torrent" || kind === "metalink" || kind === "dash") {
     return { kind, url: pathToFileUrl(filePath) };
   }
-  const text = await readFileAsText(filePath);
+  const text = await readFileAsText(filePath, "batch_text");
   return { kind, batchInput: text };
 }

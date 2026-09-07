@@ -404,47 +404,6 @@ pub fn dash_segment_cursor(record: &DashSegmentRecord) -> String {
     format!("{}:{}", record.track_kind, record.segment_index)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::models::SegmentStatus;
-
-    #[test]
-    fn parse_dash_segment_cursor_accepts_composite() {
-        assert_eq!(parse_dash_segment_cursor(None), (None, -1));
-        assert_eq!(
-            parse_dash_segment_cursor(Some("video:10")),
-            (Some("video".into()), 10)
-        );
-        assert_eq!(
-            parse_dash_segment_cursor(Some("audio")),
-            (Some("audio".into()), -1)
-        );
-    }
-
-    #[test]
-    fn dash_segment_cursor_formats_pair() {
-        let record = DashSegmentRecord {
-            id: "s1".into(),
-            task_id: "t1".into(),
-            track_kind: "video".into(),
-            segment_index: 42,
-            uri: "https://cdn.example/v42.m4s".into(),
-            local_path: "v42.m4s".into(),
-            byte_range_start: None,
-            byte_range_length: None,
-            init_segment_uri: None,
-            init_segment_local_path: None,
-            duration_ms: 0,
-            downloaded_bytes: 0,
-            status: SegmentStatus::Pending,
-            retry_count: 0,
-            last_error: None,
-        };
-        assert_eq!(dash_segment_cursor(&record), "video:42");
-    }
-}
-
 pub async fn update_dash_segment_status(
     pool: &SqlitePool,
     id: &str,
@@ -533,4 +492,45 @@ pub async fn existing_dash_segment_keys(
         .into_iter()
         .map(|row| (row.get::<String, _>("track_kind"), row.get("segment_index")))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::SegmentStatus;
+
+    #[test]
+    fn parse_dash_segment_cursor_accepts_composite() {
+        assert_eq!(parse_dash_segment_cursor(None), (None, -1));
+        assert_eq!(
+            parse_dash_segment_cursor(Some("video:10")),
+            (Some("video".into()), 10)
+        );
+        assert_eq!(
+            parse_dash_segment_cursor(Some("audio")),
+            (Some("audio".into()), -1)
+        );
+    }
+
+    #[test]
+    fn dash_segment_cursor_formats_pair() {
+        let record = DashSegmentRecord {
+            id: "s1".into(),
+            task_id: "t1".into(),
+            track_kind: "video".into(),
+            segment_index: 42,
+            uri: "https://cdn.example/v42.m4s".into(),
+            local_path: "v42.m4s".into(),
+            byte_range_start: None,
+            byte_range_length: None,
+            init_segment_uri: None,
+            init_segment_local_path: None,
+            duration_ms: 0,
+            downloaded_bytes: 0,
+            status: SegmentStatus::Pending,
+            retry_count: 0,
+            last_error: None,
+        };
+        assert_eq!(dash_segment_cursor(&record), "video:42");
+    }
 }

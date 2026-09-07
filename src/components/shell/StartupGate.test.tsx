@@ -189,6 +189,33 @@ describe("StartupGate", () => {
     await waitFor(() => expect(screen.getByText("App ready")).toBeInTheDocument());
   });
 
+  it("keeps Retry available after opening logs or data folders", async () => {
+    getStartupStatus.mockResolvedValue(failedStatus());
+    openStartupLogFolder.mockResolvedValue();
+    openStartupDataFolder.mockResolvedValue();
+
+    render(
+      <StartupGate>
+        <p>App ready</p>
+      </StartupGate>,
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /startupFailed.retry/ })).toBeInTheDocument());
+    const retry = () => screen.getByRole("button", { name: /startupFailed.retry/ });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /startupFailed.openLogs/ }));
+    });
+    expect(openStartupLogFolder).toHaveBeenCalledTimes(1);
+    expect(retry()).not.toBeDisabled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /startupFailed.openData/ }));
+    });
+    expect(openStartupDataFolder).toHaveBeenCalledTimes(1);
+    expect(retry()).not.toBeDisabled();
+  });
+
   it("shows static initializing copy when reduced motion is preferred", async () => {
     getStartupStatus.mockResolvedValue({
       mode: "initializing",

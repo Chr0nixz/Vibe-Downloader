@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -111,10 +112,10 @@ export function SiteRulesEditor({ rules, captureGlobals, disabled, onUpdate }: S
     addToast({
       tone: "info",
       title: t("settings.siteRuleDeleted"),
-      description: t("common.undoHint"),
+      description: t("toast.undoHint"),
       durationMs: UNDO_TOAST_TIMEOUT_MS,
       action: {
-        label: t("common.undo"),
+        label: t("toast.undo"),
         onClick: () => {
           const without = rulesRef.current.filter((rule) => rule.id !== removed.id);
           const restored = [...without];
@@ -180,27 +181,29 @@ export function SiteRulesEditor({ rules, captureGlobals, disabled, onUpdate }: S
     <div className="grid gap-3 border-t border-border-divider px-4 py-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h4 className="text-sm font-medium text-text-primary">{t("settings.siteRulesSection")}</h4>
+          <h3 className="text-sm font-medium text-text-primary">{t("settings.siteRulesSection")}</h3>
           <p className="mt-1 text-xs leading-5 text-text-muted">{t("settings.siteRulesHint")}</p>
           <p className="mt-1 text-xs leading-5 text-text-muted">{t("settings.siteRulesOrderHint")}</p>
         </div>
         <div className="flex flex-wrap gap-1">
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
             onClick={exportRules}
             disabled={disabled || rules.length === 0}
-            className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-primary hover:bg-surface-hover disabled:opacity-50"
           >
             {t("settings.siteRulesExport")}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
             onClick={() => fileInputRef.current?.click()}
             disabled={disabled || editingId !== null}
-            className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-primary hover:bg-surface-hover disabled:opacity-50"
           >
             {t("settings.siteRulesImport")}
-          </button>
+          </Button>
           <input
             ref={fileInputRef}
             type="file"
@@ -212,14 +215,15 @@ export function SiteRulesEditor({ rules, captureGlobals, disabled, onUpdate }: S
               if (file) importRules(file);
             }}
           />
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
             onClick={beginAdd}
             disabled={disabled || editingId !== null}
-            className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-primary hover:bg-surface-hover disabled:opacity-50"
           >
             {t("settings.addSiteRule")}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -333,7 +337,7 @@ function SiteRuleTryPanel({
   return (
     <div className="grid gap-2 rounded-md border border-border-divider p-3">
       <div>
-        <h5 className="text-xs font-medium text-text-primary">{t("settings.siteRulesTryTitle")}</h5>
+        <h4 className="text-xs font-medium text-text-primary">{t("settings.siteRulesTryTitle")}</h4>
         <p className="mt-1 text-xs text-text-muted">{t("settings.siteRulesTryHint")}</p>
       </div>
       <Field label={t("settings.siteRulesTryUrl")}>
@@ -369,14 +373,9 @@ function SiteRuleTryPanel({
         />
       </Field>
       <div className="flex justify-end">
-        <button
-          type="button"
-          onClick={runDiagnosis}
-          disabled={disabled || !url.trim()}
-          className="rounded-md bg-accent-primary px-3 py-1.5 text-xs text-text-on-accent hover:opacity-90 disabled:opacity-50"
-        >
+        <Button type="button" size="sm" onClick={runDiagnosis} disabled={disabled || !url.trim()}>
           {t("settings.siteRulesTryRun")}
-        </button>
+        </Button>
       </div>
       {error ? (
         <p role="alert" className="text-xs text-status-danger">
@@ -495,39 +494,19 @@ function RuleRow({
             {rule.includeSubdomains ? ` · ${t("settings.ruleIncludeSubdomains")}` : ""}
           </div>
         </div>
-        <div className="flex gap-1">
-          <button
-            type="button"
-            onClick={onMoveUp}
-            disabled={disabled || !canMoveUp}
-            className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
-          >
+        <div className="flex flex-wrap gap-1">
+          <Button type="button" variant="ghost" size="sm" onClick={onMoveUp} disabled={disabled || !canMoveUp}>
             {t("settings.moveUp")}
-          </button>
-          <button
-            type="button"
-            onClick={onMoveDown}
-            disabled={disabled || !canMoveDown}
-            className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
-          >
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={onMoveDown} disabled={disabled || !canMoveDown}>
             {t("settings.moveDown")}
-          </button>
-          <button
-            type="button"
-            onClick={onEdit}
-            disabled={disabled}
-            className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
-          >
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={onEdit} disabled={disabled}>
             {t("settings.editRule")}
-          </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            disabled={disabled}
-            className="rounded px-2 py-1 text-xs text-status-danger hover:bg-surface-hover disabled:opacity-50"
-          >
+          </Button>
+          <Button type="button" variant="danger" size="sm" onClick={onDelete} disabled={disabled}>
             {t("settings.deleteRule")}
-          </button>
+          </Button>
         </div>
       </div>
       {conflict ? (
@@ -656,31 +635,16 @@ function RuleEditForm({
         </p>
       ) : null}
       <div className="flex justify-between gap-2">
-        <button
-          type="button"
-          onClick={onDelete}
-          disabled={disabled}
-          className="rounded px-3 py-1.5 text-xs text-status-danger hover:bg-surface-hover disabled:opacity-50"
-        >
+        <Button type="button" variant="danger" size="sm" onClick={onDelete} disabled={disabled}>
           {t("settings.deleteRule")}
-        </button>
+        </Button>
         <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={disabled}
-            className="rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
-          >
+          <Button type="button" variant="outline" size="sm" onClick={onCancel} disabled={disabled}>
             {t("settings.cancelRule")}
-          </button>
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={disabled}
-            className="rounded-md bg-accent-primary px-3 py-1.5 text-xs text-text-on-accent hover:opacity-90 disabled:opacity-50"
-          >
+          </Button>
+          <Button type="button" size="sm" onClick={onSave} disabled={disabled}>
             {t("settings.saveRule")}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

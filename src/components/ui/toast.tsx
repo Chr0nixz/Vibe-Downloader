@@ -106,6 +106,10 @@ function ToastItem({
   const actionRef = useRef(toast.action);
   onAutoCommitRef.current = toast.onAutoCommit;
   actionRef.current = toast.action;
+  // CSS countdown pauses via animation-play-state; remount key resets on resume.
+  const [countdownKey, setCountdownKey] = useState(0);
+  const [countdownPaused, setCountdownPaused] = useState(false);
+  const [countdownMs, setCountdownMs] = useState(duration);
 
   const settleCommit = useCallback(() => {
     if (settledRef.current) return;
@@ -126,6 +130,9 @@ function ToastItem({
   const startTimer = useCallback(() => {
     startedAtRef.current = Date.now();
     pausedRef.current = false;
+    setCountdownPaused(false);
+    setCountdownMs(remainingRef.current);
+    setCountdownKey((key) => key + 1);
     timerRef.current = setTimeout(settleCommit, remainingRef.current);
   }, [settleCommit]);
 
@@ -135,6 +142,7 @@ function ToastItem({
     remainingRef.current -= Date.now() - startedAtRef.current;
     if (remainingRef.current < 0) remainingRef.current = 0;
     pausedRef.current = true;
+    setCountdownPaused(true);
   }, []);
 
   const resumeTimer = useCallback(() => {
@@ -153,27 +161,6 @@ function ToastItem({
 
   const Icon = toast.tone === "success" ? CheckCircle2 : toast.tone === "error" ? AlertTriangle : Info;
 
-  // Countdown progress: 1 → 0 across the toast lifetime. Drives the bottom
-  // edge bar width so users can see how long is left at a glance. Frozen while
-  // hovered/focused (the bar's transition is paused alongside the timer).
-  const [progress, setProgress] = useState(1);
-  useEffect(() => {
-    if (reduceMotion) return;
-    const start = Date.now();
-    const total = remainingRef.current;
-    let raf = 0;
-    const tick = () => {
-      const elapsed = Date.now() - start;
-      const remaining = Math.max(0, total - elapsed);
-      setProgress(remaining / total);
-      if (remaining > 0 && !pausedRef.current) {
-        raf = requestAnimationFrame(tick);
-      }
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [reduceMotion]);
-
   return (
     <motion.div
       layout={!reduceMotion}
@@ -182,8 +169,8 @@ function ToastItem({
       exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.98 }}
       transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
       className={cn(
-        // Layered brand-tinted shadow (was generic shadow-md) + relative for the countdown bar.
-        "pointer-events-auto relative grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-lg border bg-surface-overlay px-3 py-3 shadow-[var(--shadow-toast)] backdrop-blur-sm",
+        // Quiet product surface: border + single raised shadow, no blur/glow stack.
+        "pointer-events-auto relative grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-lg border bg-surface-overlay px-3 py-3 shadow-[var(--shadow-raised)]",
         toast.tone === "success" && "border-border-success-strong",
         toast.tone === "error" && "border-border-danger-strong",
         toast.tone === "info" && "border-border-subtle",
@@ -232,15 +219,18 @@ function ToastItem({
       >
         <X className="h-3.5 w-3.5" />
       </Button>
-      {/* Countdown bar — bottom edge, accent-tinted, shrinks 1 → 0.
-          Hidden under reduced-motion (the timer still runs; we just skip the viz). */}
-      {!reduceMotion && (
+      {/* CSS-driven countdown — no per-frame React updates. */}
+      {!reduceMotion && countdownMs > 0 ? (
         <span
+          key={countdownKey}
           aria-hidden
           className="toast-countdown-bar pointer-events-none absolute inset-x-0 bottom-0 h-px origin-left bg-accent-primary/40"
-          style={{ transform: `scaleX(${progress})` }}
+          style={{
+            animation: `toast-countdown ${countdownMs}ms linear forwards`,
+            animationPlayState: countdownPaused ? "paused" : "running",
+          }}
         />
-      )}
+      ) : null}
     </motion.div>
   );
 }

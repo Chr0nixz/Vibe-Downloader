@@ -28,6 +28,7 @@ vi.mock("@tanstack/react-virtual", () => ({
     getTotalSize: () => 0,
     scrollToOffset: vi.fn(),
     scrollToIndex: vi.fn(),
+    measure: vi.fn(),
     measureElement: vi.fn(),
   }),
 }));

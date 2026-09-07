@@ -1,8 +1,8 @@
 # 项目改进审计
 
-最后更新：2026-07-19
+最后更新：2026-08-26
 
-适用版本：Vibe Downloader `0.3.0`
+适用版本：Vibe Downloader `0.4.0`
 
 审计对象：当前工作区的前端、Rust 后端、数据库迁移、协议引擎、浏览器扩展、构建配置、测试与产品文档
 
@@ -13,6 +13,17 @@
 ## 一、如何使用本文
 
 后续修复对话应直接引用问题 ID，例如“修复 `ARC-01` 和 `ARC-02`”。每次修复都必须先重新读取对应代码，因为行号和局部实现可能已经变化。
+
+ID 前缀含义：
+
+| 前缀 | 范围 | 章节 |
+| --- | --- | --- |
+| `UX` | 用户交互与可访问性 | 五 |
+| `FUN` | 功能完整性与跨层贯通 | 六 |
+| `ARC` | 架构鲁棒性、并发、取消、事务 | 七 |
+| `PERF` | 运行效率与资源占用 | 八 |
+| `SEC` | 安全边界与攻击面（2026-08-13 新增） | 九 |
+| `ENG` | 工程门禁、测试基础设施与仓库治理（2026-08-13 新增） | 十 |
 
 状态定义：
 
@@ -42,6 +53,8 @@
 5. Rust IPC 模型或命令签名变化后运行 `pnpm specta` 和 `pnpm check:bindings`。
 6. 修复完成后在本文将状态更新为 Closed，并记录关键测试；不要删除问题及其历史原因。
 
+自 2026-08-26（第 4 轮复审）起，本文新增「已验证的非问题与负结果」清单（第十二章）：经对抗性复核判定为不可达或已有可靠上游防线的候选发现也一并登记。后续修复对话不得将其作为新问题重复报告；引用其结论时应注明「已验证的非问题」。若相关代码发生实质变更，对应条目应重新评估。
+
 ## 二、执行摘要
 
 Vibe Downloader 已经越过 HTTP 下载 MVP 阶段。HTTP 分段下载、SQLite 持久化、队列调度、全局与逐任务限速、恢复动作、多协议入口、浏览器交接、虚拟化任务列表、诊断视图和七语言框架均已落地。当前主要矛盾不是入口数量不足，而是部分跨层契约没有真正贯通。
@@ -57,41 +70,105 @@ Vibe Downloader 已经越过 HTTP 下载 MVP 阶段。HTTP 分段下载、SQLite
 | ARC-02 | 输出路径没有原子预留和 no-clobber 提交 | Closed |
 | ARC-03 | 下载 worker、限速等待和 ffmpeg 子进程不能可靠收敛 | Closed |
 
-四维判断：
+### 2026-08-13 复审
+
+本轮对前端、Rust 后端、数据层、安全边界、测试与 CI、文档一致性做了六个维度的独立复核，新增 36 条问题（`UX-17`~`UX-18`、`FUN-20`~`FUN-22`、`ARC-19`~`ARC-31`、`PERF-12`~`PERF-16`、新增 `SEC-01`~`SEC-07` 与 `ENG-01`~`ENG-06`）。阶段 A 的 6 项 P0 已逐条回到代码核实，确认全部真实修复，不得重新打开。
+
+新的 P0 阻断集合现已清空：`ARC-19`～`ARC-22`、`SEC-01`、`SEC-02` 的 P0 项均已 Closed（`ARC-19` 的协调器排空仍是 P2 残留，并入 `ARC-31`）。
+
+**2026-08-13 修复批次进展**：`ARC-20`、`ARC-21`、`ARC-22`、`SEC-02` 已 Closed；`ARC-19` 的数据损坏已根治（协调器排空作为 P2 残留并入 `ARC-31`）。同批完成的还有 `ENG-02`（工作区恢复可提交）、`PERF-12`（日志保留）与 `ENG-01` 的 CI 部分。
+
+**2026-08-14**：`SEC-01` Closed。实机确认任务列表「更多 → 导出」无反馈；根因是 `dialog:allow-save` 与写权限均未授予，失败被 `export.ts` 吞掉。已移除 `fs` 插件，读写改走后端命令，导出失败会 toast。
+
+复审最重要的结论不是任何单条问题，而是两个贯穿性的根因。**逐项修复它们的实例而不修根因，同类问题会继续产生：**
+
+1. **跨引擎契约漂移**。代理解析、取消收敛、超时和 SSRF 守卫在 8 个引擎里各自实现，没有任何机制保证它们遵守同一契约。这正是 `FUN-02` 和 `ARC-03` 在 HTTP 上被正当地判定为 Closed、却在 DASH/FTP/SFTP 探测路径和 BT 上依然破损的原因（`FUN-20`、`ARC-19`、`SEC-03`）。验收标准「主路径有测试」不等于「所有引擎遵守同一契约」。
+2. **门禁覆盖面小于其表观**。`cargo clippy` 缺 `--all-targets`、`cargo deny` 从不执行已配置的 `bans`/`sources`、`check:i18n` 只比 key 不比 value、日志默认只保留最近 40 KB。每一项都像是有防护，实际都没防住（`ENG-01`、`FUN-21`、`PERF-12`）。`ARC-18` 预言的文档漂移之所以复发，也是因为它的验收条件「增加自动文档检查」始终没有落地。
+
+六维判断：
 
 | 维度 | 当前判断 | 首要任务 |
 | --- | --- | --- |
-| 用户交互便捷性 | UX-01～UX-16 均已 Closed | — |
-| 功能丰富性和完整性 | 功能面宽，但多个已暴露设置和协议能力没有贯通 | FUN-01、FUN-02、FUN-03、FUN-08 至 FUN-11 |
-| 架构鲁棒性和稳定性 | 持久化与安全边界较强，但任务所有权、文件提交和查询缓存存在关键竞态 | ARC-01 至 ARC-13 |
-| 程序运行效率 | 已有分页、虚拟化和事件节流，但缺规模数据且仍有 O(N)、阻塞和重复 I/O | PERF-01 至 PERF-11 |
+| 用户交互便捷性 | UX-01～UX-16 已 Closed；新增分页滚动回跳与列表 ARIA 模型不一致 | UX-17 |
+| 功能丰富性和完整性 | 功能面宽且主要契约已贯通；剩余缺口集中在探测路径代理 | FUN-20 |
+| 架构鲁棒性和稳定性 | HTTP 路径的所有权与提交语义已经扎实，但同类保证没有覆盖 FTP/SFTP/Metalink/DASH；事务隔离级别是系统性问题 | ARC-19 至 ARC-22 |
+| 安全边界 | SSRF 三层防御、TOFU、凭据加密、SQL 参数化、能力面收敛都做得好；剩余缺口在「绕过统一入口」的少数路径 | SEC-03 |
+| 程序运行效率 | 进度热路径与 bundle 预算已优化到位；日志保留策略反而让现场问题不可诊断 | PERF-12 |
+| 工程门禁与可维护性 | 测试与 CI 结构健康，但多处门禁形同虚设；超大模块使同一缺陷需在多处重复修复 | ENG-01、ARC-17 |
+
+### 2026-08-26 第 4 轮复审
+
+本轮以多代理编排方式，对当前未提交工作区（HLS 模块拆分、`webdav.rs`/`ssrf.rs`/`browser_realtime.rs` 新增等约 95 个文件、+4280/−4997 行重构后的状态）做了十个维度的独立深审：并发与任务生命周期、HTTP 引擎、FTP/SFTP/WebDAV/BT 引擎、HLS/DASH 流水线、网络安全、凭据与存储、SQLite 层、前端核心、UI/i18n/可访问性、测试/CI/依赖/文档。每条候选发现均由独立评审对照代码做对抗性复核后方可登记：46 条候选中 **45 条确认、1 条驳回**（见第十二章）。本轮以静态审查为主，未重复执行构建与测试。
+
+历史遗留记分板（第 1–3 轮共 13 项跟踪项的现状）：
+
+| 遗留问题 | 现状 |
+| --- | --- |
+| pause/cancel/delete ↔ dispatch 死锁 | **仍 Open 且恶化**——Restart 路径是确定性死锁而非竞态（`ARC-32`） |
+| 调度器 slot 泄漏 | Partial——错误路径已修，panic 路径仍泄漏（`ARC-40`） |
+| SFTP 续传静默损坏 | **Closed**——双侧 seek + flush 契约 + 字节级回归测试核实有效 |
+| BT seed-ratio 不生效 | 保持 Closed |
+| SSRF DNS-rebind TOCTOU | 保持 Closed |
+| 引擎层 SSRF 缺失 | Partial——HTTP 家族已覆盖；BT 抓取与 FTP/SFTP 建连仍无防护（`SEC-03`、`SEC-12`） |
+| Metalink 并行续传错位 | Partial——原问题已修，同类根因仍在（`ARC-34`、`ARC-35`） |
+| queue-changed 全量重取 | Closed——增量路径核实有效 |
+| i18n 缺口 | Closed——7 locale × 1405 键值级校验全过 |
+| HLS/DASH staging 目录泄漏 | **仍 Open 且恶化**——DASH 连「删除任务（含文件）」都不回收（`ARC-38`） |
+| HLS/DASH segment 失败僵尸态 | **仍 Open，根因已定位**——引擎自取消伪装用户取消（`ARC-37`） |
+| DASH 续传回归 | Partial——签名 CDN 下仍全量重下（`FUN-25`） |
+| keyring 密钥轮换数据丢失 | **仍 Open 且恶化**——任意 keyring 读错误即销毁密钥（`SEC-08`） |
+
+本轮新增 30 个 ID：`UX-19`～`UX-25`、`FUN-23`～`FUN-27`、`ARC-32`～`ARC-48`、`SEC-08`～`SEC-12`、`ENG-07`～`ENG-08`。
+
+本轮最重要的结论不是任何单条问题，而是三个贯穿性的根因：
+
+1. **「引擎自取消」与「用户取消」共用同一个 token 却语义不同**。引擎在内部失败时取消调度器拥有的任务 token，supervisor 的 `is_cancelled()` 检查因此把引擎自灭误判为用户取消并跳过失败转移（`ARC-37` 的僵尸 Downloading）；`ARC-32` 的确定性死锁同属这一族「所有权边界不清」的问题。
+2. **二等引擎（Metalink/BT）缺少一等引擎已经建立的契约**。HTTP worker 要求 206 + start/end/total 全字段匹配，Metalink 只在续传时才校验且不看 end/total（`ARC-35`）；HTTP 有 ETag/If-Range 续传前置条件，FTP/SFTP 什么都不验（`ARC-42`）；Metalink 分片计划不持久化（`ARC-34`）、BT session 端口冲突（`ARC-39`）。阶段 E3 规划的跨引擎契约测试矩阵仍未建立，正是这些问题的共同背景。
+3. **信任边界缺在「最后一米」**。SSRF 守卫装在共享 client 上，字面量 IP 绕过 resolver（`SEC-10`）、BT 抓取绕过整个 client（`SEC-03`）；备份恢复校验了路径却没校验 settings（`SEC-09`）；凭据头注入了请求却没有源绑定（`SEC-11`）；keyring 读错误被当成「密钥不存在」（`SEC-08`）。
+
+六维判断（本轮）：
+
+| 维度 | 当前判断 | 首要任务 |
+| --- | --- | --- |
+| 用户交互便捷性 | 整体质量高；缺陷集中在 toast 生命周期一族（驱逐不结算、计时器重置） | UX-19 |
+| 功能丰富性和完整性 | 备份导出跨卷必败使数据安全主特性形同虚设 | FUN-23 |
+| 架构鲁棒性和稳定性 | 调度器锁序是最高优先级历史债；BufWriter 不 flush 是波及面最广的新缺陷 | ARC-32、ARC-33 |
+| 安全边界 | HTTP 核心防御扎实；缺口集中在绕过统一入口的路径与凭据头源绑定 | SEC-08 |
+| 程序运行效率 | staging 目录泄漏是当前最大的持续资源流失点 | ARC-38 |
+| 工程门禁与可维护性 | CI 门禁经抽查真实有效；文档漂移复发于 AGENTS.md 与本文自身旧文 | ENG-06 |
 
 ## 三、质量门禁实测
 
-本轮验证基于 2026-07-18 至 2026-07-19 的当前未提交工作区：
+本轮验证基于 2026-08-13 的当前未提交工作区（含 HLS 模块拆分与 PERF-10 bundle 预算脚本）：
 
 | 检查 | 结果 | 说明 |
 | --- | --- | --- |
 | `pnpm typecheck` | 通过 | TypeScript 无类型错误 |
-| `pnpm test:frontend` | 通过 | 18 个测试文件、65 项测试通过 |
-| `pnpm check:i18n` | 通过 | 7 个 locale 完整 |
+| `pnpm test:frontend` | 通过 | 36 个测试文件、151 项测试通过，13.9s |
+| `pnpm check:i18n` | 通过 | 7 个 locale 各 1390 个 key，**但只比对 key 不比对 value**，见 `FUN-21` |
 | `pnpm build` | 通过 | 生产构建通过 |
-| `pnpm test:release-tools` | 通过 | 25 项测试通过 |
+| `pnpm check:bundle` | 通过 | initial shell JS 284.0 kB gzip / 预算 340 kB；CSS 14.6 kB gzip / 预算 18 kB |
+| `pnpm test:release-tools` | 通过 | 32 项测试通过 |
 | `pnpm verify:protocol-matrix` | 通过 | 协议矩阵结构检查通过 |
-| `cargo check --manifest-path src-tauri/Cargo.toml` | 通过 | Rust 编译检查通过 |
-| `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` | 通过 | Clippy 零 warning |
-| `cargo test --manifest-path src-tauri/Cargo.toml -j 1` | 通过 | 421 项 Rust 测试通过 |
-| `pnpm lint` | 失败 | 当前未提交改动中有 6 个 Biome 格式错误，涉及 `AppShell.tsx` 和 `en/es/ja/ko/ru` locale |
+| `pnpm lint` | 审阅时**失败**，现已通过 | 当时 7 errors + 2 warnings，含 `AttentionCenter.tsx:249` 的 `noStaticElementInteractions`（非自动修复的真实 a11y 缺陷）与 `globals.css:162` 的 `noImportantStyles`。已在 `ENG-02` 修复 |
+| `cargo clippy -- -D warnings` | 通过 | 与 CI 当时的配置一致 |
+| `cargo clippy --all-targets -- -D warnings` | 审阅时**失败**，现已通过 | 当时 3 个 `items_after_test_module`：`db/dash.rs:408`、`db/hls.rs:456`、`download/http/request.rs:42`。CI 未加 `--all-targets`，因此这些错误长期逃逸。已在 `ENG-02` 修复，CI 也已收紧（`ENG-01`） |
+| `cargo test`（默认并行） | **失败** | `os error 1455`（页面文件太小）导致链接失败。这是本机资源问题而非代码问题，`-j 2` 可通过，详见 `ENG-03` |
+| `cargo test -j 2` | 通过 | 约 578 项测试通过（239 lib + 集成），需 `--skip add_torrent_source_http`，见下 |
+| `cargo test`（BT torrent 源用例） | **挂起** | `add_torrent_source_http_downloads_and_parses_private_flag` 失败、`add_torrent_source_http_fallback_on_download_failure` 永久等待 `server.await`。根因是 `SEC-03`，本批次未修 |
 
-Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及连锁元数据错误；使用单构建任务后完整测试通过。这不是已确认的代码失败，但若 hosted runner 复现，应限制 Cargo jobs 或提高 runner 资源。
+Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露出来的产品缺陷：`download_torrent_bytes`（`bt.rs:1674`）自建 reqwest client，只在 `custom_socks5_url_with_auth()` 有值时设代理，从不调用 `.no_proxy()`。由于 `Cargo.toml:29` 为 reqwest 启用了 `system-proxy`，在配置了系统代理的开发机上，指向 `127.0.0.1` 测试监听器的请求被送往系统代理，测试因此一个失败、一个死等。这同时说明**用户选择「不使用代理」时 `.torrent` 请求仍会走系统代理**。
+
+另需澄清一个被 README、CONTRIBUTING、ROADMAP 和本文同时固化的误解：`cargo test -j 1` 限制的是 **Cargo 的编译并行度**，不影响测试线程数（那是 `-- --test-threads=1`），因此它从来不可能修复测试间干扰。原始现象是本机链接阶段内存不足。真实的测试隔离隐患是 `tests/common/mod.rs:118` 在多线程测试中无保护地调用 `std::env::set_var`，见 `ENG-03`。
 
 当前自动化盲区：
 
 - 没有 Playwright、WebDriver 或 Tauri GUI 端到端测试。
-- `browser/extension-core` 没有行为测试。
+- `browser/extension-core/src/background.js`（715 行，Native Messaging 与 WS bridge 核心）没有行为测试；现有扩展测试只覆盖 `capture-policy.js`（82 行）。
 - 没有真实安装包启动、升级、卸载和浏览器接管自动化。
-- 没有同 host 多任务、同名输出并发、真实代理路由、极低限速取消、ffmpeg 删除和 BT 多任务 session 的集成测试。
-- 性能文档没有真实 1k/10k/50k 测量结果。
+- 没有覆盖率度量（Rust 与前端均无），见 `ENG-04`。
+- macOS 没有任何 Rust 测试与 clippy，平台特定代码只在 release 构建中被编译，见 `ENG-01`。
+- 没有并发创建同名多文件任务、DEFERRED 事务快照冲突的集成测试，见 `ARC-20`、`ARC-21`。
 
 ## 四、应保留的已确认优势
 
@@ -103,6 +180,14 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - 前端 task data、task UI 和 speed history 已拆分，任务列表使用游标分页、虚拟化和增量事件。
 - UI 保持密集桌面工具形态，具备命令面板、快捷键、详情抽屉、恢复动作、Tooltip、焦点环、七语言和 8 个 OKLCH 强调色。
 - `TaskProgressEmitGate` 将高频进度事件限制到至少 250ms；request diagnostics 已有保留策略。
+
+第 4 轮复审（2026-08-26）另核实以下优势，修复时不得回退：
+
+- SFTP 续传已具备完整契约：本地/远端双侧 seek（`sftp.rs:920-928`、`:894-905`）+ 「flush 后才能上报 checkpoint」约定（`:1051-1068`）+ 取消/续传字节级回归测试（`sftp_engine.rs:919-948`）。
+- HTTP 分段 worker 对 206 与 Content-Range 要求 start/end/total 全字段精确匹配（`worker.rs:252-274`），是全仓最严格的续传前置校验，应作为其他引擎对齐的范本。
+- 前端 `bindings.ts` 由 Tauri-Specta 生成，本轮逐一交叉核对 88 个 invoke 名称、参数 casing 与 enum 表示，零漂移。
+- i18n 值级校验实测通过：7 个 locale 各 1405 个叶子键，零缺失、零多余、零占位符错配、零未翻译（`FUN-21` 修复有效）。
+- HLS/DASH 重构后的段监督改用 JoinSet 并向传播 panic/join error；ffmpeg 使用 kill-on-drop 且与 cancel 竞争；加密段的发布走 `.part` + rename 原子提交。
 
 ## 五、用户交互便捷性
 
@@ -226,6 +311,69 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验证测试**：`StartupGate.test.tsx` reduced-motion 用例。
 - **验收**：开启减少动态效果后只保留静态状态文本。
 
+### UX-17（P1，Open）：无限滚动加载后列表被强制滚回选中行
+
+- **证据**：[`TaskList.tsx`](../src/components/tasks/TaskList.tsx#L347) 的 `scrollToIndex` effect 依赖 `filtered`，而 `filtered` 来自 `taskIds`；`setTaskCursorPage(..., append=true)` 追加一页会生成新数组引用，effect 因此重跑。
+- **影响**：用户向下滚动触发加载更多，新数据到达后列表立刻跳回选中行（首次加载会 `selectTask(items[0].id)`，通常是列表顶部）。滚动被打断，表现上像「加载更多没生效」。该 effect 还会与筛选变化时的 `scrollToOffset(0)` 竞争。
+- **修复方向**：该 effect 的真实意图是「选中项变化时把它滚进视口」，不是「列表变化就重新居中」。用 `lastScrolledIdRef` 去重，并改用已有的 `filteredRef` 读取最新列表，把 `filtered` 移出依赖数组。
+- **验收**：分页追加不改变滚动位置；用键盘或命令面板切换选中项时仍会滚动到目标行。
+
+### UX-18（P2，Open）：列表 ARIA 模型不一致，表单校验缺程序化关联
+
+- **证据**：三个任务列表用了三种模型——[`TaskList.tsx`](../src/components/tasks/TaskList.tsx#L769) 用 `list`/`listitem` 但给行加了 `tabIndex` 与 `aria-current`，而 [`AttentionCenter.tsx`](../src/components/workspaces/AttentionCenter.tsx#L262) 和 `QueueCenter.tsx` 用的是 `listbox`/`option`。`TaskRow` 的 DOM id 本身就叫 `task-option-${id}`，说明原始设计意图是 option。另外全仓库只有 1 处 `aria-invalid`（`NewDownloadDialog.tsx:900`），而 `role="alert"` 的错误文案有 20 处，二者之间没有 `aria-describedby` 关联。
+- **影响**：`listitem` 是非交互角色，屏幕阅读器会进入「列表浏览」而非「选择」模式，用户听到「列表项 3，共 50 项」而不是「选项 3，已选中」。设置页的数值 clamp 超限时，键盘用户得不到任何反馈。
+- **修复方向**：TaskList 统一到 `listbox` + `aria-multiselectable="true"`，行改 `option` + `aria-selected`；在 `SettingsRow` 这一层内置 `aria-invalid` / `aria-describedby` 关联，一处改动覆盖整个设置页。
+- **验收**：三个列表使用同一 ARIA 模型；校验失败时输入框与错误文案有程序化关联；用 `jest-axe` 补测试（`QueueCenter.a11y.test.tsx` 是现成模板）。
+
+### UX-19（P2，Open）：Toast 达到 20 条上限时静默驱逐待撤销删除，任务被隐藏且无法删除
+
+- **证据**：[`toast-store.ts`](../src/stores/toast-store.ts#L67) 的 `addToast` 以 `.slice(0, 20)` 丢弃最老 toast，但不像 key 去重路径（`:56-58`）、`clearToasts`（`:79-85`）与超时/X 按钮（`settleCommit`）那样结算被移除项的 `onAutoCommit`。软删除完全依赖该回调提交：`AppShell.softDelete`（[`AppShell.tsx`](../src/components/shell/AppShell.tsx#L567)）把 id 放入 `pendingDeleteIds` 后只有 toast 的 commit/undo 会调用 `deleteTask` + `removePendingDelete`；`clearPendingDeletes`（task-ui-store.ts:121）零生产调用方。`TaskList.tsx:149-155` 按 `pendingDeleteIds` 过滤行；`softDelete` 在 id 已 pending 时早退（AppShell.tsx:570），二次删除无法自愈。
+- **影响**：7 秒撤销窗口内涌入约 20 条 toast 即可触发——批量完成/失败事件每任务一条且无去重键（use-task-events.ts:154-171）。撤销 toast 被切片丢弃后 `deleteTask` 永不下发：任务从列表消失、DB 行与文件仍在、不可撤销也不可再删，重启后才「复活」。`toast-soft-delete.test.tsx` 覆盖了超时/手动/clearAll，唯独没有 cap-eviction 路径。
+- **修复方向**：slice 驱逐前对被丢弃项调用 `onAutoCommit`（与 clearToasts 同语义）；或让软删除 toast 走带 key 的替换通道避开驱逐。
+- **验收**：构造 21 条 toast 断言被驱逐的软删除已实际提交；任何驱逐路径都不在 `pendingDeleteIds` 留孤儿。
+
+### UX-20（P2，Open）：队列重排失败后乐观顺序不回滚，loading 标志永久卡死
+
+- **证据**：[`AppShell.tsx`](../src/components/shell/AppShell.tsx#L287) 先 `reorderTasksLocally(orderedIds)` 再调后端；catch 块（`:290-299`）注释称「触发刷新」但实际只执行 `setLoading(true)`——没有任何代码订阅 `loading` 来触发拉取（setLoading 只是 `set({ loading })`），唯一复位点是 TaskList role=replace loadPage 的 finally（TaskList.tsx:209-213），仅导航/排序/筛选/viewReloadToken 变化可达。
+- **影响**：后端拒绝的重排一直显示在界面上；Queue/Attention 工作区的 Load more 按钮停在「Loading more...」禁用态（QueueCenter.tsx:256-260），直到用户改导航/排序/筛选或某个无关事件触发刷新。
+- **修复方向**：catch 中真正刷新（复用 refreshTasks 或 bump viewReloadToken），不要只置 loading；顺带给乐观重排补失败回滚到上一顺序。
+- **验收**：mock `reorder_queued_tasks` 失败后列表回到服务器顺序且 Load more 可用。
+
+### UX-21（P2，Open）：Toast 计时器因依赖链断裂被任意无关渲染重置
+
+- **证据**：[`toast.tsx`](../src/components/ui/toast.tsx#L55) 的 ToastViewport 每次渲染传新的内联箭头 `onDismiss={() => dismissToast(toast.id)}` → `settleCommit([onDismiss])` → `startTimer([settleCommit])` → effect `[startTimer]`（`:130-137`、`:157-160`）。ToastItem 未 memo 化，任何 addToast/updateToast/dismissToast 都产生新数组引用并重渲染 viewport。`startTimer` 重设 `startedAtRef = Date.now()` 不扣减已流逝时间（只有 pauseTimer 做），并 `countdownKey+1` 使 CSS 倒计时条经 key 重挂载从头播放。
+- **影响**：批量操作反复更新自己的进度 toast 时（runBulkTransferAction，AppShell.tsx:392-427），所有可见 toast 的剩余寿命与倒计时条被连带重置，陈旧 toast 远超 4800ms 存活；软删除硬提交的唯一时钟就是这个 timer（UNDO_TOAST_TIMEOUT_MS），被无限期推迟，同时放大 `UX-19` 的驱逐窗口。
+- **修复方向**：`onDismiss` 用稳定引用或 ToastItem memo 化切断依赖链；`startTimer` 基于 `startedAtRef` 计算剩余时间而非归零重启。
+- **验收**：更新一条 toast 不重置其他 toast 的倒计时条动画与剩余寿命。
+
+### UX-22（P3，Open）：StartupGate 单次轮询错误即永久终止自动轮询
+
+- **证据**：[`StartupGate.tsx`](../src/components/shell/StartupGate.tsx#L44) 的轮询循环只在成功路径调度下一次 `setTimeout(check, 300)`（`:49`）；catch 直接 `setLoadError` 渲染终态 StartupFailedPage，无退避重试。tauri 层 `runCommand`（tauri.ts:90-100）与 `getStartupStatus` 均无重试包装。
+- **影响**：后端重初始化期间一次 IPC 抖动直接进失败页——即使数百毫秒后 ready 也需要用户注意到并手动 Retry。
+- **修复方向**：catch 中按次数上限指数退避继续轮询，超阈值再转失败页。
+- **验收**：前 N 次 invoke reject、之后 resolve 时 gate 自行进入就绪态。
+
+### UX-23（P3，Open）：剪贴板 / file-drop 监听器随对话框状态拆除重建，窗口期内事件丢失
+
+- **证据**：clipboard effect 的依赖数组含 `newDownloadOpen/newDownloadDraftDirty/t`（AppShell.tsx:1025），file-drop 同型（`:1122`）；依赖翻转时同步 unlisten、await IPC 后才重新注册，而这些都是 fire-and-forget 通知、无回放（tauri.ts:993-1002、1070+）。tray 监听依赖全稳定、不受影响。
+- **影响**：打开新建对话框或草稿变脏的瞬间检测到的链接静默丢失——无 toast、无预填。窗口为毫秒级 IPC 往返，命中概率低但后果是无声丢功能。
+- **修复方向**：回调依赖收进 ref 使 handler 稳定，监听器一次注册终身持有；或在重注册完成后向后端查询一次 missed 状态兜底。
+- **验收**：注册-注销窗口内触发的事件最终得到处理。
+
+### UX-24（P3，Open）：复制诊断按钮吞掉剪贴板失败仍提示「已复制」
+
+- **证据**：[`TaskRecoveryActions.tsx`](../src/components/tasks/TaskRecoveryActions.tsx#L26) 执行 `navigator.clipboard.writeText(text).catch(() => {})` 后无条件弹 info toast `recovery.errorCopied`。对比其余全部 copy 处理器（AppShell.copyTaskUrl/copyTaskLocalPath、AboutPage.copyVersion、TaskDetails.copyToClipboard、EnvironmentPanel）都有错误分支。
+- **影响**：webview 失焦/权限拒绝是 Chromium 标准拒绝场景——用户以为诊断报告已复制、实际什么都没有，故障上报流程悄悄断裂。
+- **修复方向**：对齐其他 copy 处理器的错误 toast 分支。
+- **验收**：mock writeText reject 断言出现错误提示且无成功提示。
+
+### UX-25（P3，Open）：refreshTasks / getPlatform / 目录选择器的 await 无捕获，产生无声 unhandled rejection
+
+- **证据**：[`AppShell.tsx`](../src/components/shell/AppShell.tsx#L187) 的 refreshTasks 无 try/catch，经 `void refreshTasks()`（`:379-381`）接到列表右键 Refresh（TaskList.tsx:769）；`:909` 的 `void getPlatform().then(setPlatform)` 无 `.catch`；[`SettingsPage.tsx`](../src/components/settings/SettingsPage.tsx#L866) 的 chooseDirectory/handleBrowseFfmpegPath 裸 await 且直接绑 onClick（`:1354`、`:2076`），NewDownloadDialog.tsx:694-697/:1054/:1548 同型；resolveAttention 的 choose_another_folder 分支（AppShell.tsx:891-896）在 try 范围外 await picker，由 TaskRow.tsx:932-935 fire-and-forget 调用。对照组：TaskList.loadPage 有完整 error state + `role="alert"` 重试横幅。
+- **影响**：IPC 失败时按钮毫无反馈地死掉；同一场故障走列表自身加载路径有横幅、走右键 Refresh 什么都没有。
+- **修复方向**：统一经 safeInvoke 包装（失败 toast）；至少给上述五处补 catch。
+- **验收**：mock 各自 reject 时均有用户可见反馈。
+
 ## 六、程序功能丰富性和完整性
 
 ### FUN-01（P0，Closed）：HTTP Basic Auth 探测成功后实际下载丢失 Authorization
@@ -302,7 +450,7 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 
 ### FUN-10（P1，Closed）：HLS 外部音轨和字幕是非对称的部分实现
 
-- **证据**：[`hls.rs`](../src-tauri/src/download/hls.rs) 曾直接请求原始 track URI，未相对 master URL 解析；失败只 warning 并继续。额外轨不复用主 pipeline 的 AES、byte range、EXT-X-MAP、live、重试、限速和续传能力。
+- **证据**：HLS 引擎（当时为单文件 `hls.rs`，现已拆分为 [`download/hls/`](../src-tauri/src/download/hls/)）曾直接请求原始 track URI，未相对 master URL 解析；失败只 warning 并继续。额外轨不复用主 pipeline 的 AES、byte range、EXT-X-MAP、live、重试、限速和续传能力。
 - **影响**：用户明确选择的轨道可能静默缺失，任务仍显示成功。
 - **修复**：probe/`parse_ext_x_media` 相对 master 解析为绝对 URI；`build_hls_segment_plans` + `download_hls_rendition` 复用主 pipeline；选中轨失败返回 `hls_track_failed`；live 选中轨进入同一 poll loop。
 - **验证测试**：`hls_engine.rs`（`fun10_relative_audio_track_is_resolved_and_downloaded`、`fun10_selected_track_404_fails_visibly`）；`download::hls::tests`（相对 URI resolve）。
@@ -371,6 +519,66 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 ### FUN-19（P3，Boundary）：中长期能力边界
 
 当前仍未实现稳定 CLI/JSON-RPC/REST、PAC/WPAD、云盘解析、云账号同步、插件协议、完整视频嗅探、Safari wrapper 和商店正式签名；WebDAV 仅 Basic，Metalink 资源仅 HTTP/HTTPS。这些能力应在 P0/P1 清零和协议可靠性矩阵闭环后再扩展。
+
+### FUN-20（P1，Open）：DASH / FTP / SFTP 的探测路径未接入逐任务代理
+
+- **证据**：`FUN-02` 已让下载路径全面使用 `client_for_config`，但探测侧存在三个缺口。[`dash.rs`](../src-tauri/src/download/dash.rs#L86) 的 `probe_dash` 用全局 `self.client()`，函数签名里根本没有 `proxy_config` 参数，`DashEngine::probe` 也未传 `request.proxy_config`；[`ftp.rs`](../src-tauri/src/download/ftp.rs#L149) 与 [`sftp.rs`](../src-tauri/src/download/sftp.rs#L181) 的 `probe_target` 读的是全局 `SharedProxyConfig`。对照 `probe_hls`（[`hls/engine.rs`](../src-tauri/src/download/hls/engine.rs#L287)）、`probe_metalink`、WebDAV 三者都已正确接线。
+- **影响**：为某个任务配置 Custom 代理或 Off 之后，创建阶段的探测仍走全局路由。需要代理的站点探测失败、任务建不出来；需要绕过全局代理的内网资源反被送进代理。`FUN-02` 的验收「Inherit/Off/Custom 解析正确」对这三条探测路径不成立。
+- **修复方向**：给 `probe_dash` 增加 `proxy_config: Option<&ResolvedProxyConfig>` 并按 `probe_hls` 的写法逐行对齐；FTP/SFTP 的 `probe_target` 改为消费 `ProbeRequest.proxy_config`。
+- **验收**：三个协议各有一条「Custom 代理探测成功 / Off 绕过全局代理探测成功」的集成测试；`FUN-02` 的协议覆盖表补齐探测列。
+
+### FUN-21（P1，Closed）：七个 locale 的 `errors.*` 实际未翻译，而完整性检查查不出来
+
+- **证据**：[`check-i18n-completeness.ts`](../scripts/check-i18n-completeness.ts) 曾只比对 key 路径集合的 missing/extra。7 个 locale 各约 1390 个 key，`pnpm check:i18n` 通过；但值层面 zh-CN / zh-TW 有 86 条、ja/ko/ru/es 各有 94 条 `errors.*` 是原样英文。例如 [`zh-CN.ts`](../src/i18n/locales/zh-CN.ts) 的 `authHeadersUnavailable`、`btMetadataFailed` 与紧邻的正常中文条目并列。
+- **影响**：直接推翻三处声明——AGENTS.md 的「fully translated」、`UX-11` 的验收「所有公开错误码在 7 个 locale 有映射」（key 有映射不等于用户看到本地化文案）、以及 PRODUCT.md「避免展示未加解释的原始技术码」。非英语用户在最需要理解的失败场景下看到的正是英文原文。这也是 `UX-11` 的直接遗留面：那一批把新增错误码以英文原文追加进了全部 7 个 locale。
+- **修复方向**：先给检查脚本加 value 层校验——非 en locale 若某 key 的值与 en 完全相同、包含 3 个以上英文单词、且不在白名单（`app.name`、`locale.*`、协议格式示例）内则报告；先以 WARN 输出计数，补完 `errors.*` 后升级为 FAIL。
+- **验收**：`pnpm check:i18n` 能检出值层面未翻译项；7 个 locale 的 `errors.*` 全部本地化；在此之前任何文档不得声称某 locale「完整翻译」。
+- **2026-08-13 根因**：不是「忘记翻译」，而是生成器设计如此。[`sync-stable-error-i18n.mjs`](../scripts/sync-stable-error-i18n.mjs) 的 `messageSets` 把 zh-TW / ja / ko / ru / es 直接映射到 `STABLE_ERROR_MESSAGES_EN`，只有 zh-CN 有一份硬编码的中文表。更进一步：连 zh-CN 的 `dashNoTracks` 等条目在 locale 文件里也仍是英文，说明该脚本的输出**从未真正落地**过。因此修复 `FUN-21` 需要同时处理三件事——给脚本补齐 5 个 locale 的译文、让脚本的输出与 locale 文件一致、再给 `check-i18n-completeness.ts` 加 value 校验，缺一仍会漂移。
+  本批次新增的 `dash_segment_count_too_large` 按现状登记（7 个 locale 均为英文，中文已写入 sync 脚本的 zhCN 表备用），以免在统一修复前引入一条孤立的不一致条目。
+- **2026-08-14 修复**：[`scripts/stable-error-messages.json`](../scripts/stable-error-messages.json) 成为 6 个非 en locale 的错误码译文源；`sync-stable-error-i18n.mjs` 拒绝缺译或原样英文。`check-i18n-completeness.ts` 同时比对 missing/extra key、插值占位符，以及值层未翻译项（`errors.*` 一律 FAIL；其他命名空间在 3 个以上可见英文单词且不在白名单时 FAIL）。同批补齐 ja/ko/ru/es 中站点规则等从英文粘贴的 UI 文案，并把 `SiteRulesEditor` 的错误 key `common.undo` 改为已有的 `toast.undo`。
+- **验证测试**：[`scripts/check-i18n-completeness.test.ts`](../scripts/check-i18n-completeness.test.ts)（10 项）；`pnpm check:i18n` 对 7 个 locale 各 1398 个 key 通过。beta 语言的复数/日期问题仍见 `FUN-22`，不得据此把任何 locale 写成「完整翻译」。
+
+### FUN-22（P2，Open）：复数形式缺失与日期本地化未走应用语言
+
+- **证据**：`en.ts` 有 36 处 `{{count}}` 插值，但整个 locale 目录只有 `moreFixesCount` 一个 key 提供了 `_one` 变体（[`en.ts`](../src/i18n/locales/en.ts#L1264)）。俄语 [`ru.ts`](../src/i18n/locales/ru.ts#L1272) 缺 `_few`/`_many`，而俄语需要 4 种形式。日期侧有两种写法混用：`QueueCenter.tsx:424` 与 `AttentionCenter.tsx:328` 正确传 `i18n.language`，而 `TaskDetails.tsx:2267`、`TaskRow.tsx:649`、`AboutPage.tsx:359`、`SettingsPage.tsx:2709` 用的是 `toLocale*(undefined, ...)`，取的是系统语言而非应用内所选语言。
+- **影响**：英文在 count=1 时输出「1 connections」；用户切到日语后任务行时间戳仍按系统区域显示。另外 `AttentionCenter.tsx:328` 与 `QueueCenter.tsx:424` 在组件 render 内构造 `Intl.DateTimeFormat`，而构造成本比 `.format()` 调用高 1-2 个数量级。
+- **修复方向**：句子型 `{{count}}` 补 `_one`/`_other`，俄语补 `_few`/`_many`；括号计数型（`(3)`）保持现状。新建 `src/lib/format-date.ts`，比照 [`utils.ts`](../src/lib/utils.ts#L19) 已有的 `Intl.NumberFormat` 缓存 + `languageChanged` 失效模式，统一 6 处日期格式化并一律使用 `i18n.language`。
+- **验收**：切换语言后所有日期与复数文案随之变化；组件 render 内不再构造 `Intl` 实例。
+
+### FUN-23（P1，Open）：备份导出在目标目录与应用数据不同卷时必然失败
+
+- **证据**：[`db/backup.rs`](../src-tauri/src/db/backup.rs#L74) 的 `snapshot_database_to_path` 先在 live DB 旁（app-data 卷）生成校验过的 VACUUM INTO 快照（connection.rs:213），再用 `std::fs::rename` 移到用户目标；Windows 上 rename 映射 MoveFileExW 且无 `MOVEFILE_COPY_ALLOWED`，跨卷返回 `ERROR_NOT_SAME_DEVICE`（POSIX 为 EXDEV），map_err 分支还会把好快照删掉。目标是保存对话框任一盘符（src/lib/backup.ts:21-28 → create_app_backup，commands/backup.rs:57-58 用 `dest.with_extension("sqlite.tmp")`）。
+- **影响**：C:+D: 双盘环境（本仓库作者环境即如此）备份功能 100% 失败，报「Could not move verified snapshot into place」。这是应用主打的 data-safety 特性。集成测试（backup_restore.rs:85-119）只用 live DB 同目录 sibling 路径，从未覆盖跨卷。
+- **修复方向**：rename 失败（或预判目标与源不同卷）时回退 `std::fs::copy` + 校验后再清理临时快照；或在目标卷直接落盘。
+- **验收**：模拟跨卷导出的集成测试成功且 sha256 校验通过；原同卷路径行为不变。
+
+### FUN-24（P2，Open）：DASH `$Number%05d$` 通过校验但不被替换，URL 必然 404
+
+- **证据**：`segment_template_has_unsupported_vars`（dash.rs:633-649）对 `$...$` token 只比较 `%` 前的 base，`$Number%05d$` 被放行——其注释自称「`$Number$` / `$Number%05d$` 是仅有的两种展开形式」；而 `build_segment_plans` 只做 `media_template.replace("$Number$", …)`（dash.rs:768），宽度前缀形式永不匹配，占位符原样进入 URL。
+- **影响**：spec 允许的零填充编号 MPD 全部 segment 必败（初始 + 2 次重试）；叠加 `ARC-37` 甚至僵尸而非报错。这是「校验器声称支持、实现不支持」的契约缝隙。
+- **修复方向**：替换时识别 `%0Nd%` 形式做宽度填充（推荐）；或校验阶段明确拒绝并在探测时报「不支持宽度前缀编号」。二者取其一。
+- **验收**：用 `$Number%05d$` fixture 端到端下载成功，或探测阶段结构化报错。
+
+### FUN-25（P2，Open）：签名 CDN 下 DASH 续传退化为全量重下
+
+- **证据**：`bulk_upsert_dash_segments` 的冲突保护键要求 `uri AND local_path` 均不变才保留 status/downloaded_bytes，否则重置 pending/0（[`db/dash.rs`](../src-tauri/src/db/dash.rs#L274)）；`run_dash_download` 每次会话重新抓 MPD 并重建计划（dash.rs:935-937），且先 upsert 后读 skip 集（:1011-1015）。Akamai/CloudFront 式 per-session URL 签名使 uri 全部漂移。第 3 轮登记的 DASH resume regression 在静态 URL 场景已由该 CASE 修复，本条是其残余面。
+- **影响**：暂停 90% 后恢复 → 100% 重下、进度条归零。索引键 (track_kind, segment_index) 本身对齐，无损坏，纯带宽与时间浪费。
+- **修复方向**：upsert 保护键去掉 uri 相等要求（以 track_kind + segment_index + 尺寸/时长一致为准），uri 仅作展示字段更新；或持久化首会话模板指纹校验远端内容未变。
+- **验收**：每次返回不同 query 签名的本地 mock MPD 下断言续传跳过已完成 segment。
+
+### FUN-26（P2，Open）：restore 写入 proxy_password_saved='false' 的是旧库，启动即被 pending restore 覆盖
+
+- **证据**：[`commands/backup.rs`](../src-tauri/src/commands/backup.rs#L186) 的 INSERT 目标是 `state.pool`（当前 live DB）；下次启动 `apply_pending_restore_if_any`（db/connection.rs:82 → db/backup.rs:483-508）先删 live DB 及 -wal 再 rename 覆盖，该写入连同 WAL 缓冲一起消失。备份若来自他机则标志为 true 而本机 keyring 无密码：`ResolvedProxyConfig`（proxy.rs:56-61）读到 true → `load_proxy_password()` 对 NoEntry 静默 None（proxy.rs:180）→ `custom_socks5_url_with_auth` 以空密码 `unwrap_or("")` 继续（proxy.rs:91）。
+- **影响**：设置页显示「已保存代理密码」而认证代理全部失败——正是该注释声称要防止的状态。
+- **修复方向**：把标志修正移到 `apply_pending_restore_if_any` 成功之后对恢复后的库执行；或恢复确认对话框明示全局代理密码不随备份迁移。
+- **验收**：跨机 restore 流程结束后 settings 标志与本机 keyring 实际一致。
+
+### FUN-27（P3，Open）：hls_tasks 行读取瞬时失败时选中的音轨/字幕被静默跳过
+
+- **证据**：外部轨道管线整体 gated 于 `if let Ok(Some(hls_task)) = db::get_hls_task(...)`（[`hls/engine.rs`](../src-tauri/src/download/hls/engine.rs#L520)），Err 直接以空 extra_inputs 继续——与其上方三行自身注释「Failures are visible - never warn-and-complete with missing tracks」（`:515-517`）直接矛盾。选中 URI 在创建时写入（create.rs:1065-1075）并经 COALESCE 跨会话保活（db/hls.rs:105-106），此刻真实存在。
+- **影响**：一次 SQLite 瞬时错误 → ffmpeg 不带该输入 mux，成品缺用户显式选择的字幕/音轨且标记 Completed。
+- **修复方向**：传播 Result（`?` 转 engine_error），让失败可见。
+- **验收**：mock get_hls_task Err 断言任务 Failed 而非产出缺轨文件。
 
 ## 七、项目架构的鲁棒性和稳定性
 
@@ -456,7 +664,7 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 
 ### ARC-11（P1，Closed）：HLS live 空闲退出条件实际无效
 
-- **证据**：[`hls.rs`](../src-tauri/src/download/hls.rs) 曾只在 `idle_polls >= 6 && finish == true` 时退出，但 finish 在循环顶部已独立退出；target duration 未 clamp，poll sleep 不可取消。
+- **证据**：HLS 引擎（当时为单文件 `hls.rs`，现已拆分为 [`download/hls/`](../src-tauri/src/download/hls/)）曾只在 `idle_polls >= 6 && finish == true` 时退出，但 finish 在循环顶部已独立退出；target duration 未 clamp，poll sleep 不可取消。
 - **影响**：源停止更新或声明超大 target duration 时永久占用任务槽。
 - **修复**：live-like 空闲阈值独立进入 `WaitingNetwork`（`hls_live_idle`）；`HLS_MAX_TARGET_DURATION_SECS=60`；poll sleep 用 `select!` 等待 cancel/finish。
 - **验证测试**：`hls_engine.rs`（`live_idle_polls_enter_waiting_network`、`oversized_target_duration_poll_sleep_is_clamped`、`cancel_during_live_poll_sleep_pauses_cleanly`）；`download::hls::tests::clamps_oversized_target_duration`。
@@ -494,33 +702,262 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验证测试**：`sftp_engine.rs`（`arc15_list_and_forget_known_host_then_retofu`、`probe_fails_on_host_key_mismatch`）；`SftpKnownHostsEditor.test.tsx`。
 - **验收**：密钥不匹配默认 fail closed，显式 forget 后可接受新 key，不能静默覆盖旧 key。
 
-### ARC-16（P2，Open）：下载错误类型化仍主要停留在边界包装
+### ARC-16（P2，Closed）：下载错误类型化仍主要停留在边界包装
 
-- **证据**：download 模块仍大量使用 `Result<_, String>`，恢复逻辑需要从字符串或嵌套 JSON 重新解析错误。
-- **影响**：错误码、重试策略和跨协议恢复行为容易随文案重构漂移。
-- **改进**：按网络、认证、代理、远端变化、磁盘、工具缺失、格式不支持和取消逐步迁移到 typed errors，command 层统一输出稳定 payload。
-- **验收**：scheduler 只匹配错误 code，不匹配人类文案；source chain 仍可复制诊断。
+- **证据**：曾靠英文子串推断 resume/失败分流；`task_resume` 返回 plain string。
+- **修复**：resume 路径改为 `AppErrorPayload` JSON（`remote_changed` / `resume_unavailable` / `temp_file_*` / segment codes）；集中 `NEEDS_ATTENTION_CODES` + `code_from_stored`（仅列或 JSON `.code`）；`mark_download_failed` / `task_error_code` / `error_state_from_message` 去掉 substring fallback。全引擎 `DownloadError` variant 迁移仍可后续推进。
+- **验收**：改 message 文案不影响 NeedsAttention/Failed；历史非 JSON 行不再猜码。
+- **验证**：`cargo test -j 1 --manifest-path src-tauri/Cargo.toml --lib task_resume::`；`cargo test -j 1 --manifest-path src-tauri/Cargo.toml --test segments`（resume / arc16_*）。
 
-### ARC-17（P2，Open）：超大模块扩大变更影响面
+### ARC-17（P2，Partial）：超大模块扩大变更影响面
 
 - **证据**：SettingsPage、TaskDetails、HLS、DASH、Metalink 和 BT 同时承担解析、I/O、状态、渲染或编排中的多项职责。
-- **改进**：按现有边界逐步拆分，不做机械小文件化。优先抽出 browser settings draft、query controller、manifest parser、transfer plan、remux process 和 BT session registry。
-- **验收**：公共行为不变，纯模块获得直接测试，核心文件不再同时承担四类职责。
+- **本批已做**：
+  - HLS：[`download/hls/{mod,engine,playlist}.rs`](../src-tauri/src/download/hls/) — manifest parser 与 engine 分离，原 parser 单测迁至 `playlist`。
+  - TaskDetails：抽出 [`use-task-detail-queries.ts`](../src/hooks/use-task-detail-queries.ts)（segments/requests/events/torrent 轮询门控）；[`TaskDetails.test.tsx`](../src/components/shell/TaskDetails.test.tsx) 覆盖 tab 门控。
+- **仍未做（checklist）**：DASH/Metalink parser 抽取、transfer plan、remux process、BT session registry、Settings draft hook。
+- **验收（Partial）**：公共行为不变；抽出的 parser / query controller 可直接测试。全量六域拆分不在本批 Closed。
+- **验证**：`cargo test -j 1 --manifest-path src-tauri/Cargo.toml --lib download::hls::`；`cargo test -j 1 --manifest-path src-tauri/Cargo.toml --test hls_engine`；`pnpm test:frontend`（TaskDetails）。
 
 ### ARC-18（P2，Fixed locally）：文档版本和能力声明漂移
 
 - **实现**：README、AGENTS、ROADMAP、performance baseline、浏览器说明和发布示例已同步到 `0.3.0` 当前事实；`0.2.0` 专项审计保留原版本并明确标记为历史快照。
 - **剩余风险**：协议实现或发布 profile 变化后，README、协议矩阵、浏览器权限说明和商店材料仍可能再次漂移。
 - **验收**：增加自动文档检查，覆盖主要当前态文档的版本、release capture 边界和关键能力声明；在此之前保持 Fixed locally，不标记 Closed。
+- **2026-08-13 复核**：漂移已按预期复发，且代价高于预期。`AGENTS.md` 与 README 曾把 6 项已修复的 P0 继续列为 active blockers，`AGENTS.md` 常量表有 4 项过时（设置 29→33 键、分区 7→11、`hls.rs` 路径、`ARC-11` 描述、以及一条代码中不存在的「DASH progress interval 500ms」）。本轮已人工修正，但**只要自动检查不落地，下一轮仍会复发**。这是所有文档类问题的根因，优先级应从 P2 提升到 P1。
+
+### ARC-19（P0，Closed；协调器排空残留见下）：FTP/SFTP 取消时中止未落盘的 worker，续传写出零字节空洞
+
+- **证据**：[`ftp.rs`](../src-tauri/src/download/ftp.rs#L416) 与 [`sftp.rs`](../src-tauri/src/download/sftp.rs#L523) 的协调器在检测到取消后直接 `return Ok(())`，`workers: JoinSet` 随栈帧 drop —— **drop JoinSet 会 abort 所有仍在运行的 worker**。而 worker 是先通过 channel 上报 offset、再把数据攒在 256 KB `BufWriter` 里（[`ftp.rs`](../src-tauri/src/download/ftp.rs#L873)），协调器每秒把该 offset `force_checkpoint` 落库。对照 HTTP 协调器（[`coordinator.rs`](../src-tauri/src/download/http/segmented/coordinator.rs#L416)）明确等待 `active_workers` 归零，注释也点名了这个风险。
+- **影响**：暂停、取消、删除或退出 FTP/SFTP 任务时，DB 中的 `downloaded_until` 最多可比磁盘实际字节多 256 KB × 并发数。恢复时 worker `seek(offset)` 继续写，中间那段是预分配的零字节 —— **最终文件静默损坏，且在没有校验和时无法察觉**。`ARC-03` 只为 HTTP 关闭了这个问题。
+- **修复方向**：取消分支改为「排空 JoinSet + 采纳 worker 返回的权威 offset + 再 checkpoint」，与 HTTP 对齐，并加有界兜底超时。更彻底的做法是让 worker 只在 `file.flush()` 之后才上报进度，使「已上报字节」永远不超过「已落盘字节」。建议与 `ARC-31` 的协调器合并一起做，避免在两个文件里各修一遍。
+- **验收**：FTP 与 SFTP 各有一条集成测试——传输中取消后，磁盘实际字节数不小于 DB 记录的 `downloaded_until`，且续传后文件哈希与完整下载一致。
+- **2026-08-13 修复**：调研发现问题描述只对了一半，实际有两个 bug 面，且早退点是 6 处而非 2 处（含所有 `?`）。第二个 bug 面是：worker 取消时 flush 后已把正确 offset 写进 DB，但协调器内存里仍是陈旧值，紧接着的 `force_checkpoint` 用无守卫的 UPDATE 覆盖回去。因此只加排空并不能修复。
+  实际采用的是**建立不变式**而非逐点堵漏：worker 稳态循环改为 `flush()` 之后再上报（[`ftp.rs`](../src-tauri/src/download/ftp.rs)、[`sftp.rs`](../src-tauri/src/download/sftp.rs)），使「已上报字节 ≤ 已落盘字节」恒成立。有了它，**所有** 早退点（含 abort）自动安全，因为协调器内存值永远不会超过磁盘。另外三个取消出口（循环顶部、读 `select!`、限速器）统一为 flush → 上报 → 写 DB；其中限速器那一处此前连 flush 都没有，SFTP 的两处则用 `let _ =` 吞掉了 flush 错误——现已改为 flush 失败就不上报（不可持久化的 offset 绝不能发布）。
+- **未做（残留，P2）**：协调器仍在取消时提前 `return` 而非排空 `JoinSet`。有了上述不变式后这不再是正确性问题，只影响取消时白白重下的字节数。应与 `ARC-31` 的 FTP/SFTP 协调器合并一起做，避免在两个文件里各写一遍排空逻辑。
+- **验证**：`cargo test --test ftp_engine --test sftp_engine`（12 + 18 通过），`download_pauses_mid_transfer_and_resumes_from_persisted_offset` 新增两处断言——运行期与取消后均校验 `metadata(temp).len() >= downloaded_until`，并逐字节比对已检查点的前缀与源数据（可捕获「长度对但中间是零」的变体）。
+- **测试局限（诚实记录）**：把上报移回 flush 之前做红灯验证时，测试**没有变红**。原因是该场景下 worker 正常走取消出口（有 flush），最终状态仍一致；真正的空洞需要 worker 被 `JoinSet` drop 所 abort，而那是难以在集成测试中稳定构造的时序竞态。因此这两条断言是**必要条件而非充分条件**，修复的正确性依据是上述不变式论证，不应宣称已由测试证明。
+
+### ARC-20（P0，Closed）：多文件任务的文件行在事务外插入，冲突留下半创建脏任务
+
+- **证据**：任务行在 [`create.rs`](../src-tauri/src/commands/tasks/create.rs#L944) 已经 commit，之后文件行在 [`create.rs`](../src-tauri/src/commands/tasks/create.rs#L1103) 逐条裸插入（`insert_task_file_record` 走 `&state.pool`，无事务）。而 `task_files.final_path` 上有 `ARC-02` 建立的部分唯一索引（[`001_init.sql`](../src-tauri/src/db/migrations/001_init.sql#L458)）。
+- **影响**：两个并发的 Metalink/BT 多文件任务包含同名文件时，双方读到相同的 `reserved` 集合后各自逐条插入；第 K 条命中唯一索引冲突后 `?` 直接向上抛错，而**前 K-1 条文件行已落库、tasks 行已 commit、无回滚也无重试**。数据库里留下文件列表残缺的任务，调度器会按残缺列表下载并标记完成，用户拿到不完整产物。这是静默数据损坏，意味着 `ARC-02` 对多文件任务并未真正闭合。
+- **修复方向**：把 `insert_task_record_in_tx` + 全部 `insert_task_file_record_in_tx`（该函数已存在）+ `insert_task_event_in_tx` 收进同一个 `begin_immediate` 事务，并纳入现有的 32 次重试循环；`create_dir_all` 移到事务外先做。
+- **验收**：并发创建两个包含同名文件的多文件任务，断言任务数与文件行数一致、无残缺任务；失败路径不留下任何已提交的任务行。
+- **2026-08-13 修复**：新增 [`db::insert_task_with_files_in_tx`](../src-tauri/src/db/task_records.rs) 与 pool 级包装 `insert_task_with_files`（`insert_task_file_record_in_tx` 此前已存在但生产代码零调用）。[`create.rs`](../src-tauri/src/commands/tasks/create.rs) 的重试循环改为：事务**外**读预留快照并调用 `task_file_records_from_probe`（它每个文件都要 `create_dir_all` 并 stat 文件系统，放进事务会在持写锁期间做磁盘 IO，把偶发冲突换成永久串行化），事务**内**只做两类 INSERT 再 commit。快照过期由部分唯一索引兜住，整体回滚后带着新快照重试——标准的乐观并发控制。
+- **验证**：`cargo test --test path_reservation`（4 通过），新增 `arc20_file_row_conflict_rolls_back_the_task_row`：32 个 worker 规划相同的文件路径但不同的任务路径，使唯一冲突只可能发生在 `task_files` 上，断言恰好 1 个成功且失败者不留下任何 `tasks` 行。按旧路径这条断言必然失败（32 个 worker 都会先提交 task 行）。
+
+### ARC-21（P0，Closed）：写事务普遍使用 DEFERRED，读后写路径会命中 `SQLITE_BUSY_SNAPSHOT`
+
+- **证据**：全仓库只有 [`state_machine.rs`](../src-tauri/src/state_machine.rs#L206) 使用 `db::begin_immediate`，其余 20 余处写事务都是默认 DEFERRED，其中包括 `ARC-02` 的路径预留循环——[`create.rs`](../src-tauri/src/commands/tasks/create.rs#L866) 先 `list_reserved_final_paths` 读快照，再 `insert_task_record_in_tx` 写。[`connection.rs`](../src-tauri/src/db/connection.rs#L35) 的注释已经把这个失效模式写清楚了。
+- **影响**：`PRAGMA busy_timeout` 对 `SQLITE_BUSY_SNAPSHOT` **不生效**，SQLite 不会为快照升级冲突重试而是立即返回。更糟的是 `create.rs` 的重试循环只识别唯一索引冲突（`is_final_path_unique_conflict`），BUSY_SNAPSHOT 不匹配就直接 `return Err`，用户看到一条不可理解的 SQLite 错误。连接池 16 条连接下，剪贴板监听 + 浏览器 WS 桥 + UI 批量创建可以轻易触发并发。
+- **修复方向**：所有「读后写」事务改用 `db::begin_immediate`（至少 `create.rs:867`、`task_records.rs:774`、`segments.rs:381`、`task_files.rs:136/196` 及 `task_state.rs` 相关处）；复用 `state_machine.rs` 已有的 busy 判定逻辑，把 BUSY/BUSY_SNAPSHOT 也纳入重试。
+- **验收**：8 个同名任务并发创建，断言得到 8 个不同的 `final_path` 且无错误；高频 checkpoint 与批量创建并发下无用户可见的 SQLite 错误。
+- **2026-08-13 修复**：调研把必改范围从 20 余处收窄到 **2 处**——其余事务的第一条语句就是写，走的是普通 `SQLITE_BUSY`，`busy_timeout=5000` 能兜住。两处分别是 `create.rs` 的路径预留循环和 [`segments.rs`](../src-tauri/src/db/segments.rs) 的 `split_largest_remaining_segment`（两次 SELECT 后才 UPDATE + INSERT，且注释明确说它为并发设计，却用了最危险的 DEFERRED 组合），均改为 `begin_immediate`。
+  BUSY 判定与退避从 [`state_machine.rs`](../src-tauri/src/state_machine.rs) 下沉到 [`db/connection.rs`](../src-tauri/src/db/connection.rs) 的 `is_sqlite_busy_message` / `sqlite_busy_backoff` / `SQLITE_BUSY_MAX_ATTEMPTS`，`state_machine` 改为薄包装，保持单一来源。`create.rs` 复用同一套 20/40/80/160ms 退避，且 BUSY 重试使用**独立计数**，不与 32 次唯一冲突重试共享预算。
+- **验证**：`cargo test --test path_reservation` 的 `arc21_concurrent_multi_file_creates_all_commit`（32 并发 × 每任务 8 个文件行，全部提交成功）。
+
+### ARC-22（P0，Closed）：DASH 分片数由清单决定且无上限
+
+- **证据**：[`dash.rs`](../src-tauri/src/download/dash.rs#L373) 的 `segment_count` 由 `period_seconds × timescale / duration` 算出，没有任何上界；[`dash.rs`](../src-tauri/src/download/dash.rs#L715) 随即按这个数量构造 `Vec<DashSegmentPlan>`，每个元素含 5 个 String/PathBuf。
+- **影响**：一个 `mediaPresentationDuration="PT10000H"` 配 `duration="1" timescale="90000"` 的 MPD 会算出约 3.24×10¹² 个分片，直接 OOM 崩溃；量级较小时也会把它们全部写进 SQLite。`ARC-10` 给控制面 body 加了 64 MiB 上限，但**解析后的结构体数量没有任何上限**。
+- **修复方向**：加 `DASH_MAX_SEGMENTS_PER_REPRESENTATION`（建议 100_000）并在计算后立即校验，返回结构化 `dash_segment_count_too_large`；对 `SegmentSource::List` 的长度与 `all_plans` 总量施加同类上限；`parse_iso8601_duration` 结果做合理性检查（例如拒绝超过 30 天）。
+- **验收**：fixture corpus 中加入超大 duration / 超小 segment duration 的 MPD，断言在解析阶段被拒绝且不产生残缺文件，进程内存不增长。
+- **2026-08-13 修复**：新增 `DASH_MAX_SEGMENTS_PER_REPRESENTATION = 100_000` 与结构化错误码 `dash_segment_count_too_large`（已登记进 [`stable-error-codes.ts`](../src/lib/stable-error-codes.ts) 及 7 个 locale）。校验分两层：解析期的 `template_segment_count`（顺带消除了原本重复两遍的分片数计算），以及 `build_segment_plans` 入口的统一上限——后者是必要的，因为 SegmentList 的长度只受 `CONTROL_PLANE_MAX_BYTES` 约束，走不到解析期的模板检查。
+- **验证**：`cargo test --lib download::dash::`（16 通过），新增 4 项：超大 duration 拒绝、边界值（正好等于上限）必须放行、SegmentList 在计划构建器被拒绝、非有限比值饱和到上限而非回绕。
+
+### ARC-23（P1，Open）：退出时嵌套 timeout 使 abort 分支不可达，worker 被 detach
+
+- **证据**：[`lib.rs`](../src-tauri/src/lib.rs#L131) 的 `shutdown_active_downloads` 中，`join_all` 内每个 future 的 `sleep(timeout)` 与外层 `tokio::time::timeout(timeout, join_all)` 用的是**同一个值**。外层几乎必然先触发并 drop `join_all`，内层的 `handle.abort(); handle.await` 永远执行不到。
+- **影响**：drop `JoinHandle` 只是 detach 而非 abort。超时退出时 supervisor task（含引擎、ffmpeg 子进程、打开的 BufWriter）继续运行到进程被 OS 回收，这段时间里仍在写临时文件与 SQLite，而 DB 可能已开始收尾，产生半写状态。`ARC-03` 验收中的「shutdown abort 后再次 await」在当前代码里没有生效。
+- **修复方向**：改为两轮——先用 `timeout` 等待优雅退出，再对 `!handle.is_finished()` 的逐个 `abort()` 并 `await`（abort 后 await 是即时的）。避免嵌套同值 timeout。
+- **验收**：构造一个不响应取消的 worker，断言退出流程在有界时间内完成且该 worker 确实被 abort。
+
+### ARC-24（P1，Open）：Metalink 并行下载任一镜像失败即删除全部 part 文件
+
+- **证据**：[`metalink.rs`](../src-tauri/src/download/metalink.rs#L672) 在 `worker_errors` 非空时调用 `cleanup_metalink_part_files`，删除全部 `{temp}.part-*`。
+- **影响**：3 路并行下载 3 GB 文件时，若其中 1 路的所有镜像耗尽，另外 2 GB **已完整落盘且本可续传**的数据被无条件删除，用户重试从 0 开始。注释里「不能从部分 range 拼装出有效输出」是对的，但结论错了——不能拼装不等于必须删除。
+- **修复方向**：保留 part 文件让下次 dispatch 进入 resume 模式。前提是分片计划必须稳定：当前 `worker_count = min(healthy_mirrors, 3)` 是运行时算的，健康镜像数变化会让 range 边界漂移。因此修复必须配套把 `worker_count`/`total_size`/各 range 边界持久化，恢复时校验一致才复用 part，否则才清理。
+- **验收**：模拟一路镜像全部失败，断言其余 part 保留；再次 dispatch 时只补缺失 range；分片计划变化时能正确检测并清理。
+
+### ARC-25（P1，Open）：Metalink 两条读循环缺少空闲超时与取消竞争
+
+- **证据**：[`metalink.rs`](../src-tauri/src/download/metalink.rs#L1090) 与 [`metalink.rs`](../src-tauri/src/download/metalink.rs#L1349) 都是裸 `response.chunk().await`，取消检查在 chunk 到达之后。对照其余引擎均走共享 helper（`hls/engine.rs:1137`、`dash.rs:1271`、`ftp.rs:835`、`sftp.rs:968`、`worker.rs:322`）。
+- **影响**：两点。其一，镜像建连成功后不再发数据（黑洞/半开连接）会让 Metalink 任务**永久挂起**，同时占用调度槽、host 槽、限速器和一个 DB 连接；[`download/mod.rs`](../src-tauri/src/download/mod.rs#L42) 声称「每个协议共享同一个 60 秒静默阈值」，Metalink 是反例。其二，停滞连接上的暂停/删除永远不收敛（`ARC-04` 只修了限速器等待）。
+- **修复方向**：改用 `select!` 竞争 cancel token 与 `read_with_idle_timeout`，新增 `metalink_mirror_stalled` 结构化错误码。`metalink.rs` 已经 import 了 `READ_IDLE_TIMEOUT`，只是仅用于清单抓取，数据面漏了。
+- **验收**：本地假服务器建连后不发数据，断言 60 秒内返回 `metalink_mirror_stalled`；停滞状态下取消在秒级收敛。
+
+### ARC-26（P1，Open）：FTP/SFTP 建连无超时，各引擎探测无整体超时
+
+- **证据**：[`ftp.rs`](../src-tauri/src/download/ftp.rs#L1210) 的 `AsyncFtpStream::connect` 与 [`sftp.rs`](../src-tauri/src/download/sftp.rs#L1291) 的 `client::connect` 都是裸调用。HTTP 侧 [`http/mod.rs`](../src-tauri/src/download/http/mod.rs#L384) 只设了 `connect_timeout`，注释对流式下载体是正确的，但**探测用的 HEAD / ranged-GET 是短请求，应当有总超时**。
+- **影响**：FTP/SFTP 连到黑洞地址时 TCP connect 走 OS 默认（Linux 约 130s、Windows 约 21s），登录与握手阶段则完全没有上界。这条路径也用于新建对话框的目录探测，用户点「探测」后 UI 长时间无响应且无法取消。HTTP 侧若服务器接受连接却不返回响应头，`send_head_with_retry` 会永久挂起并重试 3 次。
+- **修复方向**：FTP/SFTP 建连包 `tokio::time::timeout(30s)` 并返回结构化超时码；探测请求单独设 `timeout(30s)`（不影响下载体）；`ProbeRequest` 增加 `CancellationToken` 字段，让对话框的「取消探测」能真正中断。
+- **验收**：连接黑洞地址时探测在 30 秒内返回结构化错误；对话框取消能立即中断进行中的探测。
+
+### ARC-27（P1，Open）：HTTP 分段重试的退避 sleep 不可取消
+
+- **证据**：[`worker.rs`](../src-tauri/src/download/http/segmented/worker.rs#L113) 直接 `tokio::time::sleep(retry_after 或退避)`，没有与 cancel token 竞争。其余五个引擎（HLS、DASH、FTP、SFTP、Metalink）**全部**使用了 `select!`，唯独主力协议 HTTP 没有。
+- **影响**：服务器返回 429/503 且 `Retry-After: 60`（上限 60s）时点暂停，worker 会睡满 60 秒。而 `pause_task` 只等 5 秒就放弃 join 并执行状态转移，随后 worker 醒来继续发请求、继续写 checkpoint，与「已暂停」的 DB 状态冲突。
+- **修复方向**：用 `select!` 竞争 `cancel_token.cancelled()`，取消时先上报当前 offset 再返回。顺带把 `retry_delay` 中每次调用都读环境变量的 `VIBE_FAST_RETRY_DELAYS` 改为 `OnceLock<bool>` 缓存。
+- **验收**：`Retry-After: 60` 期间取消，断言 worker 在秒级退出且不再写入 checkpoint。
+
+### ARC-28（P1，Open）：BT 探测每次新建 librqbit Session、从不关闭、共享固定目录
+
+- **证据**：[`bt.rs`](../src-tauri/src/download/bt.rs#L307) 每次 probe 都 `std::fs::create_dir_all` 一个固定路径 `temp_dir()/vibe-downloader-bt-probe` 并 `Session::new`。同文件的测试注释（`bt.rs:1943`）自己写明了 librqbit 的 Session 总会绑定固定 UDP 端口的 DHT 监听器，两个并发 Session 会以 Windows os error 10048 失败。
+- **影响**：三重问题。探测期间若有任何 BT 下载在跑，探测就会失败；两个并发探测互撞；`api` 出作用域只是 drop `Arc`，DHT/tracker/accept 后台任务没有被显式关停，每次探测都可能留下常驻任务。此外 `std::fs::create_dir_all` 在 async 上下文中阻塞 Tokio worker（`api_for_output_folder` 那侧已改用 `tokio::fs`，探测这侧漏改）。
+- **修复方向**：对 `.torrent` 字节根本不需要 Session —— `librqbit::torrent_from_bytes` 已经在 `parse_torrent_private_flag` 和 `tracker_statuses_from_torrent_bytes` 中被这样使用，只有 magnet 才真正需要联网取 metadata。magnet 路径复用 `BtEngine` 的 session 注册表，或至少使用唯一目录、显式 forget、加 `BT_METADATA_TIMEOUT` 超时并在结束后清理。
+- **验收**：一个 BT 任务下载中同时探测另一个 torrent 能成功；两个并发探测互不影响；探测结束后无残留目录与后台任务。
+
+### ARC-29（P2，Open）：BT 限速不实时同步，且不计入全局令牌桶
+
+- **证据**：[`bt.rs`](../src-tauri/src/download/bt.rs#L436) 只在获取 session 时传入一次 `speed_limiter.current_limit_bps()`，其后 1000 余行的下载循环中再没有 `sync_session_download_limit` 调用。
+- **影响**：用户在 BT 任务下载过程中修改全局限速或任务限速不会生效（其余六个引擎都通过共享 `Arc<GlobalSpeedLimiter>` 实时生效）。反过来，BT 的实际流量也不计入全局令牌桶，因此「全局 10 MB/s」在有 BT 任务时会被突破。
+- **修复方向**：在 BT 主循环已有的 1 秒 tick 中重新读取并同步 session 限速。「BT 流量不计入全局桶」是 librqbit 的架构限制，至少应在设置界面明确标注，或把 BT 会话限速设为全局剩余量的估算值。
+- **验收**：下载中修改限速在数秒内对 BT 生效；设置界面对全局限速与 BT 的关系有明确说明。
+
+### ARC-30（P2，Open）：错误分类仍有多处依赖英文子串（`ARC-16` 遗留面）
+
+- **证据**：`ARC-16` 已让 resume 路径改用结构化 payload，但以下位置仍在匹配文案：[`dash.rs`](../src-tauri/src/download/dash.rs#L1542) 用 `error.contains("canceled")` 判断取消（而 `run_cancellable` 返回的是硬编码英文 `"Download canceled."`）；[`actions.rs`](../src-tauri/src/commands/tasks/actions.rs#L732) 用 `contains("concurrently")`/`contains("already")` 统计批量操作的 skipped；[`sftp.rs`](../src-tauri/src/download/sftp.rs#L869) 用 `contains("permission")`；[`probe_error.rs`](../src-tauri/src/download/probe_error.rs#L53) 有 20 余条基于 OS/库英文错误串的分类。
+- **影响**：DASH 的取消判定最危险——文案一旦改动或本地化，取消会被当作真实失败上报为 `dash_ffmpeg_failed`。批量操作的成功/跳过/失败统计也会随措辞漂移。
+- **修复方向**：取消判定改用 `cancel_token.is_cancelled()` 这一权威来源；批量统计改按 `AppErrorPayload.code` 分派；SQLite BUSY 判定改用 sqlx 的结构化 error code；`probe_error.rs` 优先使用 reqwest 的类型化谓词与 `std::io::ErrorKind`，英文子串只作最后兜底并记录 debug 日志。`task_resume.rs` 已有的 `resume_errors_dispatch_on_code_not_message_text` 测试确立了这条原则，只是没有推广。
+- **验收**：修改任意错误文案不影响取消判定、批量统计与状态分流；新增对应回归测试。
+
+### ARC-31（P2，Open）：超大模块与跨引擎重复代码（`ARC-17` 的量化补充）
+
+- **证据**：Rust 侧 `hls/engine.rs` 2283 行、`metalink.rs` 2256、`bt.rs` 2036、`dash.rs` 1899、`create.rs` 1690、`browser.rs` 1670、`ftp.rs` 1606、`sftp.rs` 1535；前端侧 `SettingsPage.tsx` 2623、`TaskDetails.tsx` 2195、`NewDownloadDialog.tsx` 1859、`AppShell.tsx` 1538、`Palette.tsx` 1146。可安全抽取的重复：`percent_decode_*` 在 ftp/sftp/webdav 有三份逐字节等价实现；`apply_forwarded_headers` 在 http/hls/dash/webdav 有四份完全相同实现；**FTP 与 SFTP 的协调器有约 600 行近乎逐行相同的代码**。
+- **影响**：这不是代码洁癖问题，而是修复成本的乘数。`ARC-19` 必须在 ftp.rs 和 sftp.rs 各修一遍，将来也会在两处各退化一遍。`SettingsPage.tsx` 用 53 个 `useState` 镜像一个 `AppSettings`，新增一个设置项要改 5 处，极易漏改。
+- **修复方向**：抽 `download/segment_coordinator.rs`，用 `trait SegmentTransport` + `CoordinatorConfig` 统一 FTP/SFTP（与 `ARC-19` 一起做）；把三份 `percent_decode_*` 与四份 `apply_forwarded_headers` 收敛到共享模块；前端按 `ARC-17` 已列的 checklist 推进，建议顺序为 SettingsPage（有测试覆盖、风险最低）→ AppShell（只抽 hook 不动 JSX）→ TaskDetails → NewDownloadDialog。
+- **验收**：公共行为不变；FTP/SFTP 共用同一协调器且取消语义只有一处实现；上述四个前端巨型组件各降到 400 行以内。
+
+以下 `ARC-32`～`ARC-48` 为 2026-08-26 第 4 轮复审新增。
+
+### ARC-32（P0，Open）：pause/cancel/delete/restart 持每任务运行时锁内联 await dispatch，与调度器锁构成环
+
+- **证据**：`dispatch_inner` 全程持调度全局锁（scheduler/mod.rs:111），而 `start_task` 第一步（先于任何 DB 读）就取 `task_runtime_locks.lock(task.id)`（mod.rs:270）。同时 pause_task（actions.rs:208 取锁、:274-278 **内联 await dispatch**）、cancel_task（:437/:497-501）、delete_task（:514/:557-561，guard 直到 :564 才 drop）、resolve_task_attention(Restart) → restart_task_from_beginning（guard actions.rs:761 → tasks.rs:784-788 await）都是「持任务锁 → 等调度锁」。resume/retry/mirror-retry 已 spawn 化规避（tasks.rs:654-668 的注释明说此危害），这四条路径从未转换。
+- **影响**：经典循环等待。最坏路径是**确定性**的：Restart 把任务置回 queued（db/task_state.rs:578，retry_after_at=NULL）后内联 dispatch——只要有空闲槽（NeedsAttention 任务常态），dispatcher 快照到该任务并对同一线程已持有的运行时锁再次加锁，无条件挂起。暂停 Queued 任务是受支持流程（Pause-all 目标含 queued，actions.rs:698）。一旦卡死，后续一切 dispatch 与尾部内联 dispatch 的命令（settings.rs:280、create.rs:1222 等）永久排队直至重启。这是自 2026-06-30 起跟踪的死锁的最终确认与加重版。
+- **修复方向**：四处统一改为 spawn dispatch（照抄 resume/retry 范式）；中期把「dispatcher 锁外快照、start_task 内取任务锁」的锁序文档化并加回归测试。
+- **验收**：「dispatch tick 进行中对同一 Queued 任务 Pause / Delete / Restart」三条竞态集成测试通过；Restart 在空闲槽位下立即完成。
+
+### ARC-33（P0，Open）：分段 HTTP worker 三条早退路径不 flush BufWriter，动态加速几乎必然造成成品静默缺字节
+
+- **证据**：[`worker.rs`](../src-tauri/src/download/http/segmented/worker.rs#L352) 的 `download_segment_once` 有三条上报 offset 后 `return Ok` 却**不调用 file.flush()** 的路径：(1) `offset > current_end` 早退（:351-357）；(2) `write_len <= 0` 早退（:361-363）；(3) 加速收缩范围后的 partial-chunk 写（:419-424）。写侧是 tokio BufWriter（256 KiB，无 Drop flush，tokio 文档明确要求手动 flush）。其余所有出口（cancel :310/:338、limiter-cancel :384、流结束 :427）都显式 flush 以维持 :382-383 注释的不变量「checkpointed downloaded_until 不能超前于磁盘事实」。retryable 错误出口（:325-334）同样不 flush，而 retry 从 failure.downloaded_until（:103）续跑而非磁盘位置，属同类缺口。
+- **影响**：`maybe_accelerate_segments`（coordinator.rs:606-766）收缩活跃 worker 的 range_end AtomicI64（:688-690）而服务器按旧 Range 继续推流 → 几乎每次成功的分段加速都经 (1)/(3) 退出，最多丢 256 KiB 缓冲尾。下游无法兜底：协调器把上报 offset 落库（runtime_progress.rs:177-185），预分配使 temp 尺寸恒等于 total_size（file_ops.rs:165-180）令尺寸检查失效（coordinator.rs:515-521），rename 发布带洞文件——无任何报错，除非用户手动哈希校验。默认功能、高频触发、静默损坏，故为 P0。
+- **修复方向**：所有 `return Ok` 路径统一 flush 后再上报 offset；更彻底的做法是把「flush 才能上报进度」做成类型级契约（封装 writer，使 offset 上报方法强制先 flush）。
+- **验收**：加速 split 触发前后的全文件字节比对集成测试；缓冲非空的早退路径字节级断言（参照 sftp_engine.rs:919-948 的 prefix 比对模式）。
+
+### ARC-34（P1，Open）：Metalink 并行续传按「当前健康镜像数」重算分片边界，镜像集变化即错位拼接
+
+- **证据**：`download_metalink_file_parallel`（metalink.rs:465,487-507）每次 invocation 以 `mirrors.len()`（list_healthy_mirrors_for_file 过滤 supports_range/cooldown/status，db/metalink.rs:271-299）重算 N 等分；resume 只要任一 part 存在即进入（:522-524），worker 把 part 文件长度当作**新**边界内的进度：`effective_start = range_start + already_downloaded`（:956,968）。计划边界无处持久化（001_init.sql:377-390 + 002_metalink_health.sql 只有健康字段）。镜像集双向可变：30s 冷却到期加回（db/metalink.rs:8,147）、单个 416 永久除名（:250-265）。
+- **影响**：暂停/恢复之间健康数变化 → part 内容对应的绝对偏移与新假设错位地拼接；part 尺寸恰好等于新预期长度，检查全部通过。manifest 无主校验和时 verify_metalink_file 直接 Ok（:1441-1444）发布坏文件；有时则整次传输报废。FUN-09 的 validator wipe（:972-980）救不了常见情形——ETag 在首次成功响应时即被持久化（:1915-1936）。2026-06-30 登记的 Metalink parallel-resume 问题原样已修，本条是其同类根因残余，也正是 `ARC-24` 修复方向预言的边界漂移，本轮证实它独立于 part 删除策略就会造成损坏。
+- **修复方向**：创建并行计划时持久化 {total_size, worker_count, 各 range 边界}（task_work_units 或 metalink_resources 扩展列）；resume 时校验一致才复用 part，不一致按 `ARC-24` 的策略清理重建。
+- **验收**：「暂停时 3 健康 → 恢复时 2 健康」与「2→3 增长」两条场景的字节级回归测试。
+
+### ARC-35（P1，Open）：Metalink fresh-start 接受非-206 响应、Content-Range 只看 start、part 长度 ≥ expected 即视为完成
+
+- **证据**：Range 头恒发送（:987），但非-206 恢复路径只在 `already_downloaded > 0` 时执行（:1028-1055），Content-Range 校验同样（:1060-1062），且 `validate_metalink_content_range`（:1892-1913）丢弃 `_end/_total` 只比 start——对照 HTTP worker 要求 206 + start/end/total 全符（worker.rs:252-274）。`supports_range` 默认 1（002_metalink_health.sql:14,20，「assume Range works until proven otherwise」）。`:958-966` 以 `>= expected` 判定整段完成（无 == 上界、无内容校验）；尺寸不符报错（:1129-1138）但**不删污染的 part**，failover stat 到垃圾长度照常推进。
+- **影响**：WAF/反爬镜像以 200 返回 HTML 页即可污染 part；垃圾长度 ≥ expected 时该 range 被「完成」。validator 还会把这个 200 的 ETag 持久化令 FUN-09 wipe 失效。有主校验和时至少整次传输报废，无校验和时坏文件直接发布为 Completed。
+- **修复方向**：对齐 HTTP worker 契约：ranged 请求一律要求 206 + Content-Range 全字段校验（fresh-start 同样）；part 完成判定改 `==` 并在尺寸不符时删除 part 再 failover。
+- **验收**：200-with-full-body 与 200-with-garbage 两类 mock 镜像被拒且不残留污染 part。
+
+### ARC-36（P1，Open）：外部音轨/字幕按 worker 完成顺序拼接，成品音轨乱序静默损坏
+
+- **证据**：`download_hls_rendition_segments` 以 JoinSet join_next 完成序 push `completed`（hls/engine.rs:1720-1728），`write_external_track_playlist` 按该序输出 playlist 条目（:1774-1777），中间无任何排序（:1586-1601）；`poll_live_external_track` 同病（track.completed.extend，:1663）。主视频路径从 DB 按 `discontinuity_sequence, media_sequence` 排序读取（db/hls.rs:363）——证明外部路径只是漏了排序。并发前提成立：HLS planned slots = clamp(segment_count, [1,8])，默认 DEFAULT_SEGMENT_COUNT = 4（db/mod.rs:150）。
+- **影响**：选了外部音轨/字幕（FUN-10）的 VOD，ffmpeg -c copy 按列出序拼接（run_ffmpeg :1917-1957）→ 对白错乱/字幕漂移且随时间线恶化，无任何告警。
+- **修复方向**：completed 收集后按 (discontinuity_sequence, media_sequence) 排序——plan 里带上序号即可，无需查 DB。
+- **验收**：多 worker 乱序完成的 fixture 断言 local.m3u8 严格按媒体序。
+
+### ARC-37（P1，Open）：引擎段失败时取消「自己的」任务 token，supervisor 误判为用户取消 → 任务永久滞留 Downloading（僵尸）
+
+- **证据**：HLS segment 重试耗尽时 `cancel_token.cancel()` 后 return Err（hls/engine.rs:929-938），DASH 同型（dash.rs:1149-1158）。token 由 scheduler 创建经 DownloadContext 下发（mod.rs:300,450），engine 自取消与用户取消共享同一 token。supervisor 在 future 结束后才读 `is_cancelled()`（mod.rs:459）并 `if !canceled` 才 mark_download_failed（:463-466）——该守卫本意是保护用户暂停/取消，却无法区分两种取消。此后 downloads_map 已清（:460）、dispatch 只捡 Queued（:132）、无运行时看门狗、reset_interrupted_tasks 仅启动时执行（lib.rs:590）。外部轨道变体更糟：run_hls_download 的 `Err(_) if cancel_token.is_cancelled()` 臂调用 pause_hls_task **静默转 Paused**（engine.rs:574-577）。
+- **影响**：任一 segment 403/404/断连 3 次 → UI 永远显示「Downloading 0 B/s」；auto-retry 与失败计数因状态非 Failed 全部失效。只能手动暂停再恢复或重启。这是第 2 轮登记、第 3 轮仍 Open 的僵尸态问题的根因定位。
+- **修复方向**：引擎内部放弃必须与用户取消可区分——返回结构化错误码由 supervisor 无条件转移失败（用户发起与否由命令层标记，不从 token 推断）；或引入独立的 internal_abort 信号。
+- **验收**：mock segment 永久 404，断言任务秒级转 NeedsAttention/Failed 且 slot 释放；用户取消路径回归不受影响。
+
+### ARC-38（P1，Open）：staging 目录在任何路径都不回收；DASH 连「删除任务（含文件）」都泄漏
+
+- **证据**：DASH 建 save_dir/.vibe-staging/{task_id}（dash.rs:914-921），finalize_dash_task（:1432-1520）remux 后只 rename 走 mp4；HLS 用 task.temp_path 作 staging（engine.rs:469-477），finalize_hls_task（:1787-1843）留下全部 seg-*.ts/init/output 中间物。全仓 grep 无任何对 staging 的 remove_dir_all；STAGING_DIR_NAME 仅出现在 task_file_planning.rs。删除流程只删 task.temp_path/final_path/task_files 路径（actions.rs:539-552,614-627），而 `task_stored_temp_path` 仅 protocol=="hls" 时返回 staging 目录（task_file_planning.rs:57-68）——DASH 的 temp_path 是单个已被 finalize rename 掉的文件。
+- **影响**：每个 2 GB 影片成功下载后留约 2 GB 隐藏段文件；DASH 删除任务后 DB 记录消失、应用内永久不可回收；HLS 仅当用户事后勾选「删除文件」才释放。正常使用数周即数十 GB。
+- **修复方向**：finalize 成功路径 remove_dir_all(staging)；启动时扫描 save_dir/.vibe-staging/* 对照现存任务清理孤儿（覆盖失败/取消残留）；delete 流程对 dash 协议同样解析出 staging dir。
+- **验收**：成功/失败/取消/删除四条路径各有 staging 清理断言；孤儿目录启动清扫测试。
+
+### ARC-39（P1，Open）：每任务独立 librqbit Session 在持久化 DHT 端口上相撞，第二个 BT 任务/probe 必败
+
+- **证据**：`compute_session_key` 追加 `|task:{task_id}`（bt.rs:175），每个 key 经 `Session::new_with_opts` 新建 session（:219-221）；SessionOptions 只设 connect/ratelimits（:207-218），从不触碰 DHT 配置 → librqbit 9.0.0-rc.0 默认 PersistentDht 读共享 dht.json 并绑定其记录的端口（explicit→stored→random，reuseport:false，AddrInUse 即整个 session 创建失败）。dump_interval 60s 后 dht.json 必然存在。调度器 host 槽按 source_key 计（mod.rs:166-171），不串行化 BT；做种循环在无限额时会话无限期存活（bt.rs:838-925）。probe_torrent 另建 `Session::new`（:310-312）同样相撞。仓库自己的注释与被删测试记录了 os error 10048（bt.rs:1815-1817,1845-1847,1943-1949）。
+- **影响**：ARC-12 的 per-task 化引入回归：任一 BT 任务下载/做种期间，一切后续 BT 任务与 `.torrent` URL probe 持续失败，直到该任务停止或应用重启。
+- **修复方向**：二选一并写入架构注释——(a) BtEngine 内单例共享 Session（回到共享拓扑，但必须同步补 ARC-29 的限速实时同步）；(b) 保持 per-task 但显式配置 DHT（disable 或各自端口）。probe 路径按 ARC-28 处理。
+- **验收**：两个 BT 任务并发下载互不影响；下载中 probe 另一 torrent 成功（兼作 ARC-28 验收）。
+
+### ARC-40（P2，Open）：worker panic 无 catch_unwind，slot/host 槽/缓存永久泄漏
+
+- **证据**：supervisor（spawn @ scheduler/mod.rs:366）的清理只在两个 checked 错误分支（:382-383、:407-408）与 engine.download 正常返回后（:459-461）执行；无 catch_unwind（全仓零命中），存储的 JoinHandle（:505-518）无人 poll。active_count 与 host 用量派生自 downloads.len()/map 内容（:143,169-174）。profile.release panic='unwind'（Cargo.toml:104）进程存活、泄漏固化。mod.rs:441-444 的 ARC-03 注释承认 panic 会从外层 JoinHandle 冒出——但没有任何消费者。
+- **影响**：一次引擎 panic（如畸形 Content-Range 触发 `ARC-48` 的溢出）→ 幽灵 DownloadControl 永久占用一个全局槽 + 该 source_key 的连接槽 + runtime-lock/request_headers 表项；日志反复出现「scheduler has no available slots」，需用户手动暂停/删除或重启。
+- **修复方向**：supervisor 体包 `AssertUnwindSafe(catch_unwind(...))`，poison 路径走同一套清理 + mark_download_failed("internal_panic")；或统一 monitor JoinHandle 兜底。
+- **验收**：注入 panic 的 fake engine 下断言 slot 释放、任务转 Failed、后续调度正常。
+
+### ARC-41（P2，Open）：start 失败谓词不含 queued，任务永久滞留队首静默重败
+
+- **证据**：dispatch_inner 对 status==Queued 的非 Conflict 启动失败路由 mark_download_failed（scheduler/mod.rs:237-240），但其 SQL `WHERE id = ? AND status IN ('downloading','retrying')`（db/task_state.rs:819-826）匹配不到 queued 行 → rows_affected=0 → 日志「task state changed concurrently, skipping emit」后返回，无状态写、无事件。可达路径：resolve_task_request_headers / resolve_proxy 的 DB 错误在转移前 `?` 传出（mod.rs:274-279）；transition 的 SQLITE_BUSY 重试耗尽（state_machine.rs:152-204）。
+- **影响**：持续性 DB 故障下任务永远 Queued，每个 dispatch tick 重试重败刷日志；UI 显示普通排队、无任何异常迹象，队列看似健康却不前进且无从诊断。
+- **修复方向**：该分支改用能匹配 queued 的无条件 mark（或专用 mark_queued_start_failed：置 Failed/NeedsAttention + emit）。
+- **验收**：注入 header 解析失败的 stub 断言 queued 任务转为可见失败态而非原地踏步。
+
+### ARC-42（P2，Open）：FTP/SFTP resume 不重验远端 SIZE/MDTM，等大小替换文件造成新旧缝合
+
+- **证据**：SIZE/MDTM 仅 probe 时采集（ftp.rs:160-169、sftp.rs:195-213），last_modified 存库后无人比对（唯一出现 ftp.rs:165,193）；resume 直接 REST {offset}（ftp.rs:762-769）/ seek（sftp.rs:894-905），没有 If-Range 等价物（HTTP 侧有 direct.rs:42-47、coordinator.rs:97-117 可对照）。完成判据仅 `downloaded >= total_size`（ftp.rs:644-652、sftp.rs:744-758）。
+- **影响**：暂停窗口内远端换成等大小新内容（镜像/rolling 文件常态）→ 半旧半新的文件标记 Completed。配置校验和可事后检出，但校验和可选（tests/ftp_engine.rs:29-31）。
+- **修复方向**：resume 前 MDTM/SIZE 比对 probe 记录，不一致即 fail_task_and_segments（沿用 resume_blocked/restart 恢复动作）。
+- **验收**：本地 FTP fixture 中途换等大小文件断言 resume 被拒且给出明确恢复指引。
+
+### ARC-43（P2，Open）：delete_runtime_task 按 HashMap 序挑首个成功 session，误删同种子其他任务的 torrent
+
+- **证据**：`delete_runtime_task` 只收 source_key（bt.rs:112-141），按 `sessions.keys()` 的 HashMap 序遍历、首个 api 成功即 break（:126-140）；调用方把 task.id 丢在地上（engine.rs:200-206 明明持有 TaskRecord）。ARC-12 的 per-task session 使同种子双任务各占一个含相同 info-hash 的 session，受害者可以是无关任务。受害链已逐环验证：forget → api_stats_v1 torrent_not_found（vendored api.rs:196-200）→ bt_runtime_stats_failed（bt.rs:637-661）→ 不在 NEEDS_ATTENTION_CODES（models/task.rs:1239-1248）→ mark_download_failed 写 Failed（mod.rs:617-631）。
+- **影响**：双开同一磁力到不同目录是普通用法；禁 A 的做种/取消 A 可能令 B 从 Downloading 翻成 Failed，而 A 自己的 session 反而漏清理。
+- **修复方向**：会话键已含 task_id，按 (source_key, task_id) 精确定位 owning session；engine.rs 传递 task.id。
+- **验收**：同种子双任务取消其一，断言另一任务继续下载且目标 session 被清理。
+
+### ARC-44（P3，Open）：start_task 三种 Ok 语义混一，dispatch pass 内幻影计数
+
+- **证据**：Ok 有三种含义——真启动、「download already active」跳过（mod.rs:280-283）、Conflict 清理后返回 Ok（:329-343）；dispatch_inner 一律 active_count+=1 / host_slot+=planned_slots（:225-230）。复核注：Conflict 突发 largely 不可达（BEGIN IMMEDIATE 条件更新 + SQLite 单写者 + 任务锁序列化），实际可达的是 stale control 下的 already-active skip（例如 `ARC-40` 幽灵存在时）。
+- **影响**：本 tick 后续任务被保守推迟，下一 tick 自愈；方向保守无害，但计数语义应诚实。
+- **修复方向**：start_task 返回 Started/AlreadyActive/ConflictSkipped 枚举，dispatch 分别记账。
+- **验收**：单测覆盖三分支计数。
+
+### ARC-45（P3，Open）：restart 用 abort 不排空即删临时文件，Windows delete-pending 可致新 worker ACCESS_DENIED
+
+- **证据**：pause/cancel/retry×2 均「cancel + timeout(5s) drain」（actions.rs:245-247,333-335,379-381,468-470），唯 restart_task_from_beginning 是 cancel + h.abort()（tasks.rs:723-728）后立刻 remove_task_path（:729-731）。abort 只在下一个 await 生效、spawn_blocking 写入不可中断 → 旧 handle 可仍开着；std 以 FILE_SHARE_DELETE 开文件，删除成为 delete-pending，随后新 worker 的 OpenOptions::create 得 ERROR_ACCESS_DENIED。remove 错误还经 ? 中止 restart（:730 → actions.rs:828），留下未重置的任务。前置说明：NeedsAttention 通常无活 worker，但 BT 边下边置 NeedsAttention（bt.rs:578-598）+ resolve 无状态门使重叠可达；tasks.rs:723 的防御性 remove 也说明 stale control 在预期内。
+- **影响**：Restart 后新下载打不开同名 temp → 数秒内 Failed「Access is denied」，用户眼中的「重启下载」不可靠。
+- **修复方向**：对齐 checkpoint-drain 模式（cancel + drain 5s，超时再 abort 并二次等待）；remove 失败不中止 restart（容忍残留，新 worker 截断写）。
+- **验收**：慢写 worker 下 restart 断言新下载成功打开 temp。
+
+### ARC-46（P3，Open）：完成动作可在最后一个文件仍在哈希校验时触发关机
+
+- **证据**：worker 在 engine.download 返回后立即自摘 control（mod.rs:460），然后才做可能数分钟的 SHA-256（verify_task_hash_with_pool，:468），最后才 maybe_emit_completion_action（:489-491）；后者唯一活性判据是 downloads.is_empty()（:579）+ 队列空（:582-586），无 hash_status 门。前端 AppShell.runCompletionAction（AppShell.tsx:768-794）倒计时结束直接执行系统关机/睡眠，不复核任务状态。
+- **影响**：双任务近似同时完成 + completion_action=Shutdown → 机器在 A 哈希中途断电，hash_status 卡 Pending 需手动重验。
+- **修复方向**：completion 判据纳入「存在 hash_status='pending' 的近期完成任务」；不要把哈希挪回 control 释放之前（会延长槽位占用）。
+- **验收**：两任务接力完成 + 慢哈希 fixture，断言完成动作晚于哈希落库。
+
+### ARC-47（P3，Open）：Metalink 落入串行路径后从不清理 .part-N，泄漏至多 N×文件大小
+
+- **证据**：cleanup_metalink_part_files 仅三点调用——fresh start :523、worker-failure :676、assembly 成功 :700——全部位于 parallel 函数内；serial 路径（:361-432、:725-809）直接写 temp_path 并 finalize，从不触碰 part 兄弟。触发链真实：parallel 暂停故意留 part（:653-669 供续传），后续 healthy<2（:337-359，30s 冷却或 416 除名易致）落入 serial 且 resume_from 只认 parallel 从不写的 temp_path（:1254-1257）→ 从零重下并发布，multi-GB part 永留输出目录旁。
+- **影响**：纯磁盘泄漏、无正确性影响，但量级随文件大小 × 镜像数增长。
+- **修复方向**：serial finalize 成功后调用 cleanup_metalink_part_files(temp_path)。
+- **验收**：parallel → serial 切换场景断言无 part 残留。
+
+### ARC-48（P3，Open）：parse_byte_range 对极端 Initialization/@range 整型溢出
+
+- **证据**：dash.rs:1691-1702 的 start/end 以 i64 parse、仅拒 end<start，`length: end - start + 1` 对 start=0,end=i64::MAX debug panic / release 回绕为 i64::MIN；byte_range_header（:1704-1707）再做裸加减产生无意义头。对比 HLS 孪生实现用了 saturating 运算（engine.rs:2220-2224）。值链完全来自 manifest 的 SegmentBase/Initialization range 属性。
+- **影响**：恶意/畸形 MPD：debug 构建 panic（supervisor 内 unwind 还会连坐 `ARC-40` 的 slot 泄漏）；release 构建以费解的 range 错误失败而非校验提示。
+- **修复方向**：checked/saturating 运算 + 解析失败即拒绝该 SegmentBase。
+- **验收**：极端 range 属性单测在 debug/release 均安全拒绝。
 
 ## 八、程序运行效率
 
-### PERF-01（P2，Open）：历史任务搜索无法利用普通索引
+### PERF-01（P2，Closed）：历史任务搜索无法利用普通索引
 
-- **证据**：[`task_records.rs`](../src-tauri/src/db/task_records.rs#L373) 对三个字段执行 `LOWER(column) LIKE '%term%'`。
-- **风险**：大任务库首屏仍全表扫描，游标只能降低翻页成本，不能降低首次查询成本。
-- **改进**：先记录 10k、100k、1M 数据的 query plan 和 p50/p95；超预算后引入 FTS5 或规范化 search column。
-- **验收**：目标硬件上 100k 任务连续输入搜索不阻塞 UI，预算和数据分布写入性能基线。
+- **证据**：[`task_records.rs`](../src-tauri/src/db/task_records.rs) 对三个字段执行 `LOWER(column) LIKE '%term%'`。
+- **实测**：[`perf_baseline.rs`](../src-tauri/tests/perf_baseline.rs) `perf_baseline_50k`（`#[ignore]`）：本机 debug 50k search p95 ≈ **6.90 ms**（预算 100 ms）；见 [`performance-baseline-results.md`](performance-baseline-results.md) §3.3。
+- **决策**：达标 → **保持 LIKE，不引入 FTS5**。文档写明支持规模（本机 harness ≥50k）；不假装已有 FTS。
+- **验证**：`pnpm perf:baseline:50k` / `cargo test -j 1 --manifest-path src-tauri/Cargo.toml --test perf_baseline -- --ignored --nocapture perf_baseline_50k`。
 
 ### PERF-02（P2，Closed）：TaskDetails 在非相关子页持续轮询 segments
 
@@ -538,7 +975,7 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 
 ### PERF-04（P2，Closed）：HLS AES key 和 init map 缺少任务级去重缓存
 
-- **证据**：[`hls.rs`](../src-tauri/src/download/hls.rs) 每个 segment worker 曾独立拉取同一 key/init-map。
+- **证据**：HLS 引擎（当时为单文件 `hls.rs`，现已拆分为 [`download/hls/`](../src-tauri/src/download/hls/)）每个 segment worker 曾独立拉取同一 key/init-map。
 - **修复**：任务级 `HlsTaskFetchCache` singleflight；失败不缓存；init-map 使用 `.part` + rename 发布。
 - **验证测试**：`hls` 单元测试（并发 coalesce + 失败不缓存）。
 - **验收**：N 个共享 key/map 的 segment 每个 URI 只成功请求一次；失败可重试。
@@ -565,12 +1002,12 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验证测试**：`platform` 单元测试 `run_user_command_times_out_hanging_process`；`completion_action.rs`（挂起命令超时期间 runtime 仍可调度）。
 - **验收**：永不退出的测试命令在超时后终止并记录结构化错误，不阻塞其他异步工作。
 
-### PERF-08（P2，Open）：限速器使用墙上时间且缺公平等待
+### PERF-08（P2，Closed）：限速器使用墙上时间且缺公平等待
 
-- **证据**：[`speed.rs`](../src-tauri/src/download/speed.rs#L9) 以 SystemTime 补充 token，多连接通过 CAS 争抢。
-- **风险**：系统时钟回拨会停止 refill，活跃连接可能长期抢占新 token。
-- **改进**：使用单调时钟的集中 refill/ticker，或公平 semaphore/等待队列。
-- **验收**：时钟调整模拟不影响吞吐；多连接长期测试的带宽分配在定义容差内。
+- **证据**：曾以 SystemTime 补充 token，多连接私有 sleep + CAS 争抢。
+- **修复**：[`speed.rs`](../src-tauri/src/download/speed.rs) 改用进程 `Instant` 单调毫秒；lazy 集中 ticker（25ms）+ `Notify`；不足时 `select! { cancel, notified }`；单次取量按 tick 公平量子并在成功 CAS 后 yield；`set_limit(0)` 停 ticker。公开 `throttle` API 不变（仍可取消，ARC-04）。
+- **验收**：时钟回拨不阻止 refill；取消仍快速收敛；多 waiter 吞吐方差在单元容差内。
+- **验证**：`cargo test -j 1 --manifest-path src-tauri/Cargo.toml --lib speed::`。
 
 ### PERF-09（P3，Needs benchmark）：release `opt-level="s"` 可能牺牲热点吞吐
 
@@ -578,11 +1015,12 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **处理**：先比较 `s` 与 `3` 在 hash、AES、XML、BT 和真实下载路径的吞吐、体积和启动时间；没有数据前不直接修改。
 - **验收**：结果写入性能基线，必要时只对热点 package 使用 profile override。
 
-### PERF-10（P2，Open）：没有 bundle size 和前端性能回归预算
+### PERF-10（P2，Closed）：没有 bundle size 和前端性能回归预算
 
-- **证据**：当前构建主要分块约为 202、182、150、121 kB，但 CI 没有 chunk budget，也没有交互性能门禁。
-- **改进**：记录 raw、gzip 和 brotli 体积；为初始 shell 和延迟页面分别设预算；结合真实启动和交互数据决定是否拆包。
-- **验收**：CI 对显著增长给出可解释失败，不能只按单个 chunk 数字机械优化。
+- **证据**：曾无 CI chunk budget；主要分块约 215/182/150/141 kB raw。
+- **修复**：[`scripts/bundle-budget.json`](../scripts/bundle-budget.json) + [`scripts/check-bundle-budget.mjs`](../scripts/check-bundle-budget.mjs) 聚合 initial-shell（JS gzip ≤340 kB、raw ≤1.10 MB、CSS gzip ≤18 kB，并报告 brotli）；`pnpm check:bundle`；CI frontend 在 `pnpm build` 后运行；结果写入 [`performance-baseline-results.md`](performance-baseline-results.md) §5。不对单个 vendor chunk 设硬上限。
+- **验收**：超预算时 CI 失败并打印 per-chunk 分解；交互性能门禁仍延期。
+- **验证**：`pnpm build && pnpm check:bundle`；`node --test scripts/check-bundle-budget.test.mjs`。
 
 ### PERF-11（P2，Closed）：性能基线只有方法和估算，没有实测数据
 
@@ -591,7 +1029,222 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - **验收**：有硬件/OS/commit/profile 元数据与可重复编排；50k+、UI 冷启动/FPS、HLS/BT soak、CI 绝对门禁明确延期，不假装 Closed。
 - **验证**：`cargo test -j 1 --manifest-path src-tauri/Cargo.toml --test perf_baseline`；本地 `pnpm perf:baseline:10k`。
 
-## 九、统一修复顺序
+### PERF-12（P1，Closed）：日志保留策略使现场排障不可行
+
+- **证据**：主应用在 [`lib.rs`](../src-tauri/src/lib.rs#L360) 注册 `tauri_plugin_log`，只设置了 target 与 level，**没有设置 `max_file_size` 或 `rotation_strategy`**。tauri-plugin-log v2 的默认值是 `max_file_size = 40000` 字节、`RotationStrategy::KeepOne`（超过上限即丢弃旧内容）。另一侧，native host 的 [`logging.rs`](../src-tauri/src/logging.rs#L71) 用 `Rotation::DAILY` 且**没有 `max_log_files`**，永不删除；同处第 77 行的 `std::mem::forget(guard)` 会泄漏 `WorkerGuard`，使这个短生命周期进程退出时 non-blocking writer 缓冲区中的日志（往往正是错误日志）不被 flush。
+- **影响**：两条日志路径有方向相反的缺陷。主应用实际只保留最近 40 KB，对一个多任务并发、每任务产生大量进度与重试记录的下载管理器而言约等于几百行——**用户报告问题时相关日志几乎必然已被覆盖**。这直接削弱了 `UX-01` 提供的「打开日志目录」恢复入口，也让本文其余所有问题在用户现场无法诊断。native host 侧则是无上界的磁盘占用。
+- **修复方向**：主应用显式设置 `.max_file_size(5_000_000).rotation_strategy(RotationStrategy::KeepSome(5))`；native host 改用 `RollingFileAppender::builder().max_log_files(7)`，并把 `WorkerGuard` 返回给 `main` 持有到进程结束而不是 forget。
+- **验收**：长时间运行后日志总量有明确上界且覆盖足够长的时间窗；native host 异常退出时最后一条错误日志可见于文件。
+- **2026-08-13 修复**：主应用显式设置 `.max_file_size(5_000_000)` + `RotationStrategy::KeepSome(5)`（覆盖 40 KB / `KeepOne` 的默认值）；native host 改用 `RollingFileAppender::builder().max_log_files(7)`，并把 `WorkerGuard` 从 `std::mem::forget` 改为经由 `StandaloneLogGuard` 交还给 `main` 持有到进程结束——该进程由浏览器每次交接时拉起，此前退出时缓冲区里的最后几行（往往正是错误本身）从不落盘。
+
+### PERF-13（P2，Open）：两套 rustls 密码学后端同时编译进二进制
+
+- **证据**：`Cargo.lock` 中 `rustls 0.23.40` 的依赖同时包含 `aws-lc-rs 1.17.0` 与 `ring 0.17.14`。原因是部分依赖启用 rustls 默认的 `aws-lc-rs` feature，而 `suppaftp` 的 `tokio-rustls-ring` 与 `librqbit` 的 `rust-tls` 启用 `ring`，Cargo 的 feature 合并导致两套完整后端都进入最终产物。
+- **影响**：`aws-lc-sys` 需要 cmake 与（Windows 上）NASM 的 C 构建，是 CI 冷编译时间的主要来源之一。估算统一后可减少 4-8 分钟冷编译与 2-5 MB 二进制体积。这个问题能长期存在而无人察觉，直接归因于 `ENG-01` —— `deny.toml` 配置了 `[bans] multiple-versions` 但 CI 从不执行 `bans` 子命令。
+- **修复方向**：用 `cargo tree -e features -i aws-lc-rs` 定位启用方，显式声明 `rustls = { default-features = false, features = ["ring", "std", "logging", "tls12"] }` 统一到 `ring`。改完必须验证 HTTPS / FTPS / SFTP / BT 四条 TLS 路径的握手仍正常。
+- **验收**：`cargo tree -d` 不再出现两个密码学后端；四个协议的 TLS 集成测试通过；在 `deny.toml` 的 `[bans]` 中加入 `aws-lc-rs` 防回归。
+- **2026-08-26 复核**：`cargo tree -e features -i` 确认 ring 经 suppaftp（`tokio-rustls-ring`）与 hyper-rustls → reqwest 生效；aws-lc-rs 除 reqwest 通用 `rustls` feature 外还被**直依赖** russh 与 librqbit-sha1-wrapper 无条件拉入，且 rustls 自身同时启用了两套 provider feature——统一到单一后端必须同时处理这三条来源，仅改 suppaftp 的 feature 不够。`deny.toml` 的 `[bans] multiple-versions = "warn"` 使 CI 的 `cargo deny check bans` 永不可能因此变红，问题会存续到有人主动收敛为止。
+
+### PERF-14（P2，Open）：前端渲染热路径上的冗余订阅
+
+- **证据**：进度更新链路本身已优化到位（后端 250ms 节流 → rAF 批处理 → `patchTasksBatch` 零差量快路径 → `TaskRow` 逐行订阅），全仓库没有对象字面量 selector。但有三处例外：[`Palette.tsx`](../src/components/shell/Palette.tsx#L147) 用 `useShallow` 订阅了一个随即被 `void tasks;` 丢弃的 `Task[]`，浅比较在每个进度 tick 必然失败；[`use-app-updater.ts`](../src/hooks/use-app-updater.ts#L13) 不带 selector 订阅整个 store，且 effect 依赖 `[store, autoCheckEnabled]`，导致每次 updater 状态变化都重跑 `init()` 并重排自动检查定时器；`TaskDetails.tsx` 的 6 个列表组件（`ChunkList`、`ConnectionList`、`EventList`、`RequestList`、`HlsSegmentList`、`DashSegmentList`）都没有 `memo`，而 `task` 对象每 250ms 换引用。
+- **影响**：命令面板打开期间（正是用户输入搜索时）每 250ms 全量重渲染；HLS 任务打开 Segments 子页时 100 行 DOM 每秒 reconcile 4 次，而数据 2 秒才更新一次。
+- **修复方向**：删除 `Palette.tsx:147` 与 `:159` 两行（`taskById` 订阅已覆盖需求）；`useAppUpdater` 改为逐字段 selector 并用 `getState().init()` 摘掉 effect 依赖；给 6 个列表组件加 `memo` 并把内联箭头回调提为 `useCallback`。另外 `QueueCenter.tsx:90` 的 10 秒轮询缺少 visibility 门控与 in-flight 守卫，建议抽 `useVisibilityGatedPoll` 并同时应用到 `use-task-detail-queries.ts` 中重复 3 遍的同一模式。
+- **验收**：进度 tick 期间 Palette 与 TaskDetails 列表不重渲染；窗口隐藏时 QueueCenter 停止轮询。
+
+### PERF-15（P2，Open）：HLS live 轮询期间每 100 毫秒查询一次数据库
+
+- **证据**：[`hls/engine.rs`](../src-tauri/src/download/hls/engine.rs#L2033) 的 `wait_hls_finish_signal` 以 100ms 间隔循环调用 `db::hls_finish_requested`，它被放在 `select!` 中与 target duration（典型 6-10 秒）的 sleep 竞争。
+- **影响**：每个 live HLS 任务在每个轮询间隔内产生 60-100 次 SQLite 查询，仅为轮询一个布尔标志。多个 live 任务并发时会抢占连接池并与 checkpoint 写入争锁（`ARC-06` 刚处理过 BUSY_SNAPSHOT）。而 `finish: Arc<AtomicBool>` 已经在 `DownloadContext` 中，DB 查询只是多余的回退路径。
+- **修复方向**：改用 `tokio::sync::Notify`，由 finish 命令在写 DB 的同时 `notify_waiters()`；若必须保留 DB 兜底，把间隔提高到 1-2 秒。
+- **验收**：live 轮询期间的 SQLite 查询次数与轮询次数同阶，而非与 100ms tick 同阶。
+
+### PERF-16（P2，Open）：路径预留全表扫描与若干无 LIMIT 查询
+
+- **证据**：[`task_records.rs`](../src-tauri/src/db/task_records.rs#L585) 的 `list_reserved_final_paths` 无 `LIMIT`，把所有活动任务及其全部文件的 `final_path` 拉进一个 `HashSet<String>`，且在 `create.rs` 的 DEFERRED 事务内被调用（最多重试 32 次），创建流程中另有一次调用。此外 `list_task_records` 与 `list_browser_realtime_task_records` 的 active 分支都没有 LIMIT。
+- **影响**：1 万活动任务 / 每任务 100 个文件的场景下，单次创建要在事务持锁期间物化上百万条路径字符串，直接放大 `ARC-21` 的锁冲突窗口。
+- **修复方向**：不要「读全集到内存再判断」。改为循环内做一次 `SELECT 1 FROM tasks WHERE final_path = ? AND status IN (...)` 点查（该列已有部分唯一索引），或干脆去掉预读、完全依赖唯一索引冲突加重试。`list_tasks` 复用已定义的 `MAX_TASK_PAGE_SIZE`，WS 快照 active 分支加 `LIMIT 500`。
+- **验收**：`perf_baseline` 中加入大量活动任务下的创建耗时用例，断言不随活动任务数线性增长。
+
+## 九、安全边界
+
+本章为 2026-08-13 复审新增。此前安全问题散落在 ARC 各条中，独立成章便于按攻击面而非按模块追踪。
+
+先记录已核实无问题的项，避免后续重复审查：SSRF 有三层防御（handoff 前的字面 IP 检查与 DNS 预解析、连接期 resolver 过滤、重定向逐跳复检，覆盖 IPv4-mapped IPv6、CGNAT 与 `0.0.0.0/8`）；全仓库无 `danger_accept_invalid_certs`；SFTP TOFU 在认证前校验且不匹配时 fail-closed、遗忘只能显式 DELETE；SQL 全部参数化，无 `SELECT *`，唯一的字符串拼接是白名单 match；`PRAGMA foreign_keys = ON` 对每条连接生效且 12 张子表级联完整；ffmpeg 参数全部逐个 `.arg()` 传入本地路径；`seed_mock_tasks` 正确受 `#[cfg(debug_assertions)]` 门控；`withGlobalTauri` 未启用；ChaCha20-Poly1305 的 nonce 为每次加密新生成的 96 位随机值，v1 密文的 AAD 绑定 `task_id` 且无法被 legacy 分支降级。
+
+### SEC-01（P0，Closed）：Tauri `fs` 能力被授予全盘读写 scope
+
+- **证据**：[`capabilities/default.json`](../src-tauri/capabilities/default.json#L21) 的 `fs:default` 中包含 `{ "path": "**" }`，且 `tauri_plugin_fs` 已在 [`lib.rs`](../src-tauri/src/lib.rs#L391) 注册、前端也装了 JS 绑定。
+- **影响**：`{ "path": "**" }` 是无根 glob，等价于把整个文件系统的读/写/删除/重命名交给 webview。CSP 的 `script-src 'self'` 挡得住远程脚本注入，挡不住供应链投毒。一旦有任意 JS 执行，配合已授予的 `process:allow-restart` 与 `autostart:default`，即可读取 `~/.ssh/id_rsa`、写入启动目录并完成持久化。
+- **修复方向**：删除 `{ "path": "**" }`，收敛到应用真正需要的目录。「任意用户选定目录」的读写改为经后端命令，由 Rust 侧持有唯一的文件系统权限。同时在 CSP 中补 `base-uri 'self'; form-action 'none'; object-src 'none'`。
+- **验收**：capabilities 中不存在无根 glob；保存目录选择与校验流程在收敛后的 scope 下仍然可用。
+- **2026-08-13 调研修正（本条尚未修复）**：原描述有两处不准确，会误导修复方案。
+  1. **实际授予的是全盘读 + `mkdir`，不是读写。** `fs:default` 展开后只含 `read_dir` / `read_file` / `read_text_file` / `exists` / `mkdir`，**不含任何写命令**。严重性不变（读 `~/.ssh/id_rsa`、浏览器 Login Data 等仍然成立），但方案取舍随之改变。
+  2. **不是「单行改动，风险最低」。** 前端只有两处 `plugin-fs` 调用：[`local-file.ts`](../src/lib/local-file.ts) 的 `readTextFile`（服务于拖拽 .txt、选择 .txt 批量导入、选择 SSH 私钥三个场景）与 [`export.ts`](../src/lib/export.ts) 的 `writeTextFile`。原描述所说的「校验保存目录是否存在/可写」在前端**不存在**——那些早已在后端（`query_disk_space`、`probe_directory_writable`、`resolve_save_dir`）。删掉 `**` 会打断文件选择器的两条路径；拖拽路径则不受影响，因为 fs 插件自身会在 `DragDrop` 事件里 `allow_file`，而 dialog 插件**不会**（v1→v2 的行为变更）。
+  3. **附带发现：任务导出很可能已经是坏的。** `export.ts` 需要 `write_text_file` 与 dialog `save`，两者都未被授予，失败被 `try/catch` 静默吞掉。修复前应先实机确认，以决定是否把「修好导出」纳入本条验收。
+  4. 目录选择器只返回字符串、manifest 走 `file://` URL 交给 Rust，二者都不经过 fs scope，所以「用户选任意保存目录」不受收敛影响。
+  已核实 `FsExt::fs_scope()` + `Scope::allow_file` 在本项目的 tauri 2.11.2 / tauri-plugin-fs 2.5.1 下可用，运行时放行方案技术可行；但它会引入一个新的提权原语（前端可请求放行任意路径），且 scope 只增不减，因此推荐移除 fs 插件、两处改走后端命令。
+- **2026-08-14 修复**：实机确认「更多 → 导出」无反馈。`save()` 缺 `dialog:allow-save`，`writeTextFile` 也不在 `fs:default` 里，失败被 `export.ts` 的 `try/catch` 吞掉。
+  已移除 `tauri-plugin-fs` 与 `{ "path": "**" }`。新增 [`commands/local_files.rs`](../src-tauri/src/commands/local_files.rs)：`read_local_text_file`（`.txt` 批量列表 ≤ 1 MiB；SSH 私钥限 `id_rsa` / `id_ed25519` / `id_ecdsa` / `id_dsa` / `identity` 与 `.pem` / `.key`，≤ 64 KiB）与 `write_export_file`（仅 `.json` / `.csv`，≤ 16 MiB）。两条命令都拒绝相对路径与 `..`。capabilities 增加 `dialog:allow-save`（设置页备份导出也需要它）。CSP 补 `base-uri 'self'; form-action 'none'; object-src 'none'`。导出失败改为 toast，不再静默。
+  目录选择器与 `file://` 清单路径本来就不走 fs 插件，不受影响。拖拽路径由 webview `onDragDropEvent` 提供，读取改走同一条后端命令。
+- **验证**：`cargo test --lib local_files`（策略拒绝相对路径 / `..` / 错误扩展名 / `passwd`，JSON/CSV 往返写入，capabilities 断言不再含 `fs:default` 或 `"**"`）；`src/lib/export.test.ts` 覆盖报表序列化。GUI 请再点一次「更多 → 导出 JSON/CSV」，应弹出另存为；取消无 toast，成功有成功 toast，失败有错误 toast。
+
+### SEC-02（P0，Closed）：备份恢复缺少内容策略校验，可导致任意路径写入
+
+- **证据**：[`backup.rs`](../src-tauri/src/commands/backup.rs#L132) 的校验链只有三项——magic/版本、备份文件自带的 sha256（攻击者可自行计算）、`PRAGMA integrity_check` 加迁移。恢复后 `tasks.final_path`、`temp_path`、`save_dir` 这些绝对路径字符串没有任何重新清洗，也不会回到 `unique_final_path` 重新落到 save_dir 之下。`manifest.credentials_policy` 被读出后仅回传给 UI，从未校验。
+- **影响**：「从旧机器迁移配置」是很自然的社工场景。攻击者可派发一个 `.vibe-backup`，内含 `status='paused'`、`final_path` 指向启动目录、`url` 指向自己服务器的任务。用户恢复并重启后调度器 resume 该任务，应用即把攻击者的可执行文件写入启动目录。
+- **修复方向**：在 `materialize_and_verify_backup_db` 之后、rename 到 pending 之前增加策略扫描——拒绝或重置 `final_path`/`temp_path` 不在当前 `default_save_dir` 或任务自身 `save_dir` 之下的行；校验 `credentials_policy` 必须为 machine-bound；在恢复确认对话框中明示只应恢复自己创建的备份。顺带把 [`backup.rs`](../src-tauri/src/db/backup.rs#L250) 中路径可预测、权限未收敛的验证临时文件改用 `tempfile`，并给 `.db.bak-*` 加保留策略。
+- **验收**：构造含越界 `final_path` 的备份被拒绝或被安全重置；恢复失败不破坏 live 数据库；临时验证文件不落在共享 temp 目录且随 Drop 清理。
+- **2026-08-13 修复**：新增 [`db::enforce_backup_path_policy`](../src-tauri/src/db/backup.rs)，在 `materialize_and_verify_backup_db` 之后、rename 到 pending 之前扫描 `tasks` 与 `task_files` 的 `save_dir`/`temp_path`/`final_path`，越界即 **fail-closed** 拒绝整个备份（错误码 `backup_unsafe_paths`）。不采用「重写到安全目录」，因为会撞 `idx_tasks_final_path_active` 且会给用户一个被静默篡改的恢复结果。允许根取自 **live 配置**（`default_save_dir` + `default_download_dir`），绝不取自备份自身的 `settings`，否则策略可被自举绕过。路径比较为文本级（备份里的路径通常尚不存在，无法 canonicalize），按分隔符边界匹配以免 `/data/dl-evil` 被当成 `/data/dl` 的子路径，Windows 上大小写不敏感；相对路径与含 `..` 的路径一律拒绝。
+  同时在 `parse_backup_bytes` 中校验 `credentials_policy` 必须为 machine-bound（此前它被解析后原样传给 UI，连显示都没有，是纯死数据），放在解析层使 `validate_app_backup` 一并受益。并修复了 verified 临时文件的三条泄漏路径（策略拒绝、快照失败、rename 失败）——该文件是备份库的完整副本，含加密凭据。
+- **调研补充**：攻击链比原记录更宽——恶意 `final_path` 在用户删除任务时还会流向文件删除逻辑（`actions.rs:545`），构成任意文件**删除**原语；且 `auto_resume_on_startup` 本身也在备份内，可被置真以实现无交互触发。
+- **未做**：临时文件改用 `tempfile` crate 需要改动 `validate_app_backup` 与 `restore_app_backup` 两处签名（Drop 即删，需返回持有 guard 的结构体），留待后续批次。
+- **验证**：`cargo test --test backup_restore`（6 通过），新增 3 项。其中 `sec02_backup_with_out_of_root_paths_is_rejected` 显式断言 `read_backup_file` 与 `materialize_and_verify_backup_db` **都接受**该恶意备份、只有新策略拒绝——这正是修复必要性的证据，而不只是测试新代码。另有正向用例确保策略不过度拒绝（根内路径与 NULL 路径仍放行）。
+
+### SEC-03（P1，Open）：非统一 HTTP 客户端绕过 SSRF 守卫与代理策略
+
+- **证据**：`build_client`（[`http/mod.rs`](../src-tauri/src/download/http/mod.rs#L378)）安装了 A-2 的两层 SSRF 防护（`HickoryResolver` 连接期过滤私有/保留 IP、`ssrf_safe_redirect_policy` 逐跳复检）并正确处理 `AppProxyMode::Off => builder.no_proxy()`。但有两处绕过：[`bt.rs`](../src-tauri/src/download/bt.rs#L1674) 的 `download_torrent_bytes` 自建 client，只在 SOCKS5 时设代理、从不 `.no_proxy()`、无 SSRF 守卫；[`create.rs`](../src-tauri/src/commands/tasks/create.rs#L1381) 的 sidecar 校验和发现用裸 `Client::builder().timeout(3s)`，同样无 `.no_proxy()`、无 SSRF 重定向策略、无 `HickoryResolver`。此外 [`webdav.rs`](../src-tauri/src/download/webdav.rs#L187) 直接调用 `build_client` 绕过了客户端缓存，而 `client_for_config` 上方的注释恰好写着要防止派生引擎这样做。
+- **影响**：三类。其一为 SSRF——`.torrent` URL 与 sidecar URL 均可由用户/剪贴板触发，302 到 `169.254.169.254` 或 `127.0.0.1` 会被跟随（reqwest 默认跟随 10 次）。其二为代理策略失效：由于 `Cargo.toml:29` 启用了 reqwest 的 `system-proxy`，缺少 `.no_proxy()` 意味着**用户选择「不使用代理」时这些请求仍走系统代理**；用户配置 HTTP/HTTPS 代理时 `custom_socks5_url_with_auth()` 返回 `None`，请求也不走用户指定的代理。其三，这个缺陷有活的复现证据——见第三章的 Rust 测试挂起分析。
+- **修复方向**：让 `BtEngine` 持有 `Arc<HttpEngine>`（与 HLS/DASH/Metalink/WebDAV 一致）并使用 `client_for_config`；注意 `EngineRegistry::new` 中 `bt_engine` 当前在 `http_engine` 之前构造，需要调整顺序。sidecar 发现同样改用统一工厂。WebDAV 改用 `self.http.client_for_config`。最后确立一条规则：**`download/` 下禁止出现 `reqwest::Client::builder()`，统一入口只有 `build_client`**，可用 CI grep 或 clippy `disallowed_methods` 强制。
+- **验收**：三处均通过统一工厂获取 client；新增测试断言 Off 模式下不使用系统代理、跨协议重定向到内网被拒绝；`download/` 下不存在裸 `Client::builder()`。
+- **2026-08-26 复核**：WebDAV 一侧已修复——webdav.rs:67-70、:122-128 现在委托共享 `Arc<HttpEngine>`，不再直调 build_client。仍成立的实例：`bt.rs:1674-1680` 的裸 builder（无 dns_resolver、默认 redirect policy 盲随重定向、无 `.no_proxy()`），以及此前未登记的**第二条 BT 路径**——fetch 失败时 `AddTorrent::from_url`（bt.rs:1613-1615）把同一个未审查 URL 交给 librqbit 内部自建的裸 reqwest client（vendored session.rs:706-713），Vibe 只设置了 proxy_url/ratelimits，该路径同样完全无守卫。sidecar 发现（create.rs:1381 裸 Client）未见修复。「`download/` 下禁止裸 `reqwest::Client::builder()`」的 CI 强制仍未落地。
+
+### SEC-04（P1，Open）：WebSocket 桥缺速率限制，Windows 引导文件权限不足
+
+- **证据**：桥正确绑定 `127.0.0.1`（[`browser_realtime.rs`](../src-tauri/src/browser_realtime.rs#L128)）并使用 UUIDv4 token 校验（`:183`），但 `handle_client_message` 对 `createDownload` 没有任何节流或配额，也没有 `Origin` 校验。引导文件路径可预测（`:441`），Unix 上有 `0o400` 保护，Windows 上只设了 readonly 属性（`:422`）——**readonly 不是 ACL**，同用户的任意进程都能读到 token。
+- **影响**：本机同用户进程读取 token 后即可无限调用 `createDownload`，用于耗尽磁盘或把应用当作流量放大器。
+- **修复方向**：Windows 上把引导文件 DACL 收敛为仅当前用户，或改用命名管道传递 token 而不落盘；给 `createDownload` 加令牌桶（建议 10 次/分钟，突发 5）；补 `Origin` 白名单（`chrome-extension://` / `moz-extension://`）作为纵深；把 token 从 query string 移到 `Sec-WebSocket-Protocol` 或首帧握手消息，避免出现在访问日志中。另外扩展侧 `background.js:138` 的 `api.runtime.onMessage` 忽略了 `_sender`，应校验 `sender.id === chrome.runtime.id`。
+- **验收**：超过配额的创建请求返回结构化错误；Windows 上非当前用户进程无法读取引导文件；扩展消息校验发送方身份。
+
+### SEC-05（P1，Open）：明文口令、私钥与密钥全程无 zeroize
+
+- **证据**：`zeroize` 只作为传递依赖出现在 `Cargo.lock`，`src-tauri/src` 中零引用。[`task_credentials.rs`](../src-tauri/src/db/task_credentials.rs#L6) 的 `TaskCredentials` 四个敏感字段都是普通 `String`；`resolve_task_credentials` 解密过程中还经过 `serde_json::from_str` 产生额外副本；`encryption_key()` 返回按值拷贝的 `[u8; 32]`；`decrypt_headers` 返回的 Cookie JSON 同理。
+- **影响**：进程崩溃转储、Windows 页面文件、休眠镜像或同用户进程读取内存，都能捞到 SFTP 私钥口令与 Cookie 明文。对一个明确以「加密存储凭据」为卖点的模块，这是承诺与实现之间的缺口。
+- **修复方向**：给 `TaskCredentials` 与 `TaskCredentialsSecret` 加 `ZeroizeOnDrop`（需覆盖 serde 反序列化产物），`encryption_key` 返回 `Zeroizing<[u8; 32]>`，解密中间的 `Vec<u8>` 与返回的 `String` 改用 `Zeroizing`/`SecretString`。至少覆盖 password、private_key_data、private_key_passphrase 与解密后的 headers JSON。
+- **验收**：上述四类敏感数据在作用域结束时被擦除；新增测试验证 Drop 后缓冲区不含原文。
+
+### SEC-06（P2，Open）：`browser_messages` 永久保留含凭据的完整 URL
+
+- **证据**：[`browser.rs`](../src-tauri/src/commands/browser.rs#L269) 存入的是 `input.url.trim()` 原始 URL 而非 `sanitize_url` 后的结果。`task_events`、`task_requests`、`task_request_headers` 都有 prune 任务，**只有 `browser_messages` 没有任何 prune 或 TTL**。
+- **影响**：从浏览器交接的 S3 预签名 URL、带 `?token=` 的下载链接会永久留在未加密的 SQLite 中。数据库文件泄露一次即等于泄露全部历史下载凭据。
+- **修复方向**：入库前用 `logging::sanitize_url` 剥掉 query（去重依赖 `request_id`，不依赖 URL），并新增与 `prune_task_events` 同规格的 `prune_browser_messages`（建议 7 天），挂到启动清理与 6 小时周期任务上。
+- **验收**：`browser_messages` 中不含 query string；长期运行后该表行数有上界。
+- **2026-08-26 复核**：增长维度进一步确认——`clear_tasks` 的十表清理序列（task_state.rs:135-191）同样不触碰 browser_messages，用户手动「清除全部任务」也无法回收空间；`latest_browser_error` 因 (browser, created_at DESC) 索引保持 index seek、不受增长拖累，真实成本是 DB 文件与每次 VACUUM INTO 导出（connection.rs:218）的无界膨胀，以及含凭据 URL 的无限期留存。修复建议不变；prune 建议挂到 lib.rs:564-586 既有启动清理块，与另外三个 prune 并列。
+
+### SEC-07（P2，Open）：Windows 上完成动作命令存在工作目录劫持面
+
+- **证据**：命令执行本身做得不错——黑名单、`shlex` 分词、不经 shell 直接 exec、超时与 `kill_on_drop` 都在（[`platform/mod.rs`](../src-tauri/src/platform/mod.rs#L294)）。但 `parts[0]` 若是裸名（如 `notepad`），Windows 的 `CreateProcess` 搜索顺序包含当前工作目录。
+- **影响**：若应用 CWD 落在可写目录，同用户进程可放置同名 exe 完成劫持。
+- **修复方向**：要求 `parts[0]` 为绝对路径且文件存在，否则显式在 `PATH` 中解析后再把绝对路径传给 `Command::new`。
+- **验收**：裸命令名被拒绝或解析为绝对路径后执行；新增单元测试覆盖。
+
+以下 `SEC-08`～`SEC-12` 为 2026-08-26 第 4 轮复审新增。
+
+### SEC-08（P1，Open）：keyring 读错误的 catch-all 触发密钥重生成，全部已存密文不可逆丢失
+
+- **证据**：[`secure_headers.rs`](../src-tauri/src/secure_headers.rs#L96) 的 `encryption_key()` 对 `entry.get_password()` 的 `Err(_)` **不分错误种类**就生成新 ChaCha20 密钥并 set_password 覆盖旧值；模块注释自述「no rotation/escrow」，全仓无任何重加密迁移。共享此钥的密文包括 task_credentials 四字段（含 SSH 私钥与口令）、浏览器转发 headers 的 Cookie JSON、per-task 代理密码（task_credentials.rs:89、task_proxy.rs:176、secure_headers.rs:15-21）。同仓库已有正确范式：proxy.rs:178-181 只匹配 `keyring::Error::NoEntry`。`ensure_secret_encryption_available`（:78-80）只是自调 encryption_key，唯一调用点 create.rs:678 只保护新写入。
+- **影响**：早期自启的 ERROR_NO_SUCH_LOGON_SESSION、凭据库瞬时故障、ACL 损伤等任何「读失败但写成功」的非对称窗口都会静默换钥——之后所有已存登录/Cookie/代理密码解密失败，损失发生时无警告、事后无恢复。相比第 3 轮登记的「显式轮换丢数据」，现在的恶化在于**不再需要任何用户动作**即可触发。（复核校正：纯 logon-session 未就绪场景 set_password 大概率同样失败而不覆盖，故定 P1 而非 P0。）
+- **修复方向**：对齐 proxy.rs 只认 NoEntry；其余错误上抛为结构化 secrets_unavailable 错误并在 UI 提示；中期提供显式 rotate（重加密迁移）。
+- **验收**：mock PlatformFailure 断言不覆盖密钥且报 secrets_unavailable；NoEntry 路径保持生成行为；新增单测。
+
+### SEC-09（P1，Open）：恢复备份不校验 settings 表，crafted backup 经 completion_run_command / ffmpeg_path 获得 RCE
+
+- **证据**：restore_app_backup 只跑 `enforce_backup_path_policy`（commands/backup.rs:147-157 → db/backup.rs:409-474，范围仅 tasks/task_files 的三列），settings 表原样入库。`CompletionAction::from_db_str` 接受 'run_command'（models/task.rs:1036）；`validate_user_command` 黑名单（platform/mod.rs:283-311）不含 `=` `+` `/` → `powershell -EncodedCommand <base64>` 通过 shlex 分词后 parts[0] 直接 exec（:346-347）；队列排空即执行（scheduler/mod.rs:594-601），无确认对话框；update_settings 写入侧也无校验（commands/settings.rs:200-212）。次级向量：ffmpeg_path 进 ensure_ffmpeg_available（download/ffmpeg.rs:56-76）、sftp_known_hosts 预授权攻击者指纹（db/sftp.rs:21-98）；auto_resume_on_startup 同样来自备份、可置真实现无交互触发。
+- **影响**：「从论坛/群聊下载他人分享的任务列表备份」是自然社工载体——恢复 + 重启 + 队列排空 = 以用户权限执行任意命令。威胁模型与本仓库 SEC-02 自述一致（tests/backup_restore.rs:236-238：attacker computes a valid checksum for their own payload），SEC-02 加固了路径却把 settings 留成了缺口。
+- **修复方向**：恢复侧对 settings 做白名单清洗——completion_action 强制重置为 notify、completion_run_command/ffmpeg_path 清空（或要求恢复后用户显式重填）；known_hosts 可保留但需在恢复确认对话框披露。
+- **验收**：恶意 settings 备份恢复后 completion_action != run_command 且 run_command 为空；正向用例确保常规设置不受损。
+
+### SEC-10（P2，Open）：IP 字面量 URL 不经过自定义 resolver，「连接期 SSRF 过滤覆盖非 handoff 路径」的注释声明不成立
+
+- **证据**：连接期过滤唯一存在于 HickoryResolver::resolve 内（http/mod.rs:314-346），而 hyper-util 0.1.20 的 http connector 对已是 IP 字面量的 host 明确跳过 resolution 直连（vendored client/legacy/connect/http.rs:538-544）。`is_private_or_reserved_url` 只挂在两个 handoff 边界（browser.rs:1035、vibe-native-host.rs:240）。http/mod.rs:326-328 注释声称该层「also protects non-handoff paths (direct UI/clipboard task creation)」——对 `http://169.254.169.254/`、`http://[::1]/`、`http://10.0.0.1/` 等点分/字面形式为假。WHATWG 归一化只救 hex/octal/int 型 IPv4。
+- **影响**：剪贴板监控默认开启（settings.rs:430-432）：恶意页面诱导复制云元数据 URL，点击检测 toast 即对元数据端点发起 GET 并把响应体存为下载文件；恶意 .metalink 的内网 mirror 同通道，成功/失败 + 校验和构成 readback oracle。主机名型 rebinding 仍被 resolver 过滤拦截，本条是字面量专属旁路。
+- **修复方向**：建立统一的 connect 前置校验层（authority 先行 is_private_or_reserved_url，handoff 与非 handoff 共用），并修正失实注释。
+- **验收**：字面量内网/元数据 URL 在 UI/clipboard/metalink/hls/dash 各入口被结构化拒绝；hostname rebinding 回归不受影响。
+
+### SEC-11（P1，Open）：任务 Basic-auth 与浏览器转发 Cookie 无源绑定，发往每个 Metalink 镜像与跨源 HLS/DASH 主机
+
+- **证据**：merge_basic_auth_headers（http/request.rs:17-39）注入解密后的 Basic-auth，无 origin 检查；metalink.rs:238-240 每任务合并一次，:1272-1275（及 :1307-1310 重试）对 manifest 里**每一个镜像** verbatim 附带全部 request_headers。Cookie 属 FORWARDED_HEADER_ALLOWLIST（browser.rs:51-61），sanitize 后持久化（upsert_task_request_headers browser.rs:406）并在运行时回灌（scheduler/mod.rs:274-275 → :454）。reqwest 只在同一请求链的跨主机**重定向**时剥离敏感头，应用自行发起的新请求不受影响。HLS（hls/engine.rs:466-468、:1089）与 DASH（dash.rs:932-934）对 playlist 引用的跨源绝对 URI 同模式。
+- **影响**：files.example.com 的凭据被发给 manifest 中任意第三方 mirror；若诚实镜像完成了字节传输且校验和通过，泄露对用户完全不可见。
+- **修复方向**：请求头注入处按目标 host 与任务 URL 的注册域（eTLD+1）绑定，不匹配则剥离 Authorization/Cookie；mirror 场景至少对 Authorization 默认关闭并在 UI 明示「凭据将发送至镜像」。
+- **验收**：跨域镜像出站请求断言无 Authorization/Cookie；同域回归不受影响。
+
+### SEC-12（P2，Open）：FTP/SFTP 建连对目标地址无任何私有/保留 IP 审查（引擎层 SSRF 的最后残余）
+
+- **证据**：FtpTarget::parse（ftp.rs:1560-1618）与 SftpTarget 解析只做 scheme/host/port 提取；download/{ftp,sftp,webdav,bt,metalink,dash}.rs 对 ssrf 模块零引用。connect_session 直拨 AsyncFtpStream::connect（ftp.rs:1255/:1274/:1299）、russh client::connect（sftp.rs:1335）。probe_target（ftp.rs:143-200）在任何用户可见反馈之前完成 TCP 连接 + USER/PASS 登录 + TYPE + SIZE 全握手；ftp_connect_error 区分连接失败与认证失败（ftp.rs:1253 vs :1263）。剪贴板监控提取 ftp(s)://sftp://webdav(s)://（clipboard.rs:13-23）且默认开启。
+- **影响**：一击 toast 即探测内网 FTP/SFTP 服务：细粒度错误分类构成内网主机/端口/认证状态的测绘原语，并向内网端点投递匿名登录尝试。这是 2026-06-30「引擎层 SSRF」发现经两轮修复后的最后一块未覆盖残余。
+- **修复方向**：与 `SEC-10` 共用前置校验层——引擎 connect 前解析 host（字面量直接判，域名 resolve 后逐 IP 判）拒绝私有/保留地址；如需访问内网由设置显式允许并提示。
+- **验收**：ftp://10.0.0.1/ 与 sftp://169.254.169.254/ 在创建与剪贴板入口被结构化拒绝；开启白名单后行为可解释且有提示。
+
+## 十、工程门禁与可维护性
+
+本章为 2026-08-13 复审新增，记录「门禁本身」的问题。它们不直接影响运行时，但决定了其余条目能否被及时发现。
+
+### ENG-01（P1，Partial）：多处质量门禁的实际覆盖面小于其表观
+
+- **证据**：四处独立确认。其一，[`ci.yml`](../.github/workflows/ci.yml#L81) 的 `cargo clippy` 没有 `--all-targets`，因此测试目标不受 `-D warnings` 约束；本地补齐后立即暴露 3 个 `items_after_test_module` 错误。其二，[`ci.yml`](../.github/workflows/ci.yml#L79) 只执行 `cargo deny check licenses advisories`，而 [`deny.toml`](../src-tauri/deny.toml#L48) 配置的 `[bans]` 与 `[sources]` 从未执行——这正是 `PERF-13` 的双密码学后端长期无人察觉的原因。其三，`ci.yml:42` 的 Rust 矩阵只有 ubuntu 与 windows，**macOS 的 objc2 平台代码只在 release 构建中被编译，从不被测试也从不被 clippy 检查**。其四，`check-i18n-completeness.ts` 只比 key 不比 value（见 `FUN-21`）。此外 `ci.yml:80` 的 `cargo check` 与 `clippy` 双跑是一整轮全量编译的浪费；`cargo` 命令均未加 `--locked`；advisories 只在 push/PR 触发，没有定时扫描。
+- **影响**：每一处都像是有防护而实际没防住。macOS 平台 bug 可以完整逃逸到发布。
+- **修复方向**：clippy 改为 `--locked --all-targets` 并删除冗余的 `cargo check`（估算每平台省 3-6 分钟）；`cargo deny` 加 `bans sources`；Rust 矩阵加 `macos-latest`（brew 装 ffmpeg）；新建定时执行的 `security.yml`；`check:bindings` 加 `if: ubuntu` 以避免 CRLF 假失败并省一次 specta 编译；全线加 `--locked`（需同时修 `sync-version.mjs` 同步 `Cargo.lock`，见 `ENG-06`）。
+- **验收**：`cargo clippy --all-targets -- -D warnings` 在 CI 通过；`cargo deny check bans sources` 在 CI 执行；macOS 跑完整 Rust 测试与 clippy；`check:i18n` 能检出值层面未翻译项。
+- **2026-08-13 已做**：[`ci.yml`](../.github/workflows/ci.yml) 删除冗余的 `cargo check`、clippy 改为 `--locked --all-targets`、`cargo deny` 加 `bans sources`。改动前已本地核实两项前提：`--locked` 可通过，且 `Cargo.lock` 中所有依赖的 source 均为 crates.io（唯一无 source 的是本地包自身），因此 `sources` 检查不会让 CI 意外变红；`bans` 为 `warn` 级别同样不会。
+- **仍未做**：macOS Rust 矩阵、定时安全扫描、`check:bindings` 限定 ubuntu。`check:i18n` 的 value 校验已在 `FUN-21` Closed。
+
+### ENG-02（P1，Closed）：当前工作区未通过 lint 与 clippy，且含 UTF-8 乱码
+
+- **证据**：`pnpm lint` 7 errors + 2 warnings（明细见第三章）；`cargo clippy --all-targets` 3 errors。另外 [`hls/engine.rs`](../src-tauri/src/download/hls/engine.rs#L2012) 有 6 处 UTF-8 乱码，其中 `:2012` 的 `"Live playlist idle 鈥?waiting for new segments"` 是 em dash 被以 GBK 误写，且该字符串通过 `update_task_status` 写入数据库并显示在 TaskDetails 的 Logs 视图中；其余 5 处在注释。仓库中已有同类前科（commit `9a5a083 fix: restore UTF-8 encoding in RELEASE.md`）。
+- **影响**：当前改动无法通过 CI。`AttentionCenter.tsx:249` 的 `noStaticElementInteractions` 不是可自动修复项，且与 DESIGN.md 的无障碍要求直接冲突。乱码是用户可见的文案缺陷。
+- **修复方向**：修复 lint 与 clippy 错误；把生产代码移到 `#[cfg(test)] mod tests` 之前；修复 6 处乱码；仓库缺少 `.gitattributes`（git 持续报告 LF→CRLF 转换），应补上并加一条 CI 非 ASCII 校验（源码注释按 AGENTS.md 本就应为纯英文，locale 文件与 `.md` 除外）。
+- **验收**：`pnpm lint` 与 `cargo clippy --all-targets -- -D warnings` 均通过；源码中无非预期的非 ASCII 字符。
+- **2026-08-13 修复**：6 处乱码统一改为 ASCII 连字符（而非改回 em dash），从根本上避免第三次复发。7 项 lint 中 5 项由 `lint:fix` 处理，两项需人工判断：`globals.css:162` 的 `!important` 位于 `@media (prefers-reduced-motion: reduce)` 内、用于覆盖 Tailwind 的 `animate-pulse`，Biome 建议的「删除该样式」会直接破坏 DESIGN.md 的减少动效契约，因此改为 `biome-ignore` 并写明理由；`AttentionCenter.tsx:249` 把 `onKeyDown` 下移到已有 `role="listbox"` 的容器上（焦点在 option 行，事件照常冒泡，跨分组导航行为不变）。`check-bundle-budget.mjs` 未使用的 `argv` 参数直接删除而非加下划线。新增 [`.gitattributes`](../.gitattributes)：显式声明行尾与二进制，但**不做** `git add --renormalize`（会产生巨大 diff 且触碰未提交改动）。
+- **验证**：`pnpm lint` 与 `cargo clippy --locked --all-targets -- -D warnings` 均为 exit 0。
+
+### ENG-03（P2，Open）：测试基础设施的隔离与清理缺陷
+
+- **证据**：[`tests/common/mod.rs`](../src-tauri/tests/common/mod.rs#L118) 的 `install_test_secret_key()` 在多线程测试中无保护地调用 `std::env::set_var`（Rust 1.80+ 已把它与并发 `getenv` 定义为数据竞争，edition 2024 将变为 `unsafe`）；`TestPaths::new` 与 `test_pool` 用纳秒时间戳命名且无 `Drop`，每次全量测试泄漏数百个临时目录与 `.sqlite`/`-wal`/`-shm`；[`metalink_engine.rs`](../src-tauri/tests/metalink_engine.rs#L909) 在 async 测试中用阻塞的 `thread::sleep(1100ms)`，而紧接着的两行又手动把冷却时间改成过去时刻，这个 sleep 是多余的；`tests/zz_dump_schema.rs` 是一次性诊断测试，文件头自己写明「验证后删除」，却仍在每次 `cargo test` 时建库并写入固定路径。
+- **影响**：`set_var` 是测试并行不稳定的真实候选根因（不是 `-j 1` 传说中的那个）。临时文件泄漏影响长期开发体验。
+- **修复方向**：删除 `zz_dump_schema.rs` 与那处多余 sleep；`install_test_secret_key` 改用进程内 `OnceLock<[u8; 32]>` 彻底消除 `set_var`，或至少加 `#[serial]`；`TestPaths`/`test_pool` 改用 `tempfile::TempDir`。建议引入 `cargo-nextest`，其进程级隔离能天然消除 env var 与 static 共享，CI 上还可配置自动重试。
+- **验收**：全量测试不再泄漏临时目录；默认并行度下测试稳定通过（不需要 `-j 1`）；README/CONTRIBUTING/ROADMAP 中的 `-j 1` 说明按第三章的澄清改写。
+- **2026-08-13 实证**：本轮在本机复现了那个被长期误解的现象——默认并行度下 `cargo test` 以 `error[E0786]: found invalid metadata files for crate tauri_app_lib` 失败，附带 `failed to mmap ... (os error 1455)`（页面文件太小）。降到 `-j 2` 后全量通过。这确证根因是**链接阶段内存不足**而非测试间干扰，`-j 1` 之所以「有效」纯属副作用，它限制的是编译并行度。
+  另一个值得记录的操作陷阱：强制终止正在编译的 cargo 会留下损坏的增量缓存，表现为 rustc ICE（`Res::Err but no error emitted`）和 `rlib format not found`。恢复只需删除 `target/debug/incremental`、`deps/tauri_app_lib*` 与 `.fingerprint/vibe-downloader-*`，不必全量 `cargo clean`（后者会重编译 900 多个依赖 crate）。
+- **2026-08-26 复核**：`zz_dump_schema.rs` 仍在树中且无 `#[ignore]`，固定路径 `temp_dir()/vibe_schema_new.txt` + `.expect("write dump")` 每次全量测试执行并遗留产物。一点更正：Windows 上 Rust std 以 FILE_SHARE_READ|WRITE|DELETE 打开文件，两进程并发 `fs::write` 同一路径通常表现为交错写入而非 sharing-violation panic——早先「并发必炸」的推断过强；卫生缺陷本身（一次性诊断、固定路径、残留产物、ENG-03 Open 登记属实）成立。
+
+### ENG-04（P2，Open）：没有任何覆盖率度量
+
+- **证据**：`tarpaulin`/`llvm-cov`/`codecov` 在配置中零匹配，`package.json` 无 `@vitest/coverage-v8`，`vite.config.ts` 的 test 块无 coverage 配置。
+- **影响**：本轮识别出的覆盖缺口（`logging.rs` 的 `sanitize_url` 零测试却承担日志脱敏、`download/file_ops.rs` 零测试却承担 `ARC-02` 的原子提交、`commands/settings.rs` 的 33 个键 clamp 逻辑零测试、前端 `src/lib/tauri.ts` 977 行 IPC 层零测试、扩展 `background.js` 715 行零测试）无法被量化，也无法防止回归。
+- **修复方向**：接入 `cargo-llvm-cov` 与 `@vitest/coverage-v8`，用当前实测值作为阈值基线且只允许上升，在 ubuntu 上跑一次并上传为 artifact（不必接外部服务）。优先补三类最高价值缺口：安全（`sanitize_url`）、竞态（`file_ops`）、业务规则（settings clamp、错误码映射）。
+- **验收**：CI 产出覆盖率报告；阈值配置生效并能拦截下降。
+
+### ENG-05（P2，Open）：仓库治理文件缺失
+
+- **证据**：仓库根目录与 `.github/` 下均无 `.gitattributes`、`SECURITY.md`、`CHANGELOG.md`、`CODE_OF_CONDUCT.md`、`.editorconfig`、`dependabot.yml`、`CODEOWNERS` 与 issue/PR 模板；`package.json` 也没有 `packageManager` 字段。另有一个遗留的本地临时脚本 `_apply_f6.ps1` 在仓库根目录，它引用的 `src-tauri/src/download/hls.rs` 已被删除。
+- **影响**：缺 `.gitattributes` 导致 git 持续报告行尾转换，跨平台协作会产生噪音 diff；作为 GPL 开源项目缺 `SECURITY.md` 意味着没有漏洞报告渠道；已发布到 0.4.0 却无 CHANGELOG（ROADMAP 明确声明自己不是变更日志）；`deny.toml` 已 ignore 3 个 RUSTSEC 条目，更需要 dependabot 来尽快消除这些 ignore。
+- **修复方向**：补齐上述文件；`dependabot.yml` 覆盖 npm、cargo 与 github-actions 三个生态并按 radix/tauri/react 分组；删除 `_apply_f6.ps1` 并在 `.gitignore` 中加 `_*.ps1`；加 `"packageManager": "pnpm@10.x.x"` 让 corepack 自动对齐版本。
+- **验收**：`git status` 不再出现行尾警告；有明确的漏洞报告渠道与版本变更记录。
+- **2026-08-26 更正**：`.gitattributes` 已随 `ENG-02` 修复批次落地（2026-08-15），本条证据中「仓库根目录无 `.gitattributes`」子项过时，且与同章 `ENG-02` 的修复记录自相矛盾；其余治理文件（SECURITY.md / CHANGELOG.md / CODEOWNERS / dependabot.yml / packageManager 等）与 `_apply_f6.ps1` 残留经复核仍属实。
+
+### ENG-06（P2，Open）：验证入口分散，四份文档的检查清单与 CI 不一致
+
+- **证据**：`package.json` 有 32 个 script，其中检查类 12 个。完整检查清单在仓库中有四个互不一致的版本：README（10 项）、CONTRIBUTING（9 项）、`docs/RELEASE.md`（10 项，**漏了 `pnpm lint`、`check:i18n`、`test:frontend`、`check:bundle`**）、AGENTS.md（列举式）。CI 实际执行 15 项，是唯一权威。另外 `scripts/sync-version.mjs` 同步了 `package.json`/`tauri.conf.json`/`Cargo.toml` 三处，但**不同步 `Cargo.lock` 中的包版本**，因此发布构建必然静默重写 lock 文件，这也是 `ENG-01` 无法直接加 `--locked` 的原因。`docs/RELEASE.md:167` 还指引读者「取消 release.yml 第 75-84 行的注释」，而该处实际是已生效的赋值，无注释代码。
+- **影响**：没有一份文档等于 CI 实际跑的集合，`docs/RELEASE.md` 那份尤其危险。发布前的人工检查依赖记忆。
+- **修复方向**：新增 `pnpm verify:frontend` / `verify:rust` / `verify` 三个聚合脚本，与 CI 一一对应，然后让 CI 的两个 job 退化为单行调用、四份文档统统改为引用 `pnpm verify`——这样**文档与 CI 结构性地不可能漂移**。`pnpm check` 目前只做 typecheck+lint+i18n，名字比内容大，建议改名 `check:static`。`sync-version.mjs` 补上 `Cargo.lock` 同步与 `--check` 校验。修正 `docs/RELEASE.md:167` 的错误指引。另建议在 release preflight 中加一道自动门禁，校验 README 与 AGENTS.md 中列出的 blocker ID 在本文中确为 Closed（这同时是 `ARC-18` 的验收手段）。
+- **验收**：`pnpm verify` 覆盖 CI 全集；四份文档不再各自维护清单；`--locked` 可在全线启用。
+- **2026-08-26 复核（文档漂移实锤三件）**：其一，[`AGENTS.md`](../AGENTS.md#L94) 的 Useful checks 仍列 `cargo check` 与不带 `--all-targets` 的 clippy，而 ci.yml:85 已是 `cargo clippy --locked --all-targets -- -D warnings`——按 AGENTS.md 本地自查恰好放过 CI 会拦的 test-target warning。其二，本文第十四章旧文曾写「CI 当前尚未加上 (--all-targets)」，与本章 ENG-01 已完成的记录自相矛盾（本次修订已一并改正）。其三，ENG-05 曾称根目录缺 `.gitattributes`，与同章 ENG-02 已添加的记录冲突（已在上条更正）。「`pnpm verify` 单入口」仍是根治此类漂移的结构性解法。
+
+### ENG-07（P2，Open）：六个引擎测试的无 deadline 轮询循环把回归放大成 30 分钟 CI 挂起
+
+- **证据**：ftp_engine.rs:450-473（join :476-479）、sftp_engine.rs:899-911（join :914-917）、hls_engine.rs:512-523 与 1412-1423、dash_engine.rs:443-454 与 789-800、webdav_engine.rs:440-452 均为 `loop { sleep(25ms) }` 无 deadline 轮询，且 spawn 出的 engine.download JoinHandle 错误只在循环跳出后才被读取。同文件已有 deadline 范式（hls_engine.rs:777-779,887-889,1338；dash_engine.rs:640；metalink_engine.rs:2315）但未推广。package.json 的 test:rust 是裸 `cargo test` 无超时；ci.yml:44 rust matrix timeout-minutes:30、fail-fast:false。
+- **影响**：任何「早退且不写 checkpoint」的引擎回归（例如 ARC-33 类改动失误）→ 循环永不退出、真实错误永不可见，烧满 30 分钟超时且双 OS leg 信号全失。
+- **修复方向**：抽 tests/common 的 `wait_for_segment_progress(deadline)` helper（Instant deadline + 超时 panic 时附带 JoinHandle 错误），替换六处循环。
+- **验收**：人为早退的 stub engine 下测试秒级失败并显示真实错误。
+
+### ENG-08（P3，Open）：sync-stable-error-i18n.mjs 以硬编码哨兵键区分「已同步 / regex 未命中」，且零测试覆盖
+
+- **证据**：[`sync-stable-error-i18n.mjs`](../scripts/sync-stable-error-i18n.mjs#L148) 在 `replaced === text` 时仅凭 `text.includes("tempFileSmallerThanProgress:")` 判定结果。scripts/ 下九个 *.test.mjs 与 check-i18n-completeness.test.ts 均不覆盖本脚本，test:release-tools 的 glob 不含它。
+- **影响**：STABLE_ERROR_CODES 一旦改名/删除该码，完全健康的 locale 全被误报 'Failed to replace errors block' exit 1；反向地，errors-block regex 漂移可被哨兵掩盖成「已同步」而静默漏更部分 locale。
+- **修复方向**：判定改为结构性比较（对生成 block 与现有 block 做规范化 diff）；补最小 round-trip 测试并入 test:release-tools。
+- **验收**：改名一个错误码后脚本对已同步 locale 报 Unchanged 而非失败。
+
+## 十一、统一修复顺序
 
 ### 阶段 A：发布阻断和数据完整性
 
@@ -628,10 +1281,107 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 
 1. `PERF-11`：已 Closed（1k/10k headless 基线）；50k+/UI soak 仍延期。
 2. 高价值热点已 Closed：`PERF-02`、`PERF-03`、`PERF-04`、`PERF-05`、`PERF-06`（`PERF-07` 亦已 Closed）。
-3. 仍 Open / Needs benchmark：`PERF-01`、`PERF-08`、`PERF-10`；`PERF-09` 先测再改。
-4. 可维护性：`ARC-16`、`ARC-17`。
+3. 仍 Needs benchmark：`PERF-09` 先测再改；`PERF-01` / `PERF-08` / `PERF-10` 已 Closed。
+4. 可维护性：`ARC-16` 已 Closed；`ARC-17` Partial（HLS playlist + TaskDetails query）。
 
-## 十、发布验收定义
+### 阶段 E：2026-08-13 复审批次
+
+阶段 A 至 D 已完成。以下是本轮新增条目的建议顺序，原则是「先让工作区可提交，再修数据完整性与安全，最后做防复发的结构性改造」。
+
+**E1 — 恢复可提交状态并拿掉最廉价的高收益项（建议半天内完成）**
+
+1. `ENG-02`：修 `pnpm lint` 的 7 个错误、`cargo clippy --all-targets` 的 3 个错误、`hls/engine.rs` 的 6 处 UTF-8 乱码，补 `.gitattributes`。
+2. `PERF-12`：两处日志配置各两行改动。这一项应当排在所有调查类工作之前——**在日志只保留 40 KB 的前提下，后续任何现场问题都无法诊断**。
+3. `ENG-01` 的 CI 部分：clippy 加 `--all-targets` 并删除冗余 `cargo check`、`cargo deny` 加 `bans sources`、`check:bindings` 限定 ubuntu。
+
+**E2 — 数据完整性与安全的 P0**
+
+4. `SEC-01`：已 Closed。移除 fs 插件，读写改走后端命令，并修好任务报表导出。
+5. `ARC-21` + `ARC-20`：一起改。统一 `begin_immediate`、把多文件插入并入创建事务、把 busy/snapshot 纳入重试，配一条并发创建集成测试。
+6. `ARC-19`（+ `ARC-31` 的协调器合并）：FTP/SFTP 取消排空。既然要在两个文件改同样的逻辑，直接抽公共协调器，让取消语义只有一处实现。
+7. `SEC-02`：备份恢复的路径策略校验。
+8. `ARC-22`：DASH 分片数上限。加一个常量与一处校验。
+
+**E3 — 契约一致性（防止同类问题再生的关键批次）**
+
+9. `SEC-03` + `FUN-20`：统一 HTTP 客户端入口与探测代理。同时确立并用 CI 强制「`download/` 下禁止裸 `Client::builder()`」。
+10. `ARC-25`、`ARC-26`、`ARC-27`：把「读空闲超时、连接/探测超时、退避 sleep 可取消」三条契约补齐到所有引擎。
+11. 为上述契约建立**跨引擎测试矩阵**：代理 Off/Custom、传输中取消、停滞连接、SSRF 重定向四组用例对所有引擎各跑一遍。这是本轮最重要的结构性产出——没有它，第 9、10 步的修复会在下一个引擎上重新破损。
+
+**E4 — 其余 P1 与防复发**
+
+12. `ARC-23`、`ARC-24`、`ARC-28`、`SEC-04`、`SEC-05`。
+13. `FUN-21`：已 Closed。`check:i18n` 含 value 校验，7 个 locale 的 `errors.*` 已本地化。
+14. `UX-17`、`PERF-14`：前端可感知缺陷与冗余订阅，改动量小于 50 行。
+15. `ARC-18` + `ENG-06`：落地自动文档检查与 `pnpm verify` 单入口。这两项是本轮所有文档漂移与清单不一致的结构性解法，完成后 `ARC-18` 方可从 Fixed locally 转为 Closed。
+
+**E5 — 可维护性与工程化**
+
+16. `ARC-31` 的剩余部分与 `ARC-17` 的前端拆分 checklist。
+17. `ENG-03`、`ENG-04`、`ENG-05`、`PERF-13`、`PERF-15`、`PERF-16`、`ARC-29`、`ARC-30`、`FUN-22`、`UX-18`、`SEC-06`、`SEC-07`。
+
+### 阶段 F：2026-08-26 第 4 轮复审批次
+
+原则与 E 批次一致：先止血（小改动消除大风险），再数据完整性，再安全，最后资源生命周期与防复发。
+
+**F1 — 止血批次（合计预计 <100 行，建议半天内）**
+
+1. `ARC-32`：四处内联 dispatch 统一 spawn 化（resume/retry 已有现成范式）。当前唯一的 P0 死锁，且 Restart 变体确定性触发。
+2. `SEC-08`：secure_headers.rs 的 `Err(_)` 改为只匹配 `keyring::Error::NoEntry`（照抄 proxy.rs:178-181），其余错误上抛。
+3. `ARC-41`：queued 启动失败的谓词/路由修正——一行 SQL 加一个 emit。
+4. `FUN-23`：备份导出加跨卷 copy 回退。
+5. 文档侧的 `ENG-06`：修正 AGENTS.md 的 clippy/check 清单（本文侧已于本次修订改正）。
+
+**F2 — 数据完整性**
+
+6. `ARC-33`：分段 worker 全出口 flush（含 retryable 出口），字节级回归。
+7. `ARC-34` + `ARC-35` + `ARC-24`：Metalink 一次性整改——持久化分片计划、ranged 请求强制 206 全字段校验、part 完成判定 == 化与失败清理。三者共享同一批测试基建，拆开修会互相返工。
+8. `ARC-36`：外部音轨按媒体序排序输出。
+9. `ARC-37`：引擎自取消与用户取消解耦（顺带消灭僵尸态与「静默转 Paused」变体）。
+10. `ARC-42`：FTP/SFTP resume 前置 SIZE/MDTM 重验。
+
+**F3 — 安全**
+
+11. `SEC-09`：恢复侧 settings 白名单清洗。
+12. `SEC-11`：凭据请求头按 eTLD+1 源绑定。
+13. `SEC-03` 收尾 + `SEC-10` + `SEC-12`：统一 connect 前置校验层（IP 字面量 + 私有/保留地址），BT 的两条路径接入统一工厂；落地并用 CI 强制「`download/` 下禁止裸 `Client::builder()`」。应与 E3 规划的跨引擎契约测试矩阵合并实施。
+
+**F4 — BT 子系统（与 ARC-28 / ARC-29 同批决策）**
+
+14. `ARC-39`：session 拓扑决策（共享单例 vs 显式 DHT 配置）。
+15. `ARC-43`：按 (source_key, task_id) 精确删除。
+
+**F5 — 资源生命周期与测试健壮性**
+
+16. `ARC-38`：staging 清理三处（finalize + 启动扫描 + delete 流程）。
+17. `ARC-40`：supervisor catch_unwind 兜底。
+18. `SEC-06` prune 落地；`ARC-47` serial 路径 part 清理。
+19. `ENG-07`：deadline helper 替换六处无界轮询。
+
+**F6 — 其余 P2/P3**
+
+20. `UX-19`～`UX-21`（toast 一族一起修）、`UX-22`～`UX-25`、`FUN-24`～`FUN-27`、`ARC-44`～`ARC-46`、`ARC-48`、`ENG-03`、`ENG-05`、`ENG-08`、`PERF-13`。
+
+## 十二、已验证的非问题与负结果
+
+以下候选发现经对抗性复核判定**不成立或已有可靠上游防线**，登记于此防止未来审计重复报告，同时为相关子系统已被验证的事实留档。若相关代码发生实质变更，对应条目应重新评估。
+
+### N-1：segments.rs 分段计划的非事务物化不会导致静默损坏
+
+- **原候选**：`ensure_task_segments_with_plan`（db/segments.rs:88-97）先 ANY-exists 早退、再逐条 autocommit INSERT，无事务包裹且 task_work_units 无 (task_id, range_start) 唯一索引——进程崩溃或 SQLITE_BUSY 造成半截计划被当作完整计划接受；配合预分配的 temp 文件使尺寸检查失效，最终发布带洞的 Completed 文件。
+- **驳回依据**：每个引擎执行前必经 Scheduler::start_task → prepare_task_for_download → segment_resume_error（commands/tasks.rs:845-856、commands/task_resume.rs:45-125），其连续性门要求 range_start 从 0 连续递增且末段终点 == total_size，任何残缺形状都以结构化错误响亮拒绝（fail_task_and_segments + resume_blocked 事件 + restart 恢复动作），引擎根本不会被 spawn。SFTP 虽不走该门，但其完成判据按现存 segment 求和、< total_size 即 sftp_size_mismatch（sftp.rs:744-754）。并发重复插入的最坏结局同样是响亮失败而非静默损坏。post-completion 哈希校验（scheduler/mod.rs:468）提供第三层。
+- **残留瑕疵（低危）**：非原子物化把崩溃变成一次需要手动 restart 的伪 Failed；缺唯一索引留下窄竞态窗口。可在 F6 批次顺手加唯一索引 + 事务包裹，但这不是数据损坏风险。
+- **复核时间**：2026-08-26，基于当日工作区。
+
+### N-2：本轮其余核实的正面结论
+
+- bindings 零漂移：src/generated/bindings.ts 与 88 个 #[tauri::command] 的名称、参数 casing、enum 表示逐一核对一致，Tauri-Specta 生成链有效。
+- queue-changed 增量路径有效：≤50 id 走 listTasksByIds + upsertTasksBatch（use-task-events.ts:295-304），超出才整体刷新；残余的整体刷新是 ARC-07 设计内的 sort-safety 行为，不是旧缺陷复发。
+- i18n 值级校验实测通过：7 locale × 1405 叶子键，零缺失、零多余、零占位符错配、零未翻译（FUN-21 修复有效）。
+- SFTP 续传损坏（第 3 轮 P0）确认根治：sftp.rs:920-928 双侧 seek + :1051-1068 flush-before-checkpoint 契约 + sftp_engine.rs:919-948 字节级回归测试。
+- HTTP 分段 worker 的 206/Content-Range 校验严格（start/end/total 全字段），可作为 ARC-35 给 Metalink 对齐时的范本。
+
+## 十三、发布验收定义
 
 公开稳定发布前至少满足：
 
@@ -642,11 +1392,20 @@ Windows 默认并行 Rust 测试曾因本机页面文件不足触发 OS 1455 及
 - 浏览器发布 profile、权限、设置、文档和真实行为一致。
 - 数据库迁移失败保持 fail closed，并有可验证的备份或明确重建路径。
 - 无后台 worker、ffmpeg、BT session、文件句柄或临时文件在取消和退出后泄漏。
-- `pnpm check`、前端测试、生产构建、bindings、extension build、release tools、协议矩阵、Rust test 和 Clippy 全绿。
+- 引擎内部失败不复用用户取消信号；任何 segment/worker 失败都在有限时间内落到显式终态（`ARC-37`）。
+- 下载目录的 staging/临时目录在成功、失败、取消、删除与启动清扫五条路径上都有界（`ARC-38`、`ARC-47`）。
+- 备份导出在跨卷目标下成功；恢复对 settings 表执行白名单清洗（`FUN-23`、`SEC-09`）。
+- OS keyring 读失败不销毁已有密钥；凭据请求头按源域绑定（`SEC-08`、`SEC-11`）。
+- 所有网络引擎（含 BT 抓取与 FTP/SFTP 建连）经过统一的前置地址校验，IP 字面量同等受控（`SEC-03`、`SEC-10`、`SEC-12`）。
+- `pnpm check`、前端测试、生产构建、bindings、extension build、release tools、协议矩阵、Rust test 和 Clippy 全绿。Clippy 必须以 `--all-targets` 执行，`cargo deny` 必须包含 `bans` 与 `sources`。
+- macOS 与 Windows、Linux 一样执行完整的 Rust 测试与 Clippy，而不只是 release 构建。
+- 所有网络请求经由统一客户端工厂，`download/` 下不存在裸 `reqwest::Client::builder()`；代理 Off/Custom、传输中取消、停滞连接、SSRF 重定向四组契约测试对每个引擎均通过。
+- 日志保留窗口足以覆盖一次完整的用户会话，且总量有上界。
+- 7 个 locale 的错误码文案在**值层面**完成本地化，`check:i18n` 能检出未翻译项。
 - 性能基线记录目标硬件上的冷启动、首屏、搜索、滚动、RSS、长时间运行和大批量删除结果。
 - README、ROADMAP、PRODUCT、DESIGN、协议矩阵、发布材料和当前版本不存在能力或版本冲突。
 
-## 十一、建议验证命令
+## 十四、建议验证命令
 
 基础门禁：
 
@@ -656,17 +1415,23 @@ pnpm lint
 pnpm check:i18n
 pnpm test:frontend
 pnpm build
+pnpm check:bundle
 ```
 
 Rust 与绑定：
 
 ```bash
-cargo check --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml -j 1
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
 pnpm specta
 pnpm check:bindings
 ```
+
+关于上面两条 Rust 命令的说明（`ENG-01`、`ENG-03`）：
+
+- 必须带 `--all-targets`，否则测试目标不受 `-D warnings` 约束。CI 已于 2026-08-13 收紧（ci.yml:85 为 `cargo clippy --locked --all-targets`），本地保持同一命令即可——本清单旧版「CI 当前尚未加上」的说法已过时并更正（见 `ENG-01`、`ENG-06`）。
+- `cargo check` 已从清单中移除——`clippy` 完全包含它的工作，双跑是一整轮全量编译的浪费。
+- 不再推荐 `-j 1`。它限制的是 Cargo 的编译并行度而非测试线程数（那是 `-- --test-threads=1`），因此从来不能修复测试间干扰。若本机在链接阶段内存不足，用 `-j 2` 或设置 `CARGO_BUILD_JOBS`，并考虑在 `src-tauri/.cargo/config.toml` 中设置 `[profile.dev] debug = "line-tables-only"` 降低内存峰值。
 
 浏览器、协议与发布：
 
@@ -678,7 +1443,7 @@ pnpm test:release-tools
 
 修复具体问题时还应执行本文对应条目要求的集成或端到端测试，不能用上述通用命令替代。
 
-## 十二、相关文档
+## 十五、相关文档
 
 - [产品约束](../PRODUCT.md)
 - [设计约束](../DESIGN.md)

@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next";
 
 import { CommandBar } from "@/components/shell/CommandBar";
+import { navFilterForDigit } from "@/components/shell/nav-shortcuts";
 import type { AttentionDialogRequest } from "@/components/shell/ResolveAttentionDialog";
 import { ShutdownOverlay } from "@/components/shell/ShutdownOverlay";
 import { Sidebar } from "@/components/shell/Sidebar";
@@ -31,6 +32,7 @@ import { localizedErrorMessage } from "@/lib/errors";
 import { bumpListQueryEpoch, isCurrentListQueryEpoch } from "@/lib/list-query-epoch";
 import { createLogger } from "@/lib/logger";
 import { getPlatform, type Platform, trafficLightsInsetPx } from "@/lib/platform";
+import { writeSettingsRecoveryReturn } from "@/lib/settings-recovery-return";
 import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
 
 const log = createLogger("app-shell");
@@ -541,10 +543,18 @@ export function AppShell() {
   const bulkExport = useCallback(
     async (selectedTasks: Task[], format: "json" | "csv") => {
       if (selectedTasks.length === 0) return;
-      const { exportTasks } = await import("@/lib/export");
-      const success = await exportTasks(selectedTasks, format);
-      if (success) {
-        addToast({ tone: "success", title: t("taskList.exportSuccess", { count: selectedTasks.length }) });
+      try {
+        const { exportTasks } = await import("@/lib/export");
+        const success = await exportTasks(selectedTasks, format);
+        if (success) {
+          addToast({ tone: "success", title: t("taskList.exportSuccess", { count: selectedTasks.length }) });
+        }
+      } catch (err) {
+        addToast({
+          tone: "error",
+          title: t("taskList.exportFailed"),
+          description: localizedErrorMessage(err, t),
+        });
       }
     },
     [addToast, t],
@@ -822,6 +832,11 @@ export function AppShell() {
             tone: "info",
             title: t("recovery.freeDiskSpaceToast"),
             description,
+            action: {
+              label: t("actions.retry"),
+              onClick: () => submitAttentionResolution(task, "retry"),
+            },
+            durationMs: UNDO_TOAST_TIMEOUT_MS,
           });
         }
         return;
@@ -839,8 +854,11 @@ export function AppShell() {
       }
 
       if (action === "configure_ffmpeg") {
-        // Open Settings → External tools. The user can configure or detect
-        // ffmpeg, then retry the task from its row context menu.
+        writeSettingsRecoveryReturn({
+          focus: "ffmpeg_path",
+          taskId: task.id,
+          action: "configure_ffmpeg",
+        });
         setNav("settings");
         addToast({
           tone: "info",
@@ -851,13 +869,11 @@ export function AppShell() {
       }
 
       if (action === "manage_sftp_host_keys") {
-        // ARC-15: jump to Settings → Network so the user can explicitly forget
-        // the stale TOFU row, then retry the SFTP task.
-        try {
-          sessionStorage.setItem("vibe-settings-focus", "sftp_known_hosts");
-        } catch {
-          // sessionStorage may be unavailable in locked-down environments.
-        }
+        writeSettingsRecoveryReturn({
+          focus: "sftp_known_hosts",
+          taskId: task.id,
+          action: "manage_sftp_host_keys",
+        });
         setNav("settings");
         addToast({
           tone: "info",
@@ -1106,14 +1122,6 @@ export function AppShell() {
   }, [addToast, applyDroppedFile, newDownloadDraftDirty, newDownloadOpen, t]);
 
   useEffect(() => {
-    const NAV_KEYS: Record<string, "all" | "downloading" | "paused" | "completed" | "failed"> = {
-      "1": "all",
-      "2": "downloading",
-      "3": "paused",
-      "4": "completed",
-      "5": "failed",
-    };
-
     const onKeyDown = (event: KeyboardEvent) => {
       // IME composition guard: when a CJK input method is composing (e.g. typing
       // pinyin), keystrokes should go to the IME, not trigger app shortcuts.
@@ -1169,8 +1177,8 @@ export function AppShell() {
           return;
         }
 
-        // Navigation: Mod+1~5
-        const navTarget = NAV_KEYS[event.key];
+        // Navigation: Mod+1–4 follows the primary sidebar items.
+        const navTarget = navFilterForDigit(event.key);
         if (navTarget && matchesShortcut(event, `mod+${event.key}`, platform)) {
           event.preventDefault();
           setNav(navTarget);
@@ -1334,6 +1342,12 @@ export function AppShell() {
 
   return (
     <div className="flex h-full flex-col">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-2 focus:z-[100] focus:rounded-md focus:bg-surface-overlay focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-text-primary focus:shadow-[var(--shadow-popover)] focus:ring-2 focus:ring-accent-primary focus:outline-none"
+      >
+        {t("app.skipToMain")}
+      </a>
       <TitleBar
         platform={platform}
         onOpenPalette={openPalette}
@@ -1348,8 +1362,11 @@ export function AppShell() {
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
         <Sidebar onNewDownload={openNewDownload} />
-        <main className="order-1 flex min-h-0 min-w-0 flex-1 md:order-none">
-          <h1 className="sr-only">{t("app.name")}</h1>
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="order-1 flex min-h-0 min-w-0 flex-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary md:order-none"
+        >
           <TaskList
             onToggleTransfer={toggleTransfer}
             onRetry={retry}
@@ -1620,9 +1637,9 @@ function CompletionActionDialog({
               className="h-1.5 overflow-hidden rounded-full bg-surface-raised"
             >
               <div
-                className="h-full rounded-full bg-accent-primary transition-[width] duration-300"
+                className="h-full w-full origin-left rounded-full bg-accent-primary transition-transform duration-300 motion-reduce:transition-none"
                 style={{
-                  width: `${Math.max(0, Math.min(100, (remaining / Math.max(1, request.countdownSeconds)) * 100))}%`,
+                  transform: `scaleX(${Math.max(0, Math.min(1, remaining / Math.max(1, request.countdownSeconds)))})`,
                 }}
               />
             </div>

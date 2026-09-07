@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import { isModalFocusActive, subscribeModalFocus } from "@/lib/modal-focus";
+
 export type ToastTone = "success" | "error" | "info";
 
 /** Default auto-dismiss window for informational toasts (ms). */
@@ -43,44 +45,81 @@ interface ToastStore {
 
 let toastSequence = 0;
 
+/**
+ * Toasts created while a modal owned focus. They are kept out of `toasts` so the
+ * viewport never renders them behind a scrim, where the user could not read them
+ * and the auto-dismiss timer would run out before the dialog closed. Flushed when
+ * the last modal unmounts, so the confirmation still arrives — just later.
+ */
+let deferredToasts: AppToast[] = [];
+
+function flushDeferredToasts() {
+  if (deferredToasts.length === 0) return;
+  const ready = deferredToasts;
+  deferredToasts = [];
+  useToastStore.setState((state) => ({ toasts: [...ready.reverse(), ...state.toasts].slice(0, 20) }));
+}
+
+subscribeModalFocus(() => {
+  if (!isModalFocusActive()) flushDeferredToasts();
+});
+
 export const useToastStore = create<ToastStore>((set, get) => ({
   toasts: [],
   addToast: (toast) => {
     // If a toast with the same business key already exists, update it instead
     // of creating a duplicate. This prevents toast spam during bulk operations.
     if (toast.key) {
-      const existing = get().toasts.find((t) => t.key === toast.key);
+      const existing = get().toasts.find((t) => t.key === toast.key) ?? deferredToasts.find((t) => t.key === toast.key);
       if (existing) {
         // Replacing a soft-delete toast must still commit the previous action
         // so pending deletes are not left without a commit path.
         if (existing.onAutoCommit && existing.onAutoCommit !== toast.onAutoCommit) {
           existing.onAutoCommit();
         }
-        set((state) => ({
-          toasts: state.toasts.map((t) => (t.id === existing.id ? { ...t, ...toast } : t)),
-        }));
+        const patchIn = (list: AppToast[]) => list.map((t) => (t.id === existing.id ? { ...t, ...toast } : t));
+        if (deferredToasts.some((t) => t.id === existing.id)) {
+          deferredToasts = patchIn(deferredToasts);
+        } else {
+          set((state) => ({ toasts: patchIn(state.toasts) }));
+        }
         return existing.id;
       }
     }
     const id = `toast-${Date.now()}-${toastSequence++}`;
+    const created: AppToast = { ...toast, id };
+    // Errors are not deferred: they may explain why a control inside the open
+    // dialog is not responding, so hiding them would strand the user.
+    if (created.tone !== "error" && isModalFocusActive()) {
+      deferredToasts = [created, ...deferredToasts].slice(0, 20);
+      return id;
+    }
     set((state) => ({
-      toasts: [{ ...toast, id }, ...state.toasts].slice(0, 20),
+      toasts: [created, ...state.toasts].slice(0, 20),
     }));
     return id;
   },
-  updateToast: (id, patch) =>
+  updateToast: (id, patch) => {
+    deferredToasts = deferredToasts.map((toast) => (toast.id === id ? { ...toast, ...patch } : toast));
     set((state) => ({
       toasts: state.toasts.map((toast) => (toast.id === id ? { ...toast, ...patch } : toast)),
-    })),
-  dismissToast: (id) =>
+    }));
+  },
+  dismissToast: (id) => {
+    deferredToasts = deferredToasts.filter((toast) => toast.id !== id);
     set((state) => ({
       toasts: state.toasts.filter((toast) => toast.id !== id),
-    })),
+    }));
+  },
   clearToasts: () => {
     // Dismissing the stack accepts pending soft-deletes (same as X / timeout).
     for (const toast of get().toasts) {
       toast.onAutoCommit?.();
     }
+    for (const toast of deferredToasts) {
+      toast.onAutoCommit?.();
+    }
+    deferredToasts = [];
     set({ toasts: [] });
   },
 }));

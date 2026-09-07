@@ -737,6 +737,23 @@ async fn download_ftp_segment(request: WorkerRequest) -> Result<i64, String> {
     result
 }
 
+/// ARC-19: Publish a worker's authoritative offset to the coordinator.
+///
+/// The coordinator force-checkpoints `downloaded_until` from its in-memory map,
+/// so a worker that only writes `task_work_units` directly has its value
+/// overwritten by the last periodic report. Every cancel exit must call this
+/// after flushing, never before.
+///
+/// ARC-31: `sftp.rs` carries a byte-identical twin. Both collapse into one when
+/// the FTP/SFTP coordinators are merged.
+fn report_ftp_worker_offset(request: &WorkerRequest, offset: i64, speed_bps: i64) {
+    let _ = request.progress_tx.send(WorkerProgress {
+        segment_id: request.segment.id.clone(),
+        downloaded_until: offset,
+        speed_bps,
+    });
+}
+
 async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, String> {
     let mut session = connect_session(&request.target, &request.proxy_config).await?;
     session.transfer_type(FileType::Binary).await?;
@@ -781,6 +798,12 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
             file.flush()
                 .await
                 .map_err(|e| format!("Could not checkpoint the temporary file: {e}"))?;
+            // ARC-19: hand the authoritative offset back to the coordinator
+            // before returning. The coordinator force-checkpoints from its
+            // in-memory map when it observes the cancel, so without this it
+            // would write its last periodic value straight over the row we
+            // persist below.
+            report_ftp_worker_offset(request, offset, 0);
             db::update_segment_progress(
                 &request.pool,
                 &request.segment.id,
@@ -822,6 +845,9 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
                 file.flush()
                     .await
                     .map_err(|e| format!("Could not checkpoint the temporary file: {e}"))?;
+                // ARC-19: see the loop-top cancel branch - the coordinator must
+                // learn the real offset or it will overwrite this row.
+                report_ftp_worker_offset(request, offset, 0);
                 db::update_segment_progress(
                     &request.pool,
                     &request.segment.id,
@@ -867,6 +893,13 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
             .await
             .is_err()
         {
+            // ARC-19: this is a third cancel exit. It used to return without
+            // flushing or reporting, leaving whatever the BufWriter still held
+            // unwritten while the coordinator kept a newer in-memory offset.
+            file.flush()
+                .await
+                .map_err(|e| format!("Could not checkpoint the temporary file: {e}"))?;
+            report_ftp_worker_offset(request, offset, 0);
             let _ = session.abort(remote_stream).await;
             return Err("Download canceled.".to_string());
         }
@@ -876,13 +909,20 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
         offset += i64::try_from(read).unwrap_or(0);
 
         if last_emit.elapsed() >= FTP_PROGRESS_INTERVAL {
+            // ARC-19: flush *before* publishing the offset so "reported" can
+            // never exceed "durable". The coordinator checkpoints
+            // downloaded_until straight from these messages; if an offset still
+            // sitting in the 256 KB BufWriter were persisted and the worker was
+            // then aborted on cancel, resume would seek past a zero-filled hole
+            // and silently corrupt the output. Flushing here costs nothing in
+            // practice - reads are at most 64 KB, so the buffer fills on its own
+            // every few iterations anyway.
+            file.flush()
+                .await
+                .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
             let elapsed = last_emit.elapsed().as_secs_f64().max(0.001);
             let speed = ((offset - last_emit_bytes) as f64 / elapsed) as i64;
-            let _ = request.progress_tx.send(WorkerProgress {
-                segment_id: request.segment.id.clone(),
-                downloaded_until: offset,
-                speed_bps: speed,
-            });
+            report_ftp_worker_offset(request, offset, speed);
             last_emit = Instant::now();
             last_emit_bytes = offset;
         }

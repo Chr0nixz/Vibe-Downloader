@@ -24,6 +24,7 @@ import {
 import { AnimatePresence, motion } from "motion/react";
 import { type MouseEventHandler, memo, type ReactNode, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { recoveryActionsForTask, rowShowsRetry, rowTransferMode } from "@/components/tasks/row-recovery";
 import { describeSpeedTrend, SpeedSparkline } from "@/components/tasks/SpeedSparkline";
 import { type ReorderAction, TaskContextMenu } from "@/components/tasks/TaskContextMenu";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
@@ -31,10 +32,9 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { RecoveryAction } from "@/generated/bindings";
-import { useShellLayout } from "@/hooks/use-shell-layout";
+import type { QueueTaskDecision, RecoveryAction, TaskStatus } from "@/generated/bindings";
 import { useSystemFileIcon } from "@/hooks/use-system-file-icon";
-import { localizedErrorMessage, localizedMessage, recoveryActionsForError } from "@/lib/errors";
+import { localizedErrorMessage, localizedMessage } from "@/lib/errors";
 import { cn, formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
 import type { SpeedSample } from "@/stores/speed-history-store";
 import { useSpeedHistoryStore } from "@/stores/speed-history-store";
@@ -66,6 +66,14 @@ interface TaskRowProps {
   onCopyUrl?: (task: Task) => void;
   onCopyLocalPath?: (task: Task) => void;
   onShowDetails?: (task: Task) => void;
+  shellCompact: boolean;
+  /** Scheduler wait decision, when this task is queued. Supplied by the list from
+   * a single shared poll (`useQueueReasons`) rather than fetched per row. */
+  queueReason?: QueueTaskDecision;
+  /** Compact density preset: drops the host/diagnostic lines to sr-only, uses a
+   * 2px bar and a single-line rail, and reveals checkbox/actions on hover or
+   * focus. Distinct from `shellCompact`, which is a viewport-width tier. */
+  compact: boolean;
 }
 
 const EMPTY_SPEED_HISTORY: SpeedSample[] = [];
@@ -327,10 +335,11 @@ export const TaskRow = memo(function TaskRow({
   onCopyUrl,
   onCopyLocalPath,
   onShowDetails,
+  shellCompact,
+  queueReason,
+  compact,
 }: TaskRowProps) {
   const { t } = useTranslation();
-  const shellLayout = useShellLayout();
-  const shellCompact = shellLayout === "narrow";
   const task = useTaskDataStore((s) => s.taskById[taskId]);
   const expanded = useTaskDataStore((s) => s.expandedTaskIds.includes(taskId));
   const completionFlash = useTaskDataStore((s) => s.completionFlashIds.includes(taskId));
@@ -355,12 +364,53 @@ export const TaskRow = memo(function TaskRow({
   const isActive = task.status === "downloading" || task.status === "retrying";
   const retryLaterLabel =
     task.retryAfterAt && task.status === "queued"
-      ? t("task.retryAfter", { time: formatRetryTime(task.retryAfterAt) })
+      ? t("task.retryAfter", { time: formatClockTime(task.retryAfterAt) })
       : null;
   const healthSummary = localizedMessage(task.healthSummary, t);
+  // One localized wait reason shared by the badge tooltip and the diagnostic
+  // line, so the two can never disagree about why a task is queued.
+  const queueReasonLabel =
+    task.status === "queued" && queueReason
+      ? t(`queueCenter.reason.${queueReason.reason}`, { time: formatClockTime(task.retryAfterAt ?? "") })
+      : null;
+  // The badge already names the state, so this line — the row's only free-form
+  // text slot — has to carry the *next* useful fact. Echoing the badge here
+  // wasted the one place a row could explain itself.
+  const statusFact = (() => {
+    const percent = formatPercent(task.downloadedBytes, task.totalSize);
+    switch (task.status) {
+      case "downloading":
+      case "retrying":
+        return speedTrend.label;
+      case "paused":
+        return t("task.diagnostic.pausedAt", { percent });
+      case "queued":
+        // `retryAfterAt` is the task's own record; the scheduler decision is the
+        // authoritative reason and covers slot/host/window waits too.
+        return queueReasonLabel ?? t("task.diagnostic.queuedWaiting");
+      case "waiting_network":
+        return t("task.diagnostic.waitingNetwork");
+      case "completed": {
+        const time = formatClockTime(task.updatedAt);
+        if (task.hashStatus === "verified") return t("task.diagnostic.checksumVerified", { time });
+        if (task.hashStatus === "failed") return t("task.diagnostic.checksumFailed", { time });
+        if (task.hashStatus === "pending") return t("task.diagnostic.checksumPending", { time });
+        return t("task.diagnostic.completedAt", { time });
+      }
+      case "failed":
+      case "needs_attention":
+        // Reached only when there is no errorMessage to show; still more useful
+        // than repeating "Failed".
+        return t("task.diagnostic.stoppedAt", { percent });
+      default:
+        // Exhaustive over TaskStatus today; the cast keeps this compiling if a
+        // new status ships before its diagnostic copy does.
+        return t(`task.status.${task.status as TaskStatus}`);
+    }
+  })();
   const diagnosticLabel = task.errorMessage
     ? localizedErrorMessage(task.errorMessage, t)
-    : retryLaterLabel || healthSummary || speedTrend.label;
+    : retryLaterLabel || healthSummary || statusFact;
   const baseId = `task-${task.id}`;
   const nameId = `${baseId}-name`;
   const statusId = `${baseId}-status`;
@@ -439,11 +489,18 @@ export const TaskRow = memo(function TaskRow({
           }
         }}
         className={cn(
-          // Row surface: bg-surface-base over list root gives a clearer row↔list delta now
-          // that the surface scale is widened. Hover bumps to surface-raised (was /70 opacity,
-          // now solid) and adds an inset lift so the row feels responsive without a stripe.
-          "group relative overflow-hidden rounded-md border border-transparent bg-surface-base px-2.5 py-2 transition-[background-color,border-color,box-shadow] duration-ui ease-out hover:bg-surface-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary sm:px-3 md:px-3 md:py-1.5",
-          "grid gap-x-3 gap-y-2 md:grid-cols-[minmax(0,1fr)_minmax(12rem,14rem)]",
+          // Row surface: a raised card on the recessed list well, with a 1px border
+          // so light mode gets a real figure/ground split. Hover lifts through the
+          // border + shadow rather than a bg shift — a white row has nowhere lighter
+          // to go, and the shadow reads as elevation instead of a stripe.
+          "group relative overflow-hidden rounded-md border border-row-border bg-surface-row transition-[background-color,border-color,box-shadow] duration-ui ease-out hover:border-row-border-hover hover:shadow-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary sm:px-3",
+          compact ? "px-2.5 py-1" : "px-2.5 py-2 md:py-1.5",
+          "grid gap-x-3 md:grid-cols-[minmax(0,1fr)_minmax(12rem,14rem)]",
+          // Compact parks the actions beside the content from `sm` up, the same
+          // trick the desktop rail uses. Below `sm` there is no room for both a
+          // readable filename and three 36px touch targets, so it stays stacked.
+          compact && "sm:grid-cols-[minmax(0,1fr)_auto]",
+          compact ? "gap-y-1" : "gap-y-2",
           completionFlash && "completion-flash",
           // Selected: stronger accent fill (was 4%) + inset accent ring so the row anchors.
           selected &&
@@ -451,14 +508,22 @@ export const TaskRow = memo(function TaskRow({
           multiSelected && !selected && "border-border-accent-subtle bg-accent-primary/[0.06]",
           // Shift-select anchor: bump the tint so users can see the range origin.
           isShiftAnchor && (selected || multiSelected) && "bg-accent-primary/[0.14]",
-          task.status === "completed" && !selected && "border-border-success/60",
           (task.status === "failed" || task.status === "needs_attention") && !selected && "border-border-danger-subtle",
         )}
       >
         <div className="flex min-w-0 gap-2.5">
           <label
             htmlFor={`task-select-${task.id}`}
-            className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded hover:bg-surface-raised md:h-8 md:w-8"
+            className={cn(
+              "flex shrink-0 items-center justify-center rounded transition-opacity duration-ui hover:bg-surface-hover",
+              "h-11 w-11 md:h-8 md:w-8",
+              // Compact keeps the column reserved so toggling density never shifts the
+              // filename horizontally; it just fades the control in on hover/focus.
+              compact && !multiSelected
+                ? "md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
+                : undefined,
+              compact ? "mt-0" : "mt-0.5",
+            )}
             data-row-action
           >
             <span className="sr-only">{t("taskList.selectTask", { name: task.fileName })}</span>
@@ -484,19 +549,27 @@ export const TaskRow = memo(function TaskRow({
                 className="flex shrink-0 select-none items-center justify-center text-text-secondary transition-colors duration-ui group-hover:text-text-primary"
               >
                 {systemIcon ? (
-                  <img src={systemIcon} alt="" className="h-11 w-11 object-contain md:h-8 md:w-8" draggable={false} />
+                  <img
+                    src={systemIcon}
+                    alt=""
+                    className={cn("object-contain", compact ? "h-8 w-8 md:h-7 md:w-7" : "h-11 w-11 md:h-8 md:w-8")}
+                    draggable={false}
+                  />
                 ) : (
-                  <Icon className="h-10 w-10 md:h-7 md:w-7" />
+                  <Icon className={compact ? "h-7 w-7 md:h-6 md:w-6" : "h-10 w-10 md:h-7 md:w-7"} />
                 )}
               </span>
             );
           })()}
-          <div className="min-w-0 flex-1 space-y-1.5 md:space-y-1">
+          <div className={cn("min-w-0 flex-1", compact ? "space-y-1" : "space-y-1.5 md:space-y-1")}>
             <div className="flex min-w-0 items-start justify-between gap-2 md:block">
               <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                {/* Compact keeps name + badge on one unwrapped line; comfortable lets
+                    the badge drop below a long filename rather than squeezing it. */}
+                <div className={cn("flex items-center gap-x-2", compact ? "gap-y-0.5" : "flex-wrap gap-y-1")}>
                   <div
                     id={nameId}
+                    dir="auto"
                     className="truncate text-sm font-semibold leading-snug text-text-primary"
                     title={task.fileName}
                   >
@@ -507,6 +580,7 @@ export const TaskRow = memo(function TaskRow({
                     return (
                       <motion.span
                         id={statusId}
+                        title={queueReasonLabel ?? undefined}
                         initial={reduceMotion ? false : { opacity: 0, scale: 0.96 }}
                         animate={{ opacity: 1, scale: 1 }}
                         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
@@ -526,7 +600,14 @@ export const TaskRow = memo(function TaskRow({
                     );
                   })()}
                 </div>
-                <p id={hostId} className="truncate text-xs text-text-muted" title={task.sourceKey}>
+                {/* Compact demotes these to sr-only rather than unmounting them:
+                    aria-describedby on the row points at both ids, and the text is
+                    the row's only explanation of itself. */}
+                <p
+                  id={hostId}
+                  className={compact ? "sr-only" : "truncate text-xs text-text-muted"}
+                  title={compact ? undefined : task.sourceKey}
+                >
                   {task.sourceKey}
                 </p>
               </div>
@@ -534,12 +615,16 @@ export const TaskRow = memo(function TaskRow({
 
             <p
               id={diagnosticId}
-              title={diagnosticLabel}
+              title={compact ? undefined : diagnosticLabel}
               className={cn(
-                "truncate text-xs",
-                speedTrend.tone === "warning" && !task.healthSummary
-                  ? "font-medium text-status-warning"
-                  : "text-text-secondary",
+                compact
+                  ? "sr-only"
+                  : cn(
+                      "truncate text-xs",
+                      speedTrend.tone === "warning" && !task.healthSummary
+                        ? "font-medium text-status-warning"
+                        : "text-text-secondary",
+                    ),
               )}
             >
               {diagnosticLabel}
@@ -550,17 +635,17 @@ export const TaskRow = memo(function TaskRow({
               label={progressLabel}
               active={isActive}
               smooth={!isActive}
-              size="default"
+              size={compact ? "compact" : "default"}
               className={completionFlash ? "completion-flash-progress" : undefined}
             />
 
-            <TaskMeta task={task} isActive={isActive} layout="inline" />
+            <TaskMeta task={task} isActive={isActive} layout="inline" compact={compact} />
           </div>
         </div>
 
         {!shellCompact ? (
           <div className="hidden min-w-52 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-right font-mono text-xs md:grid">
-            <TaskMeta task={task} isActive={isActive} layout="rail" />
+            <TaskMeta task={task} isActive={isActive} layout="rail" compact={compact} />
             <RowActions
               task={task}
               expanded={expanded}
@@ -571,7 +656,22 @@ export const TaskRow = memo(function TaskRow({
               onFinishLiveRecording={onFinishLiveRecording}
               onOpenFile={onOpenFile}
               onOpenFolder={onOpenFolder}
-              className="col-span-2 justify-self-end"
+              compact={compact}
+              // Compact parks the actions beside the two meta lines (spanning both
+              // rows) instead of giving them a row of their own — that single saved
+              // row is most of the height difference between the two densities.
+              className={
+                compact
+                  ? cn(
+                      "col-start-2 row-start-1 row-span-2 self-center justify-self-end",
+                      // Fading rather than unmounting: the buttons stay in the a11y
+                      // tree and tabbable, and group-focus-within reveals them for
+                      // keyboard users. Hovering a button always hovers the row, so
+                      // an invisible target can never be clicked by surprise.
+                      "md:opacity-0 md:transition-opacity md:duration-ui md:group-hover:opacity-100 md:group-focus-within:opacity-100",
+                    )
+                  : "col-span-2 justify-self-end"
+              }
             />
           </div>
         ) : (
@@ -585,7 +685,8 @@ export const TaskRow = memo(function TaskRow({
             onFinishLiveRecording={onFinishLiveRecording}
             onOpenFile={onOpenFile}
             onOpenFolder={onOpenFolder}
-            className="flex md:hidden"
+            compact={compact}
+            className={cn("flex md:hidden", compact && "sm:col-start-2 sm:row-start-1 sm:self-center")}
           />
         )}
 
@@ -593,6 +694,7 @@ export const TaskRow = memo(function TaskRow({
           <InlineRecovery
             task={task}
             expanded={expanded}
+            compact={compact}
             onToggleExpanded={onToggleExpanded}
             onResolve={onResolveAttention}
           />
@@ -643,7 +745,10 @@ export const TaskRow = memo(function TaskRow({
   );
 });
 
-function formatRetryTime(value: string): string {
+/// Local HH:MM for retry and completion timestamps. An unparseable (or empty)
+/// value is returned as-is so `{{time}}` interpolations degrade to "" instead of
+/// printing "Invalid Date".
+function formatClockTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -661,27 +766,65 @@ const TaskMeta = memo(function TaskMeta({
   task,
   isActive,
   layout,
+  compact,
 }: {
   task: Task;
   isActive: boolean;
   layout: "inline" | "rail";
+  compact: boolean;
 }) {
   const { t } = useTranslation();
   const speed = formatSpeed(task.speedBps);
   const bytes = `${formatBytes(task.downloadedBytes)} / ${formatBytes(task.totalSize)}`;
-  const progress = `${formatPercent(task.downloadedBytes, task.totalSize)} · ${t("task.eta")} ${formatEta(task.downloadedBytes, task.totalSize, task.speedBps)}`;
+  const percent = formatPercent(task.downloadedBytes, task.totalSize);
+  const eta = formatEta(task.downloadedBytes, task.totalSize, task.speedBps);
   const connections = task.connectionCount > 0 ? t("task.connections", { count: task.connectionCount }) : null;
+  // Connections ride along on the progress line rather than taking a rail row of
+  // their own — a rail row costs ~20px, a third of a compact row's whole budget.
+  const progress = [
+    task.status === "completed" || eta === "—" ? percent : `${percent} · ${t("task.eta")} ${eta}`,
+    connections,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   if (layout === "inline") {
     return (
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-text-muted md:hidden">
+      <div
+        className={cn(
+          "flex flex-wrap items-center gap-x-2 font-mono text-[11px] text-text-muted md:hidden",
+          compact ? "gap-y-0.5" : "gap-y-1",
+        )}
+      >
         <span className={cn("text-text-primary", isActive && "text-xs font-semibold text-accent-primary")}>
           {speed}
         </span>
-        <span className={META_MUTED}>{bytes}</span>
-        <span className={META_MUTED}>{progress}</span>
-        {connections ? <span className={META_MUTED}>{connections}</span> : null}
+        {compact ? null : <span className={META_MUTED}>{bytes}</span>}
+        <span className={META_MUTED} title={compact ? bytes : undefined}>
+          {progress}
+        </span>
       </div>
+    );
+  }
+
+  if (compact) {
+    // Two-line rail: bytes drop to the tooltip because percent already carries
+    // the progress signal, and the freed line is what lets the row hit ~48px.
+    return (
+      <>
+        <span
+          data-slot="speed"
+          className={cn(
+            "col-start-1 row-start-1 min-w-0 truncate text-sm",
+            isActive ? "font-semibold text-accent-primary" : "text-text-primary",
+          )}
+        >
+          {speed}
+        </span>
+        <span data-slot="progress" title={bytes} className={cn("col-start-1 row-start-2 min-w-0 truncate", META_MUTED)}>
+          {progress}
+        </span>
+      </>
     );
   }
 
@@ -702,11 +845,6 @@ const TaskMeta = memo(function TaskMeta({
       <span data-slot="progress" className={cn("col-span-2 min-w-0 truncate", META_MUTED)}>
         {progress}
       </span>
-      {connections ? (
-        <span data-slot="connections" className={cn("col-span-2", META_MUTED)}>
-          {connections}
-        </span>
-      ) : null}
     </>
   );
 });
@@ -732,6 +870,7 @@ function RowActions({
   onFinishLiveRecording,
   onOpenFile,
   onOpenFolder,
+  compact,
   className,
 }: {
   task: Task;
@@ -743,25 +882,22 @@ function RowActions({
   onFinishLiveRecording: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
+  compact: boolean;
   className?: string;
 }) {
   const { t } = useTranslation();
-  const showsStart = task.status === "paused" || task.status === "failed" || task.status === "waiting_network";
-  const hideTransfer = task.status === "completed" || task.status === "needs_attention";
+  const transferMode = rowTransferMode(task);
   const canFinishLiveRecording =
     task.protocol === "hls" && (task.status === "downloading" || task.status === "retrying");
-  // Hide RowActions retry button when InlineRecovery already shows "retry" as primary action,
-  // to avoid duplicate retry entry points on failed task rows.
-  const inlineRecoveryActions =
-    task.recoveryActions && task.recoveryActions.length > 0
-      ? task.recoveryActions
-      : recoveryActionsForError(task.errorMessage ?? "");
-  const hideRetryButton = task.status === "failed" && inlineRecoveryActions[0] === "retry";
+  const showRetry = rowShowsRetry(task);
 
   return (
     <div
       className={cn(
         "flex gap-1 [&_[data-row-icon-button]]:h-10 [&_[data-row-icon-button]]:w-10 md:[&_[data-row-icon-button]]:h-8 md:[&_[data-row-icon-button]]:w-8",
+        // Compact still clears WCAG 2.5.8's 24px minimum while fitting the rail.
+        compact &&
+          "[&_[data-row-icon-button]]:h-9 [&_[data-row-icon-button]]:w-9 md:[&_[data-row-icon-button]]:h-7 md:[&_[data-row-icon-button]]:w-7",
         className,
       )}
       data-row-action
@@ -781,10 +917,10 @@ function RowActions({
       >
         <ChevronDown className={cn("h-4 w-4 transition-transform duration-ui", expanded && "rotate-180")} />
       </ActionButton>
-      {!hideTransfer ? (
+      {transferMode !== "hidden" ? (
         <ActionButton
-          label={showsStart ? t("actions.resume") : t("actions.pause")}
-          ariaLabel={t(showsStart ? "actions.resumeFor" : "actions.pauseFor", {
+          label={transferMode === "resume" ? t("actions.resume") : t("actions.pause")}
+          ariaLabel={t(transferMode === "resume" ? "actions.resumeFor" : "actions.pauseFor", {
             name: task.fileName,
           })}
           onClick={(event) => {
@@ -792,27 +928,20 @@ function RowActions({
             onToggleTransfer(task);
           }}
         >
-          {showsStart ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+          {transferMode === "resume" ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
         </ActionButton>
       ) : null}
-      {task.status === "failed" && !hideRetryButton ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              size="sm"
-              className="h-11 px-2 text-xs md:h-8 md:px-2"
-              aria-label={t("actions.retryFor", { name: task.fileName })}
-              onClick={(event) => {
-                event.stopPropagation();
-                onRetry(task);
-              }}
-            >
-              <RotateCcw className="h-4 w-4" />
-              {t("actions.retry")}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{t("actions.retryFor", { name: task.fileName })}</TooltipContent>
-        </Tooltip>
+      {showRetry ? (
+        <ActionButton
+          label={t("actions.retry")}
+          ariaLabel={t("actions.retryFor", { name: task.fileName })}
+          onClick={(event) => {
+            event.stopPropagation();
+            onRetry(task);
+          }}
+        >
+          <RotateCcw className="h-4 w-4" />
+        </ActionButton>
       ) : null}
       {canFinishLiveRecording ? (
         <ActionButton
@@ -893,11 +1022,13 @@ const ActionButton = memo(function ActionButton({
 const InlineRecovery = memo(function InlineRecovery({
   task,
   expanded,
+  compact,
   onToggleExpanded,
   onResolve,
 }: {
   task: Task;
   expanded: boolean;
+  compact: boolean;
   onToggleExpanded: () => void;
   onResolve: (task: Task, action: RecoveryAction) => void;
 }) {
@@ -905,36 +1036,40 @@ const InlineRecovery = memo(function InlineRecovery({
 
   if (!task.errorMessage) return null;
 
-  const recoveryActions =
-    task.recoveryActions && task.recoveryActions.length > 0
-      ? task.recoveryActions
-      : recoveryActionsForError(task.errorMessage);
+  const recoveryActions = recoveryActionsForTask(task);
 
   if (recoveryActions.length === 0) return null;
 
   const primaryAction = recoveryActions[0];
   const hasMoreActions = recoveryActions.length > 1;
+  const message = localizedErrorMessage(task.errorMessage, t);
+  // Compact clamps the message to one line and shrinks the buttons at `md`+ only:
+  // below `md` they are touch targets and must keep the 32px height.
+  const buttonClass = compact ? "px-2 text-xs md:h-7 md:min-h-7" : "px-2 text-xs";
 
   return (
     // Alert container: a real callout box instead of loose inline elements.
     // Tinted bg + danger border + padding give the error its own visual unit,
     // so a failed row's recovery path reads as an alert, not as row text.
     <div
-      className="col-span-full mt-1 flex flex-wrap items-center gap-2 rounded-md border border-border-danger-subtle bg-status-danger/[0.06] px-2.5 py-2"
+      className={cn(
+        "col-span-full flex flex-wrap items-center rounded-md border border-border-danger-subtle bg-status-danger/[0.06] px-2.5",
+        compact ? "mt-0.5 gap-1.5 py-1" : "mt-1 gap-2 py-2",
+      )}
       data-row-action
       data-no-drag
     >
       <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-danger" aria-hidden />
       <span
-        className="min-w-0 line-clamp-2 text-xs leading-snug text-status-danger"
-        title={localizedErrorMessage(task.errorMessage, t)}
+        className={cn("min-w-0 text-xs leading-snug text-status-danger", compact ? "line-clamp-1" : "line-clamp-2")}
+        title={message}
       >
-        {localizedErrorMessage(task.errorMessage, t)}
+        {message}
       </span>
       <div className="ml-auto flex shrink-0 items-center gap-1">
         <Button
           size="sm"
-          className="px-2 text-xs"
+          className={buttonClass}
           onClick={(event) => {
             event.stopPropagation();
             onResolve(task, primaryAction);
@@ -946,7 +1081,7 @@ const InlineRecovery = memo(function InlineRecovery({
           <Button
             variant="ghost"
             size="sm"
-            className="px-2 text-xs"
+            className={buttonClass}
             onClick={(event) => {
               event.stopPropagation();
               if (!expanded) onToggleExpanded();

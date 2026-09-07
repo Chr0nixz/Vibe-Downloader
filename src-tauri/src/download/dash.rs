@@ -43,6 +43,16 @@ use crate::{
 const PROTOCOL_DASH: &str = "dash";
 const DASH_CONTENT_TYPE: &str = "application/dash+xml";
 const DASH_SEGMENT_RETRIES: i32 = 2;
+/// ARC-22: Hard cap on the segment count of a single representation.
+///
+/// The count is derived entirely from manifest-controlled values (period
+/// duration / timescale / segment duration), so without a bound a hostile or
+/// malformed MPD makes us allocate the plan vector - and later insert rows -
+/// for an arbitrary number of segments before a single byte is fetched.
+/// `CONTROL_PLANE_MAX_BYTES` caps the manifest itself but says nothing about
+/// what the manifest can *declare*. 100k segments is well past any real VOD
+/// asset (at 2s each that is over 55 hours).
+const DASH_MAX_SEGMENTS_PER_REPRESENTATION: i64 = 100_000;
 const TRACK_KIND_VIDEO: &str = "video";
 const TRACK_KIND_AUDIO: &str = "audio";
 
@@ -272,6 +282,39 @@ struct ByteRange {
     length: i64,
 }
 
+/// ARC-22: Derive the `$Number$` template segment count and reject values that
+/// would make us allocate an unbounded plan vector.
+///
+/// Every input here is manifest-controlled, so this is the boundary where an
+/// oversized declaration has to be rejected - `build_segment_plans` would
+/// otherwise materialize one `DashSegmentPlan` (five owned strings/paths) per
+/// segment before any network activity.
+fn template_segment_count(
+    duration: Option<i64>,
+    timescale: i64,
+    period_seconds: Option<f64>,
+) -> Result<i64, String> {
+    let segment_count = match (duration, period_seconds) {
+        (Some(d), Some(secs)) if d > 0 && timescale > 0 => {
+            // Float-to-int casts saturate in Rust, so a non-finite ratio yields
+            // i64::MAX (caught below) instead of wrapping to something small.
+            let total = (secs * timescale as f64 / d as f64).ceil() as i64;
+            total.max(0)
+        }
+        _ => 0,
+    };
+    if segment_count > DASH_MAX_SEGMENTS_PER_REPRESENTATION {
+        return Err(engine_error(
+            "dash_segment_count_too_large",
+            format!(
+                "This MPD declares {segment_count} segments for a single track, which exceeds the {DASH_MAX_SEGMENTS_PER_REPRESENTATION} segment limit."
+            ),
+            false,
+        ));
+    }
+    Ok(segment_count)
+}
+
 fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, String> {
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(true);
@@ -370,13 +413,8 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                             // Compute segment count from period duration.
                             let period_seconds =
                                 current_period_duration_seconds.or(mpd_duration_seconds);
-                            let segment_count = match (duration, period_seconds) {
-                                (Some(d), Some(secs)) if d > 0 && timescale > 0 => {
-                                    let total = (secs * timescale as f64 / d as f64).ceil() as i64;
-                                    total.max(0)
-                                }
-                                _ => 0,
-                            };
+                            let segment_count =
+                                template_segment_count(duration, timescale, period_seconds)?;
                             rep.segment_source = SegmentSource::Template {
                                 media_template,
                                 initialization,
@@ -461,13 +499,8 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                         if let Some(rep) = current_representation.as_mut() {
                             let period_seconds =
                                 current_period_duration_seconds.or(mpd_duration_seconds);
-                            let segment_count = match (duration, period_seconds) {
-                                (Some(d), Some(secs)) if d > 0 && timescale > 0 => {
-                                    let total = (secs * timescale as f64 / d as f64).ceil() as i64;
-                                    total.max(0)
-                                }
-                                _ => 0,
-                            };
+                            let segment_count =
+                                template_segment_count(duration, timescale, period_seconds)?;
                             rep.segment_source = SegmentSource::Template {
                                 media_template,
                                 initialization,
@@ -672,6 +705,24 @@ fn build_segment_plans(
     // cost; we now reuse the parsed `Url` and call `.join()` per segment.
     let parsed_base = reqwest::Url::parse(manifest_url)
         .map_err(|e| format!("Could not parse DASH manifest URL '{manifest_url}': {e}"))?;
+    // ARC-22: bound the allocation before building any plan. Template counts are
+    // already rejected at parse time; SegmentList length is only bounded by
+    // CONTROL_PLANE_MAX_BYTES, which still permits on the order of a million
+    // entries in a 64 MiB manifest. SegmentBase yields at most two plans.
+    let declared_segments = match &rep.segment_source {
+        SegmentSource::Template { segment_count, .. } => *segment_count,
+        SegmentSource::List { segments, .. } => i64::try_from(segments.len()).unwrap_or(i64::MAX),
+        SegmentSource::Base { .. } => 0,
+    };
+    if declared_segments > DASH_MAX_SEGMENTS_PER_REPRESENTATION {
+        return Err(engine_error(
+            "dash_segment_count_too_large",
+            format!(
+                "This MPD declares {declared_segments} segments for the {track_kind} track, which exceeds the {DASH_MAX_SEGMENTS_PER_REPRESENTATION} segment limit."
+            ),
+            false,
+        ));
+    }
     match &rep.segment_source {
         SegmentSource::Template {
             media_template,
@@ -1850,6 +1901,103 @@ mod tests {
         "#;
         let error = parse_dash_manifest("https://example.com/time.mpd", mpd).unwrap_err();
         assert!(error.contains("dash_template_unsupported"));
+    }
+
+    #[test]
+    fn arc22_rejects_oversized_template_segment_count() {
+        // 10000 hours at 1/90000s per segment declares ~3.2e12 segments. Before
+        // the cap this reached build_segment_plans and allocated one plan struct
+        // per segment, exhausting memory before a single byte was fetched.
+        let mpd = r#"
+            <MPD type="static" mediaPresentationDuration="PT10000H">
+              <Period>
+                <AdaptationSet mimeType="video/mp4">
+                  <Representation id="v0" bandwidth="500000">
+                    <SegmentTemplate media="seg-$Number$.m4s" startNumber="1" duration="1" timescale="90000" />
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+        let error = parse_dash_manifest("https://example.com/huge.mpd", mpd).unwrap_err();
+        assert!(
+            error.contains("dash_segment_count_too_large"),
+            "expected the segment-count guard to fire, got: {error}"
+        );
+    }
+
+    #[test]
+    fn arc22_accepts_segment_count_at_the_limit() {
+        // The bound is inclusive: a manifest sitting exactly on the cap must
+        // still parse, otherwise the guard would reject legitimate long assets.
+        let mpd = format!(
+            r#"
+            <MPD type="static" mediaPresentationDuration="PT{DASH_MAX_SEGMENTS_PER_REPRESENTATION}S">
+              <Period>
+                <AdaptationSet mimeType="video/mp4">
+                  <Representation id="v0" bandwidth="500000">
+                    <SegmentTemplate media="seg-$Number$.m4s" startNumber="1" duration="1" timescale="1" />
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#
+        );
+        let parsed = parse_dash_manifest("https://example.com/limit.mpd", &mpd)
+            .expect("a manifest exactly at the cap must still parse");
+        let rep = &parsed.periods[0].adaptation_sets[0].representations[0];
+        match &rep.segment_source {
+            SegmentSource::Template { segment_count, .. } => {
+                assert_eq!(*segment_count, DASH_MAX_SEGMENTS_PER_REPRESENTATION);
+            }
+            other => panic!("expected a template source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc22_rejects_oversized_segment_list_in_plan_builder() {
+        // SegmentList length is bounded only by CONTROL_PLANE_MAX_BYTES, never by
+        // the parse-time template check, so the plan builder needs its own guard.
+        let oversized = usize::try_from(DASH_MAX_SEGMENTS_PER_REPRESENTATION).unwrap() + 1;
+        let rep = ParsedRepresentation {
+            id: "v0".to_string(),
+            bandwidth: 500_000,
+            codecs: None,
+            segment_source: SegmentSource::List {
+                initialization: None,
+                segments: vec![
+                    ListSegment {
+                        uri: "seg.m4s".to_string()
+                    };
+                    oversized
+                ],
+            },
+        };
+        let error = build_segment_plans(
+            "https://example.com/list.mpd",
+            Path::new("staging"),
+            "task-1",
+            TRACK_KIND_VIDEO,
+            &rep,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("dash_segment_count_too_large"),
+            "expected the plan builder guard to fire, got: {error}"
+        );
+    }
+
+    #[test]
+    fn arc22_segment_count_saturates_instead_of_wrapping() {
+        // A non-finite ratio must land on the cap path, not wrap to a small
+        // positive count that would silently truncate the download.
+        let error = template_segment_count(Some(1), 1, Some(f64::INFINITY)).unwrap_err();
+        assert!(
+            error.contains("dash_segment_count_too_large"),
+            "got: {error}"
+        );
+        // Missing duration keeps the existing "no segments" behaviour.
+        assert_eq!(template_segment_count(None, 1, Some(60.0)).unwrap(), 0);
     }
 
     #[test]

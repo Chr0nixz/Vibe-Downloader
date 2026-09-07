@@ -32,6 +32,7 @@ jobs:
       - name: Version consistency check
         run: node scripts/sync-version.mjs --check
       - run: pnpm build
+      - run: pnpm check:bundle
       - run: pnpm verify:extensions
 
   rust:
@@ -73,10 +74,14 @@ jobs:
       - name: Check formatting
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check
-      - name: Check licenses and advisories
+      # ENG-01: bans/sources are configured in deny.toml but were never executed,
+      # which is how two rustls crypto backends (ring + aws-lc-rs) went unnoticed.
+      - name: Check licenses, advisories, bans and sources
         if: matrix.os == 'ubuntu-latest'
-        run: cargo deny --manifest-path src-tauri/Cargo.toml check licenses advisories
-      - run: cargo check --manifest-path src-tauri/Cargo.toml
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+        run: cargo deny --manifest-path src-tauri/Cargo.toml check licenses advisories bans sources
+      # ENG-01: `cargo check` was redundant - clippy performs the same analysis.
+      # `--all-targets` extends -D warnings to test targets, which previously
+      # escaped the gate entirely.
+      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: pnpm test:rust
       - run: pnpm check:bindings

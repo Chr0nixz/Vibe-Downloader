@@ -17,16 +17,7 @@
     "core:window:allow-scale-factor",
     "core:window:allow-inner-position",
     "dialog:allow-open",
-    {
-      "identifier": "fs:default",
-      "allow": [
-        { "path": "**" },
-        { "path": "$HOME/**" },
-        { "path": "$DOWNLOAD/**" },
-        { "path": "$DESKTOP/**" },
-        { "path": "$DOCUMENT/**" }
-      ]
-    },
+    "dialog:allow-save",
     "os:default",
     "notification:default",
     "autostart:default",

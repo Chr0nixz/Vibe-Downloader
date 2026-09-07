@@ -1,14 +1,15 @@
 import { Info, Keyboard, RefreshCw, X } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { SpeedLimitControl } from "@/components/shell/SpeedLimitControl";
 import { Button } from "@/components/ui/button";
 import { MenuItem, MenuSeparator, RegionContextMenu } from "@/components/ui/menu-item";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppUpdater } from "@/hooks/use-app-updater";
 import type { Platform } from "@/lib/platform";
 import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
-import { useSettingsStore } from "@/stores/settings-store";
-import { useTaskDataStore } from "@/stores/task-store";
+import { useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
 
 export function StatusBar({
   className,
@@ -27,9 +28,16 @@ export function StatusBar({
   // When null, returns taskStats — which now benefits from the zero-delta
   // fast path in patchTasksBatch (same ref when aggregate stats unchanged).
   const stats = useTaskDataStore((s) => s.globalTaskStats ?? s.taskStats);
-  const settings = useSettingsStore((s) => s.settings);
   const { updateVersion, installing, error, installUpdate, dismissUpdate, checkForUpdate } = useAppUpdater();
-  const speedLimit = Number(settings?.globalSpeedLimitBps ?? 0);
+  const [speedPanelOpen, setSpeedPanelOpen] = useState(false);
+  const speedPanelRequest = useTaskUIStore((s) => s.speedLimitPanelRequest);
+
+  // The palette owns no popover of its own for a custom limit, so it asks the
+  // status bar to open the panel. Zero means "never requested" — not a bump.
+  useEffect(() => {
+    if (speedPanelRequest === 0) return;
+    setSpeedPanelOpen(true);
+  }, [speedPanelRequest]);
 
   return (
     <RegionContextMenu
@@ -59,15 +67,16 @@ export function StatusBar({
         role="contentinfo"
       >
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="text-text-muted">{t("statusBar.total")}</span>
-          <span
-            className={cn(
-              "font-mono font-semibold tabular-nums",
-              stats.totalSpeed > 0 ? "text-xs text-accent-primary md:text-sm" : "text-text-secondary",
-            )}
-          >
-            {formatSpeed(stats.totalSpeed)}
-          </span>
+          {stats.active === 0 ? (
+            <span className="truncate text-text-muted">{t("statusBar.idle")}</span>
+          ) : (
+            <>
+              <span className="text-text-muted">{t("statusBar.total")}</span>
+              <span className="font-mono font-semibold tabular-nums text-xs text-accent-primary md:text-sm">
+                {formatSpeed(stats.totalSpeed)}
+              </span>
+            </>
+          )}
         </span>
         <span aria-live="polite" aria-atomic="true" className="flex shrink-0 items-center gap-3 text-text-muted">
           {/* P1c: replaced the "·" text separator (was text-border-subtle at ~1.4:1
@@ -132,16 +141,13 @@ export function StatusBar({
               ) : null}
             </span>
           ) : error ? (
-            <span className="truncate text-status-danger" title={error}>
+            <span className="hidden truncate text-status-danger sm:inline" title={error}>
               {t("statusBar.updateFailed")}
             </span>
-          ) : (
-            <span className="hidden text-text-muted md:inline">
-              {speedLimit > 0
-                ? t("statusBar.globalSpeedLimit", { speed: formatSpeed(speedLimit) })
-                : t("statusBar.noGlobalSpeedLimit")}
-            </span>
-          )}
+          ) : null}
+          {/* Rendered unconditionally: an update banner used to occupy this slot
+              exclusively, which hid the only narrow-tier path to the speed cap. */}
+          <SpeedLimitControl open={speedPanelOpen} onOpenChange={setSpeedPanelOpen} />
           {onOpenShortcuts ? (
             <Tooltip>
               <TooltipTrigger asChild>

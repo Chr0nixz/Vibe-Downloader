@@ -286,6 +286,12 @@ interface TaskDataStore {
   error: string | null;
   /** ARC-08: bumped when membership/sort requires a safe full list reload. */
   viewReloadToken: number;
+  /**
+   * PERF-03 / WCAG 4.1.3: bumped only when a task status changes so live-region
+   * subscribers can announce without scanning the full loaded list on progress ticks.
+   */
+  statusAnnounceEpoch: number;
+  lastStatusTransitions: TaskStatusTransition[];
   setTasks: (tasks: Task[]) => void;
   setTaskPage: (tasks: Task[], total: number, page: number, pageSize: number, append?: boolean) => void;
   setTaskCursorPage: (
@@ -334,6 +340,8 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
   loading: true,
   error: null,
   viewReloadToken: 0,
+  statusAnnounceEpoch: 0,
+  lastStatusTransitions: [],
 
   requestViewReload: () => set((state) => ({ viewReloadToken: state.viewReloadToken + 1 })),
 
@@ -456,6 +464,10 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
         existing.failureCategory !== merged.failureCategory ||
         existing.errorCode !== merged.errorCode ||
         existing.errorMessage !== merged.errorMessage;
+      const statusTransition =
+        existing && existing.status !== merged.status
+          ? [{ taskId: task.id, previousStatus: existing.status, task: merged } satisfies TaskStatusTransition]
+          : null;
 
       return {
         ...rebuildViewCollections(taskById, taskIds, {
@@ -463,6 +475,12 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
           failureOptions: statusChanged ? undefined : state.failureOptions,
           viewReloadToken,
         }),
+        ...(statusTransition
+          ? {
+              statusAnnounceEpoch: state.statusAnnounceEpoch + 1,
+              lastStatusTransitions: statusTransition,
+            }
+          : {}),
       };
     }),
 
@@ -689,6 +707,12 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
         taskIndexById: removed > 0 ? indexTasks(tasks) : state.taskIndexById,
         total: removed > 0 ? Math.max(0, state.total - removed) : state.total,
         failureOptions: statusChanged ? computeFailureOptions(Object.values(taskById)) : state.failureOptions,
+        ...(statusChanged
+          ? {
+              statusAnnounceEpoch: state.statusAnnounceEpoch + 1,
+              lastStatusTransitions: statusTransitions,
+            }
+          : {}),
       };
     });
 

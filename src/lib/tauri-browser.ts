@@ -1526,6 +1526,14 @@ export async function restoreAppBackup(backupPath: string) {
   };
 }
 
+export async function readLocalTextFile(_path: string, _kind: "batch_text" | "ssh_key"): Promise<string> {
+  throw new Error("Local file read is only available in the desktop app.");
+}
+
+export async function writeExportFile(_path: string, _contents: string): Promise<void> {
+  // Browser preview uses the blob download path in export.ts instead.
+}
+
 export async function createTask(input: CreateTaskInput): Promise<Task> {
   const now = nowIso();
   const normalizedUrl = input.url.trim();

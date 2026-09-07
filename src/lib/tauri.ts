@@ -27,6 +27,7 @@ import type {
   ListTasksCursorResult,
   ListTasksInput,
   ListTasksResult,
+  LocalTextFileKind,
   MetalinkMirrorView,
   PreviewClassificationInput,
   PreviewClassificationResult,
@@ -516,6 +517,22 @@ export async function restoreAppBackup(backupPath: string) {
   }
   const commands = await loadNativeCommands();
   return runCommand("restoreAppBackup", () => commands.restoreAppBackup(backupPath));
+}
+
+export async function readLocalTextFile(path: string, kind: LocalTextFileKind): Promise<string> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).readLocalTextFile(path, kind);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("readLocalTextFile", () => commands.readLocalTextFile(path, kind));
+}
+
+export async function writeExportFile(path: string, contents: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).writeExportFile(path, contents);
+  }
+  const commands = await loadNativeCommands();
+  await runCommand("writeExportFile", () => commands.writeExportFile(path, contents));
 }
 
 export type BackupCreateResult = Awaited<ReturnType<typeof createAppBackup>>;

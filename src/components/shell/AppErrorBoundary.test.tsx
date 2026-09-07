@@ -8,18 +8,18 @@ let activeLanguage: "en" | "zh-CN" = "en";
 
 const translations = {
   en: {
-    "errorBoundary.title": "Something went wrong",
+    "errorBoundary.title": "The interface hit an unexpected error",
     "errorBoundary.description": "The app hit an unexpected error.",
     "errorBoundary.reload": "Reload",
     "errorBoundary.copyError": "Copy error",
-    "errorBoundary.home": "Go home",
+    "errorBoundary.home": "Back to task list",
   },
   "zh-CN": {
-    "errorBoundary.title": "应用出现异常",
+    "errorBoundary.title": "界面出现异常",
     "errorBoundary.description": "应用遇到了意外错误。",
     "errorBoundary.reload": "重新加载",
     "errorBoundary.copyError": "复制错误",
-    "errorBoundary.home": "返回主页",
+    "errorBoundary.home": "返回任务列表",
   },
 } as const;
 
@@ -67,7 +67,7 @@ describe("AppErrorBoundary", () => {
     );
 
     expect(screen.getByRole("alert")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "应用出现异常" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "界面出现异常" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "复制错误" }));
 
     await waitFor(() => expect(clipboardWrite).toHaveBeenCalledTimes(1));
@@ -82,9 +82,9 @@ describe("AppErrorBoundary", () => {
       </AppErrorBoundary>,
     );
 
-    expect(screen.getByRole("heading", { name: "Something went wrong" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "The interface hit an unexpected error" })).toBeInTheDocument();
     broken = false;
-    fireEvent.click(screen.getByRole("button", { name: "Go home" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back to task list" }));
 
     expect(screen.getByText("Recovered content")).toBeInTheDocument();
   });

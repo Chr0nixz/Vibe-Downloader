@@ -244,10 +244,11 @@ function TaskDetailsDrawer({
       }}
     >
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-surface-scrim motion-safe:animate-[fade-in_180ms_ease-out]" />
+        <Dialog.Overlay className="fixed inset-x-0 bottom-0 top-[var(--titlebar-height)] z-40 bg-surface-scrim motion-safe:animate-[fade-in_180ms_ease-out]" />
+        {/* Keep window chrome reachable on Windows/macOS custom titlebars (Linux token is 0). */}
         <Dialog.Content
           className={cn(
-            "fixed inset-y-0 right-0 z-50 flex h-[100dvh] w-full max-w-sm flex-col border-l border-border-subtle bg-surface-base shadow-xl",
+            "fixed right-0 bottom-0 top-[var(--titlebar-height)] z-50 flex h-[calc(100dvh-var(--titlebar-height))] w-full max-w-sm flex-col border-l border-border-subtle bg-surface-base shadow-xl",
             "motion-safe:animate-[drawer-enter_220ms_cubic-bezier(0.16,1,0.3,1)_both]",
             "focus:outline-none",
           )}

@@ -7,8 +7,9 @@ interface ProgressBarProps {
   /** When false, skip transform transitions during frequent progress updates. */
   smooth?: boolean;
   tone?: "primary" | "success" | "danger" | "neutral";
-  /** Increase height for prominence; "default" keeps the slim row variant. */
-  size?: "default" | "lg";
+  /** Increase height for prominence; "default" keeps the slim row variant and
+   * "compact" is a 2px hairline for the dense row preset. */
+  size?: "default" | "lg" | "compact";
   className?: string;
   trackClassName?: string;
 }
@@ -16,6 +17,7 @@ interface ProgressBarProps {
 const sizeClass: Record<NonNullable<ProgressBarProps["size"]>, string> = {
   default: "h-1.5",
   lg: "h-2.5",
+  compact: "h-0.5",
 };
 
 const toneFill: Record<NonNullable<ProgressBarProps["tone"]>, string> = {

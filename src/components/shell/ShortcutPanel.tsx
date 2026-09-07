@@ -59,9 +59,8 @@ function buildGroups(t: (key: string) => string, platform: Platform): ShortcutGr
       shortcuts: [
         { keys: `${mod}1`, label: t("shortcuts.navAll") },
         { keys: `${mod}2`, label: t("shortcuts.navDownloading") },
-        { keys: `${mod}3`, label: t("shortcuts.navPaused") },
+        { keys: `${mod}3`, label: t("shortcuts.navAttention") },
         { keys: `${mod}4`, label: t("shortcuts.navCompleted") },
-        { keys: `${mod}5`, label: t("shortcuts.navFailed") },
       ],
     },
     {

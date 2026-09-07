@@ -139,24 +139,47 @@ pub async fn restore_app_backup(
     )
     .await?;
 
+    // SEC-02: verify the *contents* before staging. Up to this point we have only
+    // checked that the file is well-formed and internally consistent, all of
+    // which an attacker controls. The allowed roots deliberately come from the
+    // live configuration - reading them from the restored database would let a
+    // crafted backup declare its own save dir and bootstrap past this check.
+    let live_default_dir = crate::commands::settings::default_download_dir(&app)?;
+    let live_settings = db::get_settings(&state.pool, live_default_dir.clone()).await?;
+    let mut allowed_roots = vec![PathBuf::from(&live_settings.default_save_dir)];
+    let live_default_dir = PathBuf::from(live_default_dir);
+    if !allowed_roots.contains(&live_default_dir) {
+        allowed_roots.push(live_default_dir);
+    }
+    if let Err(error) = db::enforce_backup_path_policy(&verified, &allowed_roots).await {
+        let _ = fs::remove_file(&verified).await;
+        return Err(error);
+    }
+
     let db_path = platform::db_path(&app)?;
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let pre_restore = db_path.with_extension(format!("db.bak-{timestamp}"));
-    snapshot_database_to_path(&state.pool, &db_path, &pre_restore).await?;
+    // SEC-02: a failure here used to leak the materialized database - a full copy
+    // of the backup, including encrypted credentials - in the shared temp dir.
+    if let Err(error) = snapshot_database_to_path(&state.pool, &db_path, &pre_restore).await {
+        let _ = fs::remove_file(&verified).await;
+        return Err(error);
+    }
 
     let pending = pending_restore_path(&db_path);
     if pending.exists() {
         let _ = fs::remove_file(&pending).await;
     }
-    fs::rename(&verified, &pending).await.map_err(|e| {
-        backup_error(
+    if let Err(error) = fs::rename(&verified, &pending).await {
+        let _ = fs::remove_file(&verified).await;
+        return Err(backup_error(
             "backup_restore_failed",
-            format!("Could not stage restored database: {e}"),
-        )
-    })?;
+            format!("Could not stage restored database: {error}"),
+        ));
+    }
 
     // Global proxy password stays in the OS keyring and is not in the backup.
     // Clear the saved flag so the UI does not pretend the password is present.

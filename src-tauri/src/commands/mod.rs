@@ -4,6 +4,7 @@ pub mod classification;
 pub mod environment;
 pub mod ffmpeg;
 pub mod floating;
+pub mod local_files;
 pub mod settings;
 pub mod startup;
 pub mod system;

@@ -11,7 +11,8 @@ use tauri_app_lib::{
     commands::task_file_planning::{task_temp_file_path, unique_final_path_among},
     db,
     models::{
-        task::now_iso, HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus,
+        task::now_iso, HashVerificationStatus, TaskFileRecord, TaskKind, TaskPriority, TaskRecord,
+        TaskStatus,
     },
 };
 use tokio::sync::Barrier;
@@ -151,6 +152,171 @@ async fn concurrent_same_name_creates_reserve_unique_final_paths() {
         .await
         .expect("count");
     assert_eq!(count, N as i64);
+
+    let _ = std::fs::remove_dir_all(&dir);
+    pool.close().await;
+}
+
+/// Build a file row whose `final_path` is intentionally independent of the task
+/// id, so several tasks planning the same output collide on
+/// `idx_task_files_final_path_selected`.
+fn shared_task_file(task_id: &str, dir: &std::path::Path, index: usize) -> TaskFileRecord {
+    let name = format!("shared-{index}.bin");
+    TaskFileRecord {
+        id: format!("{task_id}-f{index}"),
+        task_id: task_id.to_string(),
+        relative_path: name.clone(),
+        file_name: name.clone(),
+        save_dir: dir.to_string_lossy().to_string(),
+        temp_path: Some(
+            dir.join(format!("{name}.{task_id}.vibe-downloading"))
+                .to_string_lossy()
+                .to_string(),
+        ),
+        final_path: Some(dir.join(&name).to_string_lossy().to_string()),
+        total_size: 1,
+        downloaded_bytes: 0,
+        selected: true,
+        status: TaskStatus::Queued,
+        content_type: None,
+    }
+}
+
+/// ARC-20: a UNIQUE conflict on any file row must roll the task row back too.
+///
+/// Before the fix the task row was committed first and the file rows were then
+/// inserted one at a time on the pool. A conflict part-way through the loop
+/// therefore left a committed task with a truncated file list, which the
+/// scheduler would download and report as successful - silent data loss.
+///
+/// Every worker here plans identical file paths but distinct task paths, so the
+/// only possible conflict is on `task_files`. Exactly one worker may win, and
+/// the losers must leave nothing at all behind.
+#[tokio::test]
+async fn arc20_file_row_conflict_rolls_back_the_task_row() {
+    const WORKERS: usize = 32;
+    const FILES_PER_TASK: usize = 8;
+
+    let pool = test_pool("arc20-atomic").await;
+    let dir = std::env::temp_dir().join(format!("vibe-arc20-atomic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create dir");
+
+    let barrier = Arc::new(Barrier::new(WORKERS));
+    let mut handles = Vec::new();
+    for index in 0..WORKERS {
+        let pool = pool.clone();
+        let barrier = barrier.clone();
+        let dir = dir.clone();
+        handles.push(tokio::spawn(async move {
+            let task_id = format!("task-{index}");
+            let task = queued_task(
+                &task_id,
+                &dir.join(format!("{task_id}.bin")).to_string_lossy(),
+                &dir.join(format!("{task_id}.part")).to_string_lossy(),
+            );
+            let files: Vec<TaskFileRecord> = (0..FILES_PER_TASK)
+                .map(|file_index| shared_task_file(&task_id, &dir, file_index))
+                .collect();
+            barrier.wait().await;
+            db::insert_task_with_files(&pool, &task, &files).await
+        }));
+    }
+
+    let mut succeeded = 0usize;
+    for handle in handles {
+        if handle.await.expect("join worker").is_ok() {
+            succeeded += 1;
+        }
+    }
+    assert_eq!(
+        succeeded, 1,
+        "exactly one worker can win the file-path UNIQUE race"
+    );
+
+    let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+        .fetch_one(&pool)
+        .await
+        .expect("count tasks");
+    let files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_files")
+        .fetch_one(&pool)
+        .await
+        .expect("count files");
+    assert_eq!(
+        tasks, 1,
+        "losing workers must not leave a committed task row"
+    );
+    assert_eq!(
+        files, FILES_PER_TASK as i64,
+        "the winner's file list must be complete and losers must leave no rows"
+    );
+
+    // No task may exist with an incomplete file list.
+    let partial: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks t WHERE (SELECT COUNT(*) FROM task_files f WHERE f.task_id = t.id) <> ?",
+    )
+    .bind(FILES_PER_TASK as i64)
+    .fetch_one(&pool)
+    .await
+    .expect("count partial tasks");
+    assert_eq!(partial, 0, "no task may be left with a partial file list");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    pool.close().await;
+}
+
+/// ARC-21: concurrent multi-file creates with non-colliding paths must all
+/// commit. `insert_task_with_files` uses `BEGIN IMMEDIATE`; a DEFERRED
+/// transaction that reads before writing can fail with SQLITE_BUSY_SNAPSHOT,
+/// which `busy_timeout` does not retry and the create path did not recognize.
+#[tokio::test]
+async fn arc21_concurrent_multi_file_creates_all_commit() {
+    const WORKERS: usize = 32;
+    const FILES_PER_TASK: usize = 8;
+
+    let pool = test_pool("arc21-immediate").await;
+    let dir = std::env::temp_dir().join(format!("vibe-arc21-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create dir");
+
+    let barrier = Arc::new(Barrier::new(WORKERS));
+    let mut handles = Vec::new();
+    for index in 0..WORKERS {
+        let pool = pool.clone();
+        let barrier = barrier.clone();
+        let dir = dir.clone();
+        handles.push(tokio::spawn(async move {
+            let task_id = format!("task-{index}");
+            let task = queued_task(
+                &task_id,
+                &dir.join(format!("{task_id}.bin")).to_string_lossy(),
+                &dir.join(format!("{task_id}.part")).to_string_lossy(),
+            );
+            // Per-task subdirectory keeps every final_path distinct.
+            let task_dir = dir.join(&task_id);
+            let files: Vec<TaskFileRecord> = (0..FILES_PER_TASK)
+                .map(|file_index| shared_task_file(&task_id, &task_dir, file_index))
+                .collect();
+            barrier.wait().await;
+            db::insert_task_with_files(&pool, &task, &files).await
+        }));
+    }
+
+    for (index, handle) in handles.into_iter().enumerate() {
+        handle
+            .await
+            .expect("join worker")
+            .unwrap_or_else(|error| panic!("worker {index} failed: {error}"));
+    }
+
+    let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+        .fetch_one(&pool)
+        .await
+        .expect("count tasks");
+    let files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_files")
+        .fetch_one(&pool)
+        .await
+        .expect("count files");
+    assert_eq!(tasks, WORKERS as i64);
+    assert_eq!(files, (WORKERS * FILES_PER_TASK) as i64);
 
     let _ = std::fs::remove_dir_all(&dir);
     pool.close().await;

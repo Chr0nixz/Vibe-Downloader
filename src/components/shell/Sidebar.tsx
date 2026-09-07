@@ -99,7 +99,9 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
   };
 
   const secondaryActive = secondaryFilterItems.some((item) => item.id === nav);
-  const secondaryNeedsAttention = (counts.failed ?? 0) > 0 || (counts.queue ?? 0) > 0;
+  // Tasks hidden behind the overflow that warrant a look. Previously signalled by
+  // a bare red dot, which said "something" but never "how much".
+  const secondaryAttentionCount = (counts.failed ?? 0) + (counts.queue ?? 0);
   const mobileMoreActive =
     secondaryActive || nav === "queue" || nav === "paused" || nav === "failed" || nav === "settings" || nav === "about";
 
@@ -134,16 +136,18 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
         )}
         aria-label={t("app.navAria")}
       >
-        {/* ── Filter group (top on md+) ── */}
+        {/* ── View group (top on md+) ── */}
         <div className="flex flex-1 flex-row items-center justify-around gap-1 md:flex-col md:items-stretch md:justify-start md:gap-0.5 lg:justify-start">
-          {/* Group label — only when expanded (wide) */}
+          {/* Group label — only when expanded (wide). These entries switch views;
+              the filter facets live in the CommandBar tool panel, so labelling
+              this group "Filters" sent users to the wrong control. */}
           <span
             className={cn(
               "hidden px-3 py-1 text-[11px] font-medium text-text-muted lg:block",
               collapsed && "lg:hidden",
             )}
           >
-            {t("nav.filters")}
+            {t("nav.views")}
           </span>
 
           {primaryFilterItems.map((item) => (
@@ -172,7 +176,11 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
               <Button
                 type="button"
                 variant="ghost"
-                aria-label={t("nav.moreViews")}
+                aria-label={
+                  secondaryAttentionCount > 0
+                    ? t("nav.moreViewsNeedsAttentionCount", { count: secondaryAttentionCount })
+                    : t("nav.moreViews")
+                }
                 aria-current={secondaryActive ? "page" : undefined}
                 className={cn(
                   "relative hidden h-11 min-w-10 flex-1 gap-1.5 px-1 text-xs md:flex",
@@ -197,15 +205,22 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
                 >
                   {t("nav.moreViews")}
                 </span>
-                {secondaryNeedsAttention ? (
+                {secondaryAttentionCount > 0 && (
                   <span
                     className={cn(
-                      "absolute right-1.5 top-1 h-2 w-2 rounded-full bg-status-danger md:block",
-                      collapsed ? "lg:block" : "lg:hidden",
+                      "absolute right-0 top-0 inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-4 tabular-nums",
+                      "lg:static lg:min-w-0 lg:px-1.5 lg:py-0.5 lg:text-[11px] lg:leading-none",
+                      collapsed &&
+                        "lg:absolute lg:right-0 lg:top-0 lg:min-w-4 lg:px-1 lg:py-0 lg:text-[10px] lg:leading-4",
+                      (counts.failed ?? 0) > 0
+                        ? "bg-status-danger/12 text-status-danger"
+                        : "bg-status-warning/14 text-status-warning",
                     )}
                     aria-hidden
-                  />
-                ) : null}
+                  >
+                    {secondaryAttentionCount > 99 ? "99+" : secondaryAttentionCount}
+                  </span>
+                )}
               </Button>
             </PopoverTrigger>
             <PopoverContent align="start" side="right" className="hidden w-52 p-1 md:block">
@@ -253,7 +268,11 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
               <Button
                 type="button"
                 variant="ghost"
-                aria-label={t("nav.more")}
+                aria-label={
+                  secondaryAttentionCount > 0
+                    ? t("nav.moreNeedsAttentionCount", { count: secondaryAttentionCount })
+                    : t("nav.more")
+                }
                 aria-current={mobileMoreActive ? "page" : undefined}
                 className={cn(
                   "relative h-11 min-w-10 flex-1 flex-col gap-0.5 px-1 text-[10px] md:hidden",
@@ -264,9 +283,19 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
               >
                 <MoreHorizontal className="h-[18px] w-[18px]" aria-hidden />
                 <span>{t("nav.more")}</span>
-                {secondaryNeedsAttention ? (
-                  <span className="absolute right-1.5 top-1 h-2 w-2 rounded-full bg-status-danger" aria-hidden />
-                ) : null}
+                {secondaryAttentionCount > 0 && (
+                  <span
+                    className={cn(
+                      "absolute right-0 top-0 inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-4 tabular-nums",
+                      (counts.failed ?? 0) > 0
+                        ? "bg-status-danger/12 text-status-danger"
+                        : "bg-status-warning/14 text-status-warning",
+                    )}
+                    aria-hidden
+                  >
+                    {secondaryAttentionCount > 99 ? "99+" : secondaryAttentionCount}
+                  </span>
+                )}
               </Button>
             </PopoverTrigger>
             <PopoverContent align="end" side="top" className="w-52 p-1 md:hidden">
@@ -361,11 +390,6 @@ function NavItem({
 }) {
   const Icon = item.icon;
   const showBadge = item.id !== "settings" && item.id !== "all" && count > 0;
-  const showActivityDot =
-    item.id !== "settings" &&
-    item.id !== "all" &&
-    count > 0 &&
-    (item.id === "downloading" || item.id === "attention" || item.id === "failed");
 
   const button = (
     <Tooltip>
@@ -377,10 +401,10 @@ function NavItem({
           aria-current={active ? "page" : undefined}
           aria-label={showBadge ? `${label} (${count})` : label}
           className={cn(
-            // ── Base sizing per breakpoint (left-aligned) ──
-            "relative h-11 min-w-10 flex-1 gap-1.5 px-1 text-xs",
+            // ── Mobile bottom bar: icon stacked over label, same as the More trigger ──
+            "relative h-11 min-w-10 flex-1 flex-col gap-0.5 px-1 text-[10px]",
             mobileHidden && "hidden md:flex",
-            "md:h-10 md:w-full md:flex-none md:flex-col md:items-start md:justify-start md:gap-1 md:px-1",
+            "md:h-10 md:w-full md:flex-none md:items-start md:justify-start md:gap-1 md:px-1",
             "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
             // ── Collapsed (lg): label and badge are hidden, so center the
             // lone icon within the compact nav column instead of left-aligning it.
@@ -404,57 +428,40 @@ function NavItem({
           {/* Icon — left-aligned (no mx-auto) */}
           <Icon className="h-[18px] w-[18px] shrink-0" aria-hidden />
 
-          {/* Label: hidden on mobile, 10px on compact, normal on wide; hidden when sidebar collapsed */}
+          {/* Label: visible at every tier; hidden only when the desktop rail is collapsed */}
           <span
             className={cn(
-              "hidden max-w-16 truncate text-[10px] leading-tight md:inline md:max-w-none lg:text-sm lg:leading-normal",
-              active && "inline",
+              "max-w-16 truncate leading-tight md:max-w-none lg:text-sm lg:leading-normal",
               compact && "lg:hidden",
             )}
           >
             {label}
           </span>
 
-          {/* Badge count — wide mode only, hidden when collapsed */}
+          {/* Count. Corner superscript where there is no room for an inline pill
+              (mobile, tablet, collapsed rail); pill on the expanded desktop rail. */}
           {showBadge && (
             <span
               className={cn(
-                "hidden rounded-full px-1.5 py-0.5 text-[11px] font-semibold leading-none tabular-nums lg:inline-flex",
-                compact && "lg:hidden",
+                "absolute right-0 top-0 inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-4 tabular-nums",
+                "lg:static lg:min-w-0 lg:px-1.5 lg:py-0.5 lg:text-[11px] lg:leading-none",
+                compact && "lg:absolute lg:right-0 lg:top-0 lg:min-w-4 lg:px-1 lg:py-0 lg:text-[10px] lg:leading-4",
                 active
                   ? "bg-accent-primary/20 text-accent-primary"
                   : item.id === "failed"
                     ? "bg-status-danger/12 text-status-danger"
-                    : "bg-surface-raised text-text-muted",
+                    : item.id === "attention"
+                      ? "bg-status-warning/14 text-status-warning"
+                      : "bg-surface-raised text-text-muted",
               )}
             >
               {count > 99 ? "99+" : count}
             </span>
           )}
-
-          {/* Status dot — compact mode only (md, not lg; or collapsed) */}
-          {showActivityDot && (
-            <span
-              className={cn(
-                "absolute right-1.5 top-1 h-2 w-2 rounded-full md:block lg:hidden",
-                compact && "lg:block",
-                item.id === "downloading"
-                  ? "bg-accent-primary"
-                  : item.id === "attention"
-                    ? "bg-status-warning"
-                    : "bg-status-danger",
-              )}
-              aria-hidden
-            >
-              {item.id === "downloading" && (
-                <span className="nav-dot-pulse absolute inset-0 rounded-full bg-accent-primary" />
-              )}
-            </span>
-          )}
         </Button>
       </TooltipTrigger>
-      {/* Tooltip: show on mobile and when sidebar is compact/collapsed */}
-      <TooltipContent side={compact ? "right" : "top"} className={cn("lg:hidden", compact && "lg:block")}>
+      {/* Tooltip: only needed when the label is hidden, i.e. the collapsed rail */}
+      <TooltipContent side="right" className={cn("hidden", compact && "lg:block")}>
         {label}
         {showBadge ? ` (${count})` : null}
       </TooltipContent>

@@ -3,7 +3,9 @@ import { ChevronDown, MoreHorizontal, Pause, Play, Plus, RotateCcw, Search, Slid
 import { useReducedMotion } from "motion/react";
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useDebouncedValue } from "@/hooks/use-debounced-value";
+import { useQueueReasons } from "@/hooks/use-queue-reasons";
+import { useShellLayout } from "@/hooks/use-shell-layout";
+import { handleMenuKeyDown } from "@/lib/menu-keyboard";
 
 const SettingsPage = lazy(() =>
   import("@/components/settings/SettingsPage").then((m) => ({
@@ -31,7 +33,7 @@ const QueueCenter = lazy(() =>
 
 import { ListContextMenu, type ReorderAction } from "@/components/tasks/TaskContextMenu";
 import { TaskRow } from "@/components/tasks/TaskRow";
-import { TASK_ROW_ESTIMATED_SIZE } from "@/components/tasks/task-layout";
+import { taskRowEstimateFor } from "@/components/tasks/task-layout";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -102,9 +104,8 @@ export const TaskList = memo(function TaskList({
 }) {
   const { t } = useTranslation();
   const reduceMotion = !!useReducedMotion();
-  const [toolPanelOpen, setToolPanelOpen] = useState(false);
+  const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
   const [statusAnnouncement, setStatusAnnouncement] = useState("");
-  const prevTaskStatusesRef = useRef<Record<string, string>>({});
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const loadFlightRef = useRef(createListLoadFlight());
   const initialLoadDoneRef = useRef(false);
@@ -115,10 +116,10 @@ export const TaskList = memo(function TaskList({
   const filterOptions = useTaskDataStore((s) => s.filterOptions);
   const nav = useTaskUIStore((s) => s.nav);
   const search = useTaskUIStore((s) => s.search);
-  // Debounce the value that drives backend queries and scroll resets so rapid
-  // typing doesn't fire a request per keystroke. The raw `search` value above
-  // is still used for the empty-state label so the UI stays responsive.
-  const debouncedSearch = useDebouncedValue(search, 300);
+  const shellCompact = useShellLayout() === "narrow";
+  const rowDensity = useTaskUIStore((s) => s.rowDensity);
+  const setRowDensity = useTaskUIStore((s) => s.setRowDensity);
+  const compactRows = rowDensity === "compact";
   const selectedId = useTaskUIStore((s) => s.selectedId);
   const selectedIds = useTaskUIStore((s) => s.selectedIds);
   const selectionAnchorId = useTaskUIStore((s) => s.selectionAnchorId);
@@ -132,6 +133,8 @@ export const TaskList = memo(function TaskList({
   const setTaskSelected = useTaskUIStore((s) => s.setTaskSelected);
   const clearSelectedIds = useTaskUIStore((s) => s.clearSelectedIds);
   const setFilters = useTaskUIStore((s) => s.setFilters);
+  const toolPanelOpen = useTaskUIStore((s) => s.toolPanelOpen);
+  const setToolPanelOpen = useTaskUIStore((s) => s.setToolPanelOpen);
   const setTaskCursorPage = useTaskDataStore((s) => s.setTaskCursorPage);
   const loading = useTaskDataStore((s) => s.loading);
   const setLoading = useTaskDataStore((s) => s.setLoading);
@@ -157,38 +160,26 @@ export const TaskList = memo(function TaskList({
   const filteredRef = useRef(filtered);
   filteredRef.current = filtered;
 
-  // Announce task status changes for screen readers.
-  // Optimization: Zustand's bare `subscribe(listener)` fires on every state
-  // change, including the ~4 Hz `patchTasksBatch` progress ticks that don't
-  // touch `task.status`. Do a single O(n) diff pass that breaks early when
-  // a status change is found; skip the per-tick Record allocation entirely
-  // when nothing changed.
+  // One shared scheduler poll for the whole list; rows read their decision from
+  // the returned map instead of each fetching their own.
+  const queueReasons = useQueueReasons(filtered);
+
+  // Announce task status changes for screen readers (WCAG 4.1.3).
+  // PERF-03: subscribe to statusAnnounceEpoch so progress-only patches never
+  // scan the loaded task list. The store records transitions only when status changes.
   useEffect(() => {
+    let lastEpoch = useTaskDataStore.getState().statusAnnounceEpoch;
     return useTaskDataStore.subscribe((state) => {
-      const prev = prevTaskStatusesRef.current;
-      let changedTask: { name: string; status: string } | null = null;
-      for (const taskId of state.taskIds) {
-        const task = state.taskById[taskId];
-        if (!task) continue;
-        if (prev[task.id] && prev[task.id] !== task.status) {
-          changedTask = { name: task.fileName, status: task.status };
-          break;
-        }
-      }
-      if (!changedTask) return;
+      if (state.statusAnnounceEpoch === lastEpoch) return;
+      lastEpoch = state.statusAnnounceEpoch;
+      const transition = state.lastStatusTransitions[state.lastStatusTransitions.length - 1];
+      if (!transition) return;
       setStatusAnnouncement(
         t("taskList.statusChanged", {
-          name: changedTask.name,
-          status: t(`task.status.${changedTask.status}`),
+          name: transition.task.fileName,
+          status: t(`task.status.${transition.task.status}`),
         }),
       );
-      // Rebuild the snapshot only after we know something changed.
-      const next: Record<string, string> = {};
-      for (const taskId of state.taskIds) {
-        const task = state.taskById[taskId];
-        if (task) next[task.id] = task.status;
-      }
-      prevTaskStatusesRef.current = next;
     });
   }, [t]);
   const selectedIdRef = useRef(selectedId);
@@ -203,7 +194,7 @@ export const TaskList = memo(function TaskList({
       const { epoch, role } = begin;
       if (role === "replace") setLoading(true);
       try {
-        const result = await listTasksCursor(taskCursorInput(cursor, { search: debouncedSearch }));
+        const result = await listTasksCursor(taskCursorInput(cursor, { search }));
         // ARC-07: ignore stale responses after a newer replace bumped the epoch.
         if (!isCurrentListQueryEpoch(epoch)) return;
         setTaskCursorPage(result.items, result.minimumTotal, result.nextCursor, result.filterOptions, append);
@@ -233,7 +224,7 @@ export const TaskList = memo(function TaskList({
         }
       }
     },
-    [debouncedSearch, filters, nav, selectTask, setError, setLoading, setTaskCursorPage, sortDirection, sortKey],
+    [search, filters, nav, selectTask, setError, setLoading, setTaskCursorPage, sortDirection, sortKey],
   );
 
   useEffect(() => {
@@ -257,7 +248,7 @@ export const TaskList = memo(function TaskList({
   const virtualizer = useVirtualizer({
     count: filtered.length,
     getScrollElement: () => scrollContainerRef.current,
-    estimateSize: () => TASK_ROW_ESTIMATED_SIZE, // compact row + 8px gap; failed/expanded rows are measured.
+    estimateSize: () => taskRowEstimateFor(rowDensity), // density preset + 8px gap; failed/expanded rows are measured.
     overscan: 6,
     getItemKey: (index) => filtered[index] ?? index,
     onChange: (instance) => {
@@ -278,16 +269,30 @@ export const TaskList = memo(function TaskList({
     },
   });
 
+  // Density changes every row's height at once, so the cached measurements from
+  // the previous preset have to go; otherwise the total scroll size stays wrong
+  // until each row happens to re-render.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rowDensity intentionally triggers this imperative virtualizer reset.
+  useEffect(() => {
+    virtualizer.measure();
+  }, [rowDensity, virtualizer]);
+
   // Scroll to top when filter / sort / search changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: query fields intentionally trigger this imperative virtualizer reset.
   useEffect(() => {
     virtualizer.scrollToOffset(0);
-  }, [filters, nav, debouncedSearch, sortDirection, sortKey]);
+  }, [filters, nav, search, sortDirection, sortKey]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedTasks = useCallback(() => {
     const { taskById } = useTaskDataStore.getState();
     return selectedIds.map((id) => taskById[id]).filter((task): task is Task => Boolean(task));
   }, [selectedIds]);
+  const runAfterBulkMenuClose = useCallback((action: () => void) => {
+    setBulkMenuOpen(false);
+    // Native save/open dialogs do not appear if they are invoked while this
+    // popover still owns focus in the Tauri webview. Close first, then run.
+    window.setTimeout(action, 0);
+  }, []);
   const visibleSelectedCount = useMemo(
     () => filtered.filter((taskId) => selectedIdSet.has(taskId)).length,
     [filtered, selectedIdSet],
@@ -467,6 +472,7 @@ export const TaskList = memo(function TaskList({
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-root">
+      <h1 className="sr-only">{t("taskList.aria")}</h1>
       {error ? (
         <div
           className="flex flex-wrap items-center gap-2 border-b border-border-danger bg-status-danger/10 px-3 py-2 text-sm text-status-danger md:px-4"
@@ -542,39 +548,78 @@ export const TaskList = memo(function TaskList({
               {t("taskList.bulkRetry")}
             </Button>
           ) : null}
-          <Popover>
+          <Popover open={bulkMenuOpen} onOpenChange={setBulkMenuOpen} modal={false}>
             <PopoverTrigger asChild>
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="h-11 md:h-8"
+                className="h-11 md:h-8 data-[state=open]:bg-surface-raised data-[state=open]:text-text-primary"
                 aria-label={t("taskList.moreBulkActions")}
+                aria-haspopup="menu"
+                aria-expanded={bulkMenuOpen}
               >
                 <MoreHorizontal className="h-4 w-4" aria-hidden />
                 {t("taskList.more")}
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="start" className="w-52">
-              <div className="space-y-0.5" role="menu">
-                <BulkMenuItem label={t("taskList.bulkPause")} onClick={() => onBulkPause(selectedTasks())} />
-                <BulkMenuItem label={t("taskList.bulkResume")} onClick={() => onBulkResume(selectedTasks())} />
-                <BulkMenuItem label={t("taskList.bulkRetry")} onClick={() => onBulkRetry(selectedTasks())} />
+            <PopoverContent
+              align="start"
+              className="w-52"
+              onCloseAutoFocus={(event) => event.preventDefault()}
+              onOpenAutoFocus={(event) => {
+                event.preventDefault();
+                requestAnimationFrame(() => {
+                  document
+                    .getElementById("task-list-bulk-menu")
+                    ?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')
+                    ?.focus();
+                });
+              }}
+            >
+              <div id="task-list-bulk-menu" className="space-y-0.5" role="menu" onKeyDown={handleMenuKeyDown}>
+                <BulkMenuItem
+                  label={t("taskList.bulkPause")}
+                  onClick={() => runAfterBulkMenuClose(() => onBulkPause(selectedTasks()))}
+                />
+                <BulkMenuItem
+                  label={t("taskList.bulkResume")}
+                  onClick={() => runAfterBulkMenuClose(() => onBulkResume(selectedTasks()))}
+                />
+                <BulkMenuItem
+                  label={t("taskList.bulkRetry")}
+                  onClick={() => runAfterBulkMenuClose(() => onBulkRetry(selectedTasks()))}
+                />
                 <div className="my-1 h-px bg-border-subtle" aria-hidden />
-                <BulkMenuItem label={t("taskList.bulkOpenFolder")} onClick={() => onBulkOpenFolder(selectedTasks())} />
+                <BulkMenuItem
+                  label={t("taskList.bulkOpenFolder")}
+                  onClick={() => runAfterBulkMenuClose(() => onBulkOpenFolder(selectedTasks()))}
+                />
                 <BulkMenuItem
                   label={t("taskList.selectVisible", { count: filtered.length })}
-                  onClick={() => setSelectedIds(filtered)}
+                  onClick={() => runAfterBulkMenuClose(() => setSelectedIds(filtered))}
                   disabled={allVisibleSelected}
                 />
-                <BulkMenuItem label={t("taskList.exportJson")} onClick={() => onBulkExport(selectedTasks(), "json")} />
-                <BulkMenuItem label={t("taskList.exportCsv")} onClick={() => onBulkExport(selectedTasks(), "csv")} />
+                <BulkMenuItem
+                  label={t("taskList.exportJson")}
+                  onClick={() => {
+                    const tasks = selectedTasks();
+                    runAfterBulkMenuClose(() => onBulkExport(tasks, "json"));
+                  }}
+                />
+                <BulkMenuItem
+                  label={t("taskList.exportCsv")}
+                  onClick={() => {
+                    const tasks = selectedTasks();
+                    runAfterBulkMenuClose(() => onBulkExport(tasks, "csv"));
+                  }}
+                />
                 {onBulkDeleteFiles ? (
                   <>
                     <div className="my-1 h-px bg-border-subtle" aria-hidden />
                     <BulkMenuItem
                       label={t("deleteDialog.deleteFilesToo")}
-                      onClick={() => onBulkDeleteFiles(selectedTasks())}
+                      onClick={() => runAfterBulkMenuClose(() => onBulkDeleteFiles(selectedTasks()))}
                       destructive
                     />
                   </>
@@ -645,35 +690,31 @@ export const TaskList = memo(function TaskList({
         </div>
       ) : null}
 
-      <div className="border-b border-border-subtle bg-surface-base/70 px-3 py-2 text-xs">
-        <div className="flex min-w-0 items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            aria-expanded={toolPanelOpen}
-            aria-controls="task-list-tool-panel"
-            aria-label={
-              !toolPanelOpen && activeFilterCount > 0
-                ? t("taskList.toolPanelActive", { count: activeFilterCount })
-                : t(toolPanelOpen ? "taskList.hideToolPanel" : "taskList.showToolPanel")
-            }
-            onClick={() => setToolPanelOpen((open) => !open)}
-            className="min-w-0 text-text-muted"
-          >
-            <SlidersHorizontal className="h-4 w-4 shrink-0" aria-hidden="true" />
-            <span className="truncate">{t("taskList.toolPanel")}</span>
-            <ChevronDown
-              className={`h-4 w-4 shrink-0 transition-transform duration-ui ${toolPanelOpen ? "rotate-180" : ""}`}
-              aria-hidden="true"
-            />
-          </Button>
-          {/* UX-12: narrow viewports hide CommandBar sort; surface current order here. */}
-          <span className="ml-auto truncate text-[11px] text-text-muted md:hidden" title={t("taskList.sort")}>
-            {t(`taskList.${sortSummaryKey(sortKey, sortDirection)}`)}
-          </span>
-        </div>
-        {toolPanelOpen ? (
+      {toolPanelOpen ? (
+        <div className="border-b border-border-subtle bg-surface-base/70 px-3 py-2 text-xs">
+          <div className="flex min-w-0 items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-expanded={toolPanelOpen}
+              aria-controls="task-list-tool-panel"
+              aria-label={t("taskList.hideToolPanel")}
+              onClick={() => setToolPanelOpen(false)}
+              className="min-w-0 text-text-muted"
+            >
+              <SlidersHorizontal className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span className="truncate">{t("taskList.toolPanel")}</span>
+              <ChevronDown
+                className="h-4 w-4 shrink-0 rotate-180 transition-transform duration-ui"
+                aria-hidden="true"
+              />
+            </Button>
+            {/* UX-12: narrow viewports hide CommandBar sort; surface current order here. */}
+            <span className="ml-auto truncate text-[11px] text-text-muted md:hidden" title={t("taskList.sort")}>
+              {t(`taskList.${sortSummaryKey(sortKey, sortDirection)}`)}
+            </span>
+          </div>
           <div id="task-list-tool-panel" className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <SelectControl
               label={t("taskList.sort")}
@@ -689,6 +730,15 @@ export const TaskList = memo(function TaskList({
                 ["progress:desc", t("taskList.sortProgressDesc")],
                 ["speed:desc", t("taskList.sortSpeedDesc")],
                 ["status:asc", t("taskList.sortStatusAsc")],
+              ]}
+            />
+            <SelectControl
+              label={t("taskList.rowDensity")}
+              value={rowDensity}
+              onChange={(value) => setRowDensity(value === "compact" ? "compact" : "comfortable")}
+              options={[
+                ["comfortable", t("taskList.densityComfortable")],
+                ["compact", t("taskList.densityCompact")],
               ]}
             />
             <SelectControl
@@ -733,8 +783,8 @@ export const TaskList = memo(function TaskList({
               ]}
             />
           </div>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
 
       <ListContextMenu
         onNewDownload={onNewDownload}
@@ -745,7 +795,7 @@ export const TaskList = memo(function TaskList({
         onExport={selectedIds.length > 0 ? (format) => onBulkExport(selectedTasks(), format) : undefined}
         hasSelection={selectedIds.length > 0}
       >
-        <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto">
+        <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto bg-surface-list-well">
           {loading && !initialLoadDoneRef.current ? (
             <TaskListLoadingSkeleton label={t("taskList.loading")} />
           ) : filtered.length === 0 ? (
@@ -829,6 +879,9 @@ export const TaskList = memo(function TaskList({
                         onCopyUrl={onCopyUrl}
                         onCopyLocalPath={onCopyLocalPath}
                         onShowDetails={onShowDetails}
+                        shellCompact={shellCompact}
+                        queueReason={queueReasons.get(taskId)}
+                        compact={compactRows}
                       />
                     </div>
                   );
@@ -1018,13 +1071,14 @@ function BulkMenuItem({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "flex h-9 w-full items-center rounded-md px-2 text-left text-sm md:h-8",
-        "transition-[background-color,color] duration-[var(--motion-ui)] ease-out",
+        "flex h-9 w-full cursor-pointer items-center rounded-md px-2 text-left text-sm md:h-8",
+        "transition-[background-color,color,transform] duration-[var(--motion-ui)] ease-out",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
         "disabled:pointer-events-none disabled:opacity-40",
+        "active:scale-[0.99] active:duration-75",
         destructive
-          ? "text-status-danger hover:bg-status-danger/10 hover:text-status-danger"
-          : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
+          ? "text-status-danger hover:bg-status-danger/10 hover:text-status-danger active:bg-status-danger/20"
+          : "text-text-secondary hover:bg-surface-raised hover:text-text-primary active:bg-accent-primary/15 active:text-text-primary",
       )}
     >
       {label}

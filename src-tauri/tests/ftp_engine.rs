@@ -456,6 +456,17 @@ async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
             .map(|segment| segment.downloaded_until)
             .filter(|downloaded| *downloaded > 0)
         {
+            // ARC-19: check the invariant while the transfer is still live, not
+            // just after cancel. A checkpoint may never describe more bytes than
+            // the file actually holds, because an aborted worker gets no chance
+            // to flush afterwards.
+            let durable = std::fs::metadata(&paths.temp)
+                .map(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX))
+                .unwrap_or(0);
+            assert!(
+                durable >= downloaded,
+                "ARC-19: live checkpoint {downloaded} leads durable bytes {durable}"
+            );
             break downloaded;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -466,6 +477,40 @@ async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
         .await
         .expect("FTP download task join")
         .expect("FTP cancellation is a clean pause boundary");
+
+    // ARC-19: the persisted offset must never exceed the bytes actually on disk.
+    // FTP does not preallocate, so the temp file length *is* the durable byte
+    // count. Before the fix the worker published an offset that was still held
+    // in its 256 KB BufWriter and was then aborted when the coordinator dropped
+    // the JoinSet, so resume seeked past a zero-filled hole - corruption that a
+    // task without a checksum can never detect.
+    let after_cancel = db::list_segment_records(&pool, "ftp-pause-resume")
+        .await
+        .expect("list FTP segments after cancel");
+    let persisted = after_cancel
+        .first()
+        .map(|segment| segment.downloaded_until)
+        .expect("a segment exists after cancel");
+    let durable = i64::try_from(
+        std::fs::metadata(&paths.temp)
+            .expect("temp file exists after cancel")
+            .len(),
+    )
+    .expect("temp length fits i64");
+    assert!(
+        durable >= persisted,
+        "ARC-19: checkpoint {persisted} leads durable bytes {durable} by {} bytes",
+        persisted - durable
+    );
+    // Stronger form: the durable prefix has to byte-match the source, which also
+    // catches a "correct length but zero-filled middle" regression.
+    let temp_bytes = std::fs::read(&paths.temp).expect("read FTP temp file");
+    let prefix = usize::try_from(persisted).expect("offset fits usize");
+    assert_eq!(
+        &temp_bytes[..prefix],
+        &payload[..prefix],
+        "ARC-19: the checkpointed prefix must byte-match the source"
+    );
 
     let current = db::get_task_record(&pool, "ftp-pause-resume")
         .await

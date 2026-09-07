@@ -29,7 +29,9 @@ import { useTranslation } from "react-i18next";
 import { BrowserCaptureControls } from "@/components/settings/BrowserCaptureControls";
 import { ClassificationRulesEditor } from "@/components/settings/ClassificationRulesEditor";
 import { EnvironmentPanel } from "@/components/settings/EnvironmentPanel";
+import { SettingsRecoveryReturnBanner } from "@/components/settings/SettingsRecoveryReturnBanner";
 import { SftpKnownHostsEditor } from "@/components/settings/SftpKnownHostsEditor";
+import { scrollChildWithinContainer, stickyStartOffset } from "@/components/settings/scroll-within";
 import {
   type SettingsSearchSection,
   settingsSearchHasResults,
@@ -68,6 +70,7 @@ import {
 } from "@/lib/browser-capture-draft";
 import { localizedErrorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
+import { consumeSettingsFocus } from "@/lib/settings-recovery-return";
 import {
   exportBrowserExtensionPackages,
   getBrowserCaptureSettings,
@@ -117,17 +120,6 @@ const DEFAULT_EXPANDED_SETTINGS_SECTIONS = new Set<SettingsSectionId>([
   "about-updates",
 ]);
 
-const ACCENT_SWATCHES: Record<string, { light: string; dark: string }> = {
-  blue: { light: "oklch(0.4 0.18 235)", dark: "oklch(0.76 0.14 235)" },
-  purple: { light: "oklch(0.4 0.18 290)", dark: "oklch(0.76 0.14 290)" },
-  teal: { light: "oklch(0.4 0.15 190)", dark: "oklch(0.76 0.14 190)" },
-  green: { light: "oklch(0.4 0.16 150)", dark: "oklch(0.76 0.14 150)" },
-  orange: { light: "oklch(0.4 0.16 55)", dark: "oklch(0.76 0.14 55)" },
-  rose: { light: "oklch(0.4 0.18 350)", dark: "oklch(0.76 0.14 350)" },
-  indigo: { light: "oklch(0.4 0.18 265)", dark: "oklch(0.76 0.14 265)" },
-  amber: { light: "oklch(0.4 0.16 80)", dark: "oklch(0.76 0.14 80)" },
-};
-
 const SettingsSearchContext = createContext<{
   query: string;
   setQuery: (q: string) => void;
@@ -140,8 +132,7 @@ function useSettingsSearch() {
 
 export function SettingsPage() {
   const { t, i18n } = useTranslation();
-  const { theme, resolvedTheme, setTheme } = useTheme();
-  const isDark = resolvedTheme === "dark";
+  const { theme, setTheme } = useTheme();
   const settings = useSettingsStore((s) => s.settings);
   const loading = useSettingsStore((s) => s.loading);
   const error = useSettingsStore((s) => s.error);
@@ -501,17 +492,17 @@ export function SettingsPage() {
   );
   const settingsSearchHasMatch = settingsSearchHasResults(settingsSections, settingsSearch);
   const settingsSearchActive = settingsSearch.trim().length > 0;
+  const [activeSection, setActiveSection] = useState<string>(SECTION_IDS[0]);
+  const sectionNavRef = useRef<HTMLDivElement>(null);
+  const isScrollingRef = useRef(false);
 
-  // ARC-15: recovery action can request focusing the SFTP known-hosts editor.
+  // Recovery can request focusing ffmpeg or SFTP known hosts, then returning to the task.
   useEffect(() => {
-    try {
-      const focus = sessionStorage.getItem("vibe-settings-focus");
-      if (focus === "sftp_known_hosts") {
-        sessionStorage.removeItem("vibe-settings-focus");
-        setSettingsSearch(t("settings.sftpKnownHosts"));
-      }
-    } catch {
-      // Ignore storage failures.
+    const focus = consumeSettingsFocus();
+    if (focus === "sftp_known_hosts") {
+      setSettingsSearch(t("settings.sftpKnownHosts"));
+    } else if (focus === "ffmpeg_path") {
+      setSettingsSearch(t("settings.ffmpegPath.label"));
     }
   }, [t]);
 
@@ -519,13 +510,17 @@ export function SettingsPage() {
   useEffect(() => {
     if (!settingsSearchActive) return;
     const normalized = settingsSearch.trim().toLowerCase();
-    const container = document.querySelector("[data-settings-scroll]");
+    const container = sectionNavRef.current;
     if (!container) return;
     const rows = container.querySelectorAll<HTMLElement>("[data-search-key]");
     for (const row of rows) {
       const key = (row.dataset.searchKey ?? "").toLowerCase();
       if (key.includes(normalized)) {
-        row.scrollIntoView({ behavior: "smooth", block: "center" });
+        const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        scrollChildWithinContainer(container, row, {
+          behavior: prefersReducedMotion ? "auto" : "smooth",
+          block: "center",
+        });
         row.classList.add("ring-2", "ring-accent-primary", "rounded-md");
         const timeoutId = window.setTimeout(() => {
           row.classList.remove("ring-2", "ring-accent-primary", "rounded-md");
@@ -547,11 +542,6 @@ export function SettingsPage() {
       matchesSearch: settingsSectionMatchesQuery(section, settingsSearch),
     };
   };
-
-  /* Section navigation */
-  const [activeSection, setActiveSection] = useState<string>(SECTION_IDS[0]);
-  const sectionNavRef = useRef<HTMLDivElement>(null);
-  const isScrollingRef = useRef(false);
 
   useEffect(() => {
     const nav = sectionNavRef.current;
@@ -588,12 +578,14 @@ export function SettingsPage() {
   const scrollToSection = useCallback((id: string) => {
     setActiveSection(id);
     const element = document.getElementById(id);
-    if (!element) return;
+    const container = sectionNavRef.current;
+    if (!element || !container) return;
     isScrollingRef.current = true;
     const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    element.scrollIntoView({
-      behavior: prefersReducedMotion ? "instant" : "smooth",
+    scrollChildWithinContainer(container, element, {
+      behavior: prefersReducedMotion ? "auto" : "smooth",
       block: "start",
+      offsetTop: stickyStartOffset(container),
     });
     window.setTimeout(() => {
       isScrollingRef.current = false;
@@ -1239,6 +1231,7 @@ export function SettingsPage() {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-root">
+      <h1 className="sr-only">{t("settings.title")}</h1>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <SettingsSearchContext.Provider value={{ query: settingsSearch, setQuery: setSettingsSearch }}>
           <div ref={sectionNavRef} data-settings-scroll className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
@@ -1308,6 +1301,7 @@ export function SettingsPage() {
               </div>
             </nav>
             <div className="mx-auto flex w-full max-w-4xl flex-col px-3 py-4 sm:px-4 md:px-6 md:py-5">
+              <SettingsRecoveryReturnBanner ffmpegReady={Boolean(ffmpegVersion)} />
               {error ? (
                 <div
                   className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-sm text-status-danger"
@@ -1842,9 +1836,6 @@ export function SettingsPage() {
                       ] as const
                     ).map(([color, label]) => {
                       const isSelected = accentColor === color;
-                      const swatchBg = isSelected
-                        ? "var(--accent-primary)"
-                        : (ACCENT_SWATCHES[color]?.[isDark ? "dark" : "light"] ?? "var(--accent-primary)");
                       return (
                         <button
                           key={color}
@@ -1862,7 +1853,7 @@ export function SettingsPage() {
                               ? "border-text-primary scale-110 shadow-md"
                               : "border-border-subtle hover:scale-105 hover:border-text-secondary",
                           )}
-                          style={{ backgroundColor: swatchBg }}
+                          style={{ backgroundColor: `var(--swatch-${color})` }}
                         />
                       );
                     })}
@@ -2694,8 +2685,8 @@ function UpdateProgressBar({ updater }: { updater: UpdaterSnapshot }) {
         aria-valuemax={100}
       >
         <div
-          className="h-full rounded-full bg-accent-primary transition-[width] duration-ui"
-          style={{ width: `${percent ?? 100}%` }}
+          className="h-full w-full origin-left rounded-full bg-accent-primary transition-transform duration-ui motion-reduce:transition-none"
+          style={{ transform: `scaleX(${percent == null ? 1 : Math.max(0, Math.min(1, percent / 100))})` }}
         />
       </div>
     </div>

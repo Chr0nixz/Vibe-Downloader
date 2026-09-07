@@ -452,46 +452,6 @@ pub fn hls_segment_cursor(record: &HlsSegmentRecord) -> String {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::models::SegmentStatus;
-
-    #[test]
-    fn parse_hls_segment_cursor_accepts_composite_and_legacy() {
-        assert_eq!(parse_hls_segment_cursor(None), (None, -1));
-        assert_eq!(parse_hls_segment_cursor(Some("2:10")), (Some(2), 10));
-        assert_eq!(parse_hls_segment_cursor(Some("7")), (Some(0), 7));
-    }
-
-    #[test]
-    fn hls_segment_cursor_formats_pair() {
-        let record = HlsSegmentRecord {
-            id: "s1".into(),
-            task_id: "t1".into(),
-            media_sequence: 42,
-            discontinuity_sequence: 1,
-            uri: "https://cdn.example/a.ts".into(),
-            local_path: "a.ts".into(),
-            duration_ms: 1000,
-            byte_range_start: None,
-            byte_range_length: None,
-            init_map_uri: None,
-            init_map_local_path: None,
-            init_map_byte_range_start: None,
-            init_map_byte_range_length: None,
-            key_method: None,
-            key_uri: None,
-            key_iv: None,
-            downloaded_bytes: 0,
-            status: SegmentStatus::Pending,
-            retry_count: 0,
-            last_error: None,
-        };
-        assert_eq!(hls_segment_cursor(&record), "1:42");
-    }
-}
-
 pub async fn update_hls_segment_status(
     pool: &SqlitePool,
     id: &str,
@@ -539,4 +499,44 @@ pub async fn reset_hls_segments_for_task(pool: &SqlitePool, task_id: &str) -> Re
     .await
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::SegmentStatus;
+
+    #[test]
+    fn parse_hls_segment_cursor_accepts_composite_and_legacy() {
+        assert_eq!(parse_hls_segment_cursor(None), (None, -1));
+        assert_eq!(parse_hls_segment_cursor(Some("2:10")), (Some(2), 10));
+        assert_eq!(parse_hls_segment_cursor(Some("7")), (Some(0), 7));
+    }
+
+    #[test]
+    fn hls_segment_cursor_formats_pair() {
+        let record = HlsSegmentRecord {
+            id: "s1".into(),
+            task_id: "t1".into(),
+            media_sequence: 42,
+            discontinuity_sequence: 1,
+            uri: "https://cdn.example/a.ts".into(),
+            local_path: "a.ts".into(),
+            duration_ms: 1000,
+            byte_range_start: None,
+            byte_range_length: None,
+            init_map_uri: None,
+            init_map_local_path: None,
+            init_map_byte_range_start: None,
+            init_map_byte_range_length: None,
+            key_method: None,
+            key_uri: None,
+            key_iv: None,
+            downloaded_bytes: 0,
+            status: SegmentStatus::Pending,
+            retry_count: 0,
+            last_error: None,
+        };
+        assert_eq!(hls_segment_cursor(&record), "1:42");
+    }
 }

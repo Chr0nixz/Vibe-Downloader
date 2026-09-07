@@ -13,7 +13,8 @@ const buttonVariants = cva(
         // Replaces the prior `border + 0_1px_2px shadow + hover:brightness-110`
         // ghost-card anti-pattern with a single committed surface.
         default: "bg-accent-primary text-text-on-accent shadow-[var(--shadow-raised)] hover:bg-accent-primary/90",
-        ghost: "hover:bg-surface-raised text-text-secondary hover:text-text-primary",
+        ghost:
+          "hover:bg-surface-raised text-text-secondary hover:text-text-primary active:bg-surface-raised active:text-text-primary",
         outline: "border border-border-subtle bg-transparent hover:bg-surface-raised hover:border-border-hover",
         danger: "bg-status-danger/15 text-status-danger hover:bg-status-danger/25 font-semibold",
       },

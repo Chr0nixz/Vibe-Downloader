@@ -1,6 +1,7 @@
-# PERF-11: run headless DB baseline (1k smoke; optional 10k) and write artifacts.
+# PERF-11 / PERF-01: run headless DB baseline (1k smoke; optional 10k / 50k) and write artifacts.
 param(
     [switch]$Include10k,
+    [switch]$Include50k,
     [string]$ArtifactRoot = ""
 )
 
@@ -33,5 +34,13 @@ if ($Include10k) {
     }
 }
 
-Write-Host "PERF-11 artifacts ready under $ArtifactRoot"
+if ($Include50k) {
+    Write-Host "Running PERF-01 50k ignored baseline"
+    cargo test -j 1 --manifest-path src-tauri/Cargo.toml --test perf_baseline -- --ignored --nocapture perf_baseline_50k
+    if ($LASTEXITCODE -ne 0) {
+        throw "perf_baseline_50k failed with exit $LASTEXITCODE"
+    }
+}
+
+Write-Host "PERF baseline artifacts ready under $ArtifactRoot"
 Get-ChildItem $ArtifactRoot | ForEach-Object { Write-Host " - $($_.Name)" }

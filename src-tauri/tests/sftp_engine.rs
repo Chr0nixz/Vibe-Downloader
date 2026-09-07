@@ -916,6 +916,37 @@ async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
         .expect("join")
         .expect("SFTP cancellation is a clean pause boundary");
 
+    // ARC-19: the persisted offset must never exceed the bytes actually on disk.
+    // SFTP does not preallocate, so the temp file length *is* the durable byte
+    // count. Before the fix the worker published an offset still buffered in its
+    // 256 KB BufWriter and was then aborted, leaving resume to seek past a
+    // zero-filled hole.
+    let after_cancel = db::list_segment_records(&pool, "sftp-pause-resume")
+        .await
+        .expect("list SFTP segments after cancel");
+    let persisted = after_cancel
+        .first()
+        .map(|segment| segment.downloaded_until)
+        .expect("a segment exists after cancel");
+    let durable = i64::try_from(
+        std::fs::metadata(&paths.temp)
+            .expect("temp file exists after cancel")
+            .len(),
+    )
+    .expect("temp length fits i64");
+    assert!(
+        durable >= persisted,
+        "ARC-19: checkpoint {persisted} leads durable bytes {durable} by {} bytes",
+        persisted - durable
+    );
+    let temp_bytes = std::fs::read(&paths.temp).expect("read SFTP temp file");
+    let prefix = usize::try_from(persisted).expect("offset fits usize");
+    assert_eq!(
+        &temp_bytes[..prefix],
+        &payload[..prefix],
+        "ARC-19: the checkpointed prefix must byte-match the source"
+    );
+
     let current = db::get_task_record(&pool, "sftp-pause-resume")
         .await
         .expect("read")

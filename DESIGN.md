@@ -48,31 +48,34 @@ Recommended dark tokens:
 
 - `surface.root`: `oklch(0.145 0.006 255)`
 - `surface.base`: `oklch(0.18 0.008 255)`
-- `surface.raised`: `oklch(0.235 0.01 255)`
-- `surface.overlay`: `oklch(0.245 0.012 255 / 0.78)`
+- `surface.raised`: `oklch(0.25 0.011 255)`
+- `surface.overlay`: `oklch(0.255 0.013 255 / 0.82)`
 - `border.subtle`: `oklch(0.33 0.012 255)`
 - `text.primary`: `oklch(0.93 0.006 255)`
-- `text.secondary`: `oklch(0.72 0.008 255)`
-- `text.muted`: `oklch(0.78 0.008 255)`
-- `accent.primary`: `oklch(0.72 0.14 235)`
+- `text.secondary`: `oklch(0.84 0.008 255)`
+- `text.muted`: `oklch(0.7 0.008 255)`
+- `accent.primary`: `oklch(0.76 0.14 235)`
 - `accent.energy`: `oklch(0.78 0.18 170)`
 - `accent.peak`: `oklch(0.74 0.18 305)`
-- `status.success`: `oklch(0.72 0.14 150)`
-- `status.warning`: `oklch(0.78 0.14 75)`
-- `status.danger`: `oklch(0.68 0.18 25)`
+- `status.success`: `oklch(0.8 0.14 150)`
+- `status.warning`: `oklch(0.88 0.12 75)`
+- `status.danger`: `oklch(0.8 0.16 25)`
 
 Recommended light tokens:
 
 - `surface.root`: `oklch(0.975 0.004 255)`
 - `surface.base`: `oklch(0.955 0.006 255)`
-- `surface.raised`: `oklch(0.99 0.003 255)`
+- `surface.raised`: `oklch(1 0.002 255)`
+- `surface.overlay`: `oklch(1 0.002 255 / 0.94)`
 - `border.subtle`: `oklch(0.84 0.01 255)`
 - `text.primary`: `oklch(0.22 0.012 255)`
 - `text.secondary`: `oklch(0.28 0.015 255)`
-- `text.muted`: `oklch(0.39 0.01 255)`
-- `accent.primary`: `oklch(0.30 0.16 235)`
-- `accent.energy`: `oklch(0.26 0.14 165)`
-- `status.danger`: `oklch(0.45 0.18 25)`
+- `text.muted`: `oklch(0.43 0.012 255)`
+- `accent.primary`: `oklch(0.4 0.18 235)`
+- `accent.energy`: `oklch(0.38 0.15 165)`
+- `status.success`: `oklch(0.27 0.14 150)`
+- `status.warning`: `oklch(0.3 0.14 75)`
+- `status.danger`: `oklch(0.38 0.18 25)`
 
 ## Typography
 

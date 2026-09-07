@@ -29,4 +29,5 @@ export {
   taskFileType,
   taskMatchesListQuery,
 } from "./task-query";
+export type { RowDensity } from "./task-ui-store";
 export { useTaskUIStore } from "./task-ui-store";

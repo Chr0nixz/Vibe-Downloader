@@ -800,26 +800,8 @@ fn restart_required_error_code(code: &str) -> bool {
 }
 
 fn task_error_code(task: &TaskRecord) -> Option<String> {
-    if let Some(code) = task.error_code.clone() {
-        return Some(code);
-    }
-    let error = task.error_message.as_deref()?;
-    if let Ok(payload) = serde_json::from_str::<AppErrorPayload>(error) {
-        return Some(payload.code);
-    }
-    if error.contains("Remote file changed") {
-        return Some("remote_changed".to_string());
-    }
-    if error.contains("Server no longer supports resume") || error.contains("Resume unavailable") {
-        return Some("resume_unavailable".to_string());
-    }
-    if error.contains("Temporary file is missing") {
-        return Some("temp_file_missing".to_string());
-    }
-    if error.contains("Temporary file is smaller") {
-        return Some("temp_file_smaller_than_progress".to_string());
-    }
-    None
+    // ARC-16: column or JSON `.code` only — no English substring inference.
+    AppErrorPayload::code_from_stored(task.error_code.as_deref(), task.error_message.as_deref())
 }
 
 pub(crate) async fn prepare_task_for_download(
@@ -830,7 +812,13 @@ pub(crate) async fn prepare_task_for_download(
     request_headers: &[(String, String)],
 ) -> Result<TaskRecord, String> {
     if task.status == TaskStatus::NeedsAttention {
-        return Err("Remote file changed. Restart download to avoid corruption.".to_string());
+        return Err(AppErrorPayload::new(
+            "remote_changed",
+            "Remote file changed. Restart download to avoid corruption.",
+            false,
+            vec!["restart", "check_url"],
+        )
+        .command_error());
     }
 
     if is_bt_protocol(&task.protocol)
@@ -862,9 +850,9 @@ pub(crate) async fn prepare_task_for_download(
         task.total_size,
         task.supports_resume,
     ) {
-        fail_task_and_segments(app, pool, &task.id, message).await?;
-        db::insert_task_event(pool, &task.id, "resume_blocked", Some(message)).await?;
-        return Err(message.to_string());
+        fail_task_and_segments(app, pool, &task.id, &message).await?;
+        db::insert_task_event(pool, &task.id, "resume_blocked", Some(&message)).await?;
+        return Err(message);
     }
 
     if temp_size > 0 {

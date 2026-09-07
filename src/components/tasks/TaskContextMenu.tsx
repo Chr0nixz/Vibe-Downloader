@@ -20,6 +20,7 @@ import {
 import { memo } from "react";
 import { useTranslation } from "react-i18next";
 
+import { rowShowsRetry, rowTransferMode } from "@/components/tasks/row-recovery";
 import { MenuContent, MenuItem, MenuLabel, MenuSeparator } from "@/components/ui/menu-item";
 import type { RecoveryAction } from "@/generated/bindings";
 import type { Task } from "@/types/task";
@@ -43,11 +44,6 @@ interface TaskContextMenuProps {
 
 export type ReorderAction = "move_to_top" | "move_up" | "move_down" | "move_to_bottom";
 
-const showsResume = (status: Task["status"]) =>
-  status === "paused" || status === "failed" || status === "waiting_network";
-
-const hidesTransfer = (status: Task["status"]) => status === "completed" || status === "needs_attention";
-
 export const TaskContextMenu = memo(function TaskContextMenu({
   task,
   onToggleTransfer,
@@ -65,6 +61,7 @@ export const TaskContextMenu = memo(function TaskContextMenu({
 }: TaskContextMenuProps) {
   const { t } = useTranslation();
   const { status, protocol } = task;
+  const transferMode = rowTransferMode(task);
   const canFinishRecording = protocol === "hls" && (status === "downloading" || status === "retrying");
   const canReorder = status === "queued" && onReorder;
 
@@ -73,15 +70,15 @@ export const TaskContextMenu = memo(function TaskContextMenu({
       <ContextMenu.Trigger asChild>{children}</ContextMenu.Trigger>
       <ContextMenu.Portal>
         <MenuContent>
-          {!hidesTransfer(status) && (
+          {transferMode !== "hidden" && (
             <MenuItem
-              icon={showsResume(status) ? Play : Pause}
-              label={t(showsResume(status) ? "actions.resume" : "actions.pause")}
+              icon={transferMode === "resume" ? Play : Pause}
+              label={t(transferMode === "resume" ? "actions.resume" : "actions.pause")}
               onSelect={() => onToggleTransfer(task)}
             />
           )}
 
-          {status === "failed" && (
+          {rowShowsRetry(task) && (
             <MenuItem icon={RotateCcw} label={t("actions.retry")} onSelect={() => onRetry(task)} />
           )}
 

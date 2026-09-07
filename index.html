@@ -36,7 +36,15 @@
             indigo: "oklch(0.76 0.14 265)",
             amber: "oklch(0.76 0.14 80)",
           };
-          var isDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+          // next-themes persists explicit light/dark under "theme"; honor it so
+          // forced themes do not flash the opposite splash against system preference.
+          var storedTheme = localStorage.getItem("theme");
+          var systemDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+          var isDark =
+            storedTheme === "dark" ||
+            ((storedTheme === "system" || storedTheme == null || storedTheme === "") && !!systemDark);
+          if (isDark) document.documentElement.classList.add("dark");
+          else document.documentElement.classList.remove("dark");
           var map = isDark ? darkMap : lightMap;
           document.documentElement.style.setProperty(
             "--vibe-splash-accent",
@@ -137,20 +145,18 @@
         100% { left: 100%; }
       }
 
-      /* Dark mode: respect system preference until next-themes applies. */
-      @media (prefers-color-scheme: dark) {
-        #vibe-splash {
-          background: oklch(0.145 0.006 255);
-          color: oklch(0.93 0.006 255);
-        }
+      /* Dark splash follows html.dark (set above from next-themes + system). */
+      html.dark #vibe-splash {
+        background: oklch(0.145 0.006 255);
+        color: oklch(0.93 0.006 255);
+      }
 
-        #vibe-splash__title {
-          color: oklch(0.84 0.008 255);
-        }
+      html.dark #vibe-splash__title {
+        color: oklch(0.84 0.008 255);
+      }
 
-        #vibe-splash__bar {
-          background: oklch(0.33 0.012 255 / 0.6);
-        }
+      html.dark #vibe-splash__bar {
+        background: oklch(0.33 0.012 255 / 0.6);
       }
 
       @media (prefers-reduced-motion: reduce) {

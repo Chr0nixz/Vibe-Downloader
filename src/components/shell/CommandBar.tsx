@@ -1,19 +1,15 @@
-import { ArrowUpDown, Check, Command, Gauge, LoaderCircle, Plus, Search } from "lucide-react";
-import { type RefObject, useEffect, useRef, useState } from "react";
+import { ArrowUpDown, Command, Plus, Search, SlidersHorizontal } from "lucide-react";
+import { type RefObject, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import type { Platform } from "@/lib/platform";
-import { applyGlobalSpeedLimit } from "@/lib/settings";
-import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput, speedLimitInputFromBytes } from "@/lib/speed-limit";
-import { cn, formatShortcut, formatSpeed } from "@/lib/utils";
-import { useSettingsStore } from "@/stores/settings-store";
+import { formatShortcut } from "@/lib/utils";
 import { type TaskSortKey, useTaskUIStore } from "@/stores/task-store";
-import { useToastStore } from "@/stores/toast-store";
 
 interface CommandBarProps {
   platform: Platform;
@@ -27,36 +23,28 @@ export function CommandBar({ platform, onOpenPalette, onNewDownload, inputRef }:
   const search = useTaskUIStore((s) => s.search);
   const setSearch = useTaskUIStore((s) => s.setSearch);
   const [searchInput, setSearchInput] = useState(search);
-  // UX-2: Write to store immediately on each keystroke. TaskList's 300ms
-  // useDebouncedValue is the single debounce layer — the previous serial
-  // 200ms + 300ms = 500ms delay is eliminated.
+  const debouncedSearchInput = useDebouncedValue(searchInput, 300);
+  // Debounce store writes here so TaskList/virtualizer do not rerender per keystroke.
   useEffect(() => {
-    setSearch(searchInput);
-  }, [searchInput, setSearch]);
+    if (debouncedSearchInput !== search) setSearch(debouncedSearchInput);
+  }, [debouncedSearchInput, search, setSearch]);
   useEffect(() => {
-    if (search !== searchInput) {
-      setSearchInput(search);
-    }
-  }, [search, searchInput]);
-  const settings = useSettingsStore((s) => s.settings);
-  const setSettings = useSettingsStore((s) => s.setSettings);
-  const addToast = useToastStore((s) => s.addToast);
+    setSearchInput((current) => (current === search ? current : search));
+  }, [search]);
   const sortKey = useTaskUIStore((s) => s.sortKey);
   const sortDirection = useTaskUIStore((s) => s.sortDirection);
   const setSort = useTaskUIStore((s) => s.setSort);
-  const [speedPopoverOpen, setSpeedPopoverOpen] = useState(false);
-  const initialLimit = speedLimitInputFromBytes(
-    settings?.globalSpeedLimitBps != null ? String(settings.globalSpeedLimitBps) : null,
-  );
-  const [customAmount, setCustomAmount] = useState(initialLimit.amount);
-  const [customUnit, setCustomUnit] = useState(initialLimit.unit);
-  const [savingSpeed, setSavingSpeed] = useState(false);
-  const speedTriggerRef = useRef<HTMLButtonElement>(null);
-  const currentLimit = Number(settings?.globalSpeedLimitBps ?? 0);
-  const speedLabel =
-    currentLimit > 0
-      ? t("commandBar.speedLimitActive", { speed: formatSpeed(currentLimit) })
-      : t("commandBar.speedLimit");
+  const nav = useTaskUIStore((s) => s.nav);
+  const filters = useTaskUIStore((s) => s.filters);
+  const toolPanelOpen = useTaskUIStore((s) => s.toolPanelOpen);
+  const setToolPanelOpen = useTaskUIStore((s) => s.setToolPanelOpen);
+  const showFilterButton =
+    nav === "all" || nav === "downloading" || nav === "paused" || nav === "completed" || nav === "failed";
+  const activeFilterCount =
+    Number(filters.fileType !== "all") +
+    Number(filters.source !== "all") +
+    Number(filters.failure !== "all") +
+    Number(filters.resume !== "all");
 
   // First-run tooltip: auto-shows once per session to help new users discover the button.
   // P0b: previously suppressed entirely under prefers-reduced-motion, which removed
@@ -69,41 +57,6 @@ export function CommandBar({ platform, onOpenPalette, onNewDownload, inputRef }:
     const timer = window.setTimeout(() => setFirstRunTip(false), delay);
     return () => window.clearTimeout(timer);
   }, []);
-
-  async function setSpeedLimit(limit: number | null) {
-    try {
-      setSavingSpeed(true);
-      if (!settings) return;
-      const nextSettings = await applyGlobalSpeedLimit(settings, limit);
-      setSettings(nextSettings);
-      setSpeedPopoverOpen(false);
-    } catch (error) {
-      addToast({
-        tone: "error",
-        title: t("toast.actionFailed"),
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setSavingSpeed(false);
-    }
-  }
-
-  function applyCustomSpeed() {
-    const bytes = speedLimitBytesFromInput(customAmount, customUnit);
-    // null = blank input (unlimited), undefined = invalid. Block both to match
-    // the Apply button's disabled state and avoid Enter bypassing it.
-    if (bytes == null) return;
-    void setSpeedLimit(bytes);
-  }
-
-  // Keep the amount/unit fields in sync when the global limit changes elsewhere.
-  useEffect(() => {
-    const next = speedLimitInputFromBytes(
-      settings?.globalSpeedLimitBps != null ? String(settings.globalSpeedLimitBps) : null,
-    );
-    setCustomAmount(next.amount);
-    setCustomUnit(next.unit);
-  }, [settings?.globalSpeedLimitBps]);
 
   return (
     <section
@@ -136,91 +89,6 @@ export function CommandBar({ platform, onOpenPalette, onNewDownload, inputRef }:
         </TooltipContent>
       </Tooltip>
 
-      <div className="hidden shrink-0 items-center gap-1 md:flex md:gap-2">
-        <Popover open={speedPopoverOpen} onOpenChange={setSpeedPopoverOpen}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <PopoverTrigger asChild>
-                <Button
-                  ref={speedTriggerRef}
-                  variant="ghost"
-                  size="icon"
-                  aria-label={speedLabel}
-                  disabled={!settings || savingSpeed}
-                  className={cn("hidden md:inline-flex", savingSpeed && "animate-spin")}
-                >
-                  {savingSpeed ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Gauge className="h-4 w-4" />}
-                </Button>
-              </PopoverTrigger>
-            </TooltipTrigger>
-            <TooltipContent>
-              <span>{speedLabel}</span>
-            </TooltipContent>
-          </Tooltip>
-          <PopoverContent className="w-64" align="start">
-            <fieldset className="m-0 space-y-0.5 border-0 p-0">
-              <legend className="sr-only">{t("speedLimit.customBytes")}</legend>
-              <SpeedOption
-                label={t("speedLimit.unlimited")}
-                active={currentLimit <= 0}
-                onClick={() => void setSpeedLimit(null)}
-              />
-              {SPEED_LIMIT_PRESETS.map((preset) => (
-                <SpeedOption
-                  key={preset.value}
-                  label={preset.label}
-                  active={currentLimit === preset.value}
-                  onClick={() => void setSpeedLimit(preset.value)}
-                />
-              ))}
-            </fieldset>
-            <div className="mt-1.5 border-t border-border-subtle pt-1.5">
-              <label
-                htmlFor="command-bar-custom-speed-limit"
-                className="block px-2 py-1 text-[11px] font-medium text-text-muted"
-              >
-                {t("speedLimit.custom")}
-              </label>
-              <div className="flex gap-1 px-1">
-                <Input
-                  id="command-bar-custom-speed-limit"
-                  value={customAmount}
-                  onChange={(event) => setCustomAmount(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") applyCustomSpeed();
-                  }}
-                  inputMode="decimal"
-                  placeholder={t("settings.globalSpeedLimitPlaceholder")}
-                  aria-label={t("speedLimit.custom")}
-                  className="h-8"
-                />
-                <Select value={customUnit} onValueChange={setCustomUnit}>
-                  <SelectTrigger aria-label={t("settings.speedUnit")} className="h-8 w-auto min-w-[5rem] px-2 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {SPEED_LIMIT_UNITS.map((unit) => (
-                      <SelectItem key={unit.value} value={unit.value}>
-                        {unit.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={applyCustomSpeed}
-                  disabled={savingSpeed || !customAmount.trim()}
-                >
-                  {t("speedLimit.apply")}
-                </Button>
-              </div>
-            </div>
-          </PopoverContent>
-        </Popover>
-      </div>
-
       <div className="hidden shrink-0 items-center md:flex">
         <Select
           value={`${sortKey}:${sortDirection}`}
@@ -247,6 +115,34 @@ export function CommandBar({ platform, onOpenPalette, onNewDownload, inputRef }:
           </SelectContent>
         </Select>
       </div>
+
+      {showFilterButton ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="relative h-11 w-11 shrink-0 md:h-8 md:w-8"
+              aria-pressed={toolPanelOpen}
+              aria-expanded={toolPanelOpen}
+              aria-controls="task-list-tool-panel"
+              aria-label={
+                activeFilterCount > 0
+                  ? t("taskList.toolPanelActive", { count: activeFilterCount })
+                  : t(toolPanelOpen ? "taskList.hideToolPanel" : "taskList.showToolPanel")
+              }
+              onClick={() => setToolPanelOpen(!toolPanelOpen)}
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+              {activeFilterCount > 0 ? (
+                <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-accent-primary" aria-hidden />
+              ) : null}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t("taskList.toolPanel")}</TooltipContent>
+        </Tooltip>
+      ) : null}
 
       <div className="relative min-w-0 flex-1">
         <Search className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
@@ -287,32 +183,5 @@ export function CommandBar({ platform, onOpenPalette, onNewDownload, inputRef }:
         </kbd>
       </Button>
     </section>
-  );
-}
-
-const SPEED_LIMIT_PRESETS = [
-  { label: "512 KB/s", value: 512 * 1024 },
-  { label: "1 MB/s", value: 1024 * 1024 },
-  { label: "5 MB/s", value: 5 * 1024 * 1024 },
-  { label: "10 MB/s", value: 10 * 1024 * 1024 },
-];
-
-function SpeedOption({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      className={cn(
-        "flex h-8 w-full items-center justify-between rounded-md px-2 text-left text-sm text-text-secondary",
-        "transition-[background-color,color] duration-[var(--motion-ui)] ease-out",
-        "hover:bg-surface-raised hover:text-text-primary",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
-        active && "bg-surface-raised text-text-primary",
-      )}
-      onClick={onClick}
-    >
-      <span>{label}</span>
-      {active ? <Check className="h-4 w-4 text-accent-primary" /> : null}
-    </button>
   );
 }

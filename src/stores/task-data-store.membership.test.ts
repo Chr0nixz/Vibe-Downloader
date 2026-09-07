@@ -133,6 +133,8 @@ describe("task-data-store membership (ARC-08)", () => {
         task: expect.objectContaining({ id: "q1", status: "completed" }),
       }),
     ]);
+    expect(useTaskDataStore.getState().statusAnnounceEpoch).toBeGreaterThan(0);
+    expect(useTaskDataStore.getState().lastStatusTransitions).toEqual(result.statusTransitions);
     expect(useTaskDataStore.getState().taskIds).toEqual([]);
     expect(useTaskDataStore.getState().taskById.q1?.status).toBe("completed");
   });

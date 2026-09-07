@@ -446,6 +446,7 @@ describe("TaskDetails", () => {
 
     const drawer = screen.getByRole("dialog", { name: "drawer.zip" });
     expect(drawer).toBeInTheDocument();
+    expect(drawer.className).toContain("top-[var(--titlebar-height)]");
     expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
 
     const close = screen.getByRole("button", { name: "taskDetails.close" });

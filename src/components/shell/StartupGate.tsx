@@ -96,8 +96,8 @@ function StartupInitializingSplash() {
   const reduceMotion = useReducedMotion();
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-surface-root">
-      <div role="status" className="flex flex-col items-center gap-5" aria-live="polite">
+    <main className="flex h-full min-h-0 items-center justify-center overflow-y-auto bg-surface-root">
+      <div role="status" className="flex flex-col items-center gap-5" aria-live="polite" aria-busy="true">
         <img
           src={LOGO_64_DATA_URI}
           alt=""
@@ -109,10 +109,11 @@ function StartupInitializingSplash() {
             ...(reduceMotion ? { opacity: 1 } : { animation: "vibe-splash-breathe 1.8s ease-in-out infinite" }),
           }}
         />
-        {reduceMotion ? (
-          <p className="text-sm text-text-secondary">{t("startup.initializing")}</p>
-        ) : (
+        {/* Always expose initializing copy to AT; visually hide when the bar carries the cue. */}
+        <p className={reduceMotion ? "text-sm text-text-secondary" : "sr-only"}>{t("startup.initializing")}</p>
+        {!reduceMotion ? (
           <div
+            aria-hidden
             style={{
               width: 180,
               height: 2,
@@ -135,7 +136,7 @@ function StartupInitializingSplash() {
               }}
             />
           </div>
-        )}
+        ) : null}
       </div>
     </main>
   );
@@ -158,13 +159,23 @@ function StartupFailedPage({
     setBusy(action);
     setError(null);
     try {
-      if (action === "logs") await openStartupLogFolder();
-      if (action === "data") await openStartupDataFolder();
+      if (action === "logs") {
+        await openStartupLogFolder();
+        // UX-01: opening folders is non-terminal — clear busy so Retry/Relaunch stay usable.
+        setBusy(null);
+        return;
+      }
+      if (action === "data") {
+        await openStartupDataFolder();
+        setBusy(null);
+        return;
+      }
       if (action === "retry") {
         if (status) {
           await retryStartupInit();
         }
         onRetryStarted();
+        return;
       }
       if (action === "relaunch") await relaunch();
     } catch (nextError) {
@@ -176,8 +187,8 @@ function StartupFailedPage({
   const detailMessage = status?.message ?? loadError ?? null;
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-surface-root px-4 py-8 text-text-primary sm:px-6">
-      <section className="w-full max-w-2xl overflow-hidden rounded-xl border border-border-subtle bg-surface-base">
+    <main className="flex h-full min-h-0 items-center justify-center overflow-y-auto bg-surface-root px-4 py-8 text-text-primary sm:px-6">
+      <section className="my-auto w-full max-w-2xl overflow-hidden rounded-xl border border-border-subtle bg-surface-base">
         <header className="flex gap-3 border-b border-border-divider px-5 py-5 sm:px-6">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-status-danger/15 text-status-danger">
             <ShieldAlert className="h-5 w-5" aria-hidden />
@@ -237,7 +248,12 @@ function DatabaseRecoveryPage({ status }: { status: StartupStatus }) {
     setBusy(action);
     setError(null);
     try {
-      if (action === "folder") await openDatabaseRecoveryFolder();
+      if (action === "folder") {
+        await openDatabaseRecoveryFolder();
+        // Non-terminal: keep Retry/Rebuild available after opening the folder.
+        setBusy(null);
+        return;
+      }
       if (action === "retry") await relaunch();
       if (action === "reset") {
         await resetDatabaseForRecovery();
@@ -250,8 +266,8 @@ function DatabaseRecoveryPage({ status }: { status: StartupStatus }) {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-surface-root px-4 py-8 text-text-primary sm:px-6">
-      <section className="w-full max-w-2xl overflow-hidden rounded-xl border border-border-subtle bg-surface-base">
+    <main className="flex h-full min-h-0 items-center justify-center overflow-y-auto bg-surface-root px-4 py-8 text-text-primary sm:px-6">
+      <section className="my-auto w-full max-w-2xl overflow-hidden rounded-xl border border-border-subtle bg-surface-base">
         <header className="flex gap-3 border-b border-border-divider px-5 py-5 sm:px-6">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-status-warning/15 text-status-warning">
             <ShieldAlert className="h-5 w-5" aria-hidden />

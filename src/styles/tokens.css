@@ -36,10 +36,8 @@
     0 0 0 1px color-mix(in oklch, var(--accent-primary) 6%, transparent),
     0 8px 16px -4px oklch(0.15 0.01 255 / 0.14),
     0 24px 48px -12px oklch(0.15 0.01 255 / 0.12);
-  --shadow-toast:
-    inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent),
-    0 0 12px -2px color-mix(in oklch, var(--accent-primary) 18%, transparent),
-    0 8px 24px -6px oklch(0.15 0.01 255 / 0.16);
+  /* Quiet raised toast — no glow/blur stack (anti-pattern audit). */
+  --shadow-toast: 0 1px 2px oklch(0.15 0.01 255 / 0.06), 0 8px 20px -8px oklch(0.15 0.01 255 / 0.14);
 
   /* Three-hue accent gradient — energy (cool) → primary → peak (warm).
      Vertical orientation for fills that grow upward (progress bars, docked bar);
@@ -62,6 +60,16 @@
   --accent-energy: oklch(0.38 0.15 165);
   --accent-peak: oklch(0.55 0.18 305);
 
+  /* Picker swatches stay available even when another accent is active. */
+  --swatch-blue: oklch(0.4 0.18 235);
+  --swatch-purple: oklch(0.4 0.18 290);
+  --swatch-teal: oklch(0.4 0.15 190);
+  --swatch-green: oklch(0.4 0.16 150);
+  --swatch-orange: oklch(0.4 0.16 55);
+  --swatch-rose: oklch(0.4 0.18 350);
+  --swatch-indigo: oklch(0.4 0.18 265);
+  --swatch-amber: oklch(0.4 0.16 80);
+
   /* Semantic borders — opacity-baked for consistent usage */
   --border-divider: oklch(0.84 0.01 255 / 0.7);
   --border-panel: oklch(0.84 0.01 255 / 0.75);
@@ -78,6 +86,15 @@
   --border-accent: color-mix(in oklch, var(--accent-primary) 30%, transparent);
   --border-accent-subtle: color-mix(in oklch, var(--accent-primary) 20%, transparent);
   --border-hover: oklch(0.39 0.01 255 / 0.4);
+
+  /* Task-list row elevation: the list sits in a recessed well and each row is a
+     raised card, giving light mode a real figure/ground split instead of two
+     near-identical greys. Hover is carried by border + shadow rather than a
+     background shift — a white row has nowhere lighter to go. */
+  --surface-list-well: oklch(0.945 0.007 255);
+  --surface-row: oklch(1 0.002 255);
+  --row-border: oklch(0.87 0.009 255);
+  --row-border-hover: oklch(0.72 0.012 255);
 }
 
 /* ── Light accent overrides ── */
@@ -166,9 +183,7 @@
     0 0 0 1px color-mix(in oklch, var(--accent-primary) 10%, transparent),
     0 8px 20px -4px oklch(0 0 0 / 0.6),
     0 32px 64px -16px oklch(0 0 0 / 0.55);
-  --shadow-toast:
-    inset 0 0 0 1px color-mix(in oklch, var(--border-subtle) 55%, transparent),
-    0 0 14px -2px color-mix(in oklch, var(--accent-primary) 28%, transparent), 0 10px 28px -6px oklch(0 0 0 / 0.65);
+  --shadow-toast: 0 1px 2px oklch(0 0 0 / 0.35), 0 10px 24px -8px oklch(0 0 0 / 0.55);
 
   /* Semantic borders — dark mode */
   --border-divider: oklch(0.33 0.012 255 / 0.7);
@@ -187,10 +202,25 @@
   --border-accent-subtle: color-mix(in oklch, var(--accent-primary) 20%, transparent);
   --border-hover: oklch(0.78 0.008 255 / 0.4);
 
+  /* Dark counterparts of the row elevation tokens — same ~5.5% L well/row delta. */
+  --surface-list-well: oklch(0.16 0.007 255);
+  --surface-row: oklch(0.215 0.01 255);
+  --row-border: oklch(0.3 0.012 255);
+  --row-border-hover: oklch(0.45 0.014 255);
+
   /* Accent — blue (default) */
   --accent-primary: oklch(0.76 0.14 235);
   --accent-energy: oklch(0.78 0.18 170);
   --accent-peak: oklch(0.74 0.18 305);
+
+  --swatch-blue: oklch(0.76 0.14 235);
+  --swatch-purple: oklch(0.76 0.14 290);
+  --swatch-teal: oklch(0.76 0.14 190);
+  --swatch-green: oklch(0.76 0.14 150);
+  --swatch-orange: oklch(0.76 0.14 55);
+  --swatch-rose: oklch(0.76 0.14 350);
+  --swatch-indigo: oklch(0.76 0.14 265);
+  --swatch-amber: oklch(0.76 0.14 80);
 }
 
 /* ── Dark accent overrides ── */
@@ -245,4 +275,9 @@
 
 [data-platform="macos"] {
   --traffic-lights-inset: 78px;
+}
+
+/* Linux uses native window chrome, so the in-app titlebar is not rendered. */
+[data-platform="linux"] {
+  --titlebar-height: 0px;
 }

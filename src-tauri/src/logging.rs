@@ -44,17 +44,29 @@ fn init_logging_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn init_standalone_logging() -> Result<(), String> {
+/// PERF-12: the caller must keep this alive for the whole process. Dropping it
+/// flushes the non-blocking writer; leaking it (the previous `mem::forget`)
+/// meant a short-lived native host could exit with its last lines - usually the
+/// error that explains the failure - still buffered and never written.
+///
+/// `None` when logging was already initialized by an earlier call.
+pub type StandaloneLogGuard = Option<tracing_appender::non_blocking::WorkerGuard>;
+
+#[must_use = "dropping the guard immediately would stop the log writer"]
+pub fn init_standalone_logging() -> Result<StandaloneLogGuard, String> {
     let mut init_error: Option<String> = None;
-    INIT.call_once(|| {
-        if let Err(error) = init_standalone_logging_inner() {
-            init_error = Some(error);
-        }
+    let mut guard: StandaloneLogGuard = None;
+    INIT.call_once(|| match init_standalone_logging_inner() {
+        Ok(worker_guard) => guard = Some(worker_guard),
+        Err(error) => init_error = Some(error),
     });
-    init_error.map_or(Ok(()), Err)
+    match init_error {
+        Some(error) => Err(error),
+        None => Ok(guard),
+    }
 }
 
-fn init_standalone_logging_inner() -> Result<(), String> {
+fn init_standalone_logging_inner() -> Result<tracing_appender::non_blocking::WorkerGuard, String> {
     let log_dir = platform::app_log_dir()?;
     std::fs::create_dir_all(&log_dir)
         .map_err(|e| format!("Failed to create log directory: {e}"))?;
@@ -68,13 +80,16 @@ fn init_standalone_logging_inner() -> Result<(), String> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
 
-    let file_appender = tracing_appender::rolling::RollingFileAppender::new(
-        tracing_appender::rolling::Rotation::DAILY,
-        &log_dir,
-        "native-host",
-    );
+    // PERF-12: daily rotation without `max_log_files` never deletes anything.
+    // The native host is spawned by the browser on every handoff, so the log
+    // directory would grow without bound.
+    let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("native-host")
+        .max_log_files(7)
+        .build(&log_dir)
+        .map_err(|e| format!("Failed to create the log file appender: {e}"))?;
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-    std::mem::forget(guard);
 
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
@@ -96,7 +111,7 @@ fn init_standalone_logging_inner() -> Result<(), String> {
     }
 
     tracing::info!(log_dir = %log_dir.display(), "native host logging initialized");
-    Ok(())
+    Ok(guard)
 }
 
 pub fn sanitize_url(url: &str) -> String {

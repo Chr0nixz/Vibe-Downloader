@@ -84,25 +84,77 @@ pub fn traffic_lights_inset_px() -> u32 {
     }
 }
 
+/// Win32 `ShellExecuteW` returns an `HINSTANCE` that is actually an `INT_PTR`.
+/// Success is any value greater than 32 — not a real module handle.
+#[cfg(any(windows, test))]
+fn win32_shell_execute_succeeded(raw: isize) -> bool {
+    raw > 32
+}
+
 pub fn open_path(path: &std::path::Path) -> Result<(), String> {
     tracing::debug!(path = %path.display(), "opening path");
-    let status = if cfg!(target_os = "windows") {
-        Command::new("explorer")
-            .arg(path)
-            .status()
-            .map_err(|e| format!("Failed to open path: {e}"))?
-    } else if cfg!(target_os = "macos") {
-        Command::new("open")
-            .arg(path)
-            .status()
-            .map_err(|e| format!("Failed to open path: {e}"))?
-    } else {
-        Command::new("xdg-open")
-            .arg(path)
-            .status()
-            .map_err(|e| format!("Failed to open path: {e}"))?
-    };
 
+    #[cfg(windows)]
+    {
+        open_path_windows(path)
+    }
+
+    #[cfg(not(windows))]
+    {
+        open_path_with_command(path)
+    }
+}
+
+#[cfg(windows)]
+fn open_path_windows(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    // explorer.exe returns 1 when it hands the path to the already-running
+    // shell, even though Explorer actually opened the folder. ShellExecuteW
+    // reports the real Win32 result and also opens files with their associated
+    // app instead of treating them as Explorer locations.
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    let raw = result.0 as isize;
+    if win32_shell_execute_succeeded(raw) {
+        Ok(())
+    } else {
+        tracing::warn!(
+            path = %path.display(),
+            shell_execute = raw,
+            "operating system could not open path"
+        );
+        Err("The operating system could not open the requested path.".to_string())
+    }
+}
+
+#[cfg(not(windows))]
+fn open_path_with_command(path: &std::path::Path) -> Result<(), String> {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let status = Command::new(program)
+        .arg(path)
+        .status()
+        .map_err(|e| format!("Failed to open path: {e}"))?;
     if status.success() {
         Ok(())
     } else {
@@ -348,6 +400,18 @@ pub async fn run_user_command_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn win32_shell_execute_treats_only_values_above_32_as_success() {
+        // explorer.exe exit code 1 is the false-failure that used to toast
+        // after a folder had already opened. ShellExecuteW uses a different
+        // contract: 0..=32 are errors, anything above 32 is success.
+        assert!(!win32_shell_execute_succeeded(0));
+        assert!(!win32_shell_execute_succeeded(1));
+        assert!(!win32_shell_execute_succeeded(32));
+        assert!(win32_shell_execute_succeeded(33));
+        assert!(win32_shell_execute_succeeded(42));
+    }
 
     #[tokio::test]
     async fn run_user_command_rejects_empty_string() {

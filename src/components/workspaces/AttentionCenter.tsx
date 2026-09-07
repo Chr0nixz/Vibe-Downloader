@@ -9,7 +9,7 @@ import {
   RotateCcw,
   Settings2,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { type KeyboardEvent, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 
@@ -121,6 +121,8 @@ export function AttentionCenter({
     category,
     tasks: grouped.get(category) ?? [],
   })).filter((group) => group.tasks.length > 0 && (filter === "all" || filter === group.category));
+  // Flat order for roving tabindex across category sections (mirrors QueueCenter).
+  const flatTasks = useMemo(() => visibleGroups.flatMap((group) => group.tasks), [visibleGroups]);
   const categoryCounts = Object.fromEntries(
     CATEGORY_ORDER.map((category) => [category, grouped.get(category)?.length ?? 0]),
   ) as Record<AttentionCategory, number>;
@@ -128,6 +130,41 @@ export function AttentionCenter({
   const chooseTask = (task: Task) => {
     selectTask(task.id);
     setCompactDetailOpen(true);
+  };
+
+  const focusTask = (taskId: string) => {
+    const task = flatTasks.find((item) => item.id === taskId);
+    if (!task) return;
+    chooseTask(task);
+    requestAnimationFrame(() => {
+      document.getElementById(`attention-task-${taskId}`)?.focus();
+    });
+  };
+
+  const handleListKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (flatTasks.length === 0) return;
+    const currentIndex = Math.max(
+      0,
+      flatTasks.findIndex((task) => task.id === selectedTask?.id),
+    );
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      nextIndex = Math.min(flatTasks.length - 1, currentIndex + 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      nextIndex = Math.max(0, currentIndex - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      event.preventDefault();
+      nextIndex = flatTasks.length - 1;
+    } else {
+      return;
+    }
+    const next = flatTasks[nextIndex];
+    if (next) focusTask(next.id);
   };
 
   return (
@@ -222,7 +259,15 @@ export function AttentionCenter({
                       </h2>
                       <span className="font-mono text-xs text-text-muted">{group.tasks.length}</span>
                     </div>
-                    <div role="listbox" aria-label={t(`attentionCenter.category.${group.category}`)}>
+                    {/* Arrow/Home/End navigation lives on the listbox rather than a plain
+                        wrapper so the handler sits on an element with interactive semantics.
+                        Focus stays on the option rows, so keydown still bubbles here, and
+                        handleListKeyDown walks the flattened task list across groups. */}
+                    <div
+                      role="listbox"
+                      aria-label={t(`attentionCenter.category.${group.category}`)}
+                      onKeyDown={handleListKeyDown}
+                    >
                       {group.tasks.map((task) => (
                         <AttentionTaskRow
                           key={task.id}
@@ -297,6 +342,7 @@ function AttentionTaskRow({
       type="button"
       role="option"
       aria-selected={selected}
+      tabIndex={selected ? 0 : -1}
       onClick={onSelect}
       className={`grid min-h-16 w-full min-w-0 grid-cols-[1.75rem_minmax(0,1fr)_auto] items-center gap-2 border-b border-border-divider px-3 py-2 text-left transition-colors duration-ui focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent-primary md:px-4 lg:min-h-12 lg:py-1.5 ${
         selected ? "bg-accent-primary/12" : "hover:bg-surface-hover"

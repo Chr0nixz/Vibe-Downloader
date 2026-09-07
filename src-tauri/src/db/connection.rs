@@ -44,6 +44,29 @@ pub async fn begin_immediate(
     pool.begin_with("BEGIN IMMEDIATE").await
 }
 
+/// ARC-06 / ARC-21: Shared bounded-retry budget for BUSY conflicts.
+/// 20/40/80/160ms sums to 300ms, well inside the 5s `busy_timeout`.
+pub const SQLITE_BUSY_MAX_ATTEMPTS: u32 = 5;
+pub const SQLITE_BUSY_BASE_DELAY_MS: u64 = 20;
+
+/// ARC-06 / ARC-21: Recognize `SQLITE_BUSY` (5), `SQLITE_BUSY_SNAPSHOT` (517)
+/// and sqlx's "database is locked" wording.
+///
+/// Matching on the message is a compromise, but unlike the engine error codes
+/// that ARC-30 is cleaning up, this text originates in SQLite rather than our
+/// own strings - it does not drift when we reword an error. Callers have
+/// already collapsed their errors to `String` by the time they reach here.
+pub fn is_sqlite_busy_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("busy") || lower.contains("database is locked") || lower.contains("(code: 5)")
+}
+
+/// ARC-21: Exponential backoff delay for the Nth BUSY retry (1-based).
+pub fn sqlite_busy_backoff(attempt: u32) -> std::time::Duration {
+    let shift = attempt.saturating_sub(1).min(16);
+    std::time::Duration::from_millis(SQLITE_BUSY_BASE_DELAY_MS << shift)
+}
+
 async fn run_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
     sqlx::migrate!("./src/db/migrations").run(pool).await
 }

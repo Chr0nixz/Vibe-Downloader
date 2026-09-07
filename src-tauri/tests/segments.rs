@@ -1322,35 +1322,35 @@ fn remote_metadata_change_blocks_resume() {
 
     probe.etag = Some("etag-b".to_string());
     assert_eq!(
-        resume_mismatch_message(&task, &probe).as_deref(),
-        Some("Remote file changed. Restart download to avoid corruption.")
+        resume_error_code(resume_mismatch_message(&task, &probe).as_deref()).as_deref(),
+        Some("remote_changed")
     );
 
     probe.etag = task.etag.clone();
     probe.last_modified = Some("Tue, 02 Jan 2024 00:00:00 GMT".to_string());
     assert_eq!(
-        resume_mismatch_message(&task, &probe).as_deref(),
-        Some("Remote file changed. Restart download to avoid corruption.")
+        resume_error_code(resume_mismatch_message(&task, &probe).as_deref()).as_deref(),
+        Some("remote_changed")
     );
 }
 
 #[test]
 fn local_resume_errors_are_explicit() {
     assert_eq!(
-        local_resume_error(10, false, 0, 100, true),
-        Some("Temporary file is missing. Restart this download.")
+        resume_error_code(local_resume_error(10, false, 0, 100, true).as_deref()).as_deref(),
+        Some("temp_file_missing")
     );
     assert_eq!(
-        local_resume_error(50, true, 40, 100, true),
-        Some("Temporary file is smaller than the recorded progress.")
+        resume_error_code(local_resume_error(50, true, 40, 100, true).as_deref()).as_deref(),
+        Some("temp_file_smaller_than_progress")
     );
     assert_eq!(
-        local_resume_error(0, true, 120, 100, true),
-        Some("Temporary file is larger than the remote file.")
+        resume_error_code(local_resume_error(0, true, 120, 100, true).as_deref()).as_deref(),
+        Some("temp_file_larger_than_remote")
     );
     assert_eq!(
-        local_resume_error(0, true, 10, 100, false),
-        Some("Resume unavailable. Restart this download from the beginning.")
+        resume_error_code(local_resume_error(0, true, 10, 100, false).as_deref()).as_deref(),
+        Some("resume_unavailable")
     );
 }
 
@@ -1366,34 +1366,49 @@ fn segment_resume_errors_cover_multi_segment_corruption() {
 
     segments[1].downloaded_until = segments[1].range_end + 2;
     assert_eq!(
-        segment_resume_error(&segments, 0, true, task.total_size, task.total_size, true),
-        Some("Segment progress is outside its byte range. Restart this download.")
+        resume_error_code(
+            segment_resume_error(&segments, 0, true, task.total_size, task.total_size, true)
+                .as_deref()
+        )
+        .as_deref(),
+        Some("segment_progress_invalid")
     );
 
     let mut segments = db::planned_segments_for_task(&task);
     segments[1].range_start += 1;
     assert_eq!(
-        segment_resume_error(&segments, 0, true, task.total_size, task.total_size, true),
-        Some("Segment records are inconsistent. Restart this download.")
+        resume_error_code(
+            segment_resume_error(&segments, 0, true, task.total_size, task.total_size, true)
+                .as_deref()
+        )
+        .as_deref(),
+        Some("segment_records_inconsistent")
     );
 
     let mut segments = db::planned_segments_for_task(&task);
     segments[2].downloaded_until = segments[2].range_start + 1024;
     assert_eq!(
-        segment_resume_error(
-            &segments,
-            0,
-            true,
-            segments[2].range_start,
-            task.total_size,
-            true
-        ),
-        Some("Temporary file is smaller than the recorded progress.")
+        resume_error_code(
+            segment_resume_error(
+                &segments,
+                0,
+                true,
+                segments[2].range_start,
+                task.total_size,
+                true
+            )
+            .as_deref()
+        )
+        .as_deref(),
+        Some("temp_file_smaller_than_progress")
     );
 
     assert_eq!(
-        segment_resume_error(&segments, 0, false, 0, task.total_size, true),
-        Some("Temporary file is missing. Restart this download.")
+        resume_error_code(
+            segment_resume_error(&segments, 0, false, 0, task.total_size, true).as_deref()
+        )
+        .as_deref(),
+        Some("temp_file_missing")
     );
 }
 
@@ -1411,17 +1426,64 @@ fn multi_segment_remote_metadata_changes_are_blocked() {
 
     probe.total_size += 1;
     assert_eq!(
-        resume_mismatch_message(&task, &probe).as_deref(),
-        Some("Remote file changed. Restart download to avoid corruption.")
+        resume_error_code(resume_mismatch_message(&task, &probe).as_deref()).as_deref(),
+        Some("remote_changed")
     );
 
     let mut probe = sample_probe(task.total_size);
     probe.supports_resume = false;
     probe.supports_parallel = false;
     assert_eq!(
-        resume_mismatch_message(&task, &probe).as_deref(),
-        Some("Server no longer supports resume. Restart this download.")
+        resume_error_code(resume_mismatch_message(&task, &probe).as_deref()).as_deref(),
+        Some("resume_unavailable")
     );
+}
+
+#[test]
+fn arc16_message_rewrite_does_not_change_attention_dispatch() {
+    // Human copy can change; NeedsAttention vs Failed must follow `.code` only.
+    let attention = tauri_app_lib::models::AppErrorPayload::new(
+        "remote_changed",
+        "Any localized wording about a remote change.",
+        false,
+        vec!["restart"],
+    )
+    .command_error();
+    let failed = tauri_app_lib::models::AppErrorPayload::new(
+        "disk_write_failed",
+        "Remote file changed appears in this message but must be ignored.",
+        false,
+        vec!["retry"],
+    )
+    .command_error();
+    assert!(
+        tauri_app_lib::models::AppErrorPayload::is_needs_attention_code(
+            &tauri_app_lib::models::AppErrorPayload::code_from_stored(None, Some(&attention))
+                .unwrap()
+        )
+    );
+    assert!(
+        !tauri_app_lib::models::AppErrorPayload::is_needs_attention_code(
+            &tauri_app_lib::models::AppErrorPayload::code_from_stored(None, Some(&failed)).unwrap()
+        )
+    );
+    assert_eq!(
+        tauri_app_lib::models::AppErrorPayload::code_from_stored(
+            None,
+            Some("Remote file changed. Restart download to avoid corruption.")
+        ),
+        None,
+        "plain English legacy rows must not invent codes"
+    );
+}
+
+fn resume_error_code(payload: Option<&str>) -> Option<String> {
+    let raw = payload?;
+    Some(
+        serde_json::from_str::<tauri_app_lib::models::AppErrorPayload>(raw)
+            .expect("resume error must be AppErrorPayload JSON")
+            .code,
+    )
 }
 
 async fn test_pool(label: &str) -> sqlx::SqlitePool {

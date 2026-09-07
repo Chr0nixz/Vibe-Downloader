@@ -2,6 +2,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
+import { acquireModalFocus } from "@/lib/modal-focus";
 import { cn } from "@/lib/utils";
 
 const Dialog = DialogPrimitive.Root;
@@ -35,6 +36,10 @@ const DialogContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
 >(({ className, children, ...props }, ref) => {
   const reduceMotion = useReducedMotion();
+
+  // DialogContent is the one wrapper every dialog renders through, so its
+  // lifetime is exactly the window in which a modal owns focus.
+  React.useEffect(() => acquireModalFocus(), []);
 
   return (
     <DialogPortal>

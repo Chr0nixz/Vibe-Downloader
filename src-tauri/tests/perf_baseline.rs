@@ -69,7 +69,13 @@ fn distribution_for_scale(total: u32) -> ScaleStateDistribution {
             completed: 5_000,
             failed: 1_000,
         },
-        _ => panic!("unsupported scale {total}; use 1000 or 10000"),
+        50_000 => ScaleStateDistribution {
+            queued: 10_000,
+            downloading: 10_000,
+            completed: 25_000,
+            failed: 5_000,
+        },
+        _ => panic!("unsupported scale {total}; use 1000, 10000, or 50000"),
     }
 }
 
@@ -407,6 +413,31 @@ async fn perf_baseline_10k() {
         list.latency.p95_ms < 30_000.0,
         "10k list p95 unexpectedly high: {}ms",
         list.latency.p95_ms
+    );
+}
+
+#[tokio::test]
+#[ignore = "PERF-01 50k search baseline; run via pnpm perf:baseline:50k"]
+async fn perf_baseline_50k() {
+    let report = run_baseline(50_000, "50k").await;
+    assert_report_schema(&report);
+    print_summary(&report);
+    maybe_write_artifact(&report, "baseline-50k.json");
+
+    let search = report
+        .cases
+        .iter()
+        .find(|c| c.name == "search_filename_prefix")
+        .expect("search case");
+    // PERF-01 gate: keep LIKE if 50k search p95 stays under 100ms on this harness.
+    eprintln!(
+        "PERF-01 decision input: search p95={:.2}ms (budget 100ms)",
+        search.latency.p95_ms
+    );
+    assert!(
+        search.latency.p95_ms < 60_000.0,
+        "50k search p95 unexpectedly high: {}ms",
+        search.latency.p95_ms
     );
 }
 

@@ -6,7 +6,7 @@ This file gives coding agents the local project context and working rules for Vi
 
 Vibe Downloader is a desktop download manager built with Tauri 2, React 19, TypeScript, Rust, SQLite, and WebExtension Native Messaging.
 
-The project is currently at `0.4.0`. It is not a finished IDM replacement or a stable public release. Treat HTTP/HTTPS as the most mature path, with FTP/FTPS, SFTP, BitTorrent, HLS, DASH, WebDAV, and Metalink entry points present at varying maturity levels.
+The project is currently at `0.5.0`. It is not a finished IDM replacement or a stable public release. Treat HTTP/HTTPS as the most mature path, with FTP/FTPS, SFTP, BitTorrent, HLS, DASH, WebDAV, and Metalink entry points present at varying maturity levels.
 
 Before fixing or describing current gaps, read [docs/project-improvement-audit.md](docs/project-improvement-audit.md). It is the canonical active-risk register and provides stable IDs, acceptance criteria, and repair order. Historical audit documents are point-in-time snapshots and must not override current code or the main audit.
 
@@ -19,16 +19,16 @@ Implemented today:
 - Global speed limiting through a Rust token bucket.
 - Per-task speed limits enforced across HTTP/FTP/SFTP/BT, combined with global limit (minimum wins).
 - Task priorities (high/normal/low) used by the queue scheduler to dispatch tasks in priority order.
-- Per-task proxy override models, encrypted settings, protocol-aware validation, and task detail controls. The HTTP-derived runtime path currently ignores the resolved task proxy; see `FUN-02` before claiming end-to-end support.
+- Per-task proxy override models, encrypted settings, protocol-aware validation, and task detail controls. HTTP and its derived engines honor the resolved task proxy at runtime (`FUN-02`), but the DASH/FTP/SFTP probe paths still do not; see `FUN-20`.
 - FTP/FTPS task creation and downloads with dynamic parallel segments, SOCKS5 proxy support, encrypted credential storage, and directory probing.
 - SFTP task creation and single-file downloads with password or OpenSSH private-key credentials, encrypted credential storage, local-temp pause/resume, directory probing, SOCKS5 proxy support, and TOFU host-key fingerprint verification.
-- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files, with multi-file selection, runtime snapshots (piece map, peers, configured trackers, DHT, seeding), SOCKS5 proxy support, and persisted seeding policy. The time limit and session ownership still have active gaps.
+- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files, with multi-file selection, runtime snapshots (piece map, peers, configured trackers, DHT, seeding), SOCKS5 proxy support, and persisted seeding policy. Seeding limits and session ref-counting are Closed (`FUN-11`, `ARC-12`); the remaining gaps are probe session lifecycle (`ARC-28`) and speed-limit ownership (`ARC-29`).
 - HLS/m3u8 streaming engine with master playlist variant selection, AES-128-CBC decryption, init map (EXT-X-MAP) support, byte range segments, concurrent segment downloads, live polling, and ffmpeg-based MP4 remuxing.
 - DASH (MPEG-DASH / MPD) first-pass engine for a limited static/VOD subset, with ffmpeg-based download, MP4 remuxing, and progress monitoring. Dynamic/live, SegmentTimeline, and several inheritance/template cases are unsupported.
 - WebDAV/WebDAVS engine mapping to HTTP/HTTPS with Basic Auth credentials, PROPFIND directory probing, and delegation to the HTTP engine.
-- Metalink4 engine with manifest parsing, multi-file selection, HTTP/HTTPS mirror failover by priority, per-file progress, and checksum persistence/verification. Multi-hash priority and cross-mirror resume validation remain active gaps.
+- Metalink4 engine with manifest parsing, multi-file selection, HTTP/HTTPS mirror failover by priority, per-file progress, and checksum persistence/verification. Multi-hash priority and cross-mirror resume validation are Closed (`FUN-08`, `FUN-09`); the remaining gaps are part-file retention on partial failure (`ARC-24`) and the missing read idle timeout (`ARC-25`).
 - Encrypted task credential storage (ChaCha20-Poly1305) for FTP/FTPS, SFTP, and WebDAV, with legacy plaintext migration on startup.
-- React task list with store decomposition (task-data, task-ui, speed-history stores), virtualized infinite scroll, cursor pagination, status filters, search, sorting, multi-select, batch actions, command palette, settings page with 7 collapsible sections and search, task details, Chunks/Connections/Requests/Logs views, toast, delete confirmation, recovery actions, 8 accent color themes, floating status window (ball and bar modes), and 7 locales.
+- React task list with store decomposition (task-data, task-ui, speed-history stores), virtualized infinite scroll, cursor pagination, status filters, search, sorting, multi-select, batch actions, command palette, settings page with 11 collapsible sections and search, task details, Chunks/Connections/Requests/Logs views, toast, delete confirmation, recovery actions, 8 accent color themes, floating status window (ball and bar modes), and 7 locales.
 - Clipboard link monitoring for all supported protocols (HTTP/HTTPS, FTP/FTPS, SFTP, WebDAV/WebDAVS, magnet, local manifests) while the desktop app is running.
 - Browser Native Messaging host, local WebSocket bridge, manifest install/uninstall diagnostics, duplicate request handling, Tauri single-instance forwarding, and manual HTTP/HTTPS handoff. Automatic takeover and Cookie/header forwarding are experimental dev-profile capabilities and are removed from candidate/release packages.
 - CI, Tauri build matrix, Release workflow, Specta bindings, and Tauri updater configuration.
@@ -38,20 +38,24 @@ Not implemented yet:
 
 - Cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols.
 - Safari wrapper, browser store submission IDs, production extension signing, and final browser permission review copy.
-- BT/FTP/SFTP/Metalink/HLS/DASH/WebDAV reliability gaps vs HTTP/HTTPS. TaskDetails Phase 1–2 diagnostics parity is in place (protocol-aware Requests/Logs, BT hides placeholder Segments, HLS/DASH real segment lists, Metalink per-file Overview, FTP/SFTP mini panels); Phase 3 items such as BT live tracker status remain deferred.
+- Human acceptance of non-HTTP protocols against real external servers. The reliability matrix is fully `automated` against local fake servers and fixtures (`FUN-18`), which is not the same as field-verified. TaskDetails Phase 1–2 diagnostics parity is in place (protocol-aware Requests/Logs, BT hides placeholder Segments, HLS/DASH real segment lists, Metalink per-file Overview, FTP/SFTP mini panels); Phase 3 items such as BT live tracker status remain deferred.
 - Site-rule runtime hit telemetry (settings already cover conflict analysis, import/export, and URL try-run). Classification create-dialog live preview and dynamic subdir templates (settings try-run is available).
 - OS code-signed production distribution.
 
 Active release blockers:
 
-- `UX-01`: ordinary startup failures leave the app in an unrecoverable loading state.
-- `FUN-01`: direct HTTP Basic Auth is used for probe but lost before the actual download.
-- `FUN-02`: HTTP/HLS/DASH/Metalink/WebDAV ignore the resolved per-task proxy at runtime, and proxy overrides cannot participate in create-time probe.
-- `ARC-01`: the active `source_key` UNIQUE index incorrectly prevents different URLs on the same host from coexisting.
-- `ARC-02`: output paths are not atomically reserved, so concurrent same-name tasks can share or overwrite files.
-- `ARC-03`: nested download workers, limiter waits, and ffmpeg children do not have reliable cancellation ownership.
+The original stage-A blockers (`UX-01`, `FUN-01`, `FUN-02`, `ARC-01`, `ARC-02`, `ARC-03`) are all Closed and verified in code. Do not re-open or re-fix them.
 
-Do not weaken, hide, or document around these blockers. Fix them with the acceptance tests specified in the main audit, and update the audit status only after those tests pass.
+The 2026-08-13 review raised six new blockers. All six are now Closed for their P0 correctness/security issues (`ARC-20`, `ARC-21`, `ARC-22`, `SEC-01`, `SEC-02`; `ARC-19` for the corruption itself). Remaining:
+
+- `ARC-19` (residual, P2): the worker-side invariant is fixed, so cancellation can no longer corrupt output. The coordinator still returns early instead of draining its `JoinSet`, which costs re-downloaded bytes on cancel but is no longer a correctness issue. Fold it into the `ARC-31` coordinator merge.
+
+Do not weaken, hide, or document around remaining audit items. Fix them with the acceptance tests specified in the main audit, and update the audit status only after those tests pass.
+
+Two cross-cutting root causes explain most of the above, and matter more than any single entry:
+
+1. **Per-engine contract drift.** Proxy resolution, cancellation convergence, timeouts, and SSRF guards are re-implemented per engine instead of being enforced by one shared path. That is why `FUN-02` and `ARC-03` were legitimately Closed for HTTP yet still broken on DASH/FTP/SFTP probe and BT. When you fix any of these, fix the contract for all engines, not just the reported one.
+2. **Gates narrower than they appear.** `cargo clippy` historically ran without `--all-targets`, `cargo deny` skipped `bans`/`sources`, and the log file kept only the last 40 KB. `check:i18n` now compares keys, placeholders, and values (`FUN-21` Closed). Remaining gate gaps are in `ENG-01`.
 
 ## Key Directories
 
@@ -84,6 +88,7 @@ pnpm check          # typecheck + lint + i18n completeness
 pnpm check:i18n
 pnpm test:frontend
 pnpm build
+pnpm check:bundle    # PERF-10 bundle budget; runs in CI right after `pnpm build`
 pnpm check:bindings
 pnpm test:rust
 cargo check --manifest-path src-tauri/Cargo.toml
@@ -105,7 +110,7 @@ Run `pnpm specta` and `pnpm check:bindings` after Rust command or model changes 
 - Frontend state is decomposed into three Zustand stores under `src/stores`: `task-data-store.ts` (task data, indexes, stats, progress patching), `task-ui-store.ts` (selection, nav, search, sort, filter facets), and `speed-history-store.ts` (per-task speed samples). `task-store.ts` is the facade that re-exports from all three plus `task-query.ts`.
 - Native command wrappers live in `src/lib/tauri.ts`; browser preview mocks live in `src/lib/tauri-browser.ts`.
 - Rust command registration and Specta export live in `src-tauri/src/lib.rs`.
-- Download behavior is organized under `src-tauri/src/download/` with a trait-based `EngineRegistry` that routes URLs to the correct engine. Each protocol has its own module: `http/` (segmented coordinator, worker, direct, file), `ftp.rs`, `sftp.rs`, `bt.rs`, `hls.rs`, `dash.rs`, `webdav.rs`, `metalink.rs`.
+- Download behavior is organized under `src-tauri/src/download/` with a trait-based `EngineRegistry` that routes URLs to the correct engine. Each protocol has its own module: `http/` (segmented coordinator, worker, direct, file), `hls/` (`mod`/`engine`/`playlist`), `ftp.rs`, `sftp.rs`, `bt.rs`, `dash.rs`, `webdav.rs`, `metalink.rs`.
 - SQLite access lives under `src-tauri/src/db/`; `db/mod.rs` is the re-export and shared-constant entry point. Protocol-specific DB modules include `db/metalink.rs`, `db/sftp.rs`, `db/task_credentials.rs`, `db/task_proxy.rs`, `db/task_checksums.rs`, `db/task_files.rs`, and `db/task_state.rs`.
 - Task commands are split under `src-tauri/src/commands/tasks/` for create/import, query/detail paging, actions/hash, and debug mock seed helpers.
 - Tauri events are defined in `src-tauri/src/events/mod.rs`; `TaskProgressEmitGate` throttles high-frequency progress updates to 250ms minimum intervals.
@@ -113,7 +118,7 @@ Run `pnpm specta` and `pnpm check:bindings` after Rust command or model changes 
 - The Native Messaging host binary lives in `src-tauri/src/bin/vibe-native-host.rs`.
 - Credential encryption uses ChaCha20-Poly1305 via `secure_headers` helpers; passwords are stored as ciphertext + nonce in SQLite.
 - The segment planner (`db/segment_planner.rs`) determines segment count and type based on protocol characteristics and user settings.
-- Settings span 29 keys covering downloads, scheduling, proxy, UI (accent colors, sidebar/titlebar options), and desktop integration.
+- Settings span 33 keys covering downloads, scheduling, proxy, UI (accent colors, titlebar gradient), completion actions, external tools, and desktop integration.
 
 Important current constants:
 
@@ -123,11 +128,10 @@ Important current constants:
 - Max connections per host defaults to 8 and is clamped to 1-16.
 - HTTP auto-acceleration: max 8 segments, 10s warmup, 5s evaluation, 8 MB minimum remaining.
 - FTP dynamic parallel: max 4 segments, 8s warmup, 5s interval, 16 MB minimum split remaining.
-- HLS segment retries: 2; the configured live idle threshold is 6 polls, but its current exit condition is ineffective (`ARC-11`).
+- HLS segment retries: 2; live idle threshold 6 polls; target duration clamped to 60s (`ARC-11`, both Closed and verified).
 - BT metadata timeout: 90s; progress interval: 10s.
-- DASH progress interval: 500ms.
 - SFTP read buffer: 64 KB; progress interval: 300ms.
-- Metalink hash buffer: 1 MB.
+- Checksum hash read buffer (shared by all protocols, in `download/checksum.rs`): 1 MB.
 - Clipboard max text length: 64 KB; poll interval: 1s.
 - WebSocket bridge port: 48365.
 - Event throttle (`TaskProgressEmitGate`): 250ms minimum interval.
@@ -151,8 +155,8 @@ Important current constants:
 - Keep changes scoped to the requested area.
 - Prefer existing patterns over new abstractions.
 - Use generated Specta bindings rather than hand-writing IPC types when Rust models or commands change.
-- Supported locales: `en`/`zh-CN` (stable, fully translated) and `zh-TW`/`ja`/`ko`/`ru`/`es` (beta, fully translated but marked with a Beta badge in the language selector). Auto-detection only picks stable locales; beta locales require explicit user selection. When adding new i18n keys, update all 7 locale files and run `pnpm check:i18n` to verify completeness.
-- Preserve the current browser handoff security boundary: browser handoff is HTTP/HTTPS only, browser handoff URLs must not contain embedded credentials (rejected at the handoff boundary), browsers do not control local save paths, and Cookie/header forwarding must stay explicit, allowlisted, and encrypted when persisted. Candidate/release extensions are minimal-permission manual-handoff builds; automatic capture and header forwarding are dev-only experimental capabilities. Note: direct task creation (UI and clipboard) does extract embedded credentials from HTTP/HTTPS URLs via `legacy_credentials_from_url`, encrypts them, and sanitizes the task URL. That storage behavior is intentional, but the current HTTP runtime consumption bug is tracked as `FUN-01` and must not be documented as working until fixed.
+- Supported locales: `en`/`zh-CN` (stable) and `zh-TW`/`ja`/`ko`/`ru`/`es` (beta, marked with a Beta badge in the language selector). Auto-detection only picks stable locales; beta locales require explicit user selection. When adding new i18n keys, update all 7 locale files and run `pnpm check:i18n` to verify completeness. The check compares key paths, interpolation placeholders, and values: copy-pasted English in `errors.*` fails, and other namespaces fail when a value still matches English and contains 3+ visible English words (allowlisted product/protocol tokens excepted). Beta still refers to translation maturity such as plurals and dates (`FUN-22`), not missing error-code copy. Do not describe any locale as "fully translated" while `FUN-22` remains Open.
+- Preserve the current browser handoff security boundary: browser handoff is HTTP/HTTPS only, browser handoff URLs must not contain embedded credentials (rejected at the handoff boundary), browsers do not control local save paths, and Cookie/header forwarding must stay explicit, allowlisted, and encrypted when persisted. Candidate/release extensions are minimal-permission manual-handoff builds; automatic capture and header forwarding are dev-only experimental capabilities. Note: direct task creation (UI and clipboard) does extract embedded credentials from HTTP/HTTPS URLs via `legacy_credentials_from_url`, encrypts them, and sanitizes the task URL. That storage behavior is intentional, and `FUN-01` (runtime consumption of those credentials) is Closed and verified.
 - Keep debug-only mock behavior out of production builds. `seed_mock_tasks` is intentionally debug-only.
 - When changing download or resume logic, add or update Rust tests under `src-tauri/tests`.
 - When changing frontend behavior, run at least `pnpm typecheck` and `pnpm test:frontend`; run `pnpm build` for UI or bundling changes.

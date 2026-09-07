@@ -1,5 +1,5 @@
 import * as ContextMenu from "@radix-ui/react-context-menu";
-import type { ComponentType } from "react";
+import { Children, type ComponentType, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -94,15 +94,29 @@ export function RegionContextMenu({
   alignOffset,
 }: {
   /** Element to wrap as the context-menu trigger. */
-  children: React.ReactNode;
+  children: ReactNode;
   /** Menu items (MenuItem / MenuSeparator / MenuLabel). */
-  items: React.ReactNode;
+  items: ReactNode;
   className?: string;
   alignOffset?: number;
 }) {
+  // WCAG 2.1.1: Radix only opens via Shift+F10 / ContextMenu when the trigger
+  // is focusable. Region shells (nav/footer/aside) often are not — promote the
+  // single child into the tab order without adding a layout wrapper.
+  const child = Children.only(children);
+  const trigger = isValidElement(child)
+    ? cloneElement(child as ReactElement<{ tabIndex?: number; className?: string }>, {
+        tabIndex: (child.props as { tabIndex?: number }).tabIndex ?? 0,
+        className: cn(
+          (child.props as { className?: string }).className,
+          "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary/50",
+        ),
+      })
+    : children;
+
   return (
     <ContextMenu.Root>
-      <ContextMenu.Trigger asChild>{children}</ContextMenu.Trigger>
+      <ContextMenu.Trigger asChild>{trigger}</ContextMenu.Trigger>
       <ContextMenu.Portal>
         <MenuContent className={className} alignOffset={alignOffset}>
           {items}
