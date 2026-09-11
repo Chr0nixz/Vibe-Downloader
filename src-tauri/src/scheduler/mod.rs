@@ -70,6 +70,23 @@ impl Scheduler {
         self.dispatch_inner(app, pool).await;
     }
 
+    /// Fires a dispatch tick without awaiting it.
+    ///
+    /// ARC-32: user command paths (pause/cancel/delete/restart/retry) run while
+    /// holding the per-task runtime lock. Awaiting [`Self::dispatch`] under that
+    /// lock deadlocks — `dispatch` → `start_task` re-acquires task runtime locks
+    /// (a Restarted task is already Queued, so dispatch picks that same task and
+    /// blocks on the still-held non-reentrant lock), or forms an ABBA cycle with
+    /// a concurrent dispatch that holds the scheduler lock. Spawning lets the
+    /// caller unwind and release its lock first; slot bookkeeping is unchanged
+    /// because the response to the user never depended on dispatch completing.
+    pub fn dispatch_detached(self: &Arc<Self>, app: AppHandle, pool: SqlitePool) {
+        let scheduler = self.clone();
+        tauri::async_runtime::spawn(async move {
+            scheduler.dispatch(app, pool).await;
+        });
+    }
+
     /// Delayed scheduling entry point (formerly the schedule branch of spawn_schedule_queued_tasks_after).
     pub async fn schedule_retry_after_wakeup(self: Arc<Self>, app: AppHandle, pool: SqlitePool) {
         let Some(next) = (match db::next_retry_after_at(&pool).await {

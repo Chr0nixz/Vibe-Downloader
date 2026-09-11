@@ -652,19 +652,13 @@ async fn queue_task_for_retry_at(
     emit_task_progress_snapshot(app, &task);
     emit_queue_changed_with_ids(app, Some(vec![id.to_string()]));
     if retry_after_at.is_none() {
-        // R-2.3: Spawn dispatch in background to avoid deadlock with the
-        // per-task runtime lock held by the caller (retry_task/resume_task/
-        // resolve_task_attention). dispatch → start_task will acquire the
-        // per-task lock, which is still held by the caller until it returns.
-        // Spawning lets the caller unwind and release the lock first.
-        let dispatch_app = app.clone();
-        let dispatch_pool = state.pool.clone();
-        let dispatch_scheduler = state.scheduler.clone();
-        tauri::async_runtime::spawn(async move {
-            dispatch_scheduler
-                .dispatch(dispatch_app, dispatch_pool)
-                .await;
-        });
+        // ARC-32: same constraint as restart — the caller (retry_task/
+        // resume_task/resolve_task_attention) holds the per-task runtime lock,
+        // so dispatch must run detached and only take task locks after the
+        // caller unwinds.
+        state
+            .scheduler
+            .dispatch_detached(app.clone(), state.pool.clone());
     }
     require_task(&state.pool, id).await
 }
@@ -781,11 +775,13 @@ async fn restart_task_from_beginning(
     emit_task_progress_snapshot(app, &task);
     emit_task_updated_record(app, &state.pool, &task).await;
     emit_queue_changed_with_ids(app, Some(vec![task.id.clone()]));
+    // ARC-32: the caller (resolve_task_attention) still holds this task's
+    // runtime lock, and the task is already Queued — awaiting dispatch here
+    // self-deadlocks when start_task re-acquires the same non-reentrant lock.
+    // Detached dispatch runs after the caller unwinds and releases the lock.
     state
         .scheduler
-        .clone()
-        .dispatch(app.clone(), state.pool.clone())
-        .await;
+        .dispatch_detached(app.clone(), state.pool.clone());
     require_task(&state.pool, &task.id).await
 }
 

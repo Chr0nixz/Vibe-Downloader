@@ -271,11 +271,9 @@ pub async fn pause_task(
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
     emit_queue_changed_with_ids(&app, Some(vec![id.clone()]));
-    state
-        .scheduler
-        .clone()
-        .dispatch(app, state.pool.clone())
-        .await;
+    // ARC-32: the per-task runtime lock is still held here; dispatch must not
+    // be awaited under it (start_task re-acquires task runtime locks).
+    state.scheduler.dispatch_detached(app, state.pool.clone());
     task_payload(&state.pool, &id).await
 }
 
@@ -494,11 +492,9 @@ pub async fn cancel_task(
     let task = require_task(&state.pool, &id).await?;
     emit_task_progress_snapshot(&app, &task);
     emit_queue_changed_with_ids(&app, Some(vec![id.clone()]));
-    state
-        .scheduler
-        .clone()
-        .dispatch(app, state.pool.clone())
-        .await;
+    // ARC-32: the per-task runtime lock is still held here; dispatch must not
+    // be awaited under it (start_task re-acquires task runtime locks).
+    state.scheduler.dispatch_detached(app, state.pool.clone());
     task_payload(&state.pool, &id).await
 }
 
@@ -554,11 +550,11 @@ pub async fn delete_task(
     db::delete_task_record(&state.pool, &id).await?;
     evict_task_files_version(&id);
     emit_queue_changed(&app);
-    state
-        .scheduler
-        .clone()
-        .dispatch(app, state.pool.clone())
-        .await;
+    // ARC-32: still under the per-task runtime lock; never await dispatch here.
+    // The evict below requires the guard to be the last holder, which detached
+    // dispatch preserves — it never takes this task's runtime lock again (the
+    // row is already deleted, so dispatch cannot select it).
+    state.scheduler.dispatch_detached(app, state.pool.clone());
     // R-2.5: Evict the lock entry now that the task is deleted and the guard
     // is about to drop. drop(_guard) first so evict sees Arc strong_count == 1.
     drop(_guard);
