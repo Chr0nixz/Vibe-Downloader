@@ -63,7 +63,7 @@ async fn sweep_removes_orphan_and_completed_staging_keeps_resumable() {
         );
         // download_task defaults status to Downloading; override per case.
         let record = tauri_app_lib::models::TaskRecord {
-            status: status.clone(),
+            status,
             updated_at: now.clone(),
             ..record
         };
