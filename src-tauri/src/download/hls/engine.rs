@@ -1843,6 +1843,14 @@ async fn finalize_hls_task(
     } else {
         db::complete_task(pool, &task.id).await?;
     }
+    // ARC-38: the MP4 is published — staging (segments + track playlists, near
+    // the final file's size) is garbage now. Remove the actual staging dir the
+    // engine used (HLS staging is the task's temp path, which legacy rows may
+    // place outside the canonical `.vibe-staging` location). Best-effort: a
+    // locked file must not turn a completed download into a failure.
+    if let Err(error) = crate::download::file_ops::remove_dir_all_if_exists(staging_dir).await {
+        tracing::warn!(task_id = %task.id, error = %error, "could not remove HLS staging after completion");
+    }
     if let Some(current) = db::get_task_record(pool, &task.id).await? {
         emit_task_updated_record(app, pool, &current).await;
     }

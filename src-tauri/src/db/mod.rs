@@ -121,11 +121,11 @@ pub use self::task_records::{
     find_duplicate_task_record, get_task_record, get_task_record_in_tx, insert_task_record,
     insert_task_record_in_tx, insert_task_with_files, insert_task_with_files_in_tx,
     list_browser_realtime_task_records, list_paused_schedulable_tasks, list_queued_task_records,
-    list_reserved_final_paths, list_task_ids_by_statuses, list_task_records,
-    list_task_records_by_ids, list_task_records_cursor, list_task_records_page,
+    list_reserved_final_paths, list_staging_task_refs, list_task_ids_by_statuses,
+    list_task_records, list_task_records_by_ids, list_task_records_cursor, list_task_records_page,
     next_queue_position, next_retry_after_at, reorder_queued_tasks, task_filter_options,
-    task_stats_snapshot, update_task_transfer_options, TaskFilterOptions, TaskListPage,
-    TaskListQuery, TaskTransferOptionsUpdate,
+    task_stats_snapshot, update_task_transfer_options, StagingTaskRef, TaskFilterOptions,
+    TaskListPage, TaskListQuery, TaskTransferOptionsUpdate,
 };
 pub use self::task_state::{
     checkpoint_task_progress, clear_tasks, complete_segment, complete_task, complete_task_segment,

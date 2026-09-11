@@ -843,6 +843,17 @@ async fn download_reenters_after_reset_interrupted_tasks() {
         .await
         .expect("cold reentry");
     assert!(paths.final_path.exists());
+    // ARC-38: a completed DASH task must not leave its staging directory behind.
+    let staging = paths
+        .final_path
+        .parent()
+        .expect("save dir")
+        .join(".vibe-staging")
+        .join("dash-segment-retry");
+    assert!(
+        !staging.exists(),
+        "completed DASH download must clean its staging directory"
+    );
     pool.close().await;
 }
 

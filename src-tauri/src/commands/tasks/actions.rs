@@ -528,11 +528,11 @@ pub async fn delete_task(
             .await;
     }
 
+    let mut delete_requests = Vec::new();
     if delete_file {
         let use_trash = db::delete_to_trash_enabled(&state.pool)
             .await
             .unwrap_or(true);
-        let mut delete_requests = Vec::new();
         if let Some(task) = task_for_runtime.as_ref() {
             for file in db::list_task_file_records(&state.pool, &id).await? {
                 push_delete_request(&mut delete_requests, file.temp_path.as_deref(), false);
@@ -541,10 +541,22 @@ pub async fn delete_task(
             push_delete_request(&mut delete_requests, task.temp_path.as_deref(), false);
             push_delete_request(&mut delete_requests, task.final_path.as_deref(), use_trash);
         }
-        let file_warnings = delete_paths_off_runtime(delete_requests).await;
-        for warning in &file_warnings {
-            tracing::warn!(task_id = %id, warning, "file deletion warning during task removal");
+    }
+    // ARC-38: staging is intermediate state, not user data — remove it on task
+    // deletion even when delete_file is false. DASH's staging directory cannot
+    // be derived from temp/final paths, so locate it explicitly per protocol.
+    if let Some(task) = task_for_runtime.as_ref() {
+        if matches!(task.protocol.as_str(), "hls" | "dash") {
+            let staging = crate::commands::task_file_planning::task_staging_dir(
+                std::path::Path::new(&task.save_dir),
+                &task.id,
+            );
+            push_delete_request(&mut delete_requests, staging.to_str(), false);
         }
+    }
+    let file_warnings = delete_paths_off_runtime(delete_requests).await;
+    for warning in &file_warnings {
+        tracing::warn!(task_id = %id, warning, "file deletion warning during task removal");
     }
 
     db::delete_task_record(&state.pool, &id).await?;
@@ -619,6 +631,17 @@ pub async fn bulk_delete_tasks(
                 }
                 push_delete_request(&mut delete_requests, task.temp_path.as_deref(), false);
                 push_delete_request(&mut delete_requests, task.final_path.as_deref(), use_trash);
+            }
+        }
+        // ARC-38: staging is intermediate state — remove it for staging-based
+        // protocols even when delete_file is false (see delete_task).
+        if let Some(task) = task_for_runtime.as_ref() {
+            if matches!(task.protocol.as_str(), "hls" | "dash") {
+                let staging = crate::commands::task_file_planning::task_staging_dir(
+                    std::path::Path::new(&task.save_dir),
+                    &task.id,
+                );
+                push_delete_request(&mut delete_requests, staging.to_str(), false);
             }
         }
         // R-2.5: Evict the lock entry for this deleted task.

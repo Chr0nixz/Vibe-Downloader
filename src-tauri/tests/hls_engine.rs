@@ -1475,6 +1475,12 @@ async fn download_reenters_after_reset_interrupted_tasks() {
         requests[0].load(Ordering::SeqCst) >= 1,
         "first segment should have been fetched at least once"
     );
+    // ARC-38: the completed MP4 means staging (the task's temp path) is
+    // garbage and must not survive the download.
+    assert!(
+        !paths.temp.exists(),
+        "completed HLS download must clean its staging directory"
+    );
     pool.close().await;
 }
 

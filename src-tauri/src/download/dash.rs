@@ -1518,6 +1518,12 @@ async fn finalize_dash_task(
             .ok_or_else(|| "DASH task segment could not be completed.".to_string())?;
         db::complete_unknown_size_task(pool, &task.id, &segment.id, downloaded).await?;
     }
+    // ARC-38: the MP4 is published — staging (segments + ffconcat files) is
+    // garbage now. Best-effort: a locked file must not turn a completed
+    // download into a failure.
+    if let Err(error) = crate::download::file_ops::remove_dir_all_if_exists(staging_dir).await {
+        tracing::warn!(task_id = %task.id, error = %error, "could not remove DASH staging after completion");
+    }
     if let Some(current) = db::get_task_record(pool, &task.id).await? {
         emit_task_updated_record(app, pool, &current).await;
     }

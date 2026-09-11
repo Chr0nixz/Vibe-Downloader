@@ -1185,3 +1185,27 @@ pub async fn task_filter_options(pool: &SqlitePool) -> Result<TaskFilterOptions,
         failure_categories,
     })
 }
+
+/// Minimal task projection for the ARC-38 staging sweep: the sweep only needs
+/// to decide, per staging directory, whether an owning task still exists and
+/// whether that task can still resume (a Completed task never will).
+pub struct StagingTaskRef {
+    pub id: String,
+    pub save_dir: String,
+    pub status: String,
+}
+
+pub async fn list_staging_task_refs(pool: &SqlitePool) -> Result<Vec<StagingTaskRef>, String> {
+    let rows = sqlx::query("SELECT id, save_dir, status FROM tasks")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| StagingTaskRef {
+            id: row.get("id"),
+            save_dir: row.get("save_dir"),
+            status: row.get("status"),
+        })
+        .collect())
+}

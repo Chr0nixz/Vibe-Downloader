@@ -191,3 +191,16 @@ pub(crate) async fn persist_completed_path(
         .to_string();
     db::update_task_final_path(pool, task_id, &file_name, &completed_path.to_string_lossy()).await
 }
+
+/// ARC-38: removes a directory, treating a missing path as success. Used for
+/// staging cleanup on engine completion and startup sweeps — staging holds
+/// segment data approaching the final file's size, so leftover directories
+/// accumulate tens of GB over a long session. Callers treat failures as
+/// best-effort: a completed download must not be reported failed because
+/// cleanup hit a locked file (e.g. an antivirus scanner).
+pub(crate) async fn remove_dir_all_if_exists(path: &Path) -> Result<(), std::io::Error> {
+    if !fs::try_exists(path).await.unwrap_or(false) {
+        return Ok(());
+    }
+    fs::remove_dir_all(path).await
+}

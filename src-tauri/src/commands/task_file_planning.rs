@@ -6,6 +6,7 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
+    db,
     download::ProbeOutput,
     models::{ProbedFile, TaskFileRecord, TaskRecord, TaskStatus},
 };
@@ -372,4 +373,69 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// ARC-38: startup sweep for orphaned staging directories.
+///
+/// Removes `.vibe-staging/{task_id}` under every known save directory when the
+/// owning task no longer exists (delete-path leak) or is Completed (pre-fix
+/// leftovers after the final file was published). Resumable tasks keep their
+/// staging — retry and resume semantics depend on it, exactly like HTTP temp
+/// files, so only unresumable state is garbage-collected here.
+pub async fn sweep_orphan_staging_dirs(pool: &sqlx::SqlitePool) -> Result<usize, String> {
+    let tasks = db::list_staging_task_refs(pool).await?;
+    // Group references by save dir so each `.vibe-staging` root is listed once.
+    let mut refs_by_dir: std::collections::HashMap<String, Vec<&db::StagingTaskRef>> =
+        std::collections::HashMap::new();
+    for task in &tasks {
+        refs_by_dir
+            .entry(task.save_dir.clone())
+            .or_default()
+            .push(task);
+    }
+
+    let completed_status = TaskStatus::Completed.as_str();
+    let mut removed = 0_usize;
+    for (save_dir, refs) in refs_by_dir {
+        let staging_root = Path::new(&save_dir).join(STAGING_DIR_NAME);
+        let mut entries = match tokio::fs::read_dir(&staging_root).await {
+            Ok(entries) => entries,
+            // No staging root under this save dir — nothing to sweep.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Could not read {}: {error}",
+                    staging_root.display()
+                ))
+            }
+        };
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("Could not list {}: {e}", staging_root.display()))?
+        {
+            if !entry
+                .file_type()
+                .await
+                .map_err(|e| format!("Could not inspect {}: {e}", entry.path().display()))?
+                .is_dir()
+            {
+                continue;
+            }
+            let task_id = entry.file_name().to_string_lossy().to_string();
+            // Orphan (task row gone): the directory can never resume. Completed
+            // tasks published their final file. Resumable states keep staging.
+            let removable = match refs.iter().find(|task| task.id == task_id) {
+                None => true,
+                Some(task) => task.status == completed_status,
+            };
+            if removable {
+                tokio::fs::remove_dir_all(entry.path())
+                    .await
+                    .map_err(|e| format!("Could not remove {}: {e}", entry.path().display()))?;
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
 }

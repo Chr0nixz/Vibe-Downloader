@@ -585,6 +585,15 @@ async fn run_startup_init_inner(handle: &tauri::AppHandle) -> Result<(), String>
                 tracing::warn!(error = %error, "task events prune failed");
             }
         }
+        match commands::task_file_planning::sweep_orphan_staging_dirs(&pool).await {
+            Ok(0) => {}
+            Ok(removed) => {
+                tracing::info!(removed, "startup staging directory sweep");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "staging directory sweep failed");
+            }
+        }
         let default_dir = commands::settings::default_download_dir(handle)?;
         let settings = db::get_settings(&pool, default_dir).await?;
         db::reset_interrupted_tasks(&pool, settings.auto_resume_on_startup).await?;
