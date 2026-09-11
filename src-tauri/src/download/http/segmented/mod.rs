@@ -18,6 +18,7 @@ mod coordinator;
 pub(super) mod diagnostics;
 mod runtime_progress;
 mod worker;
+mod writer;
 
 use self::coordinator::SegmentCoordinator;
 use self::diagnostics::{

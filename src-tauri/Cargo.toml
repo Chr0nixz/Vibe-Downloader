@@ -95,6 +95,8 @@ image = { version = "0.25", default-features = false, features = ["png", "ico"] 
 [dev-dependencies]
 serial_test = "3"
 rand = "0.10"
+# TCP RST in the ARC-33 mid-body abort test (std set_linger is nightly-only).
+socket2 = "0.6"
 
 [profile.release]
 # Optimize for smaller binaries and better runtime throughput on a desktop

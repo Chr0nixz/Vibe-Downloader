@@ -11,11 +11,7 @@ use reqwest::{
     header::{ACCEPT_ENCODING, CONTENT_RANGE, IF_RANGE, RANGE},
     Client, StatusCode,
 };
-use tokio::{
-    fs,
-    io::{AsyncSeekExt, AsyncWriteExt, BufWriter},
-    sync::mpsc,
-};
+use tokio::sync::mpsc;
 
 use super::super::{
     error::format_http_status,
@@ -24,6 +20,7 @@ use super::super::{
 };
 use super::{
     diagnostics::{error_diagnostic_record, parse_content_range, response_diagnostic_record},
+    writer::SegmentFileWriter,
     SegmentFailure, SegmentMessage, MAX_SEGMENT_RETRIES,
 };
 use crate::{
@@ -274,31 +271,16 @@ async fn download_segment_once(
         }
     }
 
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(temp_path)
-        .await
-        .map_err(|e| {
-            non_retryable(segment_failure(
+    let mut file = match SegmentFileWriter::open(temp_path, offset).await {
+        Ok(writer) => writer,
+        Err(e) => {
+            return Err(non_retryable(segment_failure(
                 segment,
                 offset,
                 &format!("Could not open the temporary file: {e}"),
-            ))
-        })?;
-
-    file.seek(std::io::SeekFrom::Start(u64::try_from(offset).unwrap_or(0)))
-        .await
-        .map_err(|e| {
-            non_retryable(segment_failure(
-                segment,
-                offset,
-                &format!("Could not seek in the temporary file: {e}"),
-            ))
-        })?;
-
-    let mut file = BufWriter::with_capacity(256 * 1024, file);
+            )))
+        }
+    };
 
     let mut last_emit = Instant::now();
     let mut last_tick = Instant::now();
@@ -307,13 +289,7 @@ async fn download_segment_once(
     loop {
         let chunk = tokio::select! {
             _ = cancel_token.cancelled() => {
-                file.flush().await.map_err(|e| {
-                    non_retryable(segment_failure(
-                        segment,
-                        offset,
-                        &format!("Could not flush the temporary file: {e}"),
-                    ))
-                })?;
+                let offset = durable_checkpoint(&mut file, segment).await?;
                 send_segment_progress(progress_tx, &segment.id, offset, 0)
                     .await
                     .map_err(non_retryable_attempt)?;
@@ -322,26 +298,29 @@ async fn download_segment_once(
             chunk = tokio::time::timeout(HTTP_CHUNK_READ_TIMEOUT, response.chunk()) => match chunk {
                 Ok(Ok(Some(data))) => data,
                 Ok(Ok(None)) => break,
-                Ok(Err(e)) => return Err(retryable(segment_failure(
-                    segment,
-                    offset,
-                    &format!("The connection failed while downloading: {e}"),
-                ))),
-                Err(_) => return Err(retryable(segment_failure(
-                    segment,
-                    offset,
-                    "Connection stalled: no data received for 60 seconds.",
-                ))),
+                Ok(Err(e)) => {
+                    // ARC-33: the retryable failure's offset becomes the
+                    // resume checkpoint, so buffered bytes must land on disk
+                    // before it is published.
+                    let offset = durable_checkpoint(&mut file, segment).await?;
+                    return Err(retryable(segment_failure(
+                        segment,
+                        offset,
+                        &format!("The connection failed while downloading: {e}"),
+                    )));
+                }
+                Err(_) => {
+                    let offset = durable_checkpoint(&mut file, segment).await?;
+                    return Err(retryable(segment_failure(
+                        segment,
+                        offset,
+                        "Connection stalled: no data received for 60 seconds.",
+                    )));
+                }
             }
         };
         if cancel_token.is_cancelled() {
-            file.flush().await.map_err(|e| {
-                non_retryable(segment_failure(
-                    segment,
-                    offset,
-                    &format!("Could not flush the temporary file: {e}"),
-                ))
-            })?;
+            let offset = durable_checkpoint(&mut file, segment).await?;
             send_segment_progress(progress_tx, &segment.id, offset, 0)
                 .await
                 .map_err(non_retryable_attempt)?;
@@ -350,6 +329,7 @@ async fn download_segment_once(
 
         let current_end = range_end.load(Ordering::SeqCst);
         if offset > current_end {
+            let offset = durable_checkpoint(&mut file, segment).await?;
             send_segment_progress(progress_tx, &segment.id, offset, 0)
                 .await
                 .map_err(non_retryable_attempt)?;
@@ -359,6 +339,13 @@ async fn download_segment_once(
         let allowed = current_end.saturating_add(1).saturating_sub(offset);
         let write_len = i64::try_from(chunk.len()).unwrap_or(0).min(allowed);
         if write_len <= 0 {
+            // Defensive: unreachable while offset <= current_end and the chunk
+            // is non-empty, but everything buffered still has to land before
+            // an offset is published.
+            let offset = durable_checkpoint(&mut file, segment).await?;
+            send_segment_progress(progress_tx, &segment.id, offset, 0)
+                .await
+                .map_err(non_retryable_attempt)?;
             return Ok(offset);
         }
         // If the chunk overshoots the CURRENT range_end, check whether the range was
@@ -366,6 +353,7 @@ async fn download_segment_once(
         // we voluntarily stopped early — truncate and return Ok. An overshoot on the
         // original range means the server violated the byte-range contract — fail non-retryably.
         if i64::try_from(chunk.len()).unwrap_or(0) > allowed && current_end == initial_range_end {
+            let offset = durable_checkpoint(&mut file, segment).await?;
             return Err(non_retryable(segment_failure(
                 segment,
                 offset,
@@ -381,33 +369,37 @@ async fn download_segment_once(
         {
             // Pause/cancel during limiter wait must still flush buffered bytes so
             // checkpointed downloaded_until cannot race ahead of durable disk state.
-            file.flush().await.map_err(|e| {
-                non_retryable(segment_failure(
-                    segment,
-                    offset,
-                    &format!("Could not flush the temporary file: {e}"),
-                ))
-            })?;
+            let offset = durable_checkpoint(&mut file, segment).await?;
             send_segment_progress(progress_tx, &segment.id, offset, 0)
                 .await
                 .map_err(non_retryable_attempt)?;
             return Ok(offset);
         }
-        file.write_all(&chunk[..write_len_usize])
+        let end_offset = offset + write_len;
+        if let Err(e) = file
+            .write_chunk(&chunk[..write_len_usize], end_offset)
             .await
-            .map_err(|e| {
-                non_retryable(segment_failure(
-                    segment,
-                    offset,
-                    &AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
-                        .command_error(),
-                ))
-            })?;
-        offset += write_len;
+        {
+            // write_chunk did not advance the written watermark on failure, so
+            // the durable watermark stays at bytes whose durability is known;
+            // anything at/after the failed chunk is re-downloaded on resume.
+            let _ = file.sync().await;
+            return Err(non_retryable(segment_failure(
+                segment,
+                file.durable_offset(),
+                &AppErrorPayload::disk_write_failed(format!("Could not write to disk: {e}"))
+                    .command_error(),
+            )));
+        }
+        offset = end_offset;
 
         if last_emit.elapsed() >= Duration::from_millis(300) {
             let elapsed = last_tick.elapsed().as_secs_f64().max(0.001);
             let speed_bps = ((offset - last_bytes) as f64 / elapsed) as i64;
+            // ARC-33: the coordinator checkpoints runtime progress (including
+            // force checkpoints during acceleration splits), so even mid-flight
+            // progress offsets must be durable — flush before every publish.
+            let offset = durable_checkpoint(&mut file, segment).await?;
             send_segment_progress(progress_tx, &segment.id, offset, speed_bps)
                 .await
                 .map_err(non_retryable_attempt)?;
@@ -417,6 +409,9 @@ async fn download_segment_once(
         }
 
         if write_len_usize < chunk.len() {
+            // Acceleration shrank the range mid-chunk; the partial write is
+            // complete for this attempt and must be durable before reporting.
+            let offset = durable_checkpoint(&mut file, segment).await?;
             send_segment_progress(progress_tx, &segment.id, offset, 0)
                 .await
                 .map_err(non_retryable_attempt)?;
@@ -424,13 +419,7 @@ async fn download_segment_once(
         }
     }
 
-    file.flush().await.map_err(|e| {
-        non_retryable(segment_failure(
-            segment,
-            offset,
-            &format!("Could not flush the temporary file: {e}"),
-        ))
-    })?;
+    let offset = durable_checkpoint(&mut file, segment).await?;
 
     let final_end = range_end.load(Ordering::SeqCst);
     if offset <= final_end {
@@ -445,6 +434,26 @@ async fn download_segment_once(
         .await
         .map_err(non_retryable_attempt)?;
     Ok(offset)
+}
+
+/// ARC-33: makes every buffered byte durable and returns the only offset that
+/// may be published as `downloaded_until` — for progress, retry, or failure
+/// alike, because the coordinator checkpoints runtime progress values at any
+/// time (e.g. force checkpoints during acceleration splits). On flush failure
+/// the report downgrades to the durable watermark so a resumed download can
+/// never seek past unwritten bytes in the preallocated file.
+async fn durable_checkpoint(
+    writer: &mut SegmentFileWriter,
+    segment: &TaskSegmentRecord,
+) -> Result<i64, SegmentAttemptError> {
+    match writer.sync().await {
+        Ok(()) => Ok(writer.durable_offset()),
+        Err(e) => Err(non_retryable(segment_failure(
+            segment,
+            writer.durable_offset(),
+            &format!("Could not flush the temporary file: {e}"),
+        ))),
+    }
 }
 
 fn retryable(failure: SegmentFailure) -> SegmentAttemptError {

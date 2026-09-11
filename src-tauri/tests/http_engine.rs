@@ -537,6 +537,45 @@ async fn segmented_direct_retries_transient_segment_failures() {
     std::env::remove_var("VIBE_FAST_RETRY_DELAYS");
 }
 
+/// ARC-33: a connection abort mid-body must not let the checkpoint run ahead
+/// of durable bytes. The abort leaves buffered-but-unflushed bytes in the
+/// worker's 256 KiB BufWriter; if the retryable failure's offset were reported
+/// without flushing, the resumed download would seek past a zero hole the
+/// preallocated file never refills. The assembled file must match the payload
+/// byte-for-byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segmented_direct_resume_after_mid_body_abort_writes_no_hole() {
+    std::env::set_var("VIBE_FAST_RETRY_DELAYS", "1");
+    let server = start_test_server();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("segmented-abort-hole");
+    let payload = mid_abort_payload();
+
+    let downloaded = engine
+        .download_segmented_direct(
+            DirectSegmentedDownloadRequest {
+                url: format!("{}/abort-mid-body", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: payload.len() as i64,
+                supports_resume: true,
+
+                supports_parallel: true,
+                segments: direct_segments("segmented-abort-hole", payload.len() as i64),
+                etag: None,
+                last_modified: None,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("segmented download must recover from a mid-body connection abort");
+
+    assert_eq!(downloaded, payload.len() as i64);
+    let final_bytes = fs::read(&paths.final_path).expect("read final");
+    assert_eq!(final_bytes, payload, "no zero hole may survive the abort");
+    std::env::remove_var("VIBE_FAST_RETRY_DELAYS");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_direct_resume_skips_completed_ranges() {
     let server = start_test_server();
@@ -990,6 +1029,47 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
             "transient.bin",
             false,
         ),
+        // ARC-33: retry attempts (range start > 0) see a well-formed 206 with
+        // the full range; only the first attempt (range start == 0) is aborted
+        // mid-body below.
+        "/abort-mid-body" if byte_range.is_some_and(|range| range.start > 0) => respond_file(
+            &mut stream,
+            method,
+            &mid_abort_payload(),
+            byte_range,
+            true,
+            "abort-mid-body.bin",
+            false,
+        ),
+        "/abort-mid-body" if byte_range.is_some() => {
+            let range = byte_range.expect("guarded by the match arm");
+            let payload = mid_abort_payload();
+            let start = range.start;
+            let end = range.end.unwrap_or_else(|| payload.len().saturating_sub(1));
+            let available = end - start + 1;
+            // A contract-valid 206 head: the worker's Content-Range check must
+            // pass so the abort lands mid-body (a retryable connection error),
+            // not at the response validation (non-retryable).
+            let head = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n\
+                 Content-Range: bytes {start}-{end}/{}\r\n\
+                 Content-Length: {available}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            // Stop strictly past one 256 KiB BufWriter flush boundary but
+            // before the first segment's end, so the worker holds a non-empty
+            // unflushed residue when the connection dies.
+            let serve = MID_ABORT_OFFSET.min(available);
+            let _ = stream.write_all(&payload[start..start + serve]);
+            let _ = stream.flush();
+            // SO_LINGER=0 turns close into a TCP RST so the client's next
+            // chunk() surfaces as a connection error, not a clean EOF.
+            // std's set_linger is nightly-only, hence socket2 here.
+            let raw: socket2::Socket = socket2::Socket::from(stream);
+            let _ = raw.set_linger(Some(Duration::ZERO));
+            let _ = raw.shutdown(std::net::Shutdown::Both);
+        }
         "/slow" => respond_file(
             &mut stream,
             method,
@@ -1273,6 +1353,17 @@ fn large_payload() -> Vec<u8> {
         .map(|index| (index % 251) as u8)
         .collect()
 }
+
+/// Payload for the mid-body abort route: four 300 KB segments, each larger
+/// than the worker's 256 KiB BufWriter so an abort strictly inside a segment
+/// leaves buffered-but-unflushed bytes behind.
+fn mid_abort_payload() -> Vec<u8> {
+    (0..(4 * 300_000))
+        .map(|index| (index % 251) as u8)
+        .collect()
+}
+
+const MID_ABORT_OFFSET: usize = 256 * 1024 + 10_000;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
