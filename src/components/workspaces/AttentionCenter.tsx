@@ -19,6 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { RecoveryAction } from "@/generated/bindings";
 import { localizedErrorMessage, parseAppError, recoveryActionsForError } from "@/lib/errors";
+import { formatDateTime } from "@/lib/format-date";
 import { sanitizeUrlForDisplay } from "@/lib/utils";
 import { useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
 import type { Task } from "@/types/task";
@@ -88,7 +89,7 @@ export function AttentionCenter({
   onResolve: (task: Task, action: RecoveryAction) => void;
   onShowDetails?: (task: Task) => void;
 }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [filter, setFilter] = useState<AttentionFilter>("all");
   const [compactDetailOpen, setCompactDetailOpen] = useState(false);
   const selectedId = useTaskUIStore((state) => state.selectedId);
@@ -274,7 +275,6 @@ export function AttentionCenter({
                           task={task}
                           category={group.category}
                           selected={selectedTask?.id === task.id}
-                          locale={i18n.language}
                           onSelect={() => chooseTask(task)}
                         />
                       ))}
@@ -320,22 +320,15 @@ function AttentionTaskRow({
   task,
   category,
   selected,
-  locale,
   onSelect,
 }: {
   task: Task;
   category: AttentionCategory;
   selected: boolean;
-  locale: string;
   onSelect: () => void;
 }) {
   const { t } = useTranslation();
-  const date = new Date(task.updatedAt);
-  const updated = Number.isNaN(date.getTime())
-    ? task.updatedAt
-    : new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(
-        date,
-      );
+  const updated = formatDateTime(task.updatedAt, "dateTime");
   return (
     <button
       id={`attention-task-${task.id}`}

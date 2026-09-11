@@ -1,15 +1,20 @@
 /**
- * i18n completeness check: compares leaf key paths AND values between the
- * English reference bundle and all other locale files.
+ * i18n completeness check.
  *
- * FUN-21: key-only checks cannot catch copy-pasted English. Non-en values that
- * still match English are failures when they are `errors.*` (except allowlisted
- * technical tokens) or contain 3+ visible English words.
+ * 1. Compares leaf key paths AND values between the English reference bundle and
+ *    all other locale files. FUN-21: key-only checks cannot catch copy-pasted
+ *    English. Non-en values that still match English are failures when they are
+ *    `errors.*` (except allowlisted technical tokens) or contain 3+ visible
+ *    English words.
+ * 2. Resolves plural forms against each locale's CLDR categories rather than
+ *    demanding a byte-identical key set (FUN-22).
+ * 3. Verifies every literal `t("...")` key in `src/**` exists in the English
+ *    bundle, which the locale-to-locale diff cannot see.
  *
  * Usage: pnpm check:i18n
  */
-import { readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -68,6 +73,48 @@ export function visibleEnglishWords(value: string): string[] {
 export function isValueAllowlisted(key: string): boolean {
   if (VALUE_ALLOWLIST_KEYS.has(key)) return true;
   return VALUE_ALLOWLIST_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
+/**
+ * FUN-22: i18next resolves `{{count}}` keys to a CLDR plural category suffix
+ * (`key_one`, `key_few`, `key_many`, …) and falls back to the bare key when the
+ * variant is absent. A strict key-set equality would therefore reject the
+ * correct per-language fix (ru needs `_few`/`_many`, zh/ja/ko need neither), so
+ * plural variants are checked against the locale's own CLDR categories.
+ */
+export const PLURAL_SUFFIXES = ["zero", "one", "two", "few", "many", "other"] as const;
+
+const PLURAL_SUFFIX_RE = /^(.*)_(zero|one|two|few|many|other)$/;
+
+/** CLDR plural categories the locale actually selects, e.g. ru → one/few/many/other. */
+export function pluralCategories(locale: string): Set<string> {
+  try {
+    return new Set(new Intl.PluralRules(locale).resolvedOptions().pluralCategories);
+  } catch {
+    return new Set(["other"]);
+  }
+}
+
+/**
+ * Bases the English bundle declares as pluralised: `base` exists AND has at
+ * least one `<base>_<category>` sibling AND interpolates `{{count}}`. Anchoring
+ * on `{{count}}` keeps look-alikes such as `taskList.failure_other` (a plain
+ * value, not a plural form of `taskList.failure`) out of the plural model.
+ */
+export function findPluralBases(enLeaves: Record<string, string>): Set<string> {
+  const bases = new Set<string>();
+  for (const key of Object.keys(enLeaves)) {
+    const match = PLURAL_SUFFIX_RE.exec(key);
+    if (!match) continue;
+    const base = match[1];
+    if ((enLeaves[base] ?? "").includes("{{count}}")) bases.add(base);
+  }
+  return bases;
+}
+
+function pluralSuffixOf(key: string): string | null {
+  const match = PLURAL_SUFFIX_RE.exec(key);
+  return match ? match[2] : null;
 }
 
 export type UntranslatedHit = {
@@ -129,6 +176,7 @@ export type LocaleCheckResult = {
   locale: string;
   missing: string[];
   extra: string[];
+  unreachablePlurals: string[];
   untranslated: UntranslatedHit[];
   placeholders: PlaceholderHit[];
 };
@@ -138,12 +186,42 @@ export function checkLocale(
   enLeaves: Record<string, string>,
   localeLeaves: Record<string, string>,
 ): LocaleCheckResult {
-  const enKeys = Object.keys(enLeaves);
-  const localeKeys = Object.keys(localeLeaves);
+  const pluralBases = findPluralBases(enLeaves);
+  const categories = pluralCategories(locale);
+
+  /** `<base>_<category>` where en declares `<base>` as pluralised. */
+  const pluralCategoryOf = (key: string): string | null => {
+    const suffix = pluralSuffixOf(key);
+    if (!suffix) return null;
+    return pluralBases.has(key.slice(0, key.length - suffix.length - 1)) ? suffix : null;
+  };
+
+  // A plural variant is required only where the locale actually selects that
+  // category; elsewhere i18next falls back to the bare key.
+  const missing = Object.keys(enLeaves)
+    .filter((key) => {
+      if (key in localeLeaves) return false;
+      const category = pluralCategoryOf(key);
+      return category === null || categories.has(category);
+    })
+    .sort();
+
+  const extra: string[] = [];
+  const unreachablePlurals: string[] = [];
+  for (const key of Object.keys(localeLeaves)) {
+    const category = pluralCategoryOf(key);
+    if (category !== null && !categories.has(category)) {
+      unreachablePlurals.push(key);
+      continue;
+    }
+    if (!(key in enLeaves) && category === null) extra.push(key);
+  }
+
   return {
     locale,
-    missing: enKeys.filter((k) => !(k in localeLeaves)).sort(),
-    extra: localeKeys.filter((k) => !(k in enLeaves)).sort(),
+    missing,
+    extra: extra.sort(),
+    unreachablePlurals: unreachablePlurals.sort(),
     untranslated: findUntranslatedLeaves(enLeaves, localeLeaves),
     placeholders: findPlaceholderMismatches(enLeaves, localeLeaves),
   };
@@ -153,6 +231,7 @@ export function localeHasFailures(result: LocaleCheckResult): boolean {
   return (
     result.missing.length > 0 ||
     result.extra.length > 0 ||
+    result.unreachablePlurals.length > 0 ||
     result.untranslated.length > 0 ||
     result.placeholders.length > 0
   );
@@ -161,6 +240,62 @@ export function localeHasFailures(result: LocaleCheckResult): boolean {
 async function loadLocale(localesDir: string, fileName: string): Promise<unknown> {
   const module = await import(pathToFileURL(join(localesDir, fileName)).href);
   return module.default;
+}
+
+/**
+ * Nothing else verifies that a `t("...")` literal actually exists in the English
+ * bundle — the locale-to-locale diff above cannot see a key that is absent from
+ * every bundle — so a typo would ship and render the raw key to users. Only
+ * fully literal keys are scanned: template literals and concatenations are
+ * resolved at runtime and cannot be checked statically.
+ */
+export const SOURCE_KEY_RE = /(?:^|[^\w.$])(?:i18n\.)?t\(\s*["']([^"'\n]+)["']\s*[,)]/g;
+
+export function extractLiteralTranslationKeys(source: string): string[] {
+  const keys: string[] = [];
+  for (const match of source.matchAll(SOURCE_KEY_RE)) keys.push(match[1]);
+  return keys;
+}
+
+const SOURCE_ROOT = resolve(__dirname, "../src");
+/** Locale bundles are translation content; other files are call sites. */
+const SOURCE_SKIP_DIRS = new Set(["locales"]);
+
+function collectSourceFiles(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (SOURCE_SKIP_DIRS.has(entry.name)) continue;
+      files.push(...collectSourceFiles(path));
+      continue;
+    }
+    if (!/\.(ts|tsx)$/.test(entry.name)) continue;
+    if (/\.(test|spec)\.(ts|tsx)$/.test(entry.name)) continue;
+    files.push(path);
+  }
+  return files;
+}
+
+export type SourceKeyHit = { key: string; file: string; line: number };
+
+/** Literal `t()` keys referenced in `src/**` that the English bundle does not define. */
+export function findMissingSourceKeys(enLeaves: Record<string, string>, sourceRoot = SOURCE_ROOT): SourceKeyHit[] {
+  const repoRoot = resolve(__dirname, "..");
+  const hits: SourceKeyHit[] = [];
+  for (const file of collectSourceFiles(sourceRoot)) {
+    const source = readFileSync(file, "utf8");
+    for (const match of source.matchAll(SOURCE_KEY_RE)) {
+      const key = match[1];
+      if (key in enLeaves) continue;
+      hits.push({
+        key,
+        file: relative(repoRoot, file).replace(/\\/g, "/"),
+        line: source.slice(0, match.index).split("\n").length,
+      });
+    }
+  }
+  return hits.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
 export async function runCompletenessCheck(localesDir = DEFAULT_LOCALES_DIR): Promise<number> {
@@ -202,6 +337,13 @@ export async function runCompletenessCheck(localesDir = DEFAULT_LOCALES_DIR): Pr
       console.error(`  Extra keys (${result.extra.length}):`);
       for (const key of result.extra) console.error(`    - ${key}`);
     }
+    if (result.unreachablePlurals.length > 0) {
+      console.error(`  Unreachable plural forms for ${localeName} (${result.unreachablePlurals.length}):`);
+      console.error(
+        `    i18next never selects these categories for this locale; delete or translate the base key instead.`,
+      );
+      for (const key of result.unreachablePlurals) console.error(`    - ${key}`);
+    }
     if (result.placeholders.length > 0) {
       console.error(`  Placeholder mismatches (${result.placeholders.length}):`);
       for (const hit of result.placeholders) {
@@ -222,6 +364,13 @@ export async function runCompletenessCheck(localesDir = DEFAULT_LOCALES_DIR): Pr
     }
 
     if (isStrict) hasFailures = true;
+  }
+
+  const missingSourceKeys = findMissingSourceKeys(enLeaves);
+  if (missingSourceKeys.length > 0) {
+    console.error(`\n[FAIL] ${missingSourceKeys.length} literal t() key(s) are not defined in en.ts:`);
+    for (const hit of missingSourceKeys) console.error(`    - ${hit.file}:${hit.line} → ${hit.key}`);
+    hasFailures = true;
   }
 
   if (hasFailures) {

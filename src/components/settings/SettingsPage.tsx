@@ -69,6 +69,7 @@ import {
   resolveCaptureDraftAfterSave,
 } from "@/lib/browser-capture-draft";
 import { localizedErrorMessage } from "@/lib/errors";
+import { formatDateTime } from "@/lib/format-date";
 import { createLogger } from "@/lib/logger";
 import { consumeSettingsFocus } from "@/lib/settings-recovery-return";
 import {
@@ -2694,15 +2695,5 @@ function UpdateProgressBar({ updater }: { updater: UpdaterSnapshot }) {
 }
 
 function formatReleaseDate(isoDate: string): string {
-  try {
-    const date = new Date(isoDate);
-    if (Number.isNaN(date.getTime())) return isoDate;
-    return date.toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return isoDate;
-  }
+  return formatDateTime(isoDate, "date");
 }

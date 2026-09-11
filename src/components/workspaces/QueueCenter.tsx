@@ -24,6 +24,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { QueueTaskDecision, QueueWaitReason, SchedulerSnapshot, TaskPriority } from "@/generated/bindings";
 import { errorMessage } from "@/lib/errors";
+import { formatDateTime } from "@/lib/format-date";
 import { getSchedulerSnapshot } from "@/lib/tauri";
 import { formatBytes } from "@/lib/utils";
 import { useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
@@ -416,13 +417,12 @@ function QueueTaskRow({
 }
 
 function QueueReason({ decision, retryAfterAt }: { decision: QueueTaskDecision | null; retryAfterAt: string | null }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const reason = decision?.reason ?? "ready";
-  const retryDate = retryAfterAt ? new Date(retryAfterAt) : null;
+  // Preserve the previous contract: an unparseable timestamp degrades to "" rather
+  // than leaking the raw backend value into the reason sentence.
   const retryTime =
-    retryDate && !Number.isNaN(retryDate.getTime())
-      ? new Intl.DateTimeFormat(i18n.language, { hour: "2-digit", minute: "2-digit" }).format(retryDate)
-      : "";
+    retryAfterAt && !Number.isNaN(new Date(retryAfterAt).getTime()) ? formatDateTime(retryAfterAt, "time") : "";
   const label = t(`queueCenter.reason.${reason}`, { time: retryTime });
   const tone =
     queueReasonTone(reason) === "ready"

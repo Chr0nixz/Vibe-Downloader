@@ -156,7 +156,9 @@ export async function setLocale(locale: Locale) {
   if (bundle) {
     i18n.addResourceBundle(locale, "translation", bundle, true, true);
   }
-  void i18n.changeLanguage(locale);
+  // Await the switch so callers (and tests) can rely on i18n.language being
+  // applied when this resolves; fire-and-forget callers are unaffected.
+  await i18n.changeLanguage(locale);
 }
 
 export default i18n;

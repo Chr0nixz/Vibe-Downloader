@@ -1251,7 +1251,6 @@ const zhCN = {
     cancel: "取消",
     moreFixes: "更多修复",
     moreFixesCount: "还有 {{count}} 个修复选项",
-    moreFixesCount_one: "还有 1 个修复选项",
   },
   recovery: {
     retry: "重试",

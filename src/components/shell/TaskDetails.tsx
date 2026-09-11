@@ -33,6 +33,7 @@ import type {
 import { useIsCompactShell } from "@/hooks/use-shell-layout";
 import { type TaskDetailDiagSubTab, useTaskDetailQueries } from "@/hooks/use-task-detail-queries";
 import { errorMessage } from "@/lib/errors";
+import { formatDateTime } from "@/lib/format-date";
 import { createLogger } from "@/lib/logger";
 import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput, speedLimitInputFromBytes } from "@/lib/speed-limit";
 import {
@@ -2263,15 +2264,7 @@ function LoadMoreButton({ visible, label, onClick }: { visible: boolean; label: 
 }
 
 function formatEventTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return formatDateTime(value, "dateTimeSeconds");
 }
 
 function parseSnapshotNumber(value: string): number {

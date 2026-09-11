@@ -35,6 +35,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import type { QueueTaskDecision, RecoveryAction, TaskStatus } from "@/generated/bindings";
 import { useSystemFileIcon } from "@/hooks/use-system-file-icon";
 import { localizedErrorMessage, localizedMessage } from "@/lib/errors";
+import { formatDateTime } from "@/lib/format-date";
 import { cn, formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
 import type { SpeedSample } from "@/stores/speed-history-store";
 import { useSpeedHistoryStore } from "@/stores/speed-history-store";
@@ -749,9 +750,7 @@ export const TaskRow = memo(function TaskRow({
 /// value is returned as-is so `{{time}}` interpolations degrade to "" instead of
 /// printing "Invalid Date".
 function formatClockTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return formatDateTime(value, "time");
 }
 
 // Shared meta row for speed / bytes / progress+ETA / connections.

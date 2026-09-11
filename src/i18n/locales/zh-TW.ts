@@ -1251,7 +1251,6 @@ const zhTW = {
     cancel: "取消",
     moreFixes: "更多修復",
     moreFixesCount: "還有 {{count}} 個修復選項",
-    moreFixesCount_one: "還有 1 個修復選項",
   },
   recovery: {
     retry: "重試",

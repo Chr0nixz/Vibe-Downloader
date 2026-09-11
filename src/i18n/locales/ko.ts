@@ -1276,7 +1276,6 @@ const ko = {
     cancel: "취소",
     moreFixes: "추가 수정",
     moreFixesCount: "{{count}}개 추가 수정",
-    moreFixesCount_one: "1개 추가 수정",
   },
   recovery: {
     retry: "재시도",

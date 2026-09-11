@@ -1289,7 +1289,6 @@ const ja = {
     cancel: "キャンセル",
     moreFixes: "他の修正",
     moreFixesCount: "他 {{count}} 件の修正",
-    moreFixesCount_one: "他 1 件の修正",
   },
   recovery: {
     retry: "リトライ",

@@ -16,6 +16,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { MenuItem, MenuSeparator, RegionContextMenu } from "@/components/ui/menu-item";
 import { useAppUpdater } from "@/hooks/use-app-updater";
+import { formatDateTime } from "@/lib/format-date";
 import { cn, formatBytes } from "@/lib/utils";
 import { useToastStore } from "@/stores/toast-store";
 
@@ -353,15 +354,5 @@ function UpdateProgressBar({ updater }: { updater: UpdaterSnapshot }) {
 }
 
 function formatReleaseDate(isoDate: string): string {
-  try {
-    const date = new Date(isoDate);
-    if (Number.isNaN(date.getTime())) return isoDate;
-    return date.toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return isoDate;
-  }
+  return formatDateTime(isoDate, "date");
 }
