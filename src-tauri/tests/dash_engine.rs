@@ -845,3 +845,89 @@ async fn download_reenters_after_reset_interrupted_tasks() {
     assert!(paths.final_path.exists());
     pool.close().await;
 }
+
+/// ARC-37: an internal segment failure must return Err WITHOUT cancelling the
+/// scheduler-owned cancel token. The supervisor classifies engine results by
+/// that token (`canceled = token.is_cancelled()`), so an engine that cancels it
+/// on failure makes the task masquerade as user-cancelled and stay Downloading
+/// forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn arc37_internal_segment_failure_does_not_cancel_user_token() {
+    let server = TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/");
+        let (status, body): (u16, Vec<u8>) = match path {
+            "/arc37.mpd" => (200, RECOVERY_MPD.as_bytes().to_vec()),
+            // Permanent failure: retries exhaust and the segment loop must
+            // return dash_segment_failed.
+            path_containing if path_containing.contains("recovery-0") => {
+                (500, b"permanent failure".to_vec())
+            }
+            _ => (200, vec![0_u8; 1024]),
+        };
+        let content_type = if status == 200 && path.ends_with(".mpd") {
+            "application/dash+xml"
+        } else if status == 200 {
+            "video/mp4"
+        } else {
+            "text/plain"
+        };
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(&body);
+    });
+
+    let pool = common::test_pool("dash-arc37-token").await;
+    let mut paths = common::TestPaths::new("dash-arc37-token");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("temp.mp4");
+    paths.final_path = root.join("arc37.mp4");
+    let task = common::download_task(
+        "dash-arc37-token",
+        format!("{}/arc37.mpd", server.base_url),
+        "dash",
+        "arc37.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task).await.expect("insert");
+    db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let result = new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            cancel.clone(),
+        ))
+        .await;
+    let error = result.expect_err("permanent segment 500 must fail the download");
+    assert!(
+        error.to_string().contains("dash_segment_failed") || error.to_string().contains("500"),
+        "expected dash_segment_failed, got {error}"
+    );
+    assert!(
+        !cancel.is_cancelled(),
+        "ARC-37: engine must not cancel the scheduler-owned token on internal failure"
+    );
+    pool.close().await;
+}

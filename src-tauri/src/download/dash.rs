@@ -1147,7 +1147,12 @@ async fn download_dash_segments(
                 break;
             }
             Err(error) => {
-                cancel_token.cancel();
+                // ARC-37: the task token belongs to the scheduler and signals
+                // USER cancel. An internal failure must not cancel it — the
+                // supervisor classifies Err results by that token, so cancelling
+                // here made segment failures masquerade as user cancels and
+                // left the task stuck in Downloading. abort_all alone stops the
+                // remaining workers; returning Err drives the failure state.
                 workers.abort_all();
                 progress_gate.flush(app);
                 return Err(engine_error(

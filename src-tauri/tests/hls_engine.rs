@@ -1477,3 +1477,89 @@ async fn download_reenters_after_reset_interrupted_tasks() {
     );
     pool.close().await;
 }
+
+/// ARC-37: an internal segment failure must return Err WITHOUT cancelling the
+/// scheduler-owned cancel token. The supervisor classifies engine results by
+/// that token (`canceled = token.is_cancelled()`), so an engine that cancels it
+/// on failure makes the task masquerade as user-cancelled and stay Downloading
+/// forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn arc37_internal_segment_failure_does_not_cancel_user_token() {
+    let server = TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/");
+        let (status, content_type, body): (u16, &str, Vec<u8>) = match path {
+            "/video.m3u8" => {
+                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.0,\nv0.ts\n#EXT-X-ENDLIST\n";
+                (
+                    200,
+                    "application/vnd.apple.mpegurl",
+                    playlist.as_bytes().to_vec(),
+                )
+            }
+            // Permanent failure: retries exhaust and the segment loop must
+            // return hls_segment_failed.
+            _ => (404, "text/plain", b"not found".to_vec()),
+        };
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(&body);
+    });
+
+    let pool = common::test_pool("hls-arc37-token").await;
+    let mut paths = common::TestPaths::new("hls-arc37-token");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("arc37.mp4");
+    let task = common::download_task(
+        "hls-arc37-token",
+        format!("{}/video.m3u8", server.base_url),
+        "hls",
+        "arc37.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let result = new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            cancel.clone(),
+        ))
+        .await;
+    let error = result.expect_err("permanent segment 404 must fail the download");
+    assert!(
+        error.to_string().contains("hls_segment_failed") || error.to_string().contains("404"),
+        "expected hls_segment_failed, got {error}"
+    );
+    assert!(
+        !cancel.is_cancelled(),
+        "ARC-37: engine must not cancel the scheduler-owned token on internal failure"
+    );
+    pool.close().await;
+}
