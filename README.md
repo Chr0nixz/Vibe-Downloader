@@ -40,11 +40,11 @@ HTTP Basic Auth（`FUN-01`）和 HTTP 系逐任务代理（`FUN-02`）已修复�
 
 | 协议 | 当前能力 | 主要边界 |
 | --- | --- | --- |
-| FTP/FTPS | 单文件、动态并行分段、加密凭据、目录探测（支持对话框凭据与代理）、SOCKS5 | implicit FTPS over SOCKS5 不支持；取消时未等待 worker 落盘（`ARC-19`）；无连接超时（`ARC-26`）；探测未接逐任务代理（`FUN-20`） |
-| SFTP | 单文件、密码和 OpenSSH 私钥认证、加密凭据、本地临时文件续传、SOCKS5、TOFU host key 及 list/forget UI | 同 FTP 的 `ARC-19` / `ARC-26` / `FUN-20` |
+| FTP/FTPS | 单文件、动态并行分段、加密凭据、目录探测（支持对话框凭据与代理）、SOCKS5 | implicit FTPS over SOCKS5 不支持；无连接超时（`ARC-26`）；探测未接逐任务代理（`FUN-20`） |
+| SFTP | 单文件、密码和 OpenSSH 私钥认证、加密凭据、本地临时文件续传、SOCKS5、TOFU host key 及 list/forget UI | 同 FTP 的 `ARC-26` / `FUN-20` |
 | BitTorrent | magnet、远程和本地 `.torrent`、多文件选择、piece/peer/DHT/做种快照、SOCKS5、ratio/时间做种限制 | tracker 为配置快照而非实时健康；probe 每次新建 session（`ARC-28`）；限速不实时同步且不计入全局桶（`ARC-29`）；`.torrent` 抓取绕过 SSRF 守卫与代理策略（`SEC-03`） |
 | HLS | 主变体选择、AES-128-CBC、EXT-X-MAP、byte range、并发分片、外部音轨/字幕、live 轮询与空闲收敛、ffmpeg MP4 remux | 不支持 SAMPLE-AES/DRM；staging 目录完成后不清理；live 轮询每 100ms 查库（`PERF-15`） |
-| DASH | 静态/VOD first-pass：单 Period、`$Number$` SegmentTemplate / SegmentList / SegmentBase、分段下载、进度监控、ffmpeg MP4 remux；任务可暂停后续传 | 明确拒绝 dynamic/live、SegmentTimeline、多 Period、未实现的模板变量（如 `$Time$`）；分片数无上限（`ARC-22`）；探测未接逐任务代理（`FUN-20`） |
+| DASH | 静态/VOD first-pass：单 Period、`$Number$` SegmentTemplate / SegmentList / SegmentBase、分段下载、进度监控、ffmpeg MP4 remux；任务可暂停后续传 | 明确拒绝 dynamic/live、SegmentTimeline、多 Period、未实现的模板变量（如 `$Time$`）；探测未接逐任务代理（`FUN-20`） |
 | WebDAV | WebDAV/WebDAVS 映射、Basic Auth、Depth-1 PROPFIND（支持对话框凭据与代理）、委托 HTTP 下载 | PROPFIND 无整体超时；目录探测绕过客户端缓存 |
 | Metalink4 | 本地/远程 manifest、多文件选择、HTTP/HTTPS 镜像 failover、文件级进度、strongest-hash 与跨镜像续传校验 | 并行下载任一镜像失败会删除全部 part（`ARC-24`）；读循环无空闲超时且取消不及时（`ARC-25`） |
 
@@ -84,16 +84,14 @@ HTTP Basic Auth（`FUN-01`）和 HTTP 系逐任务代理（`FUN-02`）已修复�
 
 ## 当前发布阻断
 
-初版的 6 项阶段 A 阻断（`UX-01`、`FUN-01`、`FUN-02`、`ARC-01`、`ARC-02`、`ARC-03`）均已修复并有测试覆盖。以下是 2026-08-13 复审确认的新阻断：
+初版的 6 项阶段 A 阻断（`UX-01`、`FUN-01`、`FUN-02`、`ARC-01`、`ARC-02`、`ARC-03`）与 2026-08-13 复审的 6 项阻断（`ARC-19`～`ARC-22`、`SEC-01`、`SEC-02`）均已修复并有测试覆盖（`ARC-19` 的协调器排空残留并入 `ARC-31`）。当前发布阻断来自 2026-08-26 复审：
 
 | ID | 问题 |
 | --- | --- |
-| `ARC-19` | FTP/SFTP 取消时中止未落盘的 worker，续传会写出零字节空洞 |
-| `ARC-20` | 多文件任务的文件行在事务外插入，冲突会留下文件列表残缺的任务 |
-| `ARC-21` | 写事务普遍使用 DEFERRED，读后写路径在 WAL 下会命中 `SQLITE_BUSY_SNAPSHOT` |
-| `ARC-22` | DASH 分片数完全由清单决定且无上限，恶意 MPD 可耗尽内存 |
-| `SEC-01` | Tauri `fs` 能力被授予 `{"path": "**"}` 全盘读写 |
-| `SEC-02` | 备份恢复不校验恢复内容，构造的 `.vibe-backup` 可让应用向任意路径写文件 |
+| `ARC-32` | 命令路径持任务锁 await 调度 dispatch，与调度器全局锁形成确定性死锁（Restart 必现） |
+| `ARC-33` | HTTP 分段 worker 部分早退路径未 flush 即上报 checkpoint，可能发布缺字节文件 |
+| `ARC-37` | HLS/DASH 段失败复用用户取消 token，supervisor 误判为取消，任务永久停在 Downloading |
+| `ARC-38` | HLS/DASH staging 目录在完成、失败、取消和删除路径均无清理，且无启动孤儿清扫 |
 
 完整证据、验收条件和修复顺序见 [项目改进审计](docs/project-improvement-audit.md)。在这些问题关闭前，不应发布稳定版本。
 
