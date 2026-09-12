@@ -536,22 +536,7 @@ async fn run_sftp_download(
 
     while !pending.is_empty() || !running.is_empty() {
         if cancel_token.is_cancelled() {
-            emit_sftp_progress(
-                &mut progress,
-                &mut last_checkpoint,
-                &mut progress_gate,
-                SftpProgressInput {
-                    app: &app,
-                    pool: &pool,
-                    task: &task,
-                    active_connections: running.len(),
-                    force_checkpoint: true,
-                    force_emit: true,
-                },
-            )
-            .await?;
-            progress_gate.flush(&app);
-            return Ok(());
+            break;
         }
 
         tokio::select! {
@@ -588,7 +573,7 @@ async fn run_sftp_download(
                             segment.dirty = true;
                         }
                     }
-                    Err(_error) if cancel_token.is_cancelled() => return Ok(()),
+                    Err(_error) if cancel_token.is_cancelled() => break,
                     Err(error) => {
                         let progress_len = progress.len();
                         let Some(segment) = progress.get_mut(&finished.segment_id) else {
@@ -717,6 +702,36 @@ async fn run_sftp_download(
                 pending.push_back(tail);
                 last_split_at = Instant::now();
                 db::insert_task_event(&pool, &task.id, "sftp_segment_split", None).await?;
+            }
+        }
+    }
+
+    // ARC-31: drain outstanding workers after a cancel so every worker's final
+    // flush + durable-offset report lands before the force checkpoint below.
+    while !running.is_empty() {
+        tokio::select! {
+            Some(message) = progress_rx.recv() => {
+                if let Some(segment) = progress.get_mut(&message.segment_id) {
+                    segment.downloaded_until = message.downloaded_until;
+                    segment.speed_bps = message.speed_bps;
+                    segment.status = SegmentStatus::Downloading;
+                    segment.dirty = true;
+                }
+            }
+            Some(joined) = workers.join_next() => {
+                let finished = match joined {
+                    Ok(finished) => finished,
+                    Err(error) => {
+                        return Err(format!("A SFTP worker stopped unexpectedly: {error}"))
+                    }
+                };
+                running.remove(&finished.segment_id);
+                if let Ok(downloaded_until) = finished.result {
+                    if let Some(segment) = progress.get_mut(&finished.segment_id) {
+                        segment.downloaded_until = downloaded_until;
+                        segment.dirty = true;
+                    }
+                }
             }
         }
     }

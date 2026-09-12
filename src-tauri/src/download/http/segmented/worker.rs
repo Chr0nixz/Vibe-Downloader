@@ -110,12 +110,21 @@ pub(in crate::download::http) async fn download_segment_worker(
                 // Honor the server's Retry-After header when present (RFC 7231); otherwise use
                 // exponential backoff (1s→2s→4s→8s→15s). VIBE_FAST_RETRY_DELAYS is a test-only
                 // override to keep integration tests fast.
-                tokio::time::sleep(
-                    error
-                        .retry_after
-                        .unwrap_or_else(|| retry_delay(retry_count)),
-                )
-                .await;
+                //
+                // ARC-27: race the backoff against user cancel — a Retry-After of up to
+                // 60s must not delay pause/cancel convergence past the 5s command drain.
+                // The offset is durable (published through durable_checkpoint), so
+                // reporting it here keeps the checkpoint honest.
+                let backoff = error
+                    .retry_after
+                    .unwrap_or_else(|| retry_delay(retry_count));
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        send_segment_progress(&progress_tx, &segment.id, offset, 0).await?;
+                        return Ok(());
+                    }
+                    _ = tokio::time::sleep(backoff) => {}
+                }
             }
             Err(error) => return Err(error.failure),
         }

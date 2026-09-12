@@ -297,7 +297,9 @@ impl<'a> SegmentCoordinator<'a> {
                                 error = %failure.error,
                                 "segment download failed"
                             );
-                            self.cancel_token.cancel();
+                            // ARC-37 family: never cancel the scheduler-owned
+                            // task token on internal failure — the coordinator
+                            // transitions Failed below and returns Err.
                             worker_pool.workers.abort_all();
                             acceleration.runtime.record_failure();
                             runtime_progress.mark_failed(&failure.segment_id, failure.downloaded_until);
@@ -339,7 +341,7 @@ impl<'a> SegmentCoordinator<'a> {
                                 error = %error,
                                 "download worker panicked or was cancelled unexpectedly"
                             );
-                            self.cancel_token.cancel();
+                            // ARC-37 family: same ownership rule as above.
                             worker_pool.workers.abort_all();
                             checkpoint_runtime_progress(
                                 &self.pool,

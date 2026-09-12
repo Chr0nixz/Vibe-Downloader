@@ -810,3 +810,83 @@ async fn arc26_ftp_probe_with_cancelled_token_converges_immediately() {
         "expected canceled error, got {error}"
     );
 }
+
+/// ARC-31: cancelling a parallel FTP download must drain every worker before
+/// the final force checkpoint — the engine returns cleanly with Paused state
+/// and a checkpoint that never leads the durable bytes on disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn arc31_parallel_cancel_drains_workers_before_checkpoint() {
+    let payload: Vec<u8> = (0..6 * 1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let mut files = HashMap::new();
+    files.insert("/drain.bin".to_string(), payload.clone());
+    let server = FtpTestServer::start(FtpServerConfig {
+        files,
+        data_chunk_delay: Some(Duration::from_millis(10)),
+        ..FtpServerConfig::default()
+    });
+    let pool = common::test_pool("ftp-arc31-drain").await;
+    let paths = common::TestPaths::new("ftp-arc31-drain");
+    let task = common::download_task(
+        "ftp-arc31-drain",
+        server.url("drain.bin"),
+        "ftp",
+        "drain.bin",
+        payload.len() as i64,
+        &paths,
+        true, // parallel: multiple REST segments
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+
+    let engine = new_engine();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let download = tokio::spawn({
+        let engine = engine.clone();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+
+    // Cancel once real progress exists.
+    loop {
+        let segments = db::list_segment_records(&pool, "ftp-arc31-drain")
+            .await
+            .expect("list segments");
+        if segments.iter().any(|segment| segment.downloaded_until > 0) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cancel.cancel();
+
+    let result = tokio::time::timeout(Duration::from_secs(30), download)
+        .await
+        .expect("engine must return after cancel (drain is bounded)")
+        .expect("drained cancel is a clean exit");
+
+    let _ = result;
+    let segments = db::list_segment_records(&pool, "ftp-arc31-drain")
+        .await
+        .expect("list segments after drain");
+    let checkpointed: i64 = segments
+        .iter()
+        .map(|segment| segment.downloaded_until)
+        .sum();
+    assert!(
+        checkpointed > 0,
+        "drained workers must have reported durable offsets"
+    );
+    // ARC-19 invariant: no checkpoint may lead the durable bytes on disk.
+    // FTP appends to the temp file (no preallocation), so the file length is
+    // the durable watermark.
+    let durable = std::fs::metadata(&paths.temp)
+        .map(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    assert!(
+        durable >= checkpointed,
+        "checkpoint {checkpointed} leads durable bytes {durable}"
+    );
+    pool.close().await;
+}

@@ -788,12 +788,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-08-13 修复**：新增 `DASH_MAX_SEGMENTS_PER_REPRESENTATION = 100_000` 与结构化错误码 `dash_segment_count_too_large`（已登记进 [`stable-error-codes.ts`](../src/lib/stable-error-codes.ts) 及 7 个 locale）。校验分两层：解析期的 `template_segment_count`（顺带消除了原本重复两遍的分片数计算），以及 `build_segment_plans` 入口的统一上限——后者是必要的，因为 SegmentList 的长度只受 `CONTROL_PLANE_MAX_BYTES` 约束，走不到解析期的模板检查。
 - **验证**：`cargo test --lib download::dash::`（16 通过），新增 4 项：超大 duration 拒绝、边界值（正好等于上限）必须放行、SegmentList 在计划构建器被拒绝、非有限比值饱和到上限而非回绕。
 
-### ARC-23（P1，Open）：退出时嵌套 timeout 使 abort 分支不可达，worker 被 detach
+### ARC-23（P1，Closed）：退出时嵌套 timeout 使 abort 分支不可达，worker 被 detach
 
 - **证据**：[`lib.rs`](../src-tauri/src/lib.rs#L131) 的 `shutdown_active_downloads` 中，`join_all` 内每个 future 的 `sleep(timeout)` 与外层 `tokio::time::timeout(timeout, join_all)` 用的是**同一个值**。外层几乎必然先触发并 drop `join_all`，内层的 `handle.abort(); handle.await` 永远执行不到。
 - **影响**：drop `JoinHandle` 只是 detach 而非 abort。超时退出时 supervisor task（含引擎、ffmpeg 子进程、打开的 BufWriter）继续运行到进程被 OS 回收，这段时间里仍在写临时文件与 SQLite，而 DB 可能已开始收尾，产生半写状态。`ARC-03` 验收中的「shutdown abort 后再次 await」在当前代码里没有生效。
 - **修复方向**：改为两轮——先用 `timeout` 等待优雅退出，再对 `!handle.is_finished()` 的逐个 `abort()` 并 `await`（abort 后 await 是即时的）。避免嵌套同值 timeout。
 - **验收**：构造一个不响应取消的 worker，断言退出流程在有界时间内完成且该 worker 确实被 abort。
+- **2026-09-12 修复**：`shutdown_active_downloads` 的收敛抽出为 [`drain_download_handles`](../src-tauri/src/lib.rs)——两阶段共享预算：阶段一在预算内等优雅退出，阶段二对剩余句柄逐个 abort+await（nothing detaches）。pending control（handle=None）仍由 token 取消兜底。句柄用 `Option<JoinHandle>` 槽位标记完成状态，避免对已完成句柄二次 poll（JoinHandle 双重 await 会 panic）。
+- **验证测试**：新增 [`tests/shutdown_drain.rs`](../src-tauri/tests/shutdown_drain.rs)（3 项）：合作型 worker 在预算内收敛、顽固 worker（忽略取消 120s）在预算后 abort+await 且总时长有界（<5s）、空句柄表立即返回。
 
 ### ARC-24（P1，Open）：Metalink 并行下载任一镜像失败即删除全部 part 文件
 
@@ -820,12 +822,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：`ProbeRequest` 新增 `cancel_token: Option<CancellationToken>`（后端内部结构，不进 Specta）。FTP `connect_session` 的拨号+TLS+登录整段包 30s 预算（`FTP_CONNECT_BUDGET`，新稳定码 `ftp_connect_timeout`）并与 token `select!`；SFTP `connect_sftp` 的重试循环整段包 30s 预算（`SFTP_CONNECT_BUDGET`，`sftp_connect_timeout`）同样与 token 竞争。HTTP 系控制面维持 client connect_timeout + `read_body_limited` 空闲超时的既有约束；对话框侧的取消源（UI → ProbeRequest）是后续 UX 项。
 - **验证测试**：`ftp_engine.rs`/`sftp_engine.rs` 各新增 `arc26_*_probe_with_cancelled_token_converges_immediately`（已取消 token 的探测秒级返回，证明 select! 收敛端到端贯通；超时分支与之同构）。
 
-### ARC-27（P1，Open）：HTTP 分段重试的退避 sleep 不可取消
+### ARC-27（P1，Closed）：HTTP 分段重试的退避 sleep 不可取消
 
 - **证据**：[`worker.rs`](../src-tauri/src/download/http/segmented/worker.rs#L113) 直接 `tokio::time::sleep(retry_after 或退避)`，没有与 cancel token 竞争。其余五个引擎（HLS、DASH、FTP、SFTP、Metalink）**全部**使用了 `select!`，唯独主力协议 HTTP 没有。
 - **影响**：服务器返回 429/503 且 `Retry-After: 60`（上限 60s）时点暂停，worker 会睡满 60 秒。而 `pause_task` 只等 5 秒就放弃 join 并执行状态转移，随后 worker 醒来继续发请求、继续写 checkpoint，与「已暂停」的 DB 状态冲突。
 - **修复方向**：用 `select!` 竞争 `cancel_token.cancelled()`，取消时先上报当前 offset 再返回。顺带把 `retry_delay` 中每次调用都读环境变量的 `VIBE_FAST_RETRY_DELAYS` 改为 `OnceLock<bool>` 缓存。
 - **验收**：`Retry-After: 60` 期间取消，断言 worker 在秒级退出且不再写入 checkpoint。
+- **2026-09-12 修复**：worker 重试退避（Retry-After 或指数退避）改用 `tokio::select!` 与 cancel token 竞争；取消时按 ARC-33 契约上报 durable offset 后返回 Ok。修复方向中提到的 `VIBE_FAST_RETRY_DELAYS` OnceLock 缓存**未采纳**——集成测试按用例设置/移除该变量，进程级缓存会破坏测试隔离。
+- **验证测试**：`http_engine.rs` 新增 `segmented_direct_cancel_during_retry_backoff_converges_quickly`——服务端 429 + `Retry-After: 60`，所有 worker 进入退避后取消，断言 10s 内（实测 0.5s）收敛；旧行为会睡满 60s。
 
 ### ARC-28（P1，Open）：BT 探测每次新建 librqbit Session、从不关闭、共享固定目录
 
@@ -848,12 +852,15 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：取消判定改用 `cancel_token.is_cancelled()` 这一权威来源；批量统计改按 `AppErrorPayload.code` 分派；SQLite BUSY 判定改用 sqlx 的结构化 error code；`probe_error.rs` 优先使用 reqwest 的类型化谓词与 `std::io::ErrorKind`，英文子串只作最后兜底并记录 debug 日志。`task_resume.rs` 已有的 `resume_errors_dispatch_on_code_not_message_text` 测试确立了这条原则，只是没有推广。
 - **验收**：修改任意错误文案不影响取消判定、批量统计与状态分流；新增对应回归测试。
 
-### ARC-31（P2，Open）：超大模块与跨引擎重复代码（`ARC-17` 的量化补充）
+### ARC-31（P2，Partial）：超大模块与跨引擎重复代码（`ARC-17` 的量化补充）
 
 - **证据**：Rust 侧 `hls/engine.rs` 2283 行、`metalink.rs` 2256、`bt.rs` 2036、`dash.rs` 1899、`create.rs` 1690、`browser.rs` 1670、`ftp.rs` 1606、`sftp.rs` 1535；前端侧 `SettingsPage.tsx` 2623、`TaskDetails.tsx` 2195、`NewDownloadDialog.tsx` 1859、`AppShell.tsx` 1538、`Palette.tsx` 1146。可安全抽取的重复：`percent_decode_*` 在 ftp/sftp/webdav 有三份逐字节等价实现；`apply_forwarded_headers` 在 http/hls/dash/webdav 有四份完全相同实现；**FTP 与 SFTP 的协调器有约 600 行近乎逐行相同的代码**。
 - **影响**：这不是代码洁癖问题，而是修复成本的乘数。`ARC-19` 必须在 ftp.rs 和 sftp.rs 各修一遍，将来也会在两处各退化一遍。`SettingsPage.tsx` 用 53 个 `useState` 镜像一个 `AppSettings`，新增一个设置项要改 5 处，极易漏改。
 - **修复方向**：抽 `download/segment_coordinator.rs`，用 `trait SegmentTransport` + `CoordinatorConfig` 统一 FTP/SFTP（与 `ARC-19` 一起做）；把三份 `percent_decode_*` 与四份 `apply_forwarded_headers` 收敛到共享模块；前端按 `ARC-17` 已列的 checklist 推进，建议顺序为 SettingsPage（有测试覆盖、风险最低）→ AppShell（只抽 hook 不动 JSX）→ TaskDetails → NewDownloadDialog。
 - **验收**：公共行为不变；FTP/SFTP 共用同一协调器且取消语义只有一处实现；上述四个前端巨型组件各降到 400 行以内。
+- **2026-09-12 修复（本条①）**：FTP/SFTP 协调器主循环的取消路径改为「先排空再 checkpoint」——检测到取消后进入 drain 循环（join_next + 消费 progress 直到 running 为空），每个 worker 得以观察取消、flush 缓冲并上报 durable offset，随后才执行 force checkpoint；主循环中途的 `Err(_) if cancelled` 同样路由到 drain。SFTP worker 取消出口的「flush 失败则不上报 offset」语义**保留**（ARC-19 的保守水位设计与 ARC-33 一致，不统一为 FTP 的硬失败）。
+- **验证测试**：`ftp_engine.rs` 新增 `arc31_parallel_cancel_drains_workers_before_checkpoint`（并行多段传输中途取消：引擎干净返回、checkpoint > 0、checkpoint 不领先磁盘水位）。
+- **②（共享协调器重构，推迟）**：约 1200 行去重（`SegmentTransport` trait 抽象）在本轮评估后推迟——2b 期间 FTP/SFTP 的取消/校验语义有多处独立变化，立即叠加大规模重构会放大回归面；在 2c/2d 稳定后单独执行。状态保持 Partial。
 
 以下 `ARC-32`～`ARC-48` 为 2026-08-26 第 4 轮复审新增。
 
@@ -921,12 +928,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：二选一并写入架构注释——(a) BtEngine 内单例共享 Session（回到共享拓扑，但必须同步补 ARC-29 的限速实时同步）；(b) 保持 per-task 但显式配置 DHT（disable 或各自端口）。probe 路径按 ARC-28 处理。
 - **验收**：两个 BT 任务并发下载互不影响；下载中 probe 另一 torrent 成功（兼作 ARC-28 验收）。
 
-### ARC-40（P2，Open）：worker panic 无 catch_unwind，slot/host 槽/缓存永久泄漏
+### ARC-40（P2，Closed）：worker panic 无 catch_unwind，slot/host 槽/缓存永久泄漏
 
 - **证据**：supervisor（spawn @ scheduler/mod.rs:366）的清理只在两个 checked 错误分支（:382-383、:407-408）与 engine.download 正常返回后（:459-461）执行；无 catch_unwind（全仓零命中），存储的 JoinHandle（:505-518）无人 poll。active_count 与 host 用量派生自 downloads.len()/map 内容（:143,169-174）。profile.release panic='unwind'（Cargo.toml:104）进程存活、泄漏固化。mod.rs:441-444 的 ARC-03 注释承认 panic 会从外层 JoinHandle 冒出——但没有任何消费者。
 - **影响**：一次引擎 panic（如畸形 Content-Range 触发 `ARC-48` 的溢出）→ 幽灵 DownloadControl 永久占用一个全局槽 + 该 source_key 的连接槽 + runtime-lock/request_headers 表项；日志反复出现「scheduler has no available slots」，需用户手动暂停/删除或重启。
 - **修复方向**：supervisor 体包 `AssertUnwindSafe(catch_unwind(...))`，poison 路径走同一套清理 + mark_download_failed("internal_panic")；或统一 monitor JoinHandle 兜底。
 - **验收**：注入 panic 的 fake engine 下断言 slot 释放、任务转 Failed、后续调度正常。
+- **2026-09-12 修复**：supervisor 的收敛体以 `catch_unwind(AssertUnwindSafe(engine.download(...)))` 包裹——panic 转为结构化失败消息（`describe_engine_panic`），随后的 downloads_map 移除、request_headers 移除、`mark_download_failed`、runtime lock evict、spawn_dispatch 全部照常执行，槽位不再泄漏。
+- **验证测试**：`scheduler/mod.rs` 新增 `engine_panic_tests`（3 项：&str/String/不透明 payload 的消息渲染）。完整路径的 panic 注入需要真实 AppHandle（同 scheduler_dispatch.rs 的 harness 说明），收敛体的执行保证由 catch_unwind 的控制流位置结构性提供。
 
 ### ARC-41（P2，Open）：start 失败谓词不含 queued，任务永久滞留队首静默重败
 

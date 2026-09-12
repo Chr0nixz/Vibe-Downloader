@@ -459,20 +459,28 @@ impl Scheduler {
             // tokio::spawn previously detached the engine when the outer handle was
             // aborted, leaving workers/ffmpeg running after pause/delete/shutdown.
             // Panics still surface through this outer JoinHandle (panic=unwind).
-            let result = engine
-                .download(DownloadContext {
-                    app: Some(task_app.clone()),
-                    pool: task_pool.clone(),
-                    task,
-                    cancel_token: task_cancel_token.clone(),
-                    finish: task_finish.clone(),
-                    speed_limiter: task_speed_limiter,
-                    connection_limit,
-                    request_headers: task_request_headers.clone(),
-                    proxy_config: task_proxy_config,
-                })
-                .await
-                .map_err(String::from);
+            let download = engine.download(DownloadContext {
+                app: Some(task_app.clone()),
+                pool: task_pool.clone(),
+                task,
+                cancel_token: task_cancel_token.clone(),
+                finish: task_finish.clone(),
+                speed_limiter: task_speed_limiter,
+                connection_limit,
+                request_headers: task_request_headers.clone(),
+                proxy_config: task_proxy_config,
+            });
+            // ARC-40: an engine panic must not skip the convergence body below —
+            // that would leak the downloads_map slot and the runtime lock, and
+            // leave the task stuck in Downloading. Catch the unwind, release the
+            // runtime state, and transition to Failed like any other error.
+            let result =
+                match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(download))
+                    .await
+                {
+                    Ok(result) => result.map_err(String::from),
+                    Err(panic_payload) => Err(describe_engine_panic(panic_payload)),
+                };
             let canceled = task_cancel_token.is_cancelled();
             let _ = downloads_map.lock().await.remove(&task_id);
             let _ = scheduler.request_headers.lock().await.remove(&task_id);
@@ -698,5 +706,38 @@ fn min_optional_limit(left: Option<i64>, right: Option<i64>) -> Option<i64> {
         (Some(left), Some(right)) => Some(left.min(right)),
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
+    }
+}
+
+/// ARC-40: renders a caught engine panic as the download failure message.
+pub(crate) fn describe_engine_panic(payload: Box<dyn std::any::Any + Send>) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string());
+    format!("The download engine crashed: {detail}")
+}
+
+#[cfg(test)]
+mod engine_panic_tests {
+    use super::describe_engine_panic;
+
+    #[test]
+    fn str_payload_is_described() {
+        let message = describe_engine_panic(Box::new("boom"));
+        assert_eq!(message, "The download engine crashed: boom");
+    }
+
+    #[test]
+    fn string_payload_is_described() {
+        let message = describe_engine_panic(Box::new(String::from("blew up")));
+        assert_eq!(message, "The download engine crashed: blew up");
+    }
+
+    #[test]
+    fn opaque_payload_falls_back() {
+        let message = describe_engine_panic(Box::new(7_u32));
+        assert_eq!(message, "The download engine crashed: unknown panic");
     }
 }

@@ -126,30 +126,66 @@ pub async fn shutdown_active_downloads(state: &AppState, timeout: std::time::Dur
     }
     drop(remaining);
 
-    // A-3 / ARC-03: Wait for all workers concurrently under a shared timeout.
-    // After abort, await again so the supervisor fully exits and releases slots.
-    let join_all = futures_util::future::join_all(handles.into_iter().map(
-        |(task_id, mut handle)| async move {
-            tokio::select! {
-                result = &mut handle => {
-                    match result {
-                        Ok(()) => tracing::debug!(task_id, "download task exited cleanly"),
-                        Err(e) => tracing::warn!(task_id, error = %e, "download task exited with error"),
-                    }
-                }
-                _ = tokio::time::sleep(timeout) => {
-                    tracing::warn!(task_id, "download task did not exit in time, aborting");
-                    handle.abort();
-                    match handle.await {
-                        Ok(()) => tracing::debug!(task_id, "aborted download task joined"),
-                        Err(e) => tracing::warn!(task_id, error = %e, "aborted download task join error"),
-                    }
-                }
-            }
-        },
-    ));
-    let _ = tokio::time::timeout(timeout, join_all).await;
+    drain_download_handles(handles, timeout).await;
     tracing::info!("shutdown_active_downloads complete");
+}
+
+/// ARC-23: two-phase drain with a SHARED budget. The previous shape raced each
+/// handle against its own `timeout` inside an outer `timeout(join_all)` using
+/// the same duration — the outer future expired first and dropped the inner
+/// ones, making the per-handle abort branch unreachable and detaching any
+/// unfinished worker (its checkpoint/flush died with the process).
+///
+/// Phase 1: wait gracefully until the whole budget is spent. Phase 2: abort
+/// whatever is left and await each handle so nothing detaches.
+pub async fn drain_download_handles(
+    handles: Vec<(String, JoinHandle<()>)>,
+    budget: std::time::Duration,
+) {
+    // `None` marks a handle that already completed in phase 1 so phase 2 never
+    // re-polls it (JoinHandle panics when awaited twice).
+    let mut slots: Vec<(String, Option<JoinHandle<()>>)> = handles
+        .into_iter()
+        .map(|(id, handle)| (id, Some(handle)))
+        .collect();
+
+    let grace = tokio::time::timeout(
+        budget,
+        futures_util::future::join_all(slots.iter_mut().map(|(task_id, slot)| async move {
+            if let Some(handle) = slot.as_mut() {
+                match handle.await {
+                    Ok(()) => tracing::debug!(task_id, "download task exited cleanly"),
+                    Err(e) => {
+                        tracing::warn!(task_id, error = %e, "download task exited with error")
+                    }
+                }
+                *slot = None;
+            }
+        })),
+    )
+    .await;
+    if grace.is_ok() {
+        return;
+    }
+
+    let remaining = slots.iter().filter(|(_, slot)| slot.is_some()).count();
+    tracing::warn!(
+        remaining,
+        "shutdown budget expired, aborting remaining download tasks"
+    );
+    for (_, slot) in slots.iter_mut() {
+        if let Some(handle) = slot.as_mut() {
+            handle.abort();
+        }
+    }
+    for (task_id, slot) in slots {
+        if let Some(handle) = slot {
+            match handle.await {
+                Ok(()) => tracing::debug!(task_id, "aborted download task joined"),
+                Err(e) => tracing::warn!(task_id, error = %e, "aborted download task join error"),
+            }
+        }
+    }
 }
 
 /// R-4: Single source of truth for the command list shared between

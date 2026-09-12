@@ -1086,6 +1086,16 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
         // both sides of the resume test's 2 s cancel window even under heavy
         // parallel suite load (the 64 KiB /slow transfer finishes in ~0.65 s,
         // so its usable cancel window is too narrow to be load-tolerant).
+        // ARC-27: a long server-imposed backoff that the test cancels out of.
+        "/retry-after-forever" => {
+            let response = "HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+Content-Length: 0
+Connection: close
+
+";
+            let _ = stream.write_all(response.as_bytes());
+        }
         "/slow-resume" => respond_file(
             &mut stream,
             method,
@@ -1445,4 +1455,54 @@ fn parse_header(line: &str, expected_name: &str) -> Option<String> {
     let (name, value) = line.split_once(':')?;
     name.eq_ignore_ascii_case(expected_name)
         .then(|| value.trim().to_string())
+}
+
+/// ARC-27: a worker sleeping in a server-imposed Retry-After backoff must
+/// converge as soon as the user cancels — not after the full 60s backoff.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn segmented_direct_cancel_during_retry_backoff_converges_quickly() {
+    let server = start_test_server();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("segmented-backoff-cancel");
+    let payload = mid_abort_payload();
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    let started = std::time::Instant::now();
+    let download = {
+        let engine = engine.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            engine
+                .download_segmented_direct(
+                    DirectSegmentedDownloadRequest {
+                        url: format!("{}/retry-after-forever", server.base_url),
+                        temp_path: paths.temp.clone(),
+                        final_path: paths.final_path.clone(),
+                        total_size: payload.len() as i64,
+                        supports_resume: true,
+                        supports_parallel: true,
+                        segments: direct_segments("segmented-backoff-cancel", payload.len() as i64),
+                        etag: None,
+                        last_modified: None,
+                    },
+                    cancel,
+                )
+                .await
+        })
+    };
+
+    // Let every worker enter its 60s backoff, then cancel.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    cancel.cancel();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), download).await;
+    assert!(
+        result.is_ok(),
+        "ARC-27 regression: cancel during Retry-After backoff did not converge quickly"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(9),
+        "convergence took {:?}; the worker slept through the backoff",
+        started.elapsed()
+    );
 }
