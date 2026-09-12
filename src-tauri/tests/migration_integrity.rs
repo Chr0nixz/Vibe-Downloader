@@ -33,7 +33,7 @@ async fn full_migration_on_fresh_database() {
         .fetch_one(&pool)
         .await
         .expect("count migrations");
-    assert_eq!(count, 6, "expected exactly 6 migrations, got {count}");
+    assert_eq!(count, 7, "expected exactly 7 migrations, got {count}");
 
     pool.close().await;
 }
@@ -616,8 +616,8 @@ async fn migration_idempotent_on_reconnect() {
         .await
         .expect("count");
     assert_eq!(
-        count, 6,
-        "expected exactly 6 migrations on reconnect, got {count}"
+        count, 7,
+        "expected exactly 7 migrations on reconnect, got {count}"
     );
     pool2.close().await;
 

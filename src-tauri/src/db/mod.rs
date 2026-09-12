@@ -59,12 +59,14 @@ pub use self::hls::{
     HlsSegmentRecord, HlsSegmentUpsert, HlsTaskRecord, HlsTaskUpsert,
 };
 pub use self::metalink::{
-    insert_metalink_resource, list_healthy_mirrors_for_file, list_metalink_resources_for_file,
+    delete_metalink_file_plan, get_metalink_file_plan, insert_metalink_resource,
+    list_healthy_mirrors_for_file, list_metalink_resources_for_file,
     list_metalink_resources_for_task, mark_metalink_resource_attempted,
     mark_metalink_resource_completed, mark_metalink_resource_failed, mark_mirror_unsupported_range,
     promote_metalink_resource_for_retry, reset_metalink_resource_statuses,
     set_metalink_mirror_cooldown, update_metalink_resource_validators, update_mirror_speed,
-    upsert_metalink_task, MetalinkResourceInsert, MetalinkResourceRecord, MetalinkTaskUpsert,
+    upsert_metalink_file_plan, upsert_metalink_task, MetalinkFilePlan, MetalinkResourceInsert,
+    MetalinkResourceRecord, MetalinkTaskUpsert,
 };
 pub use self::request_diagnostics::{
     insert_request_diagnostic, list_request_diagnostics_page, prune_request_diagnostics,

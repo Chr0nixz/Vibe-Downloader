@@ -447,3 +447,76 @@ pub async fn promote_metalink_resource_for_retry(
     .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/// ARC-34: persisted parallel-plan identity for a Metalink file. Boundaries
+/// are a deterministic function of (total_size, worker_count), so storing the
+/// pair is sufficient to reproduce the exact range split a previous session
+/// used — mirror health changes never re-partition a resumed file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetalinkFilePlan {
+    pub worker_count: i64,
+    pub total_size: i64,
+}
+
+pub async fn get_metalink_file_plan(
+    pool: &SqlitePool,
+    task_id: &str,
+    file_id: &str,
+) -> Result<Option<MetalinkFilePlan>, String> {
+    let row = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT worker_count, total_size FROM metalink_file_plans WHERE task_id = ? AND file_id = ?",
+    )
+    .bind(task_id)
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(row.map(|(worker_count, total_size)| MetalinkFilePlan {
+        worker_count,
+        total_size,
+    }))
+}
+
+/// Writes or replaces the plan. Called only when a fresh parallel plan is
+/// created (parts discarded); resume paths never rewrite it.
+pub async fn upsert_metalink_file_plan(
+    pool: &SqlitePool,
+    task_id: &str,
+    file_id: &str,
+    worker_count: usize,
+    total_size: i64,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        INSERT INTO metalink_file_plans (task_id, file_id, worker_count, total_size, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(task_id, file_id) DO UPDATE SET
+            worker_count = excluded.worker_count,
+            total_size = excluded.total_size,
+            created_at = excluded.created_at
+        "#,
+    )
+    .bind(task_id)
+    .bind(file_id)
+    .bind(i64::try_from(worker_count).unwrap_or(0))
+    .bind(total_size)
+    .bind(now_iso())
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn delete_metalink_file_plan(
+    pool: &SqlitePool,
+    task_id: &str,
+    file_id: &str,
+) -> Result<(), String> {
+    sqlx::query("DELETE FROM metalink_file_plans WHERE task_id = ? AND file_id = ?")
+        .bind(task_id)
+        .bind(file_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}

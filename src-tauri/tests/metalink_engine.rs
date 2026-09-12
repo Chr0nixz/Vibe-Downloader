@@ -43,7 +43,8 @@ use tauri_app_lib::{
     db,
     download::{
         testing::{
-            assemble_metalink_part_files, download_metalink_range_from_mirror, part_file_path,
+            assemble_metalink_part_files, download_metalink_file_parallel,
+            download_metalink_range_from_mirror, part_file_path,
             run_metalink_range_worker_with_failover, MetalinkWorkerProgress,
         },
         DownloadEngine, GlobalSpeedLimiter, HttpEngine, MetalinkEngine, ProbeRequest,
@@ -1722,8 +1723,12 @@ async fn fun09_mismatched_content_range_rejects_resume() {
         error.contains("Content-Range") || error.contains("Resume unavailable"),
         "got: {error}"
     );
-    let part_data = tokio::fs::read(&part_path).await.expect("read part");
-    assert_eq!(part_data, payload[0..5]);
+    // ARC-35: a polluted part is deleted before failing over — keeping it
+    // would let the garbage bytes poison the next mirror attempt.
+    assert!(
+        !part_path.exists(),
+        "mismatched Content-Range must delete the polluted part"
+    );
 
     let _ = tokio::fs::remove_file(&temp_path).await;
     let _ = tokio::fs::remove_file(&part_path).await;
@@ -2368,5 +2373,128 @@ async fn download_reenters_after_reset_interrupted_tasks() {
     assert!(paths.final_path.exists(), "final file must exist");
     let written = std::fs::read(&paths.final_path).expect("read final");
     assert_eq!(written, payload.as_slice());
+    pool.close().await;
+}
+
+/// ARC-34: a stored plan whose worker_count disagrees with the fresh
+/// computation (here: 3 mirrors paused, 2 healthy on resume) must discard the
+/// stale parts and re-download — never re-partition bytes written under the
+/// old boundaries. The old behavior recomputed boundaries from the current
+/// healthy count and could publish a mis-partitioned file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn arc34_plan_identity_mismatch_discards_stale_parts() {
+    let payload: Vec<u8> = (0..30u8).collect();
+    let payload = Arc::new(payload);
+    let range_log = Arc::new(Mutex::new(Vec::new()));
+    let server = start_mirror_server(payload.clone(), range_log.clone(), None, false);
+
+    let pool = test_pool("arc34-plan").await;
+    let mirror_url = format!("{}/payload.bin", server.base_url);
+    // metalink_resources has UNIQUE(file_id, url): give each mirror a
+    // distinct query so three rows actually land.
+    let mirrors_seed: Vec<String> = (0..3)
+        .map(|index| format!("{mirror_url}?mirror={index}"))
+        .collect();
+    let mirror_refs: Vec<&str> = mirrors_seed.iter().map(String::as_str).collect();
+    let (file_id, _resource_ids) = seed_mirrors(&pool, "arc34-plan", &mirror_refs).await;
+    let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
+        .await
+        .expect("list mirrors");
+    let task = db::get_task_record(&pool, "metalink-test-task-arc34-plan")
+        .await
+        .expect("read task")
+        .expect("task exists");
+    let file = db::list_task_file_records(&pool, &task.id)
+        .await
+        .expect("list files")
+        .into_iter()
+        .next()
+        .expect("file row");
+    // The parallel path scales ranges off file.total_size; the seeded row
+    // carries 0, so override it in memory for this call.
+    let file = tauri_app_lib::models::TaskFileRecord {
+        total_size: 30,
+        ..file
+    };
+
+    let client = test_client();
+    let speed_limiter = GlobalSpeedLimiter::disabled();
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let temp_path = unique_temp_path("arc34-plan");
+    let final_path = unique_temp_path("arc34-plan-final");
+
+    // Session 1: 3 healthy mirrors → worker_count 3, ranges 0-9/10-19/20-29.
+    // Fresh start writes the plan identity (3, 30).
+    let downloaded = download_metalink_file_parallel(
+        &None,
+        &pool,
+        &task,
+        &file,
+        &client,
+        &[],
+        &speed_limiter,
+        &cancel_token,
+        0,
+        &temp_path,
+        &final_path,
+        mirrors.clone(),
+    )
+    .await
+    .expect("3-mirror download");
+    assert_eq!(downloaded, 30);
+    let plan = db::get_metalink_file_plan(&pool, &task.id, &file.id)
+        .await
+        .expect("read plan")
+        .expect("plan persisted on fresh start");
+    assert_eq!(plan.worker_count, 3);
+    assert_eq!(plan.total_size, 30);
+
+    // Session 2: only 2 healthy mirrors → fresh worker_count is 2, which
+    // disagrees with the stored 3-worker plan. The stale parts (part-0 was
+    // re-created by session 1's assembly? No — parts are cleaned after
+    // assembly; pre-write one to prove the mismatch path discards it) must be
+    // discarded and the ranges re-derived as 0-14/15-29.
+    tokio::fs::write(part_file_path(&temp_path, 0), &payload[0..10])
+        .await
+        .expect("pre-write stale part");
+    let healthy_two: Vec<_> = mirrors[..2].to_vec();
+    let final_path_two = unique_temp_path("arc34-plan-final-2");
+    let downloaded = download_metalink_file_parallel(
+        &None,
+        &pool,
+        &task,
+        &file,
+        &client,
+        &[],
+        &speed_limiter,
+        &cancel_token,
+        0,
+        &temp_path,
+        &final_path_two,
+        healthy_two,
+    )
+    .await
+    .expect("2-mirror download after identity mismatch");
+    assert_eq!(downloaded, 30);
+
+    let ranges = range_log.lock().expect("range log").clone();
+    let two_mirror_ranges: Vec<_> = ranges
+        .iter()
+        .filter(|range| range.contains("bytes=0-14") || range.contains("bytes=15-29"))
+        .cloned()
+        .collect();
+    assert!(
+        two_mirror_ranges.len() >= 2,
+        "expected the 2-worker re-partition (0-14/15-29), got {ranges:?}"
+    );
+    let plan = db::get_metalink_file_plan(&pool, &task.id, &file.id)
+        .await
+        .expect("read plan 2")
+        .expect("plan rewritten");
+    assert_eq!(plan.worker_count, 2, "plan identity must be rewritten");
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+    let _ = tokio::fs::remove_file(&final_path).await;
+    let _ = tokio::fs::remove_file(&final_path_two).await;
     pool.close().await;
 }

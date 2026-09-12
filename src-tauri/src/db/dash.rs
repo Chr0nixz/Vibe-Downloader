@@ -204,17 +204,25 @@ pub async fn upsert_dash_segment(
             init_segment_local_path = excluded.init_segment_local_path,
             duration_ms = excluded.duration_ms,
             downloaded_bytes = CASE
-                WHEN dash_segments.uri = excluded.uri AND dash_segments.local_path = excluded.local_path
-                THEN dash_segments.downloaded_bytes ELSE 0 END,
-            status = CASE
-                WHEN dash_segments.uri = excluded.uri AND dash_segments.local_path = excluded.local_path
-                THEN dash_segments.status ELSE 'pending' END,
-            retry_count = CASE
-                WHEN dash_segments.uri = excluded.uri AND dash_segments.local_path = excluded.local_path
-                THEN dash_segments.retry_count ELSE 0 END,
-            last_error = CASE
-                WHEN dash_segments.uri = excluded.uri AND dash_segments.local_path = excluded.local_path
-                THEN dash_segments.last_error ELSE NULL END,
+                    WHEN dash_segments.duration_ms = excluded.duration_ms
+                         AND dash_segments.byte_range_start IS excluded.byte_range_start
+                         AND dash_segments.byte_range_length IS excluded.byte_range_length
+                    THEN dash_segments.downloaded_bytes ELSE 0 END,
+                status = CASE
+                    WHEN dash_segments.duration_ms = excluded.duration_ms
+                         AND dash_segments.byte_range_start IS excluded.byte_range_start
+                         AND dash_segments.byte_range_length IS excluded.byte_range_length
+                    THEN dash_segments.status ELSE 'pending' END,
+                retry_count = CASE
+                    WHEN dash_segments.duration_ms = excluded.duration_ms
+                         AND dash_segments.byte_range_start IS excluded.byte_range_start
+                         AND dash_segments.byte_range_length IS excluded.byte_range_length
+                    THEN dash_segments.retry_count ELSE 0 END,
+                last_error = CASE
+                    WHEN dash_segments.duration_ms = excluded.duration_ms
+                         AND dash_segments.byte_range_start IS excluded.byte_range_start
+                         AND dash_segments.byte_range_length IS excluded.byte_range_length
+                    THEN dash_segments.last_error ELSE NULL END,
             updated_at = excluded.updated_at
         "#,
     )
@@ -272,16 +280,24 @@ pub async fn bulk_upsert_dash_segments(
                 init_segment_local_path = excluded.init_segment_local_path,
                 duration_ms = excluded.duration_ms,
                 downloaded_bytes = CASE
-                    WHEN dash_segments.uri = excluded.uri AND dash_segments.local_path = excluded.local_path
+                    WHEN dash_segments.duration_ms = excluded.duration_ms
+                         AND dash_segments.byte_range_start IS excluded.byte_range_start
+                         AND dash_segments.byte_range_length IS excluded.byte_range_length
                     THEN dash_segments.downloaded_bytes ELSE 0 END,
                 status = CASE
-                    WHEN dash_segments.uri = excluded.uri AND dash_segments.local_path = excluded.local_path
+                    WHEN dash_segments.duration_ms = excluded.duration_ms
+                         AND dash_segments.byte_range_start IS excluded.byte_range_start
+                         AND dash_segments.byte_range_length IS excluded.byte_range_length
                     THEN dash_segments.status ELSE 'pending' END,
                 retry_count = CASE
-                    WHEN dash_segments.uri = excluded.uri AND dash_segments.local_path = excluded.local_path
+                    WHEN dash_segments.duration_ms = excluded.duration_ms
+                         AND dash_segments.byte_range_start IS excluded.byte_range_start
+                         AND dash_segments.byte_range_length IS excluded.byte_range_length
                     THEN dash_segments.retry_count ELSE 0 END,
                 last_error = CASE
-                    WHEN dash_segments.uri = excluded.uri AND dash_segments.local_path = excluded.local_path
+                    WHEN dash_segments.duration_ms = excluded.duration_ms
+                         AND dash_segments.byte_range_start IS excluded.byte_range_start
+                         AND dash_segments.byte_range_length IS excluded.byte_range_length
                     THEN dash_segments.last_error ELSE NULL END,
                 updated_at = excluded.updated_at
             "#,

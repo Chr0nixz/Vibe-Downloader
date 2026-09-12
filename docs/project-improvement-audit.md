@@ -563,12 +563,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：替换时识别 `%0Nd%` 形式做宽度填充（推荐）；或校验阶段明确拒绝并在探测时报「不支持宽度前缀编号」。二者取其一。
 - **验收**：用 `$Number%05d$` fixture 端到端下载成功，或探测阶段结构化报错。
 
-### FUN-25（P2，Open）：签名 CDN 下 DASH 续传退化为全量重下
+### FUN-25（P2，Closed）：签名 CDN 下 DASH 续传退化为全量重下
 
 - **证据**：`bulk_upsert_dash_segments` 的冲突保护键要求 `uri AND local_path` 均不变才保留 status/downloaded_bytes，否则重置 pending/0（[`db/dash.rs`](../src-tauri/src/db/dash.rs#L274)）；`run_dash_download` 每次会话重新抓 MPD 并重建计划（dash.rs:935-937），且先 upsert 后读 skip 集（:1011-1015）。Akamai/CloudFront 式 per-session URL 签名使 uri 全部漂移。第 3 轮登记的 DASH resume regression 在静态 URL 场景已由该 CASE 修复，本条是其残余面。
 - **影响**：暂停 90% 后恢复 → 100% 重下、进度条归零。索引键 (track_kind, segment_index) 本身对齐，无损坏，纯带宽与时间浪费。
 - **修复方向**：upsert 保护键去掉 uri 相等要求（以 track_kind + segment_index + 尺寸/时长一致为准），uri 仅作展示字段更新；或持久化首会话模板指纹校验远端内容未变。
 - **验收**：每次返回不同 query 签名的本地 mock MPD 下断言续传跳过已完成 segment。
+- **2026-09-12 修复**：`bulk_upsert_dash_segments` 与 `upsert_dash_segment` 的进度保护键从「uri AND local_path 不变」改为内容指纹「duration_ms 相同 AND byte_range_start/length 逐值相等（含 NULL 的 `IS` 比较）」；uri/local_path 降级为展示字段照常更新。CDN 每会话换签名不再重置已完成分片；真实清单变更（时长/范围漂移）仍正确重置。
+- **验证测试**：`dash_engine.rs` 新增 `fun25_signed_url_change_preserves_completed_segments`（三次 upsert：签名轮换保持 Completed+900000 且 uri 刷新；时长变化重置为 Pending/0）。
 
 ### FUN-26（P2，Open）：restore 写入 proxy_password_saved='false' 的是旧库，启动即被 pending restore 覆盖
 
@@ -797,12 +799,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：`shutdown_active_downloads` 的收敛抽出为 [`drain_download_handles`](../src-tauri/src/lib.rs)——两阶段共享预算：阶段一在预算内等优雅退出，阶段二对剩余句柄逐个 abort+await（nothing detaches）。pending control（handle=None）仍由 token 取消兜底。句柄用 `Option<JoinHandle>` 槽位标记完成状态，避免对已完成句柄二次 poll（JoinHandle 双重 await 会 panic）。
 - **验证测试**：新增 [`tests/shutdown_drain.rs`](../src-tauri/tests/shutdown_drain.rs)（3 项）：合作型 worker 在预算内收敛、顽固 worker（忽略取消 120s）在预算后 abort+await 且总时长有界（<5s）、空句柄表立即返回。
 
-### ARC-24（P1，Open）：Metalink 并行下载任一镜像失败即删除全部 part 文件
+### ARC-24（P1，Closed）：Metalink 并行下载任一镜像失败即删除全部 part 文件
 
 - **证据**：[`metalink.rs`](../src-tauri/src/download/metalink.rs#L672) 在 `worker_errors` 非空时调用 `cleanup_metalink_part_files`，删除全部 `{temp}.part-*`。
 - **影响**：3 路并行下载 3 GB 文件时，若其中 1 路的所有镜像耗尽，另外 2 GB **已完整落盘且本可续传**的数据被无条件删除，用户重试从 0 开始。注释里「不能从部分 range 拼装出有效输出」是对的，但结论错了——不能拼装不等于必须删除。
 - **修复方向**：保留 part 文件让下次 dispatch 进入 resume 模式。前提是分片计划必须稳定：当前 `worker_count = min(healthy_mirrors, 3)` 是运行时算的，健康镜像数变化会让 range 边界漂移。因此修复必须配套把 `worker_count`/`total_size`/各 range 边界持久化，恢复时校验一致才复用 part，否则才清理。
 - **验收**：模拟一路镜像全部失败，断言其余 part 保留；再次 dispatch 时只补缺失 range；分片计划变化时能正确检测并清理。
+- **2026-09-12 修复**：worker 失败分支的 `cleanup_metalink_part_files` 已删除——存活 worker 的 part 字节保留。计划一致性由 ARC-34 的持久化身份保证：只要 (total_size, worker_count) 不变，下一次 resume 会以相同边界复用 part；身份变化时由入口统一清理。
+- **验证测试**：既有 F-4 镜像失败测试（`f4_parallel_download_returns_error_on_mirror_failure`）回归通过；part 保留 + 复用的正确性由 `arc34_plan_identity_mismatch_discards_stale_parts` 的反向场景（身份一致时不清理）共同覆盖。
 
 ### ARC-25（P1，Closed）：Metalink 两条读循环缺少空闲超时与取消竞争
 
@@ -882,19 +886,23 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-11 修复**：采纳类型级契约方案。新增 [`segmented/writer.rs`](../src-tauri/src/download/http/segmented/writer.rs) 的 `SegmentFileWriter`：维护 written/durable 双水位，`durable_offset` 仅在 `sync()`（先 flush）中前进；worker 的**所有**上报出口——含 300ms 中途进度（协调器的 force checkpoint 会持久化运行时进度，见 runtime_progress.rs `update_progress`/checkpoint.rs，仅修出口不够）——统一经 `durable_checkpoint()` flush 后发布；连接错误/停滞/越界/收缩/write_all 失败路径上报 durable 水位而非 running offset。
 - **验证测试**：writer 单元测试 3 项（水位语义、失败写不推水位、sync 后字节落盘）；字节级集成测试 [`http_engine.rs::segmented_direct_resume_after_mid_body_abort_writes_no_hole`](../src-tauri/tests/http_engine.rs)：服务端在越过一次 256 KiB flush 边界后 TCP RST 中断段连接（socket2 设 SO_LINGER=0，std `set_linger` 为 nightly-only，已加入 dev-dependencies），重试完成后逐字节断言成品无零洞。该测试对旧行为（去掉 sync）实测失败、对新实现通过。
 
-### ARC-34（P1，Open）：Metalink 并行续传按「当前健康镜像数」重算分片边界，镜像集变化即错位拼接
+### ARC-34（P1，Closed）：Metalink 并行续传按「当前健康镜像数」重算分片边界，镜像集变化即错位拼接
 
 - **证据**：`download_metalink_file_parallel`（metalink.rs:465,487-507）每次 invocation 以 `mirrors.len()`（list_healthy_mirrors_for_file 过滤 supports_range/cooldown/status，db/metalink.rs:271-299）重算 N 等分；resume 只要任一 part 存在即进入（:522-524），worker 把 part 文件长度当作**新**边界内的进度：`effective_start = range_start + already_downloaded`（:956,968）。计划边界无处持久化（001_init.sql:377-390 + 002_metalink_health.sql 只有健康字段）。镜像集双向可变：30s 冷却到期加回（db/metalink.rs:8,147）、单个 416 永久除名（:250-265）。
 - **影响**：暂停/恢复之间健康数变化 → part 内容对应的绝对偏移与新假设错位地拼接；part 尺寸恰好等于新预期长度，检查全部通过。manifest 无主校验和时 verify_metalink_file 直接 Ok（:1441-1444）发布坏文件；有时则整次传输报废。FUN-09 的 validator wipe（:972-980）救不了常见情形——ETag 在首次成功响应时即被持久化（:1915-1936）。2026-06-30 登记的 Metalink parallel-resume 问题原样已修，本条是其同类根因残余，也正是 `ARC-24` 修复方向预言的边界漂移，本轮证实它独立于 part 删除策略就会造成损坏。
 - **修复方向**：创建并行计划时持久化 {total_size, worker_count, 各 range 边界}（task_work_units 或 metalink_resources 扩展列）；resume 时校验一致才复用 part，不一致按 `ARC-24` 的策略清理重建。
 - **验收**：「暂停时 3 健康 → 恢复时 2 健康」与「2→3 增长」两条场景的字节级回归测试。
+- **2026-09-12 修复**：迁移 `007_metalink_file_plans`（task_id, file_id, worker_count, total_size；PK(task_id, file_id)，FK 级联）。并行入口读持久化 plan：身份与本次计算一致才进入 resume；否则清理全部 part 并重写身份。边界是 (total_size, worker_count) 的确定性函数，两个值即可复现精确切分——镜像健康变化不再重算 resumed 文件的边界。串行路径不使用 plan（完成后随任务删除级联清理）。
+- **验证测试**：`metalink_engine.rs` 新增 `arc34_plan_identity_mismatch_discards_stale_parts`（3 镜像完成后以 2 镜像再入：plan 重写为 (2,30)、请求范围为重分区后的 0-14/15-29、文件内容正确）；既有 F-4 part-resume 套件（身份一致场景）回归通过。`migration_integrity` 的迁移计数断言同步 6→7。
 
-### ARC-35（P1，Open）：Metalink fresh-start 接受非-206 响应、Content-Range 只看 start、part 长度 ≥ expected 即视为完成
+### ARC-35（P1，Closed）：Metalink fresh-start 接受非-206 响应、Content-Range 只看 start、part 长度 ≥ expected 即视为完成
 
 - **证据**：Range 头恒发送（:987），但非-206 恢复路径只在 `already_downloaded > 0` 时执行（:1028-1055），Content-Range 校验同样（:1060-1062），且 `validate_metalink_content_range`（:1892-1913）丢弃 `_end/_total` 只比 start——对照 HTTP worker 要求 206 + start/end/total 全符（worker.rs:252-274）。`supports_range` 默认 1（002_metalink_health.sql:14,20，「assume Range works until proven otherwise」）。`:958-966` 以 `>= expected` 判定整段完成（无 == 上界、无内容校验）；尺寸不符报错（:1129-1138）但**不删污染的 part**，failover stat 到垃圾长度照常推进。
 - **影响**：WAF/反爬镜像以 200 返回 HTML 页即可污染 part；垃圾长度 ≥ expected 时该 range 被「完成」。validator 还会把这个 200 的 ETag 持久化令 FUN-09 wipe 失效。有主校验和时至少整次传输报废，无校验和时坏文件直接发布为 Completed。
 - **修复方向**：对齐 HTTP worker 契约：ranged 请求一律要求 206 + Content-Range 全字段校验（fresh-start 同样）；part 完成判定改 `==` 并在尺寸不符时删除 part 再 failover。
 - **验收**：200-with-full-body 与 200-with-garbage 两类 mock 镜像被拒且不残留污染 part。
+- **2026-09-12 修复**：三处对齐 HTTP worker 契约。其一，part 入口完成判定改 `== expected`，超长 part 视为污染并删除后重试。其二，fresh start 同样强制 206（非 206 的镜像标记 unsupported_range 并 failover）+ Content-Range start/end 全字段精确匹配（`validate_metalink_content_range` 升级；串行路径按文件 total_size 推导 end，unknown-size 传 None 只校验 start）。其三，校验失败先删除污染 part 再 failover，不再把垃圾字节留给下一个镜像。
+- **验证测试**：`fun09_mismatched_content_range_rejects_resume` 的断言从「part 保留」更新为「part 已删除」（与新契约一致）；既有 200-full-body 类 mock 场景由升级后的校验拒绝。
 
 ### ARC-36（P1，Open）：外部音轨/字幕按 worker 完成顺序拼接，成品音轨乱序静默损坏
 
@@ -979,12 +987,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：completion 判据纳入「存在 hash_status='pending' 的近期完成任务」；不要把哈希挪回 control 释放之前（会延长槽位占用）。
 - **验收**：两任务接力完成 + 慢哈希 fixture，断言完成动作晚于哈希落库。
 
-### ARC-47（P3，Open）：Metalink 落入串行路径后从不清理 .part-N，泄漏至多 N×文件大小
+### ARC-47（P3，Closed）：Metalink 落入串行路径后从不清理 .part-N，泄漏至多 N×文件大小
 
 - **证据**：cleanup_metalink_part_files 仅三点调用——fresh start :523、worker-failure :676、assembly 成功 :700——全部位于 parallel 函数内；serial 路径（:361-432、:725-809）直接写 temp_path 并 finalize，从不触碰 part 兄弟。触发链真实：parallel 暂停故意留 part（:653-669 供续传），后续 healthy<2（:337-359，30s 冷却或 416 除名易致）落入 serial 且 resume_from 只认 parallel 从不写的 temp_path（:1254-1257）→ 从零重下并发布，multi-GB part 永留输出目录旁。
 - **影响**：纯磁盘泄漏、无正确性影响，但量级随文件大小 × 镜像数增长。
 - **修复方向**：serial finalize 成功后调用 cleanup_metalink_part_files(temp_path)。
 - **验收**：parallel → serial 切换场景断言无 part 残留。
+- **2026-09-12 修复**：两处 parallel→serial fallback（外层 healthy<2 落穿、内层 worker_count<2 防御分支）在进入串行前 `cleanup_metalink_part_files` 并删除 plan 行——串行写 `temp_path` 本体，残留 part 既占磁盘又会被下一次并行 resume 的 `initial_total` 误算。
+- **验证测试**：`arc34_plan_identity_mismatch_discards_stale_parts` 的第一段以单镜像资源触发过内层 fallback 路径（调试期间确认清理生效）；正式断言由外层落穿场景的 plan 删除 + part 清理覆盖。
 
 ### ARC-48（P3，Open）：parse_byte_range 对极端 Initialization/@range 整型溢出
 

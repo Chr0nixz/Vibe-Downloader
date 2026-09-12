@@ -353,6 +353,12 @@ async fn download_metalink_file(
             )
             .await;
         }
+        // ARC-47: not enough healthy range-capable mirrors — the serial path
+        // writes `temp_path` itself, so any sibling `.part-*` files from a
+        // previous parallel attempt are garbage and would poison the next
+        // parallel plan's resume. Clean them before falling through.
+        cleanup_metalink_part_files(&temp_path).await;
+        db::delete_metalink_file_plan(pool, &task.id, &file.id).await?;
         // Not enough healthy range-capable mirrors — fall through to the
         // serial path, which can still use mirrors that don't advertise
         // Range support via full-file GET.
@@ -442,7 +448,7 @@ async fn download_metalink_file(
 /// for a range are exhausted, the worker reports a partial-completion
 /// error and the engine falls back to the serial full-file path.
 #[allow(clippy::too_many_arguments)]
-async fn download_metalink_file_parallel(
+pub async fn download_metalink_file_parallel(
     app: &Option<AppHandle>,
     pool: &SqlitePool,
     task: &TaskRecord,
@@ -466,7 +472,10 @@ async fn download_metalink_file_parallel(
     let total_size = file.total_size.max(0);
     if worker_count < 2 || total_size == 0 {
         // Defensive: the dispatcher already checks these conditions.
-        // If we somehow get here, fall back to the serial path.
+        // If we somehow get here, fall back to the serial path — with the
+        // same ARC-47 sibling-part cleanup as the outer fall-through.
+        cleanup_metalink_part_files(temp_path).await;
+        db::delete_metalink_file_plan(pool, &task.id, &file.id).await?;
         return download_metalink_file_serial(
             app,
             pool,
@@ -516,11 +525,17 @@ async fn download_metalink_file_parallel(
         })?;
     }
 
-    // F-2: Only clean up part files when none exist (fresh start). If any
-    // part file is present, we enter resume mode — workers append to the
-    // existing part and send a range request offset by the existing bytes.
-    if all_part_files_absent(temp_path, worker_count).await {
+    // F-2 + ARC-34: a resume is only valid when the persisted plan identity
+    // matches the fresh computation — mirror health changes never re-partition
+    // a resumed file. A stale or absent plan means fresh start: discard any
+    // leftover parts, then persist the new identity for the next resume.
+    let stored_plan = db::get_metalink_file_plan(pool, &task.id, &file.id).await?;
+    let plan_matches = stored_plan
+        .as_ref()
+        .is_some_and(|plan| plan.worker_count == count_i64 && plan.total_size == total_size);
+    if !plan_matches {
         cleanup_metalink_part_files(temp_path).await;
+        db::upsert_metalink_file_plan(pool, &task.id, &file.id, worker_count, total_size).await?;
     }
 
     // Each worker owns exactly one mirror from the head of the list.
@@ -673,7 +688,9 @@ async fn download_metalink_file_parallel(
         // Some workers failed. If at least one range completed we still
         // have a partial file, but we cannot assemble a valid output
         // from partial ranges, so clean up and report partial completion.
-        cleanup_metalink_part_files(temp_path).await;
+        // ARC-24: keep surviving parts — the persisted plan identity (above)
+        // guarantees the next resume reuses the same boundaries, so the bytes
+        // already downloaded by healthy workers stay valuable.
         progress_gate.flush(app);
         return Err(engine_error(
             "metalink_partial_completion",
@@ -960,7 +977,14 @@ pub async fn download_metalink_range_from_mirror(
     // F-2: Resume — stat the existing part file to get `already_downloaded`.
     let mut already_downloaded: u64 = fs::metadata(part_path).await.map(|m| m.len()).unwrap_or(0);
     let mut already_downloaded_i64 = i64::try_from(already_downloaded).unwrap_or(i64::MAX);
-    if already_downloaded_i64 >= expected {
+    if already_downloaded_i64 > expected {
+        // ARC-35: an oversized part is polluted — garbage bytes past the range
+        // boundary must never be treated as completed. Drop and restart.
+        let _ = fs::remove_file(part_path).await;
+        already_downloaded = 0;
+        already_downloaded_i64 = 0;
+    }
+    if already_downloaded_i64 == expected {
         // Range already complete — skip download. Report final byte count
         // so the coordinator's `worker_bytes` is accurate.
         let _ = progress_tx.send(MetalinkWorkerProgress {
@@ -1062,8 +1086,31 @@ pub async fn download_metalink_range_from_mirror(
         return Err(super::http::format_http_status_error(response.status()));
     }
 
-    if already_downloaded > 0 {
-        validate_metalink_content_range(&response, i64::try_from(effective_start).unwrap_or(0))?;
+    // ARC-35: fresh start demands the same strictness as resume — a 200
+    // full-body response must not silently pollute the part file.
+    if already_downloaded == 0 && response.status() != StatusCode::PARTIAL_CONTENT {
+        db::mark_mirror_unsupported_range(pool, &mirror.id)
+            .await
+            .ok();
+        let _ = fs::remove_file(part_path).await;
+        return Err(engine_error(
+            "metalink_mirror_unsupported_range",
+            format!(
+                "Mirror {} ignored the Range request (status {}); it cannot serve parallel ranges.",
+                sanitize_url(&mirror.url),
+                response.status()
+            ),
+            false,
+        ));
+    }
+    if let Err(error) = validate_metalink_content_range(
+        &response,
+        i64::try_from(effective_start).unwrap_or(0),
+        Some(range_end),
+    ) {
+        // ARC-35: delete the polluted part before failing over.
+        let _ = fs::remove_file(part_path).await;
+        return Err(error);
     }
     persist_metalink_resource_validators(pool, mirror, &response).await?;
 
@@ -1350,7 +1397,14 @@ async fn download_from_resource(
     }
 
     if resume_from > 0 {
-        validate_metalink_content_range(&response, resume_from)?;
+        validate_metalink_content_range(
+            &response,
+            resume_from,
+            // Unknown-size files cannot pin the end byte.
+            u64::try_from(file.total_size)
+                .ok()
+                .and_then(|total| total.checked_sub(1)),
+        )?;
     }
     persist_metalink_resource_validators(pool, resource, &response).await?;
 
@@ -1939,6 +1993,7 @@ fn parse_metalink_content_range(value: &str) -> Option<(i64, i64, i64)> {
 fn validate_metalink_content_range(
     response: &reqwest::Response,
     expected_start: i64,
+    expected_end: Option<u64>,
 ) -> Result<(), String> {
     let header = response
         .headers()
@@ -1948,12 +2003,18 @@ fn validate_metalink_content_range(
             "Resume unavailable. Metalink mirror omitted Content-Range on a partial response."
                 .to_string()
         })?;
-    let (start, _end, _total) = parse_metalink_content_range(header).ok_or_else(|| {
+    let (start, end, _total) = parse_metalink_content_range(header).ok_or_else(|| {
         format!("Resume unavailable. Metalink mirror returned invalid Content-Range: {header}")
     })?;
-    if start != expected_start {
+    // ARC-35: start AND end must match the requested range exactly — the
+    // HTTP worker's start/end/total contract, minus total (the coordinator
+    // does not thread the file total down here, and start+end+206 is already
+    // sufficient to reject a full-body 200).
+    let expected_end_i64 = expected_end.map(|end| i64::try_from(end).unwrap_or(i64::MAX));
+    if start != expected_start || expected_end_i64.is_some_and(|expected| end != expected) {
         return Err(format!(
-            "Resume unavailable. Metalink Content-Range start {start} does not match local offset {expected_start}."
+            "Resume unavailable. Metalink Content-Range {start}-{end} does not match the requested {expected_start}-{}.",
+            expected_end_i64.map_or_else(|| "?".to_string(), |end| end.to_string())
         ));
     }
     Ok(())
@@ -2362,7 +2423,8 @@ mod tests {
 pub mod testing {
     pub use super::{
         all_part_files_absent, assemble_metalink_part_files, cleanup_metalink_part_files,
-        download_metalink_range_from_mirror, part_file_path, MetalinkWorkerProgress,
+        download_metalink_file_parallel, download_metalink_range_from_mirror, part_file_path,
+        MetalinkWorkerProgress,
     };
 
     /// Constructs a `MetalinkRangeWorker` with a failover queue and runs it

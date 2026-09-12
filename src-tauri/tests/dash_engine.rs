@@ -972,3 +972,141 @@ async fn fun20_task_proxy_off_bypasses_unreachable_global_during_probe() {
         .expect("Off task proxy must bypass the unreachable global proxy");
     assert_eq!(output.protocol, "dash");
 }
+
+/// FUN-25: a signed CDN that rotates its query string on every session must
+/// not reset completed-segment progress. Identity is (track_kind,
+/// segment_index) + content fingerprint (duration/byte range); `uri` is a
+/// display field. A genuine manifest change (duration shift) still resets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun25_signed_url_change_preserves_completed_segments() {
+    let pool = common::test_pool("fun25-dash-signature").await;
+    let task_id = "fun25-dash-task";
+
+    // dash_segments has an FK to tasks(id).
+    let task = common::download_task(
+        task_id,
+        "https://example.com/video.mpd".to_string(),
+        "dash",
+        "video.mp4",
+        0,
+        &common::TestPaths::new("fun25-dash-signature"),
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+
+    db::upsert_dash_task(
+        &pool,
+        db::DashTaskUpsert {
+            task_id,
+            input_url: "https://example.com/video.mpd",
+            manifest_url: "https://example.com/video.mpd",
+            staging_dir: "unused-staging",
+            video_representation_id: None,
+            video_bandwidth: None,
+            video_codecs: None,
+            audio_representation_id: None,
+            audio_bandwidth: None,
+            audio_codecs: None,
+            output_format: "mp4",
+            segment_count: 0,
+        },
+    )
+    .await
+    .expect("upsert dash task");
+
+    fn seg_upsert<'a>(
+        task_id: &'a str,
+        uri: &'a str,
+        duration_ms: i64,
+    ) -> db::DashSegmentUpsert<'a> {
+        db::DashSegmentUpsert {
+            id: "fun25-seg-0",
+            task_id,
+            track_kind: "video",
+            segment_index: 0,
+            uri,
+            local_path: "seg-0.mp4",
+            byte_range_start: None,
+            byte_range_length: None,
+            init_segment_uri: None,
+            init_segment_local_path: None,
+            duration_ms,
+        }
+    }
+    // Session 1: segment completes.
+    db::bulk_upsert_dash_segments(
+        &pool,
+        &[seg_upsert(
+            task_id,
+            "https://cdn.example/seg-0.mp4?sig=session1",
+            4000,
+        )],
+    )
+    .await
+    .expect("upsert 1");
+    db::update_dash_segment_status(
+        &pool,
+        "fun25-seg-0",
+        900_000,
+        SegmentStatus::Completed,
+        0,
+        None,
+    )
+    .await
+    .expect("complete segment");
+
+    // Session 2: the CDN rotates the signature.
+    db::bulk_upsert_dash_segments(
+        &pool,
+        &[seg_upsert(
+            task_id,
+            "https://cdn.example/seg-0.mp4?sig=session2",
+            4000,
+        )],
+    )
+    .await
+    .expect("upsert 2");
+    let segments = db::list_dash_segments(&pool, task_id).await.expect("list");
+    let segment = segments
+        .iter()
+        .find(|s| s.segment_index == 0)
+        .expect("segment");
+    assert_eq!(
+        segment.status,
+        SegmentStatus::Completed,
+        "signature-only change must not reset completed progress"
+    );
+    assert_eq!(segment.downloaded_bytes, 900_000);
+    assert_eq!(
+        segment.uri, "https://cdn.example/seg-0.mp4?sig=session2",
+        "uri is a display field and must refresh"
+    );
+
+    // A genuine manifest change (duration shifted) resets the segment.
+    db::bulk_upsert_dash_segments(
+        &pool,
+        &[seg_upsert(
+            task_id,
+            "https://cdn.example/seg-0.mp4?sig=session3",
+            4100,
+        )],
+    )
+    .await
+    .expect("upsert 3");
+    let segments = db::list_dash_segments(&pool, task_id)
+        .await
+        .expect("list 2");
+    let segment = segments
+        .iter()
+        .find(|s| s.segment_index == 0)
+        .expect("segment 2");
+    assert_eq!(
+        segment.status,
+        SegmentStatus::Pending,
+        "a duration shift means different bytes — progress must reset"
+    );
+    assert_eq!(segment.downloaded_bytes, 0);
+    pool.close().await;
+}
