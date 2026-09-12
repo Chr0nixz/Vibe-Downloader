@@ -14,7 +14,7 @@ mod common;
 
 use std::io::{Read, Write};
 
-use common::TestServer;
+use common::{install_intranet_test_bypass, TestServer};
 use tauri_app_lib::{
     download::{BtEngine, DownloadEngine, DownloadError, ProbeRequest},
     models::AppErrorPayload,
@@ -201,6 +201,11 @@ async fn probe_http_torrent_via_unreachable_socks5_fails_without_bypass() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_unreachable_http_torrent_returns_bt_torrent_fetch_failed() {
     let _guard = bt_test_lock().await;
+    // The target is a loopback literal; lift the SEC-10 guard so the test
+    // reaches the fetch layer it is asserting about. Install explicitly:
+    // the bypass is process-global, so relying on a sibling test to set it
+    // first makes this test pass only by execution-order luck.
+    install_intranet_test_bypass();
     let engine = new_engine();
 
     let error = engine
@@ -217,6 +222,10 @@ async fn probe_unreachable_http_torrent_returns_bt_torrent_fetch_failed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bt_retry_contract_marks_fetch_failures_recoverable() {
     let _guard = bt_test_lock().await;
+    // SEC-10: lift the loopback-literal guard so the assertions exercise the
+    // fetch-failure classification, not the SSRF pre-flight. Install
+    // explicitly so the result does not depend on sibling-test env leakage.
+    install_intranet_test_bypass();
     let engine = new_engine();
 
     let invalid = engine
