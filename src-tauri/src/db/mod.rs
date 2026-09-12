@@ -27,7 +27,7 @@ pub use self::backup::{
     BACKUP_FORMAT_VERSION, CREDENTIALS_POLICY_MACHINE_BOUND,
 };
 pub use self::browser_messages::{
-    browser_message_exists, insert_browser_message, latest_browser_error,
+    browser_message_exists, insert_browser_message, latest_browser_error, prune_browser_messages,
     update_browser_message_status,
 };
 pub use self::classification_rules::{

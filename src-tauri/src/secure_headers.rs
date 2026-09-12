@@ -1,3 +1,4 @@
+use crate::models::AppErrorPayload;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
@@ -79,6 +80,25 @@ pub fn ensure_secret_encryption_available() -> Result<(), String> {
     encryption_key().map(|_| ())
 }
 
+/// SEC-08: the outcome of reading the OS keyring, classified so that only a
+/// genuine "no entry yet" may rotate the key. A transient keyring failure
+/// (service unavailable, ACL denial, IPC timeout) reported as an arbitrary
+/// Err used to take the same branch and OVERWRITE the existing key — making
+/// every historical ciphertext permanently undecryptable.
+enum KeyringRead {
+    Exists(String),
+    NoEntry,
+    Unavailable(String),
+}
+
+fn classify_keyring_read(entry: &keyring::Entry) -> KeyringRead {
+    match entry.get_password() {
+        Ok(value) => KeyringRead::Exists(value),
+        Err(keyring::Error::NoEntry) => KeyringRead::NoEntry,
+        Err(error) => KeyringRead::Unavailable(error.to_string()),
+    }
+}
+
 fn encryption_key() -> Result<[u8; 32], String> {
     // First-use auto-generates a 256-bit key and stores it in the OS keyring. Key loss is
     // unrecoverable — all encrypted credentials become undecryptable (no rotation/escrow).
@@ -91,9 +111,9 @@ fn encryption_key() -> Result<[u8; 32], String> {
 
     let entry = keyring::Entry::new(SERVICE, ACCOUNT)
         .map_err(|e| format!("OS key store is unavailable: {e}"))?;
-    match entry.get_password() {
-        Ok(value) => decode_key(&value),
-        Err(_) => {
+    match classify_keyring_read(&entry) {
+        KeyringRead::Exists(value) => decode_key(&value),
+        KeyringRead::NoEntry => {
             let key = ChaCha20Poly1305::generate_key(&mut OsRng);
             let encoded = STANDARD.encode(key);
             entry
@@ -101,6 +121,15 @@ fn encryption_key() -> Result<[u8; 32], String> {
                 .map_err(|e| format!("Could not save secret encryption key: {e}"))?;
             decode_key(&encoded)
         }
+        KeyringRead::Unavailable(detail) => Err(AppErrorPayload::new(
+            "secrets_unavailable",
+            format!(
+                "The OS key store reported an error and the secret encryption key was not read. Existing credentials stay intact; retry after restoring keyring access. ({detail})"
+            ),
+            true,
+            vec!["retry"],
+        )
+        .command_error()),
     }
 }
 

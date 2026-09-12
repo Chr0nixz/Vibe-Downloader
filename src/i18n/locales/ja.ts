@@ -1604,6 +1604,8 @@ const ja = {
     resumeMismatch: "リモートファイルが一致しなくなったため、レジューム検証に失敗しました。",
     resumeUnavailable: "サーバーはレジュームに対応しなくなりました。最初からやり直してください。",
     serverRateLimited: "サーバーがリクエストを制限しています。しばらくしてから再試行してください。",
+    secretsUnavailable:
+      "OSキーストアを利用できません。既存の認証情報は無事です。キーストアのアクセスを復旧してから再試行してください。",
     sftpAuthFailed: "SFTP 認証に失敗しました。資格情報または鍵を確認してください。",
     sftpChannelFailed: "SFTP チャネルを開けませんでした。",
     sftpConnectFailed: "SFTP サーバーに接続できませんでした。",

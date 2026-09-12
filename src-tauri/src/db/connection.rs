@@ -79,7 +79,7 @@ pub(crate) async fn run_migrations_for_backup(pool: &SqlitePool) -> Result<(), S
 pub async fn connect_for_startup(db_path: &Path) -> Result<DatabaseConnectOutcome, String> {
     // FUN-16: apply a staged restore before opening the live pool so an open
     // handle never blocks replacing the database file on Windows.
-    crate::db::backup::apply_pending_restore_if_any(db_path)?;
+    crate::db::backup::apply_pending_restore_if_any(db_path).await?;
     let pool = open_pool(db_path).await?;
 
     match run_migrations(&pool).await {

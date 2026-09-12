@@ -1607,6 +1607,8 @@ const en = {
     resumeMismatch: "Resume validation failed because the remote file no longer matches.",
     resumeUnavailable: "The server no longer supports resuming. Restart from the beginning.",
     serverRateLimited: "The server is rate-limiting requests. Try again later.",
+    secretsUnavailable:
+      "The OS key store is unavailable. Existing credentials are intact; retry after restoring keyring access.",
     sftpAuthFailed: "SFTP authentication failed. Check credentials or key.",
     sftpChannelFailed: "Opening the SFTP channel failed.",
     sftpConnectFailed: "Could not connect to the SFTP server.",

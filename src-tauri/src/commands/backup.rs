@@ -181,14 +181,10 @@ pub async fn restore_app_backup(
         ));
     }
 
-    // Global proxy password stays in the OS keyring and is not in the backup.
-    // Clear the saved flag so the UI does not pretend the password is present.
-    let _ = sqlx::query(
-        "INSERT INTO settings(key, value) VALUES('proxy_password_saved', 'false')
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    )
-    .execute(&state.pool)
-    .await;
+    // FUN-26: the proxy-password flag is corrected against the LOCAL keyring
+    // when the pending restore replaces the live database at next startup
+    // (db::backup::post_restore_scrub). Writing the flag here was a no-op —
+    // the swap overwrites this database entirely.
 
     Ok(BackupRestoreResult {
         requires_restart: true,

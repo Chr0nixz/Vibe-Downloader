@@ -1584,6 +1584,8 @@ const ko = {
     resumeMismatch: "원격 파일이 더 이상 일치하지 않아 이어받기 검증에 실패했습니다.",
     resumeUnavailable: "서버가 더 이상 이어받기를 지원하지 않습니다. 처음부터 다시 시작하세요.",
     serverRateLimited: "서버가 요청 빈도를 제한하고 있습니다. 나중에 다시 시도하세요.",
+    secretsUnavailable:
+      "OS 키 저장소를 사용할 수 없습니다. 기존 자격 증명은 그대로이며, 키 저장소 접근을 복구한 후 재시도하세요.",
     sftpAuthFailed: "SFTP 인증에 실패했습니다. 자격 증명 또는 키를 확인하세요.",
     sftpChannelFailed: "SFTP 채널을 열지 못했습니다.",
     sftpConnectFailed: "SFTP 서버에 연결할 수 없습니다.",

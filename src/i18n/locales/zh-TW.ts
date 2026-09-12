@@ -1554,6 +1554,7 @@ const zhTW = {
     resumeMismatch: "續傳校驗失敗，遠端檔案已不匹配。",
     resumeUnavailable: "伺服器不再支援續傳。請從頭重新開始。",
     serverRateLimited: "伺服器正在限制請求頻率。請稍後再試。",
+    secretsUnavailable: "作業系統金鑰庫不可用。既有憑據完好，恢復金鑰庫存取後可重試。",
     sftpAuthFailed: "SFTP 認證失敗。請檢查憑證或金鑰。",
     sftpChannelFailed: "開啟 SFTP 通道失敗。",
     sftpConnectFailed: "無法連線 SFTP 伺服器。",

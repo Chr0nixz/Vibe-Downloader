@@ -1554,6 +1554,7 @@ const zhCN = {
     resumeMismatch: "续传校验失败，远程文件已不匹配。",
     resumeUnavailable: "服务器不再支持续传。请从头重新开始。",
     serverRateLimited: "服务器正在限制请求频率。请稍后再试。",
+    secretsUnavailable: "操作系统密钥库不可用。既有凭据完好，恢复密钥库访问后可重试。",
     sftpAuthFailed: "SFTP 认证失败。请检查凭据或密钥。",
     sftpChannelFailed: "打开 SFTP 通道失败。",
     sftpConnectFailed: "无法连接 SFTP 服务器。",

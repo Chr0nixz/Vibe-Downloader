@@ -1643,6 +1643,8 @@ const es = {
     resumeMismatch: "Falló la validación de reanudación porque el archivo remoto ya no coincide.",
     resumeUnavailable: "El servidor ya no admite la reanudación. Reinicia desde el principio.",
     serverRateLimited: "El servidor está limitando las solicitudes. Inténtalo más tarde.",
+    secretsUnavailable:
+      "El almacén de claves del sistema operativo no está disponible. Las credenciales existentes están intactas; reintenta tras restaurar el acceso al almacén.",
     sftpAuthFailed: "Falló la autenticación SFTP. Comprueba las credenciales o la clave.",
     sftpChannelFailed: "No se pudo abrir el canal SFTP.",
     sftpConnectFailed: "No se pudo conectar al servidor SFTP.",

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
@@ -288,6 +288,46 @@ const SHELL_METACHARACTERS: &[char] = &[
 /// Default wall-clock budget for completion-action user commands (PERF-07).
 pub const USER_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// SEC-07: resolve a completion-command executable to an explicit path before
+/// exec. Windows' `CreateProcess` search order includes the current working
+/// directory before PATH, so a bare name executed from a writable CWD can be
+/// hijacked by planting a same-named binary. A bare name is resolved against
+/// PATH (never CWD); a relative or absolute path is used as given.
+fn resolve_executable(requested: &str) -> Result<String, String> {
+    let is_path_like =
+        requested.contains('\\') || requested.contains('/') || Path::new(requested).is_absolute();
+    if is_path_like {
+        return Ok(requested.to_string());
+    }
+    if let Some(path_env) = std::env::var_os("PATH") {
+        let extensions: Vec<String> = if cfg!(windows) {
+            std::env::var_os("PATHEXT")
+                .map(|value| {
+                    value
+                        .to_string_lossy()
+                        .split(';')
+                        .filter(|ext| !ext.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_else(|| vec![".exe".to_string()])
+        } else {
+            vec![String::new()]
+        };
+        for dir in std::env::split_paths(&path_env) {
+            for ext in &extensions {
+                let candidate = dir.join(format!("{requested}{ext}"));
+                if candidate.is_file() {
+                    return Ok(candidate.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    Err(format!(
+        "Command '{requested}' was not found on PATH. Configure an absolute path in the completion action."
+    ))
+}
+
 /// S-4: Validate and tokenize a completion-action command without executing it.
 pub fn validate_user_command(command: &str) -> Result<Vec<String>, String> {
     let trimmed = command.trim();
@@ -336,14 +376,16 @@ pub async fn run_user_command_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<(), String> {
     let parts = validate_user_command(command)?;
+    let resolved = resolve_executable(&parts[0])?;
     tracing::info!(
-        executable = %parts[0],
+        executable = %resolved,
+        requested = %parts[0],
         arg_count = parts.len() - 1,
         timeout_secs = timeout.as_secs(),
         "user command requested by confirmed completion action"
     );
 
-    let mut cmd = tokio::process::Command::new(&parts[0]);
+    let mut cmd = tokio::process::Command::new(resolved);
     cmd.args(&parts[1..]);
     // Detach all stdio so console tools cannot block waiting for a pipe/parent console.
     cmd.stdin(std::process::Stdio::null());
@@ -394,6 +436,42 @@ pub async fn run_user_command_with_timeout(
             )
             .command_error())
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_executable_tests {
+    use super::resolve_executable;
+
+    /// SEC-07: a bare name that does not exist anywhere must fail with a
+    /// structured message — never fall back to CWD-relative resolution.
+    #[test]
+    fn bare_name_not_on_path_is_rejected() {
+        let error =
+            resolve_executable("definitely-not-a-real-exe-vibe-07").expect_err("must reject");
+        assert!(error.contains("not found on PATH"), "got: {error}");
+    }
+
+    /// SEC-07: a known system binary resolves to an explicit path (never a
+    /// relative one), eliminating CWD search.
+    #[test]
+    fn bare_name_on_path_resolves_to_absolute() {
+        let name = if cfg!(windows) { "cmd" } else { "sh" };
+        let resolved = resolve_executable(name).expect("must resolve");
+        let path = std::path::Path::new(&resolved);
+        assert!(
+            path.is_absolute(),
+            "resolved path must be absolute, got {resolved}"
+        );
+        assert!(path.is_file(), "resolved path must exist: {resolved}");
+    }
+
+    /// SEC-07: path-like input (even relative) is used as given — the user
+    /// asked for that exact file.
+    #[test]
+    fn path_like_input_passes_through() {
+        let resolved = resolve_executable("./tools/my-script").expect("path-like passes");
+        assert_eq!(resolved, "./tools/my-script");
     }
 }
 

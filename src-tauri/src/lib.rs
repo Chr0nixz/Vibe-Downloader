@@ -621,6 +621,15 @@ async fn run_startup_init_inner(handle: &tauri::AppHandle) -> Result<(), String>
                 tracing::warn!(error = %error, "task events prune failed");
             }
         }
+        match db::prune_browser_messages(&pool).await {
+            Ok(0) => {}
+            Ok(removed) => {
+                tracing::info!(removed, "startup browser messages prune");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "browser messages prune failed");
+            }
+        }
         match commands::task_file_planning::sweep_orphan_staging_dirs(&pool).await {
             Ok(0) => {}
             Ok(removed) => {

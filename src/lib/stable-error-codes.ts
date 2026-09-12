@@ -88,6 +88,7 @@ export const STABLE_ERROR_CODES = [
   "resume_mismatch",
   "resume_unavailable",
   "server_rate_limited",
+  "secrets_unavailable",
   "sftp_auth_failed",
   "sftp_channel_failed",
   "sftp_connect_failed",
@@ -222,6 +223,8 @@ export const STABLE_ERROR_MESSAGES_EN: Record<StableErrorCode, string> = {
   resume_mismatch: "Resume validation failed because the remote file no longer matches.",
   resume_unavailable: "The server no longer supports resuming. Restart from the beginning.",
   server_rate_limited: "The server is rate-limiting requests. Try again later.",
+  secrets_unavailable:
+    "The OS key store is unavailable. Existing credentials are intact; retry after restoring keyring access.",
   sftp_auth_failed: "SFTP authentication failed. Check credentials or key.",
   sftp_channel_failed: "Opening the SFTP channel failed.",
   sftp_connect_failed: "Could not connect to the SFTP server.",

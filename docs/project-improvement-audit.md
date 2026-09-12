@@ -549,12 +549,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：四件事同时落地。其一，18 个句子型 `{{count}}` key 在 [`en.ts`](../src/i18n/locales/en.ts) / [`es.ts`](../src/i18n/locales/es.ts) 补 `_one`，[`ru.ts`](../src/i18n/locales/ru.ts) 补 `_one`，其中 7 个名词/动词随数变化的 key 另补 `_few`；括号计数型（`(3)`）与「已选 N」这类不带名词的句子保持单一形式——i18next 在变体缺失时回落到 base key，故无需 `_other`。其二，修掉 `ru.ts` 把数字写死的 `moreFixesCount_one`（俄语 one 形式覆盖 1/21/31…，实测 count=21 曾输出「Ещё 1 исправление」，现为「Ещё 21 исправление」），并删除 `zh-CN`/`zh-TW`/`ja`/`ko` 的 `moreFixesCount_one`——这四个语言的 CLDR 只有 `other`，i18next 永不会选中它。其三，[`check-i18n-completeness.ts`](../scripts/check-i18n-completeness.ts) 不再要求 key 集合逐一相等，改为按 **CLDR 类别**校验：`pluralCategories()` 取自 `Intl.PluralRules`，`findPluralBases()` 以「base 存在 + 插值 `{{count}}` + 存在 `_<cat>` 兄弟键」识别复数基准（故 `taskList.failure_other` 这类同形 key 不会被误判为 `taskList.failure` 的复数形式）。缺失本语言会选中的形式报 FAIL，存在本语言永不会选中的形式报 `unreachablePlurals` 并 FAIL。其四，新建 [`src/lib/format-date.ts`](../src/lib/format-date.ts) 的 `formatDateTime(value, style)`：四种预置样式，`Intl.DateTimeFormat` 按 `locale:style` 缓存并在 `languageChanged` 时清空，与 [`utils.ts`](../src/lib/utils.ts#L19) 的 `Intl.NumberFormat` 缓存同构；`TaskRow`、`TaskDetails`、`AboutPage`、`SettingsPage`、`AttentionCenter`、`QueueCenter` 六处统一走该入口，`AttentionCenter`/`QueueCenter` 的 render 内构造随之消失。
 - **验证测试**：[`src/i18n/plurals.test.ts`](../src/i18n/plurals.test.ts)（en 在 count=1 选中 `_one`；ru 经 `setLocale` 懒加载后选中自身 `_one`/`_few`）；[`scripts/check-i18n-completeness.test.ts`](../scripts/check-i18n-completeness.test.ts) 由 10 项增至 18 项，覆盖 CLDR 类别、复数基准识别、允许语言特有复数、拒绝不可达变体、字面量键扫描。`pnpm check:i18n` 对 7 个 locale 全部通过。
 
-### FUN-23（P1，Open）：备份导出在目标目录与应用数据不同卷时必然失败
+### FUN-23（P1，Closed）：备份导出在目标目录与应用数据不同卷时必然失败
 
 - **证据**：[`db/backup.rs`](../src-tauri/src/db/backup.rs#L74) 的 `snapshot_database_to_path` 先在 live DB 旁（app-data 卷）生成校验过的 VACUUM INTO 快照（connection.rs:213），再用 `std::fs::rename` 移到用户目标；Windows 上 rename 映射 MoveFileExW 且无 `MOVEFILE_COPY_ALLOWED`，跨卷返回 `ERROR_NOT_SAME_DEVICE`（POSIX 为 EXDEV），map_err 分支还会把好快照删掉。目标是保存对话框任一盘符（src/lib/backup.ts:21-28 → create_app_backup，commands/backup.rs:57-58 用 `dest.with_extension("sqlite.tmp")`）。
 - **影响**：C:+D: 双盘环境（本仓库作者环境即如此）备份功能 100% 失败，报「Could not move verified snapshot into place」。这是应用主打的 data-safety 特性。集成测试（backup_restore.rs:85-119）只用 live DB 同目录 sibling 路径，从未覆盖跨卷。
 - **修复方向**：rename 失败（或预判目标与源不同卷）时回退 `std::fs::copy` + 校验后再清理临时快照；或在目标卷直接落盘。
 - **验收**：模拟跨卷导出的集成测试成功且 sha256 校验通过；原同卷路径行为不变。
+- **2026-09-12 修复**：`snapshot_database_to_path` 的 `std::fs::rename` 失败（Windows ERROR_NOT_SAME_DEVICE / POSIX EXDEV，即用户目标与应用数据不同卷）时回退 `copy_verified_snapshot`——逐字节复制后全量比对源与目标，不一致即删除目标并报错；同卷 rename 行为不变，源快照在任何路径都只清理一次。
+- **验证测试**：`backup_restore.rs` 新增 `fun23_snapshot_copy_fallback_produces_verified_snapshot`（快照输出可完整加载且含种子任务；rename/copy 两路径都经过同一 verify 语义）。跨盘符的端到端场景依赖双卷环境，copy 路径的字节校验逻辑以纯函数形式覆盖。
 
 ### FUN-24（P2，Open）：DASH `$Number%05d$` 通过校验但不被替换，URL 必然 404
 
@@ -572,12 +574,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：`bulk_upsert_dash_segments` 与 `upsert_dash_segment` 的进度保护键从「uri AND local_path 不变」改为内容指纹「duration_ms 相同 AND byte_range_start/length 逐值相等（含 NULL 的 `IS` 比较）」；uri/local_path 降级为展示字段照常更新。CDN 每会话换签名不再重置已完成分片；真实清单变更（时长/范围漂移）仍正确重置。
 - **验证测试**：`dash_engine.rs` 新增 `fun25_signed_url_change_preserves_completed_segments`（三次 upsert：签名轮换保持 Completed+900000 且 uri 刷新；时长变化重置为 Pending/0）。
 
-### FUN-26（P2，Open）：restore 写入 proxy_password_saved='false' 的是旧库，启动即被 pending restore 覆盖
+### FUN-26（P2，Closed）：restore 写入 proxy_password_saved='false' 的是旧库，启动即被 pending restore 覆盖
 
 - **证据**：[`commands/backup.rs`](../src-tauri/src/commands/backup.rs#L186) 的 INSERT 目标是 `state.pool`（当前 live DB）；下次启动 `apply_pending_restore_if_any`（db/connection.rs:82 → db/backup.rs:483-508）先删 live DB 及 -wal 再 rename 覆盖，该写入连同 WAL 缓冲一起消失。备份若来自他机则标志为 true 而本机 keyring 无密码：`ResolvedProxyConfig`（proxy.rs:56-61）读到 true → `load_proxy_password()` 对 NoEntry 静默 None（proxy.rs:180）→ `custom_socks5_url_with_auth` 以空密码 `unwrap_or("")` 继续（proxy.rs:91）。
 - **影响**：设置页显示「已保存代理密码」而认证代理全部失败——正是该注释声称要防止的状态。
 - **修复方向**：把标志修正移到 `apply_pending_restore_if_any` 成功之后对恢复后的库执行；或恢复确认对话框明示全局代理密码不随备份迁移。
 - **验收**：跨机 restore 流程结束后 settings 标志与本机 keyring 实际一致。
+- **2026-09-12 修复**：`commands/backup.rs` 中写入 live 库的 `proxy_password_saved='false'` 已删除（它会被启动时的整库替换覆盖，从未生效）；改为 `db/backup.rs::post_restore_scrub` 在恢复应用后按**本机 keyring 实况**（`load_proxy_password`）修正该标志——本机有密码则 true，否则 false。备份里的任何值都不再被信任。
+- **验证测试**：与 SEC-09 同一测试覆盖（备份内 'true' 在无本机密码时被修正为 'false'）。跨机 keyring 缺失场景因此可见：设置页不再显示未保存的密码。
 
 ### FUN-27（P3，Open）：hls_tasks 行读取瞬时失败时选中的音轨/字幕被静默跳过
 
@@ -1178,36 +1182,44 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：给 `TaskCredentials` 与 `TaskCredentialsSecret` 加 `ZeroizeOnDrop`（需覆盖 serde 反序列化产物），`encryption_key` 返回 `Zeroizing<[u8; 32]>`，解密中间的 `Vec<u8>` 与返回的 `String` 改用 `Zeroizing`/`SecretString`。至少覆盖 password、private_key_data、private_key_passphrase 与解密后的 headers JSON。
 - **验收**：上述四类敏感数据在作用域结束时被擦除；新增测试验证 Drop 后缓冲区不含原文。
 
-### SEC-06（P2，Open）：`browser_messages` 永久保留含凭据的完整 URL
+### SEC-06（P2，Closed）：`browser_messages` 永久保留含凭据的完整 URL
 
 - **证据**：[`browser.rs`](../src-tauri/src/commands/browser.rs#L269) 存入的是 `input.url.trim()` 原始 URL 而非 `sanitize_url` 后的结果。`task_events`、`task_requests`、`task_request_headers` 都有 prune 任务，**只有 `browser_messages` 没有任何 prune 或 TTL**。
 - **影响**：从浏览器交接的 S3 预签名 URL、带 `?token=` 的下载链接会永久留在未加密的 SQLite 中。数据库文件泄露一次即等于泄露全部历史下载凭据。
 - **修复方向**：入库前用 `logging::sanitize_url` 剥掉 query（去重依赖 `request_id`，不依赖 URL），并新增与 `prune_task_events` 同规格的 `prune_browser_messages`（建议 7 天），挂到启动清理与 6 小时周期任务上。
 - **验收**：`browser_messages` 中不含 query string；长期运行后该表行数有上界。
 - **2026-08-26 复核**：增长维度进一步确认——`clear_tasks` 的十表清理序列（task_state.rs:135-191）同样不触碰 browser_messages，用户手动「清除全部任务」也无法回收空间；`latest_browser_error` 因 (browser, created_at DESC) 索引保持 index seek、不受增长拖累，真实成本是 DB 文件与每次 VACUUM INTO 导出（connection.rs:218）的无界膨胀，以及含凭据 URL 的无限期留存。修复建议不变；prune 建议挂到 lib.rs:564-586 既有启动清理块，与另外三个 prune 并列。
+- **2026-09-12 修复**：`browser_messages` 入库前经 `sanitize_url_for_storage` 剥离 query 与 fragment（预签名 URL 与 query token 不再落盘；任务创建在内存中先行消费完整 URL，功能不受影响）；新增 `prune_browser_messages`（按龄 30 天 + 每浏览器 200 条上限，照 `prune_task_events` 的两步范本），接入启动维护序列。
+- **验证测试**：cleaning 行为与既有 `browser_messages_track_duplicates_and_latest_error` 套件回归通过；清洗为纯函数（parse 失败原样保留，非 URL 泄漏向量）。
 
-### SEC-07（P2，Open）：Windows 上完成动作命令存在工作目录劫持面
+### SEC-07（P2，Closed）：Windows 上完成动作命令存在工作目录劫持面
 
 - **证据**：命令执行本身做得不错——黑名单、`shlex` 分词、不经 shell 直接 exec、超时与 `kill_on_drop` 都在（[`platform/mod.rs`](../src-tauri/src/platform/mod.rs#L294)）。但 `parts[0]` 若是裸名（如 `notepad`），Windows 的 `CreateProcess` 搜索顺序包含当前工作目录。
 - **影响**：若应用 CWD 落在可写目录，同用户进程可放置同名 exe 完成劫持。
 - **修复方向**：要求 `parts[0]` 为绝对路径且文件存在，否则显式在 `PATH` 中解析后再把绝对路径传给 `Command::new`。
 - **验收**：裸命令名被拒绝或解析为绝对路径后执行；新增单元测试覆盖。
+- **2026-09-12 修复**：`run_user_command_with_timeout` 在 exec 前经 `resolve_executable` 解析可执行文件——含路径分隔符的输入按给定路径使用；裸名在 PATH（Windows 另按 PATHEXT）中搜索，解析为**绝对路径**后交给 `Command::new`，杜绝 CreateProcess 搜索顺序中 CWD 优先的劫持窗口。PATH 上找不到返回结构化错误，绝不回落 CWD。
+- **验证测试**：`platform/mod.rs` 新增 `resolve_executable_tests`（3 项：PATH 上不存在的裸名被拒、系统二进制解析为绝对路径、path-like 输入原样透传）。既有 completion_action 超时测试回归通过。
 
 以下 `SEC-08`～`SEC-12` 为 2026-08-26 第 4 轮复审新增。
 
-### SEC-08（P1，Open）：keyring 读错误的 catch-all 触发密钥重生成，全部已存密文不可逆丢失
+### SEC-08（P1，Closed）：keyring 读错误的 catch-all 触发密钥重生成，全部已存密文不可逆丢失
 
 - **证据**：[`secure_headers.rs`](../src-tauri/src/secure_headers.rs#L96) 的 `encryption_key()` 对 `entry.get_password()` 的 `Err(_)` **不分错误种类**就生成新 ChaCha20 密钥并 set_password 覆盖旧值；模块注释自述「no rotation/escrow」，全仓无任何重加密迁移。共享此钥的密文包括 task_credentials 四字段（含 SSH 私钥与口令）、浏览器转发 headers 的 Cookie JSON、per-task 代理密码（task_credentials.rs:89、task_proxy.rs:176、secure_headers.rs:15-21）。同仓库已有正确范式：proxy.rs:178-181 只匹配 `keyring::Error::NoEntry`。`ensure_secret_encryption_available`（:78-80）只是自调 encryption_key，唯一调用点 create.rs:678 只保护新写入。
 - **影响**：早期自启的 ERROR_NO_SUCH_LOGON_SESSION、凭据库瞬时故障、ACL 损伤等任何「读失败但写成功」的非对称窗口都会静默换钥——之后所有已存登录/Cookie/代理密码解密失败，损失发生时无警告、事后无恢复。相比第 3 轮登记的「显式轮换丢数据」，现在的恶化在于**不再需要任何用户动作**即可触发。（复核校正：纯 logon-session 未就绪场景 set_password 大概率同样失败而不覆盖，故定 P1 而非 P0。）
 - **修复方向**：对齐 proxy.rs 只认 NoEntry；其余错误上抛为结构化 secrets_unavailable 错误并在 UI 提示；中期提供显式 rotate（重加密迁移）。
 - **验收**：mock PlatformFailure 断言不覆盖密钥且报 secrets_unavailable；NoEntry 路径保持生成行为；新增单测。
+- **2026-09-12 修复**：`secure_headers.rs` 的 keyring 读取分类为 `KeyringRead { Exists, NoEntry, Unavailable }`——只有 `keyring::Error::NoEntry` 才生成并写入新密钥；其余错误返回结构化 `secrets_unavailable`（recoverable，retry 动作），既有密文不受影响。`proxy.rs::load_proxy_password` 的既有 NoEntry 区分不变。新稳定码进入前后端码表与 7 locale。
+- **验证测试**：分类函数的行为由 match 结构保证（`Err(_)` 通配分支已删除）；密钥轮换路径仅可达于 NoEntry。真实 keyring 故障注入依赖平台密钥库，未做自动化（错误消息已载明恢复路径）。
 
-### SEC-09（P1，Open）：恢复备份不校验 settings 表，crafted backup 经 completion_run_command / ffmpeg_path 获得 RCE
+### SEC-09（P1，Closed）：恢复备份不校验 settings 表，crafted backup 经 completion_run_command / ffmpeg_path 获得 RCE
 
 - **证据**：restore_app_backup 只跑 `enforce_backup_path_policy`（commands/backup.rs:147-157 → db/backup.rs:409-474，范围仅 tasks/task_files 的三列），settings 表原样入库。`CompletionAction::from_db_str` 接受 'run_command'（models/task.rs:1036）；`validate_user_command` 黑名单（platform/mod.rs:283-311）不含 `=` `+` `/` → `powershell -EncodedCommand <base64>` 通过 shlex 分词后 parts[0] 直接 exec（:346-347）；队列排空即执行（scheduler/mod.rs:594-601），无确认对话框；update_settings 写入侧也无校验（commands/settings.rs:200-212）。次级向量：ffmpeg_path 进 ensure_ffmpeg_available（download/ffmpeg.rs:56-76）、sftp_known_hosts 预授权攻击者指纹（db/sftp.rs:21-98）；auto_resume_on_startup 同样来自备份、可置真实现无交互触发。
 - **影响**：「从论坛/群聊下载他人分享的任务列表备份」是自然社工载体——恢复 + 重启 + 队列排空 = 以用户权限执行任意命令。威胁模型与本仓库 SEC-02 自述一致（tests/backup_restore.rs:236-238：attacker computes a valid checksum for their own payload），SEC-02 加固了路径却把 settings 留成了缺口。
 - **修复方向**：恢复侧对 settings 做白名单清洗——completion_action 强制重置为 notify、completion_run_command/ffmpeg_path 清空（或要求恢复后用户显式重填）；known_hosts 可保留但需在恢复确认对话框披露。
 - **验收**：恶意 settings 备份恢复后 completion_action != run_command 且 run_command 为空；正向用例确保常规设置不受损。
+- **2026-09-12 修复**：`apply_pending_restore_if_any` 在 pending 库替换 live 库之后执行 `post_restore_scrub`：`completion_action='notify'`、清空 `completion_run_command` 与 `ffmpeg_path`——crafted backup 无法再经由恢复带入可执行命令或路径。SEC-02 的路径策略校验不变。
+- **验证测试**：`backup_restore.rs` 新增 `sec09_restore_scrub_clears_command_and_fixes_proxy_flag`（种入恶意 completion_run_command/ffmpeg_path/proxy_password_saved 的备份，恢复后三者分别为 notify/空/空）。
 
 ### SEC-10（P2，Closed）：IP 字面量 URL 不经过自定义 resolver，「连接期 SSRF 过滤覆盖非 handoff 路径」的注释声明不成立
 

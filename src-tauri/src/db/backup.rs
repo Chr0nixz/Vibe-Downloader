@@ -69,12 +69,40 @@ pub async fn snapshot_database_to_path(
         std::fs::remove_file(destination)
             .map_err(|e| format!("Could not replace existing snapshot: {e}"))?;
     }
-    // Reuse the verified VACUUM path by writing beside the live DB, then rename.
+    // Reuse the verified VACUUM path by writing beside the live DB, then move.
+    // FUN-23: `rename` cannot cross volumes/filesystems (Windows
+    // ERROR_NOT_SAME_DEVICE, POSIX EXDEV) — a user-selected destination on
+    // another drive previously failed AND deleted the good snapshot. Fall back
+    // to copy + byte-verify so any destination volume works.
     let verified = create_verified_backup(pool, db_path).await?;
-    std::fs::rename(&verified, destination).map_err(|e| {
+    if let Err(rename_error) = std::fs::rename(&verified, destination) {
+        let copied = copy_verified_snapshot(&verified, destination)
+            .map_err(|copy_error| {
+                let _ = std::fs::remove_file(&verified);
+                format!(
+                    "Could not move verified snapshot into place ({rename_error}) and the copy fallback failed: {copy_error}"
+                )
+            });
         let _ = std::fs::remove_file(&verified);
-        format!("Could not move verified snapshot into place: {e}")
-    })?;
+        copied?;
+    }
+    Ok(())
+}
+
+/// FUN-23: cross-volume move fallback — byte copy followed by a full-content
+/// comparison against the source, so a partially written destination is never
+/// accepted as a backup.
+fn copy_verified_snapshot(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::copy(source, destination)
+        .map_err(|e| format!("Could not copy the snapshot to the destination volume: {e}"))?;
+    let source_bytes = std::fs::read(source)
+        .map_err(|e| format!("Could not re-read the snapshot for verification: {e}"))?;
+    let destination_bytes = std::fs::read(destination)
+        .map_err(|e| format!("Could not verify the copied snapshot: {e}"))?;
+    if source_bytes != destination_bytes {
+        let _ = std::fs::remove_file(destination);
+        return Err("The copied snapshot does not match the source; it was removed.".to_string());
+    }
     Ok(())
 }
 
@@ -480,7 +508,7 @@ pub fn pending_restore_path(db_path: &Path) -> PathBuf {
 }
 
 /// Apply a staged restore before opening the live pool (startup path).
-pub fn apply_pending_restore_if_any(db_path: &Path) -> Result<bool, String> {
+pub async fn apply_pending_restore_if_any(db_path: &Path) -> Result<bool, String> {
     let pending = pending_restore_path(db_path);
     if !pending.exists() {
         return Ok(false);
@@ -500,11 +528,69 @@ pub fn apply_pending_restore_if_any(db_path: &Path) -> Result<bool, String> {
     }
     std::fs::rename(&pending, db_path)
         .map_err(|e| format!("Could not apply pending restore database: {e}"))?;
+    if let Err(error) = post_restore_scrub(db_path).await {
+        tracing::warn!(error = %error, "post-restore settings scrub failed");
+    }
     tracing::info!(
         db_path = %db_path.display(),
         "applied pending vibe-backup restore"
     );
     Ok(true)
+}
+
+/// FUN-26 + SEC-09: run right after the restored database replaced the live
+/// one. A previous fix wrote `proxy_password_saved=false` into the live DB —
+/// which this swap then overwrote, so the restored row claimed a password the
+/// local keyring never had. Fix the flag against keyring reality here, and
+/// scrub settings that must never silently execute after a restore from
+/// another machine.
+async fn post_restore_scrub(db_path: &Path) -> Result<(), String> {
+    let connection = sqlite_connect_single(db_path).await?;
+    let proxy_password_present =
+        crate::proxy::load_proxy_password().is_ok_and(|value| value.is_some());
+    sqlx::query(
+        "INSERT INTO settings(key, value) VALUES('proxy_password_saved', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(if proxy_password_present {
+        "true"
+    } else {
+        "false"
+    })
+    .execute(&connection)
+    .await
+    .map_err(|e| e.to_string())?;
+    // SEC-09: completion commands and the ffmpeg path are machine-specific and
+    // a crafted backup could smuggle an executable path in here.
+    for (key, value) in [
+        ("completion_action", "notify"),
+        ("completion_run_command", ""),
+        ("ffmpeg_path", ""),
+    ] {
+        sqlx::query(
+            "INSERT INTO settings(key, value) VALUES(?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&connection)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    connection.close().await;
+    Ok(())
+}
+
+/// Opens a single short-lived connection for the post-restore scrub (the pool
+/// for the new DB is not up yet at this point in startup).
+async fn sqlite_connect_single(db_path: &Path) -> Result<sqlx::SqlitePool, String> {
+    let url = format!("sqlite://{}?mode=rw", db_path.display());
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .map_err(|e| format!("Could not open the restored database for scrubbing: {e}"))?;
+    Ok(pool)
 }
 
 fn engine_backup_error(code: &str, message: impl Into<String>) -> String {
