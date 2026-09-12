@@ -76,4 +76,37 @@ describe("detectInitialLocale (UX-1)", () => {
     });
     expect(detectInitialLocale()).toBe("zh-CN");
   });
+
+  // Regression: a generic `zh-*` branch used to hand every Hant tag Simplified.
+  it("stored 的 zh-Hant* 必须解析为 zh-TW，而不是简体", () => {
+    vi.stubGlobal("navigator", { language: "en-US" });
+    for (const stored of ["zh-Hant", "zh-Hant-TW", "zh-Hant-HK"]) {
+      vi.stubGlobal("localStorage", {
+        getItem: (key: string) => (key === "vibe-locale" ? stored : null),
+        setItem: () => undefined,
+        removeItem: () => undefined,
+      });
+      expect(detectInitialLocale()).toBe("zh-TW");
+    }
+  });
+
+  it("navigator=zh-Hant 不回落到简体，而是按 beta 规则回落 en", () => {
+    vi.stubGlobal("navigator", { language: "zh-Hant" });
+    vi.stubGlobal("localStorage", {
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    });
+    expect(detectInitialLocale()).toBe("en");
+  });
+
+  it("大小写不敏感：stored=ZH-HANT-TW → zh-TW", () => {
+    vi.stubGlobal("navigator", { language: "en-US" });
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => (key === "vibe-locale" ? "ZH-HANT-TW" : null),
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    });
+    expect(detectInitialLocale()).toBe("zh-TW");
+  });
 });

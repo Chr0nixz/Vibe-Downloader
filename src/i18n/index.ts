@@ -65,12 +65,21 @@ async function loadLocaleBundle(locale: string): Promise<LocaleBundle | undefine
   return mod.default;
 }
 
+/**
+ * Chinese tags need script awareness before region: browsers emit `zh-Hant`,
+ * `zh-Hant-TW` and `zh-Hant-HK`, and a generic `zh-*` branch would hand those
+ * users a Simplified interface. The region-only tags (`zh-TW`/`zh-HK`/`zh-MO`)
+ * stay listed because legacy values are still stored that way.
+ */
+const TRADITIONAL_CHINESE_RE = /^zh-(hant|tw|hk|mo)\b/;
+
 function normalizeLocale(value: string | null | undefined): Locale {
   if (!value) return "en";
-  if (value === "zh-TW" || value === "zh-HK" || value === "zh-MO") return "zh-TW";
-  if (value === "zh" || value.startsWith("zh-")) return "zh-CN";
-  if (SUPPORTED_LOCALES.includes(value as Locale)) return value as Locale;
-  return "en";
+  const tag = value.toLowerCase();
+  if (tag === "zh" || tag.startsWith("zh-")) {
+    return TRADITIONAL_CHINESE_RE.test(tag) ? "zh-TW" : "zh-CN";
+  }
+  return SUPPORTED_LOCALES.find((locale) => locale.toLowerCase() === tag) ?? "en";
 }
 
 export function detectInitialLocale(): Locale {
