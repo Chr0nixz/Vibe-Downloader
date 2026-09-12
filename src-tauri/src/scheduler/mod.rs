@@ -482,14 +482,20 @@ impl Scheduler {
                     Err(panic_payload) => Err(describe_engine_panic(panic_payload)),
                 };
             let canceled = task_cancel_token.is_cancelled();
-            let _ = downloads_map.lock().await.remove(&task_id);
-            let _ = scheduler.request_headers.lock().await.remove(&task_id);
+            let failed = result.is_err();
+            converge_download_outcome(
+                &downloads_map,
+                &scheduler.request_headers,
+                &scheduler.task_runtime_locks,
+                Some(&task_app),
+                &task_pool,
+                &task_id,
+                canceled,
+                result,
+            )
+            .await;
 
-            if let Err(error) = result {
-                if !canceled {
-                    mark_download_failed(&task_app, &task_pool, &task_id, error).await;
-                }
-            } else if !canceled {
+            if !failed && !canceled {
                 match crate::commands::tasks::verify_task_hash_with_pool(&task_pool, &task_id).await
                 {
                     Ok(state) if state.status != HashVerificationStatus::NotRequested => {
@@ -515,14 +521,6 @@ impl Scheduler {
                     .maybe_emit_completion_action(&task_app, &task_pool)
                     .await;
             }
-
-            // A-4: Evict the runtime lock entry now that the worker has finished
-            // and the downloads_map/request_headers entries are removed. If a user
-            // action (pause/cancel/delete/retry) is concurrently holding the lock,
-            // strong_count > 1 and evict is a safe no-op. This prevents completed/
-            // failed/paused task entries from accumulating indefinitely in the
-            // registry (only delete_* previously evicted).
-            scheduler.task_runtime_locks.evict(&task_id).await;
 
             scheduler.clone().spawn_dispatch(task_app, task_pool);
         });
@@ -638,9 +636,21 @@ impl Scheduler {
 /// Mark a task download as failed and update DB/events (formerly commands::tasks::mark_download_failed).
 /// Internal to the scheduler module.
 async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str, error: String) {
-    tracing::error!(task_id = %task_id, error = %error, "download failed");
+    mark_download_failure_state(pool, task_id, &error).await;
+    if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
+        emit_task_progress_snapshot(app, &task);
+        emit_task_updated_record(app, pool, &task).await;
+    }
+    emit_queue_changed_with_ids(app, Some(vec![task_id.to_string()]));
+}
+
+/// DB persistence half of a download failure (status write + failed event +
+/// segment failure marks) with no UI emits. Split from [`mark_download_failed`]
+/// so the supervisor convergence can run headlessly in tests (ARC-40).
+async fn mark_download_failure_state(pool: &SqlitePool, task_id: &str, error: &str) {
+    tracing::error!(task_id = task_id, error = %error, "download failed");
     // ARC-16: dispatch only on structured code — never on human message text.
-    let code = crate::models::AppErrorPayload::code_from_stored(None, Some(&error));
+    let code = crate::models::AppErrorPayload::code_from_stored(None, Some(error));
     let status = if code
         .as_deref()
         .is_some_and(crate::models::AppErrorPayload::is_needs_attention_code)
@@ -653,13 +663,12 @@ async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str,
     // If the user paused/canceled/deleted while the worker was erroring out,
     // skip the failure write to avoid overwriting their action.
     let updated =
-        match db::mark_task_failed_if_active(pool, task_id, status, Some(&error), Some(&error))
-            .await
+        match db::mark_task_failed_if_active(pool, task_id, status, Some(error), Some(error)).await
         {
             Ok(updated) => updated,
             Err(db_error) => {
                 tracing::warn!(
-                    task_id = %task_id,
+                    task_id = task_id,
                     error = %db_error,
                     "failed to persist task failure status"
                 );
@@ -668,14 +677,14 @@ async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str,
         };
     if !updated {
         tracing::warn!(
-            task_id = %task_id,
+            task_id = task_id,
             "mark_download_failed: task state changed concurrently, skipping emit"
         );
         return;
     }
-    if let Err(db_error) = db::insert_task_event(pool, task_id, "failed", Some(&error)).await {
+    if let Err(db_error) = db::insert_task_event(pool, task_id, "failed", Some(error)).await {
         tracing::warn!(
-            task_id = %task_id,
+            task_id = task_id,
             error = %db_error,
             "failed to persist task failure event"
         );
@@ -684,21 +693,66 @@ async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str,
         pool,
         task_id,
         crate::models::SegmentStatus::Failed,
-        Some(&error),
+        Some(error),
     )
     .await
     {
         tracing::warn!(
-            task_id = %task_id,
+            task_id = task_id,
             error = %db_error,
             "failed to persist segment failure status"
         );
     }
-    if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
-        emit_task_progress_snapshot(app, &task);
-        emit_task_updated_record(app, pool, &task).await;
+}
+
+/// Supervisor convergence shared by every engine outcome (panic, error,
+/// success): release the active slot and the request-header cache, persist the
+/// failure when the engine ended in error and the user did not cancel, and
+/// evict the A-4 runtime-lock entry.
+///
+/// Extracted from the supervisor closure so the panic path can be driven
+/// headlessly in tests (ARC-40) — a real `AppHandle<Wry>` cannot be built
+/// outside a running Tauri app, so in-crate tests pass `app: None` and skip
+/// the emits. Production passes `Some(&task_app)`.
+///
+/// Note: the A-4 evict now runs before the success-path hash verification.
+/// The evict only drops an idle registry entry (guards are never held by this
+/// worker), so the reorder is unobservable to hash verification and user
+/// actions.
+// The parameters mirror the supervisor's local bindings one-to-one; a
+// parameter struct would only relocate this list without a second call site.
+#[allow(clippy::too_many_arguments)]
+async fn converge_download_outcome(
+    downloads: &Arc<Mutex<HashMap<String, DownloadControl>>>,
+    request_headers: &TaskRequestHeaders,
+    task_runtime_locks: &Arc<crate::TaskRuntimeLocks>,
+    app: Option<&AppHandle>,
+    pool: &SqlitePool,
+    task_id: &str,
+    canceled: bool,
+    result: Result<(), String>,
+) {
+    let _ = downloads.lock().await.remove(task_id);
+    let _ = request_headers.lock().await.remove(task_id);
+    if let Err(error) = result {
+        if !canceled {
+            mark_download_failure_state(pool, task_id, &error).await;
+            if let Some(app) = app {
+                if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
+                    emit_task_progress_snapshot(app, &task);
+                    emit_task_updated_record(app, pool, &task).await;
+                }
+                emit_queue_changed_with_ids(app, Some(vec![task_id.to_string()]));
+            }
+        }
     }
-    emit_queue_changed_with_ids(app, Some(vec![task_id.to_string()]));
+    // A-4: Evict the runtime lock entry now that the worker has finished
+    // and the downloads_map/request_headers entries are removed. If a user
+    // action (pause/cancel/delete/retry) is concurrently holding the lock,
+    // strong_count > 1 and evict is a safe no-op. This prevents completed/
+    // failed/paused task entries from accumulating indefinitely in the
+    // registry (only delete_* previously evicted).
+    task_runtime_locks.evict(task_id).await;
 }
 
 fn min_optional_limit(left: Option<i64>, right: Option<i64>) -> Option<i64> {
@@ -739,5 +793,244 @@ mod engine_panic_tests {
     fn opaque_payload_falls_back() {
         let message = describe_engine_panic(Box::new(7_u32));
         assert_eq!(message, "The download engine crashed: unknown panic");
+    }
+}
+
+#[cfg(test)]
+mod convergence_tests {
+    //! ARC-40: the supervisor's convergence after an engine panic must release
+    //! the active/host slot, transition the task to Failed, and leave nothing
+    //! behind that blocks the next task.
+    //!
+    //! The full dispatch path needs a real `AppHandle<Wry>`, which cannot be
+    //! constructed headlessly, so these tests drive the same
+    //! [`super::converge_download_outcome`] the supervisor calls, feeding it a
+    //! REAL caught panic rendered through [`super::describe_engine_panic`] —
+    //! the identical glue the supervisor uses between `catch_unwind` and
+    //! convergence.
+
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    use tokio::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{converge_download_outcome, describe_engine_panic};
+    use crate::models::task::now_iso;
+    use crate::models::{HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus};
+    use crate::{db, DownloadControl, TaskRequestHeaders, TaskRuntimeLocks};
+
+    fn task_record(id: &str, status: TaskStatus) -> TaskRecord {
+        let now = now_iso();
+        TaskRecord {
+            id: id.to_string(),
+            url: "https://panic-host/file.bin".to_string(),
+            final_url: None,
+            protocol: "https".to_string(),
+            task_kind: TaskKind::SingleFile,
+            file_name: format!("{id}.bin"),
+            save_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            temp_path: None,
+            final_path: None,
+            total_size: 0,
+            downloaded_bytes: 0,
+            status,
+            etag: None,
+            last_modified: None,
+            content_type: None,
+            supports_resume: true,
+            supports_parallel: false,
+            supports_multi_file: false,
+            source_key: "panic-host".to_string(),
+            connection_count: 0,
+            speed_bps: 0,
+            task_speed_limit_bps: None,
+            priority: TaskPriority::Normal,
+            queue_position: 0,
+            category_key: None,
+            obey_schedule: false,
+            health_summary: None,
+            error_message: None,
+            error_code: None,
+            recovery_actions: Vec::new(),
+            retry_after_at: None,
+            expected_hash_sha256: None,
+            actual_hash_sha256: None,
+            hash_status: HashVerificationStatus::NotRequested,
+            hash_error: None,
+            hash_verified_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+            files_version: 0,
+        }
+    }
+
+    async fn test_pool(label: &str) -> sqlx::SqlitePool {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vibe-sched-conv-{label}-{id}.sqlite"));
+        db::connect(&path)
+            .await
+            .expect("database connect with migrations")
+            .pool
+    }
+
+    fn control(source_key: &str) -> DownloadControl {
+        DownloadControl {
+            cancel_token: CancellationToken::new(),
+            finish: Arc::new(AtomicBool::new(false)),
+            handle: None,
+            source_key: source_key.to_string(),
+            connection_slots: 1,
+        }
+    }
+
+    /// A download future that panics when polled — the fake-engine shape the
+    /// audit's acceptance asks for. The supervisor wraps exactly such a future
+    /// in `catch_unwind`.
+    fn panicking_download() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+        Box::pin(async { panic!("engine exploded mid-download") })
+    }
+
+    #[tokio::test]
+    async fn engine_panic_releases_slot_and_fails_task() {
+        let pool = test_pool("panic").await;
+        let task = task_record("task-arc40-panic", TaskStatus::Downloading);
+        db::insert_task_record(&pool, &task).await.expect("insert");
+
+        let downloads: Arc<Mutex<HashMap<String, DownloadControl>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        downloads
+            .lock()
+            .await
+            .insert(task.id.clone(), control("panic-host"));
+        let request_headers: TaskRequestHeaders = Arc::new(Mutex::new(HashMap::new()));
+        request_headers.lock().await.insert(
+            task.id.clone(),
+            vec![("authorization".into(), "Bearer x".into())],
+        );
+        let task_runtime_locks = Arc::new(TaskRuntimeLocks::default());
+
+        // Mirror the supervisor glue exactly: catch_unwind around the engine
+        // future, panic payload rendered by describe_engine_panic, then the
+        // shared convergence body.
+        let result = match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+            panicking_download(),
+        ))
+        .await
+        {
+            Ok(result) => result,
+            Err(payload) => Err(describe_engine_panic(payload)),
+        };
+        converge_download_outcome(
+            &downloads,
+            &request_headers,
+            &task_runtime_locks,
+            None,
+            &pool,
+            &task.id,
+            false,
+            result,
+        )
+        .await;
+
+        assert!(
+            downloads.lock().await.is_empty(),
+            "the panicked control must not keep occupying the active/host slot"
+        );
+        assert!(
+            request_headers.lock().await.is_empty(),
+            "the header cache entry must be evicted"
+        );
+        let stored = db::get_task_record(&pool, &task.id)
+            .await
+            .expect("query")
+            .expect("task exists");
+        assert_eq!(stored.status, TaskStatus::Failed);
+        let message = stored.error_message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("download engine crashed") && message.contains("engine exploded"),
+            "panic detail must reach the failure message, got: {message}"
+        );
+
+        // A follow-up task on the same host converges cleanly: the released
+        // slot is reusable and a healthy outcome touches nothing.
+        let next = task_record("task-arc40-next", TaskStatus::Queued);
+        db::insert_task_record(&pool, &next).await.expect("insert");
+        downloads
+            .lock()
+            .await
+            .insert(next.id.clone(), control("panic-host"));
+        converge_download_outcome(
+            &downloads,
+            &request_headers,
+            &task_runtime_locks,
+            None,
+            &pool,
+            &next.id,
+            false,
+            Ok(()),
+        )
+        .await;
+        assert!(downloads.lock().await.is_empty());
+        let stored_next = db::get_task_record(&pool, &next.id)
+            .await
+            .expect("query")
+            .expect("task exists");
+        assert_eq!(
+            stored_next.status,
+            TaskStatus::Queued,
+            "a healthy convergence must not touch the task status"
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_outcome_cleans_up_without_overwriting_user_state() {
+        // R-2.4: the user owns the state machine while cancelling. The engine
+        // may still return an error during teardown — the convergence must
+        // clean up runtime state but NOT write Failed over the user's action.
+        let pool = test_pool("cancel").await;
+        let task = task_record("task-arc40-cancel", TaskStatus::Downloading);
+        db::insert_task_record(&pool, &task).await.expect("insert");
+
+        let downloads: Arc<Mutex<HashMap<String, DownloadControl>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        downloads
+            .lock()
+            .await
+            .insert(task.id.clone(), control("panic-host"));
+        let request_headers: TaskRequestHeaders = Arc::new(Mutex::new(HashMap::new()));
+        let task_runtime_locks = Arc::new(TaskRuntimeLocks::default());
+
+        converge_download_outcome(
+            &downloads,
+            &request_headers,
+            &task_runtime_locks,
+            None,
+            &pool,
+            &task.id,
+            true,
+            Err("engine exploded during cancellation".to_string()),
+        )
+        .await;
+
+        assert!(
+            downloads.lock().await.is_empty(),
+            "runtime slot must still be released on cancel"
+        );
+        let stored = db::get_task_record(&pool, &task.id)
+            .await
+            .expect("query")
+            .expect("task exists");
+        assert_eq!(
+            stored.status,
+            TaskStatus::Downloading,
+            "a canceled outcome must not write Failed over user-owned state"
+        );
     }
 }

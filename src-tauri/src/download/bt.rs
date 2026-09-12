@@ -238,18 +238,13 @@ impl BtEngine {
         // ONE shared dht.json whose recorded port every new session re-binds —
         // the second concurrent task then fails with AddrInUse. Per-task
         // filenames give each session its own recorded port (explicit port is
-        // left None so first bind picks a free one). The key contains Windows
-        // verbatim-path prefixes and separators, so hash it into a flat name.
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        let dht_file_name = format!("vibe-dht-{:016x}.json", hasher.finish());
+        // left None so first bind picks a free one).
         options.dht = Some(librqbit::DhtSessionConfig {
             bootstrap_addrs: None,
             port: None,
             persistence: Some(librqbit::dht::DhtPersistenceConfig {
                 dump_interval: None,
-                config_filename: Some(std::env::temp_dir().join(dht_file_name)),
+                config_filename: Some(std::env::temp_dir().join(dht_persistence_file_name(&key))),
             }),
         });
         let session = Session::new_with_opts(PathBuf::from(&output_path), options)
@@ -1065,6 +1060,16 @@ fn non_zero_u32(limit_bps: Option<i64>) -> Option<NonZeroU32> {
     }
     let value = u32::try_from(value).unwrap_or(u32::MAX);
     NonZeroU32::new(value)
+}
+
+/// ARC-39: flat per-session DHT persistence filename. The session key embeds
+/// Windows verbatim-path prefixes and separators, which librqbit would treat
+/// as nested directory segments, so hash it into a flat name.
+fn dht_persistence_file_name(session_key: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    session_key.hash(&mut hasher);
+    format!("vibe-dht-{:016x}.json", hasher.finish())
 }
 
 /// FUN-11: pure seeding-stop predicate for ratio and/or time limits.
@@ -1969,9 +1974,10 @@ mod tests {
             .expect("session 1");
         assert_eq!(engine.sessions.lock().await.len(), 1);
 
-        // Same task_id reuses the session (refcount 2). Different task_ids would
-        // create separate sessions — skipped here because librqbit DHT binds a
-        // fixed UDP port and two sessions conflict in-process.
+        // Same task_id reuses the session (refcount 2). Two DIFFERENT task_ids
+        // now also coexist on the same folder — see
+        // concurrent_same_folder_tasks_start_independent_sessions (ARC-39
+        // removed the shared dht.json port collision).
         let (_api2, key2) = engine
             .api_for_output_folder(
                 temp_dir.to_str().unwrap(),
@@ -2317,5 +2323,172 @@ mod tests {
         assert_eq!(updates[1], ("f2".into(), 200, TaskStatus::Completed));
         let sum: i64 = updates.iter().map(|(_, bytes, _)| *bytes).sum();
         assert_eq!(sum, 240);
+    }
+
+    /// Single-file torrent with a real 20-byte pieces field — the shape
+    /// librqbit's add path fully validates. Never fetched over the network.
+    const ARC43_TORRENT: &[u8] =
+        b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces20:ABCDEFGHIJKLMNOPQRST6:lengthi1eee";
+
+    fn bt_test_engine() -> BtEngine {
+        BtEngine::new(
+            crate::proxy::ResolvedProxyConfig::shared_default(),
+            std::sync::Arc::new(crate::download::net_factory::NetworkClientFactory::new()),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_same_folder_tasks_start_independent_sessions() {
+        // ARC-39 acceptance: two tasks sharing one save_dir must start
+        // concurrently. Deliberately NOT taking BT_TEST_LOCK — concurrent
+        // session creation is the point. Before ARC-39 both sessions read the
+        // same shared dht.json and the second DHT bind failed with AddrInUse.
+        let engine = bt_test_engine();
+        let temp_dir = std::env::temp_dir().join(format!("vibe-bt-dht-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let folder = temp_dir.to_str().unwrap().to_string();
+        let proxy = crate::proxy::ResolvedProxyConfig::default();
+
+        let (first, second) = tokio::join!(
+            engine.api_for_output_folder(&folder, "task-dht-a", None, None, &proxy),
+            engine.api_for_output_folder(&folder, "task-dht-b", None, None, &proxy),
+        );
+        let (api_a, key_a) = first.expect("session A must start concurrently");
+        let (api_b, key_b) = second.expect("session B must start concurrently");
+        assert_ne!(
+            key_a, key_b,
+            "same folder with different tasks must yield different session keys"
+        );
+        assert_eq!(engine.sessions.lock().await.len(), 2);
+
+        // Each session is live and answers independently.
+        assert!(api_a.api_torrent_list().torrents.is_empty());
+        assert!(api_b.api_torrent_list().torrents.is_empty());
+
+        // Distinct session keys must map to distinct, flat persistence file
+        // names so no two sessions ever share a dht state file.
+        let file_a = dht_persistence_file_name(&key_a);
+        let file_b = dht_persistence_file_name(&key_b);
+        assert_ne!(file_a, file_b);
+        assert!(!file_a.contains('/') && !file_a.contains('\\'));
+        assert!(!file_b.contains('/') && !file_b.contains('\\'));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn sync_session_download_limit_updates_live_session() {
+        // ARC-29: the download loop's 1s tick re-applies the effective limit
+        // through sync_session_download_limit. Assert the live session's rate
+        // limiter really follows, including the clear-to-unlimited paths —
+        // that is the mechanism that makes mid-download limit changes work.
+        let _guard = BT_TEST_LOCK.lock().await;
+        let engine = bt_test_engine();
+        let temp_dir = std::env::temp_dir().join(format!("vibe-bt-limit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let folder = temp_dir.to_str().unwrap().to_string();
+        let proxy = crate::proxy::ResolvedProxyConfig::default();
+
+        let (api, _key) = engine
+            .api_for_output_folder(&folder, "task-limit-sync", Some(123_456), None, &proxy)
+            .await
+            .expect("session with creation-time download limit");
+        let download_bps = |api: &Api| api.session().ratelimits.get_download_bps().map(|v| v.get());
+        assert_eq!(
+            download_bps(&api),
+            Some(123_456),
+            "creation-time limit must reach the live limiter"
+        );
+
+        sync_session_download_limit(&api, Some(999_999));
+        assert_eq!(download_bps(&api), Some(999_999));
+        sync_session_download_limit(&api, Some(-1));
+        assert_eq!(
+            download_bps(&api),
+            None,
+            "non-positive limit must clear the cap"
+        );
+        sync_session_download_limit(&api, Some(0));
+        assert_eq!(download_bps(&api), None);
+        sync_session_download_limit(&api, None);
+        assert_eq!(download_bps(&api), None);
+
+        sync_session_upload_limit(&api, Some(55_000));
+        assert_eq!(
+            api.session().ratelimits.get_upload_bps().map(|v| v.get()),
+            Some(55_000)
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn delete_runtime_task_targets_only_the_owning_session() {
+        // ARC-43 acceptance: two tasks on the same torrent hold separate
+        // sessions; deleting task A's runtime state must forget the torrent in
+        // A's session only — B keeps downloading. The pre-ARC-43 shape
+        // iterated all sessions and stopped at the first hash match, so the
+        // victim could be either task.
+        let _guard = BT_TEST_LOCK.lock().await;
+        let engine = bt_test_engine();
+        let proxy = crate::proxy::ResolvedProxyConfig::default();
+        let dir_a = std::env::temp_dir().join(format!("vibe-bt-arc43-a-{}", uuid::Uuid::new_v4()));
+        let dir_b = std::env::temp_dir().join(format!("vibe-bt-arc43-b-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir_a).expect("create dir A");
+        std::fs::create_dir_all(&dir_b).expect("create dir B");
+
+        let (api_a, _key_a) = engine
+            .api_for_output_folder(dir_a.to_str().unwrap(), "task-arc43-a", None, None, &proxy)
+            .await
+            .expect("session A");
+        let (api_b, _key_b) = engine
+            .api_for_output_folder(dir_b.to_str().unwrap(), "task-arc43-b", None, None, &proxy)
+            .await
+            .expect("session B");
+
+        // The same torrent bytes, added paused to BOTH sessions.
+        let mut info_hash = String::new();
+        for api in [&api_a, &api_b] {
+            let added = api
+                .api_add_torrent(
+                    AddTorrent::TorrentFileBytes(ARC43_TORRENT.to_vec().into()),
+                    Some(AddTorrentOptions {
+                        paused: true,
+                        overwrite: true,
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .expect("add torrent to session");
+            if info_hash.is_empty() {
+                info_hash = added.details.info_hash.clone();
+            }
+        }
+        assert_eq!(api_a.api_torrent_list().torrents.len(), 1);
+        assert_eq!(api_b.api_torrent_list().torrents.len(), 1);
+
+        let source_key = format!("{SOURCE_BT_PREFIX}{info_hash}");
+        engine
+            .delete_runtime_task("task-arc43-a", &source_key, false)
+            .await;
+
+        assert!(
+            api_a.api_torrent_list().torrents.is_empty(),
+            "the owning session must forget the torrent"
+        );
+        assert_eq!(
+            api_b.api_torrent_list().torrents.len(),
+            1,
+            "the other task's session must be untouched"
+        );
+
+        // A task id with no owning session is a no-op for both sessions.
+        engine
+            .delete_runtime_task("task-arc43-unknown", &source_key, false)
+            .await;
+        assert_eq!(api_b.api_torrent_list().torrents.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 }

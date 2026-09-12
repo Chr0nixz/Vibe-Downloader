@@ -856,6 +856,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：下载中修改限速在数秒内对 BT 生效；设置界面对全局限速与 BT 的关系有明确说明。
 - **2026-09-12 修复**：下载主循环的 1s tick 处同步 session 限速——`sync_session_download_limit(min(任务限速, speed_limiter.current_limit_bps()))`，使传输中修改任务限速（update_task_transfer_options）与调度窗口限速即时生效（create 时的初值仍保留）。全局 token bucket 由 per-task 子限速器参与最小值组合；BT 原生流量不经全局桶的残留由该 min 组合约束，UI 明示为后续项。
 - **验证测试**：`sync_session_*` 函数为 librqbit 运行时 API 的直接薄封装（既有单测覆盖 non_zero 语义）；tick 路径的调用由结构位置保证每秒执行。真实带宽变化验证依赖外部 tracker 环境，归入 FUN-18 的人工验收面。
+- **2026-09-13 加固**：新增单测 `sync_session_download_limit_updates_live_session`——在真实 librqbit session 上断言创建时限速到达 limiter、tick 同款 `sync_session_download_limit` 实时改写 `get_download_bps`、非正数与 `None` 清除上限、`sync_session_upload_limit` 同样生效。真实带宽下的端到端变化仍归 FUN-18。
 
 ### ARC-30（P2，Open）：错误分类仍有多处依赖英文子串（`ARC-16` 遗留面）
 
@@ -945,6 +946,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：两个 BT 任务并发下载互不影响；下载中 probe 另一 torrent 成功（兼作 ARC-28 验收）。
 - **2026-09-12 修复**：每个任务的 session 现在写入**独立的 DHT 持久化文件**（`vibe-dht-{hash(session_key)}.json`，key 含 Windows verbatim 前缀故哈希为平铺名）。此前所有 session 共享 librqbit 默认的单个 dht.json，新 session 重绑其中记录的同一端口 → 第二个并发任务 AddrInUse。DhtSessionConfig.port 保持 None（首个绑定随机选空闲口），persistence 文件隔离后互不覆盖。
 - **验证测试**：BT 单测（session 创建/驱逐/refcount）在真实 DHT 初始化下回归通过——双文件名隔离使创建路径不再共享端口记录；「同 save_dir 双任务并发」的端到端场景需要两个真实 torrent 源，归入 FUN-18 人工验收。
+- **2026-09-13 加固**：文件名哈希抽为纯函数 `dht_persistence_file_name`；新增 `concurrent_same_folder_tasks_start_independent_sessions`（刻意不持 BT_TEST_LOCK，即并发创建本体）：同 save_dir 双任务并发 `api_for_output_folder` 两个真实 session——key 互异、各自 api 独立往返、持久化文件名互异且不含路径分隔符。端到端双 torrent 下载仍归 FUN-18。
 
 ### ARC-40（P2，Closed）：worker panic 无 catch_unwind，slot/host 槽/缓存永久泄漏
 
@@ -954,6 +956,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：注入 panic 的 fake engine 下断言 slot 释放、任务转 Failed、后续调度正常。
 - **2026-09-12 修复**：supervisor 的收敛体以 `catch_unwind(AssertUnwindSafe(engine.download(...)))` 包裹——panic 转为结构化失败消息（`describe_engine_panic`），随后的 downloads_map 移除、request_headers 移除、`mark_download_failed`、runtime lock evict、spawn_dispatch 全部照常执行，槽位不再泄漏。
 - **验证测试**：`scheduler/mod.rs` 新增 `engine_panic_tests`（3 项：&str/String/不透明 payload 的消息渲染）。完整路径的 panic 注入需要真实 AppHandle（同 scheduler_dispatch.rs 的 harness 说明），收敛体的执行保证由 catch_unwind 的控制流位置结构性提供。
+- **2026-09-13 加固**：收敛体抽为 `converge_download_outcome`（supervisor 调用同一函数；A-4 evict 随之提前到成功路径哈希校验前——evict 只清空闲注册表项，重排不可观察）。新增 `convergence_tests` 两项：①以真实 panic future 走 supervisor 同款 `catch_unwind → describe_engine_panic → converge` 粘合，断言 downloads_map/request_headers 清空、任务转 Failed 且 panic 细节进入 error_message、同 host 后续任务收敛无损；②canceled=true 时运行时状态照常清理但不写 Failed（R-2.4）。测试向 `app: None` 注入以跳过 emits；完整 Wry 路径仍受真实 AppHandle 限制，粘合层为 3 行且与生产逐字一致。
 
 ### ARC-41（P2，Open）：start 失败谓词不含 queued，任务永久滞留队首静默重败
 
@@ -977,6 +980,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：同种子双任务取消其一，断言另一任务继续下载且目标 session 被清理。
 - **2026-09-12 修复**：`delete_runtime_task` 签名增加 `task_id`（engine 分发与全部调用方同步），按 session key 的 `|task:{task_id}` 后缀精确定位 owning session 后删除/forget info-hash，不再「遍历全部 session 第一个匹配就 break」。无 owning session 时记 debug 日志退出。
 - **验证测试**：既有单测 `delete_runtime_task_does_not_decrement_session_refcount` 更新为新签名并回归；「同种子双任务删 A 不影响 B」需要两个真实活动 session，单测以无匹配 task_id 的 no-op 路径覆盖定位逻辑（找不到即不动任何 session）。
+- **2026-09-13 加固**：新增 `delete_runtime_task_targets_only_the_owning_session`——两个真实 session 各自加入同一 `.torrent`（paused），删除任务 A 的运行时状态后 A 的 session 不再持有该 torrent、B 的 session 原样保留；无 owning session 的 task_id 为 no-op。同步修正 `session_evicted_when_ref_count_reaches_zero` 中「双 session 必撞 DHT 端口」的过时注释（ARC-39 后已可共存）。
 
 ### ARC-44（P3，Open）：start_task 三种 Ok 语义混一，dispatch pass 内幻影计数
 
