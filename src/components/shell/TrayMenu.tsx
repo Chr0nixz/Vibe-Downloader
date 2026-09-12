@@ -1,8 +1,8 @@
 import { AppWindow, FolderOpen, type LucideIcon, Plus, Power, Settings, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import type { TrayMenuAction } from "@/generated/bindings";
+import type { TranslationKey } from "@/i18n";
 import { createLogger } from "@/lib/logger";
 import { runTrayMenuAction } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
@@ -11,7 +11,7 @@ const log = createLogger("tray-menu");
 
 interface TrayMenuItem {
   action: TrayMenuAction;
-  labelKey: `trayMenu.${string}`;
+  labelKey: TranslationKey;
   icon: LucideIcon;
   tone?: "primary" | "danger";
 }

@@ -34,6 +34,7 @@ import { ProgressBar } from "@/components/ui/progress-bar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { QueueTaskDecision, RecoveryAction, TaskStatus } from "@/generated/bindings";
 import { useSystemFileIcon } from "@/hooks/use-system-file-icon";
+import type { TranslationKey } from "@/i18n";
 import { localizedErrorMessage, localizedMessage } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
 import { cn, formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
@@ -288,7 +289,7 @@ const APP_EXTS = new Set([
 ]);
 const MANIFEST_EXTS = new Set(["torrent", "meta4", "metalink", "mpd", "m3u", "m3u8"]);
 
-function fileTypeIconFor(fileName: string, protocol: string): { Icon: IconComponent; labelKey: string } {
+function fileTypeIconFor(fileName: string, protocol: string): { Icon: IconComponent; labelKey: TranslationKey } {
   const p = protocol.toLowerCase();
   // Protocol-based shortcuts: streaming media and P2P have no single extension.
   if (p === "bt" || p === "magnet") return { Icon: FileStack, labelKey: "task.fileType.torrent" };

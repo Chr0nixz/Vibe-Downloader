@@ -218,6 +218,7 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         proxy_config: None,
         app: None,
         request_id: None,
+        cancel_token: None,
     }
 }
 

@@ -135,6 +135,7 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         proxy_config: None,
         app: None,
         request_id: None,
+        cancel_token: None,
     }
 }
 
@@ -941,4 +942,33 @@ async fn arc37_internal_segment_failure_does_not_cancel_user_token() {
         "ARC-37: engine must not cancel the scheduler-owned token on internal failure"
     );
     pool.close().await;
+}
+
+/// FUN-20: a task-level Off proxy must drive the DASH manifest probe even
+/// when the HTTP engine's global proxy is an unreachable SOCKS5 endpoint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun20_task_proxy_off_bypasses_unreachable_global_during_probe() {
+    use tauri_app_lib::download::DownloadEngine as _;
+
+    let server = start_test_server();
+    let shared = std::sync::Arc::new(tokio::sync::RwLock::new(
+        tauri_app_lib::proxy::ResolvedProxyConfig {
+            mode: tauri_app_lib::proxy::AppProxyMode::Custom,
+            url: Some("socks5://127.0.0.1:9".to_string()),
+            no_proxy: None,
+            username: None,
+            password: None,
+        },
+    ));
+    let engine = tauri_app_lib::download::DashEngine::new(std::sync::Arc::new(
+        tauri_app_lib::download::HttpEngine::with_proxy_config(shared).expect("http engine"),
+    ));
+    let mut request = new_probe_request(format!("{}/manifest.mpd", server.base_url));
+    request.proxy_config = Some(tauri_app_lib::proxy::ResolvedProxyConfig::default());
+
+    let output = engine
+        .probe(request)
+        .await
+        .expect("Off task proxy must bypass the unreachable global proxy");
+    assert_eq!(output.protocol, "dash");
 }

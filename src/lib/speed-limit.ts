@@ -1,4 +1,4 @@
-import i18n from "@/i18n";
+import i18n, { type TranslationKey } from "@/i18n";
 import { formatSpeed } from "@/lib/utils";
 
 /**
@@ -32,7 +32,7 @@ export function speedLimitPresetLabel(value: number | null): string {
   return value === null ? i18n.t("speedLimit.unlimited") : formatSpeed(value);
 }
 
-export function speedLimitUnitLabel(byteUnitKey: string): string {
+export function speedLimitUnitLabel(byteUnitKey: TranslationKey): string {
   return i18n.t("format.perSecondUnit", { unit: i18n.t(byteUnitKey) });
 }
 

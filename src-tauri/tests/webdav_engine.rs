@@ -243,6 +243,7 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         proxy_config: None,
         app: None,
         request_id: None,
+        cancel_token: None,
     }
 }
 
@@ -594,7 +595,12 @@ async fn directory_probe_fails_when_propfind_returns_403() {
 
     let server = start_test_server(WebDavHandlerState::new());
     let url = webdav_url(&server, "/forbidden/");
-    let error = probe_webdav_directory_url(&url, ResolvedProxyConfig::default(), None)
+    let factory = tauri_app_lib::download::NetworkClientFactory::new();
+    let client = factory
+        .client_for(&tauri_app_lib::proxy::ResolvedProxyConfig::default())
+        .await
+        .expect("client");
+    let error = probe_webdav_directory_url(&client, &url, None)
         .await
         .expect_err("403 PROPFIND must fail");
     let payload: AppErrorPayload =

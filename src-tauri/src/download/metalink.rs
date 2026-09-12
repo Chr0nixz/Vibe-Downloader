@@ -20,8 +20,8 @@ use tokio::{
 use super::{
     engine::EngineFuture, file_ops::finalize_download_file, http::HttpEngine, read_body_limited,
     read_local_file_limited, url_classify::is_metalink_url, DownloadContext, DownloadEngine,
-    DownloadError, LimitedBodyError, ProbeOutput, ProbeRequest, CONTROL_PLANE_MAX_BYTES,
-    READ_IDLE_TIMEOUT,
+    DownloadError, IdleReadOutcome, LimitedBodyError, ProbeOutput, ProbeRequest,
+    CONTROL_PLANE_MAX_BYTES, READ_IDLE_TIMEOUT,
 };
 use crate::{
     db,
@@ -951,6 +951,11 @@ pub async fn download_metalink_range_from_mirror(
     part_path: &Path,
 ) -> Result<i64, String> {
     let expected = (range_end - range_start + 1) as i64;
+    // SEC-10: literal-authority pre-flight for the mirror target (covers the
+    // initial request and the in-loop retry below).
+    crate::download::ssrf::assert_public_authority(
+        &reqwest::Url::parse(&mirror.url).map_err(|e| e.to_string())?,
+    )?;
 
     // F-2: Resume — stat the existing part file to get `already_downloaded`.
     let mut already_downloaded: u64 = fs::metadata(part_path).await.map(|m| m.len()).unwrap_or(0);
@@ -1087,39 +1092,60 @@ pub async fn download_metalink_range_from_mirror(
     // reflects the full range size and matches `expected` for validation.
     let mut downloaded: i64 = already_downloaded_i64;
     let mut last_progress = Instant::now();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("Metalink mirror connection failed: {e}"))?
-    {
-        if cancel_token.is_cancelled() {
-            out.flush()
-                .await
-                .map_err(|e| format!("Could not flush Metalink part file: {e}"))?;
-            return Err("Download canceled.".to_string());
-        }
-        if speed_limiter
-            .throttle(chunk.len(), cancel_token)
-            .await
-            .is_err()
+    // ARC-25: the data plane must not hang forever on a silent mirror — race
+    // the read against the shared 60 s idle timeout and the cancel token
+    // (same contract as the HLS/DASH/FTP/SFTP data planes).
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                out.flush()
+                    .await
+                    .map_err(|e| format!("Could not flush Metalink part file: {e}"))?;
+                return Err("Download canceled.".to_string());
+            }
+            outcome = crate::download::read_with_idle_timeout(response.chunk(), READ_IDLE_TIMEOUT) => {
+                match outcome {
+                    IdleReadOutcome::Data(chunk) => chunk,
+                    IdleReadOutcome::End => break,
+                    IdleReadOutcome::Error(e) => {
+                        return Err(format!("Metalink mirror connection failed: {e}"))
+                    }
+                    IdleReadOutcome::IdleTimeout => {
+                        return Err(engine_error(
+                            "metalink_mirror_stalled",
+                            "The mirror connection stalled: no data received for 60 seconds.",
+                            true,
+                        ));
+                    }
+                }
+            }
+        };
         {
-            out.flush()
+            if speed_limiter
+                .throttle(chunk.len(), cancel_token)
                 .await
-                .map_err(|e| format!("Could not flush Metalink part file: {e}"))?;
-            return Err("Download canceled.".to_string());
-        }
-        out.write_all(&chunk).await.map_err(|e| {
-            AppErrorPayload::disk_write_failed(format!("Could not write Metalink part file: {e}"))
+                .is_err()
+            {
+                out.flush()
+                    .await
+                    .map_err(|e| format!("Could not flush Metalink part file: {e}"))?;
+                return Err("Download canceled.".to_string());
+            }
+            out.write_all(&chunk).await.map_err(|e| {
+                AppErrorPayload::disk_write_failed(format!(
+                    "Could not write Metalink part file: {e}"
+                ))
                 .command_error()
-        })?;
-        downloaded = downloaded.saturating_add(i64::try_from(chunk.len()).unwrap_or(0));
-        if last_progress.elapsed() >= Duration::from_millis(300) {
-            // F-3: Report via mpsc instead of writing `file_id` row directly.
-            let _ = progress_tx.send(MetalinkWorkerProgress {
-                worker_index,
-                downloaded,
-            });
-            last_progress = Instant::now();
+            })?;
+            downloaded = downloaded.saturating_add(i64::try_from(chunk.len()).unwrap_or(0));
+            if last_progress.elapsed() >= Duration::from_millis(300) {
+                // F-3: Report via mpsc instead of writing `file_id` row directly.
+                let _ = progress_tx.send(MetalinkWorkerProgress {
+                    worker_index,
+                    downloaded,
+                });
+                last_progress = Instant::now();
+            }
         }
     }
     out.flush()
@@ -1269,6 +1295,10 @@ async fn download_from_resource(
     }
 
     let started = Instant::now();
+    // SEC-10: literal-authority pre-flight for the serial mirror target.
+    crate::download::ssrf::assert_public_authority(
+        &reqwest::Url::parse(&resource.url).map_err(|e| e.to_string())?,
+    )?;
     let mut request = client.get(&resource.url);
     for (name, value) in request_headers {
         request = request.header(name, value);
@@ -1346,33 +1376,48 @@ async fn download_from_resource(
         .checked_sub(Duration::from_secs(2))
         .unwrap_or_else(Instant::now);
     db::update_task_file_progress(pool, &file.id, downloaded, TaskStatus::Downloading).await?;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("Metalink mirror connection failed: {e}"))?
-    {
-        if cancel_token.is_cancelled() {
-            out.flush()
-                .await
-                .map_err(|e| format!("Could not flush Metalink temp file: {e}"))?;
-            // Force checkpoint before surfacing cancel so the parent clean-pause
-            // path persists bytes already on disk.
-            emit_metalink_progress(
-                app,
-                pool,
-                task,
-                file,
-                completed_before_file,
-                downloaded,
-                &mut progress_gate,
-                &mut last_files_emit,
-                true,
-                TaskStatus::Downloading,
-            )
-            .await?;
-            progress_gate.flush(app);
-            return Err("Download canceled.".to_string());
-        }
+    // ARC-25: same idle-timeout + cancel contract as the parallel range worker.
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                out.flush()
+                    .await
+                    .map_err(|e| format!("Could not flush Metalink temp file: {e}"))?;
+                // Force checkpoint before surfacing cancel so the parent clean-pause
+                // path persists bytes already on disk.
+                emit_metalink_progress(
+                    app,
+                    pool,
+                    task,
+                    file,
+                    completed_before_file,
+                    downloaded,
+                    &mut progress_gate,
+                    &mut last_files_emit,
+                    true,
+                    TaskStatus::Downloading,
+                )
+                .await?;
+                progress_gate.flush(app);
+                return Err("Download canceled.".to_string());
+            }
+            outcome = crate::download::read_with_idle_timeout(response.chunk(), READ_IDLE_TIMEOUT) => {
+                match outcome {
+                    IdleReadOutcome::Data(chunk) => chunk,
+                    IdleReadOutcome::End => break,
+                    IdleReadOutcome::Error(e) => {
+                        return Err(format!("Metalink mirror connection failed: {e}"))
+                    }
+                    IdleReadOutcome::IdleTimeout => {
+                        return Err(engine_error(
+                            "metalink_mirror_stalled",
+                            "The mirror connection stalled: no data received for 60 seconds.",
+                            true,
+                        ));
+                    }
+                }
+            }
+        };
         if speed_limiter
             .throttle(chunk.len(), cancel_token)
             .await
@@ -1598,6 +1643,8 @@ async fn fetch_manifest_bytes(
             .await
             .map_err(map_metalink_limited_body_error);
     }
+    // SEC-10: literal-authority pre-flight for the network branch.
+    crate::download::ssrf::assert_public_authority(&parsed)?;
     let mut request = client.get(url);
     for (name, value) in request_headers {
         request = request.header(name, value);

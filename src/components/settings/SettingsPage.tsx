@@ -220,8 +220,7 @@ export function SettingsPage() {
       : theme === "dark"
         ? t("settings.themeDark")
         : t("settings.themeSystem");
-  const currentLocaleKey = currentLocale === "zh-CN" ? "zhCN" : currentLocale;
-  const localeLabel = t(`locale.${currentLocaleKey}`);
+  const localeLabel = t(LOCALE_LABEL_KEYS[currentLocale]);
   const enabledDesktopIntegrations = [
     systemNotifications,
     closeToTray,
@@ -1806,7 +1805,7 @@ export function SettingsPage() {
                       {SUPPORTED_LOCALES.map((locale) => (
                         <SelectItem key={locale} value={locale}>
                           <span className="flex items-center gap-2">
-                            {LOCALE_LABEL_KEYS[locale] ? t(LOCALE_LABEL_KEYS[locale]) : locale}
+                            {t(LOCALE_LABEL_KEYS[locale])}
                             {!STABLE_LOCALES.includes(locale) && (
                               <span className="rounded bg-surface-hover px-1.5 py-0.5 text-xs text-text-muted">
                                 {t("locale.beta")}

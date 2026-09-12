@@ -39,6 +39,7 @@ impl TestServer {
     where
         F: Fn(TcpStream) + Send + Sync + Clone + 'static,
     {
+        install_intranet_test_bypass();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let stop = Arc::new(AtomicBool::new(false));
@@ -108,6 +109,13 @@ impl TestPaths {
             final_path: dir.join("file.bin"),
         }
     }
+}
+
+/// Test-only escape hatch for the SEC-10/12 intranet guards. Every fake
+/// server in the suites listens on loopback; call this before dialing.
+#[allow(dead_code)]
+pub fn install_intranet_test_bypass() {
+    std::env::set_var("VIBE_TEST_ALLOW_INTRANET", "1");
 }
 
 /// Fixed ChaCha20 key so credential encryption works without an OS keyring (CI).

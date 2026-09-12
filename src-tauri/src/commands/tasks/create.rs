@@ -1,7 +1,7 @@
 use std::{collections::HashSet, path::PathBuf, time::Duration};
 
 use base64::Engine as _;
-use reqwest::{Client, Url};
+use reqwest::Url;
 use serde::Deserialize;
 use specta::Type;
 use tauri::{AppHandle, Manager, State};
@@ -181,6 +181,7 @@ pub async fn probe_task(
             proxy_config: Some(proxy_config),
             app: Some(app),
             request_id: input.request_id,
+            cancel_token: None,
         })
         .await
         .map_err(|e| ensure_structured_error(e.to_string()))?;
@@ -232,6 +233,7 @@ async fn resolve_create_probe(
             proxy_config: Some(proxy_config),
             app: None,
             request_id: None,
+            cancel_token: None,
         })
         .await
         .map_err(|e| ensure_structured_error(e.to_string()))
@@ -552,6 +554,7 @@ pub async fn import_urls(
                                 proxy_config: Some(proxy_config),
                                 app: None,
                                 request_id: None,
+                                cancel_token: None,
                             })
                             .await
                             .map_err(|e| ensure_structured_error(e.to_string())),
@@ -1251,7 +1254,7 @@ fn spawn_checksum_sidecar_discovery(
             ));
         }
         let checksums =
-            discover_checksum_sidecars(&task_id, &final_url, &headers, &timestamp).await;
+            discover_checksum_sidecars(&app, &task_id, &final_url, &headers, &timestamp).await;
         if checksums.is_empty() {
             return;
         }
@@ -1403,6 +1406,7 @@ async fn persist_metalink_probe(
 }
 
 async fn discover_checksum_sidecars(
+    app: &AppHandle,
     task_id: &str,
     final_url: &str,
     request_headers: &[(String, String)],
@@ -1415,7 +1419,25 @@ async fn discover_checksum_sidecars(
         return Vec::new();
     }
 
-    let Ok(client) = Client::builder().timeout(Duration::from_secs(3)).build() else {
+    // SEC-03: sidecar probes previously built a bare client that inherited the
+    // system proxy and skipped the SSRF guards. Route through the shared
+    // factory with the task-resolved proxy instead; each request keeps a 3 s
+    // budget because discovery is best-effort and must not delay completion.
+    let Some(state) = app.try_state::<crate::AppState>() else {
+        return Vec::new();
+    };
+    let global_proxy = state.engine_registry.proxy_config().await;
+    let Ok(proxy_config) =
+        db::resolve_task_proxy_config(&state.pool, task_id, "https", &global_proxy).await
+    else {
+        return Vec::new();
+    };
+    let Ok(client) = state
+        .engine_registry
+        .http_engine()
+        .client_for_config(&proxy_config)
+        .await
+    else {
         return Vec::new();
     };
     let mut checksums = Vec::new();
@@ -1430,13 +1452,22 @@ async fn discover_checksum_sidecars(
         for (name, value) in request_headers {
             request = request.header(name, value);
         }
-        let Ok(response) = request.send().await else {
+        // 3 s per request keeps best-effort discovery bounded now that the
+        // factory client carries no overall timeout.
+        let Ok(response) = tokio::time::timeout(Duration::from_secs(3), request.send()).await
+        else {
+            continue;
+        };
+        let Ok(response) = response else {
             continue;
         };
         if !response.status().is_success() {
             continue;
         }
-        let Ok(text) = response.text().await else {
+        let Ok(text) = tokio::time::timeout(Duration::from_secs(3), response.text()).await else {
+            continue;
+        };
+        let Ok(text) = text else {
             continue;
         };
         let Some(expected_hash) = first_checksum_token(&text, algorithm) else {

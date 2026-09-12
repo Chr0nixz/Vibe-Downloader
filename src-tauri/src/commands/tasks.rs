@@ -287,8 +287,14 @@ pub async fn probe_webdav_directory(
         input.proxy_no_proxy.as_deref(),
     )?;
     let credentials = directory_probe_credentials(&input);
-    crate::download::webdav::probe_webdav_directory_url(url, proxy_config, credentials.as_ref())
-        .await
+    // SEC-03: obtain the client from the shared network factory so the
+    // directory probe shares pooling and the proxy policy stack.
+    let client = state
+        .engine_registry
+        .http_engine()
+        .client_for_config(&proxy_config)
+        .await?;
+    crate::download::webdav::probe_webdav_directory_url(&client, url, credentials.as_ref()).await
 }
 
 fn directory_probe_credentials(input: &DirectoryProbeInput) -> Option<db::TaskCredentials> {
@@ -742,6 +748,7 @@ async fn restart_task_from_beginning(
             proxy_config: Some(proxy_config),
             app: None,
             request_id: None,
+            cancel_token: None,
         })
         .await?;
     db::update_task_remote_metadata(
@@ -869,6 +876,7 @@ pub(crate) async fn prepare_task_for_download(
                 proxy_config: Some(proxy_config),
                 app: None,
                 request_id: None,
+                cancel_token: None,
             })
             .await?;
         if let Some(message) = resume_mismatch_message(&task, &probe) {

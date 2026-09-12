@@ -156,3 +156,85 @@ fn ssrf_public_addresses_pass_both_layers() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// SEC-10 / SEC-12: connect-time authority checks
+// ---------------------------------------------------------------------------
+
+/// Waits briefly for an in-flight connection attempt, then asserts the
+/// listener accepted nothing (the guard must reject before any socket I/O).
+fn assert_no_connection(listener: &std::net::TcpListener) {
+    listener
+        .set_nonblocking(true)
+        .expect("set listener nonblocking");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    match listener.accept() {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Ok(_) => panic!("guard must reject the target before any connection is made"),
+        Err(error) => panic!("unexpected listener error: {error}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sec10_literal_private_ip_is_rejected_before_any_connection() {
+    // SEC-10: IP literals never reach the client's dns_resolver, so the
+    // request-site authority pre-flight is the only layer that sees them.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let engine = tauri_app_lib::download::HttpEngine::new().expect("engine");
+    let error = engine
+        .probe_with_headers_and_proxy(&format!("http://{addr}/file"), &[], None)
+        .await
+        .expect_err("literal private target must be rejected");
+    assert!(
+        error.contains("SSRF guard"),
+        "expected SSRF rejection, got {error}"
+    );
+
+    assert_no_connection(&listener);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sec12_ftp_probe_rejects_hostname_resolving_to_private_ip() {
+    // SEC-12: FTP control connections bypass reqwest entirely; the DNS
+    // pre-flight must block localhost before the engine dials the port.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+
+    use tauri_app_lib::download::DownloadEngine as _;
+    let engine = tauri_app_lib::download::FtpEngine::new(
+        tauri_app_lib::proxy::ResolvedProxyConfig::shared_default(),
+    );
+    let error = engine
+        .probe(tauri_app_lib::download::ProbeRequest {
+            uri: format!("ftp://localhost:{port}/file.bin"),
+            ..tests_new_ftp_probe_request()
+        })
+        .await
+        .expect_err("intranet FTP target must be rejected");
+    let error_text = error.to_string();
+    assert!(
+        error_text.contains("intranet_target_blocked"),
+        "expected intranet_target_blocked, got {error_text}"
+    );
+
+    assert_no_connection(&listener);
+}
+
+fn tests_new_ftp_probe_request() -> tauri_app_lib::download::ProbeRequest {
+    // Mirrors ftp_engine.rs::new_probe_request; kept local so this file does
+    // not depend on that test module's helpers.
+    tauri_app_lib::download::ProbeRequest {
+        uri: String::new(),
+        source: None,
+        request_headers: Vec::new(),
+        pool: None,
+        task_id: None,
+        credentials: None,
+        proxy_config: None,
+        app: None,
+        request_id: None,
+        cancel_token: None,
+    }
+}

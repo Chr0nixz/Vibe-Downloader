@@ -10,6 +10,7 @@ pub(crate) mod ftp;
 mod hls;
 mod http;
 mod metalink;
+pub(crate) mod net_factory;
 pub(crate) mod probe_error;
 pub(crate) mod retry;
 pub(crate) mod sanitize;
@@ -29,6 +30,7 @@ pub use http::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine
 #[doc(hidden)]
 pub use metalink::testing;
 pub use metalink::MetalinkEngine;
+pub use net_factory::NetworkClientFactory;
 pub use sftp::{probe_sftp_directory_url, SftpEngine};
 pub use speed::GlobalSpeedLimiter;
 pub use webdav::{probe_webdav_directory_url, WebDavEngine};

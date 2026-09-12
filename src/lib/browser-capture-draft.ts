@@ -1,4 +1,5 @@
 import type { BrowserCaptureSettings, BrowserSiteRule } from "@/generated/bindings";
+import type { TranslationKey } from "@/i18n";
 
 /** UX-03: debounce window for browser capture settings IPC saves. */
 export const BROWSER_CAPTURE_SAVE_DEBOUNCE_MS = 500;
@@ -56,7 +57,7 @@ export function resolveCaptureDraftAfterSave(
 }
 
 /** UX-06: validate a site rule before persisting into the parent draft. */
-export function validateSiteRule(rule: BrowserSiteRule): string | null {
+export function validateSiteRule(rule: BrowserSiteRule): TranslationKey | null {
   const host = rule.hostPattern.trim();
   if (!host) {
     return "settings.siteRuleHostRequired";

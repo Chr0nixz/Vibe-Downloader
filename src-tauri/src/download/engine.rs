@@ -36,6 +36,11 @@ pub struct ProbeRequest {
     /// UX-6: Correlates phase events to a specific probe invocation.
     /// The frontend passes this via `ProbeTaskInput.request_id`.
     pub request_id: Option<String>,
+    /// ARC-26: cooperative cancellation for probe paths. Engine connect/login
+    /// steps race this token against their timeouts so a hung dial cannot
+    /// occupy the scheduler past its budget. `None` for callers that have no
+    /// cancellation source yet.
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// UX-6: Emit a probe-phase event if `app` and `request_id` are both `Some`.
@@ -140,8 +145,14 @@ impl Default for EngineRegistry {
 impl EngineRegistry {
     pub fn new() -> Result<Self, String> {
         let proxy_config = ResolvedProxyConfig::shared_default();
-        let bt_engine = Arc::new(BtEngine::new(proxy_config.clone()));
-        let http_engine = Arc::new(HttpEngine::with_proxy_config(proxy_config.clone())?);
+        // SEC-03: HTTP and BT share one client factory (cache + policy stack),
+        // so set_proxy_config's invalidation covers both in one call.
+        let factory = Arc::new(crate::download::net_factory::NetworkClientFactory::new());
+        let bt_engine = Arc::new(BtEngine::new(proxy_config.clone(), factory.clone()));
+        let http_engine = Arc::new(HttpEngine::with_proxy_config_and_factory(
+            proxy_config.clone(),
+            factory.clone(),
+        )?);
         Ok(Self {
             engines: vec![
                 bt_engine.clone(),

@@ -1,5 +1,6 @@
 import type { TFunction } from "i18next";
 import type { RecoveryAction } from "@/generated/bindings";
+import type { TranslationKey } from "@/i18n";
 import { ERROR_CODE_I18N_MAP } from "@/lib/stable-error-codes";
 
 export interface AppErrorPayload {
@@ -41,14 +42,15 @@ export function errorMessage(error: unknown): string {
   return String(error);
 }
 
-export function errorCodeToI18nKey(code: string): string | null {
+export function errorCodeToI18nKey(code: string): TranslationKey | null {
   return ERROR_CODE_I18N_MAP[code] ?? null;
 }
 
 export function localizedMessage(message: string | null | undefined, t: TFunction): string | undefined {
   if (!message) return undefined;
   if (message.startsWith("taskDiagnostics.")) {
-    return t(message);
+    // The backend sends the key itself here; it cannot be checked statically.
+    return t(message as TranslationKey);
   }
   return message;
 }

@@ -111,6 +111,53 @@ pub async fn is_hostname_private_via_dns(host: &str) -> bool {
     }
 }
 
+/// Test-only escape hatch for the SEC-10/12 guards: every fake server in the
+/// integration suites listens on loopback, which the guards correctly reject.
+/// Mirrors the `VIBE_DOWNLOADER_TEST_SECRET_KEY` pattern — compile-gated to
+/// debug/test builds so release binaries ignore the variable entirely.
+fn intranet_guard_bypassed() -> bool {
+    cfg!(any(test, debug_assertions)) && std::env::var_os("VIBE_TEST_ALLOW_INTRANET").is_some()
+}
+
+/// SEC-10: synchronous authority pre-flight for targets sent through factory
+/// clients. IP literals never reach the connection-time dns_resolver (reqwest
+/// dials them directly) and the redirect policy only fires on redirects, so an
+/// initial request to `http://10.0.0.1/...` would otherwise bypass every
+/// client-level guard. Hostname checks are left to the resolver layer — this
+/// check is deliberately synchronous and allocation-free per request.
+pub fn assert_public_authority(url: &Url) -> Result<(), String> {
+    if intranet_guard_bypassed() {
+        return Ok(());
+    }
+    if is_private_or_reserved_url(url) {
+        return Err(format!(
+            "SSRF guard: {} is a private or reserved address.",
+            url.host_str().unwrap_or(url.as_str())
+        ));
+    }
+    Ok(())
+}
+
+/// SEC-12: full pre-flight for protocols that bypass reqwest entirely (FTP/
+/// SFTP control connections). Performs the literal check above and, for real
+/// hostnames, the 3-second DNS pre-flight — the reqwest resolver layer does
+/// not exist on these paths.
+pub async fn assert_connectable_authority(url: &Url) -> Result<(), String> {
+    if intranet_guard_bypassed() {
+        return Ok(());
+    }
+    assert_public_authority(url)?;
+    if let Some(host) = url.host_str() {
+        // IP literals were already judged above; only real hostnames need DNS.
+        if host.parse::<std::net::IpAddr>().is_err() && is_hostname_private_via_dns(host).await {
+            return Err(format!(
+                "SSRF guard: {host} resolves to a private or reserved address."
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

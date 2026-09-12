@@ -85,6 +85,7 @@ impl DashEngine {
         pool: Option<&SqlitePool>,
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
+        proxy_config: Option<&crate::proxy::ResolvedProxyConfig>,
     ) -> Result<DashManifestSummary, String> {
         crate::download::engine::emit_probe_phase(app, request_id, "checking_ffmpeg", Some("dash"));
         super::ffmpeg::ensure_ffmpeg_available(
@@ -93,7 +94,12 @@ impl DashEngine {
             "ffmpeg was not found. Install ffmpeg, configure a path in Settings → External tools, or set VIBE_FFMPEG_PATH before creating MPEG-DASH tasks.",
         )
         .await?;
-        let client = self.client().await?;
+        // FUN-20: task-level proxy must apply to the probe, matching probe_hls.
+        let client = if let Some(config) = proxy_config {
+            self.client_for_config(config).await?
+        } else {
+            self.client().await?
+        };
         crate::download::engine::emit_probe_phase(
             app,
             request_id,
@@ -161,6 +167,7 @@ impl DownloadEngine for DashEngine {
                     pool,
                     &request.app,
                     &request.request_id,
+                    request.proxy_config.as_ref(),
                 )
                 .await
                 .map_err(DownloadError::Other)?;
@@ -1088,6 +1095,8 @@ async fn download_dash_segments(
     first_segment_id: Option<&str>,
     db_write_gate: &mut DbWriteGate,
 ) -> Result<i64, String> {
+    // SEC-11: credential headers may only travel to the origin host.
+    let origin_host = crate::download::http::url_host(&task.url).unwrap_or_default();
     let mut pending = plans.into_iter();
     let mut workers = JoinSet::new();
     let mut active = 0_usize;
@@ -1104,6 +1113,7 @@ async fn download_dash_segments(
             let request_headers = request_headers.to_vec();
             let speed_limiter = speed_limiter.clone();
             let cancel_token = cancel_token.clone();
+            let origin_host = origin_host.clone();
             workers.spawn(async move {
                 download_dash_segment(
                     &pool,
@@ -1112,6 +1122,7 @@ async fn download_dash_segments(
                     speed_limiter,
                     cancel_token,
                     plan,
+                    origin_host,
                 )
                 .await
             });
@@ -1179,6 +1190,7 @@ async fn download_dash_segment(
     speed_limiter: Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: tokio_util::sync::CancellationToken,
     plan: DashSegmentPlan,
+    origin_host: String,
 ) -> DashSegmentDownloadResult {
     let retry_policy = RetryPolicy::hls_segment();
     let mut retry_count = 0;
@@ -1189,6 +1201,7 @@ async fn download_dash_segment(
             pool,
             client,
             &request_headers,
+            &origin_host,
             &speed_limiter,
             &cancel_token,
             &plan,
@@ -1280,6 +1293,7 @@ async fn download_dash_segment_once(
     pool: &SqlitePool,
     client: &Client,
     request_headers: &[(String, String)],
+    origin_host: &str,
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: &tokio_util::sync::CancellationToken,
     plan: &DashSegmentPlan,
@@ -1292,7 +1306,15 @@ async fn download_dash_segment_once(
         })?;
     }
 
-    let mut request = apply_forwarded_headers(client.get(&plan.uri), request_headers)
+    // SEC-10: literal-authority pre-flight (resolver covers hostnames).
+    crate::download::ssrf::assert_public_authority(
+        &reqwest::Url::parse(&plan.uri)
+            .map_err(|e| format!("Could not request DASH segment: {e}"))?,
+    )?;
+    // SEC-11: strip Authorization/Cookie when the segment lives on another host.
+    let bound_headers =
+        crate::download::http::headers_for_origin(request_headers, origin_host, &plan.uri);
+    let mut request = apply_forwarded_headers(client.get(&plan.uri), &bound_headers)
         .header(ACCEPT_ENCODING, "identity");
     if let Some(range) = &plan.byte_range {
         request = request.header(RANGE, byte_range_header(range));
@@ -1636,6 +1658,9 @@ async fn fetch_mpd_text(
         return String::from_utf8(bytes)
             .map_err(|_| "DASH MPD file is not valid UTF-8.".to_string());
     }
+    // SEC-10: literal-authority pre-flight for the network branch.
+    crate::download::ssrf::assert_public_authority(&parsed)
+        .map_err(|e| format!("Could not request DASH MPD: {e}"))?;
     let response = apply_forwarded_headers(client.get(url), headers)
         .send()
         .await

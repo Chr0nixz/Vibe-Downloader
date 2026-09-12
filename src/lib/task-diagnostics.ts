@@ -1,5 +1,7 @@
 /** Protocol helpers for TaskDetails diagnostics presentation. */
 
+import type { TranslationKey } from "@/i18n";
+
 export function isTorrentProtocol(protocol: string): boolean {
   return protocol === "bt" || protocol === "magnet";
 }
@@ -36,19 +38,19 @@ export function showsHttpRequestFields(method: string): boolean {
   );
 }
 
-export function diagnosticsSegmentsEmptyKey(protocol: string): string {
+export function diagnosticsSegmentsEmptyKey(protocol: string): TranslationKey {
   if (isHlsProtocol(protocol)) return "taskDetails.noHlsSegments";
   if (isDashProtocol(protocol)) return "taskDetails.noDashSegments";
   if (isHttpLikeProtocol(protocol)) return "taskDetails.noChunks";
   return "taskDetails.noWorkUnits";
 }
 
-export function diagnosticsConnectionsEmptyKey(protocol: string): string {
+export function diagnosticsConnectionsEmptyKey(protocol: string): TranslationKey {
   if (isHttpLikeProtocol(protocol)) return "taskDetails.noConnections";
   return "taskDetails.noWorkUnits";
 }
 
-export function diagnosticsRequestsEmptyKey(protocol: string): string {
+export function diagnosticsRequestsEmptyKey(protocol: string): TranslationKey {
   if (isHttpLikeProtocol(protocol)) return "taskDetails.noRequests";
   return "taskDetails.noRequestsGeneric";
 }
@@ -57,11 +59,14 @@ export function defaultDiagSubTab(protocol: string): "segments" | "requests" {
   return isTorrentProtocol(protocol) ? "requests" : "segments";
 }
 
+/** TLS mode for the TaskDetails protocol row; each maps to a `ftpTls.*` key. */
+export type FtpTlsMode = "plain" | "explicit" | "implicit";
+
 /**
  * Align with FTP engine: FTPS on port 21 is explicit TLS; other FTPS ports
  * (default 990) are implicit TLS. Plain FTP has no TLS mode.
  */
-export function ftpTlsModeLabel(protocol: string, url: string): string | null {
+export function ftpTlsModeLabel(protocol: string, url: string): FtpTlsMode | null {
   if (protocol === "ftp") return "plain";
   if (protocol !== "ftps") return null;
   try {

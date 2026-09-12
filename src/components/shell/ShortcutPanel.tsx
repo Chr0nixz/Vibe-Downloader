@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -25,7 +26,7 @@ function modSymbol(platform: Platform): string {
   return platform === "macos" ? "\u2318" : "Ctrl+";
 }
 
-function buildGroups(t: (key: string) => string, platform: Platform): ShortcutGroup[] {
+function buildGroups(t: TFunction, platform: Platform): ShortcutGroup[] {
   const mod = modSymbol(platform);
 
   return [

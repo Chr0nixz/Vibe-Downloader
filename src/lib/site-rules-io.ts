@@ -1,11 +1,12 @@
 import type { BrowserSiteRule, BrowserSiteRuleMode } from "@/generated/bindings";
+import type { TranslationKey } from "@/i18n";
 import { normalizeSiteRule, validateSiteRule } from "@/lib/browser-capture-draft";
 
 const MODES = new Set<BrowserSiteRuleMode>(["auto", "ask", "never"]);
 
 export type SiteRulesImportResult =
   | { ok: true; rules: BrowserSiteRule[] }
-  | { ok: false; errorKey: string; detail?: string };
+  | { ok: false; errorKey: TranslationKey; detail?: string };
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -15,7 +16,10 @@ function parseMode(value: unknown): BrowserSiteRuleMode | null {
   return typeof value === "string" && MODES.has(value as BrowserSiteRuleMode) ? (value as BrowserSiteRuleMode) : null;
 }
 
-function parseRule(raw: unknown, index: number): { rule: BrowserSiteRule } | { errorKey: string; detail: string } {
+function parseRule(
+  raw: unknown,
+  index: number,
+): { rule: BrowserSiteRule } | { errorKey: TranslationKey; detail: string } {
   if (!isObject(raw)) {
     return { errorKey: "settings.siteRulesImportInvalidRule", detail: String(index) };
   }

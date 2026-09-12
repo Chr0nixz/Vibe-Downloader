@@ -32,6 +32,7 @@ import type {
 } from "@/generated/bindings";
 import { useIsCompactShell } from "@/hooks/use-shell-layout";
 import { type TaskDetailDiagSubTab, useTaskDetailQueries } from "@/hooks/use-task-detail-queries";
+import type { TranslationKey } from "@/i18n";
 import { errorMessage } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
 import { createLogger } from "@/lib/logger";
@@ -75,6 +76,13 @@ import type { TaskSegment } from "@/types/task-segment";
 
 const log = createLogger("task-details");
 
+/** `ftpTlsModeLabel` returns a closed mode union, so this lookup is exhaustive. */
+const FTP_TLS_MODE_KEYS = {
+  plain: "taskDetails.ftpTls.plain",
+  explicit: "taskDetails.ftpTls.explicit",
+  implicit: "taskDetails.ftpTls.implicit",
+} as const satisfies Record<NonNullable<ReturnType<typeof ftpTlsModeLabel>>, TranslationKey>;
+
 const EMPTY_TASK_FILES: Task["files"] = [];
 
 interface TaskDetailsProps {
@@ -96,7 +104,7 @@ export function TaskDetails({ taskId, open, onClose, onResolveAttention }: TaskD
   const addToast = useToastStore((s) => s.addToast);
 
   const copyToClipboard = useCallback(
-    async (text: string, successKey: string) => {
+    async (text: string, successKey: TranslationKey) => {
       try {
         await navigator.clipboard?.writeText(text);
         addToast({ tone: "success", title: t(successKey) });
@@ -1064,7 +1072,7 @@ function FtpSftpOverviewPanel({
       <div className="text-text-muted">{t("taskDetails.ftpSftpRuntime")}</div>
       <div className="mt-2 space-y-0.5">
         <Row label={t("taskDetails.protocol")} value={task.protocol.toUpperCase()} />
-        {tlsMode ? <Row label={t("taskDetails.ftpTlsMode")} value={t(`taskDetails.ftpTls.${tlsMode}`)} /> : null}
+        {tlsMode ? <Row label={t("taskDetails.ftpTlsMode")} value={t(FTP_TLS_MODE_KEYS[tlsMode])} /> : null}
         <Row label={t("taskDetails.connections")} value={String(task.connectionCount)} />
         <Row
           label={t("taskDetails.resumeSupport")}

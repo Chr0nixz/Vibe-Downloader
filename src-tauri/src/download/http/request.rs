@@ -44,6 +44,10 @@ pub(super) async fn send_head_with_retry(
     headers: &[(String, String)],
 ) -> Result<Response, String> {
     let url = url.to_owned();
+    // SEC-10: IP literals bypass the connection-time resolver; reject
+    // private/reserved literal targets before the first attempt.
+    let parsed = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+    crate::download::ssrf::assert_public_authority(&parsed)?;
     let headers = headers.to_owned();
     with_retry(&RetryPolicy::http_request(), |_attempt| {
         let request = apply_forwarded_headers(client.head(&url), &headers)
@@ -67,6 +71,9 @@ pub(super) async fn send_get_with_retry(
     headers: &[(String, String)],
 ) -> Result<Response, String> {
     let url = url.to_owned();
+    // SEC-10: literal-authority pre-flight, mirroring send_head_with_retry.
+    let parsed = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+    crate::download::ssrf::assert_public_authority(&parsed)?;
     let headers = headers.to_owned();
     let range = range.clone();
     let if_range = if_range.map(str::to_owned);
@@ -119,6 +126,100 @@ pub(super) fn retry_after_duration(response: &Response) -> Option<Duration> {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
         .map(|duration| duration.min(Duration::from_secs(60)))
+}
+
+/// SEC-11: bind credential-bearing headers to the origin that produced them.
+///
+/// Authorization/Cookie may only travel to the origin host — manifest-declared
+/// mirrors and cross-source media hosts are third parties from the origin's
+/// perspective. Non-sensitive forwarded headers (User-Agent, Referer, ...)
+/// still flow. Fail-closed: when the target URL cannot be parsed, credentials
+/// are stripped.
+pub(crate) fn headers_for_origin(
+    headers: &[(String, String)],
+    origin_host: &str,
+    target_url: &str,
+) -> Vec<(String, String)> {
+    let same_origin = reqwest::Url::parse(target_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| host.eq_ignore_ascii_case(origin_host));
+    if same_origin {
+        headers.to_vec()
+    } else {
+        headers
+            .iter()
+            .filter(|(name, _)| {
+                !name.eq_ignore_ascii_case("authorization") && !name.eq_ignore_ascii_case("cookie")
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+/// Extracts the host of a URL string for origin comparisons; `None` when the
+/// URL is unparseable or hostless.
+pub(crate) fn url_host(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+}
+
+#[cfg(test)]
+mod origin_binding_tests {
+    use super::headers_for_origin;
+
+    fn sample_headers() -> Vec<(String, String)> {
+        vec![
+            ("User-Agent".to_string(), "vibe-test".to_string()),
+            (
+                "Authorization".to_string(),
+                "Basic dXNlcjpwYXNz".to_string(),
+            ),
+            ("Cookie".to_string(), "session=abc".to_string()),
+            (
+                "Referer".to_string(),
+                "https://origin.example/list".to_string(),
+            ),
+        ]
+    }
+
+    /// SEC-11: same-origin targets keep every forwarded header.
+    #[test]
+    fn same_origin_keeps_credentials() {
+        let headers = sample_headers();
+        let bound = headers_for_origin(
+            &headers,
+            "origin.example",
+            "https://origin.example/seg-1.ts",
+        );
+        assert_eq!(bound.len(), headers.len());
+        assert!(bound.iter().any(|(n, _)| n == "Authorization"));
+        assert!(bound.iter().any(|(n, _)| n == "Cookie"));
+    }
+
+    /// SEC-11: cross-host targets lose Authorization/Cookie but keep the rest.
+    #[test]
+    fn cross_origin_strips_credentials_only() {
+        let headers = sample_headers();
+        let bound = headers_for_origin(
+            &headers,
+            "origin.example",
+            "https://cdn.other.example/seg-1.ts",
+        );
+        assert!(bound.iter().all(|(n, _)| n != "Authorization"));
+        assert!(bound.iter().all(|(n, _)| n != "Cookie"));
+        assert!(bound.iter().any(|(n, _)| n == "User-Agent"));
+        assert!(bound.iter().any(|(n, _)| n == "Referer"));
+    }
+
+    /// SEC-11: fail closed — an unparseable target strips credentials too.
+    #[test]
+    fn unparseable_target_strips_credentials() {
+        let headers = sample_headers();
+        let bound = headers_for_origin(&headers, "origin.example", "not a url");
+        assert!(bound.iter().all(|(n, _)| n != "Authorization"));
+    }
 }
 
 #[cfg(test)]

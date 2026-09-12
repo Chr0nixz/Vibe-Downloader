@@ -74,6 +74,7 @@ pub struct TestSftpServer {
 /// fingerprint of the generated ed25519 host key (without the `SHA256:`
 /// prefix, matching the format stored in `sftp_known_hosts`).
 pub async fn start_sftp_server(config: SftpServerConfig) -> TestSftpServer {
+    super::install_intranet_test_bypass();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
 
@@ -117,6 +118,7 @@ pub async fn start_sftp_server(config: SftpServerConfig) -> TestSftpServer {
 /// Convenience wrapper: start a server that accepts any password and
 /// serves the given files.
 pub async fn start_sftp_server_with_files(files: HashMap<String, Vec<u8>>) -> TestSftpServer {
+    super::install_intranet_test_bypass();
     start_sftp_server(SftpServerConfig {
         files,
         reject_auth: false,

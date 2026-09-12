@@ -66,6 +66,7 @@ fn probe_request(uri: String, pool: sqlx::SqlitePool) -> ProbeRequest {
         proxy_config: None,
         app: None,
         request_id: None,
+        cancel_token: None,
     }
 }
 
@@ -363,6 +364,7 @@ async fn probe_fails_without_db_pool() {
         proxy_config: None,
         app: None,
         request_id: None,
+        cancel_token: None,
     };
 
     let error = engine
@@ -1118,5 +1120,67 @@ async fn download_rejects_non_socks5_custom_proxy() {
         .await
         .expect_err("HTTP custom proxy must be rejected for SFTP");
     assert_eq!(error_code(&error), "sftp_proxy_unsupported");
+    pool.close().await;
+}
+
+/// FUN-20: a task-level Off proxy must drive the SFTP probe even when the
+/// global proxy is an unreachable SOCKS5 endpoint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun20_task_proxy_off_bypasses_unreachable_global_during_probe() {
+    let mut files = HashMap::new();
+    files.insert("/file.bin".to_string(), vec![0xA5u8; 1024]);
+    let server = start_sftp_server_with_files(files).await;
+    let pool = test_pool("fun20-sftp-off").await;
+
+    // Global proxy: unreachable SOCKS5. The request-level Off must win.
+    let shared = std::sync::Arc::new(tokio::sync::RwLock::new(
+        tauri_app_lib::proxy::ResolvedProxyConfig {
+            mode: tauri_app_lib::proxy::AppProxyMode::Custom,
+            url: Some("socks5://127.0.0.1:9".to_string()),
+            no_proxy: None,
+            username: None,
+            password: None,
+        },
+    ));
+    let engine = SftpEngine::new(shared);
+    let mut request = probe_request(sftp_url(server.addr, "file.bin"), pool.clone());
+    request.proxy_config = Some(tauri_app_lib::proxy::ResolvedProxyConfig::default());
+
+    let output = engine
+        .probe(request)
+        .await
+        .expect("Off task proxy must bypass the unreachable global proxy");
+    assert_eq!(output.total_size, 1024);
+    pool.close().await;
+}
+
+/// ARC-26: a cancelled SFTP probe must converge immediately instead of
+/// waiting on the SSH handshake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc26_sftp_probe_with_cancelled_token_converges_immediately() {
+    let mut files = HashMap::new();
+    files.insert("/file.bin".to_string(), vec![0xA5u8; 1024]);
+    let server = start_sftp_server_with_files(files).await;
+    let pool = test_pool("arc26-sftp-cancel").await;
+    let engine = new_engine();
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    let mut request = probe_request(sftp_url(server.addr, "file.bin"), pool.clone());
+    request.cancel_token = Some(token);
+
+    let start = std::time::Instant::now();
+    let error = engine
+        .probe(request)
+        .await
+        .expect_err("cancelled probe must fail fast");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "probe must converge immediately, took {:?}",
+        start.elapsed()
+    );
+    assert!(
+        error.to_string().contains("canceled"),
+        "expected canceled error, got {error}"
+    );
     pool.close().await;
 }

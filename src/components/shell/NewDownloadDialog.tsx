@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import {
   ChevronDown,
   File,
@@ -38,6 +39,7 @@ import type {
   TaskProxyMode,
   WebDavDirectoryProbe,
 } from "@/generated/bindings";
+import type { TranslationKey } from "@/i18n";
 import {
   applyDraftToCreateTaskInput,
   type CreateDraftShared,
@@ -121,7 +123,7 @@ function inferProbePhaseFromUrl(url: string): ProbePhase {
   return { kind: "classifying" };
 }
 
-function probePhaseMessageKey(phase: ProbePhase): string | null {
+function probePhaseMessageKey(phase: ProbePhase): TranslationKey | null {
   switch (phase.kind) {
     case "classifying":
       return "newDownload.probePhaseClassifying";
@@ -154,7 +156,7 @@ function probePhaseMessageKey(phase: ProbePhase): string | null {
 /*  Probe error classification                                       */
 /* ------------------------------------------------------------------ */
 
-function probeErrorHintKey(rawError: unknown, message: string): string {
+function probeErrorHintKey(rawError: unknown, message: string): TranslationKey {
   // Prefer structured error codes from AppErrorPayload when available.
   const appError = parseAppError(rawError);
   if (appError) {
@@ -294,16 +296,34 @@ function protocolBadgeLabel(protocol: string): string {
   }
 }
 
+/** Badge tooltips. Unknown protocols fall back to the HTTP copy, matching `protocolBadgeLabel`. */
+const PROTOCOL_HINT_KEYS: Record<string, TranslationKey | undefined> = {
+  bt: "newDownload.protocolHint.bt",
+  magnet: "newDownload.protocolHint.magnet",
+  metalink: "newDownload.protocolHint.metalink",
+  hls: "newDownload.protocolHint.hls",
+  dash: "newDownload.protocolHint.dash",
+  ftp: "newDownload.protocolHint.ftp",
+  ftps: "newDownload.protocolHint.ftps",
+  sftp: "newDownload.protocolHint.sftp",
+  webdav: "newDownload.protocolHint.webdav",
+  webdavs: "newDownload.protocolHint.webdavs",
+  http: "newDownload.protocolHint.http",
+  https: "newDownload.protocolHint.https",
+};
+
+const HTTP_PROTOCOL_HINT_KEY = "newDownload.protocolHint.http" satisfies TranslationKey;
+
 /** i18n key for the plain-language tooltip explaining a protocol badge. */
-function protocolHintKey(protocol: string): string {
-  return `newDownload.protocolHint.${protocol}`;
+function protocolHintKey(protocol: string): TranslationKey {
+  return PROTOCOL_HINT_KEYS[protocol] ?? HTTP_PROTOCOL_HINT_KEY;
 }
 
 function remoteDirectoryEntryKey(entry: RemoteDirectoryEntry): string {
   return "raw" in entry ? `${entry.name}-${entry.raw}` : `${entry.name}-${entry.href}`;
 }
 
-function localFileKindLabel(kind: SelectedLocalFile["kind"], t: (key: string) => string): string {
+function localFileKindLabel(kind: SelectedLocalFile["kind"], t: TFunction): string {
   if (kind === "torrent") return t("newDownload.fileKindTorrent");
   if (kind === "metalink") return t("newDownload.fileKindMetalink");
   if (kind === "dash") return t("newDownload.fileKindDash");
@@ -362,6 +382,7 @@ export function NewDownloadDialog({
   const [submitting, setSubmitting] = useState(false);
   const [probing, setProbing] = useState(false);
   const [probePhase, setProbePhase] = useState<ProbePhase>({ kind: "idle" });
+  const phaseMessageKey = probePhaseMessageKey(probePhase);
   const [probe, setProbe] = useState<ProbeTaskPayload | null>(null);
   const [probeUrl, setProbeUrl] = useState("");
   const [batchInput, setBatchInput] = useState("");
@@ -1189,9 +1210,7 @@ export function NewDownloadDialog({
                 {/* Auto-detecting indicator with phase-aware feedback */}
                 {!probe && probing ? (
                   <p className="text-xs text-text-muted">
-                    {probePhaseMessageKey(probePhase)
-                      ? t(probePhaseMessageKey(probePhase) as string)
-                      : t("newDownload.autoDetecting")}
+                    {phaseMessageKey ? t(phaseMessageKey) : t("newDownload.autoDetecting")}
                   </p>
                 ) : null}
 

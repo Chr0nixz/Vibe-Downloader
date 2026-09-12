@@ -4,7 +4,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use quick_xml::{events::Event, Reader};
 use reqwest::{
     header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
-    Method, RequestBuilder, Url,
+    Client, Method, RequestBuilder, Url,
 };
 
 use super::{
@@ -18,7 +18,6 @@ use crate::{
     models::{
         EngineCapabilities, ProbedFile, TaskKind, WebDavDirectoryEntry, WebDavDirectoryProbe,
     },
-    proxy::ResolvedProxyConfig,
 };
 
 #[derive(Debug, Clone)]
@@ -168,8 +167,8 @@ impl DownloadEngine for WebDavEngine {
 }
 
 pub async fn probe_webdav_directory_url(
+    client: &Client,
     input_url: &str,
-    proxy_config: ResolvedProxyConfig,
     credentials: Option<&crate::db::TaskCredentials>,
 ) -> Result<WebDavDirectoryProbe, String> {
     let mut target = WebDavTarget::parse_directory(input_url)?;
@@ -184,7 +183,11 @@ pub async fn probe_webdav_directory_url(
             }
         }
     }
-    let client = super::http::build_client(&proxy_config)?;
+    // SEC-10: literal-authority pre-flight for the PROPFIND target.
+    crate::download::ssrf::assert_public_authority(
+        &reqwest::Url::parse(&target.http_url)
+            .map_err(|e| format!("Could not resolve WebDAV target: {e}"))?,
+    )?;
     let credentials = target.credentials.clone();
     let headers = webdav_request_headers(&[], credentials.as_ref());
     let mut request = client

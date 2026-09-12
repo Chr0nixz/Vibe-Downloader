@@ -22,12 +22,14 @@ import {
 } from "@/components/ui/dialog";
 import { ToastViewport } from "@/components/ui/toast";
 import type {
+  CompletionAction,
   CompletionActionRequestedPayload,
   RecoveryAction,
   ResolveTaskAttentionInput,
   TaskPriority,
 } from "@/generated/bindings";
 import { useTaskEvents } from "@/hooks/use-task-events";
+import type { TranslationKey } from "@/i18n";
 import { localizedErrorMessage } from "@/lib/errors";
 import { bumpListQueryEpoch, isCurrentListQueryEpoch } from "@/lib/list-query-epoch";
 import { createLogger } from "@/lib/logger";
@@ -73,6 +75,40 @@ import { useSettingsStore } from "@/stores/settings-store";
 import { taskCursorInput, useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
 import { UNDO_TOAST_TIMEOUT_MS, useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
+
+/**
+ * `CompletionAction` includes `none`, which has no dialog copy and never opens
+ * this dialog. Keying these maps on the excluded union replaces the previous
+ * capitalize-style template construction, which the compiler could not check.
+ */
+type CompletionDialogAction = Exclude<CompletionAction, "none">;
+
+const COMPLETION_TITLE_KEYS = {
+  exit_app: "completionDialog.exit_appTitle",
+  shutdown: "completionDialog.shutdownTitle",
+  sleep: "completionDialog.sleepTitle",
+  hibernate: "completionDialog.hibernateTitle",
+  lock_screen: "completionDialog.lock_screenTitle",
+  run_command: "completionDialog.run_commandTitle",
+} as const satisfies Record<CompletionDialogAction, TranslationKey>;
+
+const COMPLETION_DESCRIPTION_KEYS = {
+  exit_app: "completionDialog.exit_appDescription",
+  shutdown: "completionDialog.shutdownDescription",
+  sleep: "completionDialog.sleepDescription",
+  hibernate: "completionDialog.hibernateDescription",
+  lock_screen: "completionDialog.lock_screenDescription",
+  run_command: "completionDialog.run_commandDescription",
+} as const satisfies Record<CompletionDialogAction, TranslationKey>;
+
+const COMPLETION_CONFIRM_KEYS = {
+  exit_app: "completionDialog.confirmExit",
+  shutdown: "completionDialog.confirmShutdown",
+  sleep: "completionDialog.confirmSleep",
+  hibernate: "completionDialog.confirmHibernate",
+  lock_screen: "completionDialog.confirmLock",
+  run_command: "completionDialog.confirmRun",
+} as const satisfies Record<CompletionDialogAction, TranslationKey>;
 
 interface NewDownloadInitialState {
   sourceId: string;
@@ -1606,10 +1642,11 @@ function CompletionActionDialog({
     return () => window.clearTimeout(timer);
   }, [hasCountdown, onRun, open, remaining, request]);
 
-  const titleKey = `completionDialog.${request.action}Title` as const;
-  const descriptionKey = `completionDialog.${request.action}Description` as const;
-  const confirmKey =
-    `completionDialog.confirm${request.action === "exit_app" ? "Exit" : request.action === "shutdown" ? "Shutdown" : request.action === "sleep" ? "Sleep" : request.action === "hibernate" ? "Hibernate" : request.action === "lock_screen" ? "Lock" : "Run"}` as const;
+  // Only a scheduled completion action opens this dialog, so `none` is excluded.
+  const completionAction = request.action as CompletionDialogAction;
+  const titleKey = COMPLETION_TITLE_KEYS[completionAction];
+  const descriptionKey = COMPLETION_DESCRIPTION_KEYS[completionAction];
+  const confirmKey = COMPLETION_CONFIRM_KEYS[completionAction];
 
   return (
     <Dialog

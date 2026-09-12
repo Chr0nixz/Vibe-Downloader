@@ -6,6 +6,20 @@ import zhCN from "./locales/zh-CN";
 
 export const LOCALE_STORAGE_KEY = "vibe-locale";
 
+/** Every dotted leaf path in the English bundle: `"nav.all" | "task.status.ok" | …`. */
+type TranslationLeaves<T, Prefix extends string = ""> = {
+  [K in keyof T & string]: T[K] extends string ? `${Prefix}${K}` : TranslationLeaves<T[K], `${Prefix}${K}.`>;
+}[keyof T & string];
+
+/**
+ * FUN-29: the type for *tables* that hold i18n keys as data — `labelKey` fields,
+ * arrays of step keys, code-to-key maps. The i18next type augmentation in
+ * `i18next.d.ts` covers a direct translate call with a literal string; without
+ * this type, a table declared as `string` widens the key back to `string` and
+ * the augmentation cannot help.
+ */
+export type TranslationKey = TranslationLeaves<typeof en>;
+
 /**
  * Single source of truth for locale metadata. All locale constants below are
  * derived from this registry to prevent drift between SUPPORTED_LOCALES,
@@ -19,7 +33,7 @@ const LOCALE_REGISTRY = [
   { code: "ko", labelKey: "locale.ko", stable: false },
   { code: "ru", labelKey: "locale.ru", stable: false },
   { code: "es", labelKey: "locale.es", stable: false },
-] as const;
+] as const satisfies readonly { code: string; labelKey: TranslationKey; stable: boolean }[];
 
 export type Locale = (typeof LOCALE_REGISTRY)[number]["code"];
 
@@ -29,9 +43,10 @@ export const SUPPORTED_LOCALES: readonly Locale[] = LOCALE_REGISTRY.map((e) => e
 export const STABLE_LOCALES: readonly Locale[] = LOCALE_REGISTRY.filter((e) => e.stable).map((e) => e.code);
 
 /** Maps locale code → i18n key for the locale's display name. */
-export const LOCALE_LABEL_KEYS: Record<string, string> = Object.fromEntries(
-  LOCALE_REGISTRY.map((e) => [e.code, e.labelKey]),
-);
+export const LOCALE_LABEL_KEYS = Object.fromEntries(LOCALE_REGISTRY.map((e) => [e.code, e.labelKey])) as Record<
+  Locale,
+  TranslationKey
+>;
 
 /**
  * Eagerly bundled locales (first-screen). All other locales are lazy-loaded

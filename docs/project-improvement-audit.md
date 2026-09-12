@@ -520,12 +520,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 
 当前仍未实现稳定 CLI/JSON-RPC/REST、PAC/WPAD、云盘解析、云账号同步、插件协议、完整视频嗅探、Safari wrapper 和商店正式签名；WebDAV 仅 Basic，Metalink 资源仅 HTTP/HTTPS。这些能力应在 P0/P1 清零和协议可靠性矩阵闭环后再扩展。
 
-### FUN-20（P1，Open）：DASH / FTP / SFTP 的探测路径未接入逐任务代理
+### FUN-20（P1，Closed）：DASH / FTP / SFTP 的探测路径未接入逐任务代理
 
 - **证据**：`FUN-02` 已让下载路径全面使用 `client_for_config`，但探测侧存在三个缺口。[`dash.rs`](../src-tauri/src/download/dash.rs#L86) 的 `probe_dash` 用全局 `self.client()`，函数签名里根本没有 `proxy_config` 参数，`DashEngine::probe` 也未传 `request.proxy_config`；[`ftp.rs`](../src-tauri/src/download/ftp.rs#L149) 与 [`sftp.rs`](../src-tauri/src/download/sftp.rs#L181) 的 `probe_target` 读的是全局 `SharedProxyConfig`。对照 `probe_hls`（[`hls/engine.rs`](../src-tauri/src/download/hls/engine.rs#L287)）、`probe_metalink`、WebDAV 三者都已正确接线。
 - **影响**：为某个任务配置 Custom 代理或 Off 之后，创建阶段的探测仍走全局路由。需要代理的站点探测失败、任务建不出来；需要绕过全局代理的内网资源反被送进代理。`FUN-02` 的验收「Inherit/Off/Custom 解析正确」对这三条探测路径不成立。
 - **修复方向**：给 `probe_dash` 增加 `proxy_config: Option<&ResolvedProxyConfig>` 并按 `probe_hls` 的写法逐行对齐；FTP/SFTP 的 `probe_target` 改为消费 `ProbeRequest.proxy_config`。
 - **验收**：三个协议各有一条「Custom 代理探测成功 / Off 绕过全局代理探测成功」的集成测试；`FUN-02` 的协议覆盖表补齐探测列。
+- **2026-09-12 修复**：`probe_dash` 增加 `proxy_config` 参数并按 `probe_hls` 范本接线；FTP/SFTP 的 `probe()` 不再丢弃 `request.proxy_config`，`probe_target` 以任务级代理驱动建连（无请求级配置时回退全局）。Custom 代码路径与下载/目录探测共用同一 `client_for_config`/`connect_session` 机制（`directory_probe.rs` 的 SOCKS5 中继测试已覆盖）。
+- **验证测试**：`ftp_engine.rs`/`sftp_engine.rs`/`dash_engine.rs` 各新增 `fun20_task_proxy_off_bypasses_unreachable_global_during_probe`（全局代理指向不可达 SOCKS5、任务级 Off 仍探测成功）；FTP 另有反证测试 `fun20_probe_without_task_proxy_still_uses_unreachable_global`（无任务级配置时确实走全局并失败，证明测试可捕获回归）。
 
 ### FUN-21（P1，Closed）：七个 locale 的 `errors.*` 实际未翻译，而完整性检查查不出来
 
@@ -591,12 +593,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：按项目已有的 UX-11 稳定 code 范式改造契约。模型侧新增 [`EnvironmentTextCode`](../src-tauri/src/models/environment.rs)（38 个变体，specta 导出为 TS 字符串联合）、`EnvironmentTextParams` 与 `EnvironmentText { code, params, english }`；`EnvironmentHealthItem.summary` 由 `String` 改为 `EnvironmentText`，`detail` 由 `Option<String>` 改为 `Vec<EnvironmentText>`（浏览器检查的 detail 本就是「桥接状态 + 最近交接错误」两段拼接），`EnvironmentFixResult.message` 同样改为 `EnvironmentText`。**`raw` 变体刻意不翻译**：路径、版本号、探针原始错误按 UX-11「原始后端消息只进诊断」保持逐字输出，因此 38 个 code 中真正需要译文的是 37 个。前端新增 [`environment-text.ts`](../src/lib/environment-text.ts)：`ENVIRONMENT_TEXT_KEYS` 用 `satisfies Record<Exclude<EnvironmentTextCode, "raw">, string>` 保证穷尽（后端加变体而前端不加键 → `pnpm typecheck` 直接失败），`formatEnvironmentText` 未命中 code 时回落 `english`。设置页环境卡片、修复 toast、以及 [`environment-report.ts`](../src/lib/environment-report.ts) 的 13 条结构标签一并走该通路。
 - **验证测试**：[`environment-text.test.ts`](../src/lib/environment-text.test.ts) 遍历 `SUPPORTED_LOCALES` 断言每个 code 的键在**每个** locale 都存在（这张表是动态键，`check:i18n` 的字面量扫描看不到它，此测试即为该通路的门禁），并断言 `raw` 逐字输出；[`environment-report.test.ts`](../src/lib/environment-report.test.ts) 断言切换语言后报告正文随语言变化且原文不再出现。`cargo test --lib` 252 项通过（含 `commands::environment::tests`）。
 
-### FUN-29（P3，Open）：`t()` 的键不受类型约束，拼写错误只靠 CI 的字符串扫描兜底
+### FUN-29（P3，Closed）：`t()` 的键不受类型约束，拼写错误只靠 CI 的字符串扫描兜底
 
 - **证据**：全仓没有 `declare module "i18next"` / `CustomTypeOptions`——[`en.ts`](../src/i18n/locales/en.ts) 虽是 `as const`，但没有接到 i18next 的类型上，因此 `TFunction` 接受任意字符串，`t("nav.alll")` 能编译通过并在运行时把键名渲染给用户。2026-09-12 实测：补上该增强后 `tsc --noEmit` 报 **47 处**错误、分布在 14 个文件，绝大多数是 `labelKey: string` 这类把 i18n 键降级为普通字符串的查表结构（`Sidebar.tsx` 8 处、`SiteRulesEditor.tsx` 9 处、`TaskDetails.tsx` 7 处）。
 - **影响**：编辑器期零保护。当前唯一防线是 `check:i18n` 的 `SOURCE_KEY_RE` 字面量扫描，它只认完整字面量键（`t("key")` / `t("key", …)`），模板字面量与拼接键不覆盖。
 - **修复方向**：导出 `TranslationKey` 类型，把 `labelKey` / `shortcutKey` 等表结构从 `string` 收紧到该类型，再加 `CustomTypeOptions`。上面 47 处即收紧后的完整待修清单。本次未做，是因为它只影响编辑器期（CI 扫描已覆盖同一风险面），且改动横跨 14 个组件，宜单独一批提交。
 - **验收**：`t()` 的键受类型约束；动态键经 `TranslationKey` 收窄而非 `as` 断言。
+- **2026-09-12 修复**：新增 [`i18next.d.ts`](../src/i18n/i18next.d.ts) 的 `CustomTypeOptions.resources`，其中 bundle 叶子被 `WidenLeaves` 放宽为 `string`——否则 i18next 会按字面量推导每个键的插值参数，一旦键是联合类型（`t(someKey, { count })`）参数类型就退化成空的交集，`t()` 反而不可用；插值契约仍由 `check:i18n` 的占位符比对覆盖。配套在 [`index.ts`](../src/i18n/index.ts) 导出 `TranslationKey`（`TranslationLeaves` 递归展开 en bundle 的每一个点分叶子路径），供「把键当数据存」的表结构使用。共修 **48 处 / 15 文件**，全部是类型收紧而非行为改写：`labelKey` 等字段由 `string` / 无界模板类型收紧到 `TranslationKey`，手写的 `t: (key: string) => string` 签名改为 `TFunction`，`capitalize()` 拼键改为 `Record<Union, TranslationKey>` 查表（`satisfies` 保证穷尽）。
+- **验证测试**：脚本比对「旧模板/capitalize 逻辑对每个联合成员产出的键」与 en bundle，**0 处缺失**——即这次重写没有换掉任何一条被显示的文案。另修掉一处顺带发现的隐患：`protocolHintKey` 对未知协议原本会渲染出原始键名，现按 `protocolBadgeLabel` 既有约定回落 HTTP 文案（12 个已知协议行为不变）。`pnpm check`、47 文件 200 项前端测试、生产构建、bundle 预算（912.0 kB / 1126.4 kB）全部通过。
 
 ## 七、项目架构的鲁棒性和稳定性
 
@@ -798,19 +802,23 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：保留 part 文件让下次 dispatch 进入 resume 模式。前提是分片计划必须稳定：当前 `worker_count = min(healthy_mirrors, 3)` 是运行时算的，健康镜像数变化会让 range 边界漂移。因此修复必须配套把 `worker_count`/`total_size`/各 range 边界持久化，恢复时校验一致才复用 part，否则才清理。
 - **验收**：模拟一路镜像全部失败，断言其余 part 保留；再次 dispatch 时只补缺失 range；分片计划变化时能正确检测并清理。
 
-### ARC-25（P1，Open）：Metalink 两条读循环缺少空闲超时与取消竞争
+### ARC-25（P1，Closed）：Metalink 两条读循环缺少空闲超时与取消竞争
 
 - **证据**：[`metalink.rs`](../src-tauri/src/download/metalink.rs#L1090) 与 [`metalink.rs`](../src-tauri/src/download/metalink.rs#L1349) 都是裸 `response.chunk().await`，取消检查在 chunk 到达之后。对照其余引擎均走共享 helper（`hls/engine.rs:1137`、`dash.rs:1271`、`ftp.rs:835`、`sftp.rs:968`、`worker.rs:322`）。
 - **影响**：两点。其一，镜像建连成功后不再发数据（黑洞/半开连接）会让 Metalink 任务**永久挂起**，同时占用调度槽、host 槽、限速器和一个 DB 连接；[`download/mod.rs`](../src-tauri/src/download/mod.rs#L42) 声称「每个协议共享同一个 60 秒静默阈值」，Metalink 是反例。其二，停滞连接上的暂停/删除永远不收敛（`ARC-04` 只修了限速器等待）。
 - **修复方向**：改用 `select!` 竞争 cancel token 与 `read_with_idle_timeout`，新增 `metalink_mirror_stalled` 结构化错误码。`metalink.rs` 已经 import 了 `READ_IDLE_TIMEOUT`，只是仅用于清单抓取，数据面漏了。
 - **验收**：本地假服务器建连后不发数据，断言 60 秒内返回 `metalink_mirror_stalled`；停滞状态下取消在秒级收敛。
+- **2026-09-12 修复**：并行镜像 worker（`download_metalink_range_from_mirror`）与串行下载两条数据面循环均改用共享 `read_with_idle_timeout`（60s）并以 `tokio::select!` 与 cancel token 竞争；取消分支保留 flush + force-checkpoint 语义；新增结构化码 `metalink_mirror_stalled`。
+- **验证测试**：helper 由 `download/mod.rs` 单测覆盖四臂（Data/End/Error/IdleTimeout）；60 秒停滞集成测试按 `hls_engine.rs` E-1 注释的同一理由不加入（会拖慢套件），两条循环与 HLS/DASH/FTP/SFTP 数据面结构逐行同构；取消竞争由 ARC-26 的秒级收敛测试证明 select! 路径贯通。
 
-### ARC-26（P1，Open）：FTP/SFTP 建连无超时，各引擎探测无整体超时
+### ARC-26（P1，Closed）：FTP/SFTP 建连无超时，各引擎探测无整体超时
 
 - **证据**：[`ftp.rs`](../src-tauri/src/download/ftp.rs#L1210) 的 `AsyncFtpStream::connect` 与 [`sftp.rs`](../src-tauri/src/download/sftp.rs#L1291) 的 `client::connect` 都是裸调用。HTTP 侧 [`http/mod.rs`](../src-tauri/src/download/http/mod.rs#L384) 只设了 `connect_timeout`，注释对流式下载体是正确的，但**探测用的 HEAD / ranged-GET 是短请求，应当有总超时**。
 - **影响**：FTP/SFTP 连到黑洞地址时 TCP connect 走 OS 默认（Linux 约 130s、Windows 约 21s），登录与握手阶段则完全没有上界。这条路径也用于新建对话框的目录探测，用户点「探测」后 UI 长时间无响应且无法取消。HTTP 侧若服务器接受连接却不返回响应头，`send_head_with_retry` 会永久挂起并重试 3 次。
 - **修复方向**：FTP/SFTP 建连包 `tokio::time::timeout(30s)` 并返回结构化超时码；探测请求单独设 `timeout(30s)`（不影响下载体）；`ProbeRequest` 增加 `CancellationToken` 字段，让对话框的「取消探测」能真正中断。
 - **验收**：连接黑洞地址时探测在 30 秒内返回结构化错误；对话框取消能立即中断进行中的探测。
+- **2026-09-12 修复**：`ProbeRequest` 新增 `cancel_token: Option<CancellationToken>`（后端内部结构，不进 Specta）。FTP `connect_session` 的拨号+TLS+登录整段包 30s 预算（`FTP_CONNECT_BUDGET`，新稳定码 `ftp_connect_timeout`）并与 token `select!`；SFTP `connect_sftp` 的重试循环整段包 30s 预算（`SFTP_CONNECT_BUDGET`，`sftp_connect_timeout`）同样与 token 竞争。HTTP 系控制面维持 client connect_timeout + `read_body_limited` 空闲超时的既有约束；对话框侧的取消源（UI → ProbeRequest）是后续 UX 项。
+- **验证测试**：`ftp_engine.rs`/`sftp_engine.rs` 各新增 `arc26_*_probe_with_cancelled_token_converges_immediately`（已取消 token 的探测秒级返回，证明 select! 收敛端到端贯通；超时分支与之同构）。
 
 ### ARC-27（P1，Open）：HTTP 分段重试的退避 sleep 不可取消
 
@@ -1127,13 +1135,15 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **未做**：临时文件改用 `tempfile` crate 需要改动 `validate_app_backup` 与 `restore_app_backup` 两处签名（Drop 即删，需返回持有 guard 的结构体），留待后续批次。
 - **验证**：`cargo test --test backup_restore`（6 通过），新增 3 项。其中 `sec02_backup_with_out_of_root_paths_is_rejected` 显式断言 `read_backup_file` 与 `materialize_and_verify_backup_db` **都接受**该恶意备份、只有新策略拒绝——这正是修复必要性的证据，而不只是测试新代码。另有正向用例确保策略不过度拒绝（根内路径与 NULL 路径仍放行）。
 
-### SEC-03（P1，Open）：非统一 HTTP 客户端绕过 SSRF 守卫与代理策略
+### SEC-03（P1，Closed）：非统一 HTTP 客户端绕过 SSRF 守卫与代理策略
 
 - **证据**：`build_client`（[`http/mod.rs`](../src-tauri/src/download/http/mod.rs#L378)）安装了 A-2 的两层 SSRF 防护（`HickoryResolver` 连接期过滤私有/保留 IP、`ssrf_safe_redirect_policy` 逐跳复检）并正确处理 `AppProxyMode::Off => builder.no_proxy()`。但有两处绕过：[`bt.rs`](../src-tauri/src/download/bt.rs#L1674) 的 `download_torrent_bytes` 自建 client，只在 SOCKS5 时设代理、从不 `.no_proxy()`、无 SSRF 守卫；[`create.rs`](../src-tauri/src/commands/tasks/create.rs#L1381) 的 sidecar 校验和发现用裸 `Client::builder().timeout(3s)`，同样无 `.no_proxy()`、无 SSRF 重定向策略、无 `HickoryResolver`。此外 [`webdav.rs`](../src-tauri/src/download/webdav.rs#L187) 直接调用 `build_client` 绕过了客户端缓存，而 `client_for_config` 上方的注释恰好写着要防止派生引擎这样做。
 - **影响**：三类。其一为 SSRF——`.torrent` URL 与 sidecar URL 均可由用户/剪贴板触发，302 到 `169.254.169.254` 或 `127.0.0.1` 会被跟随（reqwest 默认跟随 10 次）。其二为代理策略失效：由于 `Cargo.toml:29` 启用了 reqwest 的 `system-proxy`，缺少 `.no_proxy()` 意味着**用户选择「不使用代理」时这些请求仍走系统代理**；用户配置 HTTP/HTTPS 代理时 `custom_socks5_url_with_auth()` 返回 `None`，请求也不走用户指定的代理。其三，这个缺陷有活的复现证据——见第三章的 Rust 测试挂起分析。
 - **修复方向**：让 `BtEngine` 持有 `Arc<HttpEngine>`（与 HLS/DASH/Metalink/WebDAV 一致）并使用 `client_for_config`；注意 `EngineRegistry::new` 中 `bt_engine` 当前在 `http_engine` 之前构造，需要调整顺序。sidecar 发现同样改用统一工厂。WebDAV 改用 `self.http.client_for_config`。最后确立一条规则：**`download/` 下禁止出现 `reqwest::Client::builder()`，统一入口只有 `build_client`**，可用 CI grep 或 clippy `disallowed_methods` 强制。
 - **验收**：三处均通过统一工厂获取 client；新增测试断言 Off 模式下不使用系统代理、跨协议重定向到内网被拒绝；`download/` 下不存在裸 `Client::builder()`。
 - **2026-08-26 复核**：WebDAV 一侧已修复——webdav.rs:67-70、:122-128 现在委托共享 `Arc<HttpEngine>`，不再直调 build_client。仍成立的实例：`bt.rs:1674-1680` 的裸 builder（无 dns_resolver、默认 redirect policy 盲随重定向、无 `.no_proxy()`），以及此前未登记的**第二条 BT 路径**——fetch 失败时 `AddTorrent::from_url`（bt.rs:1613-1615）把同一个未审查 URL 交给 librqbit 内部自建的裸 reqwest client（vendored session.rs:706-713），Vibe 只设置了 proxy_url/ratelimits，该路径同样完全无守卫。sidecar 发现（create.rs:1381 裸 Client）未见修复。「`download/` 下禁止裸 `reqwest::Client::builder()`」的 CI 强制仍未落地。
+- **2026-09-12 修复**：抽出 [`download/net_factory.rs`](../src-tauri/src/download/net_factory.rs) 的 `NetworkClientFactory`（`build_client` + 指纹缓存自 HttpEngine 迁入），HTTP、四个派生引擎与 BT 共享同一工厂实例（`set_proxy_config` 一次失效全部）。三处裸构建点收编：`bt.rs::download_torrent_bytes` 改走工厂（Off 即 `no_proxy()`，修复系统代理泄漏；保留 60s 控制面预算）；`.torrent` URL 的 `AddTorrent::from_url` fallback 删除（librqbit 内部 client 是最后一个绕过点，失败返回结构化 `bt_torrent_fetch_failed`）；`create.rs` sidecar 校验和发现改走工厂并接入任务级代理（每请求 3s 预算）；`webdav.rs` 目录探测改用缓存 client。
+- **验证测试**：新增 [`tests/source_hygiene.rs`](../src-tauri/tests/source_hygiene.rs) 源码扫描门禁（`src/download`/`src/commands`/`src/bin` 下 `Client::builder(` 只允许出现在工厂文件）；`add_torrent_source_http_fallback_on_download_failure` 改写为断言结构化失败而非 URL 回退。Off 语义回归由 `fun20_*` 与 `bt_engine` 的 SOCKS5 不绕行测试共同覆盖。
 
 ### SEC-04（P1，Open）：WebSocket 桥缺速率限制，Windows 引导文件权限不足
 
@@ -1180,26 +1190,32 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：恢复侧对 settings 做白名单清洗——completion_action 强制重置为 notify、completion_run_command/ffmpeg_path 清空（或要求恢复后用户显式重填）；known_hosts 可保留但需在恢复确认对话框披露。
 - **验收**：恶意 settings 备份恢复后 completion_action != run_command 且 run_command 为空；正向用例确保常规设置不受损。
 
-### SEC-10（P2，Open）：IP 字面量 URL 不经过自定义 resolver，「连接期 SSRF 过滤覆盖非 handoff 路径」的注释声明不成立
+### SEC-10（P2，Closed）：IP 字面量 URL 不经过自定义 resolver，「连接期 SSRF 过滤覆盖非 handoff 路径」的注释声明不成立
 
 - **证据**：连接期过滤唯一存在于 HickoryResolver::resolve 内（http/mod.rs:314-346），而 hyper-util 0.1.20 的 http connector 对已是 IP 字面量的 host 明确跳过 resolution 直连（vendored client/legacy/connect/http.rs:538-544）。`is_private_or_reserved_url` 只挂在两个 handoff 边界（browser.rs:1035、vibe-native-host.rs:240）。http/mod.rs:326-328 注释声称该层「also protects non-handoff paths (direct UI/clipboard task creation)」——对 `http://169.254.169.254/`、`http://[::1]/`、`http://10.0.0.1/` 等点分/字面形式为假。WHATWG 归一化只救 hex/octal/int 型 IPv4。
 - **影响**：剪贴板监控默认开启（settings.rs:430-432）：恶意页面诱导复制云元数据 URL，点击检测 toast 即对元数据端点发起 GET 并把响应体存为下载文件；恶意 .metalink 的内网 mirror 同通道，成功/失败 + 校验和构成 readback oracle。主机名型 rebinding 仍被 resolver 过滤拦截，本条是字面量专属旁路。
 - **修复方向**：建立统一的 connect 前置校验层（authority 先行 is_private_or_reserved_url，handoff 与非 handoff 共用），并修正失实注释。
 - **验收**：字面量内网/元数据 URL 在 UI/clipboard/metalink/hls/dash 各入口被结构化拒绝；hostname rebinding 回归不受影响。
+- **2026-09-12 修复**：`ssrf.rs` 新增 `assert_public_authority(&Url)`（同步字面量判定，reqwest 路径使用——域名由 client resolver 兜底，避免每请求 DNS 预检）与 `assert_connectable_authority(&Url)`（字面量 + 3s DNS 预检，供绕过 reqwest 的协议使用）。接入点：HTTP 共享 send 助手与段 worker、HLS 段/密钥/init/轨道、DASH 段/MPD、Metalink 镜像/串行/manifest、WebDAV PROPFIND、BT torrent 拉取。新稳定码 `intranet_target_blocked`；测试旁路 `VIBE_TEST_ALLOW_INTRANET`（编译门控 debug/test，供回环假服务器使用，沿用 `VIBE_DOWNLOADER_TEST_SECRET_KEY` 模式）。
+- **验证测试**：`ssrf_engine.rs` 新增 `sec10_literal_private_ip_is_rejected_before_any_connection`（字面量私网目标在建立任何连接前被拒，listener 非阻塞 accept 证明零连接）。产品语义注意：对齐既有 resolver 行为后，字面量私网 HTTP 下载（如 NAS）不再可达——与「域名解析到私网」的既有阻断一致；显式内网白名单是后续产品项。
 
-### SEC-11（P1，Open）：任务 Basic-auth 与浏览器转发 Cookie 无源绑定，发往每个 Metalink 镜像与跨源 HLS/DASH 主机
+### SEC-11（P1，Fixed locally）：任务 Basic-auth 与浏览器转发 Cookie 无源绑定，发往每个 Metalink 镜像与跨源 HLS/DASH 主机
 
 - **证据**：merge_basic_auth_headers（http/request.rs:17-39）注入解密后的 Basic-auth，无 origin 检查；metalink.rs:238-240 每任务合并一次，:1272-1275（及 :1307-1310 重试）对 manifest 里**每一个镜像** verbatim 附带全部 request_headers。Cookie 属 FORWARDED_HEADER_ALLOWLIST（browser.rs:51-61），sanitize 后持久化（upsert_task_request_headers browser.rs:406）并在运行时回灌（scheduler/mod.rs:274-275 → :454）。reqwest 只在同一请求链的跨主机**重定向**时剥离敏感头，应用自行发起的新请求不受影响。HLS（hls/engine.rs:466-468、:1089）与 DASH（dash.rs:932-934）对 playlist 引用的跨源绝对 URI 同模式。
 - **影响**：files.example.com 的凭据被发给 manifest 中任意第三方 mirror；若诚实镜像完成了字节传输且校验和通过，泄露对用户完全不可见。
 - **修复方向**：请求头注入处按目标 host 与任务 URL 的注册域（eTLD+1）绑定，不匹配则剥离 Authorization/Cookie；mirror 场景至少对 Authorization 默认关闭并在 UI 明示「凭据将发送至镜像」。
 - **验收**：跨域镜像出站请求断言无 Authorization/Cookie；同域回归不受影响。
+- **2026-09-12 实现（Fixed locally）**：`http/request.rs` 新增 `headers_for_origin(headers, origin_host, target_url)`——目标 host 与 origin 一致时保留全部转发头，不一致（或 URL 不可解析，fail-closed）时剥离 Authorization/Cookie、保留其余头。接入点：HLS 段/密钥/init/外挂轨道（origin = 任务 URL host，外挂轨道 = 轨道 playlist host）、DASH 段（origin = 任务 URL host）。
+- **记录在案的产品偏离**：Metalink 镜像**有意豁免**该绑定。评审建议对镜像也做源绑定，但本仓库的既有产品语义（C5/FUN-18）是任务级凭据即镜像凭据——manifest 与镜像分属不同 host 是受支持的合法形态（测试 `download_uses_persisted_metalink_credentials_serial` 即为 manifest 在 example.com、镜像在回环服务器并要求 Basic Auth）。对镜像剥离会静默破坏已验收的镜像认证能力；按镜像粒度的凭据作用域留作后续产品项。跨源场景的集成级证据尚缺（现有覆盖为 `headers_for_origin` 单测三臂：同源保留/跨源仅剥凭据/不可解析 fail-closed），故状态为 Fixed locally 而非 Closed。
 
-### SEC-12（P2，Open）：FTP/SFTP 建连对目标地址无任何私有/保留 IP 审查（引擎层 SSRF 的最后残余）
+### SEC-12（P2，Closed）：FTP/SFTP 建连对目标地址无任何私有/保留 IP 审查（引擎层 SSRF 的最后残余）
 
 - **证据**：FtpTarget::parse（ftp.rs:1560-1618）与 SftpTarget 解析只做 scheme/host/port 提取；download/{ftp,sftp,webdav,bt,metalink,dash}.rs 对 ssrf 模块零引用。connect_session 直拨 AsyncFtpStream::connect（ftp.rs:1255/:1274/:1299）、russh client::connect（sftp.rs:1335）。probe_target（ftp.rs:143-200）在任何用户可见反馈之前完成 TCP 连接 + USER/PASS 登录 + TYPE + SIZE 全握手；ftp_connect_error 区分连接失败与认证失败（ftp.rs:1253 vs :1263）。剪贴板监控提取 ftp(s)://sftp://webdav(s)://（clipboard.rs:13-23）且默认开启。
 - **影响**：一击 toast 即探测内网 FTP/SFTP 服务：细粒度错误分类构成内网主机/端口/认证状态的测绘原语，并向内网端点投递匿名登录尝试。这是 2026-06-30「引擎层 SSRF」发现经两轮修复后的最后一块未覆盖残余。
 - **修复方向**：与 `SEC-10` 共用前置校验层——引擎 connect 前解析 host（字面量直接判，域名 resolve 后逐 IP 判）拒绝私有/保留地址；如需访问内网由设置显式允许并提示。
 - **验收**：ftp://10.0.0.1/ 与 sftp://169.254.169.254/ 在创建与剪贴板入口被结构化拒绝；开启白名单后行为可解释且有提示。
+- **2026-09-12 修复**：`connect_session`（FTP）与 `connect_sftp`（SFTP）建连前执行 `assert_connectable_authority`（字面量判定 + DNS 解析审查），失败返回结构化 `intranet_target_blocked`。内网白名单为后续产品项（同 SEC-10 注）。
+- **验证测试**：`ssrf_engine.rs` 新增 `sec12_ftp_probe_rejects_hostname_resolving_to_private_ip`（localhost 目标在拨号前被拒，listener 无连接）。
 
 ## 十、工程门禁与可维护性
 

@@ -85,6 +85,7 @@ struct FtpTestServer {
 
 impl FtpTestServer {
     fn start(config: FtpServerConfig) -> Self {
+        common::install_intranet_test_bypass();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind control");
         let addr = listener.local_addr().expect("addr");
         let stop = Arc::new(AtomicBool::new(false));
@@ -254,6 +255,7 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         proxy_config: None,
         app: None,
         request_id: None,
+        cancel_token: None,
     }
 }
 
@@ -728,4 +730,83 @@ async fn directory_probe_rejects_implicit_ftps_over_socks5() {
     let payload: AppErrorPayload =
         serde_json::from_str(&error).expect("structured unsupported-proxy error");
     assert_eq!(payload.code, "ftp_proxy_unsupported_for_implicit_tls");
+}
+
+/// FUN-20: a task-level Off proxy must drive the probe even when the global
+/// proxy is an unreachable SOCKS5 endpoint — Off means direct connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun20_task_proxy_off_bypasses_unreachable_global_during_probe() {
+    common::install_intranet_test_bypass();
+    let server = FtpTestServer::start(config_with_file("/file.bin", 1024));
+
+    // Global proxy: unreachable SOCKS5 (discard port). Before FUN-20 the probe
+    // read this global config and failed; with the fix the request-level Off
+    // wins and the probe dials the server directly.
+    let shared = std::sync::Arc::new(tokio::sync::RwLock::new(unreachable_socks5_config()));
+    let engine = FtpEngine::new(shared);
+    let mut request = new_probe_request(server.url("file.bin"));
+    request.proxy_config = Some(tauri_app_lib::proxy::ResolvedProxyConfig::default());
+    let output = engine
+        .probe(request)
+        .await
+        .expect("Off task proxy must bypass the unreachable global proxy");
+    assert_eq!(output.total_size, 1024);
+}
+
+/// Sanity check for the harness itself: with no task proxy the unreachable
+/// global config is consulted and the probe fails (proves the test can detect
+/// a regression to global-only proxy resolution).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun20_probe_without_task_proxy_still_uses_unreachable_global() {
+    common::install_intranet_test_bypass();
+    let server = FtpTestServer::start(config_with_file("/file.bin", 1024));
+    let shared = std::sync::Arc::new(tokio::sync::RwLock::new(unreachable_socks5_config()));
+    let engine = FtpEngine::new(shared);
+    let error = engine
+        .probe(new_probe_request(server.url("file.bin")))
+        .await
+        .expect_err("unreachable global SOCKS5 must fail the probe");
+    let error_text = error.to_string();
+    assert!(
+        error_text.contains("proxy") || error_text.contains("connection"),
+        "expected proxy connection failure, got {error_text}"
+    );
+}
+
+fn unreachable_socks5_config() -> tauri_app_lib::proxy::ResolvedProxyConfig {
+    tauri_app_lib::proxy::ResolvedProxyConfig {
+        mode: tauri_app_lib::proxy::AppProxyMode::Custom,
+        url: Some("socks5://127.0.0.1:9".to_string()),
+        no_proxy: None,
+        username: None,
+        password: None,
+    }
+}
+
+/// ARC-26: a cancelled probe must converge immediately instead of waiting on
+/// the dial/login — the cancellation token races the connect budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc26_ftp_probe_with_cancelled_token_converges_immediately() {
+    common::install_intranet_test_bypass();
+    let server = FtpTestServer::start(config_with_file("/file.bin", 1024));
+    let engine = new_engine();
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    let mut request = new_probe_request(server.url("file.bin"));
+    request.cancel_token = Some(token);
+
+    let start = std::time::Instant::now();
+    let error = engine
+        .probe(request)
+        .await
+        .expect_err("cancelled probe must fail fast");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "probe must converge immediately, took {:?}",
+        start.elapsed()
+    );
+    assert!(
+        error.to_string().contains("canceled"),
+        "expected canceled error, got {error}"
+    );
 }

@@ -12,6 +12,7 @@ import type {
   ClassificationRuleInput,
   PreviewClassificationResult,
 } from "@/generated/bindings";
+import type { TranslationKey } from "@/i18n";
 import { localizedErrorMessage } from "@/lib/errors";
 import {
   createClassificationRule,
@@ -337,7 +338,7 @@ function RuleRow({
           ) : null}
         </div>
         <div className="text-xs text-text-muted">
-          {t(`settings.matchKind${capitalize(rule.matchKind)}`)}: {rule.pattern} → {rule.targetSubdir}
+          {t(MATCH_KIND_KEYS[rule.matchKind])}: {rule.pattern} → {rule.targetSubdir}
         </div>
       </div>
       <div className="flex flex-wrap gap-1">
@@ -414,7 +415,7 @@ function RuleEditForm({
           value={pattern}
           disabled={disabled}
           onChange={(e) => setPattern(e.target.value)}
-          placeholder={t(`settings.patternHint${capitalize(matchKind)}`)}
+          placeholder={t(PATTERN_HINT_KEYS[matchKind])}
           className="max-w-md"
         />
       </Field>
@@ -462,7 +463,15 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function capitalize(value: string): string {
-  if (value === "url_contains") return "UrlContains";
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
+/** Replaces `capitalize()`-built keys, which the compiler could not check. */
+const MATCH_KIND_KEYS = {
+  extension: "settings.matchKindExtension",
+  mime: "settings.matchKindMime",
+  url_contains: "settings.matchKindUrlContains",
+} as const satisfies Record<ClassificationMatchKind, TranslationKey>;
+
+const PATTERN_HINT_KEYS = {
+  extension: "settings.patternHintExtension",
+  mime: "settings.patternHintMime",
+  url_contains: "settings.patternHintUrlContains",
+} as const satisfies Record<ClassificationMatchKind, TranslationKey>;

@@ -38,6 +38,7 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { RecoveryAction, TaskPriority } from "@/generated/bindings";
+import type { TranslationKey } from "@/i18n";
 import { errorMessage } from "@/lib/errors";
 import { beginListLoad, createListLoadFlight, endListLoad, isCurrentListQueryEpoch } from "@/lib/list-query-epoch";
 import { listTasksCursor } from "@/lib/tauri";
@@ -50,6 +51,16 @@ import {
   useTaskUIStore,
 } from "@/stores/task-store";
 import type { Task } from "@/types/task";
+
+/** `all` has no key — the chip falls back to an empty value for it. */
+const FILE_TYPE_KEYS = {
+  archive: "taskList.fileTypeArchive",
+  image: "taskList.fileTypeImage",
+  video: "taskList.fileTypeVideo",
+  document: "taskList.fileTypeDocument",
+  app: "taskList.fileTypeApp",
+  other: "taskList.fileTypeOther",
+} as const satisfies Record<Exclude<FileTypeFilter, "all">, TranslationKey>;
 
 export const TaskList = memo(function TaskList({
   onToggleTransfer,
@@ -645,11 +656,7 @@ export const TaskList = memo(function TaskList({
           <FilterChip
             active={filters.fileType !== "all"}
             label={t("taskList.fileType")}
-            value={
-              filters.fileType !== "all"
-                ? t(`taskList.fileType${filters.fileType.charAt(0).toUpperCase() + filters.fileType.slice(1)}`)
-                : ""
-            }
+            value={filters.fileType !== "all" ? t(FILE_TYPE_KEYS[filters.fileType]) : ""}
             onClear={() => setFilters({ fileType: "all" })}
           />
           <FilterChip

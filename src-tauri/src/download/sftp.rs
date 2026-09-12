@@ -177,15 +177,22 @@ impl SftpEngine {
         target: SftpTarget,
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
+        request_proxy: Option<&ResolvedProxyConfig>,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ProbeOutput, String> {
-        let proxy_config = self.proxy_config.read().await.clone();
+        // FUN-20: the task-resolved proxy must drive the probe too. Fall back
+        // to the global config only when the caller did not resolve one.
+        let proxy_config = match request_proxy {
+            Some(config) => config.clone(),
+            None => self.proxy_config.read().await.clone(),
+        };
         crate::download::engine::emit_probe_phase(
             app,
             request_id,
             "verifying_host_key",
             Some("sftp"),
         );
-        let connection = connect_sftp(pool, &target, &proxy_config).await?;
+        let connection = connect_sftp(pool, &target, &proxy_config, cancel_token).await?;
         crate::download::engine::emit_probe_phase(
             app,
             request_id,
@@ -338,9 +345,16 @@ impl DownloadEngine for SftpEngine {
                     }
                 }
             }
-            self.probe_target(pool, target, &request.app, &request.request_id)
-                .await
-                .map_err(DownloadError::Other)
+            self.probe_target(
+                pool,
+                target,
+                &request.app,
+                &request.request_id,
+                request.proxy_config.as_ref(),
+                request.cancel_token.as_ref(),
+            )
+            .await
+            .map_err(DownloadError::Other)
         })
     }
 
@@ -376,7 +390,7 @@ pub async fn probe_sftp_directory_url(
         }
     }
     let mut diagnostics = Vec::new();
-    let connection = connect_sftp(pool, &target, &proxy_config).await?;
+    let connection = connect_sftp(pool, &target, &proxy_config, None).await?;
     let canonical = connection.session.canonicalize(&target.path).await.ok();
     if let Some(canonical) = canonical.as_deref() {
         diagnostics.push(format!("REALPATH {canonical} succeeded"));
@@ -866,7 +880,13 @@ fn report_sftp_worker_offset(request: &WorkerRequest, offset: i64, speed_bps: i6
 async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, String> {
     // Each worker establishes its own SSH channel + SFTP subsystem so that
     // multiple segments can transfer in parallel (Path A from the PoC).
-    let connection = connect_sftp(&request.pool, &request.target, &request.proxy_config).await?;
+    let connection = connect_sftp(
+        &request.pool,
+        &request.target,
+        &request.proxy_config,
+        Some(&request.cancel_token),
+    )
+    .await?;
     let session = &connection.session;
 
     let mut offset = request
@@ -1278,10 +1298,16 @@ fn planned_sftp_split(segment: &SegmentProgress) -> Option<SftpSplit> {
     })
 }
 
+/// ARC-26: overall budget for dial + SSH handshake + auth + SFTP subsystem,
+/// including the internal connect retries. Black-hole addresses previously
+/// waited for the OS connect timeout per attempt.
+const SFTP_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn connect_sftp(
     pool: &SqlitePool,
     target: &SftpTarget,
     proxy_config: &ResolvedProxyConfig,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<SftpConnection, String> {
     if target.username.is_empty() {
         return Err(engine_error(
@@ -1297,8 +1323,16 @@ async fn connect_sftp(
             true,
         ));
     }
-    let handle = with_retry_if(
-        &RetryPolicy::sftp_connect(),
+    // SEC-12: SFTP control connections bypass reqwest, so the client-level
+    // SSRF layers never see them. Full authority pre-flight before connecting.
+    let authority = reqwest::Url::parse(&format!("sftp://{}:{}", target.host, target.port))
+        .map_err(|e| format!("Could not resolve SFTP target: {e}"))?;
+    crate::download::ssrf::assert_connectable_authority(&authority)
+        .await
+        .map_err(|e| engine_error("intranet_target_blocked", e, false))?;
+    let connect_policy = RetryPolicy::sftp_connect();
+    let connect_future = with_retry_if(
+        &connect_policy,
         |_attempt| {
             let pool = pool.clone();
             let target_host = target.host.clone();
@@ -1355,10 +1389,32 @@ async fn connect_sftp(
             // The error is a JSON-serialized AppErrorPayload; check for the code.
             !error.contains("sftp_host_key_changed")
         },
-    )
-    .await?;
+    );
+    // ARC-26: race the retry loop against the budget and the token.
+    let connect_outcome = match cancel_token {
+        Some(token) => {
+            tokio::select! {
+                outcome = tokio::time::timeout(SFTP_CONNECT_BUDGET, connect_future) => outcome
+                    .unwrap_or_else(|_| Err(engine_error(
+                        "sftp_connect_timeout",
+                        "The SFTP server did not complete the connection within 30 seconds.",
+                        true,
+                    ))),
+                _ = token.cancelled() => Err("Download canceled.".to_string()),
+            }
+        }
+        None => tokio::time::timeout(SFTP_CONNECT_BUDGET, connect_future)
+            .await
+            .unwrap_or_else(|_| {
+                Err(engine_error(
+                    "sftp_connect_timeout",
+                    "The SFTP server did not complete the connection within 30 seconds.",
+                    true,
+                ))
+            }),
+    };
 
-    let mut handle = handle;
+    let mut handle = connect_outcome?;
 
     // Try public key authentication first if a private key was provided.
     let mut authenticated = false;

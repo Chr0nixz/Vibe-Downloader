@@ -17,11 +17,11 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { Button } from "@/components/ui/button";
 import { MenuItem, RegionContextMenu } from "@/components/ui/menu-item";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import type { TranslationKey } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { type NavFilter, useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
 
@@ -29,7 +29,7 @@ const COLLAPSE_KEY = "vibe-sidebar-collapsed";
 
 type NavItemDef = {
   id: NavFilter;
-  labelKey: `nav.${string}`;
+  labelKey: TranslationKey;
   icon: React.ComponentType<{ className?: string }>;
 };
 

@@ -145,9 +145,16 @@ impl FtpEngine {
         target: FtpTarget,
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
+        request_proxy: Option<&ResolvedProxyConfig>,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ProbeOutput, String> {
-        let proxy_config = self.proxy_config.read().await.clone();
-        let mut session = connect_session(&target, &proxy_config).await?;
+        // FUN-20: the task-resolved proxy must drive the probe too. Fall back
+        // to the global config only when the caller did not resolve one.
+        let proxy_config = match request_proxy {
+            Some(config) => config.clone(),
+            None => self.proxy_config.read().await.clone(),
+        };
+        let mut session = connect_session(&target, &proxy_config, cancel_token).await?;
         session.transfer_type(FileType::Binary).await?;
         session.set_mode(Mode::Passive);
         crate::download::engine::emit_probe_phase(
@@ -239,7 +246,7 @@ pub async fn probe_ftp_directory_url(
         }
     }
     let mut diagnostics = Vec::new();
-    let mut session = connect_session(&target, &proxy_config).await?;
+    let mut session = connect_session(&target, &proxy_config, None).await?;
     session.transfer_type(FileType::Binary).await?;
     session.set_mode(Mode::Passive);
     let cwd_result = session.cwd(&target.path).await;
@@ -297,9 +304,15 @@ impl DownloadEngine for FtpEngine {
             );
             let target = FtpTarget::parse(&request.uri).map_err(DownloadError::Other)?;
             tracing::debug!(url = %target.sanitized_uri, "probing ftp url");
-            self.probe_target(target, &request.app, &request.request_id)
-                .await
-                .map_err(DownloadError::Other)
+            self.probe_target(
+                target,
+                &request.app,
+                &request.request_id,
+                request.proxy_config.as_ref(),
+                request.cancel_token.as_ref(),
+            )
+            .await
+            .map_err(DownloadError::Other)
         })
     }
 
@@ -755,7 +768,12 @@ fn report_ftp_worker_offset(request: &WorkerRequest, offset: i64, speed_bps: i64
 }
 
 async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, String> {
-    let mut session = connect_session(&request.target, &request.proxy_config).await?;
+    let mut session = connect_session(
+        &request.target,
+        &request.proxy_config,
+        Some(&request.cancel_token),
+    )
+    .await?;
     session.transfer_type(FileType::Binary).await?;
     session.set_mode(Mode::Passive);
 
@@ -1145,7 +1163,7 @@ mod tests {
             username: None,
             password: None,
         };
-        let error = match connect_session(&target, &proxy).await {
+        let error = match connect_session(&target, &proxy, None).await {
             Ok(_) => panic!("implicit FTPS + SOCKS5 must be rejected"),
             Err(error) => error,
         };
@@ -1239,74 +1257,127 @@ fn planned_ftp_split(segment: &SegmentProgress) -> Option<FtpSplit> {
     })
 }
 
+/// ARC-26: control-channel budget for dial + TLS handshake + login. Black-hole
+/// addresses previously waited for the OS connect timeout; now the probe and
+/// download paths converge within this budget (or earlier when cancelled).
+const FTP_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn connect_session(
     target: &FtpTarget,
     proxy_config: &ResolvedProxyConfig,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<FtpSession, String> {
+    // SEC-12: FTP control connections bypass reqwest, so the client-level SSRF
+    // layers never see them. Run the full authority pre-flight (literal check
+    // + DNS resolution) before any socket is opened.
+    let authority_url = format!(
+        "{}://{}:{}",
+        if target.mode == FtpSecurityMode::Plain {
+            "ftp"
+        } else {
+            "ftps"
+        },
+        target.host,
+        target.port
+    );
+    let authority = reqwest::Url::parse(&authority_url)
+        .map_err(|e| format!("Could not resolve FTP target: {e}"))?;
+    crate::download::ssrf::assert_connectable_authority(&authority)
+        .await
+        .map_err(|e| engine_error("intranet_target_blocked", e, false))?;
     let addr = format!("{}:{}", target.host, target.port);
-    let result = match target.mode {
-        FtpSecurityMode::Plain => {
-            let mut session = if proxy_config.is_custom_socks5() {
-                let stream = socks5_control_stream(target, proxy_config).await?;
-                AsyncFtpStream::connect_with_stream(stream)
+    let dial = async {
+        let result = match target.mode {
+            FtpSecurityMode::Plain => {
+                let mut session = if proxy_config.is_custom_socks5() {
+                    let stream = socks5_control_stream(target, proxy_config).await?;
+                    AsyncFtpStream::connect_with_stream(stream)
+                        .await
+                        .map_err(|error| ftp_connect_error(target.mode, error))?
+                } else {
+                    AsyncFtpStream::connect(addr)
+                        .await
+                        .map_err(|error| ftp_connect_error(target.mode, error))?
+                };
+                session = apply_passive_proxy(session, proxy_config);
+                session
+                    .login(&target.username, &target.password)
                     .await
-                    .map_err(|error| ftp_connect_error(target.mode, error))?
-            } else {
-                AsyncFtpStream::connect(addr)
+                    .map_err(|error| ftp_auth_error(target.mode, error))?;
+                Ok(FtpSession::Plain(session))
+            }
+            FtpSecurityMode::ExplicitTls => {
+                let connector = rustls_connector();
+                let session = if proxy_config.is_custom_socks5() {
+                    let stream = socks5_control_stream(target, proxy_config).await?;
+                    AsyncRustlsFtpStream::connect_with_stream(stream)
+                        .await
+                        .map_err(|error| ftp_connect_error(target.mode, error))?
+                } else {
+                    AsyncRustlsFtpStream::connect(addr)
+                        .await
+                        .map_err(|error| ftp_connect_error(target.mode, error))?
+                };
+                let mut session = session
+                    .into_secure(connector, &target.host)
                     .await
-                    .map_err(|error| ftp_connect_error(target.mode, error))?
-            };
-            session = apply_passive_proxy(session, proxy_config);
-            session
-                .login(&target.username, &target.password)
-                .await
-                .map_err(|error| ftp_auth_error(target.mode, error))?;
-            Ok(FtpSession::Plain(session))
-        }
-        FtpSecurityMode::ExplicitTls => {
-            let connector = rustls_connector();
-            let session = if proxy_config.is_custom_socks5() {
-                let stream = socks5_control_stream(target, proxy_config).await?;
-                AsyncRustlsFtpStream::connect_with_stream(stream)
+                    .map_err(|error| ftp_connect_error(target.mode, error))?;
+                session = apply_passive_proxy(session, proxy_config);
+                session
+                    .login(&target.username, &target.password)
                     .await
-                    .map_err(|error| ftp_connect_error(target.mode, error))?
-            } else {
-                AsyncRustlsFtpStream::connect(addr)
-                    .await
-                    .map_err(|error| ftp_connect_error(target.mode, error))?
-            };
-            let mut session = session
-                .into_secure(connector, &target.host)
-                .await
-                .map_err(|error| ftp_connect_error(target.mode, error))?;
-            session = apply_passive_proxy(session, proxy_config);
-            session
-                .login(&target.username, &target.password)
-                .await
-                .map_err(|error| ftp_auth_error(target.mode, error))?;
-            Ok(FtpSession::Secure(session))
-        }
-        FtpSecurityMode::ImplicitTls => {
-            if proxy_config.is_custom_socks5() {
-                return Err(engine_error(
+                    .map_err(|error| ftp_auth_error(target.mode, error))?;
+                Ok(FtpSession::Secure(session))
+            }
+            FtpSecurityMode::ImplicitTls => {
+                if proxy_config.is_custom_socks5() {
+                    return Err(engine_error(
                     "ftp_proxy_unsupported_for_implicit_tls",
                     "Implicit FTPS over a task SOCKS5 proxy is not supported by the current FTP runtime. Use explicit FTPS on port 21, plain FTP through SOCKS5, or disable the task proxy for this task.",
                     true,
                 ));
-            }
-            let connector = rustls_connector();
-            let mut session =
-                AsyncRustlsFtpStream::connect_secure_implicit(addr, connector, &target.host)
+                }
+                let connector = rustls_connector();
+                let mut session =
+                    AsyncRustlsFtpStream::connect_secure_implicit(addr, connector, &target.host)
+                        .await
+                        .map_err(|error| ftp_connect_error(target.mode, error))?;
+                session
+                    .login(&target.username, &target.password)
                     .await
-                    .map_err(|error| ftp_connect_error(target.mode, error))?;
-            session
-                .login(&target.username, &target.password)
-                .await
-                .map_err(|error| ftp_auth_error(target.mode, error))?;
-            Ok(FtpSession::Secure(session))
-        }
+                    .map_err(|error| ftp_auth_error(target.mode, error))?;
+                Ok(FtpSession::Secure(session))
+            }
+        };
+        result
     };
-    result
+    // ARC-26: race the dial against the budget and the cancellation token.
+    match cancel_token {
+        Some(token) => {
+            tokio::select! {
+                outcome = tokio::time::timeout(FTP_CONNECT_BUDGET, dial) => outcome
+                    .unwrap_or_else(|_| Err(ftp_connect_timeout_error(target.mode))),
+                _ = token.cancelled() => Err("Download canceled.".to_string()),
+            }
+        }
+        None => tokio::time::timeout(FTP_CONNECT_BUDGET, dial)
+            .await
+            .unwrap_or_else(|_| Err(ftp_connect_timeout_error(target.mode))),
+    }
+}
+
+fn ftp_connect_timeout_error(mode: FtpSecurityMode) -> String {
+    engine_error(
+        "ftp_connect_timeout",
+        format!(
+            "The FTP{} server did not complete the connection within 30 seconds.",
+            match mode {
+                FtpSecurityMode::Plain => "",
+                _ => "S",
+            }
+        ),
+        true,
+    )
 }
 
 async fn socks5_control_stream(

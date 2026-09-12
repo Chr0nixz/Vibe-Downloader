@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { BrowserCaptureSettings, BrowserSiteRule, BrowserSiteRuleMode } from "@/generated/bindings";
+import type { TranslationKey } from "@/i18n";
 import { normalizeSiteRule, validateSiteRule } from "@/lib/browser-capture-draft";
 import {
   analyzeSiteRuleConflicts,
@@ -15,6 +16,13 @@ import {
 } from "@/lib/capture-policy";
 import { parseSiteRulesImport, serializeSiteRulesExport } from "@/lib/site-rules-io";
 import { UNDO_TOAST_TIMEOUT_MS, useToastStore } from "@/stores/toast-store";
+
+/** Rule modes are a closed union, so the key lookup is exhaustive by construction. */
+const RULE_MODE_KEYS = {
+  auto: "settings.ruleModeAuto",
+  ask: "settings.ruleModeAsk",
+  never: "settings.ruleModeNever",
+} as const satisfies Record<BrowserSiteRuleMode, TranslationKey>;
 
 type CaptureGlobals = Pick<
   BrowserCaptureSettings,
@@ -39,7 +47,7 @@ export function SiteRulesEditor({ rules, captureGlobals, disabled, onUpdate }: S
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<BrowserSiteRule | null>(null);
   const [isNew, setIsNew] = useState(false);
-  const [validationError, setValidationError] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<TranslationKey | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const rulesRef = useRef(rules);
   useEffect(() => {
@@ -308,7 +316,7 @@ function SiteRuleTryPanel({
   const [url, setUrl] = useState("https://cdn.example.com/video.mp4");
   const [filename, setFilename] = useState("video.mp4");
   const [sizeMiB, setSizeMiB] = useState("10");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<TranslationKey | null>(null);
   const [diagnosis, setDiagnosis] = useState<CaptureDiagnosis | null>(null);
 
   function runDiagnosis() {
@@ -400,7 +408,7 @@ function DiagnosisResult({ diagnosis }: { diagnosis: CaptureDiagnosis }) {
         <dt className="inline text-text-muted">{t("settings.siteRulesTryMatched")}: </dt>
         <dd className="inline text-text-primary">
           {matched?.hostPattern ?? t("settings.siteRulesTryNoMatch")}
-          {matched ? ` (${t(`settings.ruleMode${capitalize(matched.mode)}`)})` : ""}
+          {matched ? ` (${t(RULE_MODE_KEYS[matched.mode])})` : ""}
         </dd>
       </div>
       <div>
@@ -431,7 +439,7 @@ function DiagnosisResult({ diagnosis }: { diagnosis: CaptureDiagnosis }) {
   );
 }
 
-function interceptReasonKey(reason: string | undefined): string {
+function interceptReasonKey(reason: string | undefined): TranslationKey {
   switch (reason) {
     case "site-rule":
       return "settings.siteRulesTryReasonSiteRule";
@@ -446,7 +454,7 @@ function interceptReasonKey(reason: string | undefined): string {
   }
 }
 
-function headerStateKey(state: string): string {
+function headerStateKey(state: string): TranslationKey {
   switch (state) {
     case "allowed":
       return "settings.siteRulesTryHeaderAllowed";
@@ -490,7 +498,7 @@ function RuleRow({
             {rule.hostPattern || t("settings.ruleHostPatternPlaceholder")}
           </div>
           <div className="text-xs text-text-muted">
-            {t(`settings.ruleMode${capitalize(rule.mode)}`)}
+            {t(RULE_MODE_KEYS[rule.mode])}
             {rule.includeSubdomains ? ` · ${t("settings.ruleIncludeSubdomains")}` : ""}
           </div>
         </div>
@@ -531,7 +539,7 @@ function RuleEditForm({
 }: {
   rule: BrowserSiteRule;
   disabled?: boolean;
-  validationError: string | null;
+  validationError: TranslationKey | null;
   onChange: (patch: Partial<BrowserSiteRule>) => void;
   onCancel: () => void;
   onSave: () => void;
@@ -658,8 +666,4 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div>{children}</div>
     </div>
   );
-}
-
-function capitalize(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }

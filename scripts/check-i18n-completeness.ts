@@ -248,6 +248,11 @@ async function loadLocale(localesDir: string, fileName: string): Promise<unknown
  * every bundle — so a typo would ship and render the raw key to users. Only
  * fully literal keys are scanned: template literals and concatenations are
  * resolved at runtime and cannot be checked statically.
+ *
+ * Known false-positive class: the pattern is textual, so a *comment* spelling a
+ * translate call with a literal string argument is reported. Reword the comment
+ * rather than weakening the scan — a comment stripper here would risk silent
+ * false negatives, which is the failure this check exists to prevent.
  */
 export const SOURCE_KEY_RE = /(?:^|[^\w.$])(?:i18n\.)?t\(\s*["']([^"'\n]+)["']\s*[,)]/g;
 

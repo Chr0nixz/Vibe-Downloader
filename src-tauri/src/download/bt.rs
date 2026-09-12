@@ -12,7 +12,7 @@ use librqbit::{
     limits::LimitsConfig,
     AddTorrent, AddTorrentOptions, ConnectionOptions, Magnet, Session, SessionOptions,
 };
-use reqwest::Url;
+use reqwest::{Client, Url};
 use tokio::sync::Mutex;
 
 use super::engine::{DownloadContext, DownloadEngine, EngineFuture, ProbeOutput, ProbeRequest};
@@ -50,6 +50,9 @@ const TORRENT_MAX_BYTES: usize = 32 * 1024 * 1024;
 pub struct BtEngine {
     sessions: Arc<Mutex<HashMap<String, BtSessionEntry>>>,
     _proxy_config: SharedProxyConfig,
+    /// SEC-03: `.torrent` fetches go through the shared network factory so
+    /// proxy Off means `no_proxy()` and the SSRF guards always apply.
+    factory: Arc<crate::download::net_factory::NetworkClientFactory>,
 }
 
 struct BtSessionEntry {
@@ -97,15 +100,22 @@ impl Drop for SessionRefGuard {
 
 impl Default for BtEngine {
     fn default() -> Self {
-        Self::new(crate::proxy::ResolvedProxyConfig::shared_default())
+        Self::new(
+            crate::proxy::ResolvedProxyConfig::shared_default(),
+            std::sync::Arc::new(crate::download::net_factory::NetworkClientFactory::new()),
+        )
     }
 }
 
 impl BtEngine {
-    pub fn new(proxy_config: SharedProxyConfig) -> Self {
+    pub fn new(
+        proxy_config: SharedProxyConfig,
+        factory: Arc<crate::download::net_factory::NetworkClientFactory>,
+    ) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             _proxy_config: proxy_config,
+            factory,
         }
     }
 
@@ -270,6 +280,7 @@ impl DownloadEngine for BtEngine {
                 &request.app,
                 &request.request_id,
                 &proxy_config,
+                &self.factory,
             )
             .await
             .map_err(DownloadError::Other)
@@ -293,6 +304,7 @@ async fn probe_torrent(
     app: &Option<tauri::AppHandle>,
     request_id: &Option<String>,
     proxy_config: &ResolvedProxyConfig,
+    factory: &crate::download::net_factory::NetworkClientFactory,
 ) -> Result<ProbeOutput, String> {
     if uri.trim_start().starts_with("magnet:") {
         crate::download::engine::emit_probe_phase(app, request_id, "parsing_magnet", Some("bt"));
@@ -302,7 +314,7 @@ async fn probe_torrent(
     crate::download::engine::emit_probe_phase(app, request_id, "fetching_torrent", Some("bt"));
     // Probe must not fall back to AddTorrent::from_url when HTTP fetch fails; that
     // would bypass SOCKS5 and hide proxy misconfiguration during create-time probe.
-    let (add, _, _) = add_torrent_source(uri, proxy_config, false).await?;
+    let (add, _, _) = add_torrent_source(uri, proxy_config, factory).await?;
     crate::download::engine::emit_probe_phase(app, request_id, "inspecting_metadata", Some("bt"));
     let probe_dir = std::env::temp_dir().join("vibe-downloader-bt-probe");
     std::fs::create_dir_all(&probe_dir)
@@ -444,7 +456,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         .await?;
     let _session_guard = SessionRefGuard::new(engine.clone(), session_key);
     let source_started = Instant::now();
-    let source_result = add_torrent_source(&task.url, &proxy_config, true)
+    let source_result = add_torrent_source(&task.url, &proxy_config, &engine.factory)
         .await
         .map_err(|error| {
             engine_error(
@@ -1585,7 +1597,7 @@ fn selected_torrent_total_size(
 async fn add_torrent_source(
     uri: &str,
     proxy_config: &ResolvedProxyConfig,
-    allow_http_url_fallback: bool,
+    factory: &crate::download::net_factory::NetworkClientFactory,
 ) -> Result<(AddTorrent<'static>, Option<bool>, Vec<TorrentTrackerStatus>), String> {
     let trimmed = uri.trim();
     if trimmed.starts_with("magnet:") {
@@ -1602,16 +1614,17 @@ async fn add_torrent_source(
             // Pre-download the .torrent bytes so we can parse the private flag
             // and submit via from_bytes (matching the file:// path). This ensures
             // librqbit receives the private flag and can disable DHT/PEX for
-            // private torrents. Falls back to from_url on download failure to
-            // avoid blocking the download flow.
-            match download_torrent_bytes(trimmed, proxy_config).await {
+            // private torrents.
+            //
+            // SEC-03: no fallback to AddTorrent::from_url — librqbit's internal
+            // client bypasses our proxy policy and SSRF guards, so a fetch
+            // failure surfaces as a structured error instead.
+            let client = factory.client_for(proxy_config).await?;
+            match download_torrent_bytes(&client, trimmed, proxy_config).await {
                 Ok(bytes) => {
                     let private = parse_torrent_private_flag(&bytes);
                     let trackers = tracker_statuses_from_torrent_bytes(&bytes);
                     Ok((AddTorrent::from_bytes(bytes), private, trackers))
-                }
-                Err(_error) if allow_http_url_fallback => {
-                    Ok((AddTorrent::from_url(trimmed.to_string()), None, Vec::new()))
                 }
                 Err(error) => Err(bt_torrent_fetch_failed(error)),
             }
@@ -1668,33 +1681,45 @@ fn classify_torrent_download_error(
 /// Download .torrent file bytes via HTTP/HTTPS with optional SOCKS5 proxy.
 /// Used to pre-parse the private flag before submitting to librqbit.
 async fn download_torrent_bytes(
+    client: &Client,
     url: &str,
     proxy_config: &ResolvedProxyConfig,
 ) -> Result<Vec<u8>, String> {
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(60));
-    if let Some(proxy_url) = proxy_config.custom_socks5_url_with_auth() {
-        builder = builder.proxy(reqwest::Proxy::all(&proxy_url).map_err(|e| e.to_string())?);
-    }
-    let client = builder.build().map_err(|e| e.to_string())?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| classify_torrent_download_error(&error, proxy_config))?
-        .error_for_status()
-        .map_err(|error| {
-            if error.is_status() {
-                engine_error(
-                    "bt_torrent_fetch_failed",
-                    format!("HTTP error fetching torrent: {error}"),
-                    true,
-                )
-            } else {
-                classify_torrent_download_error(&error, proxy_config)
-            }
-        })?;
+    // The factory client has no overall timeout (streaming downloads); this is
+    // a bounded control-plane fetch, so keep the previous 60 s budget here.
+    // SEC-03: proxy policy and SSRF guards come from the shared factory client.
+    // SEC-10: literal-authority pre-flight (resolver covers hostnames).
+    crate::download::ssrf::assert_public_authority(
+        &reqwest::Url::parse(url).map_err(|e| e.to_string())?,
+    )?;
+    let response = tokio::time::timeout(Duration::from_secs(60), async {
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| classify_torrent_download_error(&error, proxy_config))?
+            .error_for_status()
+            .map_err(|error| {
+                if error.is_status() {
+                    engine_error(
+                        "bt_torrent_fetch_failed",
+                        format!("HTTP error fetching torrent: {error}"),
+                        true,
+                    )
+                } else {
+                    classify_torrent_download_error(&error, proxy_config)
+                }
+            })?;
+        Ok::<_, String>(response)
+    })
+    .await
+    .map_err(|_| {
+        engine_error(
+            "bt_torrent_fetch_failed",
+            "Torrent download timed out after 60 seconds.".to_string(),
+            true,
+        )
+    })??;
     // E-3: Pre-check Content-Length if the server provided it.
     if let Some(content_length) = response.content_length() {
         if content_length as usize > TORRENT_MAX_BYTES {
@@ -1819,7 +1844,10 @@ mod tests {
     #[tokio::test]
     async fn session_evicted_when_ref_count_reaches_zero() {
         let _guard = BT_TEST_LOCK.lock().await;
-        let engine = BtEngine::new(crate::proxy::ResolvedProxyConfig::shared_default());
+        let engine = BtEngine::new(
+            crate::proxy::ResolvedProxyConfig::shared_default(),
+            std::sync::Arc::new(crate::download::net_factory::NetworkClientFactory::new()),
+        );
         let temp_dir =
             std::env::temp_dir().join(format!("vibe-bt-session-{}", uuid::Uuid::new_v4()));
         // Create the directory BEFORE calling api_for_output_folder so that
@@ -1892,7 +1920,10 @@ mod tests {
     async fn delete_runtime_task_does_not_decrement_session_refcount() {
         // ARC-12: forget/delete must not race SessionRefGuard on refcount.
         let _guard = BT_TEST_LOCK.lock().await;
-        let engine = BtEngine::new(crate::proxy::ResolvedProxyConfig::shared_default());
+        let engine = BtEngine::new(
+            crate::proxy::ResolvedProxyConfig::shared_default(),
+            std::sync::Arc::new(crate::download::net_factory::NetworkClientFactory::new()),
+        );
         let temp_dir =
             std::env::temp_dir().join(format!("vibe-bt-delete-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).expect("create temp dir");
@@ -1950,7 +1981,10 @@ mod tests {
 
     #[tokio::test]
     async fn release_nonexistent_session_is_noop() {
-        let engine = BtEngine::new(crate::proxy::ResolvedProxyConfig::shared_default());
+        let engine = BtEngine::new(
+            crate::proxy::ResolvedProxyConfig::shared_default(),
+            std::sync::Arc::new(crate::download::net_factory::NetworkClientFactory::new()),
+        );
         engine.release_session_ref("nonexistent-key").await;
         assert_eq!(engine.sessions.lock().await.len(), 0);
     }
@@ -1965,7 +1999,8 @@ mod tests {
         let url = Url::from_file_path(&path).expect("file url").to_string();
 
         let proxy_config = crate::proxy::ResolvedProxyConfig::default();
-        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config, true)
+        let factory = crate::download::net_factory::NetworkClientFactory::new();
+        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config, &factory)
             .await
             .expect("local torrent source");
 
@@ -2042,6 +2077,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_torrent_source_http_downloads_and_parses_private_flag() {
+        std::env::set_var("VIBE_TEST_ALLOW_INTRANET", "1");
         // A minimal private torrent with info.private=1.
         let private_torrent =
             b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1e7:privatei1eee";
@@ -2063,7 +2099,8 @@ mod tests {
         });
 
         let proxy_config = crate::proxy::ResolvedProxyConfig::default();
-        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config, true)
+        let factory = crate::download::net_factory::NetworkClientFactory::new();
+        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config, &factory)
             .await
             .expect("http torrent source");
 
@@ -2079,6 +2116,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_torrent_source_http_fallback_on_download_failure() {
+        std::env::set_var("VIBE_TEST_ALLOW_INTRANET", "1");
         // Bind to a port but immediately close the connection to simulate download failure.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2094,17 +2132,18 @@ mod tests {
         });
 
         let proxy_config = crate::proxy::ResolvedProxyConfig::default();
-        let (add, private_flag, trackers) = add_torrent_source(&url, &proxy_config, true)
-            .await
-            .expect("http torrent source with fallback");
+        let factory = crate::download::net_factory::NetworkClientFactory::new();
+        let error = match add_torrent_source(&url, &proxy_config, &factory).await {
+            Ok(_) => panic!("http torrent fetch failure must surface, not fall back"),
+            Err(error) => error,
+        };
 
-        // On download failure, should fall back to from_url with private_flag=None.
-        match add {
-            AddTorrent::Url(value) => assert_eq!(value, url),
-            AddTorrent::TorrentFileBytes(_) => panic!("expected URL fallback, got bytes"),
-        }
-        assert_eq!(private_flag, None);
-        assert!(trackers.is_empty());
+        // SEC-03: no AddTorrent::from_url fallback — the fetch failure must be
+        // a structured error instead of handing the URL to librqbit's client.
+        assert!(
+            error.contains("bt_torrent_fetch_failed"),
+            "expected bt_torrent_fetch_failed, got {error}"
+        );
 
         server.await.unwrap();
     }

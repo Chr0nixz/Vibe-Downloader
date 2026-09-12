@@ -32,7 +32,10 @@ async fn bt_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 fn new_engine() -> BtEngine {
-    BtEngine::new(ResolvedProxyConfig::shared_default())
+    BtEngine::new(
+        ResolvedProxyConfig::shared_default(),
+        std::sync::Arc::new(tauri_app_lib::download::NetworkClientFactory::new()),
+    )
 }
 
 fn probe_request(uri: String, proxy_config: Option<ResolvedProxyConfig>) -> ProbeRequest {
@@ -46,6 +49,7 @@ fn probe_request(uri: String, proxy_config: Option<ResolvedProxyConfig>) -> Prob
         proxy_config,
         app: None,
         request_id: None,
+        cancel_token: None,
     }
 }
 

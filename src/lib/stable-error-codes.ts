@@ -1,3 +1,5 @@
+import type { TranslationKey } from "@/i18n";
+
 /**
  * UX-11: stable public AppErrorPayload / DownloadError codes that must have
  * localized user-facing copy. Raw backend messages stay in diagnostics only.
@@ -41,6 +43,7 @@ export const STABLE_ERROR_CODES = [
   "final_path_conflict",
   "ftp_auth_failed",
   "ftp_connect_failed",
+  "ftp_connect_timeout",
   "ftp_proxy_unsupported_for_implicit_tls",
   "ftp_read_failed",
   "ftp_read_timeout",
@@ -56,11 +59,13 @@ export const STABLE_ERROR_CODES = [
   "hls_unsupported_encryption",
   "http_denied",
   "http_not_found",
+  "intranet_target_blocked",
   "io_error",
   "local_file_denied",
   "local_file_read_failed",
   "local_file_too_large",
   "metalink_all_mirrors_failed",
+  "metalink_mirror_stalled",
   "metalink_invalid_manifest",
   "metalink_manifest_too_large",
   "metalink_mirror_unsupported_range",
@@ -86,6 +91,7 @@ export const STABLE_ERROR_CODES = [
   "sftp_auth_failed",
   "sftp_channel_failed",
   "sftp_connect_failed",
+  "sftp_connect_timeout",
   "sftp_credentials_required",
   "sftp_directory_not_file",
   "sftp_directory_probe_failed",
@@ -117,14 +123,19 @@ export const STABLE_ERROR_CODES = [
 
 export type StableErrorCode = (typeof STABLE_ERROR_CODES)[number];
 
-function toI18nKey(code: string): string {
-  return `errors.${code.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase())}`;
+/**
+ * The camelCase mapping is mechanical and its target keys are guaranteed by
+ * `scripts/sync-stable-error-i18n.mjs`, which refuses to write a locale that is
+ * missing any of them — hence the single assertion here.
+ */
+function toI18nKey(code: StableErrorCode): TranslationKey {
+  return `errors.${code.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase())}` as TranslationKey;
 }
 
 /** Map every stable code to its i18n key (camelCase under errors.*). */
-export const ERROR_CODE_I18N_MAP: Record<string, string> = Object.fromEntries(
-  STABLE_ERROR_CODES.map((code) => [code, toI18nKey(code)]),
-);
+export const ERROR_CODE_I18N_MAP = Object.fromEntries(
+  STABLE_ERROR_CODES.map((code) => [code, toI18nKey(code)] as const),
+) as Record<string, TranslationKey>;
 
 /** English user-facing copy for stable error codes. */
 export const STABLE_ERROR_MESSAGES_EN: Record<StableErrorCode, string> = {
@@ -166,6 +177,7 @@ export const STABLE_ERROR_MESSAGES_EN: Record<StableErrorCode, string> = {
   final_path_conflict: "The destination file already exists. Choose another name or folder.",
   ftp_auth_failed: "FTP authentication failed. Check the username and password.",
   ftp_connect_failed: "Could not connect to the FTP server.",
+  ftp_connect_timeout: "The FTP server did not complete the connection within 30 seconds.",
   ftp_proxy_unsupported_for_implicit_tls: "The configured proxy does not support implicit FTPS.",
   ftp_read_failed: "Reading from the FTP server failed.",
   ftp_read_timeout: "The FTP read timed out.",
@@ -181,11 +193,13 @@ export const STABLE_ERROR_MESSAGES_EN: Record<StableErrorCode, string> = {
   hls_unsupported_encryption: "This HLS encryption method is not supported.",
   http_denied: "Access denied (403). Check the URL or credentials.",
   http_not_found: "The resource was not found (404). Check the URL.",
+  intranet_target_blocked: "The target address is private or reserved and was blocked by the SSRF guard.",
   io_error: "A local file I/O error occurred.",
   local_file_denied: "This local file type is not allowed.",
   local_file_read_failed: "The local file could not be read.",
   local_file_too_large: "The local file is too large to read safely.",
   metalink_all_mirrors_failed: "All Metalink mirrors failed.",
+  metalink_mirror_stalled: "A Metalink mirror connection stalled: no data received for 60 seconds.",
   metalink_invalid_manifest: "The Metalink manifest is invalid.",
   metalink_manifest_too_large: "The Metalink manifest is too large to process safely.",
   metalink_mirror_unsupported_range: "A Metalink mirror does not support resume ranges.",
@@ -211,6 +225,7 @@ export const STABLE_ERROR_MESSAGES_EN: Record<StableErrorCode, string> = {
   sftp_auth_failed: "SFTP authentication failed. Check credentials or key.",
   sftp_channel_failed: "Opening the SFTP channel failed.",
   sftp_connect_failed: "Could not connect to the SFTP server.",
+  sftp_connect_timeout: "The SFTP server did not complete the connection within 30 seconds.",
   sftp_credentials_required: "SFTP credentials are required.",
   sftp_directory_not_file: "The SFTP path is a directory, not a file.",
   sftp_directory_probe_failed: "Probing the SFTP directory failed.",

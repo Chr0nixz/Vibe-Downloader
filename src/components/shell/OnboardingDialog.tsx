@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -11,11 +10,25 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import type { TranslationKey } from "@/i18n";
 import { getBrowserIntegrationStatus } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 
 const ONBOARDING_STORAGE_KEY = "vibe-onboarding-completed";
 const TOTAL_STEPS = 3;
+
+/** `as const` keeps these as a tuple, so `[step]` is a `TranslationKey | undefined`. */
+const STEP_TITLE_KEYS = [
+  "onboarding.step1Title",
+  "onboarding.step2Title",
+  "onboarding.step3Title",
+] as const satisfies readonly TranslationKey[];
+
+const STEP_BODY_KEYS = [
+  "onboarding.step1Body",
+  "onboarding.step2Body",
+  "onboarding.step3Body",
+] as const satisfies readonly TranslationKey[];
 
 export function markOnboardingCompleted() {
   try {
@@ -97,8 +110,8 @@ export function OnboardingDialog({
   const isLastStep = step === TOTAL_STEPS - 1;
   const isFirstStep = step === 0;
 
-  const stepTitleKey = ["onboarding.step1Title", "onboarding.step2Title", "onboarding.step3Title"][step];
-  const stepBodyKey = ["onboarding.step1Body", "onboarding.step2Body", "onboarding.step3Body"][step];
+  const stepTitleKey = STEP_TITLE_KEYS[step];
+  const stepBodyKey = STEP_BODY_KEYS[step];
 
   return (
     <Dialog

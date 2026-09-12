@@ -107,8 +107,13 @@ async fn fun04_webdav_directory_probe_uses_draft_password() {
     let observed = state.observed_authorization.clone();
     let server = start_webdav_dir_server(state);
     let url = format!("webdav://{}/dir/", server.authority());
+    let factory = tauri_app_lib::download::NetworkClientFactory::new();
+    let client = factory
+        .client_for(&tauri_app_lib::proxy::ResolvedProxyConfig::default())
+        .await
+        .expect("client");
 
-    let without = probe_webdav_directory_url(&url, ResolvedProxyConfig::default(), None).await;
+    let without = probe_webdav_directory_url(&client, &url, None).await;
     assert!(without.is_err(), "missing credentials must fail auth");
 
     let credentials = db::TaskCredentials {
@@ -117,10 +122,9 @@ async fn fun04_webdav_directory_probe_uses_draft_password() {
         private_key_data: None,
         private_key_passphrase: None,
     };
-    let probe =
-        probe_webdav_directory_url(&url, ResolvedProxyConfig::default(), Some(&credentials))
-            .await
-            .expect("directory probe with draft credentials");
+    let probe = probe_webdav_directory_url(&client, &url, Some(&credentials))
+        .await
+        .expect("directory probe with draft credentials");
 
     assert!(
         !probe.directory_url.contains("alice") && !probe.directory_url.contains("s3cret"),

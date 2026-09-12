@@ -358,10 +358,7 @@ function updaterStatusToHealth(status: ReturnType<typeof useAppUpdater>["status"
   }
 }
 
-function updaterSummary(
-  updater: ReturnType<typeof useAppUpdater>,
-  t: (key: string, options?: Record<string, unknown>) => string,
-): string {
+function updaterSummary(updater: ReturnType<typeof useAppUpdater>, t: TFunction): string {
   switch (updater.status) {
     case "up-to-date":
       return t("settings.upToDate");
@@ -380,7 +377,7 @@ function updaterSummary(
   }
 }
 
-function itemTitle(id: string, t: (key: string) => string): string {
+function itemTitle(id: string, t: TFunction): string {
   switch (id) {
     case "native_host":
       return t("settings.environmentItemNativeHost");
@@ -401,11 +398,7 @@ function itemTitle(id: string, t: (key: string) => string): string {
   }
 }
 
-function fixActionLabel(
-  kind: EnvironmentFixKind,
-  browser: string | null,
-  t: (key: string, options?: Record<string, unknown>) => string,
-): string {
+function fixActionLabel(kind: EnvironmentFixKind, browser: string | null, t: TFunction): string {
   switch (kind) {
     case "install_native_host":
       return browser
