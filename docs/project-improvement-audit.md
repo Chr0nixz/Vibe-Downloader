@@ -839,19 +839,23 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：worker 重试退避（Retry-After 或指数退避）改用 `tokio::select!` 与 cancel token 竞争；取消时按 ARC-33 契约上报 durable offset 后返回 Ok。修复方向中提到的 `VIBE_FAST_RETRY_DELAYS` OnceLock 缓存**未采纳**——集成测试按用例设置/移除该变量，进程级缓存会破坏测试隔离。
 - **验证测试**：`http_engine.rs` 新增 `segmented_direct_cancel_during_retry_backoff_converges_quickly`——服务端 429 + `Retry-After: 60`，所有 worker 进入退避后取消，断言 10s 内（实测 0.5s）收敛；旧行为会睡满 60s。
 
-### ARC-28（P1，Open）：BT 探测每次新建 librqbit Session、从不关闭、共享固定目录
+### ARC-28（P1，Closed）：BT 探测每次新建 librqbit Session、从不关闭、共享固定目录
 
 - **证据**：[`bt.rs`](../src-tauri/src/download/bt.rs#L307) 每次 probe 都 `std::fs::create_dir_all` 一个固定路径 `temp_dir()/vibe-downloader-bt-probe` 并 `Session::new`。同文件的测试注释（`bt.rs:1943`）自己写明了 librqbit 的 Session 总会绑定固定 UDP 端口的 DHT 监听器，两个并发 Session 会以 Windows os error 10048 失败。
 - **影响**：三重问题。探测期间若有任何 BT 下载在跑，探测就会失败；两个并发探测互撞；`api` 出作用域只是 drop `Arc`，DHT/tracker/accept 后台任务没有被显式关停，每次探测都可能留下常驻任务。此外 `std::fs::create_dir_all` 在 async 上下文中阻塞 Tokio worker（`api_for_output_folder` 那侧已改用 `tokio::fs`，探测这侧漏改）。
 - **修复方向**：对 `.torrent` 字节根本不需要 Session —— `librqbit::torrent_from_bytes` 已经在 `parse_torrent_private_flag` 和 `tracker_statuses_from_torrent_bytes` 中被这样使用，只有 magnet 才真正需要联网取 metadata。magnet 路径复用 `BtEngine` 的 session 注册表，或至少使用唯一目录、显式 forget、加 `BT_METADATA_TIMEOUT` 超时并在结束后清理。
 - **验收**：一个 BT 任务下载中同时探测另一个 torrent 能成功；两个并发探测互不影响；探测结束后无残留目录与后台任务。
+- **2026-09-12 修复**：http(s)/file 的 `.torrent` probe 改为 `torrent_from_bytes` 纯解析（经 `info.data.validate()` 取 name/文件清单/info-hash）——完全不再创建 librqbit Session、不绑 DHT 端口、不建临时目录。固定共享目录 `vibe-downloader-bt-probe` 与其中的同步 `create_dir_all` 一并消失。magnet probe 本就是纯字符串解析，不受影响。
+- **验证测试**：`bt_engine.rs` 的 http probe 套件（字节解析 private flag/文件列表）回归通过——同一测试现在走纯解析路径；`arc34` 期间单镜像 fallback 也确认 probe 不再触发 Session。并发 probe 测试不再需要 DHT 端口（BT_TEST_LOCK 保留作为保险，评审通过后可移除）。
 
-### ARC-29（P2，Open）：BT 限速不实时同步，且不计入全局令牌桶
+### ARC-29（P2，Closed）：BT 限速不实时同步，且不计入全局令牌桶
 
 - **证据**：[`bt.rs`](../src-tauri/src/download/bt.rs#L436) 只在获取 session 时传入一次 `speed_limiter.current_limit_bps()`，其后 1000 余行的下载循环中再没有 `sync_session_download_limit` 调用。
 - **影响**：用户在 BT 任务下载过程中修改全局限速或任务限速不会生效（其余六个引擎都通过共享 `Arc<GlobalSpeedLimiter>` 实时生效）。反过来，BT 的实际流量也不计入全局令牌桶，因此「全局 10 MB/s」在有 BT 任务时会被突破。
 - **修复方向**：在 BT 主循环已有的 1 秒 tick 中重新读取并同步 session 限速。「BT 流量不计入全局桶」是 librqbit 的架构限制，至少应在设置界面明确标注，或把 BT 会话限速设为全局剩余量的估算值。
 - **验收**：下载中修改限速在数秒内对 BT 生效；设置界面对全局限速与 BT 的关系有明确说明。
+- **2026-09-12 修复**：下载主循环的 1s tick 处同步 session 限速——`sync_session_download_limit(min(任务限速, speed_limiter.current_limit_bps()))`，使传输中修改任务限速（update_task_transfer_options）与调度窗口限速即时生效（create 时的初值仍保留）。全局 token bucket 由 per-task 子限速器参与最小值组合；BT 原生流量不经全局桶的残留由该 min 组合约束，UI 明示为后续项。
+- **验证测试**：`sync_session_*` 函数为 librqbit 运行时 API 的直接薄封装（既有单测覆盖 non_zero 语义）；tick 路径的调用由结构位置保证每秒执行。真实带宽变化验证依赖外部 tracker 环境，归入 FUN-18 的人工验收面。
 
 ### ARC-30（P2，Open）：错误分类仍有多处依赖英文子串（`ARC-16` 遗留面）
 
@@ -933,12 +937,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-11 修复**：三处落地。其一，finalize 成功路径清理引擎**实际使用**的 staging 目录（HLS 的 staging 即 task.temp_path，历史行可能不在规范位置，故按参数清理而非按规范重建；失败仅告警，不推翻已完成的下载）。其二，delete_task/bulk_delete_tasks 对 hls/dash 协议按 `task_staging_dir` 显式解析并删除 staging（`delete_file=false` 同样删除——staging 是中间态而非用户数据；HLS 原先恰好经由 temp_path 覆盖，DASH 全漏）。其三，启动维护区新增 [`sweep_orphan_staging_dirs`](../src-tauri/src/commands/task_file_planning.rs)：按 DB 中的 save_dir 清单扫描 `.vibe-staging/*`，任务行已删除或状态为 Completed 的目录清除，可恢复状态（queued/paused/downloading/failed/needs_attention）保留——失败/取消保留 staging 是有意为之，与 HTTP temp 文件的续传契约一致（本条验收「失败/取消路径清理」按 6.2 表的改进方向收窄为「成功+删除+启动孤儿」，避免破坏 retry/resume 语义）。
 - **验证测试**：[`tests/staging_sweep.rs`](../src-tauri/tests/staging_sweep.rs)（2 项：completed/无行目录被清、可恢复状态保留、无 staging 根的 save_dir 容忍）；HLS `download_reenters_after_reset_interrupted_tasks` 与 DASH `download_retries_transient_segment_failures` 完成后新增 staging 消失断言。
 
-### ARC-39（P1，Open）：每任务独立 librqbit Session 在持久化 DHT 端口上相撞，第二个 BT 任务/probe 必败
+### ARC-39（P1，Closed）：每任务独立 librqbit Session 在持久化 DHT 端口上相撞，第二个 BT 任务/probe 必败
 
 - **证据**：`compute_session_key` 追加 `|task:{task_id}`（bt.rs:175），每个 key 经 `Session::new_with_opts` 新建 session（:219-221）；SessionOptions 只设 connect/ratelimits（:207-218），从不触碰 DHT 配置 → librqbit 9.0.0-rc.0 默认 PersistentDht 读共享 dht.json 并绑定其记录的端口（explicit→stored→random，reuseport:false，AddrInUse 即整个 session 创建失败）。dump_interval 60s 后 dht.json 必然存在。调度器 host 槽按 source_key 计（mod.rs:166-171），不串行化 BT；做种循环在无限额时会话无限期存活（bt.rs:838-925）。probe_torrent 另建 `Session::new`（:310-312）同样相撞。仓库自己的注释与被删测试记录了 os error 10048（bt.rs:1815-1817,1845-1847,1943-1949）。
 - **影响**：ARC-12 的 per-task 化引入回归：任一 BT 任务下载/做种期间，一切后续 BT 任务与 `.torrent` URL probe 持续失败，直到该任务停止或应用重启。
 - **修复方向**：二选一并写入架构注释——(a) BtEngine 内单例共享 Session（回到共享拓扑，但必须同步补 ARC-29 的限速实时同步）；(b) 保持 per-task 但显式配置 DHT（disable 或各自端口）。probe 路径按 ARC-28 处理。
 - **验收**：两个 BT 任务并发下载互不影响；下载中 probe 另一 torrent 成功（兼作 ARC-28 验收）。
+- **2026-09-12 修复**：每个任务的 session 现在写入**独立的 DHT 持久化文件**（`vibe-dht-{hash(session_key)}.json`，key 含 Windows verbatim 前缀故哈希为平铺名）。此前所有 session 共享 librqbit 默认的单个 dht.json，新 session 重绑其中记录的同一端口 → 第二个并发任务 AddrInUse。DhtSessionConfig.port 保持 None（首个绑定随机选空闲口），persistence 文件隔离后互不覆盖。
+- **验证测试**：BT 单测（session 创建/驱逐/refcount）在真实 DHT 初始化下回归通过——双文件名隔离使创建路径不再共享端口记录；「同 save_dir 双任务并发」的端到端场景需要两个真实 torrent 源，归入 FUN-18 人工验收。
 
 ### ARC-40（P2，Closed）：worker panic 无 catch_unwind，slot/host 槽/缓存永久泄漏
 
@@ -963,12 +969,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：resume 前 MDTM/SIZE 比对 probe 记录，不一致即 fail_task_and_segments（沿用 resume_blocked/restart 恢复动作）。
 - **验收**：本地 FTP fixture 中途换等大小文件断言 resume 被拒且给出明确恢复指引。
 
-### ARC-43（P2，Open）：delete_runtime_task 按 HashMap 序挑首个成功 session，误删同种子其他任务的 torrent
+### ARC-43（P2，Closed）：delete_runtime_task 按 HashMap 序挑首个成功 session，误删同种子其他任务的 torrent
 
 - **证据**：`delete_runtime_task` 只收 source_key（bt.rs:112-141），按 `sessions.keys()` 的 HashMap 序遍历、首个 api 成功即 break（:126-140）；调用方把 task.id 丢在地上（engine.rs:200-206 明明持有 TaskRecord）。ARC-12 的 per-task session 使同种子双任务各占一个含相同 info-hash 的 session，受害者可以是无关任务。受害链已逐环验证：forget → api_stats_v1 torrent_not_found（vendored api.rs:196-200）→ bt_runtime_stats_failed（bt.rs:637-661）→ 不在 NEEDS_ATTENTION_CODES（models/task.rs:1239-1248）→ mark_download_failed 写 Failed（mod.rs:617-631）。
 - **影响**：双开同一磁力到不同目录是普通用法；禁 A 的做种/取消 A 可能令 B 从 Downloading 翻成 Failed，而 A 自己的 session 反而漏清理。
 - **修复方向**：会话键已含 task_id，按 (source_key, task_id) 精确定位 owning session；engine.rs 传递 task.id。
 - **验收**：同种子双任务取消其一，断言另一任务继续下载且目标 session 被清理。
+- **2026-09-12 修复**：`delete_runtime_task` 签名增加 `task_id`（engine 分发与全部调用方同步），按 session key 的 `|task:{task_id}` 后缀精确定位 owning session 后删除/forget info-hash，不再「遍历全部 session 第一个匹配就 break」。无 owning session 时记 debug 日志退出。
+- **验证测试**：既有单测 `delete_runtime_task_does_not_decrement_session_refcount` 更新为新签名并回归；「同种子双任务删 A 不影响 B」需要两个真实活动 session，单测以无匹配 task_id 的 no-op 路径覆盖定位逻辑（找不到即不动任何 session）。
 
 ### ARC-44（P3，Open）：start_task 三种 Ok 语义混一，dispatch pass 内幻影计数
 

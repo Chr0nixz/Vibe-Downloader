@@ -16,7 +16,6 @@ use reqwest::{Client, Url};
 use tokio::sync::Mutex;
 
 use super::engine::{DownloadContext, DownloadEngine, EngineFuture, ProbeOutput, ProbeRequest};
-use super::probe_error::reqwest_error_to_structured;
 use super::url_classify::is_torrent_url;
 use super::DownloadError;
 use crate::download::error::engine_error;
@@ -119,7 +118,7 @@ impl BtEngine {
         }
     }
 
-    pub async fn delete_runtime_task(&self, source_key: &str, delete_files: bool) {
+    pub async fn delete_runtime_task(&self, task_id: &str, source_key: &str, delete_files: bool) {
         let Some(info_hash) = info_hash_from_source_key(source_key) else {
             return;
         };
@@ -129,24 +128,33 @@ impl BtEngine {
 
         // ARC-12: only forget/delete the torrent here. Session refcount is owned
         // exclusively by `SessionRefGuard` so cancel/delete + Drop never double-decrement.
-        let touched_keys: Vec<String> = {
+        //
+        // ARC-43: the session key ends in `|task:{task_id}`, so the owning
+        // session for THIS task can be addressed exactly. The previous shape
+        // iterated all sessions and stopped at the first hash match, which
+        // cancelled a DIFFERENT task's torrent when two tasks shared one.
+        let api = {
             let sessions = self.sessions.lock().await;
-            sessions.keys().cloned().collect()
+            sessions
+                .keys()
+                .find(|key| key.ends_with(&format!("|task:{task_id}")))
+                .and_then(|key| sessions.get(key).map(|e| e.api.clone()))
         };
-        for key in &touched_keys {
-            let api = {
-                let sessions = self.sessions.lock().await;
-                sessions.get(key).map(|e| e.api.clone())
-            };
-            let Some(api) = api else { continue };
+        if let Some(api) = api {
+            tracing::debug!(task_id, "deleting torrent in the task's owning session");
             let result = if delete_files {
                 api.api_torrent_action_delete(id).await
             } else {
                 api.api_torrent_action_forget(id).await
             };
-            if result.is_ok() {
-                break;
+            if let Err(error) = result {
+                tracing::warn!(task_id, error = %error, "torrent runtime delete failed");
             }
+        } else {
+            tracing::debug!(
+                task_id,
+                "no active session owns this task; nothing to delete"
+            );
         }
     }
 
@@ -226,6 +234,24 @@ impl BtEngine {
             upload_bps: non_zero_u32(upload_limit_bps),
             download_bps: non_zero_u32(download_limit_bps),
         };
+        // ARC-39: isolate each task's DHT persistence file. Sessions default to
+        // ONE shared dht.json whose recorded port every new session re-binds —
+        // the second concurrent task then fails with AddrInUse. Per-task
+        // filenames give each session its own recorded port (explicit port is
+        // left None so first bind picks a free one). The key contains Windows
+        // verbatim-path prefixes and separators, so hash it into a flat name.
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let dht_file_name = format!("vibe-dht-{:016x}.json", hasher.finish());
+        options.dht = Some(librqbit::DhtSessionConfig {
+            bootstrap_addrs: None,
+            port: None,
+            persistence: Some(librqbit::dht::DhtPersistenceConfig {
+                dump_interval: None,
+                config_filename: Some(std::env::temp_dir().join(dht_file_name)),
+            }),
+        });
         let session = Session::new_with_opts(PathBuf::from(&output_path), options)
             .await
             .map_err(|e| format!("Could not start BitTorrent session: {e:#}"))?;
@@ -312,36 +338,125 @@ async fn probe_torrent(
     }
 
     crate::download::engine::emit_probe_phase(app, request_id, "fetching_torrent", Some("bt"));
-    // Probe must not fall back to AddTorrent::from_url when HTTP fetch fails; that
-    // would bypass SOCKS5 and hide proxy misconfiguration during create-time probe.
-    let (add, _, _) = add_torrent_source(uri, proxy_config, factory).await?;
+    // ARC-28: inspecting a .torrent file is pure metainfo parsing — no session,
+    // no DHT socket, no temp dir. The fixed shared probe directory previously
+    // made concurrent probes fight over librqbit's persistent DHT port
+    // (os error 10048); now only downloads touch sessions.
+    let bytes = fetch_torrent_source_bytes(uri, proxy_config, factory).await?;
     crate::download::engine::emit_probe_phase(app, request_id, "inspecting_metadata", Some("bt"));
-    let probe_dir = std::env::temp_dir().join("vibe-downloader-bt-probe");
-    std::fs::create_dir_all(&probe_dir)
-        .map_err(|e| format!("Could not create the torrent probe directory: {e}"))?;
-    let session = Session::new(probe_dir.clone())
-        .await
-        .map_err(|e| format!("Could not start BitTorrent probe session: {e:#}"))?;
-    let api = Api::new(session, None);
-    let response = api
-        .api_add_torrent(
-            add,
-            Some(AddTorrentOptions {
-                paused: true,
-                list_only: true,
-                output_folder: Some(probe_dir.to_string_lossy().to_string()),
-                ..Default::default()
-            }),
+    probe_from_torrent_bytes(uri, &bytes)
+}
+
+/// ARC-28: obtains the raw .torrent bytes for a file/http(s) source.
+async fn fetch_torrent_source_bytes(
+    uri: &str,
+    proxy_config: &ResolvedProxyConfig,
+    factory: &crate::download::net_factory::NetworkClientFactory,
+) -> Result<Vec<u8>, String> {
+    let trimmed = uri.trim();
+    let parsed = Url::parse(trimmed).map_err(|_| "Torrent URL is invalid.".to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => {
+            let client = factory.client_for(proxy_config).await?;
+            download_torrent_bytes(&client, trimmed, proxy_config).await
+        }
+        "file" => {
+            let path = parsed
+                .to_file_path()
+                .map_err(|_| "Torrent file path is invalid.".to_string())?;
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|e| format!("Could not read torrent file {}: {e}", path.display()))?;
+            if bytes.len() > TORRENT_MAX_BYTES {
+                return Err(engine_error(
+                    "bt_torrent_too_large",
+                    "The torrent file exceeds the size limit.",
+                    false,
+                ));
+            }
+            Ok(bytes)
+        }
+        _ => Err(format!(
+            "The {} protocol is not supported for torrent sources.",
+            parsed.scheme()
+        )),
+    }
+}
+
+/// ARC-28: builds the ProbeOutput by parsing metainfo bytes directly — the
+/// same source of truth librqbit's list-only session produced, minus the
+/// session.
+fn probe_from_torrent_bytes(uri: &str, bytes: &[u8]) -> Result<ProbeOutput, String> {
+    let _ = uri;
+    let meta = librqbit::torrent_from_bytes(bytes).map_err(|e| {
+        engine_error(
+            "bt_torrent_invalid",
+            format!("The torrent file is invalid: {e}"),
+            false,
         )
-        .await
-        .map_err(|e| {
-            engine_error(
-                "bt_torrent_probe_failed",
-                format!("Could not inspect torrent metadata: {e:#}"),
-                true,
-            )
-        })?;
-    Ok(probe_from_torrent_details(uri, &response.details))
+    })?;
+    let info = meta.info.data.clone().validate().map_err(|e| {
+        engine_error(
+            "bt_torrent_invalid",
+            format!("The torrent file is invalid: {e}"),
+            false,
+        )
+    })?;
+    let info_hash = meta.info_hash.as_string();
+    let display_name = info
+        .name()
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| format!("torrent-{info_hash}"));
+
+    let mut files = Vec::new();
+    let mut total_size = 0_i64;
+    for file in info.iter_file_details() {
+        let path_parts: Vec<String> = file
+            .filename
+            .to_vec()
+            .into_iter()
+            .map(|part| part.replace('"', "/"))
+            .collect();
+        total_size = total_size.saturating_add(i64::try_from(file.len).unwrap_or(0));
+        let relative = if path_parts.len() > 1 {
+            path_parts.join("/")
+        } else {
+            path_parts
+                .last()
+                .cloned()
+                .unwrap_or_else(|| display_name.clone())
+        };
+        files.push(ProbedFile {
+            relative_path: relative,
+            size: file.len.to_string(),
+            content_type: content_type_for_path(
+                path_parts.last().map(String::as_str).unwrap_or(""),
+            ),
+        });
+    }
+
+    Ok(ProbeOutput {
+        protocol: PROTOCOL_BT.to_string(),
+        task_kind: if files.len() > 1 {
+            TaskKind::MultiFile
+        } else {
+            TaskKind::SingleFile
+        },
+        resolved_uri: format!("{SOURCE_BT_PREFIX}{info_hash}"),
+        display_name,
+        total_size,
+        source_key: format!("{SOURCE_BT_PREFIX}{info_hash}"),
+        capabilities: bt_capabilities(),
+        files,
+        etag: None,
+        last_modified: None,
+        content_type: Some("application/x-bittorrent".to_string()),
+        hls_variants: Vec::new(),
+        hls_audio_tracks: Vec::new(),
+        hls_subtitle_tracks: Vec::new(),
+        metalink: None,
+    })
 }
 
 fn probe_magnet(uri: &str) -> Result<ProbeOutput, String> {
@@ -385,45 +500,6 @@ fn probe_magnet(uri: &str) -> Result<ProbeOutput, String> {
         hls_subtitle_tracks: Vec::new(),
         metalink: None,
     })
-}
-
-fn probe_from_torrent_details(uri: &str, details: &TorrentDetailsResponse) -> ProbeOutput {
-    let files = torrent_files_from_details(details);
-    let total_size = files.iter().map(|file| parse_i64(&file.size)).sum::<i64>();
-    let display_name = details
-        .name
-        .clone()
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| format!("torrent-{}", details.info_hash));
-
-    ProbeOutput {
-        protocol: PROTOCOL_BT.to_string(),
-        task_kind: if files.len() > 1 {
-            TaskKind::MultiFile
-        } else {
-            TaskKind::SingleFile
-        },
-        resolved_uri: format!("{SOURCE_BT_PREFIX}{}", details.info_hash),
-        display_name,
-        total_size,
-        source_key: format!("{SOURCE_BT_PREFIX}{}", details.info_hash),
-        capabilities: bt_capabilities(),
-        files,
-        etag: None,
-        last_modified: None,
-        content_type: Some(
-            if uri.starts_with("magnet:") {
-                "application/x-magnet"
-            } else {
-                "application/x-bittorrent"
-            }
-            .to_string(),
-        ),
-        hls_variants: Vec::new(),
-        hls_audio_tracks: Vec::new(),
-        hls_subtitle_tracks: Vec::new(),
-        metalink: None,
-    }
 }
 
 async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Result<(), String> {
@@ -622,6 +698,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     let mut last_progress = 0_i64;
     let mut last_health_summary = Some("Fetching torrent metadata".to_string());
     let mut last_tick = Instant::now();
+    let mut last_limit_sync = Instant::now();
     let mut last_file_progress_emit = Instant::now()
         .checked_sub(Duration::from_secs(10))
         .unwrap_or_else(Instant::now);
@@ -947,6 +1024,21 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
 
         last_progress = downloaded;
         last_tick = Instant::now();
+        // ARC-29: sync the session rate limits every tick so mid-transfer
+        // changes to the task limit (update_task_transfer_options) and the
+        // scheduled-window speed take effect without restarting the session.
+        // The global token bucket is enforced by the per-task child limiter
+        // that feeds `download_limit_bps` here; BT's own traffic bypasses the
+        // shared bucket, but the effective limit is the minimum of the two,
+        // which this sync preserves.
+        if last_tick.duration_since(last_limit_sync) >= Duration::from_secs(1) {
+            sync_session_download_limit(
+                &api,
+                db::parse_speed_limit_bps(task.task_speed_limit_bps.as_deref())
+                    .min(speed_limiter.current_limit_bps().or(Some(i64::MAX))),
+            );
+            last_limit_sync = Instant::now();
+        }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
@@ -1089,13 +1181,13 @@ async fn wait_for_torrent_metadata(
             }
             _ = interval.tick() => {
                 if cancel_token.is_cancelled() {
-                    engine.delete_runtime_task(&task.source_key, false).await;
+                    engine.delete_runtime_task(&task.id, &task.source_key, false).await;
                     return Err("Torrent metadata fetch was canceled.".to_string());
                 }
 
                 let elapsed = started.elapsed();
                 if elapsed >= BT_METADATA_TIMEOUT {
-                    engine.delete_runtime_task(&task.source_key, false).await;
+                    engine.delete_runtime_task(&task.id, &task.source_key, false).await;
                     return Err(crate::download::error::engine_error(
                         "bt_metadata_timeout",
                         format!(
@@ -1110,7 +1202,7 @@ async fn wait_for_torrent_metadata(
             }
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
                 if cancel_token.is_cancelled() {
-                    engine.delete_runtime_task(&task.source_key, false).await;
+                    engine.delete_runtime_task(&task.id, &task.source_key, false).await;
                     return Err("Torrent metadata fetch was canceled.".to_string());
                 }
             }
@@ -1675,7 +1767,14 @@ fn classify_torrent_download_error(
             true,
         );
     }
-    reqwest_error_to_structured(error)
+    // Surface every non-proxy fetch failure as the BT-specific code: the
+    // frontend maps it to a download-specific message, and the retry contract
+    // treats all fetch failures uniformly as recoverable.
+    engine_error(
+        "bt_torrent_fetch_failed",
+        format!("Could not download the torrent file: {error}"),
+        true,
+    )
 }
 
 /// Download .torrent file bytes via HTTP/HTTPS with optional SOCKS5 proxy.
@@ -1953,7 +2052,11 @@ mod tests {
         // No matching torrent — delete is a no-op for the API, and must not
         // release the session ref that the Guard still owns.
         engine
-            .delete_runtime_task("bt:0000000000000000000000000000000000000000", false)
+            .delete_runtime_task(
+                "test-task",
+                "bt:0000000000000000000000000000000000000000",
+                false,
+            )
             .await;
         assert_eq!(
             engine

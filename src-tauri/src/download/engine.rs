@@ -211,7 +211,7 @@ impl EngineRegistry {
     pub async fn delete_runtime_task(&self, task: &TaskRecord, delete_files: bool) {
         if matches!(task.protocol.as_str(), "bt" | "magnet") {
             self.bt_engine
-                .delete_runtime_task(&task.source_key, delete_files)
+                .delete_runtime_task(&task.id, &task.source_key, delete_files)
                 .await;
         }
     }
