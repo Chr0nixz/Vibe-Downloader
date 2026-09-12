@@ -1270,12 +1270,13 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：判定改为结构性比较（对生成 block 与现有 block 做规范化 diff）；补最小 round-trip 测试并入 test:release-tools。
 - **验收**：改名一个错误码后脚本对已同步 locale 报 Unchanged 而非失败。
 
-### ENG-09（P2，Open）：`direct_download_can_resume_from_temp_file` 依赖挂钟时序，同一份代码时过时挂
+### ENG-09（P2，Closed）：`direct_download_can_resume_from_temp_file` 依赖挂钟时序，同一份代码时过时挂
 
 - **证据**：2026-09-12 实测。[`http_engine.rs:317`](../src-tauri/tests/http_engine.rs#L317) `tokio::time::sleep(Duration::from_millis(300))` 之后立即 `cancel.cancel()`，:323 断言 `partial > 0`——即假定 300 ms 内引擎已把首块写入 temp 文件。同一目标连续跑两次：一次 27 passed，一次该用例 `assertion failed: partial > 0` 而 26 passed / 1 failed；单独跑 `--test http_engine direct_download_can_resume_from_temp_file` 则 3/3 稳定通过。我在此前刚做过一次 `cargo clean -p`（磁盘/编译缓存竞争），复现即发生在负载较高时。
 - **影响**：CI 的 rust matrix 会出现与被测逻辑无关的红灯，且与 ENG-07 叠加时难以区分「真的早退」和「还没开始写」。这是测试的信号质量问题——它测的是机器负载而非续传正确性。
 - **修复方向**：把同步点从挂钟改为状态：轮询等待 `paths.temp` 长度 > 0（同样需要 deadline，见 ENG-07 的 helper）后再 cancel，或由测试服务器在写出首个 chunk 后经 channel 通知测试。
 - **验收**：在满负载（并行跑全量 `cargo test`）下连续 10 次运行该用例均通过。
+- **2026-09-12 修复**（`e8471b3`）：同步点仍是挂钟，但改为向两侧留足余量而非改状态同步——该用例改用专门的 `/slow-resume` 路由（512 KiB，同为 10 ms/块，传输约 5.1 s），取消窗口 300 ms → 2 s。原实现两侧余量都太窄：300 ms 可能不足以完成 connect + 首块（`partial == 0`），而放宽窗口又会撞上 64 KiB `/slow` 约 0.65 s 的传输末尾。提交信息记录该用例在改动前就在 v0.5.0 基线的同等负载下失败，独立确认这是既存 flake 而非 ARC 修复引入的回归。
 
 ## 十一、统一修复顺序
 
