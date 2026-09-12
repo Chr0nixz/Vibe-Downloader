@@ -536,14 +536,16 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-08-13 根因**：不是「忘记翻译」，而是生成器设计如此。[`sync-stable-error-i18n.mjs`](../scripts/sync-stable-error-i18n.mjs) 的 `messageSets` 把 zh-TW / ja / ko / ru / es 直接映射到 `STABLE_ERROR_MESSAGES_EN`，只有 zh-CN 有一份硬编码的中文表。更进一步：连 zh-CN 的 `dashNoTracks` 等条目在 locale 文件里也仍是英文，说明该脚本的输出**从未真正落地**过。因此修复 `FUN-21` 需要同时处理三件事——给脚本补齐 5 个 locale 的译文、让脚本的输出与 locale 文件一致、再给 `check-i18n-completeness.ts` 加 value 校验，缺一仍会漂移。
   本批次新增的 `dash_segment_count_too_large` 按现状登记（7 个 locale 均为英文，中文已写入 sync 脚本的 zhCN 表备用），以免在统一修复前引入一条孤立的不一致条目。
 - **2026-08-14 修复**：[`scripts/stable-error-messages.json`](../scripts/stable-error-messages.json) 成为 6 个非 en locale 的错误码译文源；`sync-stable-error-i18n.mjs` 拒绝缺译或原样英文。`check-i18n-completeness.ts` 同时比对 missing/extra key、插值占位符，以及值层未翻译项（`errors.*` 一律 FAIL；其他命名空间在 3 个以上可见英文单词且不在白名单时 FAIL）。同批补齐 ja/ko/ru/es 中站点规则等从英文粘贴的 UI 文案，并把 `SiteRulesEditor` 的错误 key `common.undo` 改为已有的 `toast.undo`。
-- **验证测试**：[`scripts/check-i18n-completeness.test.ts`](../scripts/check-i18n-completeness.test.ts)（10 项）；`pnpm check:i18n` 对 7 个 locale 各 1398 个 key 通过。beta 语言的复数/日期问题仍见 `FUN-22`，不得据此把任何 locale 写成「完整翻译」。
+- **验证测试**：[`scripts/check-i18n-completeness.test.ts`](../scripts/check-i18n-completeness.test.ts)（10 项）；`pnpm check:i18n` 对 7 个 locale 各 1398 个 key 通过。beta 语言的复数/日期问题见 `FUN-22`（2026-09-12 Closed）。
 
-### FUN-22（P2，Open）：复数形式缺失与日期本地化未走应用语言
+### FUN-22（P2，Closed）：复数形式缺失与日期本地化未走应用语言
 
 - **证据**：`en.ts` 有 36 处 `{{count}}` 插值，但整个 locale 目录只有 `moreFixesCount` 一个 key 提供了 `_one` 变体（[`en.ts`](../src/i18n/locales/en.ts#L1264)）。俄语 [`ru.ts`](../src/i18n/locales/ru.ts#L1272) 缺 `_few`/`_many`，而俄语需要 4 种形式。日期侧有两种写法混用：`QueueCenter.tsx:424` 与 `AttentionCenter.tsx:328` 正确传 `i18n.language`，而 `TaskDetails.tsx:2267`、`TaskRow.tsx:649`、`AboutPage.tsx:359`、`SettingsPage.tsx:2709` 用的是 `toLocale*(undefined, ...)`，取的是系统语言而非应用内所选语言。
 - **影响**：英文在 count=1 时输出「1 connections」；用户切到日语后任务行时间戳仍按系统区域显示。另外 `AttentionCenter.tsx:328` 与 `QueueCenter.tsx:424` 在组件 render 内构造 `Intl.DateTimeFormat`，而构造成本比 `.format()` 调用高 1-2 个数量级。
 - **修复方向**：句子型 `{{count}}` 补 `_one`/`_other`，俄语补 `_few`/`_many`；括号计数型（`(3)`）保持现状。新建 `src/lib/format-date.ts`，比照 [`utils.ts`](../src/lib/utils.ts#L19) 已有的 `Intl.NumberFormat` 缓存 + `languageChanged` 失效模式，统一 6 处日期格式化并一律使用 `i18n.language`。
 - **验收**：切换语言后所有日期与复数文案随之变化；组件 render 内不再构造 `Intl` 实例。
+- **2026-09-12 修复**：四件事同时落地。其一，18 个句子型 `{{count}}` key 在 [`en.ts`](../src/i18n/locales/en.ts) / [`es.ts`](../src/i18n/locales/es.ts) 补 `_one`，[`ru.ts`](../src/i18n/locales/ru.ts) 补 `_one`，其中 7 个名词/动词随数变化的 key 另补 `_few`；括号计数型（`(3)`）与「已选 N」这类不带名词的句子保持单一形式——i18next 在变体缺失时回落到 base key，故无需 `_other`。其二，修掉 `ru.ts` 把数字写死的 `moreFixesCount_one`（俄语 one 形式覆盖 1/21/31…，实测 count=21 曾输出「Ещё 1 исправление」，现为「Ещё 21 исправление」），并删除 `zh-CN`/`zh-TW`/`ja`/`ko` 的 `moreFixesCount_one`——这四个语言的 CLDR 只有 `other`，i18next 永不会选中它。其三，[`check-i18n-completeness.ts`](../scripts/check-i18n-completeness.ts) 不再要求 key 集合逐一相等，改为按 **CLDR 类别**校验：`pluralCategories()` 取自 `Intl.PluralRules`，`findPluralBases()` 以「base 存在 + 插值 `{{count}}` + 存在 `_<cat>` 兄弟键」识别复数基准（故 `taskList.failure_other` 这类同形 key 不会被误判为 `taskList.failure` 的复数形式）。缺失本语言会选中的形式报 FAIL，存在本语言永不会选中的形式报 `unreachablePlurals` 并 FAIL。其四，新建 [`src/lib/format-date.ts`](../src/lib/format-date.ts) 的 `formatDateTime(value, style)`：四种预置样式，`Intl.DateTimeFormat` 按 `locale:style` 缓存并在 `languageChanged` 时清空，与 [`utils.ts`](../src/lib/utils.ts#L19) 的 `Intl.NumberFormat` 缓存同构；`TaskRow`、`TaskDetails`、`AboutPage`、`SettingsPage`、`AttentionCenter`、`QueueCenter` 六处统一走该入口，`AttentionCenter`/`QueueCenter` 的 render 内构造随之消失。
+- **验证测试**：[`src/i18n/plurals.test.ts`](../src/i18n/plurals.test.ts)（en 在 count=1 选中 `_one`；ru 经 `setLocale` 懒加载后选中自身 `_one`/`_few`）；[`scripts/check-i18n-completeness.test.ts`](../scripts/check-i18n-completeness.test.ts) 由 10 项增至 18 项，覆盖 CLDR 类别、复数基准识别、允许语言特有复数、拒绝不可达变体、字面量键扫描。`pnpm check:i18n` 对 7 个 locale 全部通过。
 
 ### FUN-23（P1，Open）：备份导出在目标目录与应用数据不同卷时必然失败
 
@@ -579,6 +581,22 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **影响**：一次 SQLite 瞬时错误 → ffmpeg 不带该输入 mux，成品缺用户显式选择的字幕/音轨且标记 Completed。
 - **修复方向**：传播 Result（`?` 转 engine_error），让失败可见。
 - **验收**：mock get_hls_task Err 断言任务 Failed 而非产出缺轨文件。
+
+### FUN-28（P2，Closed）：环境健康检查的全部文案由 Rust 硬编码英文，七个 locale 均不翻译
+
+- **证据**：[`commands/environment.rs`](../src-tauri/src/commands/environment.rs) 内联了 18 条 `summary` 与 20 条 `detail` 英文字面量（如 `"Native Messaging host binary is ready."`、`"ffmpeg was not found. HLS/DASH remuxing will fail."`）。前端把 `item.summary` 原样渲染（[`EnvironmentPanel.tsx:281`](../src/components/settings/EnvironmentPanel.tsx#L281)），复制出的剪贴板报告同样直写该字段（[`environment-report.ts:25`](../src/lib/environment-report.ts#L25)）。项目对下载错误已有现成范式：后端只发稳定 code，前端经 `ERROR_CODE_I18N_MAP` 映射（`UX-11`）。
+- **影响**：界面切成 zh-CN/ja/ru 后，设置页「Environment」卡片中每一项的摘要与详情仍是英文，复制出的诊断报告与截图同样如此。`pnpm check:i18n` 看不见这批字符串——它们不在任何 locale 文件里。
+- **修复方向**：比照 [`stable-error-codes.ts`](../src/lib/stable-error-codes.ts)，为 38 条文案定义稳定 code 并让 Rust 只回 code + 参数；前端映射到 `settings.environment.*`；`formatEnvironmentReport` 接受 `t`，把自身 12 条结构标签（`Checked at:`、`Platform:`、`Checks:`、`Updater:`、`Note: …`）一并本地化。注意 `item.id` 已由 `environmentItem*` 键本地化，缺的只有 summary/detail。
+- **验收**：切换语言后设置页环境卡片与复制出的报告文案随之变化；新增键由 `check:i18n` 覆盖。
+- **2026-09-12 修复**：按项目已有的 UX-11 稳定 code 范式改造契约。模型侧新增 [`EnvironmentTextCode`](../src-tauri/src/models/environment.rs)（38 个变体，specta 导出为 TS 字符串联合）、`EnvironmentTextParams` 与 `EnvironmentText { code, params, english }`；`EnvironmentHealthItem.summary` 由 `String` 改为 `EnvironmentText`，`detail` 由 `Option<String>` 改为 `Vec<EnvironmentText>`（浏览器检查的 detail 本就是「桥接状态 + 最近交接错误」两段拼接），`EnvironmentFixResult.message` 同样改为 `EnvironmentText`。**`raw` 变体刻意不翻译**：路径、版本号、探针原始错误按 UX-11「原始后端消息只进诊断」保持逐字输出，因此 38 个 code 中真正需要译文的是 37 个。前端新增 [`environment-text.ts`](../src/lib/environment-text.ts)：`ENVIRONMENT_TEXT_KEYS` 用 `satisfies Record<Exclude<EnvironmentTextCode, "raw">, string>` 保证穷尽（后端加变体而前端不加键 → `pnpm typecheck` 直接失败），`formatEnvironmentText` 未命中 code 时回落 `english`。设置页环境卡片、修复 toast、以及 [`environment-report.ts`](../src/lib/environment-report.ts) 的 13 条结构标签一并走该通路。
+- **验证测试**：[`environment-text.test.ts`](../src/lib/environment-text.test.ts) 遍历 `SUPPORTED_LOCALES` 断言每个 code 的键在**每个** locale 都存在（这张表是动态键，`check:i18n` 的字面量扫描看不到它，此测试即为该通路的门禁），并断言 `raw` 逐字输出；[`environment-report.test.ts`](../src/lib/environment-report.test.ts) 断言切换语言后报告正文随语言变化且原文不再出现。`cargo test --lib` 252 项通过（含 `commands::environment::tests`）。
+
+### FUN-29（P3，Open）：`t()` 的键不受类型约束，拼写错误只靠 CI 的字符串扫描兜底
+
+- **证据**：全仓没有 `declare module "i18next"` / `CustomTypeOptions`——[`en.ts`](../src/i18n/locales/en.ts) 虽是 `as const`，但没有接到 i18next 的类型上，因此 `TFunction` 接受任意字符串，`t("nav.alll")` 能编译通过并在运行时把键名渲染给用户。2026-09-12 实测：补上该增强后 `tsc --noEmit` 报 **47 处**错误、分布在 14 个文件，绝大多数是 `labelKey: string` 这类把 i18n 键降级为普通字符串的查表结构（`Sidebar.tsx` 8 处、`SiteRulesEditor.tsx` 9 处、`TaskDetails.tsx` 7 处）。
+- **影响**：编辑器期零保护。当前唯一防线是 `check:i18n` 的 `SOURCE_KEY_RE` 字面量扫描，它只认完整字面量键（`t("key")` / `t("key", …)`），模板字面量与拼接键不覆盖。
+- **修复方向**：导出 `TranslationKey` 类型，把 `labelKey` / `shortcutKey` 等表结构从 `string` 收紧到该类型，再加 `CustomTypeOptions`。上面 47 处即收紧后的完整待修清单。本次未做，是因为它只影响编辑器期（CI 扫描已覆盖同一风险面），且改动横跨 14 个组件，宜单独一批提交。
+- **验收**：`t()` 的键受类型约束；动态键经 `TranslationKey` 收窄而非 `as` 断言。
 
 ## 七、项目架构的鲁棒性和稳定性
 
@@ -831,19 +849,23 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 
 以下 `ARC-32`～`ARC-48` 为 2026-08-26 第 4 轮复审新增。
 
-### ARC-32（P0，Open）：pause/cancel/delete/restart 持每任务运行时锁内联 await dispatch，与调度器锁构成环
+### ARC-32（P0，Closed）：pause/cancel/delete/restart 持每任务运行时锁内联 await dispatch，与调度器锁构成环
 
 - **证据**：`dispatch_inner` 全程持调度全局锁（scheduler/mod.rs:111），而 `start_task` 第一步（先于任何 DB 读）就取 `task_runtime_locks.lock(task.id)`（mod.rs:270）。同时 pause_task（actions.rs:208 取锁、:274-278 **内联 await dispatch**）、cancel_task（:437/:497-501）、delete_task（:514/:557-561，guard 直到 :564 才 drop）、resolve_task_attention(Restart) → restart_task_from_beginning（guard actions.rs:761 → tasks.rs:784-788 await）都是「持任务锁 → 等调度锁」。resume/retry/mirror-retry 已 spawn 化规避（tasks.rs:654-668 的注释明说此危害），这四条路径从未转换。
 - **影响**：经典循环等待。最坏路径是**确定性**的：Restart 把任务置回 queued（db/task_state.rs:578，retry_after_at=NULL）后内联 dispatch——只要有空闲槽（NeedsAttention 任务常态），dispatcher 快照到该任务并对同一线程已持有的运行时锁再次加锁，无条件挂起。暂停 Queued 任务是受支持流程（Pause-all 目标含 queued，actions.rs:698）。一旦卡死，后续一切 dispatch 与尾部内联 dispatch 的命令（settings.rs:280、create.rs:1222 等）永久排队直至重启。这是自 2026-06-30 起跟踪的死锁的最终确认与加重版。
 - **修复方向**：四处统一改为 spawn dispatch（照抄 resume/retry 范式）；中期把「dispatcher 锁外快照、start_task 内取任务锁」的锁序文档化并加回归测试。
 - **验收**：「dispatch tick 进行中对同一 Queued 任务 Pause / Delete / Restart」三条竞态集成测试通过；Restart 在空闲槽位下立即完成。
+- **2026-09-11 修复**：新增 [`Scheduler::dispatch_detached`](../src-tauri/src/scheduler/mod.rs)，pause（actions.rs pause_task）、cancel（cancel_task）、delete（delete_task）、Restart（restart_task_from_beginning）与 retry（queue_task_for_retry_at 的内联 spawn 一并收敛）五条命令尾部统一改走 detached dispatch——spawn 后调用方先 unwind 释放任务锁，dispatch → start_task 再取任务锁。锁序约定已写入该方法的 doc comment（「命令尾部在持任务锁期间不得 await dispatch」）。delete_task 的 evict 顺序不变：staging 行已删，detached dispatch 不可能再选中该任务加锁。
+- **验证测试**：[`tests/scheduler_lock_order.rs`](../src-tauri/tests/scheduler_lock_order.rs)（3 项）：以真实 `TaskRuntimeLocks` + tokio 并发编码「Restart 写回 Queued 后持锁 dispatch 自死锁」与「双命令尾部 ABBA」两个场景（旧行为下必然超时），并断言真实 `reset_task_download_state` 写回后任务可被 dispatch 选中。全量 dispatch 需要真实 AppHandle（同 `scheduler_dispatch.rs` 的 harness 说明），锁序契约因此以生产锁原语验证。
 
-### ARC-33（P0，Open）：分段 HTTP worker 三条早退路径不 flush BufWriter，动态加速几乎必然造成成品静默缺字节
+### ARC-33（P0，Closed）：分段 HTTP worker 三条早退路径不 flush BufWriter，动态加速几乎必然造成成品静默缺字节
 
 - **证据**：[`worker.rs`](../src-tauri/src/download/http/segmented/worker.rs#L352) 的 `download_segment_once` 有三条上报 offset 后 `return Ok` 却**不调用 file.flush()** 的路径：(1) `offset > current_end` 早退（:351-357）；(2) `write_len <= 0` 早退（:361-363）；(3) 加速收缩范围后的 partial-chunk 写（:419-424）。写侧是 tokio BufWriter（256 KiB，无 Drop flush，tokio 文档明确要求手动 flush）。其余所有出口（cancel :310/:338、limiter-cancel :384、流结束 :427）都显式 flush 以维持 :382-383 注释的不变量「checkpointed downloaded_until 不能超前于磁盘事实」。retryable 错误出口（:325-334）同样不 flush，而 retry 从 failure.downloaded_until（:103）续跑而非磁盘位置，属同类缺口。
 - **影响**：`maybe_accelerate_segments`（coordinator.rs:606-766）收缩活跃 worker 的 range_end AtomicI64（:688-690）而服务器按旧 Range 继续推流 → 几乎每次成功的分段加速都经 (1)/(3) 退出，最多丢 256 KiB 缓冲尾。下游无法兜底：协调器把上报 offset 落库（runtime_progress.rs:177-185），预分配使 temp 尺寸恒等于 total_size（file_ops.rs:165-180）令尺寸检查失效（coordinator.rs:515-521），rename 发布带洞文件——无任何报错，除非用户手动哈希校验。默认功能、高频触发、静默损坏，故为 P0。
 - **修复方向**：所有 `return Ok` 路径统一 flush 后再上报 offset；更彻底的做法是把「flush 才能上报进度」做成类型级契约（封装 writer，使 offset 上报方法强制先 flush）。
 - **验收**：加速 split 触发前后的全文件字节比对集成测试；缓冲非空的早退路径字节级断言（参照 sftp_engine.rs:919-948 的 prefix 比对模式）。
+- **2026-09-11 修复**：采纳类型级契约方案。新增 [`segmented/writer.rs`](../src-tauri/src/download/http/segmented/writer.rs) 的 `SegmentFileWriter`：维护 written/durable 双水位，`durable_offset` 仅在 `sync()`（先 flush）中前进；worker 的**所有**上报出口——含 300ms 中途进度（协调器的 force checkpoint 会持久化运行时进度，见 runtime_progress.rs `update_progress`/checkpoint.rs，仅修出口不够）——统一经 `durable_checkpoint()` flush 后发布；连接错误/停滞/越界/收缩/write_all 失败路径上报 durable 水位而非 running offset。
+- **验证测试**：writer 单元测试 3 项（水位语义、失败写不推水位、sync 后字节落盘）；字节级集成测试 [`http_engine.rs::segmented_direct_resume_after_mid_body_abort_writes_no_hole`](../src-tauri/tests/http_engine.rs)：服务端在越过一次 256 KiB flush 边界后 TCP RST 中断段连接（socket2 设 SO_LINGER=0，std `set_linger` 为 nightly-only，已加入 dev-dependencies），重试完成后逐字节断言成品无零洞。该测试对旧行为（去掉 sync）实测失败、对新实现通过。
 
 ### ARC-34（P1，Open）：Metalink 并行续传按「当前健康镜像数」重算分片边界，镜像集变化即错位拼接
 
@@ -866,19 +888,23 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：completed 收集后按 (discontinuity_sequence, media_sequence) 排序——plan 里带上序号即可，无需查 DB。
 - **验收**：多 worker 乱序完成的 fixture 断言 local.m3u8 严格按媒体序。
 
-### ARC-37（P1，Open）：引擎段失败时取消「自己的」任务 token，supervisor 误判为用户取消 → 任务永久滞留 Downloading（僵尸）
+### ARC-37（P1，Closed）：引擎段失败时取消「自己的」任务 token，supervisor 误判为用户取消 → 任务永久滞留 Downloading（僵尸）
 
 - **证据**：HLS segment 重试耗尽时 `cancel_token.cancel()` 后 return Err（hls/engine.rs:929-938），DASH 同型（dash.rs:1149-1158）。token 由 scheduler 创建经 DownloadContext 下发（mod.rs:300,450），engine 自取消与用户取消共享同一 token。supervisor 在 future 结束后才读 `is_cancelled()`（mod.rs:459）并 `if !canceled` 才 mark_download_failed（:463-466）——该守卫本意是保护用户暂停/取消，却无法区分两种取消。此后 downloads_map 已清（:460）、dispatch 只捡 Queued（:132）、无运行时看门狗、reset_interrupted_tasks 仅启动时执行（lib.rs:590）。外部轨道变体更糟：run_hls_download 的 `Err(_) if cancel_token.is_cancelled()` 臂调用 pause_hls_task **静默转 Paused**（engine.rs:574-577）。
 - **影响**：任一 segment 403/404/断连 3 次 → UI 永远显示「Downloading 0 B/s」；auto-retry 与失败计数因状态非 Failed 全部失效。只能手动暂停再恢复或重启。这是第 2 轮登记、第 3 轮仍 Open 的僵尸态问题的根因定位。
 - **修复方向**：引擎内部放弃必须与用户取消可区分——返回结构化错误码由 supervisor 无条件转移失败（用户发起与否由命令层标记，不从 token 推断）；或引入独立的 internal_abort 信号。
 - **验收**：mock segment 永久 404，断言任务秒级转 NeedsAttention/Failed 且 slot 释放；用户取消路径回归不受影响。
+- **2026-09-11 修复**：HLS 段失败（engine.rs `hls_segment_failed` 臂）、外部轨道失败（`hls_track_failed` 臂）与 DASH 段失败（dash.rs `dash_segment_failed` 臂）删除 `cancel_token.cancel()`——`workers.abort_all()` 本就足以停住其余 worker，token 取消只是污染 supervisor 的 `canceled` 判定。全仓审计确认引擎内主动 `cancel_token.cancel()` 仅此三处且全部为内部失败语义；用户取消仍由命令层取消 token 并由既有 `Err(_) if cancel_token.is_cancelled()` 分支收敛。
+- **验证测试**：[`hls_engine.rs`](../src-tauri/tests/hls_engine.rs) 与 [`dash_engine.rs`](../src-tauri/tests/dash_engine.rs) 各新增 `arc37_internal_segment_failure_does_not_cancel_user_token`：永久 404/500 耗尽重试后断言引擎返回结构化失败且调用方持有的 token 未被取消（对旧行为实测失败）。既有取消收敛测试（`cancel_during_live_poll_sleep_pauses_cleanly` 等 18+14 项）全绿。
 
-### ARC-38（P1，Open）：staging 目录在任何路径都不回收；DASH 连「删除任务（含文件）」都泄漏
+### ARC-38（P1，Closed）：staging 目录在任何路径都不回收；DASH 连「删除任务（含文件）」都泄漏
 
 - **证据**：DASH 建 save_dir/.vibe-staging/{task_id}（dash.rs:914-921），finalize_dash_task（:1432-1520）remux 后只 rename 走 mp4；HLS 用 task.temp_path 作 staging（engine.rs:469-477），finalize_hls_task（:1787-1843）留下全部 seg-*.ts/init/output 中间物。全仓 grep 无任何对 staging 的 remove_dir_all；STAGING_DIR_NAME 仅出现在 task_file_planning.rs。删除流程只删 task.temp_path/final_path/task_files 路径（actions.rs:539-552,614-627），而 `task_stored_temp_path` 仅 protocol=="hls" 时返回 staging 目录（task_file_planning.rs:57-68）——DASH 的 temp_path 是单个已被 finalize rename 掉的文件。
 - **影响**：每个 2 GB 影片成功下载后留约 2 GB 隐藏段文件；DASH 删除任务后 DB 记录消失、应用内永久不可回收；HLS 仅当用户事后勾选「删除文件」才释放。正常使用数周即数十 GB。
 - **修复方向**：finalize 成功路径 remove_dir_all(staging)；启动时扫描 save_dir/.vibe-staging/* 对照现存任务清理孤儿（覆盖失败/取消残留）；delete 流程对 dash 协议同样解析出 staging dir。
 - **验收**：成功/失败/取消/删除四条路径各有 staging 清理断言；孤儿目录启动清扫测试。
+- **2026-09-11 修复**：三处落地。其一，finalize 成功路径清理引擎**实际使用**的 staging 目录（HLS 的 staging 即 task.temp_path，历史行可能不在规范位置，故按参数清理而非按规范重建；失败仅告警，不推翻已完成的下载）。其二，delete_task/bulk_delete_tasks 对 hls/dash 协议按 `task_staging_dir` 显式解析并删除 staging（`delete_file=false` 同样删除——staging 是中间态而非用户数据；HLS 原先恰好经由 temp_path 覆盖，DASH 全漏）。其三，启动维护区新增 [`sweep_orphan_staging_dirs`](../src-tauri/src/commands/task_file_planning.rs)：按 DB 中的 save_dir 清单扫描 `.vibe-staging/*`，任务行已删除或状态为 Completed 的目录清除，可恢复状态（queued/paused/downloading/failed/needs_attention）保留——失败/取消保留 staging 是有意为之，与 HTTP temp 文件的续传契约一致（本条验收「失败/取消路径清理」按 6.2 表的改进方向收窄为「成功+删除+启动孤儿」，避免破坏 retry/resume 语义）。
+- **验证测试**：[`tests/staging_sweep.rs`](../src-tauri/tests/staging_sweep.rs)（2 项：completed/无行目录被清、可恢复状态保留、无 staging 根的 save_dir 容忍）；HLS `download_reenters_after_reset_interrupted_tasks` 与 DASH `download_retries_transient_segment_failures` 完成后新增 staging 消失断言。
 
 ### ARC-39（P1，Open）：每任务独立 librqbit Session 在持久化 DHT 端口上相撞，第二个 BT 任务/probe 必败
 
@@ -1244,6 +1270,13 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：判定改为结构性比较（对生成 block 与现有 block 做规范化 diff）；补最小 round-trip 测试并入 test:release-tools。
 - **验收**：改名一个错误码后脚本对已同步 locale 报 Unchanged 而非失败。
 
+### ENG-09（P2，Open）：`direct_download_can_resume_from_temp_file` 依赖挂钟时序，同一份代码时过时挂
+
+- **证据**：2026-09-12 实测。[`http_engine.rs:317`](../src-tauri/tests/http_engine.rs#L317) `tokio::time::sleep(Duration::from_millis(300))` 之后立即 `cancel.cancel()`，:323 断言 `partial > 0`——即假定 300 ms 内引擎已把首块写入 temp 文件。同一目标连续跑两次：一次 27 passed，一次该用例 `assertion failed: partial > 0` 而 26 passed / 1 failed；单独跑 `--test http_engine direct_download_can_resume_from_temp_file` 则 3/3 稳定通过。我在此前刚做过一次 `cargo clean -p`（磁盘/编译缓存竞争），复现即发生在负载较高时。
+- **影响**：CI 的 rust matrix 会出现与被测逻辑无关的红灯，且与 ENG-07 叠加时难以区分「真的早退」和「还没开始写」。这是测试的信号质量问题——它测的是机器负载而非续传正确性。
+- **修复方向**：把同步点从挂钟改为状态：轮询等待 `paths.temp` 长度 > 0（同样需要 deadline，见 ENG-07 的 helper）后再 cancel，或由测试服务器在写出首个 chunk 后经 channel 通知测试。
+- **验收**：在满负载（并行跑全量 `cargo test`）下连续 10 次运行该用例均通过。
+
 ## 十一、统一修复顺序
 
 ### 阶段 A：发布阻断和数据完整性
@@ -1318,7 +1351,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 **E5 — 可维护性与工程化**
 
 16. `ARC-31` 的剩余部分与 `ARC-17` 的前端拆分 checklist。
-17. `ENG-03`、`ENG-04`、`ENG-05`、`PERF-13`、`PERF-15`、`PERF-16`、`ARC-29`、`ARC-30`、`FUN-22`、`UX-18`、`SEC-06`、`SEC-07`。
+17. `ENG-03`、`ENG-04`、`ENG-05`、`PERF-13`、`PERF-15`、`PERF-16`、`ARC-29`、`ARC-30`、`UX-18`、`SEC-06`、`SEC-07`。
 
 ### 阶段 F：2026-08-26 第 4 轮复审批次
 
