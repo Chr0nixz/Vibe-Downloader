@@ -24,7 +24,7 @@ use crate::{
     models::{
         BrowserKind, EnvironmentFixAction, EnvironmentFixInput, EnvironmentFixKind,
         EnvironmentFixResult, EnvironmentHealthItem, EnvironmentHealthReport,
-        EnvironmentHealthStatus,
+        EnvironmentHealthStatus, EnvironmentText, EnvironmentTextCode, EnvironmentTextParams,
     },
     platform,
     proxy::{AppProxyMode, ResolvedProxyConfig},
@@ -35,6 +35,12 @@ const PROXY_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const DISK_WARN_BYTES: u64 = 512 * 1024 * 1024;
 const DISK_ERROR_BYTES: u64 = 64 * 1024 * 1024;
 const WRITE_PROBE_NAME: &str = ".vibe-write-probe";
+
+/// Wraps an opaque value (path, version, raw probe error) as a single detail
+/// fragment, or no fragment at all when there is nothing to add.
+fn detail_of(value: Option<String>) -> Vec<EnvironmentText> {
+    value.map(EnvironmentText::raw).into_iter().collect()
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -58,10 +64,17 @@ pub async fn run_environment_fix(
             if !status.native_host_ready {
                 return Ok(EnvironmentFixResult {
                     ok: false,
-                    message: status.native_host_error.unwrap_or_else(|| {
-                        "Native Messaging host binary is missing. Reinstall the desktop app."
-                            .to_string()
-                    }),
+                    // A raw install error stays verbatim; only the synthesized
+                    // fallback is localized.
+                    message: status
+                        .native_host_error
+                        .map(EnvironmentText::raw)
+                        .unwrap_or_else(|| {
+                            EnvironmentText::new(
+                            EnvironmentTextCode::FixNativeHostMissing,
+                            "Native Messaging host binary is missing. Reinstall the desktop app.",
+                        )
+                        }),
                     focus_section: Some("browser-integration".into()),
                     refresh: true,
                 });
@@ -83,7 +96,10 @@ pub async fn run_environment_fix(
             if targets.is_empty() {
                 return Ok(EnvironmentFixResult {
                     ok: true,
-                    message: "No browsers need a Native Messaging manifest install.".into(),
+                    message: EnvironmentText::new(
+                        EnvironmentTextCode::FixNoBrowsersToInstall,
+                        "No browsers need a Native Messaging manifest install.",
+                    ),
                     focus_section: Some("browser-integration".into()),
                     refresh: true,
                 });
@@ -96,11 +112,16 @@ pub async fn run_environment_fix(
                 browser::install_manifest(&app, *browser_kind)?;
             }
             emit_browser_integration_changed(&app);
+            let count = targets.len() as u32;
             Ok(EnvironmentFixResult {
                 ok: true,
-                message: format!(
-                    "Installed Native Messaging manifests for {} browser(s).",
-                    targets.len()
+                message: EnvironmentText::with_params(
+                    EnvironmentTextCode::FixManifestsInstalled,
+                    format!("Installed Native Messaging manifests for {count} browsers."),
+                    EnvironmentTextParams {
+                        count: Some(count),
+                        ..Default::default()
+                    },
                 ),
                 focus_section: Some("browser-integration".into()),
                 refresh: true,
@@ -110,9 +131,17 @@ pub async fn run_environment_fix(
             let kind = input.path_kind.as_deref().unwrap_or("data");
             let path = resolve_open_path(&app, state.inner(), kind).await?;
             platform::open_path(&path)?;
+            let path = path.display().to_string();
             Ok(EnvironmentFixResult {
                 ok: true,
-                message: format!("Opened {}", path.display()),
+                message: EnvironmentText::with_params(
+                    EnvironmentTextCode::FixOpenedPath,
+                    format!("Opened {path}"),
+                    EnvironmentTextParams {
+                        path: Some(path),
+                        ..Default::default()
+                    },
+                ),
                 focus_section: None,
                 refresh: false,
             })
@@ -124,20 +153,33 @@ pub async fn run_environment_fix(
                 .unwrap_or_else(|| "environment".into());
             Ok(EnvironmentFixResult {
                 ok: true,
-                message: format!("Focus settings section: {section}"),
+                message: EnvironmentText::with_params(
+                    EnvironmentTextCode::FixFocusSection,
+                    format!("Focus settings section: {section}"),
+                    EnvironmentTextParams {
+                        section: Some(section.clone()),
+                        ..Default::default()
+                    },
+                ),
                 focus_section: Some(section),
                 refresh: false,
             })
         }
         EnvironmentFixKind::ExportBackup => Ok(EnvironmentFixResult {
             ok: true,
-            message: "Choose a destination to export a database backup.".into(),
+            message: EnvironmentText::new(
+                EnvironmentTextCode::FixChooseBackupDestination,
+                "Choose a destination to export a database backup.",
+            ),
             focus_section: Some("data-backup".into()),
             refresh: false,
         }),
         EnvironmentFixKind::CheckForUpdate => Ok(EnvironmentFixResult {
             ok: true,
-            message: "Check for updates from the frontend updater.".into(),
+            message: EnvironmentText::new(
+                EnvironmentTextCode::FixCheckFromUpdater,
+                "Check for updates from the frontend updater.",
+            ),
             focus_section: Some("about-updates".into()),
             refresh: false,
         }),
@@ -173,16 +215,22 @@ fn check_native_host(status: &crate::models::BrowserIntegrationStatus) -> Enviro
         EnvironmentHealthItem {
             id: "native_host".into(),
             status: EnvironmentHealthStatus::Ok,
-            summary: "Native Messaging host binary is ready.".into(),
-            detail: status.native_host_path.clone(),
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::NativeHostReady,
+                "Native Messaging host binary is ready.",
+            ),
+            detail: detail_of(status.native_host_path.clone()),
             suggested_actions: vec![],
         }
     } else {
         EnvironmentHealthItem {
             id: "native_host".into(),
             status: EnvironmentHealthStatus::Error,
-            summary: "Native Messaging host binary is missing or not executable.".into(),
-            detail: status.native_host_error.clone(),
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::NativeHostMissing,
+                "Native Messaging host binary is missing or not executable.",
+            ),
+            detail: detail_of(status.native_host_error.clone()),
             suggested_actions: vec![EnvironmentFixAction {
                 kind: EnvironmentFixKind::FocusSetting,
                 browser: None,
@@ -216,24 +264,50 @@ fn check_browser(status: &crate::models::BrowserIntegrationStatus) -> Environmen
         .collect();
 
     let ws_detail = match (status.realtime.ws_url.as_deref(), status.realtime.connected) {
-        (Some(url), true) => format!("Realtime bridge connected ({url})."),
-        (Some(url), false) => {
-            format!("Realtime bridge listening but no extension connected ({url}).")
-        }
-        (None, _) => "Realtime bridge is not available.".to_string(),
+        (Some(url), true) => EnvironmentText::with_params(
+            EnvironmentTextCode::BridgeConnected,
+            format!("Realtime bridge connected ({url})."),
+            EnvironmentTextParams {
+                url: Some(url.to_string()),
+                ..Default::default()
+            },
+        ),
+        (Some(url), false) => EnvironmentText::with_params(
+            EnvironmentTextCode::BridgeListening,
+            format!("Realtime bridge listening but no extension connected ({url})."),
+            EnvironmentTextParams {
+                url: Some(url.to_string()),
+                ..Default::default()
+            },
+        ),
+        (None, _) => EnvironmentText::new(
+            EnvironmentTextCode::BridgeUnavailable,
+            "Realtime bridge is not available.",
+        ),
     };
 
     let mut detail_parts = vec![ws_detail];
     if !last_errors.is_empty() {
-        detail_parts.push(format!("Recent handoff errors: {}", last_errors.join("; ")));
+        let joined = last_errors.join("; ");
+        detail_parts.push(EnvironmentText::with_params(
+            EnvironmentTextCode::RecentHandoffErrors,
+            format!("Recent handoff errors: {joined}"),
+            EnvironmentTextParams {
+                errors: Some(joined),
+                ..Default::default()
+            },
+        ));
     }
 
     if detected.is_empty() {
         return EnvironmentHealthItem {
             id: "browser".into(),
             status: EnvironmentHealthStatus::Unknown,
-            summary: "No supported browsers were detected on this machine.".into(),
-            detail: Some(detail_parts.join(" ")),
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::BrowserNoneDetected,
+                "No supported browsers were detected on this machine.",
+            ),
+            detail: detail_parts,
             suggested_actions: vec![EnvironmentFixAction {
                 kind: EnvironmentFixKind::FocusSetting,
                 browser: None,
@@ -247,8 +321,11 @@ fn check_browser(status: &crate::models::BrowserIntegrationStatus) -> Environmen
         return EnvironmentHealthItem {
             id: "browser".into(),
             status: EnvironmentHealthStatus::Error,
-            summary: "Browser integration cannot install manifests without the native host.".into(),
-            detail: Some(detail_parts.join(" ")),
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::BrowserNeedsNativeHost,
+                "Browser integration cannot install manifests without the native host.",
+            ),
+            detail: detail_parts,
             suggested_actions: vec![EnvironmentFixAction {
                 kind: EnvironmentFixKind::FocusSetting,
                 browser: None,
@@ -278,14 +355,22 @@ fn check_browser(status: &crate::models::BrowserIntegrationStatus) -> Environmen
                 section: None,
             });
         }
+        let count = missing_manifest.len() as u32;
         return EnvironmentHealthItem {
             id: "browser".into(),
             status: EnvironmentHealthStatus::Warn,
-            summary: format!(
-                "{} detected browser(s) are missing Native Messaging manifests: {names}.",
-                missing_manifest.len()
+            summary: EnvironmentText::with_params(
+                EnvironmentTextCode::BrowserMissingManifests,
+                format!(
+                    "{count} detected browsers are missing Native Messaging manifests: {names}."
+                ),
+                EnvironmentTextParams {
+                    count: Some(count),
+                    names: Some(names),
+                    ..Default::default()
+                },
             ),
-            detail: Some(detail_parts.join(" ")),
+            detail: detail_parts,
             suggested_actions: actions,
         };
     }
@@ -295,15 +380,26 @@ fn check_browser(status: &crate::models::BrowserIntegrationStatus) -> Environmen
     } else {
         EnvironmentHealthStatus::Warn
     };
+    let count = detected.len() as u32;
     let summary = if status.realtime.connected {
-        format!(
-            "{} detected browser(s) have Native Messaging manifests installed.",
-            detected.len()
+        EnvironmentText::with_params(
+            EnvironmentTextCode::BrowserReady,
+            format!("{count} detected browsers have Native Messaging manifests installed."),
+            EnvironmentTextParams {
+                count: Some(count),
+                ..Default::default()
+            },
         )
     } else {
-        format!(
-            "{} browser manifest(s) installed; extension realtime bridge is not connected yet.",
-            detected.len()
+        EnvironmentText::with_params(
+            EnvironmentTextCode::BrowserBridgeOffline,
+            format!(
+                "{count} browser manifests installed; the extension realtime bridge is not connected yet."
+            ),
+            EnvironmentTextParams {
+                count: Some(count),
+                ..Default::default()
+            },
         )
     };
 
@@ -311,7 +407,7 @@ fn check_browser(status: &crate::models::BrowserIntegrationStatus) -> Environmen
         id: "browser".into(),
         status: status_level,
         summary,
-        detail: Some(detail_parts.join(" ")),
+        detail: detail_parts,
         suggested_actions: vec![],
     }
 }
@@ -322,15 +418,21 @@ async fn check_ffmpeg(state: &AppState) -> EnvironmentHealthItem {
             Ok(version) => EnvironmentHealthItem {
                 id: "ffmpeg".into(),
                 status: EnvironmentHealthStatus::Ok,
-                summary: "ffmpeg is available.".into(),
-                detail: Some(format!("{} ({})", version, path.display())),
+                summary: EnvironmentText::new(
+                    EnvironmentTextCode::FfmpegReady,
+                    "ffmpeg is available.",
+                ),
+                detail: detail_of(Some(format!("{} ({})", version, path.display()))),
                 suggested_actions: vec![],
             },
             Err(error) => EnvironmentHealthItem {
                 id: "ffmpeg".into(),
                 status: EnvironmentHealthStatus::Error,
-                summary: "ffmpeg path is set but the binary could not be probed.".into(),
-                detail: Some(error),
+                summary: EnvironmentText::new(
+                    EnvironmentTextCode::FfmpegUnprobeable,
+                    "ffmpeg path is set but the binary could not be probed.",
+                ),
+                detail: detail_of(Some(error)),
                 suggested_actions: vec![EnvironmentFixAction {
                     kind: EnvironmentFixKind::FocusSetting,
                     browser: None,
@@ -342,8 +444,11 @@ async fn check_ffmpeg(state: &AppState) -> EnvironmentHealthItem {
         None => EnvironmentHealthItem {
             id: "ffmpeg".into(),
             status: EnvironmentHealthStatus::Error,
-            summary: "ffmpeg was not found. HLS/DASH remuxing will fail.".into(),
-            detail: None,
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::FfmpegMissing,
+                "ffmpeg was not found. HLS/DASH remuxing will fail.",
+            ),
+            detail: vec![],
             suggested_actions: vec![EnvironmentFixAction {
                 kind: EnvironmentFixKind::FocusSetting,
                 browser: None,
@@ -359,18 +464,21 @@ async fn check_proxy(config: &ResolvedProxyConfig) -> EnvironmentHealthItem {
         AppProxyMode::Off => EnvironmentHealthItem {
             id: "proxy".into(),
             status: EnvironmentHealthStatus::Ok,
-            summary: "Proxy is disabled.".into(),
-            detail: None,
+            summary: EnvironmentText::new(EnvironmentTextCode::ProxyDisabled, "Proxy is disabled."),
+            detail: vec![],
             suggested_actions: vec![],
         },
         AppProxyMode::System => EnvironmentHealthItem {
             id: "proxy".into(),
             status: EnvironmentHealthStatus::Warn,
-            summary: "System proxy mode cannot be probed reliably from the app.".into(),
-            detail: Some(
-                "Vibe inherits the OS proxy; use a custom proxy URL if you need a handshake check."
-                    .into(),
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::ProxySystemUnprobeable,
+                "System proxy mode cannot be probed reliably from the app.",
             ),
+            detail: vec![EnvironmentText::new(
+                EnvironmentTextCode::ProxySystemInherits,
+                "Vibe inherits the OS proxy; use a custom proxy URL if you need a handshake check.",
+            )],
             suggested_actions: vec![EnvironmentFixAction {
                 kind: EnvironmentFixKind::FocusSetting,
                 browser: None,
@@ -382,15 +490,21 @@ async fn check_proxy(config: &ResolvedProxyConfig) -> EnvironmentHealthItem {
             Ok(detail) => EnvironmentHealthItem {
                 id: "proxy".into(),
                 status: EnvironmentHealthStatus::Ok,
-                summary: "Custom proxy endpoint accepted a short handshake.".into(),
-                detail: Some(detail),
+                summary: EnvironmentText::new(
+                    EnvironmentTextCode::ProxyHandshakeOk,
+                    "Custom proxy endpoint accepted a short handshake.",
+                ),
+                detail: detail_of(Some(detail)),
                 suggested_actions: vec![],
             },
             Err(error) => EnvironmentHealthItem {
                 id: "proxy".into(),
                 status: EnvironmentHealthStatus::Error,
-                summary: "Custom proxy handshake failed.".into(),
-                detail: Some(error),
+                summary: EnvironmentText::new(
+                    EnvironmentTextCode::ProxyHandshakeFailed,
+                    "Custom proxy handshake failed.",
+                ),
+                detail: detail_of(Some(error)),
                 suggested_actions: vec![EnvironmentFixAction {
                     kind: EnvironmentFixKind::FocusSetting,
                     browser: None,
@@ -523,8 +637,11 @@ fn check_save_dir(save_dir: &str) -> EnvironmentHealthItem {
         Ok(()) => EnvironmentHealthItem {
             id: "save_dir".into(),
             status: EnvironmentHealthStatus::Ok,
-            summary: "Default save directory is writable.".into(),
-            detail: Some(path.to_string_lossy().into_owned()),
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::SaveDirWritable,
+                "Default save directory is writable.",
+            ),
+            detail: detail_of(Some(path.to_string_lossy().into_owned())),
             suggested_actions: vec![EnvironmentFixAction {
                 kind: EnvironmentFixKind::OpenPath,
                 browser: None,
@@ -535,8 +652,11 @@ fn check_save_dir(save_dir: &str) -> EnvironmentHealthItem {
         Err(error) => EnvironmentHealthItem {
             id: "save_dir".into(),
             status: EnvironmentHealthStatus::Error,
-            summary: "Default save directory is not writable.".into(),
-            detail: Some(error),
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::SaveDirNotWritable,
+                "Default save directory is not writable.",
+            ),
+            detail: detail_of(Some(error)),
             suggested_actions: vec![
                 EnvironmentFixAction {
                     kind: EnvironmentFixKind::FocusSetting,
@@ -570,28 +690,39 @@ fn check_disk(save_dir: &str) -> EnvironmentHealthItem {
     match query_disk_space_for_path(Path::new(save_dir)) {
         Ok((probe_path, total, available)) => {
             let status = disk_status_for_available(available);
-            let summary = match status {
-                EnvironmentHealthStatus::Ok => {
-                    "Default save volume has sufficient free space.".to_string()
-                }
-                EnvironmentHealthStatus::Warn => {
-                    "Default save volume is running low on free space.".to_string()
-                }
-                EnvironmentHealthStatus::Error => {
-                    "Default save volume is critically low on free space.".to_string()
-                }
-                EnvironmentHealthStatus::Unknown => "Could not classify disk space.".to_string(),
+            let (code, english) = match status {
+                EnvironmentHealthStatus::Ok => (
+                    EnvironmentTextCode::DiskOk,
+                    "Default save volume has sufficient free space.",
+                ),
+                EnvironmentHealthStatus::Warn => (
+                    EnvironmentTextCode::DiskLow,
+                    "Default save volume is running low on free space.",
+                ),
+                EnvironmentHealthStatus::Error => (
+                    EnvironmentTextCode::DiskCritical,
+                    "Default save volume is critically low on free space.",
+                ),
+                EnvironmentHealthStatus::Unknown => (
+                    EnvironmentTextCode::DiskUnclassified,
+                    "Could not classify disk space.",
+                ),
             };
+            let probe_path = probe_path.display().to_string();
             EnvironmentHealthItem {
                 id: "disk".into(),
                 status,
-                summary,
-                detail: Some(format!(
-                    "path={} available={} total={}",
-                    probe_path.display(),
-                    available,
-                    total
-                )),
+                summary: EnvironmentText::new(code, english),
+                detail: vec![EnvironmentText::with_params(
+                    EnvironmentTextCode::DiskUsage,
+                    format!("path={probe_path} available={available} total={total}"),
+                    EnvironmentTextParams {
+                        path: Some(probe_path),
+                        available: Some(available.to_string()),
+                        total: Some(total.to_string()),
+                        ..Default::default()
+                    },
+                )],
                 suggested_actions: vec![EnvironmentFixAction {
                     kind: EnvironmentFixKind::OpenPath,
                     browser: None,
@@ -603,8 +734,11 @@ fn check_disk(save_dir: &str) -> EnvironmentHealthItem {
         Err(error) => EnvironmentHealthItem {
             id: "disk".into(),
             status: EnvironmentHealthStatus::Unknown,
-            summary: "Could not query disk space for the default save directory.".into(),
-            detail: Some(error),
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::DiskQueryFailed,
+                "Could not query disk space for the default save directory.",
+            ),
+            detail: detail_of(Some(error)),
             suggested_actions: vec![EnvironmentFixAction {
                 kind: EnvironmentFixKind::FocusSetting,
                 browser: None,
@@ -675,8 +809,14 @@ async fn check_database(
         return Ok(EnvironmentHealthItem {
             id: "database".into(),
             status: EnvironmentHealthStatus::Error,
-            summary: "Database integrity check failed.".into(),
-            detail: Some(format!("path={} integrity={integrity}", db_path.display())),
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::DatabaseIntegrityFailed,
+                "Database integrity check failed.",
+            ),
+            detail: detail_of(Some(format!(
+                "path={} integrity={integrity}",
+                db_path.display()
+            ))),
             suggested_actions: vec![
                 EnvironmentFixAction {
                     kind: EnvironmentFixKind::OpenPath,
@@ -699,12 +839,15 @@ async fn check_database(
         Some(path) => Ok(EnvironmentHealthItem {
             id: "database".into(),
             status: EnvironmentHealthStatus::Ok,
-            summary: "Database integrity is ok and an automatic backup file was found.".into(),
-            detail: Some(format!(
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::DatabaseBackedUp,
+                "Database integrity is ok and an automatic backup file was found.",
+            ),
+            detail: detail_of(Some(format!(
                 "path={} latest_backup={}",
                 db_path.display(),
                 path.display()
-            )),
+            ))),
             suggested_actions: vec![
                 EnvironmentFixAction {
                     kind: EnvironmentFixKind::OpenPath,
@@ -723,9 +866,11 @@ async fn check_database(
         None => Ok(EnvironmentHealthItem {
             id: "database".into(),
             status: EnvironmentHealthStatus::Warn,
-            summary: "Database integrity is ok, but no automatic .db.bak file was found yet."
-                .into(),
-            detail: Some(format!("path={}", db_path.display())),
+            summary: EnvironmentText::new(
+                EnvironmentTextCode::DatabaseNoBackup,
+                "Database integrity is ok, but no automatic .db.bak file was found yet.",
+            ),
+            detail: detail_of(Some(format!("path={}", db_path.display()))),
             suggested_actions: vec![
                 EnvironmentFixAction {
                     kind: EnvironmentFixKind::ExportBackup,

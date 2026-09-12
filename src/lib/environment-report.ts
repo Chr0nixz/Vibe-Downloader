@@ -1,6 +1,9 @@
 //! Pure helpers for formatting the Environment health report for clipboard copy.
 
+import type { TFunction } from "i18next";
+
 import type { EnvironmentHealthReport, EnvironmentHealthStatus } from "@/generated/bindings";
+import { formatEnvironmentDetail, formatEnvironmentText } from "@/lib/environment-text";
 import type { UpdateStatus } from "@/stores/updater-store";
 
 export type EnvironmentUpdaterSnapshot = {
@@ -10,39 +13,55 @@ export type EnvironmentUpdaterSnapshot = {
   error: string | null;
 };
 
-export function formatEnvironmentReport(report: EnvironmentHealthReport, updater: EnvironmentUpdaterSnapshot): string {
+/**
+ * FUN-28: the report follows the app language like every other surface. Status
+ * codes and ids stay machine-facing; only the labels and the item copy are
+ * localized.
+ */
+export function formatEnvironmentReport(
+  report: EnvironmentHealthReport,
+  updater: EnvironmentUpdaterSnapshot,
+  t: TFunction,
+): string {
   const checkedAt = formatCheckedAt(report.checkedAtMs);
   const lines: string[] = [
-    "Vibe Downloader — Environment diagnostics",
-    `Checked at: ${checkedAt}`,
-    `App version: ${report.appVersion}`,
-    `Platform: ${report.platform}`,
+    t("environment.report.title"),
+    t("environment.report.checkedAt", { time: checkedAt }),
+    t("environment.report.appVersion", { version: report.appVersion }),
+    t("environment.report.platform", { platform: report.platform }),
     "",
-    "Checks:",
+    t("environment.report.checks"),
   ];
 
   for (const item of report.items) {
-    lines.push(`- [${statusLabel(item.status)}] ${item.id}: ${item.summary}`);
-    if (item.detail) {
-      lines.push(`  detail: ${sanitizeDetail(item.detail)}`);
+    lines.push(
+      t("environment.report.itemLine", {
+        status: statusLabel(item.status),
+        id: item.id,
+        summary: formatEnvironmentText(item.summary, t),
+      }),
+    );
+    const detail = formatEnvironmentDetail(item.detail, t);
+    if (detail) {
+      lines.push(`  ${t("environment.report.detailLabel")} ${sanitizeDetail(detail)}`);
     }
   }
 
   lines.push("");
-  lines.push("Updater:");
-  lines.push(`- status: ${updater.status}`);
+  lines.push(t("environment.report.updater"));
+  lines.push(t("environment.report.updaterStatus", { status: updater.status }));
   if (updater.currentVersion) {
-    lines.push(`- current: ${updater.currentVersion}`);
+    lines.push(t("environment.report.updaterCurrent", { version: updater.currentVersion }));
   }
   if (updater.updateVersion) {
-    lines.push(`- available: ${updater.updateVersion}`);
+    lines.push(t("environment.report.updaterAvailable", { version: updater.updateVersion }));
   }
   if (updater.error) {
-    lines.push(`- error: ${sanitizeDetail(updater.error)}`);
+    lines.push(t("environment.report.updaterError", { error: sanitizeDetail(updater.error) }));
   }
 
   lines.push("");
-  lines.push("Note: report excludes passwords, cookies, and other secrets.");
+  lines.push(t("environment.report.note"));
   return lines.join("\n");
 }
 

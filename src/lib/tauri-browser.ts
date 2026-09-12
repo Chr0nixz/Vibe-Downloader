@@ -1344,6 +1344,32 @@ export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationS
   };
 }
 
+/**
+ * Browser-preview mocks only. They carry no real backend code, so they are
+ * emitted as `raw` fragments: preview-mode copy stays English and never enters
+ * the locale bundles.
+ */
+function mockText(english: string): import("@/generated/bindings").EnvironmentText {
+  return {
+    code: "raw",
+    params: {
+      count: null,
+      names: null,
+      url: null,
+      errors: null,
+      path: null,
+      section: null,
+      available: null,
+      total: null,
+    },
+    english,
+  };
+}
+
+function mockDetail(english: string | null): import("@/generated/bindings").EnvironmentText[] {
+  return english === null ? [] : [mockText(english)];
+}
+
 export async function getEnvironmentHealth(): Promise<import("@/generated/bindings").EnvironmentHealthReport> {
   return {
     checkedAtMs: String(Date.now()),
@@ -1353,15 +1379,15 @@ export async function getEnvironmentHealth(): Promise<import("@/generated/bindin
       {
         id: "native_host",
         status: "ok",
-        summary: "Native Messaging host binary is ready (browser preview mock).",
-        detail: null,
+        summary: mockText("Native Messaging host binary is ready (browser preview mock)."),
+        detail: [],
         suggestedActions: [],
       },
       {
         id: "browser",
         status: "warn",
-        summary: "Browser preview mocks integration status.",
-        detail: null,
+        summary: mockText("Browser preview mocks integration status."),
+        detail: [],
         suggestedActions: [
           {
             kind: "focus_setting",
@@ -1374,8 +1400,8 @@ export async function getEnvironmentHealth(): Promise<import("@/generated/bindin
       {
         id: "ffmpeg",
         status: "error",
-        summary: "ffmpeg is not available in browser preview mode.",
-        detail: null,
+        summary: mockText("ffmpeg is not available in browser preview mode."),
+        detail: [],
         suggestedActions: [
           {
             kind: "focus_setting",
@@ -1388,29 +1414,29 @@ export async function getEnvironmentHealth(): Promise<import("@/generated/bindin
       {
         id: "proxy",
         status: "ok",
-        summary: "Proxy is disabled.",
-        detail: null,
+        summary: mockText("Proxy is disabled."),
+        detail: [],
         suggestedActions: [],
       },
       {
         id: "save_dir",
         status: "ok",
-        summary: "Default save directory is writable (browser preview mock).",
-        detail: settings.defaultSaveDir,
+        summary: mockText("Default save directory is writable (browser preview mock)."),
+        detail: mockDetail(settings.defaultSaveDir),
         suggestedActions: [],
       },
       {
         id: "disk",
         status: "unknown",
-        summary: "Disk space is not queried in browser preview mode.",
-        detail: null,
+        summary: mockText("Disk space is not queried in browser preview mode."),
+        detail: [],
         suggestedActions: [],
       },
       {
         id: "database",
         status: "warn",
-        summary: "Database checks are mocked in browser preview mode.",
-        detail: null,
+        summary: mockText("Database checks are mocked in browser preview mode."),
+        detail: [],
         suggestedActions: [
           {
             kind: "export_backup",
@@ -1429,7 +1455,7 @@ export async function runEnvironmentFix(
 ): Promise<import("@/generated/bindings").EnvironmentFixResult> {
   return {
     ok: true,
-    message: `Browser preview acknowledged fix: ${input.kind}`,
+    message: mockText(`Browser preview acknowledged fix: ${input.kind}`),
     focusSection: input.section,
     refresh: input.kind === "install_native_host",
   };

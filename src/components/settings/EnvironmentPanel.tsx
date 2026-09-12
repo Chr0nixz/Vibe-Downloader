@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { Check, ClipboardCopy, LoaderCircle, RefreshCw, Wrench } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -13,6 +14,7 @@ import type {
 import { useAppUpdater } from "@/hooks/use-app-updater";
 import { exportAppBackup } from "@/lib/backup";
 import { formatEnvironmentReport } from "@/lib/environment-report";
+import { formatEnvironmentDetail, formatEnvironmentText } from "@/lib/environment-text";
 import { createLogger } from "@/lib/logger";
 import { getEnvironmentHealth, runEnvironmentFix } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
@@ -61,12 +63,16 @@ export function EnvironmentPanel({ onFocusSection }: EnvironmentPanelProps) {
 
   async function copyReport() {
     if (!report) return;
-    const text = formatEnvironmentReport(report, {
-      currentVersion: updater.currentVersion,
-      updateVersion: updater.updateVersion,
-      status: updater.status,
-      error: updater.error,
-    });
+    const text = formatEnvironmentReport(
+      report,
+      {
+        currentVersion: updater.currentVersion,
+        updateVersion: updater.updateVersion,
+        status: updater.status,
+        error: updater.error,
+      },
+      t,
+    );
     try {
       await navigator.clipboard.writeText(text);
       addToast({
@@ -111,7 +117,7 @@ export function EnvironmentPanel({ onFocusSection }: EnvironmentPanelProps) {
       });
       addToast({
         title: result.ok ? t("settings.environmentFixApplied") : t("settings.environmentFixFailed"),
-        description: result.message,
+        description: formatEnvironmentText(result.message, t),
         tone: result.ok ? "success" : "error",
       });
       if (result.focusSection) {
@@ -217,6 +223,7 @@ export function EnvironmentPanel({ onFocusSection }: EnvironmentPanelProps) {
               key={item.id}
               item={item}
               title={itemTitle(item.id, t)}
+              t={t}
               fixingKey={fixingKey}
               onFix={(action) => void applyFix(item, action)}
               fixLabel={(kind, browser) => fixActionLabel(kind, browser, t)}
@@ -255,12 +262,14 @@ export function EnvironmentPanel({ onFocusSection }: EnvironmentPanelProps) {
 function HealthRow({
   item,
   title,
+  t,
   fixingKey,
   onFix,
   fixLabel,
 }: {
   item: EnvironmentHealthItem;
   title: string;
+  t: TFunction;
   fixingKey: string | null;
   onFix: (action: EnvironmentFixAction) => void;
   fixLabel: (kind: EnvironmentFixKind, browser: string | null) => string;
@@ -270,6 +279,8 @@ function HealthRow({
     item.suggestedActions[0] ??
     null;
   const key = primary ? `${item.id}:${primary.kind}:${primary.browser ?? ""}:${primary.pathKind ?? ""}` : null;
+  const summary = formatEnvironmentText(item.summary, t);
+  const detail = formatEnvironmentDetail(item.detail, t);
 
   return (
     <div className="grid gap-2 border-t border-border-divider px-4 py-3 first:border-t-0 md:grid-cols-[minmax(9rem,12rem)_minmax(0,1fr)_auto] md:items-start">
@@ -278,10 +289,10 @@ function HealthRow({
         <span>{title}</span>
       </div>
       <div className="min-w-0">
-        <p className="text-sm text-text-primary">{item.summary}</p>
-        {item.detail ? (
-          <p className="mt-1 truncate text-xs text-text-muted" title={item.detail}>
-            {item.detail}
+        <p className="text-sm text-text-primary">{summary}</p>
+        {detail ? (
+          <p className="mt-1 truncate text-xs text-text-muted" title={detail}>
+            {detail}
           </p>
         ) : null}
       </div>

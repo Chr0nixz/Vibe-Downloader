@@ -16,7 +16,8 @@ pub use classification::{
 };
 pub use environment::{
     EnvironmentFixAction, EnvironmentFixInput, EnvironmentFixKind, EnvironmentFixResult,
-    EnvironmentHealthItem, EnvironmentHealthReport, EnvironmentHealthStatus,
+    EnvironmentHealthItem, EnvironmentHealthReport, EnvironmentHealthStatus, EnvironmentText,
+    EnvironmentTextCode, EnvironmentTextParams,
 };
 pub use task::{
     AppAccentColor, AppErrorPayload, AppSettings, BatchImportItem, BatchImportResult,

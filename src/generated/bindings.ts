@@ -593,7 +593,7 @@ export type EnvironmentFixKind = "install_native_host" | "open_path" | "focus_se
 
 export type EnvironmentFixResult = {
 	ok: boolean,
-	message: string,
+	message: EnvironmentText,
 	/**  When set, the frontend should scroll/expand this Settings section. */
 	focusSection: string | null,
 	/**  True when the caller should re-run `get_environment_health`. */
@@ -604,9 +604,12 @@ export type EnvironmentHealthItem = {
 	/**  Stable id: `native_host` | `browser` | `ffmpeg` | `proxy` | `save_dir` | `disk` | `database`. */
 	id: string,
 	status: EnvironmentHealthStatus,
-	/**  English machine-facing summary for the copyable report. */
-	summary: string,
-	detail: string | null,
+	summary: EnvironmentText,
+	/**
+	 *  Detail fragments, joined with a space by the frontend. Empty when the
+	 *  item has nothing to add beyond its summary.
+	 */
+	detail: EnvironmentText[],
 	suggestedActions: EnvironmentFixAction[],
 };
 
@@ -619,6 +622,47 @@ export type EnvironmentHealthReport = {
 };
 
 export type EnvironmentHealthStatus = "ok" | "warn" | "error" | "unknown";
+
+/**
+ *  One localizable fragment of environment copy. `English` is the text the
+ *  copied diagnostics report prints; the app localizes by `code` and falls back
+ *  to `english` when the frontend does not know the code yet.
+ */
+export type EnvironmentText = {
+	code: EnvironmentTextCode,
+	params: EnvironmentTextParams,
+	/**  English source text. Also the value shown for [`EnvironmentTextCode::Raw`]. */
+	english: string,
+};
+
+/**
+ *  Stable code for a piece of environment copy. The frontend maps each variant
+ *  to an `environment.<code>` i18n key, so the backend never ships user-facing
+ *  English. Do not rename a variant without updating every locale bundle.
+ */
+export type EnvironmentTextCode = 
+/**
+ *  Opaque value kept verbatim: a filesystem path, a version, a browser
+ *  handoff error, or any other raw backend string. Per `UX-11` these stay in
+ *  diagnostics and are deliberately not translated.
+ */
+"raw" | "nativeHostReady" | "nativeHostMissing" | "browserNoneDetected" | "browserNeedsNativeHost" | "browserMissingManifests" | "browserReady" | "browserBridgeOffline" | "ffmpegReady" | "ffmpegUnprobeable" | "ffmpegMissing" | "proxyDisabled" | "proxySystemUnprobeable" | "proxyHandshakeOk" | "proxyHandshakeFailed" | "saveDirWritable" | "saveDirNotWritable" | "diskOk" | "diskLow" | "diskCritical" | "diskUnclassified" | "diskQueryFailed" | "diskUsage" | "databaseIntegrityFailed" | "databaseBackedUp" | "databaseNoBackup" | "bridgeConnected" | "bridgeListening" | "bridgeUnavailable" | "recentHandoffErrors" | "proxySystemInherits" | "fixNativeHostMissing" | "fixNoBrowsersToInstall" | "fixManifestsInstalled" | "fixOpenedPath" | "fixFocusSection" | "fixChooseBackupDestination" | "fixCheckFromUpdater";
+
+/**
+ *  Interpolation values for an [`EnvironmentText`]. Every field is optional so a
+ *  single shape covers all codes; the frontend passes them straight to i18next.
+ */
+export type EnvironmentTextParams = {
+	count: number | null,
+	names: string | null,
+	url: string | null,
+	errors: string | null,
+	path: string | null,
+	/**  Settings section id, e.g. `browser-integration`. An internal id, not copy. */
+	section: string | null,
+	available: string | null,
+	total: string | null,
+};
 
 export type FtpDirectoryEntry = {
 	name: string,
