@@ -84,14 +84,9 @@ HTTP Basic Auth（`FUN-01`）和 HTTP 系逐任务代理（`FUN-02`）已修复�
 
 ## 当前发布阻断
 
-初版的 6 项阶段 A 阻断（`UX-01`、`FUN-01`、`FUN-02`、`ARC-01`、`ARC-02`、`ARC-03`）与 2026-08-13 复审的 6 项阻断（`ARC-19`～`ARC-22`、`SEC-01`、`SEC-02`）均已修复并有测试覆盖（`ARC-19` 的协调器排空残留并入 `ARC-31`）。当前发布阻断来自 2026-08-26 复审：
+初版的 6 项阶段 A 阻断（`UX-01`、`FUN-01`、`FUN-02`、`ARC-01`、`ARC-02`、`ARC-03`）、2026-08-13 复审的 6 项阻断（`ARC-19`～`ARC-22`、`SEC-01`、`SEC-02`，`ARC-19` 排空残留并入 `ARC-31`）与 2026-08-26 复审的 4 项 P0（`ARC-32`、`ARC-33`、`ARC-37`、`ARC-38`，2026-09-11 关闭）均已修复并有测试覆盖。
 
-| ID | 问题 |
-| --- | --- |
-| `ARC-32` | 命令路径持任务锁 await 调度 dispatch，与调度器全局锁形成确定性死锁（Restart 必现） |
-| `ARC-33` | HTTP 分段 worker 部分早退路径未 flush 即上报 checkpoint，可能发布缺字节文件 |
-| `ARC-37` | HLS/DASH 段失败复用用户取消 token，supervisor 误判为取消，任务永久停在 Downloading |
-| `ARC-38` | HLS/DASH staging 目录在完成、失败、取消和删除路径均无清理，且无启动孤儿清扫 |
+当前没有已登记的 P0 发布阻断。发布前仍需清零主审计中的 P1 项（探测代理缺口 `FUN-20`、跨卷备份 `FUN-23`、统一网络契约 `SEC-03`/`SEC-08`~`SEC-11` 等），完整清单见下节与[项目改进审计](docs/project-improvement-audit.md)。
 
 完整证据、验收条件和修复顺序见 [项目改进审计](docs/project-improvement-audit.md)。在这些问题关闭前，不应发布稳定版本。
 
