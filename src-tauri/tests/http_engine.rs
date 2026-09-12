@@ -304,10 +304,10 @@ async fn direct_download_can_resume_from_temp_file() {
     let first = tokio::spawn({
         let engine = engine.clone();
         let request = DirectDownloadRequest {
-            url: format!("{}/slow", server.base_url),
+            url: format!("{}/slow-resume", server.base_url),
             temp_path: paths.temp.clone(),
             final_path: paths.final_path.clone(),
-            total_size: slow_payload().len() as i64,
+            total_size: slow_resume_payload().len() as i64,
             supports_resume: true,
 
             supports_parallel: true,
@@ -317,20 +317,23 @@ async fn direct_download_can_resume_from_temp_file() {
         async move { engine.download_direct(request, first_cancel).await }
     });
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // A fixed 300 ms window could elapse before connect + first chunk under
+    // parallel suite load (partial == 0); 2 s against the ~5.1 s /slow-resume
+    // transfer keeps both assertions satisfied with wide margins.
+    tokio::time::sleep(Duration::from_millis(2000)).await;
     cancel.cancel();
     let partial = first.await.expect("join").expect("partial");
     assert!(partial > 0);
-    assert!(partial < slow_payload().len() as i64);
+    assert!(partial < slow_resume_payload().len() as i64);
     assert!(paths.temp.exists());
 
     engine
         .download_direct(
             DirectDownloadRequest {
-                url: format!("{}/slow", server.base_url),
+                url: format!("{}/slow-resume", server.base_url),
                 temp_path: paths.temp.clone(),
                 final_path: paths.final_path.clone(),
-                total_size: slow_payload().len() as i64,
+                total_size: slow_resume_payload().len() as i64,
                 supports_resume: true,
 
                 supports_parallel: true,
@@ -344,7 +347,7 @@ async fn direct_download_can_resume_from_temp_file() {
 
     assert_eq!(
         fs::read(&paths.final_path).expect("read final"),
-        slow_payload()
+        slow_resume_payload()
     );
 }
 
@@ -1079,6 +1082,19 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
             "slow.bin",
             true,
         ),
+        // 512 KiB at 10 ms/1 KiB-chunk ≈ 5.1 s of transfer: wide margins on
+        // both sides of the resume test's 2 s cancel window even under heavy
+        // parallel suite load (the 64 KiB /slow transfer finishes in ~0.65 s,
+        // so its usable cancel window is too narrow to be load-tolerant).
+        "/slow-resume" => respond_file(
+            &mut stream,
+            method,
+            &slow_resume_payload(),
+            byte_range,
+            true,
+            "slow-resume.bin",
+            true,
+        ),
         "/large" => respond_file(
             &mut stream,
             method,
@@ -1346,6 +1362,10 @@ fn write_unknown_size_response(
 
 fn slow_payload() -> Vec<u8> {
     (0..65_536).map(|index| (index % 251) as u8).collect()
+}
+
+fn slow_resume_payload() -> Vec<u8> {
+    (0..(512 * 1024)).map(|index| (index % 251) as u8).collect()
 }
 
 fn large_payload() -> Vec<u8> {
