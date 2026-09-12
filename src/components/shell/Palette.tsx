@@ -43,7 +43,7 @@ import { errorMessage } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import type { Platform } from "@/lib/platform";
 import { applyGlobalSpeedLimit } from "@/lib/settings";
-import { SPEED_LIMIT_PRESETS } from "@/lib/speed-limit";
+import { SPEED_LIMIT_PRESETS, speedLimitPresetLabel } from "@/lib/speed-limit";
 
 const log = createLogger("palette");
 
@@ -1175,7 +1175,7 @@ function buildCommands({
       label:
         preset.value === null
           ? t("speedLimit.unlimited")
-          : t("palette.commands.setSpeedLimit", { speed: preset.label }),
+          : t("palette.commands.setSpeedLimit", { speed: speedLimitPresetLabel(preset.value) }),
       description:
         preset.value === null
           ? t("palette.descriptions.speedUnlimited")
@@ -1186,7 +1186,7 @@ function buildCommands({
         "speed",
         "limit",
         "throttle",
-        preset.value === null ? t("speedLimit.unlimited") : preset.label,
+        speedLimitPresetLabel(preset.value),
         t("palette.keywords.speedLimit"),
         t("palette.keywords.speed"),
       ),

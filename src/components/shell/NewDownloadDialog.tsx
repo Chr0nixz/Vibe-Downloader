@@ -48,7 +48,7 @@ import {
 } from "@/lib/create-draft";
 import { localizedErrorMessage, parseAppError } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
-import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput } from "@/lib/speed-limit";
+import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput, speedLimitUnitLabel } from "@/lib/speed-limit";
 import {
   createTask,
   importUrls,
@@ -738,7 +738,10 @@ export function NewDownloadDialog({
   async function chooseSshKeyFile() {
     try {
       const picked = await openFilePicker([
-        { name: "SSH Private Key", extensions: ["pem", "key", "id_rsa", "id_ed25519", "id_ecdsa", ""] },
+        {
+          name: t("newDownload.sshPrivateKeyFilter"),
+          extensions: ["pem", "key", "id_rsa", "id_ed25519", "id_ecdsa", ""],
+        },
       ]);
       if (!picked) return;
       const content = await readFileAsText(picked.path, "ssh_key");
@@ -1841,7 +1844,7 @@ function SharedCreateDraftFields({
             <SelectContent>
               {SPEED_LIMIT_UNITS.map((unit) => (
                 <SelectItem key={unit.value} value={unit.value}>
-                  {unit.label}
+                  {speedLimitUnitLabel(unit.byteUnitKey)}
                 </SelectItem>
               ))}
             </SelectContent>

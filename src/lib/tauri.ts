@@ -56,6 +56,7 @@ import type {
   UpdateTorrentSeedingInput,
   WebDavDirectoryProbe,
 } from "@/generated/bindings";
+import i18n from "@/i18n";
 import { parseAppError } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
@@ -456,7 +457,9 @@ export async function openFilePicker(filters?: { name: string; extensions: strin
   const selected = await open({
     directory: false,
     multiple: false,
-    filters: filters ?? [{ name: "Download files", extensions: ["torrent", "meta4", "metalink", "txt"] }],
+    filters: filters ?? [
+      { name: i18n.t("newDownload.downloadFilesFilter"), extensions: ["torrent", "meta4", "metalink", "txt"] },
+    ],
   });
   if (typeof selected !== "string") {
     log.debug("✓ openFilePicker (canceled)");

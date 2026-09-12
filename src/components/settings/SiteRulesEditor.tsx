@@ -547,7 +547,7 @@ function RuleEditForm({
           value={rule.hostPattern}
           disabled={disabled}
           onChange={(e) => onChange({ hostPattern: e.target.value })}
-          placeholder="*.example.com"
+          placeholder={t("settings.ruleHostPatternPlaceholder")}
         />
       </Field>
       <Field label={t("settings.ruleIncludeSubdomains")}>

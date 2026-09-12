@@ -1,3 +1,4 @@
+import i18n from "@/i18n";
 import { createLogger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
 import {
@@ -20,7 +21,8 @@ export async function exportAppBackup(): Promise<BackupCreateResult | null> {
   }
   const { save } = await import("@tauri-apps/plugin-dialog");
   const destination = await save({
-    title: "Export Vibe backup",
+    // OS dialog chrome follows the app language, like every in-app surface does.
+    title: i18n.t("settings.dataBackupExportTitle"),
     defaultPath: `vibe-backup-${new Date().toISOString().slice(0, 10)}.vibe-backup`,
     filters: [{ name: "Vibe Backup", extensions: ["vibe-backup"] }],
   });
@@ -35,7 +37,7 @@ export async function validateSelectedAppBackup(): Promise<BackupValidateResult 
   }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({
-    title: "Validate Vibe backup",
+    title: i18n.t("settings.dataBackupValidateTitle"),
     multiple: false,
     filters: [{ name: "Vibe Backup", extensions: ["vibe-backup"] }],
   });
@@ -50,7 +52,7 @@ export async function restoreSelectedAppBackup(): Promise<BackupRestoreResult | 
   }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({
-    title: "Restore Vibe backup",
+    title: i18n.t("settings.dataBackupRestoreTitle"),
     multiple: false,
     filters: [{ name: "Vibe Backup", extensions: ["vibe-backup"] }],
   });

@@ -424,7 +424,7 @@ function RuleEditForm({
           value={targetSubdir}
           disabled={disabled}
           onChange={(e) => setTargetSubdir(e.target.value)}
-          placeholder="videos"
+          placeholder={t("settings.targetSubdirPlaceholder")}
           className="max-w-md"
         />
       </Field>

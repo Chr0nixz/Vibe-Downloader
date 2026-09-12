@@ -18,6 +18,8 @@ import {
   SPEED_LIMIT_UNITS,
   speedLimitBytesFromInput,
   speedLimitInputFromBytes,
+  speedLimitPresetLabel,
+  speedLimitUnitLabel,
 } from "@/lib/speed-limit";
 import { cn, formatSpeed } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -102,7 +104,7 @@ export function SpeedLimitControl({ open, onOpenChange }: { open: boolean; onOpe
           {SPEED_LIMIT_PRESETS.map((preset) => (
             <SpeedOption
               key={preset.id}
-              label={preset.value === null ? t("speedLimit.unlimited") : preset.label}
+              label={speedLimitPresetLabel(preset.value)}
               active={preset.value === null ? currentLimit <= 0 : currentLimit === preset.value}
               onClick={() => void apply(preset.value)}
             />
@@ -135,7 +137,7 @@ export function SpeedLimitControl({ open, onOpenChange }: { open: boolean; onOpe
               <SelectContent>
                 {SPEED_LIMIT_UNITS.map((unit) => (
                   <SelectItem key={unit.value} value={unit.value}>
-                    {unit.label}
+                    {speedLimitUnitLabel(unit.byteUnitKey)}
                   </SelectItem>
                 ))}
               </SelectContent>

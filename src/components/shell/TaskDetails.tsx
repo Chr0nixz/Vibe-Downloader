@@ -35,7 +35,12 @@ import { type TaskDetailDiagSubTab, useTaskDetailQueries } from "@/hooks/use-tas
 import { errorMessage } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
 import { createLogger } from "@/lib/logger";
-import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput, speedLimitInputFromBytes } from "@/lib/speed-limit";
+import {
+  SPEED_LIMIT_UNITS,
+  speedLimitBytesFromInput,
+  speedLimitInputFromBytes,
+  speedLimitUnitLabel,
+} from "@/lib/speed-limit";
 import {
   defaultDiagSubTab,
   diagnosticsConnectionsEmptyKey,
@@ -1521,7 +1526,7 @@ function TaskTransferPanel({ task }: { task: Task }) {
               <SelectContent>
                 {SPEED_LIMIT_UNITS.map((unit) => (
                   <SelectItem key={unit.value} value={unit.value}>
-                    {unit.label}
+                    {speedLimitUnitLabel(unit.byteUnitKey)}
                   </SelectItem>
                 ))}
               </SelectContent>

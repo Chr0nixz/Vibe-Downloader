@@ -1701,7 +1701,7 @@ export function SettingsPage() {
                       id="proxy-url"
                       value={proxyUrl}
                       onChange={(event) => setProxyUrl(event.target.value)}
-                      placeholder="socks5://127.0.0.1:1080"
+                      placeholder={t("settings.proxyUrlPlaceholder")}
                       disabled={controlsDisabled || proxyMode !== "custom"}
                       className="h-11 bg-surface-root font-mono md:h-8"
                     />
@@ -1718,7 +1718,7 @@ export function SettingsPage() {
                     id="proxy-no-proxy"
                     value={proxyNoProxy}
                     onChange={(event) => setProxyNoProxy(event.target.value)}
-                    placeholder="localhost,127.0.0.1,.local"
+                    placeholder={t("settings.proxyNoProxyPlaceholder")}
                     disabled={controlsDisabled || proxyMode !== "custom"}
                     className="h-11 bg-surface-root font-mono md:h-8"
                   />
