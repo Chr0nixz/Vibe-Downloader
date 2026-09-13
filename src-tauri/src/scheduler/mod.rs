@@ -624,14 +624,7 @@ impl Scheduler {
 
     /// Emit the completion action when the queue is empty and no tasks are active (formerly maybe_emit_completion_action).
     async fn maybe_emit_completion_action(&self, app: &AppHandle, pool: &SqlitePool) {
-        if !self.downloads.lock().await.is_empty() {
-            return;
-        }
-        if db::list_queued_task_records(pool, 1)
-            .await
-            .map(|tasks| !tasks.is_empty())
-            .unwrap_or(true)
-        {
+        if !should_emit_completion_action(&self.downloads, pool).await {
             return;
         }
         let Ok(settings) =
@@ -803,6 +796,31 @@ async fn handle_start_failure(
         }
         _ => {}
     }
+}
+
+/// ARC-46: the completion-action liveness gate. Hash verification runs AFTER
+/// the worker released its control entry, so a downloads-only check fires the
+/// action while the last SHA-256 is still running — the machine powers off
+/// with hash_status stuck at Pending and the user must re-verify manually.
+/// Both verify paths set `hash_status = 'pending'` before hashing, so "some
+/// completed row is mid-hash" is the exact window to hold the action for.
+/// A DB error is treated the same way as a non-empty queue: skip firing this
+/// tick rather than risk a destructive action on incomplete information.
+async fn should_emit_completion_action(
+    downloads: &Arc<Mutex<HashMap<String, DownloadControl>>>,
+    pool: &SqlitePool,
+) -> bool {
+    if !downloads.lock().await.is_empty() {
+        return false;
+    }
+    if db::list_queued_task_records(pool, 1)
+        .await
+        .map(|tasks| !tasks.is_empty())
+        .unwrap_or(true)
+    {
+        return false;
+    }
+    matches!(db::any_completed_task_hash_pending(pool).await, Ok(false))
 }
 
 /// Supervisor convergence shared by every engine outcome (panic, error,
@@ -1256,6 +1274,82 @@ mod convergence_tests {
             stored.status,
             TaskStatus::Downloading,
             "non-queued rows must keep their state (snapshot-only branch)"
+        );
+    }
+
+    #[tokio::test]
+    async fn arc46_completion_action_holds_for_pending_hash() {
+        // ARC-46: hash verification runs after the worker released its slot,
+        // so a completed row with hash_status=pending is mid-hash right now —
+        // firing shutdown here would interrupt it and stick the status.
+        let pool = test_pool("completion-hash-pending").await;
+        let mut task = task_record("task-arc46-pending", TaskStatus::Completed);
+        task.hash_status = HashVerificationStatus::Pending;
+        db::insert_task_record(&pool, &task).await.expect("insert");
+
+        let downloads: Arc<Mutex<HashMap<String, DownloadControl>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        assert!(
+            !super::should_emit_completion_action(&downloads, &pool).await,
+            "a mid-hash completion must hold the action"
+        );
+
+        db::update_hash_verification(
+            &pool,
+            &task.id,
+            None,
+            HashVerificationStatus::Verified,
+            None,
+        )
+        .await
+        .expect("resolve hash status");
+        assert!(
+            super::should_emit_completion_action(&downloads, &pool).await,
+            "once the hash resolves the gate must open"
+        );
+    }
+
+    #[tokio::test]
+    async fn arc46_completion_action_unaffected_without_checksums() {
+        // Tasks without an expected hash never reach Pending; the gate must
+        // not hold completion actions hostage for them.
+        let pool = test_pool("completion-hash-notreq").await;
+        let task = task_record("task-arc46-plain", TaskStatus::Completed);
+        db::insert_task_record(&pool, &task).await.expect("insert");
+        let downloads: Arc<Mutex<HashMap<String, DownloadControl>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        assert!(super::should_emit_completion_action(&downloads, &pool).await);
+    }
+
+    #[tokio::test]
+    async fn arc46_completion_action_still_gated_on_activity_and_queue() {
+        // The hash gate extends the existing liveness checks, never replaces
+        // them: active downloads and a non-empty queue keep holding the
+        // action regardless of hash state.
+        let pool = test_pool("completion-hash-queue").await;
+        let mut task = task_record("task-arc46-done", TaskStatus::Completed);
+        task.hash_status = HashVerificationStatus::Verified;
+        db::insert_task_record(&pool, &task).await.expect("insert");
+        let queued = task_record("task-arc46-queued", TaskStatus::Queued);
+        db::insert_task_record(&pool, &queued)
+            .await
+            .expect("insert");
+
+        let downloads: Arc<Mutex<HashMap<String, DownloadControl>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        downloads
+            .lock()
+            .await
+            .insert("task-x".to_string(), control("panic-host"));
+        assert!(
+            !super::should_emit_completion_action(&downloads, &pool).await,
+            "active downloads hold the action"
+        );
+
+        downloads.lock().await.clear();
+        assert!(
+            !super::should_emit_completion_action(&downloads, &pool).await,
+            "a non-empty queue holds the action"
         );
     }
 }

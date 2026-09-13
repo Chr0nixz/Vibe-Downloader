@@ -39,3 +39,19 @@ pub async fn update_hash_verification(
 
     Ok(())
 }
+
+/// ARC-46: whether any completed task still has a hash verification in flight
+/// (`hash_status = 'pending'`). Both verify paths set Pending before the
+/// potentially minutes-long hashing and resolve to Verified/Failed afterwards,
+/// so this is the completion-action gate: firing shutdown while the last file
+/// is still being hashed leaves hash_status stuck at Pending and forces a
+/// manual re-verify.
+pub async fn any_completed_task_hash_pending(pool: &SqlitePool) -> Result<bool, String> {
+    let pending = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE status = 'completed' AND hash_status = 'pending')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(pending != 0)
+}

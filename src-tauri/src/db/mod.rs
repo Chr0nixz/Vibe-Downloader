@@ -51,7 +51,7 @@ pub use self::events::{
     get_latest_pause_event_type, insert_task_event, insert_task_event_in_tx, list_task_events_page,
     prune_task_events, TASK_EVENTS_MAX_AGE_DAYS, TASK_EVENTS_MAX_PER_TASK,
 };
-pub use self::hash::update_hash_verification;
+pub use self::hash::{any_completed_task_hash_pending, update_hash_verification};
 pub use self::hls::{
     bulk_upsert_hls_segments, get_hls_task, hls_finish_requested, hls_segment_cursor,
     list_hls_segments, list_hls_segments_page, request_hls_finish, reset_hls_segments_for_task,

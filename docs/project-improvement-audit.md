@@ -1025,12 +1025,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-13 修复**：lib.rs 新增 `cancel_and_drain_control(control, grace)`——单控制版两段式排空（Phase1 `timeout(grace, &mut handle)` 优雅等待；超时 Phase2 abort + join；经 `&mut` await 使 handle 所有权跨过 timeout 分支，避开 JoinHandle 二次 await 的 panic），与 shutdown 的 `drain_download_handles` 同语义。restart 改用它（5s grace）替代裸 abort；temp 与 auxiliary artifacts 的删除失败降级为 warn + 继续（不再 `?` 中止 restart——陈旧残留不应让任务停在半重置态，新 worker 本就 create/truncate 重建 temp）。并行特性同期加入的 artifact 清理点一并纳入容错。
 - **验证测试**：新建 `tests/restart_quiesce.rs` 两条（无 AppHandle，直接驱动排空助手）——慢写 worker（持句柄循环写、20ms 轮询取消）断言排空返回时 worker 已退出、temp 可删、新 `create()` 成功（症状检查，Windows CI 上真实有效）；顽固 worker（忽略取消、睡 30s）断言 200ms grace 内经 abort+join 返回且路径可建。敏感性验证：助手临时还原为 abort-不排空 → 首条用例失败（exited 标志未置）。验收偏离记录：restart 函数硬依赖 `&AppHandle`（emit/default_download_dir/dispatch），故验收断言落在抽出的排空核心 + restart 内删改点的代码审阅，与 ARC-40 同款偏离。
 
-### ARC-46（P3，Open）：完成动作可在最后一个文件仍在哈希校验时触发关机
+### ARC-46（P3，Closed）：完成动作可在最后一个文件仍在哈希校验时触发关机
 
 - **证据**：worker 在 engine.download 返回后立即自摘 control（mod.rs:460），然后才做可能数分钟的 SHA-256（verify_task_hash_with_pool，:468），最后才 maybe_emit_completion_action（:489-491）；后者唯一活性判据是 downloads.is_empty()（:579）+ 队列空（:582-586），无 hash_status 门。前端 AppShell.runCompletionAction（AppShell.tsx:768-794）倒计时结束直接执行系统关机/睡眠，不复核任务状态。
 - **影响**：双任务近似同时完成 + completion_action=Shutdown → 机器在 A 哈希中途断电，hash_status 卡 Pending 需手动重验。
 - **修复方向**：completion 判据纳入「存在 hash_status='pending' 的近期完成任务」；不要把哈希挪回 control 释放之前（会延长槽位占用）。
 - **验收**：两任务接力完成 + 慢哈希 fixture，断言完成动作晚于哈希落库。
+- **2026-09-13 修复**：核实两条 verify 路径（单文件 expected_hash、多文件 checksum records）都在长哈希**之前**置 task 级 `hash_status='pending'`、完成时置 Verified/Failed——该标志即哈希进行中的精确窗口。db 层新增 `any_completed_task_hash_pending`（`EXISTS(... status='completed' AND hash_status='pending')`）；scheduler 抽自由函数 `should_emit_completion_action(downloads, pool)`（downloads 空 + 队列空 + 无 pending 哈希，DB 错误按保守不触发处理），`maybe_emit_completion_action` 的活性判据换用之。哈希工作**未**挪回 control 释放前（按修复方向要求，槽位占用不变）。残余竞态如实记录：control 释放到 Pending 写入之间有毫秒级窗口，量级上与原缺陷的分钟级窗口不可比。
+- **验证测试**：`convergence_tests` 三条——completed+pending（空 downloads/空队列）判据返回 false、置 Verified 后返回 true；无 expected hash（NotRequested）不受门影响；活跃 downloads 与非空队列在 hash 无关时依旧各自扣住动作（门是扩展不是替换）。敏感性验证：去掉 hash 门 → 首条用例失败。验收偏离记录：原文的「两任务接力 + 慢哈希 fixture」需整机 worker/事件环境（AppHandle 不可无头构造），以判据函数的直接驱动等价承载，与 ARC-40 同款偏离。
 
 ### ARC-47（P3，Closed）：Metalink 落入串行路径后从不清理 .part-N，泄漏至多 N×文件大小
 
