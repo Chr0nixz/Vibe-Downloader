@@ -617,27 +617,30 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
     Ok(ParsedMpd { periods })
 }
 
-/// FUN-12: only `$Number$` (optional printf width) is expanded today. Other
-/// DASH template variables must fail fast instead of producing partial files.
+/// FUN-12/FUN-24: only `$Number$` (optionally printf-width-padded, e.g.
+/// `$Number%05d$`) is expanded in media templates. Other DASH template
+/// variables must fail fast instead of producing partial files.
 fn reject_unsupported_segment_template(
     media_template: &str,
     initialization: Option<&str>,
 ) -> Result<(), String> {
-    for value in std::iter::once(media_template).chain(initialization) {
-        if segment_template_has_unsupported_vars(value) {
-            return Err(engine_error(
-                "dash_template_unsupported",
-                format!(
-                    "SegmentTemplate uses unsupported placeholders in `{value}`. Only $Number$ is supported in this first-pass engine."
-                ),
-                false,
-            ));
-        }
+    // FUN-24: $Number is a media-position identifier. DASH reserves it for
+    // media templates, and this engine never expands it in Initialization —
+    // the old base-prefix check let `$Number%05d$` pass there and 404 the
+    // init fetch, so validation is now context-aware.
+    if template_has_unsupported_vars(media_template, true)
+        || initialization.is_some_and(|init| template_has_unsupported_vars(init, false))
+    {
+        return Err(engine_error(
+            "dash_template_unsupported",
+            "SegmentTemplate uses unsupported placeholders. Media may use $Number$ or $Number%0Nd$; initialization must not use $Number; every other identifier is unsupported in this first-pass engine.",
+            false,
+        ));
     }
     Ok(())
 }
 
-fn segment_template_has_unsupported_vars(value: &str) -> bool {
+fn template_has_unsupported_vars(value: &str, allow_number: bool) -> bool {
     let mut rest = value;
     while let Some(start) = rest.find('$') {
         let after = &rest[start + 1..];
@@ -645,14 +648,53 @@ fn segment_template_has_unsupported_vars(value: &str) -> bool {
             break;
         };
         let token = &after[..end];
-        // `$Number$` / `$Number%05d$` are the only expanded forms.
-        let base = token.split('%').next().unwrap_or(token);
-        if base != "Number" {
+        let number_ok = allow_number
+            && match token.strip_prefix("Number") {
+                Some("") => true,
+                // ISO 23009-1 printf-style padding: `$Number%0Nd$`, 1-9
+                // width digits. Anything else fails fast instead of 404ing.
+                Some(spec) => spec
+                    .strip_prefix("%0")
+                    .and_then(|digits| digits.strip_suffix('d'))
+                    .and_then(|digits| digits.parse::<usize>().ok())
+                    .is_some_and(|width| (1..=9).contains(&width)),
+                None => false,
+            };
+        if !number_ok {
             return true;
         }
         rest = &after[end + 1..];
     }
     false
+}
+
+/// FUN-24: expand `$Number$` / `$Number%0Nd$` in a media template. Returns
+/// `None` when the template carries a token validation should have rejected —
+/// the caller turns that into a structured error instead of a 404.
+fn expand_number_template(template: &str, number: i64) -> Option<String> {
+    let mut out = String::with_capacity(template.len() + 8);
+    let mut rest = template;
+    while let Some(dollar) = rest.find('$') {
+        let after = &rest[dollar + 1..];
+        let end = after.find('$')?;
+        let token = &after[..end];
+        out.push_str(&rest[..dollar]);
+        match token.strip_prefix("Number") {
+            Some("") => out.push_str(&number.to_string()),
+            Some(spec) => {
+                let width = spec
+                    .strip_prefix("%0")
+                    .and_then(|digits| digits.strip_suffix('d'))
+                    .and_then(|digits| digits.parse::<usize>().ok())
+                    .filter(|width| (1..=9).contains(width))?;
+                out.push_str(&format!("{number:0width$}"));
+            }
+            None => return None,
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 fn select_tracks(
@@ -771,8 +813,18 @@ fn build_segment_plans(
                 });
             }
             for i in 0..*segment_count {
-                let number = start_number + i;
-                let media_url = media_template.replace("$Number$", &number.to_string());
+                // ARC-48: start_number comes straight from the manifest; saturate
+                // instead of overflowing on extreme values.
+                let number = start_number.saturating_add(i);
+                let media_url = expand_number_template(media_template, number).ok_or_else(|| {
+                    engine_error(
+                        "dash_template_unsupported",
+                        format!(
+                            "SegmentTemplate media `{media_template}` uses placeholders this engine cannot expand."
+                        ),
+                        false,
+                    )
+                })?;
                 let resolved = resolve_url_with_base(&parsed_base, &media_url)?;
                 let local_path = staging_dir.join(format!("seg_{track_kind}_{i}.m4s"));
                 plans.push(DashSegmentPlan {
@@ -1725,20 +1777,31 @@ fn local_name(name: &[u8]) -> String {
 }
 
 fn parse_byte_range(value: &str) -> Option<ByteRange> {
-    let (start, length) = value.split_once('-')?;
+    // ARC-48: DASH @range is unsigned. Reject negative positions outright and
+    // build the length with saturating math so an extreme Initialization
+    // range (e.g. `0-9223372036854775807`) cannot overflow — the HLS side
+    // already parses ranges this way.
+    let (start, end) = value.split_once('-')?;
     let start = start.trim().parse::<i64>().ok()?;
-    let end = length.trim().parse::<i64>().ok()?;
-    if end < start {
+    let end = end.trim().parse::<i64>().ok()?;
+    if start < 0 || end < start {
         return None;
     }
     Some(ByteRange {
         start,
-        length: end - start + 1,
+        length: end.saturating_sub(start).saturating_add(1),
     })
 }
 
 fn byte_range_header(range: &ByteRange) -> String {
-    let end = range.start + range.length - 1;
+    // ARC-48: saturating mirror of the HLS header builder; parse_byte_range
+    // guarantees end >= start, and the max() keeps that true even after a
+    // saturated length.
+    let end = range
+        .start
+        .saturating_add(range.length)
+        .saturating_sub(1)
+        .max(range.start);
     format!("bytes={}-{}", range.start, end)
 }
 
@@ -2053,6 +2116,78 @@ mod tests {
         let header = byte_range_header(&br);
         assert_eq!(header, "bytes=0-1023");
         assert!(parse_byte_range("invalid").is_none());
+    }
+
+    #[test]
+    fn parses_byte_range_extremes_without_overflow() {
+        // ARC-48: `end - start + 1` overflowed on i64 extremes and negatives
+        // were silently accepted although @range is unsigned.
+        let br = parse_byte_range("0-9223372036854775807").expect("max range");
+        assert_eq!(br.start, 0);
+        // True length is i64::MAX + 1; the saturating builder clamps to the
+        // representable maximum — an off-by-one at the extreme beats a panic.
+        assert_eq!(br.length, i64::MAX);
+        let header = byte_range_header(&br);
+        assert_eq!(header, "bytes=0-9223372036854775806");
+
+        let br = parse_byte_range("18446744073709551614-18446744073709551615");
+        assert!(
+            br.is_none(),
+            "positions beyond i64 must be rejected, not truncated"
+        );
+        assert!(parse_byte_range("-5-10").is_none(), "negative start");
+        assert!(parse_byte_range("10--3").is_none(), "negative end");
+        assert!(parse_byte_range("10-5").is_none(), "end before start");
+
+        let br = parse_byte_range("5-5").expect("single byte range");
+        assert_eq!((br.start, br.length), (5, 1));
+        assert_eq!(byte_range_header(&br), "bytes=5-5");
+    }
+
+    #[test]
+    fn expands_number_template_with_printf_width() {
+        // FUN-24: `$Number%05d$` passed the old base-prefix validation but was
+        // never substituted, so the fetch 404ed. Plain and padded forms must
+        // both expand.
+        assert_eq!(
+            expand_number_template("seg-$Number$.m4s", 7).as_deref(),
+            Some("seg-7.m4s")
+        );
+        assert_eq!(
+            expand_number_template("seg-$Number%05d$.m4s", 42).as_deref(),
+            Some("seg-00042.m4s")
+        );
+        assert_eq!(
+            expand_number_template("$Number%08d$.m4s", 1).as_deref(),
+            Some("00000001.m4s")
+        );
+        assert_eq!(
+            expand_number_template("p$Number$s$Number$.m4s", 3).as_deref(),
+            Some("p3s3.m4s")
+        );
+        assert!(expand_number_template("$RepresentationID$.m4s", 1).is_none());
+        assert!(expand_number_template("$Number%5d$.m4s", 1).is_none());
+        assert!(expand_number_template("$Number%05i$.m4s", 1).is_none());
+    }
+
+    #[test]
+    fn template_validation_is_context_aware() {
+        // FUN-24: media may use Number tokens; initialization must not — the
+        // engine never expands them there, so allowing them 404s the init.
+        assert!(!template_has_unsupported_vars("seg-$Number$.m4s", true));
+        assert!(!template_has_unsupported_vars("seg-$Number%05d$.m4s", true));
+        assert!(template_has_unsupported_vars("seg-$Number%5d$.m4s", true));
+        assert!(template_has_unsupported_vars("$Time$.m4s", true));
+        assert!(template_has_unsupported_vars(
+            "$RepresentationID$.m4s",
+            true
+        ));
+        assert!(!template_has_unsupported_vars("init.mp4", false));
+        assert!(
+            template_has_unsupported_vars("init-$Number$.mp4", false),
+            "$Number in initialization must be rejected"
+        );
+        assert!(template_has_unsupported_vars("$Bandwidth$", true));
     }
 
     #[test]

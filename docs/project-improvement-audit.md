@@ -558,12 +558,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：`snapshot_database_to_path` 的 `std::fs::rename` 失败（Windows ERROR_NOT_SAME_DEVICE / POSIX EXDEV，即用户目标与应用数据不同卷）时回退 `copy_verified_snapshot`——逐字节复制后全量比对源与目标，不一致即删除目标并报错；同卷 rename 行为不变，源快照在任何路径都只清理一次。
 - **验证测试**：`backup_restore.rs` 新增 `fun23_snapshot_copy_fallback_produces_verified_snapshot`（快照输出可完整加载且含种子任务；rename/copy 两路径都经过同一 verify 语义）。跨盘符的端到端场景依赖双卷环境，copy 路径的字节校验逻辑以纯函数形式覆盖。
 
-### FUN-24（P2，Open）：DASH `$Number%05d$` 通过校验但不被替换，URL 必然 404
+### FUN-24（P2，Closed）：DASH `$Number%05d$` 通过校验但不被替换，URL 必然 404
 
 - **证据**：`segment_template_has_unsupported_vars`（dash.rs:633-649）对 `$...$` token 只比较 `%` 前的 base，`$Number%05d$` 被放行——其注释自称「`$Number$` / `$Number%05d$` 是仅有的两种展开形式」；而 `build_segment_plans` 只做 `media_template.replace("$Number$", …)`（dash.rs:768），宽度前缀形式永不匹配，占位符原样进入 URL。
 - **影响**：spec 允许的零填充编号 MPD 全部 segment 必败（初始 + 2 次重试）；叠加 `ARC-37` 甚至僵尸而非报错。这是「校验器声称支持、实现不支持」的契约缝隙。
 - **修复方向**：替换时识别 `%0Nd%` 形式做宽度填充（推荐）；或校验阶段明确拒绝并在探测时报「不支持宽度前缀编号」。二者取其一。
 - **验收**：用 `$Number%05d$` fixture 端到端下载成功，或探测阶段结构化报错。
+- **2026-09-13 修复**：两条路都做——`expand_number_template` 支持 `$Number$` 与 `$Number%0Nd$`（1-9 位宽度的 printf 零填充，不认识的 token 返回 None → `dash_template_unsupported` 结构化错误而非 404）；校验改上下文相关（`template_has_unsupported_vars(value, allow_number)`）：media 放行 Number 两种形式、**Initialization 中任何 `$Number` 一律拒绝**（DASH 规范 Number 不得用于 Initialization，旧 base 检查放行后 init 必 404）、其余标识符维持拒绝。
+- **验证测试**：单测 `expands_number_template_with_printf_width`（plain/%05d/%08d/多次出现/非法宽度矩阵）与 `template_validation_is_context_aware`；集成 `fun24_padded_number_template_downloads_padded_urls`（假服务器记录请求路径，断言 `/seg-00001.m4s`、`/seg-00002.m4s` 被请求且无裸 `$` 占位符上线）与 `fun24_number_in_initialization_template_is_rejected`（probe 结构化拒绝）。旧行为敏感性：还原 `.replace` 后 padded 测试失败。
 
 ### FUN-25（P2，Closed）：签名 CDN 下 DASH 续传退化为全量重下
 
@@ -1016,12 +1018,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：两处 parallel→serial fallback（外层 healthy<2 落穿、内层 worker_count<2 防御分支）在进入串行前 `cleanup_metalink_part_files` 并删除 plan 行——串行写 `temp_path` 本体，残留 part 既占磁盘又会被下一次并行 resume 的 `initial_total` 误算。
 - **验证测试**：`arc34_plan_identity_mismatch_discards_stale_parts` 的第一段以单镜像资源触发过内层 fallback 路径（调试期间确认清理生效）；正式断言由外层落穿场景的 plan 删除 + part 清理覆盖。
 
-### ARC-48（P3，Open）：parse_byte_range 对极端 Initialization/@range 整型溢出
+### ARC-48（P3，Closed）：parse_byte_range 对极端 Initialization/@range 整型溢出
 
 - **证据**：dash.rs:1691-1702 的 start/end 以 i64 parse、仅拒 end<start，`length: end - start + 1` 对 start=0,end=i64::MAX debug panic / release 回绕为 i64::MIN；byte_range_header（:1704-1707）再做裸加减产生无意义头。对比 HLS 孪生实现用了 saturating 运算（engine.rs:2220-2224）。值链完全来自 manifest 的 SegmentBase/Initialization range 属性。
 - **影响**：恶意/畸形 MPD：debug 构建 panic（supervisor 内 unwind 还会连坐 `ARC-40` 的 slot 泄漏）；release 构建以费解的 range 错误失败而非校验提示。
 - **修复方向**：checked/saturating 运算 + 解析失败即拒绝该 SegmentBase。
 - **验收**：极端 range 属性单测在 debug/release 均安全拒绝。
+- **2026-09-13 修复**：`parse_byte_range` 镜像 HLS 范本——@range 无符号语义下拒绝负值（含负 start/end），长度以 `saturating_sub().saturating_add(1)` 构造；`byte_range_header` 改 saturating 并 `.max(start)` 保持 end≥start 不变量。同族顺手修：`build_segment_plans` 的 `start_number + i` 改 `saturating_add`（同为 manifest 直接来源的算术）。
+- **验证测试**：单测 `parses_byte_range_extremes_without_overflow`（0~i64::MAX、负值、end<start、u64 越界拒绝、单字节范围）；集成 `arc48_extreme_initialization_range_does_not_overflow`（Initialization range="0-9223372036854775807" 的 probe 不 panic）。旧行为敏感性：还原裸算术后集成测试以溢出 panic 失败。
 
 ## 八、程序运行效率
 
