@@ -28,6 +28,34 @@ use crate::{
     DownloadControl, TaskRequestHeaders,
 };
 
+/// ARC-44: the three Ok paths of `start_task` have different slot-accounting
+/// implications, so they must not be collapsed into a bare `Ok(())`.
+/// `AlreadyActive` rows are already inside `downloads` (counted by the map
+/// seeding in dispatch_inner), and `ConflictSkipped` never spawned a worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartTaskOutcome {
+    Started,
+    AlreadyActive,
+    ConflictSkipped,
+}
+
+/// ARC-44: honest slot accounting per start outcome. Only `Started` consumes a
+/// new slot; counting the other outcomes inflated active/host usage for the
+/// rest of the dispatch tick and conservatively deferred following tasks.
+fn account_start_outcome(
+    active_count: &mut usize,
+    host_slot_map: &mut HashMap<String, usize>,
+    outcome: StartTaskOutcome,
+    source_key: &str,
+    planned_slots: usize,
+) {
+    if outcome != StartTaskOutcome::Started {
+        return;
+    }
+    *active_count += 1;
+    *host_slot_map.entry(source_key.to_string()).or_insert(0) += planned_slots;
+}
+
 /// Download scheduler: encapsulates active download map, request header cache, global speed limiter, engine registry, and other shared state.
 ///
 /// All scheduling methods take `self: Arc<Self>` so an `Arc` clone can continue scheduling in a spawned task.
@@ -239,11 +267,17 @@ impl Scheduler {
                 .start_task(app.clone(), pool.clone(), task, planned_slots)
                 .await
             {
-                Ok(()) => {
-                    // Task was inserted into the downloads map — count it.
-                    active_count += 1;
-                    // Update the local count map synchronously so subsequent tasks see the latest slot usage.
-                    *host_slot_map.entry(source_key).or_insert(0) += planned_slots;
+                Ok(outcome) => {
+                    // ARC-44: only a genuinely started worker consumes a slot.
+                    // AlreadyActive was already counted by the downloads-map
+                    // seeding above, and ConflictSkipped never spawned one.
+                    account_start_outcome(
+                        &mut active_count,
+                        &mut host_slot_map,
+                        outcome,
+                        &source_key,
+                        planned_slots,
+                    );
                 }
                 Err(error) => {
                     // start_task failed before spawning a worker; it has
@@ -251,16 +285,7 @@ impl Scheduler {
                     // all error paths (Conflict at the transition_task match,
                     // non-Conflict at the same match). Do NOT increment
                     // active_count — the task is not consuming a slot.
-                    match db::get_task_record(&pool, &task_id).await {
-                        Ok(Some(current)) if current.status == TaskStatus::Queued => {
-                            mark_download_failed(&app, &pool, &task_id, error).await;
-                        }
-                        Ok(Some(current)) => {
-                            emit_task_progress_snapshot(&app, &current);
-                            emit_task_updated_record(&app, &pool, &current).await;
-                        }
-                        _ => {}
-                    }
+                    handle_start_failure(Some(&app), &pool, &task_id, error).await;
                 }
             }
         }
@@ -280,7 +305,7 @@ impl Scheduler {
         pool: SqlitePool,
         task: TaskRecord,
         connection_limit: usize,
-    ) -> Result<(), String> {
+    ) -> Result<StartTaskOutcome, String> {
         // R-2.3: Per-task runtime lock serializes start vs pause/cancel/delete/retry.
         // Worker (download engine) does NOT hold this lock — it relies on R-1's
         // conditional DB update to avoid overwriting user-initiated state changes.
@@ -296,7 +321,7 @@ impl Scheduler {
                 .await?;
         if self.downloads.lock().await.contains_key(&task.id) {
             tracing::debug!(task_id = %task.id, "download already active, skipping start");
-            return Ok(());
+            return Ok(StartTaskOutcome::AlreadyActive);
         }
 
         tracing::info!(
@@ -356,7 +381,7 @@ impl Scheduler {
                     attempted = ?attempted,
                     "start_task: task state changed concurrently, skipping"
                 );
-                return Ok(());
+                return Ok(StartTaskOutcome::ConflictSkipped);
             }
             Err(error) => {
                 // R-2.3: Non-Conflict transition failure (e.g. Database, Illegal,
@@ -541,7 +566,7 @@ impl Scheduler {
         }
 
         emit_queue_changed_with_ids(&app, Some(vec![map_task_id.clone()]));
-        Ok(())
+        Ok(StartTaskOutcome::Started)
     }
 
     /// Count used connection slots for the given host (formerly host_connection_slots).
@@ -648,6 +673,25 @@ async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str,
 /// segment failure marks) with no UI emits. Split from [`mark_download_failed`]
 /// so the supervisor convergence can run headlessly in tests (ARC-40).
 async fn mark_download_failure_state(pool: &SqlitePool, task_id: &str, error: &str) {
+    persist_failure_state(pool, task_id, error, FailureRowScope::Active).await;
+}
+
+/// Which DB rows a failure write may overwrite. The active-only scope keeps
+/// the R-2.4 guarantee for worker errors; the queued scope exists because the
+/// dispatch start path can fail before any state change (ARC-41).
+enum FailureRowScope {
+    Active,
+    Queued,
+}
+
+/// Shared body of both failure scopes — one place for the status choice
+/// (ARC-16 code dispatch), the event insert, and the segment failure marks.
+async fn persist_failure_state(
+    pool: &SqlitePool,
+    task_id: &str,
+    error: &str,
+    scope: FailureRowScope,
+) {
     tracing::error!(task_id = task_id, error = %error, "download failed");
     // ARC-16: dispatch only on structured code — never on human message text.
     let code = crate::models::AppErrorPayload::code_from_stored(None, Some(error));
@@ -659,22 +703,27 @@ async fn mark_download_failure_state(pool: &SqlitePool, task_id: &str, error: &s
     } else {
         TaskStatus::Failed
     };
-    // R-2.4: Conditional UPDATE — only mark failed if still Downloading/Retrying.
-    // If the user paused/canceled/deleted while the worker was erroring out,
-    // skip the failure write to avoid overwriting their action.
-    let updated =
-        match db::mark_task_failed_if_active(pool, task_id, status, Some(error), Some(error)).await
-        {
-            Ok(updated) => updated,
-            Err(db_error) => {
-                tracing::warn!(
-                    task_id = task_id,
-                    error = %db_error,
-                    "failed to persist task failure status"
-                );
-                return;
-            }
-        };
+    // R-2.4: Conditional UPDATE — never overwrite a user-initiated state
+    // change (pause/cancel/delete) that raced the failure.
+    let updated = match scope {
+        FailureRowScope::Active => {
+            db::mark_task_failed_if_active(pool, task_id, status, Some(error), Some(error)).await
+        }
+        FailureRowScope::Queued => {
+            db::mark_task_failed_if_queued(pool, task_id, status, Some(error), Some(error)).await
+        }
+    };
+    let updated = match updated {
+        Ok(updated) => updated,
+        Err(db_error) => {
+            tracing::warn!(
+                task_id = task_id,
+                error = %db_error,
+                "failed to persist task failure status"
+            );
+            return;
+        }
+    };
     if !updated {
         tracing::warn!(
             task_id = task_id,
@@ -682,7 +731,15 @@ async fn mark_download_failure_state(pool: &SqlitePool, task_id: &str, error: &s
         );
         return;
     }
-    if let Err(db_error) = db::insert_task_event(pool, task_id, "failed", Some(error)).await {
+    // The failure event names its class: needs_attention entries get their
+    // own event so recovery surfaces can find them without re-classifying
+    // the payload.
+    let event_type = if status == TaskStatus::NeedsAttention {
+        "needs_attention"
+    } else {
+        "failed"
+    };
+    if let Err(db_error) = db::insert_task_event(pool, task_id, event_type, Some(error)).await {
         tracing::warn!(
             task_id = task_id,
             error = %db_error,
@@ -702,6 +759,49 @@ async fn mark_download_failure_state(pool: &SqlitePool, task_id: &str, error: &s
             error = %db_error,
             "failed to persist segment failure status"
         );
+    }
+}
+
+/// ARC-41: failure handling for a start that failed while the row was still
+/// Queued (header/proxy resolution or transition errors happen before any
+/// state change). The worker-side failure paths match active rows; this one
+/// matches the queued row so the task becomes a visible failure instead of
+/// sitting at the queue head, silently re-failing every dispatch tick.
+async fn mark_queued_start_failed(
+    app: Option<&AppHandle>,
+    pool: &SqlitePool,
+    task_id: &str,
+    error: String,
+) {
+    persist_failure_state(pool, task_id, &error, FailureRowScope::Queued).await;
+    let Some(app) = app else { return };
+    if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
+        emit_task_progress_snapshot(app, &task);
+        emit_task_updated_record(app, pool, &task).await;
+    }
+    emit_queue_changed_with_ids(app, Some(vec![task_id.to_string()]));
+}
+
+/// Shared tail of the dispatch start-failure branch (ARC-41). Re-reads the
+/// task: a still-Queued row is failed via the queued matcher; any other state
+/// only gets a progress snapshot (its transition already happened elsewhere);
+/// `app: None` (headless tests) skips every emit.
+async fn handle_start_failure(
+    app: Option<&AppHandle>,
+    pool: &SqlitePool,
+    task_id: &str,
+    error: String,
+) {
+    match db::get_task_record(pool, task_id).await {
+        Ok(Some(current)) if current.status == TaskStatus::Queued => {
+            mark_queued_start_failed(app, pool, task_id, error).await;
+        }
+        Ok(Some(current)) => {
+            let Some(app) = app else { return };
+            emit_task_progress_snapshot(app, &current);
+            emit_task_updated_record(app, pool, &current).await;
+        }
+        _ => {}
     }
 }
 
@@ -1031,6 +1131,131 @@ mod convergence_tests {
             stored.status,
             TaskStatus::Downloading,
             "a canceled outcome must not write Failed over user-owned state"
+        );
+    }
+
+    #[test]
+    fn arc44_start_outcome_accounting_counts_only_started() {
+        // ARC-44: only Started may consume a slot. AlreadyActive is already
+        // inside the downloads map the dispatch counts were seeded from, and
+        // ConflictSkipped never spawned a worker — counting either inflated
+        // active/host usage for the rest of the tick.
+        let mut active_count = 3usize;
+        let mut host_slot_map = HashMap::from([("panic-host".to_string(), 4usize)]);
+
+        super::account_start_outcome(
+            &mut active_count,
+            &mut host_slot_map,
+            super::StartTaskOutcome::Started,
+            "panic-host",
+            2,
+        );
+        assert_eq!(active_count, 4);
+        assert_eq!(host_slot_map["panic-host"], 6);
+
+        super::account_start_outcome(
+            &mut active_count,
+            &mut host_slot_map,
+            super::StartTaskOutcome::AlreadyActive,
+            "panic-host",
+            2,
+        );
+        super::account_start_outcome(
+            &mut active_count,
+            &mut host_slot_map,
+            super::StartTaskOutcome::ConflictSkipped,
+            "other-host",
+            1,
+        );
+        assert_eq!(active_count, 4, "non-Started outcomes must not count");
+        assert_eq!(host_slot_map["panic-host"], 6, "no double counting");
+        assert!(
+            !host_slot_map.contains_key("other-host"),
+            "ConflictSkipped must not reserve host slots"
+        );
+    }
+
+    #[tokio::test]
+    async fn arc41_queued_start_failure_becomes_visible_failure() {
+        // ARC-41: a start failure on a still-Queued row (header/proxy
+        // resolution or transition error) must produce a visible failure, not
+        // a silent no-op that leaves the task re-failing at the queue head.
+        let pool = test_pool("queued-start-fail").await;
+        let task = task_record("task-arc41-queued", TaskStatus::Queued);
+        db::insert_task_record(&pool, &task).await.expect("insert");
+
+        super::handle_start_failure(
+            None,
+            &pool,
+            &task.id,
+            "request header resolution failed".to_string(),
+        )
+        .await;
+
+        let stored = db::get_task_record(&pool, &task.id)
+            .await
+            .expect("query")
+            .expect("task exists");
+        assert_eq!(
+            stored.status,
+            TaskStatus::Failed,
+            "queued start failure must leave the queue instead of idling"
+        );
+        assert!(
+            stored.error_message.is_some(),
+            "failure must carry a diagnosable error message"
+        );
+        assert_eq!(stored.error_code, None, "plain errors must not fake a code");
+    }
+
+    #[tokio::test]
+    async fn arc41_queued_start_failure_maps_needs_attention_codes() {
+        // Structured needs-attention payloads (e.g. remote_changed) route to
+        // NeedsAttention with recovery actions, same as worker failures.
+        let pool = test_pool("queued-start-na").await;
+        let task = task_record("task-arc41-na", TaskStatus::Queued);
+        db::insert_task_record(&pool, &task).await.expect("insert");
+
+        let payload = crate::models::AppErrorPayload::new(
+            "remote_changed",
+            "The remote file changed since the download started.",
+            false,
+            vec!["restart", "check_url"],
+        );
+        let error = serde_json::to_string(&payload).expect("serialize payload");
+
+        super::handle_start_failure(None, &pool, &task.id, error).await;
+
+        let stored = db::get_task_record(&pool, &task.id)
+            .await
+            .expect("query")
+            .expect("task exists");
+        assert_eq!(stored.status, TaskStatus::NeedsAttention);
+        assert_eq!(
+            stored.error_code.as_deref(),
+            Some("remote_changed"),
+            "the structured code must be persisted for the recovery surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn arc41_non_queued_start_failure_keeps_snapshot_semantics() {
+        // Regression: for rows that already left the queue, the branch must
+        // not write any state — it only refreshes the UI snapshot.
+        let pool = test_pool("queued-start-active").await;
+        let task = task_record("task-arc41-active", TaskStatus::Downloading);
+        db::insert_task_record(&pool, &task).await.expect("insert");
+
+        super::handle_start_failure(None, &pool, &task.id, "boom".to_string()).await;
+
+        let stored = db::get_task_record(&pool, &task.id)
+            .await
+            .expect("query")
+            .expect("task exists");
+        assert_eq!(
+            stored.status,
+            TaskStatus::Downloading,
+            "non-queued rows must keep their state (snapshot-only branch)"
         );
     }
 }

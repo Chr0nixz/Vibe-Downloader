@@ -812,29 +812,78 @@ pub async fn mark_task_failed_if_active(
     health_summary: Option<&str>,
     error_message: Option<&str>,
 ) -> Result<bool, String> {
+    mark_task_failed_where(
+        pool,
+        task_id,
+        status,
+        health_summary,
+        error_message,
+        "status IN ('downloading', 'retrying')",
+    )
+    .await
+}
+
+/// ARC-41: mirror of [`mark_task_failed_if_active`] for the dispatch start
+/// path, where header/proxy resolution or a transition error can fail the
+/// start while the row is still `Queued`. The active-only matcher would no-op
+/// there and leave the task stuck at the head of the queue, silently
+/// re-failing on every dispatch tick. The conditional WHERE keeps the R-2.4
+/// guarantee: a concurrent user pause/cancel/delete is never overwritten.
+pub async fn mark_task_failed_if_queued(
+    pool: &SqlitePool,
+    task_id: &str,
+    status: TaskStatus,
+    health_summary: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<bool, String> {
+    mark_task_failed_where(
+        pool,
+        task_id,
+        status,
+        health_summary,
+        error_message,
+        "status = 'queued'",
+    )
+    .await
+}
+
+/// Shared failure write for the two scoped matchers above. The WHERE clause is
+/// a static fragment from this module (never user input); keeping one SET list
+/// prevents the column sets from drifting apart. QueryBuilder is the
+/// sqlx-sanctioned way to compose a query with a dynamic clause — `query()`
+/// only accepts `&'static str` SQL.
+async fn mark_task_failed_where(
+    pool: &SqlitePool,
+    task_id: &str,
+    status: TaskStatus,
+    health_summary: Option<&str>,
+    error_message: Option<&str>,
+    status_filter: &str,
+) -> Result<bool, String> {
     let updated_at = crate::models::task::now_iso();
     let (error_code, recovery_actions) = error_state_from_message(error_message);
     let recovery_actions = recovery_actions_json(&recovery_actions)?;
 
-    let result = sqlx::query(
-        r#"
-        UPDATE tasks
-        SET status = ?, speed_bps = 0, connection_count = 0,
-            health_summary = ?, error_message = ?, error_code = ?, recovery_actions = ?,
-            retry_after_at = NULL, updated_at = ?
-        WHERE id = ? AND status IN ('downloading', 'retrying')
-        "#,
-    )
-    .bind(status.as_str())
-    .bind(health_summary)
-    .bind(error_message)
-    .bind(error_code)
-    .bind(recovery_actions)
-    .bind(&updated_at)
-    .bind(task_id)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let mut builder = sqlx::QueryBuilder::new(
+        "UPDATE tasks
+         SET status = ?, speed_bps = 0, connection_count = 0,
+             health_summary = ?, error_message = ?, error_code = ?, recovery_actions = ?,
+             retry_after_at = NULL, updated_at = ?
+         WHERE id = ? AND ",
+    );
+    builder.push(status_filter);
+    let result = builder
+        .build()
+        .bind(status.as_str())
+        .bind(health_summary)
+        .bind(error_message)
+        .bind(error_code)
+        .bind(recovery_actions)
+        .bind(&updated_at)
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(result.rows_affected() > 0)
 }
 

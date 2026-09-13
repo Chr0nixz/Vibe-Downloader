@@ -979,12 +979,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验证测试**：`scheduler/mod.rs` 新增 `engine_panic_tests`（3 项：&str/String/不透明 payload 的消息渲染）。完整路径的 panic 注入需要真实 AppHandle（同 scheduler_dispatch.rs 的 harness 说明），收敛体的执行保证由 catch_unwind 的控制流位置结构性提供。
 - **2026-09-13 加固**：收敛体抽为 `converge_download_outcome`（supervisor 调用同一函数；A-4 evict 随之提前到成功路径哈希校验前——evict 只清空闲注册表项，重排不可观察）。新增 `convergence_tests` 两项：①以真实 panic future 走 supervisor 同款 `catch_unwind → describe_engine_panic → converge` 粘合，断言 downloads_map/request_headers 清空、任务转 Failed 且 panic 细节进入 error_message、同 host 后续任务收敛无损；②canceled=true 时运行时状态照常清理但不写 Failed（R-2.4）。测试向 `app: None` 注入以跳过 emits；完整 Wry 路径仍受真实 AppHandle 限制，粘合层为 3 行且与生产逐字一致。
 
-### ARC-41（P2，Open）：start 失败谓词不含 queued，任务永久滞留队首静默重败
+### ARC-41（P2，Closed）：start 失败谓词不含 queued，任务永久滞留队首静默重败
 
 - **证据**：dispatch_inner 对 status==Queued 的非 Conflict 启动失败路由 mark_download_failed（scheduler/mod.rs:237-240），但其 SQL `WHERE id = ? AND status IN ('downloading','retrying')`（db/task_state.rs:819-826）匹配不到 queued 行 → rows_affected=0 → 日志「task state changed concurrently, skipping emit」后返回，无状态写、无事件。可达路径：resolve_task_request_headers / resolve_proxy 的 DB 错误在转移前 `?` 传出（mod.rs:274-279）；transition 的 SQLITE_BUSY 重试耗尽（state_machine.rs:152-204）。
 - **影响**：持续性 DB 故障下任务永远 Queued，每个 dispatch tick 重试重败刷日志；UI 显示普通排队、无任何异常迹象，队列看似健康却不前进且无从诊断。
 - **修复方向**：该分支改用能匹配 queued 的无条件 mark（或专用 mark_queued_start_failed：置 Failed/NeedsAttention + emit）。
 - **验收**：注入 header 解析失败的 stub 断言 queued 任务转为可见失败态而非原地踏步。
+- **2026-09-13 修复**：db 层新增 `mark_task_failed_if_queued`（`WHERE status = 'queued'`，与 active 版共享同一 SET 列——经 `mark_task_failed_where` 单一实现 + QueryBuilder 组装，sqlx 0.9 的 `query()` 仅收 `&'static str`）；scheduler 侧把失败持久化拆为 `persist_failure_state(pool, task_id, error, FailureRowScope::{Active, Queued})`，新增 `handle_start_failure(app: Option<&AppHandle>, ...)` 承接 dispatch 的 Err 分支——重读后仍 Queued 的行走 queued 匹配器落库（ARC-16 code 派发决定 Failed/NeedsAttention），其他状态维持仅快照的既有语义，`app=None`（无头测试）跳过全部 emit（沿 converge 的 Option 模式）。条件 WHERE 保留 R-2.4 保证：标记与写库之间用户暂停/取消/删除不被覆盖。
+- **验证测试**：`convergence_tests` 三条——queued + 注入错误 → Failed 且带错误消息、无伪造 code；queued + `remote_changed` JSON payload → NeedsAttention 且 error_code=remote_changed；downloading 任务 + 错误 → 状态不变（快照臂回归）。敏感性验证：queued 臂临时改回 Active 匹配器 → 首条用例失败（任务滞留 queued）。验收偏离记录：审计原文的「stub 注入 header 解析失败」以直接驱动 `handle_start_failure` 等价承载（start_task 本身硬依赖 AppHandle，无法无头构造），与 ARC-40 同款偏离。
 
 ### ARC-42（P2，Closed）：FTP/SFTP resume 不重验远端 SIZE/MDTM，等大小替换文件造成新旧缝合
 
@@ -1005,12 +1007,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验证测试**：既有单测 `delete_runtime_task_does_not_decrement_session_refcount` 更新为新签名并回归；「同种子双任务删 A 不影响 B」需要两个真实活动 session，单测以无匹配 task_id 的 no-op 路径覆盖定位逻辑（找不到即不动任何 session）。
 - **2026-09-13 加固**：新增 `delete_runtime_task_targets_only_the_owning_session`——两个真实 session 各自加入同一 `.torrent`（paused），删除任务 A 的运行时状态后 A 的 session 不再持有该 torrent、B 的 session 原样保留；无 owning session 的 task_id 为 no-op。同步修正 `session_evicted_when_ref_count_reaches_zero` 中「双 session 必撞 DHT 端口」的过时注释（ARC-39 后已可共存）。
 
-### ARC-44（P3，Open）：start_task 三种 Ok 语义混一，dispatch pass 内幻影计数
+### ARC-44（P3，Closed）：start_task 三种 Ok 语义混一，dispatch pass 内幻影计数
 
 - **证据**：Ok 有三种含义——真启动、「download already active」跳过（mod.rs:280-283）、Conflict 清理后返回 Ok（:329-343）；dispatch_inner 一律 active_count+=1 / host_slot+=planned_slots（:225-230）。复核注：Conflict 突发 largely 不可达（BEGIN IMMEDIATE 条件更新 + SQLite 单写者 + 任务锁序列化），实际可达的是 stale control 下的 already-active skip（例如 `ARC-40` 幽灵存在时）。
 - **影响**：本 tick 后续任务被保守推迟，下一 tick 自愈；方向保守无害，但计数语义应诚实。
 - **修复方向**：start_task 返回 Started/AlreadyActive/ConflictSkipped 枚举，dispatch 分别记账。
 - **验收**：单测覆盖三分支计数。
+- **2026-09-13 修复**：`start_task -> Result<StartTaskOutcome, String>`（Started/AlreadyActive/ConflictSkipped，全仓唯一调用方是 dispatch_inner，影响面收敛）；计数逻辑抽为纯函数 `account_start_outcome`——仅 `Started` 计数：AlreadyActive 行已在 downloads 初值里（原实现实为**双计**），ConflictSkipped 从未 spawn worker（原实现凭空占额）。方向保守性不变：非 Started 出口不计即从不虚高。
+- **验证测试**：`convergence_tests::arc44_start_outcome_accounting_counts_only_started`——三分支逐一记账断言（Started +1/+slots、AlreadyActive/ConflictSkipped 零变化、无凭空 host 键），逐字满足验收；敏感性验证：计数改为无条件后用例失败。
 
 ### ARC-45（P3，Open）：restart 用 abort 不排空即删临时文件，Windows delete-pending 可致新 worker ACCESS_DENIED
 

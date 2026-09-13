@@ -133,6 +133,7 @@ pub use self::task_state::{
     checkpoint_task_progress, clear_tasks, complete_segment, complete_task, complete_task_segment,
     complete_unknown_size_task, delete_segments_for_task, delete_task_files_for_task,
     delete_task_record, delete_task_records_batch, mark_task_failed_if_active,
+    mark_task_failed_if_queued,
     reset_interrupted_tasks, reset_task_download_state, update_task_and_segment_progress,
     update_task_final_path, update_task_health_summary, update_task_progress,
     update_task_retry_after, update_task_retry_after_in_tx, update_task_runtime_progress,
