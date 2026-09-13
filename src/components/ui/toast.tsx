@@ -101,11 +101,17 @@ function ToastItem({
   // One settle path per mount: commit (timeout/X) or undo — never both.
   const settledRef = useRef(false);
   // Keep callbacks in refs so the dismiss timer is not reset when the store
-  // replaces toast object identity without changing duration.
+  // replaces toast object identity without changing duration. UX-21: this
+  // must include onDismiss — the viewport passes a fresh inline arrow on
+  // every unrelated render, and a changing settle identity re-ran the
+  // startTimer effect below, silently restarting the auto-dismiss window
+  // (and the countdown bar) whenever ANY toast was added or updated.
   const onAutoCommitRef = useRef(toast.onAutoCommit);
   const actionRef = useRef(toast.action);
+  const onDismissRef = useRef(onDismiss);
   onAutoCommitRef.current = toast.onAutoCommit;
   actionRef.current = toast.action;
+  onDismissRef.current = onDismiss;
   // CSS countdown pauses via animation-play-state; remount key resets on resume.
   const [countdownKey, setCountdownKey] = useState(0);
   const [countdownPaused, setCountdownPaused] = useState(false);
@@ -116,16 +122,16 @@ function ToastItem({
     settledRef.current = true;
     clearTimeout(timerRef.current);
     onAutoCommitRef.current?.();
-    onDismiss();
-  }, [onDismiss]);
+    onDismissRef.current();
+  }, []);
 
   const settleUndo = useCallback(() => {
     if (settledRef.current) return;
     settledRef.current = true;
     clearTimeout(timerRef.current);
     actionRef.current?.onClick();
-    onDismiss();
-  }, [onDismiss]);
+    onDismissRef.current();
+  }, []);
 
   const startTimer = useCallback(() => {
     startedAtRef.current = Date.now();

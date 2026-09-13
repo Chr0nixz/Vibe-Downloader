@@ -237,4 +237,65 @@ describe("toast soft-delete lifecycle", () => {
     });
     expect(onAutoCommit).not.toHaveBeenCalled();
   });
+
+  it("evicting a toast past the stack cap still commits it (UX-19)", () => {
+    // The 21st toast evicts the oldest one. Pre-UX-19 the eviction was a raw
+    // slice() that dropped the evicted toast's onAutoCommit, stranding the
+    // soft-deleted task in pendingDeleteIds (hidden and undeletable).
+    const commits: Array<ReturnType<typeof vi.fn>> = [];
+    render(<ToastViewport />);
+    act(() => {
+      for (let i = 0; i < 21; i += 1) {
+        const onAutoCommit = vi.fn();
+        commits.push(onAutoCommit);
+        useToastStore.getState().addToast({
+          tone: "info",
+          title: `Deleted file-${i}.zip`,
+          durationMs: UNDO_TOAST_TIMEOUT_MS,
+          onAutoCommit,
+        });
+      }
+    });
+    // The oldest toast was evicted and must have left through its commit.
+    expect(commits[0]).toHaveBeenCalledTimes(1);
+    // The remaining 20 stay visible and uncommitted.
+    expect(commits[1]).not.toHaveBeenCalled();
+    expect(useToastStore.getState().toasts).toHaveLength(20);
+  });
+
+  it("an unrelated store update does not restart the dismiss timer (UX-21)", () => {
+    // Pre-UX-21 the viewport's inline onDismiss arrow gave ToastItem a new
+    // settle identity on every render, so ANY toast update restarted the
+    // auto-dismiss window. Here an unrelated toast is added mid-window; the
+    // first toast must still commit exactly 7s after IT appeared.
+    const onAutoCommit = vi.fn();
+    render(<ToastViewport />);
+    act(() => {
+      useToastStore.getState().addToast({
+        tone: "info",
+        title: "Deleted demo.zip",
+        durationMs: UNDO_TOAST_TIMEOUT_MS,
+        onAutoCommit,
+      });
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+      useToastStore.getState().addToast({
+        tone: "info",
+        title: "Unrelated notice",
+      });
+    });
+
+    // The unrelated toast's own window: 4.8s from now.
+    act(() => {
+      vi.advanceTimersByTime(UNDO_TOAST_TIMEOUT_MS - 3_000 - 1);
+    });
+    expect(onAutoCommit).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(onAutoCommit).toHaveBeenCalledTimes(1);
+  });
 });

@@ -331,6 +331,8 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **影响**：7 秒撤销窗口内涌入约 20 条 toast 即可触发——批量完成/失败事件每任务一条且无去重键（use-task-events.ts:154-171）。撤销 toast 被切片丢弃后 `deleteTask` 永不下发：任务从列表消失、DB 行与文件仍在、不可撤销也不可再删，重启后才「复活」。`toast-soft-delete.test.tsx` 覆盖了超时/手动/clearAll，唯独没有 cap-eviction 路径。
 - **修复方向**：slice 驱逐前对被丢弃项调用 `onAutoCommit`（与 clearToasts 同语义）；或让软删除 toast 走带 key 的替换通道避开驱逐。
 - **验收**：构造 21 条 toast 断言被驱逐的软删除已实际提交；任何驱逐路径都不在 `pendingDeleteIds` 留孤儿。
+- **2026-09-13 修复**：三处 `.slice(0, 20)`（addToast 主路径、deferred 插入、flushDeferredToasts 合并）统一抽为 `capToasts` 助手——驱逐前对每个被丢弃 toast 调用 `onAutoCommit?.()`，与 clearToasts 同语义。软删除被驱逐时落地为真删除，pendingDeleteIds 不再留孤儿；被驱逐项的 UI 通知按既有能力限制安静消失（同 clearAll 行为）。
+- **验证测试**：`toast-soft-delete.test.tsx` 新增 cap-eviction 用例——21 条 undo toast 进栈，最老一条被驱逐且其 `onAutoCommit` 恰好调用一次、其余 20 条保持可见未提交。
 
 ### UX-20（P2，Open）：队列重排失败后乐观顺序不回滚，loading 标志永久卡死
 
@@ -345,6 +347,8 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **影响**：批量操作反复更新自己的进度 toast 时（runBulkTransferAction，AppShell.tsx:392-427），所有可见 toast 的剩余寿命与倒计时条被连带重置，陈旧 toast 远超 4800ms 存活；软删除硬提交的唯一时钟就是这个 timer（UNDO_TOAST_TIMEOUT_MS），被无限期推迟，同时放大 `UX-19` 的驱逐窗口。
 - **修复方向**：`onDismiss` 用稳定引用或 ToastItem memo 化切断依赖链；`startTimer` 基于 `startedAtRef` 计算剩余时间而非归零重启。
 - **验收**：更新一条 toast 不重置其他 toast 的倒计时条动画与剩余寿命。
+- **2026-09-13 修复**：`onDismiss` 进入与 `onAutoCommitRef` 同款的 ref 模式（视口每渲染传新内联箭头不再改变 settle 身份），`settleCommit`/`settleUndo` 依赖数组清空 → `startTimer` 恒定 → 计时 effect 每挂载只跑一次，无关渲染不再 clearTimeout+重启；hover resume 路径本就基于 `remainingRef` 扣减流逝时间，保持不变。倒计时条随之不再被无关更新重挂载归零。
+- **验证测试**：`toast-soft-delete.test.tsx` 新增「无关 store 更新不重置计时」用例——撤销 toast 3 秒后插入无关 toast，推进到原 7 秒截止点恰好提交一次。旧行为敏感性：恢复 onDismiss 依赖链后该用例失败。
 
 ### UX-22（P3，Open）：StartupGate 单次轮询错误即永久终止自动轮询
 

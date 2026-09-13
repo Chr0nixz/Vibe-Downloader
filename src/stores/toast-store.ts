@@ -45,6 +45,25 @@ interface ToastStore {
 
 let toastSequence = 0;
 
+/** UX-19: hard cap on the toast stack (and the deferred queue). */
+const TOAST_STACK_LIMIT = 20;
+
+/**
+ * UX-19: trim the stack to the cap, evicting the oldest entries. An evicted
+ * toast still leaves through its onAutoCommit — silently dropping a
+ * soft-delete toast would strand the task in pendingDeleteIds forever
+ * (hidden from the list and undeletable).
+ */
+function capToasts(list: AppToast[]): AppToast[] {
+  if (list.length <= TOAST_STACK_LIMIT) {
+    return list;
+  }
+  for (const evicted of list.slice(TOAST_STACK_LIMIT)) {
+    evicted.onAutoCommit?.();
+  }
+  return list.slice(0, TOAST_STACK_LIMIT);
+}
+
 /**
  * Toasts created while a modal owned focus. They are kept out of `toasts` so the
  * viewport never renders them behind a scrim, where the user could not read them
@@ -57,7 +76,8 @@ function flushDeferredToasts() {
   if (deferredToasts.length === 0) return;
   const ready = deferredToasts;
   deferredToasts = [];
-  useToastStore.setState((state) => ({ toasts: [...ready.reverse(), ...state.toasts].slice(0, 20) }));
+  const current = useToastStore.getState().toasts;
+  useToastStore.setState({ toasts: capToasts([...ready.reverse(), ...current]) });
 }
 
 subscribeModalFocus(() => {
@@ -91,12 +111,10 @@ export const useToastStore = create<ToastStore>((set, get) => ({
     // Errors are not deferred: they may explain why a control inside the open
     // dialog is not responding, so hiding them would strand the user.
     if (created.tone !== "error" && isModalFocusActive()) {
-      deferredToasts = [created, ...deferredToasts].slice(0, 20);
+      deferredToasts = capToasts([created, ...deferredToasts]);
       return id;
     }
-    set((state) => ({
-      toasts: [created, ...state.toasts].slice(0, 20),
-    }));
+    set({ toasts: capToasts([created, ...get().toasts]) });
     return id;
   },
   updateToast: (id, patch) => {
