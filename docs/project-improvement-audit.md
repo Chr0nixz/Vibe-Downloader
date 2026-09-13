@@ -326,7 +326,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：三个列表使用同一 ARIA 模型；校验失败时输入框与错误文案有程序化关联；用 `jest-axe` 补测试（`QueueCenter.a11y.test.tsx` 是现成模板）。
 - **2026-09-13 部分修复 + 证据修正**：核实发现 QueueCenter 早已改为 `list`/`listitem` + `aria-current`（本条证据过时）——真正的孤儿是 AttentionCenter 的 `listbox`/`option`。现已把 AttentionCenter 统一到 `list`/`listitem` + `aria-current` + 单一 tab stop，键盘导航保持不变（新增 `AttentionCenter.a11y.test.tsx` 两条断言）。**剩余**（TaskRow `task-option-${id}` 改名与 NDD 其余校验输入的 `aria-invalid`/`aria-describedby` 关联）因相关文件被并行特性开发占用而暂缓；设置页数值 clamp 的完整校验 UI 按修复方向的原 note 继续沿 `SettingsRow` 层方案另行处理。
 
-### UX-19（P2，Open）：Toast 达到 20 条上限时静默驱逐待撤销删除，任务被隐藏且无法删除
+### UX-19（P2，Closed）：Toast 达到 20 条上限时静默驱逐待撤销删除，任务被隐藏且无法删除
 
 - **证据**：[`toast-store.ts`](../src/stores/toast-store.ts#L67) 的 `addToast` 以 `.slice(0, 20)` 丢弃最老 toast，但不像 key 去重路径（`:56-58`）、`clearToasts`（`:79-85`）与超时/X 按钮（`settleCommit`）那样结算被移除项的 `onAutoCommit`。软删除完全依赖该回调提交：`AppShell.softDelete`（[`AppShell.tsx`](../src/components/shell/AppShell.tsx#L567)）把 id 放入 `pendingDeleteIds` 后只有 toast 的 commit/undo 会调用 `deleteTask` + `removePendingDelete`；`clearPendingDeletes`（task-ui-store.ts:121）零生产调用方。`TaskList.tsx:149-155` 按 `pendingDeleteIds` 过滤行；`softDelete` 在 id 已 pending 时早退（AppShell.tsx:570），二次删除无法自愈。
 - **影响**：7 秒撤销窗口内涌入约 20 条 toast 即可触发——批量完成/失败事件每任务一条且无去重键（use-task-events.ts:154-171）。撤销 toast 被切片丢弃后 `deleteTask` 永不下发：任务从列表消失、DB 行与文件仍在、不可撤销也不可再删，重启后才「复活」。`toast-soft-delete.test.tsx` 覆盖了超时/手动/clearAll，唯独没有 cap-eviction 路径。
@@ -335,14 +335,16 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-13 修复**：三处 `.slice(0, 20)`（addToast 主路径、deferred 插入、flushDeferredToasts 合并）统一抽为 `capToasts` 助手——驱逐前对每个被丢弃 toast 调用 `onAutoCommit?.()`，与 clearToasts 同语义。软删除被驱逐时落地为真删除，pendingDeleteIds 不再留孤儿；被驱逐项的 UI 通知按既有能力限制安静消失（同 clearAll 行为）。
 - **验证测试**：`toast-soft-delete.test.tsx` 新增 cap-eviction 用例——21 条 undo toast 进栈，最老一条被驱逐且其 `onAutoCommit` 恰好调用一次、其余 20 条保持可见未提交。
 
-### UX-20（P2，Open）：队列重排失败后乐观顺序不回滚，loading 标志永久卡死
+### UX-20（P2，Closed）：队列重排失败后乐观顺序不回滚，loading 标志永久卡死
 
 - **证据**：[`AppShell.tsx`](../src/components/shell/AppShell.tsx#L287) 先 `reorderTasksLocally(orderedIds)` 再调后端；catch 块（`:290-299`）注释称「触发刷新」但实际只执行 `setLoading(true)`——没有任何代码订阅 `loading` 来触发拉取（setLoading 只是 `set({ loading })`），唯一复位点是 TaskList role=replace loadPage 的 finally（TaskList.tsx:209-213），仅导航/排序/筛选/viewReloadToken 变化可达。
 - **影响**：后端拒绝的重排一直显示在界面上；Queue/Attention 工作区的 Load more 按钮停在「Loading more...」禁用态（QueueCenter.tsx:256-260），直到用户改导航/排序/筛选或某个无关事件触发刷新。
 - **修复方向**：catch 中真正刷新（复用 refreshTasks 或 bump viewReloadToken），不要只置 loading；顺带给乐观重排补失败回滚到上一顺序。
 - **验收**：mock `reorder_queued_tasks` 失败后列表回到服务器顺序且 Load more 可用。
+- **2026-09-13 修复**：`reorderTasksLocally` 返回回滚句柄（重排前的 tasks 数组快照，恢复时重建 taskIds/taskIndexById）；`handleReorder` catch 中回滚乐观顺序并 `refreshTasks()` 重新拉取服务器权威顺序，`setLoading(true)` 调用彻底删除（Load more 不再有卡死态）。refreshTasks 自身同步补 try/catch + 错误 toast——catch 处理器内部的 await 不能自己成为新的无声 rejection 源。
+- **验证测试**：`task-data-store.reorder.test.ts` 三条用例——全集重排命中位置映射且回滚恢复原序与索引、回滚恢复精确快照（重排后到回滚前的 intervening 变更被快照语义覆盖，调用方随后以刷新取权威顺序）、空 id 列表返回 null 不动状态。敏感性验证：回滚句柄替换为 no-op 后前两条用例立即变红。handleReorder 的 4 行粘合（句柄 + refreshTasks 复用）未另建整机挂载测试（AppShell 无全量 mock 基建，仅为 4 行粘合搭建不成比例），由 store 级语义测试 + 全量回归覆盖。
 
-### UX-21（P2，Open）：Toast 计时器因依赖链断裂被任意无关渲染重置
+### UX-21（P2，Closed）：Toast 计时器因依赖链断裂被任意无关渲染重置
 
 - **证据**：[`toast.tsx`](../src/components/ui/toast.tsx#L55) 的 ToastViewport 每次渲染传新的内联箭头 `onDismiss={() => dismissToast(toast.id)}` → `settleCommit([onDismiss])` → `startTimer([settleCommit])` → effect `[startTimer]`（`:130-137`、`:157-160`）。ToastItem 未 memo 化，任何 addToast/updateToast/dismissToast 都产生新数组引用并重渲染 viewport。`startTimer` 重设 `startedAtRef = Date.now()` 不扣减已流逝时间（只有 pauseTimer 做），并 `countdownKey+1` 使 CSS 倒计时条经 key 重挂载从头播放。
 - **影响**：批量操作反复更新自己的进度 toast 时（runBulkTransferAction，AppShell.tsx:392-427），所有可见 toast 的剩余寿命与倒计时条被连带重置，陈旧 toast 远超 4800ms 存活；软删除硬提交的唯一时钟就是这个 timer（UNDO_TOAST_TIMEOUT_MS），被无限期推迟，同时放大 `UX-19` 的驱逐窗口。
@@ -351,7 +353,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-13 修复**：`onDismiss` 进入与 `onAutoCommitRef` 同款的 ref 模式（视口每渲染传新内联箭头不再改变 settle 身份），`settleCommit`/`settleUndo` 依赖数组清空 → `startTimer` 恒定 → 计时 effect 每挂载只跑一次，无关渲染不再 clearTimeout+重启；hover resume 路径本就基于 `remainingRef` 扣减流逝时间，保持不变。倒计时条随之不再被无关更新重挂载归零。
 - **验证测试**：`toast-soft-delete.test.tsx` 新增「无关 store 更新不重置计时」用例——撤销 toast 3 秒后插入无关 toast，推进到原 7 秒截止点恰好提交一次。旧行为敏感性：恢复 onDismiss 依赖链后该用例失败。
 
-### UX-22（P3，Open）：StartupGate 单次轮询错误即永久终止自动轮询
+### UX-22（P3，Closed）：StartupGate 单次轮询错误即永久终止自动轮询
 
 - **证据**：[`StartupGate.tsx`](../src/components/shell/StartupGate.tsx#L44) 的轮询循环只在成功路径调度下一次 `setTimeout(check, 300)`（`:49`）；catch 直接 `setLoadError` 渲染终态 StartupFailedPage，无退避重试。tauri 层 `runCommand`（tauri.ts:90-100）与 `getStartupStatus` 均无重试包装。
 - **影响**：后端重初始化期间一次 IPC 抖动直接进失败页——即使数百毫秒后 ready 也需要用户注意到并手动 Retry。
@@ -360,14 +362,16 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-13 修复**：轮询循环加连续失败预算（3 次，1s/2s/4s 指数退避）——预算内继续自动轮询（用户停留在 splash），任何一次成功即清零预算；预算耗尽才落 StartupFailedPage，手动 Retry 路径保持不变（重置 pollKey 即重置预算）。
 - **验证测试**：`StartupGate.test.tsx` 两条新用例（假定时器）：两次失败后第三次成功自动进入就绪、无失败页；持续失败耗尽预算后失败页出现且手动 Retry 恢复（原「单次错误即需手动 Retry」用例随行为更新为预算耗尽场景）。
 
-### UX-23（P3，Open）：剪贴板 / file-drop 监听器随对话框状态拆除重建，窗口期内事件丢失
+### UX-23（P3，Closed）：剪贴板 / file-drop 监听器随对话框状态拆除重建，窗口期内事件丢失
 
 - **证据**：clipboard effect 的依赖数组含 `newDownloadOpen/newDownloadDraftDirty/t`（AppShell.tsx:1025），file-drop 同型（`:1122`）；依赖翻转时同步 unlisten、await IPC 后才重新注册，而这些都是 fire-and-forget 通知、无回放（tauri.ts:993-1002、1070+）。tray 监听依赖全稳定、不受影响。
 - **影响**：打开新建对话框或草稿变脏的瞬间检测到的链接静默丢失——无 toast、无预填。窗口为毫秒级 IPC 往返，命中概率低但后果是无声丢功能。
 - **修复方向**：回调依赖收进 ref 使 handler 稳定，监听器一次注册终身持有；或在重注册完成后向后端查询一次 missed 状态兜底。
 - **验收**：注册-注销窗口内触发的事件最终得到处理。
+- **2026-09-13 修复**：抽出 [`useClipboardLinkMonitor`](../src/hooks/use-clipboard-link-monitor.ts) / [`useFileDropMonitor`](../src/hooks/use-file-drop-monitor.ts) 两个 hook——事件回调经 ref 读取最新闭包，监听器在组件生命周期内只注册一次，注册完成前卸载仍会补发 unlisten；对话框状态（`newDownloadOpen/newDownloadDraftDirty`）改为事件到达时在 handler 内读取，重注册 await 窗口不复存在。AppShell 两个内联 effect 换用 hook，监听语义（草稿活跃时 toast 提示、否则直接应用）逐行保持。
+- **验证测试**：`use-link-monitors.test.ts` 三条用例——重渲染（回调身份变化）不拆装监听器且事件派发给最新回调、注册 resolve 前卸载仍调用 unlisten、drop/drag-state 两类事件均转发到最新 handler。
 
-### UX-24（P3，Open）：复制诊断按钮吞掉剪贴板失败仍提示「已复制」
+### UX-24（P3，Closed）：复制诊断按钮吞掉剪贴板失败仍提示「已复制」
 
 - **证据**：[`TaskRecoveryActions.tsx`](../src/components/tasks/TaskRecoveryActions.tsx#L26) 执行 `navigator.clipboard.writeText(text).catch(() => {})` 后无条件弹 info toast `recovery.errorCopied`。对比其余全部 copy 处理器（AppShell.copyTaskUrl/copyTaskLocalPath、AboutPage.copyVersion、TaskDetails.copyToClipboard、EnvironmentPanel）都有错误分支。
 - **影响**：webview 失焦/权限拒绝是 Chromium 标准拒绝场景——用户以为诊断报告已复制、实际什么都没有，故障上报流程悄悄断裂。
@@ -382,6 +386,8 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **影响**：IPC 失败时按钮毫无反馈地死掉；同一场故障走列表自身加载路径有横幅、走右键 Refresh 什么都没有。
 - **修复方向**：统一经 safeInvoke 包装（失败 toast）；至少给上述五处补 catch。
 - **验收**：mock 各自 reject 时均有用户可见反馈。
+- **2026-09-13 修复（部分，5 处中 4 处）**：refreshTasks 包 try/catch + 错误 toast（右键 Refresh、重排回滚等 fire-and-forget 调用不再产生无声 rejection）；resolveAttention 的 choose_another_folder picker 补 try/catch + 错误 toast；SettingsPage 的 chooseDirectory/handleBrowseFfmpegPath 对齐同页 syncAutostart 范本补 catch + 错误 toast；getPlatform 补 `.catch` 卫生（其内部已有 fallback，此为防 unhandled rejection 的最后一道）。**剩余**：NewDownloadDialog 三处 picker——该文件正被并行特性开发整文件重写（400+ 行在途改动），为避免冲突推迟，待其落地后按同一范本补齐并闭合本条。
+- **验证测试**：`SettingsPage.test.tsx` 两条新用例——save-dir picker 与 ffmpeg path picker mock reject 后断言真实 toast store 出现 `toast.actionFailed` 错误项（ffmpeg 用例经 aria-controls 定位展开默认折叠的 External tools 区块）。refreshTasks 的失败分支由 `TaskList.scroll.test.tsx` 同款挂载路径覆盖类型与回归，未单列 reject 用例（AppShell 无全量 mock 基建）。
 
 ## 六、程序功能丰富性和完整性
 
