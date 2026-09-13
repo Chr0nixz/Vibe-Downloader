@@ -721,13 +721,19 @@ async fn restart_task_from_beginning(
     // runtime lock. tokio::sync::Mutex is not re-entrant, so we do not
     // re-acquire here.
     if let Some(control) = state.downloads.lock().await.remove(&task.id) {
-        control.cancel_token.cancel();
-        if let Some(h) = control.handle.as_ref() {
-            h.abort();
-        }
+        // ARC-45: cancel + drain, not bare abort — abort takes effect at the
+        // next await, so a worker mid-write keeps the temp handle open and on
+        // Windows the removal below becomes delete-pending while the new
+        // worker's create() hits ACCESS_DENIED.
+        crate::cancel_and_drain_control(control, std::time::Duration::from_secs(5)).await;
     }
+    // ARC-45: removal failures no longer abort the restart — a stale artifact
+    // must not leave the task half-reset; the new worker creates/truncates
+    // its temp files anyway.
     if let Some(temp_path) = task.temp_path.as_deref() {
-        remove_task_path(temp_path)?;
+        if let Err(error) = remove_task_path(temp_path) {
+            tracing::warn!(task_id = %task.id, path = %temp_path, error = %error, "restart: stale temp removal failed, continuing");
+        }
     }
 
     let engine = state.engine_registry.engine_for_uri(&task.url)?;

@@ -1016,12 +1016,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-13 修复**：`start_task -> Result<StartTaskOutcome, String>`（Started/AlreadyActive/ConflictSkipped，全仓唯一调用方是 dispatch_inner，影响面收敛）；计数逻辑抽为纯函数 `account_start_outcome`——仅 `Started` 计数：AlreadyActive 行已在 downloads 初值里（原实现实为**双计**），ConflictSkipped 从未 spawn worker（原实现凭空占额）。方向保守性不变：非 Started 出口不计即从不虚高。
 - **验证测试**：`convergence_tests::arc44_start_outcome_accounting_counts_only_started`——三分支逐一记账断言（Started +1/+slots、AlreadyActive/ConflictSkipped 零变化、无凭空 host 键），逐字满足验收；敏感性验证：计数改为无条件后用例失败。
 
-### ARC-45（P3，Open）：restart 用 abort 不排空即删临时文件，Windows delete-pending 可致新 worker ACCESS_DENIED
+### ARC-45（P3，Closed）：restart 用 abort 不排空即删临时文件，Windows delete-pending 可致新 worker ACCESS_DENIED
 
 - **证据**：pause/cancel/retry×2 均「cancel + timeout(5s) drain」（actions.rs:245-247,333-335,379-381,468-470），唯 restart_task_from_beginning 是 cancel + h.abort()（tasks.rs:723-728）后立刻 remove_task_path（:729-731）。abort 只在下一个 await 生效、spawn_blocking 写入不可中断 → 旧 handle 可仍开着；std 以 FILE_SHARE_DELETE 开文件，删除成为 delete-pending，随后新 worker 的 OpenOptions::create 得 ERROR_ACCESS_DENIED。remove 错误还经 ? 中止 restart（:730 → actions.rs:828），留下未重置的任务。前置说明：NeedsAttention 通常无活 worker，但 BT 边下边置 NeedsAttention（bt.rs:578-598）+ resolve 无状态门使重叠可达；tasks.rs:723 的防御性 remove 也说明 stale control 在预期内。
 - **影响**：Restart 后新下载打不开同名 temp → 数秒内 Failed「Access is denied」，用户眼中的「重启下载」不可靠。
 - **修复方向**：对齐 checkpoint-drain 模式（cancel + drain 5s，超时再 abort 并二次等待）；remove 失败不中止 restart（容忍残留，新 worker 截断写）。
 - **验收**：慢写 worker 下 restart 断言新下载成功打开 temp。
+- **2026-09-13 修复**：lib.rs 新增 `cancel_and_drain_control(control, grace)`——单控制版两段式排空（Phase1 `timeout(grace, &mut handle)` 优雅等待；超时 Phase2 abort + join；经 `&mut` await 使 handle 所有权跨过 timeout 分支，避开 JoinHandle 二次 await 的 panic），与 shutdown 的 `drain_download_handles` 同语义。restart 改用它（5s grace）替代裸 abort；temp 与 auxiliary artifacts 的删除失败降级为 warn + 继续（不再 `?` 中止 restart——陈旧残留不应让任务停在半重置态，新 worker 本就 create/truncate 重建 temp）。并行特性同期加入的 artifact 清理点一并纳入容错。
+- **验证测试**：新建 `tests/restart_quiesce.rs` 两条（无 AppHandle，直接驱动排空助手）——慢写 worker（持句柄循环写、20ms 轮询取消）断言排空返回时 worker 已退出、temp 可删、新 `create()` 成功（症状检查，Windows CI 上真实有效）；顽固 worker（忽略取消、睡 30s）断言 200ms grace 内经 abort+join 返回且路径可建。敏感性验证：助手临时还原为 abort-不排空 → 首条用例失败（exited 标志未置）。验收偏离记录：restart 函数硬依赖 `&AppHandle`（emit/default_download_dir/dispatch），故验收断言落在抽出的排空核心 + restart 内删改点的代码审阅，与 ARC-40 同款偏离。
 
 ### ARC-46（P3，Open）：完成动作可在最后一个文件仍在哈希校验时触发关机
 

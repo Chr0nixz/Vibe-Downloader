@@ -417,8 +417,14 @@ fn emit_payload<T: Clone + serde::Serialize>(app: &AppHandle, event: &str, paylo
 mod tests {
     use super::*;
 
+    /// The cache behind these tests is a process global (`FILES_VERSION_CACHE`).
+    /// Parallel test threads interleave the insert/evict sequences and flake the
+    /// size assertions, so every cache test holds this lock for its whole body.
+    static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn task_file_version_cache_evicts_deleted_tasks() {
+        let _guard = CACHE_TEST_LOCK.lock().expect("cache test lock");
         clear_task_files_version_cache();
         {
             let mut cache = files_version_cache().lock().expect("cache lock");
@@ -437,6 +443,7 @@ mod tests {
 
     #[test]
     fn task_file_version_cache_evicts_oldest_when_full() {
+        let _guard = CACHE_TEST_LOCK.lock().expect("cache test lock");
         clear_task_files_version_cache();
         {
             let mut cache = files_version_cache().lock().expect("cache lock");

@@ -188,6 +188,32 @@ pub async fn drain_download_handles(
     }
 }
 
+/// ARC-45: cancel a download worker and wait until it is actually gone before
+/// callers delete files the worker may still hold open. The previous restart
+/// path aborted without joining, so on Windows a not-yet-polled worker kept
+/// the temp file handle open: `remove_file` became delete-pending and the new
+/// worker's `create()` failed with ACCESS_DENIED. Phase 1 awaits the handle
+/// gracefully for `grace`; on expiry Phase 2 aborts AND joins (mirroring
+/// [`drain_download_handles`]) so no I/O outlives the call.
+pub async fn cancel_and_drain_control(control: DownloadControl, grace: std::time::Duration) {
+    control.cancel_token.cancel();
+    let Some(mut handle) = control.handle else {
+        return;
+    };
+    // Await through `&mut` so ownership survives the timeout branch —
+    // `timeout(grace, handle)` would consume the handle on both outcomes and
+    // make the abort phase impossible (JoinHandle panics on double await).
+    if tokio::time::timeout(grace, &mut handle).await.is_ok() {
+        return;
+    }
+    tracing::warn!("restart drain budget expired, aborting the download worker");
+    handle.abort();
+    match handle.await {
+        Ok(()) => tracing::debug!("aborted download worker joined"),
+        Err(e) => tracing::warn!(error = %e, "aborted download worker join error"),
+    }
+}
+
 /// R-4: Single source of truth for the command list shared between
 /// `tauri_specta::collect_commands!` (Specta bindings) and
 /// `tauri::generate_handler!` (runtime invoke handler). Both macros have
