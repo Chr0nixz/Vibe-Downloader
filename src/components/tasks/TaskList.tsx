@@ -376,14 +376,18 @@ export const TaskList = memo(function TaskList({
     [setSelectedIds],
   );
 
-  // Ensure the selected row is scrolled into view (e.g. after initial load).
+  // UX-17: scroll the selected row into view only when the selection itself
+  // changes. `filtered` gets a fresh identity on every infinite-scroll append,
+  // so keeping it in the deps re-centered the viewport onto the selection after
+  // each page load; the latest list is read through filteredRef instead.
+  const lastScrolledSelectedIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!selectedId || filtered.length === 0) return;
-    const index = filtered.indexOf(selectedId);
-    if (index >= 0) {
-      virtualizer.scrollToIndex(index, { align: "center" });
-    }
-  }, [selectedId, filtered, virtualizer]);
+    if (!selectedId || lastScrolledSelectedIdRef.current === selectedId) return;
+    const index = filteredRef.current.indexOf(selectedId);
+    if (index < 0) return;
+    lastScrolledSelectedIdRef.current = selectedId;
+    virtualizer.scrollToIndex(index, { align: "center" });
+  }, [selectedId, virtualizer]);
 
   const navigateRow = useCallback(
     (direction: "next" | "prev") => {

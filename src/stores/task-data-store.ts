@@ -303,7 +303,7 @@ interface TaskDataStore {
   ) => void;
   upsertTask: (task: Task) => void;
   upsertTasksBatch: (tasks: Task[]) => void;
-  reorderTasksLocally: (orderedIds: string[]) => void;
+  reorderTasksLocally: (orderedIds: string[]) => (() => void) | null;
   patchTask: (payload: TaskProgressPayload | unknown) => PatchTasksBatchResult;
   patchTasksBatch: (payloads: Array<TaskProgressPayload | unknown>) => PatchTasksBatchResult;
   setGlobalTaskStats: (stats: TaskStats | TaskStatsSnapshot | null) => void;
@@ -539,10 +539,13 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
   // UX-5: Optimistic local reorder of queued tasks. Replaces the affected
   // tasks in-place within the `tasks` array to match `orderedIds`, keeping
   // all non-affected tasks in their current positions. Used by handleReorder
-  // to give immediate visual feedback before the backend confirms.
-  reorderTasksLocally: (orderedIds) =>
+  // to give immediate visual feedback before the backend confirms. Returns a
+  // rollback handle that restores the exact pre-reorder snapshot (UX-20), or
+  // null when there is nothing to reorder.
+  reorderTasksLocally: (orderedIds) => {
+    if (orderedIds.length === 0) return null;
+    const previousTasks = get().tasks;
     set((state) => {
-      if (orderedIds.length === 0) return {};
       const affectedSet = new Set(orderedIds);
       const queue = [...orderedIds];
       const tasks = state.tasks.map((t) => {
@@ -557,7 +560,15 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
         taskIds: tasks.map((t) => t.id),
         taskIndexById: indexTasks(tasks),
       };
-    }),
+    });
+    return () => {
+      set({
+        tasks: previousTasks,
+        taskIds: previousTasks.map((t) => t.id),
+        taskIndexById: indexTasks(previousTasks),
+      });
+    };
+  },
 
   patchTask: (raw) => get().patchTasksBatch([raw]),
 

@@ -220,22 +220,34 @@ export function AppShell() {
     async (selectId?: string) => {
       // ARC-07: share epoch with TaskList so a late refresh cannot overwrite a newer query.
       const epoch = bumpListQueryEpoch();
-      const page = await listTasksCursor(taskCursorInput(null));
-      if (!isCurrentListQueryEpoch(epoch)) return;
-      const data = page.items;
-      setTaskCursorPage(data, page.minimumTotal, page.nextCursor, page.filterOptions);
-      if (selectId) {
-        selectTask(selectId);
-      } else {
-        const currentSelectedId = useTaskUIStore.getState().selectedId;
-        if (data.length > 0 && (!currentSelectedId || !data.some((task) => task.id === currentSelectedId))) {
-          selectTask(data[0].id);
-        } else if (data.length === 0) {
-          selectTask(null);
+      try {
+        const page = await listTasksCursor(taskCursorInput(null));
+        if (!isCurrentListQueryEpoch(epoch)) return;
+        const data = page.items;
+        setTaskCursorPage(data, page.minimumTotal, page.nextCursor, page.filterOptions);
+        if (selectId) {
+          selectTask(selectId);
+        } else {
+          const currentSelectedId = useTaskUIStore.getState().selectedId;
+          if (data.length > 0 && (!currentSelectedId || !data.some((task) => task.id === currentSelectedId))) {
+            selectTask(data[0].id);
+          } else if (data.length === 0) {
+            selectTask(null);
+          }
         }
+      } catch (err) {
+        // UX-25: refreshTasks is invoked fire-and-forget from several surfaces
+        // (context-menu Refresh, reorder revert); a rejection here would
+        // otherwise surface as a silent unhandled rejection.
+        log.error("refreshTasks failed", err);
+        addToast({
+          tone: "error",
+          title: t("toast.actionFailed"),
+          description: localizedErrorMessage(err, t),
+        });
       }
     },
-    [selectTask, setTaskCursorPage],
+    [addToast, selectTask, setTaskCursorPage, t],
   );
 
   const runTaskAction = useCallback(
@@ -319,8 +331,8 @@ export function AppShell() {
       }
       const orderedIds = next.map((t) => t.id);
       // UX-5: Optimistic update — reorder the store immediately so the user
-      // sees instant feedback. On failure, reload from server to revert.
-      useTaskDataStore.getState().reorderTasksLocally(orderedIds);
+      // sees instant feedback. On failure, roll back to the pre-reorder order.
+      const rollbackReorder = useTaskDataStore.getState().reorderTasksLocally(orderedIds);
       try {
         await reorderQueuedTasks(orderedIds);
       } catch (err) {
@@ -330,11 +342,15 @@ export function AppShell() {
           title: t("toast.actionFailed"),
           description: localizedErrorMessage(err, t),
         });
-        // Revert: trigger a refresh to reload the correct order from the server.
-        useTaskDataStore.getState().setLoading(true);
+        // UX-20: restore the pre-reorder order right away, then reload the
+        // authoritative server order. The previous `setLoading(true)` had no
+        // observer, so both the optimistic order and the loading flag stayed
+        // stuck until some unrelated event triggered a fetch.
+        rollbackReorder?.();
+        void refreshTasks();
       }
     },
-    [addToast, t],
+    [addToast, refreshTasks, t],
   );
 
   const finishRecording = useCallback(
