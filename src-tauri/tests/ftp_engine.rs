@@ -42,7 +42,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::Duration,
@@ -77,10 +77,20 @@ struct FtpServerConfig {
     data_chunk_delay: Option<Duration>,
 }
 
+/// ARC-42 hook state: per-path content/mtime overrides consulted before the
+/// static `files` map, so a test can replace a file between a pause and the
+/// resume without rebuilding the server.
+#[derive(Default)]
+struct FtpSwapState {
+    files: HashMap<String, Vec<u8>>,
+    mtimes: HashMap<String, String>,
+}
+
 /// A running FTP fake server. Drop stops the accept loop.
 struct FtpTestServer {
     addr: std::net::SocketAddr,
     stop: Arc<AtomicBool>,
+    swap: Arc<Mutex<FtpSwapState>>,
 }
 
 impl FtpTestServer {
@@ -90,18 +100,29 @@ impl FtpTestServer {
         let addr = listener.local_addr().expect("addr");
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
+        let swap: Arc<Mutex<FtpSwapState>> = Arc::new(Mutex::new(FtpSwapState::default()));
+        let thread_swap = swap.clone();
         thread::spawn(move || {
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let cfg = config.clone();
-                        thread::spawn(move || handle_ftp_session(stream, cfg));
+                        let swap = thread_swap.clone();
+                        thread::spawn(move || handle_ftp_session(stream, cfg, swap));
                     }
                     Err(_) => break,
                 }
             }
         });
-        Self { addr, stop }
+        Self { addr, stop, swap }
+    }
+
+    /// ARC-42: replace a served file's content and MDTM so a resumed
+    /// download sees a changed remote identity.
+    fn swap_file(&self, path: &str, content: Vec<u8>, mtime: &str) {
+        let mut swap = self.swap.lock().expect("swap state");
+        swap.files.insert(path.to_string(), content);
+        swap.mtimes.insert(path.to_string(), mtime.to_string());
     }
 
     fn url(&self, path: &str) -> String {
@@ -117,7 +138,11 @@ impl Drop for FtpTestServer {
     }
 }
 
-fn handle_ftp_session(mut stream: TcpStream, config: FtpServerConfig) {
+fn handle_ftp_session(
+    mut stream: TcpStream,
+    config: FtpServerConfig,
+    swap: Arc<Mutex<FtpSwapState>>,
+) {
     let _ = writeln!(stream, "220 vibe-test FTP server ready");
     let mut buf = [0u8; 512];
     // Per-session state. The engine issues commands in a fixed order
@@ -175,14 +200,19 @@ fn handle_ftp_session(mut stream: TcpStream, config: FtpServerConfig) {
                 let _ = writeln!(stream, "550 Could not get file size");
             } else {
                 let path = trimmed[5..].trim().to_string();
-                if let Some(payload) = config.files.get(&path) {
+                let swap_files = swap.lock().expect("swap state").files.clone();
+                let payload = swap_files.get(&path).or_else(|| config.files.get(&path));
+                if let Some(payload) = payload {
                     let _ = writeln!(stream, "213 {}", payload.len());
                 } else {
                     let _ = writeln!(stream, "550 File not found");
                 }
             }
         } else if upper.starts_with("MDTM ") {
-            let _ = writeln!(stream, "213 20260101000000");
+            let path = trimmed[5..].trim().to_string();
+            let swap_mtime = swap.lock().expect("swap state").mtimes.get(&path).cloned();
+            let mtime = swap_mtime.unwrap_or_else(|| "20260101000000".to_string());
+            let _ = writeln!(stream, "213 {mtime}");
         } else if upper.starts_with("REST ") {
             if config.reject_rest {
                 let _ = writeln!(stream, "501 REST not supported");
@@ -209,7 +239,9 @@ fn handle_ftp_session(mut stream: TcpStream, config: FtpServerConfig) {
             // downloads if a future test exercises the full download path.
             if let Some(listener) = data_listener.take() {
                 if let Ok((mut data_stream, _)) = listener.accept() {
-                    if let Some(payload) = config.files.get(&path) {
+                    let swap_files = swap.lock().expect("swap state").files.clone();
+                    let payload = swap_files.get(&path).or_else(|| config.files.get(&path));
+                    if let Some(payload) = payload.as_deref() {
                         let start = usize::try_from(rest_offset).unwrap_or(0);
                         if start < payload.len() {
                             if let Some(delay) = config.data_chunk_delay {
@@ -889,4 +921,211 @@ async fn arc31_parallel_cancel_drains_workers_before_checkpoint() {
         "checkpoint {checkpointed} leads durable bytes {durable}"
     );
     pool.close().await;
+}
+
+/// Shared pause-mid-transfer setup for the ARC-42 tests: start a 2 MiB
+/// download, cancel it once a partial offset is checkpointed, and return the
+/// artifacts needed for the resume leg.
+struct Arc42FtpFixture {
+    server: FtpTestServer,
+    pool: sqlx::SqlitePool,
+    paths: common::TestPaths,
+    payload: Vec<u8>,
+}
+
+async fn pause_ftp_download_mid_transfer(task_id: &str, payload_len: i64) -> Arc42FtpFixture {
+    let payload: Vec<u8> = (0..payload_len as usize)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let mut files = HashMap::new();
+    files.insert("/resume.bin".to_string(), payload.clone());
+    let server = FtpTestServer::start(FtpServerConfig {
+        files,
+        data_chunk_delay: Some(Duration::from_millis(10)),
+        ..FtpServerConfig::default()
+    });
+    let pool = common::test_pool("ftp-arc42").await;
+    let paths = common::TestPaths::new("ftp-arc42");
+    let mut task = common::download_task(
+        task_id,
+        server.url("resume.bin"),
+        "ftp",
+        "resume.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    // The production create path records the probe-time MDTM as the task's
+    // last_modified; the fake server's default MDTM is 2026-01-01T00:00:00Z.
+    task.last_modified = Some("2026-01-01T00:00:00+00:00".to_string());
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert FTP task");
+
+    let engine = new_engine();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let first_download = tokio::spawn({
+        let engine = engine.clone();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+    loop {
+        let segments = db::list_segment_records(&pool, task_id)
+            .await
+            .expect("list FTP segments");
+        if segments
+            .first()
+            .map(|segment| segment.downloaded_until)
+            .is_some_and(|downloaded| downloaded > 0)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        std::fs::metadata(&paths.temp)
+            .map(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX))
+            .unwrap_or(0)
+            < payload_len,
+        "the download must be cancelled before it finishes"
+    );
+    cancel.cancel();
+    first_download
+        .await
+        .expect("FTP download task join")
+        .expect("FTP cancellation is a clean pause boundary");
+
+    let current = db::get_task_record(&pool, task_id)
+        .await
+        .expect("read FTP task")
+        .expect("FTP task exists");
+    let no_app = Option::<tauri::AppHandle>::None;
+    state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &current.id,
+        TaskStatus::Paused,
+        current.downloaded_bytes,
+        0,
+        Some("Paused"),
+        Some("paused"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist FTP pause");
+
+    Arc42FtpFixture {
+        server,
+        pool,
+        paths,
+        payload,
+    }
+}
+
+async fn transition_ftp_back_to_downloading(
+    pool: &sqlx::SqlitePool,
+    task_id: &str,
+) -> tauri_app_lib::models::TaskRecord {
+    let current = db::get_task_record(pool, task_id)
+        .await
+        .expect("read FTP task")
+        .expect("FTP task exists");
+    let no_app = Option::<tauri::AppHandle>::None;
+    state_machine::transition_task_with_runtime_state(
+        &no_app,
+        pool,
+        &current.id,
+        TaskStatus::Downloading,
+        current.downloaded_bytes,
+        1,
+        Some("Downloading"),
+        Some("resumed"),
+        None,
+        SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist FTP resume")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc42_resume_rejects_same_size_remote_replacement() {
+    // ARC-42: a remote file replaced with the SAME size must not be stitched
+    // onto the local prefix. The engine revalidates MDTM before any worker
+    // RESTs blind, so this resume fails with remote_changed.
+    let fixture = pause_ftp_download_mid_transfer("ftp-arc42-same-size", 2 * 1024 * 1024).await;
+    let replacement = vec![0xFF_u8; fixture.payload.len()];
+    fixture
+        .server
+        .swap_file("/resume.bin", replacement, "20260202120000");
+
+    let resumed = transition_ftp_back_to_downloading(&fixture.pool, "ftp-arc42-same-size").await;
+    let engine = new_engine();
+    let error = engine
+        .download(common::headless_download_context(
+            fixture.pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("same-size replacement must fail the resume");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured remote_changed");
+    assert_eq!(payload.code, "remote_changed");
+
+    // The local prefix must be untouched: no worker ran, so nothing was
+    // appended and no final file was produced.
+    let durable = i64::try_from(
+        std::fs::metadata(&fixture.paths.temp)
+            .expect("temp file still exists")
+            .len(),
+    )
+    .expect("temp length fits i64");
+    let temp_bytes = std::fs::read(&fixture.paths.temp).expect("read FTP temp file");
+    let prefix = usize::try_from(durable).expect("offset fits usize");
+    assert_eq!(
+        &temp_bytes[..prefix],
+        &fixture.payload[..prefix],
+        "the original prefix must be untouched by a rejected resume"
+    );
+    assert!(
+        !fixture.paths.final_path.exists(),
+        "a rejected resume must not produce a final file"
+    );
+    fixture.pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc42_resume_rejects_size_change() {
+    // ARC-42: a remote file that grew/shrank must fail the size comparison
+    // even when MDTM is unchanged (same-second replacement on servers with
+    // second-granularity timestamps).
+    let fixture = pause_ftp_download_mid_transfer("ftp-arc42-size-change", 2 * 1024 * 1024).await;
+    let replacement = vec![0x7F_u8; fixture.payload.len() / 2];
+    fixture
+        .server
+        .swap_file("/resume.bin", replacement, "20260101000000");
+
+    let resumed = transition_ftp_back_to_downloading(&fixture.pool, "ftp-arc42-size-change").await;
+    let engine = new_engine();
+    let error = engine
+        .download(common::headless_download_context(
+            fixture.pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("size change must fail the resume");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured remote_changed");
+    assert_eq!(payload.code, "remote_changed");
+    assert!(
+        !fixture.paths.final_path.exists(),
+        "a size-mismatched resume must not produce a final file"
+    );
+    fixture.pool.close().await;
 }

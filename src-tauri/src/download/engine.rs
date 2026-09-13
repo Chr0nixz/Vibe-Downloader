@@ -64,6 +64,60 @@ pub(crate) fn emit_probe_phase(
     );
 }
 
+/// ARC-42: structured payload for a failed resume-identity revalidation.
+/// Resume blockers require a full restart — same shape as the HTTP
+/// prepare-path `resume_error` in `commands/task_resume.rs`, so the failure
+/// lands in NeedsAttention with restart as the recovery action.
+pub(crate) fn remote_changed_payload(protocol: &str, detail: &str) -> String {
+    crate::models::AppErrorPayload::new(
+        "remote_changed",
+        format!("{protocol} remote file changed during the download. {detail}"),
+        false,
+        vec!["restart", "check_url"],
+    )
+    .command_error()
+}
+
+/// ARC-42: shared resume-identity comparison for engines whose workers
+/// transfer blind from stored offsets (FTP REST, SFTP seek). Size is the
+/// primary guard; mtime only rejects when BOTH the probe-time and current
+/// values exist, so servers without MDTM/stat times keep the ability to
+/// resume. `None` metadata degrades to the legacy behavior with a warning.
+pub(crate) fn compare_remote_identity(
+    task: &TaskRecord,
+    protocol: &str,
+    remote_size: Option<i64>,
+    remote_mtime: Option<&str>,
+) -> Result<(), String> {
+    if task.total_size > 0 {
+        match remote_size {
+            Some(size) if size != task.total_size => {
+                return Err(remote_changed_payload(
+                    protocol,
+                    &format!(
+                        "Remote file size changed since the download started (expected {}, found {}). Restart the download to avoid corruption.",
+                        task.total_size, size
+                    ),
+                ));
+            }
+            Some(_) => {}
+            None => tracing::warn!(
+                task_id = %task.id,
+                "{protocol} size unavailable at resume; skipping size revalidation"
+            ),
+        }
+    }
+    if let (Some(expected), Some(actual)) = (task.last_modified.as_deref(), remote_mtime) {
+        if expected != actual {
+            return Err(remote_changed_payload(
+                protocol,
+                "Remote file was modified since the download started. Restart the download to avoid corruption.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct ProbeOutput {
     pub protocol: String,

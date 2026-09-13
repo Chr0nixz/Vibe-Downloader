@@ -62,11 +62,31 @@ pub struct SftpServerConfig {
     pub deny_open: bool,
 }
 
+/// ARC-42 hook state: per-path content/mtime overrides consulted before the
+/// static `files` map, so a test can replace a file between a pause and the
+/// resume without rebuilding the server.
+#[derive(Default)]
+pub struct SftpSwapState {
+    pub files: HashMap<String, Vec<u8>>,
+    pub mtimes: HashMap<String, u32>,
+}
+
 /// A running SFTP test server. Drop is a no-op; the server task ends when
 /// the test process exits or the listener errors.
 pub struct TestSftpServer {
     pub addr: SocketAddr,
     pub host_key_fingerprint: String,
+    swap: Arc<std::sync::Mutex<SftpSwapState>>,
+}
+
+impl TestSftpServer {
+    /// ARC-42: replace a served file's content and mtime so a resumed
+    /// download sees a changed remote identity.
+    pub fn swap_file(&self, path: &str, content: Vec<u8>, mtime: u32) {
+        let mut swap = self.swap.lock().expect("swap state");
+        swap.files.insert(path.to_string(), content);
+        swap.mtimes.insert(path.to_string(), mtime);
+    }
 }
 
 /// Start a test SFTP server with the given configuration. The server
@@ -93,9 +113,12 @@ pub async fn start_sftp_server(config: SftpServerConfig) -> TestSftpServer {
         ..Default::default()
     });
 
+    let swap: Arc<std::sync::Mutex<SftpSwapState>> =
+        Arc::new(std::sync::Mutex::new(SftpSwapState::default()));
     let mut server = TestSshServer {
         fs: InMemFs {
             files: Arc::new(config.files),
+            swap: swap.clone(),
             read_counter: Arc::new(Mutex::new(0)),
             fail_on_read: config.fail_on_read,
             stall_on_read: config.stall_on_read,
@@ -112,6 +135,7 @@ pub async fn start_sftp_server(config: SftpServerConfig) -> TestSftpServer {
     TestSftpServer {
         addr,
         host_key_fingerprint: fingerprint,
+        swap,
     }
 }
 
@@ -168,6 +192,9 @@ pub async fn connect_sftp(addr: SocketAddr, user: &str, password: &str) -> Clien
 #[derive(Clone)]
 struct InMemFs {
     files: Arc<HashMap<String, Vec<u8>>>,
+    /// ARC-42: content/mtime overrides consulted before `files` so a test
+    /// can swap a file's identity between a pause and the resume.
+    swap: Arc<std::sync::Mutex<SftpSwapState>>,
     /// Per-session read counter; used by `fail_on_read` to inject a
     /// failure on the N-th read call.
     read_counter: Arc<Mutex<usize>>,
@@ -208,7 +235,13 @@ impl SftpHandler for InMemFs {
         if self.deny_open {
             return Err(StatusCode::PermissionDenied);
         }
-        if self.files.contains_key(&filename) {
+        let swapped = self
+            .swap
+            .lock()
+            .expect("swap state")
+            .files
+            .contains_key(&filename);
+        if swapped || self.files.contains_key(&filename) {
             Ok(Handle {
                 id,
                 handle: filename,
@@ -244,7 +277,19 @@ impl SftpHandler for InMemFs {
         if let Some(delay) = self.read_chunk_delay {
             tokio::time::sleep(delay).await;
         }
-        let data = self.files.get(&handle).ok_or(StatusCode::BadMessage)?;
+        // Clone the (possibly swapped) content out of the guard — the std
+        // lock must not be held across the await-free remainder is fine, but
+        // the borrow cannot outlive this scope.
+        let swapped = self
+            .swap
+            .lock()
+            .expect("swap state")
+            .files
+            .get(&handle)
+            .cloned();
+        let data = swapped
+            .or_else(|| self.files.get(&handle).cloned())
+            .ok_or(StatusCode::BadMessage)?;
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
         if start >= data.len() {
             return Err(StatusCode::Eof);
@@ -303,11 +348,18 @@ impl SftpHandler for InMemFs {
         } else {
             path
         };
-        if let Some(data) = self.files.get(&normalized) {
+        let (swapped, swapped_mtime) = {
+            let swap = self.swap.lock().expect("swap state");
+            (
+                swap.files.get(&normalized).cloned(),
+                swap.mtimes.get(&normalized).copied(),
+            )
+        };
+        if let Some(data) = swapped.or_else(|| self.files.get(&normalized).cloned()) {
             let attrs = FileAttributes {
                 size: Some(data.len() as u64),
                 permissions: Some(FileMode::REG.bits() | 0o644),
-                mtime: Some(0),
+                mtime: Some(swapped_mtime.unwrap_or(0)),
                 ..FileAttributes::empty()
             };
             return Ok(Attrs { id, attrs });

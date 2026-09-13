@@ -971,12 +971,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：该分支改用能匹配 queued 的无条件 mark（或专用 mark_queued_start_failed：置 Failed/NeedsAttention + emit）。
 - **验收**：注入 header 解析失败的 stub 断言 queued 任务转为可见失败态而非原地踏步。
 
-### ARC-42（P2，Open）：FTP/SFTP resume 不重验远端 SIZE/MDTM，等大小替换文件造成新旧缝合
+### ARC-42（P2，Closed）：FTP/SFTP resume 不重验远端 SIZE/MDTM，等大小替换文件造成新旧缝合
 
 - **证据**：SIZE/MDTM 仅 probe 时采集（ftp.rs:160-169、sftp.rs:195-213），last_modified 存库后无人比对（唯一出现 ftp.rs:165,193）；resume 直接 REST {offset}（ftp.rs:762-769）/ seek（sftp.rs:894-905），没有 If-Range 等价物（HTTP 侧有 direct.rs:42-47、coordinator.rs:97-117 可对照）。完成判据仅 `downloaded >= total_size`（ftp.rs:644-652、sftp.rs:744-758）。
 - **影响**：暂停窗口内远端换成等大小新内容（镜像/rolling 文件常态）→ 半旧半新的文件标记 Completed。配置校验和可事后检出，但校验和可选（tests/ftp_engine.rs:29-31）。
 - **修复方向**：resume 前 MDTM/SIZE 比对 probe 记录，不一致即 fail_task_and_segments（沿用 resume_blocked/restart 恢复动作）。
 - **验收**：本地 FTP fixture 中途换等大小文件断言 resume 被拒且给出明确恢复指引。
+- **2026-09-13 修复（含证据修正）**：核实发现 FTP 走调度器恢复时 prepare 路径已会重探测比对（`resume_mismatch_message`）——本条的真实缺口是 **SFTP 在 skip-probe 分支完全无重验**，以及**两引擎 worker 盲传**（绕过 prepare 的直连路径零防护）。修复放在引擎层：download 入口在 `downloaded_bytes > 0`（续传态）时以短命控制连接重验——FTP 发 SIZE+MDTM，SFTP stat——共享比较器 `compare_remote_identity`（download/engine.rs，ARC-31 教训：跨引擎契约一处实现）：total_size 不等或双方 last_modified 均可得且不等 → `remote_changed` 稳定码（restart/check_url，落 NeedsAttention）；任一侧元数据不可得降级为日志+放行（不因服务器不支持 MDTM 误伤续传）。`downloaded_bytes == 0` 跳过（无可缝合前缀）。MDTM 秒级粒度限制记录在案：同秒替换由 size 守卫兜底。
+- **验证测试**：假服务器升级（FTP per-path MDTM + 内容覆盖层、SFTP InMemFs per-file mtime + 覆盖层 + `swap_file` 句柄）；`ftp_engine.rs::arc42_resume_rejects_same_size_remote_replacement`（等大小换内容+MDTM 前移 → remote_changed，且断言本地前缀逐字节未动、无成品文件）、`arc42_resume_rejects_size_change`（同 MDTM 换尺寸 → size 分支）、SFTP 同构两用例。旧行为敏感性：禁用 revalidate 后 FTP 两用例失败，恢复后通过；未换内容的既有 resume 测试（ARC-19 契约）全量回归不退化（ftp 18/18、sftp 22/22）。
 
 ### ARC-43（P2，Closed）：delete_runtime_task 按 HashMap 序挑首个成功 session，误删同种子其他任务的 torrent
 

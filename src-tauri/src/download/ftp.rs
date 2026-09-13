@@ -328,6 +328,36 @@ impl DownloadEngine for FtpEngine {
     }
 }
 
+/// ARC-42: revalidate the remote file identity before a resume. SIZE and
+/// MDTM are compared against the probe-time record; when either is
+/// unavailable (server limitation or transient error) the check degrades to
+/// the legacy blind resume instead of blocking restarts. The extra control
+/// connection runs once per download, not per segment.
+async fn revalidate_ftp_remote(
+    target: &FtpTarget,
+    proxy_config: &ResolvedProxyConfig,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    task: &TaskRecord,
+) -> Result<(), String> {
+    if task.downloaded_bytes <= 0 {
+        // Fresh start: there are no local bytes to stitch with.
+        return Ok(());
+    }
+    let mut session = connect_session(target, proxy_config, Some(cancel_token)).await?;
+    let remote_size = session
+        .size(&target.path)
+        .await
+        .ok()
+        .map(|size| i64::try_from(size).unwrap_or(i64::MAX));
+    let remote_mtime = session
+        .mdtm(&target.path)
+        .await
+        .ok()
+        .map(format_ftp_datetime);
+    let _ = session.quit().await;
+    super::engine::compare_remote_identity(task, "FTP", remote_size, remote_mtime.as_deref())
+}
+
 async fn run_ftp_download(
     target: FtpTarget,
     context: DownloadContext,
@@ -387,6 +417,13 @@ async fn run_ftp_download(
         .drain(..)
         .filter(|segment| segment.downloaded_until <= segment.range_end)
         .collect();
+
+    // ARC-42: workers REST blind from the stored offsets, so a remote file
+    // replaced with the same size would stitch old and new bytes undetected.
+    // Revalidate SIZE/MDTM on a short-lived control connection before any
+    // worker starts; metadata errors degrade to the legacy behavior.
+    revalidate_ftp_remote(&target, &proxy_config, &cancel_token, &task).await?;
+
     let mut running: HashMap<String, SegmentRuntime> = HashMap::new();
     let mut workers = JoinSet::new();
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();

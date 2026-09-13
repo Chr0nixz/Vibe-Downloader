@@ -1184,3 +1184,204 @@ async fn arc26_sftp_probe_with_cancelled_token_converges_immediately() {
     );
     pool.close().await;
 }
+
+/// Shared pause-mid-transfer setup for the ARC-42 tests.
+struct Arc42SftpFixture {
+    server: common::sftp_server::TestSftpServer,
+    pool: sqlx::SqlitePool,
+    paths: common::TestPaths,
+    payload: Vec<u8>,
+}
+
+async fn pause_sftp_download_mid_transfer(task_id: &str) -> Arc42SftpFixture {
+    common::install_test_secret_key();
+    let payload: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let mut files = HashMap::new();
+    files.insert("/resume.bin".to_string(), payload.clone());
+    let server = start_sftp_server(SftpServerConfig {
+        files,
+        read_chunk_delay: Some(std::time::Duration::from_millis(50)),
+        ..Default::default()
+    })
+    .await;
+    let pool = common::test_pool("sftp-arc42").await;
+    seed_matching_host_key(
+        &pool,
+        &server.addr.ip().to_string(),
+        server.addr.port(),
+        &server.host_key_fingerprint,
+    )
+    .await;
+    let paths = common::TestPaths::new("sftp-arc42");
+    let url = format!(
+        "sftp://{}:{}/resume.bin",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let mut task = common::download_task(
+        task_id,
+        url,
+        "sftp",
+        "resume.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    // The create path records the probe-time mtime (epoch for the fake
+    // server, which reports mtime=0 until a swap changes it).
+    task.last_modified = Some("1970-01-01T00:00:00+00:00".to_string());
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert SFTP task");
+    db::upsert_task_credentials(&pool, &task.id, "sftp", "u", "p", None, None)
+        .await
+        .expect("store credentials");
+
+    let engine = new_engine();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let first = tokio::spawn({
+        let engine = engine.clone();
+        let context = common::headless_download_context(pool.clone(), task, cancel.clone());
+        async move { engine.download(context).await }
+    });
+    loop {
+        let segments = db::list_segment_records(&pool, task_id)
+            .await
+            .expect("list segments");
+        if segments
+            .first()
+            .map(|segment| segment.downloaded_until)
+            .is_some_and(|downloaded| downloaded > 0)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        std::fs::metadata(&paths.temp)
+            .map(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX))
+            .unwrap_or(0)
+            < payload.len() as i64,
+        "the download must be cancelled before it finishes"
+    );
+    cancel.cancel();
+    first
+        .await
+        .expect("SFTP download task join")
+        .expect("SFTP cancellation is a clean pause boundary");
+
+    let current = db::get_task_record(&pool, task_id)
+        .await
+        .expect("read")
+        .expect("exists");
+    let no_app = Option::<tauri::AppHandle>::None;
+    tauri_app_lib::state_machine::transition_task_with_runtime_state(
+        &no_app,
+        &pool,
+        &current.id,
+        tauri_app_lib::models::TaskStatus::Paused,
+        current.downloaded_bytes,
+        0,
+        Some("Paused"),
+        Some("paused"),
+        None,
+        tauri_app_lib::models::SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist pause");
+
+    Arc42SftpFixture {
+        server,
+        pool,
+        paths,
+        payload,
+    }
+}
+
+async fn transition_sftp_back_to_downloading(
+    pool: &sqlx::SqlitePool,
+    task_id: &str,
+) -> tauri_app_lib::models::TaskRecord {
+    let current = db::get_task_record(pool, task_id)
+        .await
+        .expect("read")
+        .expect("exists");
+    let no_app = Option::<tauri::AppHandle>::None;
+    tauri_app_lib::state_machine::transition_task_with_runtime_state(
+        &no_app,
+        pool,
+        &current.id,
+        tauri_app_lib::models::TaskStatus::Downloading,
+        current.downloaded_bytes,
+        1,
+        Some("Downloading"),
+        Some("resumed"),
+        None,
+        tauri_app_lib::models::SegmentStatus::Pending,
+        None,
+        None,
+    )
+    .await
+    .expect("persist resume")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc42_sftp_resume_rejects_same_size_remote_replacement() {
+    // ARC-42: SFTP tasks skip the prepare-path re-probe entirely, so the
+    // engine-level stat is the only line of defense. A same-size remote
+    // replacement (changed mtime) must fail with remote_changed before any
+    // worker seeks blind into the replaced content.
+    let fixture = pause_sftp_download_mid_transfer("sftp-arc42-same-size").await;
+    let replacement = vec![0xFF_u8; fixture.payload.len()];
+    fixture.server.swap_file("/resume.bin", replacement, 3_600);
+
+    let resumed = transition_sftp_back_to_downloading(&fixture.pool, "sftp-arc42-same-size").await;
+    let engine = new_engine();
+    let error = engine
+        .download(common::headless_download_context(
+            fixture.pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("same-size replacement must fail the resume");
+    let payload: tauri_app_lib::models::AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured remote_changed");
+    assert_eq!(payload.code, "remote_changed");
+    assert!(
+        !fixture.paths.final_path.exists(),
+        "a rejected resume must not produce a final file"
+    );
+    fixture.pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc42_sftp_resume_rejects_size_change() {
+    // ARC-42: a remote file whose size changed must fail the size comparison
+    // even when the mtime is unchanged (same-second replacement semantics).
+    let fixture = pause_sftp_download_mid_transfer("sftp-arc42-size-change").await;
+    let replacement = vec![0x7F_u8; fixture.payload.len() / 2];
+    fixture.server.swap_file("/resume.bin", replacement, 0);
+
+    let resumed =
+        transition_sftp_back_to_downloading(&fixture.pool, "sftp-arc42-size-change").await;
+    let engine = new_engine();
+    let error = engine
+        .download(common::headless_download_context(
+            fixture.pool.clone(),
+            resumed,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("size change must fail the resume");
+    let payload: tauri_app_lib::models::AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured remote_changed");
+    assert_eq!(payload.code, "remote_changed");
+    assert!(
+        !fixture.paths.final_path.exists(),
+        "a size-mismatched resume must not produce a final file"
+    );
+    fixture.pool.close().await;
+}

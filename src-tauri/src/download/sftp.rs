@@ -435,6 +435,51 @@ pub async fn probe_sftp_directory_url(
     })
 }
 
+/// ARC-42: revalidate the remote file identity before a resume. SFTP tasks
+/// skip the prepare-path re-probe entirely (see `prepare_task_for_download`),
+/// so without this check a same-size remote replacement would stitch old and
+/// new bytes. Stat errors degrade to the legacy blind resume; the extra
+/// connection runs once per download, not per segment.
+async fn revalidate_sftp_remote(
+    pool: &SqlitePool,
+    target: &SftpTarget,
+    proxy_config: &ResolvedProxyConfig,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    task: &TaskRecord,
+) -> Result<(), String> {
+    if task.downloaded_bytes <= 0 {
+        // Fresh start: there are no local bytes to stitch with.
+        return Ok(());
+    }
+    let connection = connect_sftp(pool, target, proxy_config, Some(cancel_token)).await?;
+    let metadata = match connection.session.metadata(&target.path).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %error,
+                "SFTP stat unavailable at resume; skipping remote revalidation"
+            );
+            let _ = connection.session.close().await;
+            return Ok(());
+        }
+    };
+    let _ = connection.session.close().await;
+    if metadata.is_dir() {
+        return Err(super::engine::remote_changed_payload(
+            "SFTP",
+            "The remote path is now a directory.",
+        ));
+    }
+    let remote_size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+    let remote_mtime = metadata.mtime.map(|mtime| {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(i64::from(mtime), 0)
+            .unwrap_or_else(chrono::Utc::now)
+            .to_rfc3339()
+    });
+    super::engine::compare_remote_identity(task, "SFTP", Some(remote_size), remote_mtime.as_deref())
+}
+
 async fn run_sftp_download(
     target: SftpTarget,
     context: DownloadContext,
@@ -495,6 +540,12 @@ async fn run_sftp_download(
         .drain(..)
         .filter(|segment| segment.downloaded_until <= segment.range_end)
         .collect();
+
+    // ARC-42: workers seek blind on both sides of the transfer, so a remote
+    // file replaced with the same size would stitch old and new bytes
+    // undetected. Revalidate the remote identity before any worker starts.
+    revalidate_sftp_remote(&pool, &target, &proxy_config, &cancel_token, &task).await?;
+
     let mut running: HashMap<String, SegmentRuntime> = HashMap::new();
     let mut workers = JoinSet::new();
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
