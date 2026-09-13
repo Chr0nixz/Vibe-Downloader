@@ -1585,6 +1585,7 @@ fn headless_context_with_connections(
         task,
         cancel_token,
         finish: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        finish_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         speed_limiter: tauri_app_lib::download::GlobalSpeedLimiter::disabled(),
         connection_limit,
         request_headers: Vec::new(),

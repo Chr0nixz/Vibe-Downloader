@@ -36,6 +36,9 @@ const TRAY_MENU_SCREEN_MARGIN: f64 = 10.0;
 pub struct DownloadControl {
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub finish: Arc<AtomicBool>,
+    /// PERF-15: the finish command notifies this after `finish.store(true)` so
+    /// the waiting HLS loop wakes immediately instead of polling the DB flag.
+    pub finish_notify: Arc<tokio::sync::Notify>,
     pub handle: Option<JoinHandle<()>>,
     pub source_key: String,
     pub connection_slots: usize,

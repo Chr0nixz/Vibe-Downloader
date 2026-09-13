@@ -148,6 +148,9 @@ pub struct DownloadContext {
     pub task: TaskRecord,
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub finish: Arc<AtomicBool>,
+    /// PERF-15: woken by the finish command in the same process; replaces the
+    /// 100 ms DB polling as the prompt finish signal. Only HLS waits on it.
+    pub finish_notify: Arc<tokio::sync::Notify>,
     pub speed_limiter: Arc<GlobalSpeedLimiter>,
     pub connection_limit: usize,
     pub request_headers: Vec<(String, String)>,

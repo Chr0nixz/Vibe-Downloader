@@ -1154,12 +1154,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：删除 `Palette.tsx:147` 与 `:159` 两行（`taskById` 订阅已覆盖需求）；`useAppUpdater` 改为逐字段 selector 并用 `getState().init()` 摘掉 effect 依赖；给 6 个列表组件加 `memo` 并把内联箭头回调提为 `useCallback`。另外 `QueueCenter.tsx:90` 的 10 秒轮询缺少 visibility 门控与 in-flight 守卫，建议抽 `useVisibilityGatedPoll` 并同时应用到 `use-task-detail-queries.ts` 中重复 3 遍的同一模式。
 - **验收**：进度 tick 期间 Palette 与 TaskDetails 列表不重渲染；窗口隐藏时 QueueCenter 停止轮询。
 
-### PERF-15（P2，Open）：HLS live 轮询期间每 100 毫秒查询一次数据库
+### PERF-15（P2，Closed）：HLS live 轮询期间每 100 毫秒查询一次数据库
 
 - **证据**：[`hls/engine.rs`](../src-tauri/src/download/hls/engine.rs#L2033) 的 `wait_hls_finish_signal` 以 100ms 间隔循环调用 `db::hls_finish_requested`，它被放在 `select!` 中与 target duration（典型 6-10 秒）的 sleep 竞争。
 - **影响**：每个 live HLS 任务在每个轮询间隔内产生 60-100 次 SQLite 查询，仅为轮询一个布尔标志。多个 live 任务并发时会抢占连接池并与 checkpoint 写入争锁（`ARC-06` 刚处理过 BUSY_SNAPSHOT）。而 `finish: Arc<AtomicBool>` 已经在 `DownloadContext` 中，DB 查询只是多余的回退路径。
 - **修复方向**：改用 `tokio::sync::Notify`，由 finish 命令在写 DB 的同时 `notify_waiters()`；若必须保留 DB 兜底，把间隔提高到 1-2 秒。
 - **验收**：live 轮询期间的 SQLite 查询次数与轮询次数同阶，而非与 100ms tick 同阶。
+- **2026-09-13 修复**：按修复方向主路落地——`DownloadControl`（lib.rs）与 `DownloadContext`（engine.rs）各加 `finish_notify: Arc<Notify>`（同一实例，scheduler 在 start_task 注册时创建接线）；`finish_live_recording` 在 `finish.store(true)` 后 `notify_waiters()`。`wait_hls_finish_signal` 重构为「finish 标志 → DB 检查 → `select!{ notified, sleep(fallback) }`」——notify 即时唤醒，DB 兜底间隔 100ms→2s（常量 `HLS_FINISH_DB_FALLBACK`，函数参数化便于测试注入）。非 HLS 引擎的 context 解构以 `finish_notify: _` 吸收新字段。
+- **验证测试**：`hls/engine.rs` 内两条单测——notify 触发（fallback=60s）下 waiter 5s 内返回（证明走的是 Notify 而非轮询）；无 notify 时 DB 置位 + 200ms fallback 下 2s 内返回。敏感性验证：临时禁用 notify 分支 → 首条用例 5s 超时失败。验收映射：live 轮询的 DB 查询从「每 100ms 一次」（每 target-duration 轮询 60-100 次）降为「每 2s 兜底一次 + finish 即时唤醒」，查询次数与轮询次数同阶达成。
 
 ### PERF-16（P2，Open）：路径预留全表扫描与若干无 LIMIT 查询
 

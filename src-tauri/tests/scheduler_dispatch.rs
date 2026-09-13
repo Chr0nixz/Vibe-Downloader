@@ -103,6 +103,7 @@ async fn reserve_task_under_lock(
             DownloadControl {
                 cancel_token,
                 finish: finish.clone(),
+                finish_notify: Arc::new(tokio::sync::Notify::new()),
                 handle: None,
                 source_key: task.source_key.clone(),
                 connection_slots,

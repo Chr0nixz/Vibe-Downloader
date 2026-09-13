@@ -416,6 +416,9 @@ pub async fn finish_live_recording(
     db::request_hls_finish(&state.pool, &id).await?;
     if let Some(control) = state.downloads.lock().await.get(&id) {
         control.finish.store(true, Ordering::SeqCst);
+        // PERF-15: wake the waiting HLS loop immediately — the DB flag is its
+        // 2 s fallback, not the prompt path.
+        control.finish_notify.notify_waiters();
     }
     db::update_task_health_summary(&state.pool, &id, Some("Finishing HLS recording")).await?;
     db::insert_task_event(&state.pool, &id, "hls_finish_requested", None).await?;

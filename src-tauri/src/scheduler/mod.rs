@@ -339,6 +339,9 @@ impl Scheduler {
         // will listen on. This closes the race window where pause/cancel sees
         // status=Downloading in DB but no control entry to cancel the worker.
         let finish = Arc::new(AtomicBool::new(false));
+        // PERF-15: one Notify instance shared by the registered control (the
+        // finish command notifies it) and the worker context (HLS waits on it).
+        let finish_notify = Arc::new(tokio::sync::Notify::new());
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let source_key = task.source_key.clone();
         {
@@ -348,6 +351,7 @@ impl Scheduler {
                 DownloadControl {
                     cancel_token: cancel_token.clone(),
                     finish: finish.clone(),
+                    finish_notify: finish_notify.clone(),
                     handle: None, // pending — updated to Some(handle) after spawn
                     source_key: source_key.clone(),
                     connection_slots: connection_limit.max(1),
@@ -400,6 +404,7 @@ impl Scheduler {
         let task_app = app.clone();
         let task_cancel_token = cancel_token.clone();
         let task_finish = finish.clone();
+        let task_finish_notify = finish_notify.clone();
         let task_pool = pool.clone();
         let state_speed_limiter = self.speed_limiter.clone();
         let task_engine_registry = self.engine_registry.clone();
@@ -490,6 +495,7 @@ impl Scheduler {
                 task,
                 cancel_token: task_cancel_token.clone(),
                 finish: task_finish.clone(),
+                finish_notify: task_finish_notify.clone(),
                 speed_limiter: task_speed_limiter,
                 connection_limit,
                 request_headers: task_request_headers.clone(),
@@ -1002,6 +1008,7 @@ mod convergence_tests {
         DownloadControl {
             cancel_token: CancellationToken::new(),
             finish: Arc::new(AtomicBool::new(false)),
+            finish_notify: Arc::new(tokio::sync::Notify::new()),
             handle: None,
             source_key: source_key.to_string(),
             connection_slots: 1,

@@ -217,8 +217,8 @@ impl FtpEngine {
         if let Some(credentials) =
             db::resolve_task_credentials(&context.pool, &context.task.id).await?
         {
-            target.username = credentials.username;
-            target.password = credentials.password;
+            target.username = credentials.username.clone();
+            target.password = credentials.password.clone();
         }
         let proxy_config = context.proxy_config.clone();
         run_ftp_download(target, context, proxy_config).await
@@ -369,6 +369,7 @@ async fn run_ftp_download(
         task,
         cancel_token,
         finish: _,
+        finish_notify: _,
         speed_limiter,
         connection_limit,
         request_headers: _,

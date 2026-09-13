@@ -218,6 +218,7 @@ pub fn headless_download_context(
         task,
         cancel_token,
         finish: Arc::new(AtomicBool::new(false)),
+        finish_notify: Arc::new(tokio::sync::Notify::new()),
         speed_limiter: GlobalSpeedLimiter::disabled(),
         connection_limit: 1,
         request_headers: Vec::new(),

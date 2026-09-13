@@ -42,6 +42,7 @@ fn control_for(cancel: &CancellationToken, handle: tokio::task::JoinHandle<()>) 
     DownloadControl {
         cancel_token: cancel.clone(),
         finish: Arc::new(AtomicBool::new(false)),
+        finish_notify: Arc::new(tokio::sync::Notify::new()),
         handle: Some(handle),
         source_key: "quiesce-host".to_string(),
         connection_slots: 1,

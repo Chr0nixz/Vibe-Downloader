@@ -448,6 +448,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         task,
         cancel_token,
         finish,
+        finish_notify,
         speed_limiter,
         connection_limit,
         request_headers,
@@ -713,7 +714,13 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                 progress_gate.flush(&app);
                 return Ok(());
             }
-            _ = wait_hls_finish_signal(&finish, &pool, &task.id) => {
+            _ = wait_hls_finish_signal(
+                &finish,
+                Some(&finish_notify),
+                &pool,
+                &task.id,
+                HLS_FINISH_DB_FALLBACK,
+            ) => {
                 break;
             }
             _ = tokio::time::sleep(delay) => {}
@@ -2107,10 +2114,23 @@ async fn waiting_network_hls_task(
 }
 
 /// ARC-11: resolve finish during poll sleep without busy-spinning forever.
+/// PERF-15: DB fallback cadence for the finish signal. The in-process Notify
+/// is the prompt path; the DB flag is only a cross-boundary fallback (e.g. a
+/// future external trigger), so polling it at 2 s instead of 100 ms removes
+/// the 20-60 SQLite queries per target-duration poll that used to contend
+/// with checkpoint writes on the connection pool.
+const HLS_FINISH_DB_FALLBACK: Duration = Duration::from_secs(2);
+
+/// ARC-11: resolve finish during poll sleep without busy-spinning forever.
+/// PERF-15: wake on the finish command's `notify_waiters()` instead of
+/// polling the DB flag every 100 ms; the DB check remains as a low-frequency
+/// fallback and an empty `notify` keeps that fallback as the only source.
 async fn wait_hls_finish_signal(
     finish: &std::sync::atomic::AtomicBool,
+    notify: Option<&tokio::sync::Notify>,
     pool: &SqlitePool,
     task_id: &str,
+    db_fallback: Duration,
 ) {
     loop {
         if finish.load(Ordering::SeqCst) {
@@ -2122,7 +2142,15 @@ async fn wait_hls_finish_signal(
         {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        match notify {
+            Some(notify) => {
+                tokio::select! {
+                    _ = notify.notified() => {}
+                    _ = tokio::time::sleep(db_fallback) => {}
+                }
+            }
+            None => tokio::time::sleep(db_fallback).await,
+        }
     }
 }
 
@@ -2338,6 +2366,151 @@ fn sequence_iv(sequence: i64) -> [u8; 16] {
 mod tests {
     use super::*;
     use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn perf15_finish_notify_wakes_waiter_promptly() {
+        // PERF-15: the notify path must resolve the finish long before the DB
+        // fallback would — here the fallback is 60 s, so a return within 5 s
+        // proves the waiter was woken by notify_waiters(), not the poll.
+        let pool = test_pool_for_finish_signal().await;
+        let finish = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let setter_finish = finish.clone();
+        let setter_notify = notify.clone();
+        let setter = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            setter_finish.store(true, Ordering::SeqCst);
+            setter_notify.notify_waiters();
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_hls_finish_signal(
+                &finish,
+                Some(&notify),
+                &pool,
+                "task-perf15-notify",
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("notify must wake the finish waiter promptly");
+        setter.await.expect("setter task");
+    }
+
+    #[tokio::test]
+    async fn perf15_db_flag_fallback_returns_without_notify() {
+        // No notify: the low-frequency DB check is the only finish source.
+        // The flag is written after 100 ms and the fallback cadence is 200 ms,
+        // so the waiter must return well inside 2 s.
+        let pool = test_pool_for_finish_signal().await;
+        // hls_tasks.task_id is FK-bound to tasks; the finish flag is an
+        // UPDATE, so the row (and its parent task) must exist first.
+        let task = task_record_for_finish_signal("task-perf15-db");
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("seed task");
+        db::upsert_hls_task(
+            &pool,
+            db::HlsTaskUpsert {
+                task_id: "task-perf15-db",
+                input_url: "https://example.com/live.m3u8",
+                media_url: "https://example.com/live.m3u8",
+                playlist_kind: "event",
+                selected_bandwidth: None,
+                selected_resolution: None,
+                target_duration: 6,
+                last_media_sequence: None,
+                output_format: "mp4",
+                staging_dir: "staging",
+                selected_audio_track_uris: None,
+                selected_subtitle_track_uris: None,
+            },
+        )
+        .await
+        .expect("seed hls row");
+
+        let finish = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let setter = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        setter.await.expect("setter task");
+        db::request_hls_finish(&pool, "task-perf15-db")
+            .await
+            .expect("set finish flag");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_hls_finish_signal(
+                &finish,
+                None,
+                &pool,
+                "task-perf15-db",
+                Duration::from_millis(200),
+            ),
+        )
+        .await
+        .expect("DB fallback must resolve the finish signal");
+    }
+
+    async fn test_pool_for_finish_signal() -> SqlitePool {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vibe-hls-finish-{id}.sqlite"));
+        db::connect(&path)
+            .await
+            .expect("database connect with migrations")
+            .pool
+    }
+
+    /// Minimal parent row so the FK-bound `hls_tasks` entry can be seeded.
+    fn task_record_for_finish_signal(id: &str) -> crate::models::TaskRecord {
+        let now = crate::models::task::now_iso();
+        crate::models::TaskRecord {
+            id: id.to_string(),
+            url: "https://example.com/live.m3u8".to_string(),
+            final_url: None,
+            protocol: "https".to_string(),
+            task_kind: crate::models::TaskKind::SingleFile,
+            file_name: format!("{id}.mp4"),
+            save_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            temp_path: None,
+            final_path: None,
+            total_size: 0,
+            downloaded_bytes: 0,
+            status: crate::models::TaskStatus::Downloading,
+            etag: None,
+            last_modified: None,
+            content_type: None,
+            supports_resume: true,
+            supports_parallel: false,
+            supports_multi_file: false,
+            source_key: "example.com".to_string(),
+            connection_count: 0,
+            speed_bps: 0,
+            task_speed_limit_bps: None,
+            priority: crate::models::TaskPriority::Normal,
+            queue_position: 0,
+            category_key: None,
+            obey_schedule: false,
+            health_summary: None,
+            error_message: None,
+            error_code: None,
+            recovery_actions: Vec::new(),
+            retry_after_at: None,
+            expected_hash_sha256: None,
+            actual_hash_sha256: None,
+            hash_status: crate::models::HashVerificationStatus::NotRequested,
+            hash_error: None,
+            hash_verified_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+            files_version: 0,
+        }
+    }
 
     #[test]
     fn derives_aes_iv_from_sequence() {
