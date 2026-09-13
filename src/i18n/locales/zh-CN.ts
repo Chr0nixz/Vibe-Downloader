@@ -1521,6 +1521,7 @@ const zhCN = {
     hlsSegmentFailed: "HLS 分段下载失败。",
     hlsSegmentStalled: "HLS 分段下载停滞。",
     hlsSegmentTooLarge: "HLS 分段超过大小限制。",
+    hlsStateReadFailed: "无法读取 HLS 任务状态，请重试下载。",
     hlsTrackFailed: "所选 HLS 音轨或字幕轨下载失败。",
     hlsUnsupportedEncryption: "不支持此 HLS 加密方式。",
     httpDenied: "访问被拒绝（403）。请检查 URL 或凭据。",

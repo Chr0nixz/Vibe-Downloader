@@ -1521,6 +1521,7 @@ const zhTW = {
     hlsSegmentFailed: "HLS 分段下載失敗。",
     hlsSegmentStalled: "HLS 分段下載停滯。",
     hlsSegmentTooLarge: "HLS 分段超過大小限制。",
+    hlsStateReadFailed: "無法讀取 HLS 任務狀態，請重試下載。",
     hlsTrackFailed: "所選 HLS 音軌或字幕軌下載失敗。",
     hlsUnsupportedEncryption: "不支援此 HLS 加密方式。",
     httpDenied: "存取被拒絕（403）。請檢查 URL 或憑證。",

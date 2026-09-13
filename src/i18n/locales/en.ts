@@ -1574,6 +1574,7 @@ const en = {
     hlsSegmentFailed: "An HLS segment download failed.",
     hlsSegmentStalled: "An HLS segment download stalled.",
     hlsSegmentTooLarge: "An HLS segment exceeded the size limit.",
+    hlsStateReadFailed: "Could not read the HLS task state. Retry the download.",
     hlsTrackFailed: "A selected HLS audio or subtitle track could not be downloaded.",
     hlsUnsupportedEncryption: "This HLS encryption method is not supported.",
     httpDenied: "Access denied (403). Check the URL or credentials.",

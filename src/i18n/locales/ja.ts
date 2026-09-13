@@ -1571,6 +1571,7 @@ const ja = {
     hlsSegmentFailed: "HLS セグメントのダウンロードに失敗しました。",
     hlsSegmentStalled: "HLS セグメントのダウンロードが停滞しました。",
     hlsSegmentTooLarge: "HLS セグメントがサイズ制限を超えました。",
+    hlsStateReadFailed: "HLSタスクの状態を読み取れませんでした。ダウンロードを再試行してください。",
     hlsTrackFailed: "選択した HLS 音声または字幕トラックをダウンロードできませんでした。",
     hlsUnsupportedEncryption: "この HLS 暗号化方式はサポートされていません。",
     httpDenied: "アクセスが拒否されました（403）。URL または資格情報を確認してください。",

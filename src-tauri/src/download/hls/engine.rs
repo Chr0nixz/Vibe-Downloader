@@ -235,7 +235,9 @@ struct LiveExternalTrack {
     kind: String,
     staging_dir: PathBuf,
     seen: HashSet<(i64, i64)>,
-    completed: Vec<(String, i64)>,
+    // ARC-36: entries carry (discontinuity, media) sequence keys so the final
+    // playlist can be written in declared order, not poll/worker order.
+    completed: Vec<(String, i64, i64, i64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -486,6 +488,18 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
             Some(&proxy_config),
         )
         .await?;
+    // FUN-27: read the persisted hls_tasks row BEFORE this session's upsert —
+    // the row carries the creation-time track selection, and a failed read
+    // must fail the task instead of silently completing without the selected
+    // tracks. The row only exists when tracks were selected, so Ok(None) is
+    // the normal no-external-tracks shape and stays legal.
+    let hls_state = db::get_hls_task(&pool, &task.id).await.map_err(|error| {
+        engine_error(
+            "hls_state_read_failed",
+            format!("Could not read the HLS task state: {error}"),
+            true,
+        )
+    })?;
     db::upsert_hls_task(
         &pool,
         db::HlsTaskUpsert {
@@ -517,7 +531,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     // are visible - never warn-and-complete with missing tracks.
     let mut extra_inputs: Vec<PathBuf> = Vec::new();
     let mut live_tracks: Vec<LiveExternalTrack> = Vec::new();
-    if let Ok(Some(hls_task)) = db::get_hls_task(&pool, &task.id).await {
+    if let Some(hls_task) = hls_state {
         let selected = collect_selected_external_tracks(&hls_task)?;
         for track in selected {
             if cancel_token.is_cancelled() {
@@ -1704,11 +1718,14 @@ async fn download_hls_rendition_segments(
     connection_limit: usize,
     plans: Vec<SegmentDownloadPlan>,
     fetch_cache: Arc<HlsTaskFetchCache>,
-) -> Result<Vec<(String, i64)>, String> {
+) -> Result<Vec<(String, i64, i64, i64)>, String> {
     let mut pending = plans.into_iter();
     let mut workers = JoinSet::new();
     let mut active = 0_usize;
-    let mut completed: Vec<(String, i64)> = Vec::new();
+    // ARC-36: each entry carries its (discontinuity, media) sequence key —
+    // JoinSet completion order is nondeterministic and must not decide the
+    // playlist order.
+    let mut completed: Vec<(String, i64, i64, i64)> = Vec::new();
 
     loop {
         while active < connection_limit {
@@ -1723,6 +1740,8 @@ async fn download_hls_rendition_segments(
             let cancel_token = cancel_token.clone();
             let fetch_cache = fetch_cache.clone();
             let duration_ms = plan.duration_ms;
+            let discontinuity_sequence = plan.discontinuity_sequence;
+            let media_sequence = plan.media_sequence;
             let local_name = plan
                 .local_path
                 .file_name()
@@ -1742,7 +1761,13 @@ async fn download_hls_rendition_segments(
                     origin_host,
                 )
                 .await;
-                (local_name, duration_ms, result)
+                (
+                    local_name,
+                    duration_ms,
+                    discontinuity_sequence,
+                    media_sequence,
+                    result,
+                )
             });
         }
 
@@ -1754,10 +1779,15 @@ async fn download_hls_rendition_segments(
             .await
             .ok_or_else(|| "HLS track worker stopped unexpectedly.".to_string())?;
         active = active.saturating_sub(1);
-        let (local_name, duration_ms, result) =
+        let (local_name, duration_ms, discontinuity_sequence, media_sequence, result) =
             joined.map_err(|e| format!("A HLS track worker stopped unexpectedly: {e}"))?;
         match result.result {
-            Ok(()) => completed.push((local_name, duration_ms)),
+            Ok(()) => completed.push((
+                local_name,
+                duration_ms,
+                discontinuity_sequence,
+                media_sequence,
+            )),
             Err(_) if cancel_token.is_cancelled() => {
                 workers.abort_all();
                 break;
@@ -1785,7 +1815,7 @@ async fn download_hls_rendition_segments(
 
 async fn write_external_track_playlist(
     staging_dir: &Path,
-    completed: &[(String, i64)],
+    completed: &[(String, i64, i64, i64)],
 ) -> Result<PathBuf, String> {
     if completed.is_empty() {
         return Err(engine_error(
@@ -1794,10 +1824,15 @@ async fn write_external_track_playlist(
             true,
         ));
     }
+    // ARC-36: workers finish out of order, but the muxer reads this playlist
+    // top to bottom — order it by the declared (discontinuity, media)
+    // sequence so the assembled track matches the source rendition.
+    let mut ordered: Vec<(String, i64, i64, i64)> = completed.to_vec();
+    ordered.sort_by_key(|(_, _, disc, media)| (*disc, *media));
     let mut text = String::from("#EXTM3U\n#EXT-X-VERSION:3\n");
-    let target = completed
+    let target = ordered
         .iter()
-        .map(|(_, ms)| (ms + 999) / 1000)
+        .map(|(_, ms, _, _)| (ms + 999) / 1000)
         .max()
         .unwrap_or(1)
         .max(1);
@@ -1805,8 +1840,8 @@ async fn write_external_track_playlist(
         "#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:0\n",
         clamp_hls_target_duration(target)
     ));
-    for (name, ms) in completed {
-        let duration = (*ms as f64) / 1000.0;
+    for (name, ms, _, _) in ordered {
+        let duration = (ms as f64) / 1000.0;
         text.push_str(&format!("#EXTINF:{duration:.3},\n{name}\n"));
     }
     text.push_str("#EXT-X-ENDLIST\n");

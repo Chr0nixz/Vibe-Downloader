@@ -1594,6 +1594,7 @@ const ru = {
     hlsSegmentFailed: "Не удалось загрузить сегмент HLS.",
     hlsSegmentStalled: "Загрузка сегмента HLS зависла.",
     hlsSegmentTooLarge: "Сегмент HLS превысил ограничение размера.",
+    hlsStateReadFailed: "Не удалось прочитать состояние HLS-задачи. Повторите загрузку.",
     hlsTrackFailed: "Не удалось загрузить выбранную аудио- или субтитровую дорожку HLS.",
     hlsUnsupportedEncryption: "Этот метод шифрования HLS не поддерживается.",
     httpDenied: "Доступ запрещён (403). Проверьте URL или учётные данные.",

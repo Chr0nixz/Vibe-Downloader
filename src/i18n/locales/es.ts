@@ -1610,6 +1610,7 @@ const es = {
     hlsSegmentFailed: "Falló la descarga de un segmento HLS.",
     hlsSegmentStalled: "La descarga de un segmento HLS se detuvo.",
     hlsSegmentTooLarge: "Un segmento HLS superó el límite de tamaño.",
+    hlsStateReadFailed: "No se pudo leer el estado de la tarea HLS. Reintenta la descarga.",
     hlsTrackFailed: "No se pudo descargar la pista de audio o subtítulos HLS seleccionada.",
     hlsUnsupportedEncryption: "Este método de cifrado HLS no es compatible.",
     httpDenied: "Acceso denegado (403). Comprueba la URL o las credenciales.",

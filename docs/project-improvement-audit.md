@@ -583,12 +583,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：`commands/backup.rs` 中写入 live 库的 `proxy_password_saved='false'` 已删除（它会被启动时的整库替换覆盖，从未生效）；改为 `db/backup.rs::post_restore_scrub` 在恢复应用后按**本机 keyring 实况**（`load_proxy_password`）修正该标志——本机有密码则 true，否则 false。备份里的任何值都不再被信任。
 - **验证测试**：与 SEC-09 同一测试覆盖（备份内 'true' 在无本机密码时被修正为 'false'）。跨机 keyring 缺失场景因此可见：设置页不再显示未保存的密码。
 
-### FUN-27（P3，Open）：hls_tasks 行读取瞬时失败时选中的音轨/字幕被静默跳过
+### FUN-27（P3，Closed）：hls_tasks 行读取瞬时失败时选中的音轨/字幕被静默跳过
 
 - **证据**：外部轨道管线整体 gated 于 `if let Ok(Some(hls_task)) = db::get_hls_task(...)`（[`hls/engine.rs`](../src-tauri/src/download/hls/engine.rs#L520)），Err 直接以空 extra_inputs 继续——与其上方三行自身注释「Failures are visible - never warn-and-complete with missing tracks」（`:515-517`）直接矛盾。选中 URI 在创建时写入（create.rs:1065-1075）并经 COALESCE 跨会话保活（db/hls.rs:105-106），此刻真实存在。
 - **影响**：一次 SQLite 瞬时错误 → ffmpeg 不带该输入 mux，成品缺用户显式选择的字幕/音轨且标记 Completed。
 - **修复方向**：传播 Result（`?` 转 engine_error），让失败可见。
 - **验收**：mock get_hls_task Err 断言任务 Failed 而非产出缺轨文件。
+- **2026-09-13 修复**：`get_hls_task` 的读取移到本次会话的 `upsert_hls_task` 之前（读取的是创建期持久化的选轨行，COALESCE 语义等价），Err 以新稳定码 `hls_state_read_failed`（可重试、非 NeedsAttention）显式失败任务；`Ok(None)` 是「未选外部轨道」的常态（hls_tasks 行仅在创建时选了轨道才写入），保持合法。稳定码走全链路：`STABLE_ERROR_CODES` → `errors.hlsStateReadFailed` ×7 locale → `stable-error-messages.json` 同步。
+- **验证测试**：`hls_engine.rs::fun27_hls_state_read_failure_fails_task`——测试池 `DROP TABLE hls_tasks` 注入真实读取失败，断言 engine.download 返回错误且消息含 `hls_state_read_failed`，不再产出缺轨成品。
 
 ### FUN-28（P2，Closed）：环境健康检查的全部文案由 Rust 硬编码英文，七个 locale 均不翻译
 
@@ -913,12 +915,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：三处对齐 HTTP worker 契约。其一，part 入口完成判定改 `== expected`，超长 part 视为污染并删除后重试。其二，fresh start 同样强制 206（非 206 的镜像标记 unsupported_range 并 failover）+ Content-Range start/end 全字段精确匹配（`validate_metalink_content_range` 升级；串行路径按文件 total_size 推导 end，unknown-size 传 None 只校验 start）。其三，校验失败先删除污染 part 再 failover，不再把垃圾字节留给下一个镜像。
 - **验证测试**：`fun09_mismatched_content_range_rejects_resume` 的断言从「part 保留」更新为「part 已删除」（与新契约一致）；既有 200-full-body 类 mock 场景由升级后的校验拒绝。
 
-### ARC-36（P1，Open）：外部音轨/字幕按 worker 完成顺序拼接，成品音轨乱序静默损坏
+### ARC-36（P1，Closed）：外部音轨/字幕按 worker 完成顺序拼接，成品音轨乱序静默损坏
 
 - **证据**：`download_hls_rendition_segments` 以 JoinSet join_next 完成序 push `completed`（hls/engine.rs:1720-1728），`write_external_track_playlist` 按该序输出 playlist 条目（:1774-1777），中间无任何排序（:1586-1601）；`poll_live_external_track` 同病（track.completed.extend，:1663）。主视频路径从 DB 按 `discontinuity_sequence, media_sequence` 排序读取（db/hls.rs:363）——证明外部路径只是漏了排序。并发前提成立：HLS planned slots = clamp(segment_count, [1,8])，默认 DEFAULT_SEGMENT_COUNT = 4（db/mod.rs:150）。
 - **影响**：选了外部音轨/字幕（FUN-10）的 VOD，ffmpeg -c copy 按列出序拼接（run_ffmpeg :1917-1957）→ 对白错乱/字幕漂移且随时间线恶化，无任何告警。
 - **修复方向**：completed 收集后按 (discontinuity_sequence, media_sequence) 排序——plan 里带上序号即可，无需查 DB。
 - **验收**：多 worker 乱序完成的 fixture 断言 local.m3u8 严格按媒体序。
+- **2026-09-13 修复**：`SegmentDownloadPlan` 已携带两个序号，worker 结果元组扩为 `(local_name, duration_ms, discontinuity_sequence, media_sequence)`；`write_external_track_playlist` 写盘前按 `(disc, media)` 升序 `sort_by_key`（VOD 与 live 共用此出口，`LiveExternalTrack.completed` 同步换 4 元组）。段文件名与 ffmpeg 的 `-i` 轨道输入序（本就按声明序）不变。
+- **验证测试**：`hls_engine.rs::arc36_external_track_playlist_follows_declared_order`——4 段外部音轨、假服务器延迟第 1 段、`connection_limit=4`（新增 `headless_context_with_connections` 帮助函数，绕开 headless 助手的单 worker），断言 local.m3u8 严格为 `seg-0-0..seg-0-3`。旧行为敏感性验证：移除排序后完成序恰为 0,2,3,1、测试失败，恢复后通过。
 
 ### ARC-37（P1，Closed）：引擎段失败时取消「自己的」任务 token，supervisor 误判为用户取消 → 任务永久滞留 Downloading（僵尸）
 

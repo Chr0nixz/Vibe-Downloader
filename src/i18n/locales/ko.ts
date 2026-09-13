@@ -1551,6 +1551,7 @@ const ko = {
     hlsSegmentFailed: "HLS 세그먼트 다운로드에 실패했습니다.",
     hlsSegmentStalled: "HLS 세그먼트 다운로드가 정체되었습니다.",
     hlsSegmentTooLarge: "HLS 세그먼트가 크기 제한을 초과했습니다.",
+    hlsStateReadFailed: "HLS 작업 상태를 읽을 수 없습니다. 다운로드를 다시 시도하세요.",
     hlsTrackFailed: "선택한 HLS 오디오 또는 자막 트랙을 다운로드할 수 없습니다.",
     hlsUnsupportedEncryption: "이 HLS 암호화 방식은 지원되지 않습니다.",
     httpDenied: "액세스가 거부되었습니다(403). URL 또는 자격 증명을 확인하세요.",

@@ -1570,3 +1570,269 @@ async fn arc37_internal_segment_failure_does_not_cancel_user_token() {
     );
     pool.close().await;
 }
+
+fn headless_context_with_connections(
+    pool: sqlx::SqlitePool,
+    task: tauri_app_lib::models::TaskRecord,
+    cancel_token: tokio_util::sync::CancellationToken,
+    connection_limit: usize,
+) -> tauri_app_lib::download::DownloadContext {
+    // ARC-36: headless_download_context pins connection_limit to 1, which
+    // removes the worker-completion divergence this test needs to exercise.
+    tauri_app_lib::download::DownloadContext {
+        app: None,
+        pool,
+        task,
+        cancel_token,
+        finish: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        speed_limiter: tauri_app_lib::download::GlobalSpeedLimiter::disabled(),
+        connection_limit,
+        request_headers: Vec::new(),
+        proxy_config: ResolvedProxyConfig::default(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn arc36_external_track_playlist_follows_declared_order() {
+    // ARC-36: the media playlist inside a track's staging folder must list
+    // segments in declared (media_sequence) order. The fake server delays
+    // segment 1 so four parallel workers finish 0,2,3,1 — the pre-ARC-36
+    // code wrote that completion order into local.m3u8 and ffmpeg muxed a
+    // scrambled track.
+    let server = TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/");
+        let (status, content_type, body): (u16, &str, Vec<u8>) = match path {
+            "/master.m3u8" => {
+                let playlist = "#EXTM3U\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/en.m3u8\"\n\
+#EXT-X-STREAM-INF:BANDWIDTH=128000,AUDIO=\"aud\"\n\
+video.m3u8\n";
+                (
+                    200,
+                    "application/vnd.apple.mpegurl",
+                    playlist.as_bytes().to_vec(),
+                )
+            }
+            "/video.m3u8" => {
+                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.0,\nv0.ts\n#EXT-X-ENDLIST\n";
+                (
+                    200,
+                    "application/vnd.apple.mpegurl",
+                    playlist.as_bytes().to_vec(),
+                )
+            }
+            "/audio/en.m3u8" => {
+                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXTINF:1.0,\na0.ts\n#EXTINF:1.0,\na1.ts\n#EXTINF:1.0,\na2.ts\n#EXTINF:1.0,\na3.ts\n#EXT-X-ENDLIST\n";
+                (
+                    200,
+                    "application/vnd.apple.mpegurl",
+                    playlist.as_bytes().to_vec(),
+                )
+            }
+            // Segment 1 sleeps long enough that the other three workers (no
+            // artificial delay) drain first under connection_limit=4.
+            "/audio/a1.ts" => {
+                std::thread::sleep(Duration::from_millis(500));
+                (200, "video/mp2t", vec![1_u8; 188])
+            }
+            "/v0.ts" | "/audio/a0.ts" | "/audio/a2.ts" | "/audio/a3.ts" => {
+                (200, "video/mp2t", vec![0_u8; 188])
+            }
+            _ => (404, "text/plain", b"not found".to_vec()),
+        };
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(&body);
+    });
+
+    let engine = new_engine();
+    let probe = engine
+        .probe(new_probe_request(format!(
+            "{}/master.m3u8",
+            server.base_url
+        )))
+        .await
+        .expect("probe master");
+    let audio_uri = probe
+        .hls_audio_tracks
+        .iter()
+        .find_map(|track| track.uri.clone())
+        .expect("audio track uri");
+
+    let pool = common::test_pool("hls-arc36-order").await;
+    let mut paths = common::TestPaths::new("hls-arc36-order");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("arc36.mp4");
+    let task = common::download_task(
+        "hls-arc36-order",
+        format!("{}/master.m3u8", server.base_url),
+        "hls",
+        "arc36.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+    let audio_json = serde_json::to_string(&vec![audio_uri]).expect("audio json");
+    let staging = paths.temp.to_string_lossy();
+    db::upsert_hls_task(
+        &pool,
+        db::HlsTaskUpsert {
+            task_id: &task.id,
+            input_url: &task.url,
+            media_url: &probe.resolved_uri,
+            playlist_kind: "vod",
+            selected_bandwidth: None,
+            selected_resolution: None,
+            target_duration: 1,
+            last_media_sequence: None,
+            output_format: "mp4",
+            staging_dir: &staging,
+            selected_audio_track_uris: Some(&audio_json),
+            selected_subtitle_track_uris: None,
+        },
+    )
+    .await
+    .expect("upsert selected audio");
+
+    // Remux may fail on the dummy payloads (or without ffmpeg); the ARC-36
+    // contract under test is the on-disk track playlist, written before
+    // finalize.
+    let _ = engine
+        .download(headless_context_with_connections(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+            4,
+        ))
+        .await;
+
+    let track_playlist = paths.temp.join("audio_en.m3u8").join("local.m3u8");
+    assert!(
+        track_playlist.exists(),
+        "external track playlist must be written to {:?}",
+        track_playlist
+    );
+    let content = std::fs::read_to_string(&track_playlist).expect("read track playlist");
+    let segment_order: Vec<&str> = content
+        .lines()
+        .filter(|line| line.starts_with("seg-") && line.ends_with(".ts"))
+        .collect();
+    assert_eq!(
+        segment_order,
+        vec!["seg-0-0.ts", "seg-0-1.ts", "seg-0-2.ts", "seg-0-3.ts"],
+        "track playlist must follow declared media_sequence order, got: {segment_order:?}"
+    );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun27_hls_state_read_failure_fails_task() {
+    // FUN-27: a transient read failure of the hls_tasks row must fail the
+    // download instead of silently completing a product without the selected
+    // audio/subtitle tracks. The row only exists when tracks were selected,
+    // so dropping the table injects the exact error shape.
+    let server = TestServer::start(move |mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/");
+        let (status, content_type, body): (u16, &str, Vec<u8>) = match path {
+            "/video.m3u8" => {
+                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.0,\nv0.ts\n#EXT-X-ENDLIST\n";
+                (
+                    200,
+                    "application/vnd.apple.mpegurl",
+                    playlist.as_bytes().to_vec(),
+                )
+            }
+            "/v0.ts" => (200, "video/mp2t", vec![0_u8; 188]),
+            _ => (404, "text/plain", b"not found".to_vec()),
+        };
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(&body);
+    });
+
+    let engine = new_engine();
+    let pool = common::test_pool("hls-fun27-state-read").await;
+    let mut paths = common::TestPaths::new("hls-fun27-state-read");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("fun27.mp4");
+    let task = common::download_task(
+        "hls-fun27-state-read",
+        format!("{}/video.m3u8", server.base_url),
+        "hls",
+        "fun27.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+
+    sqlx::query("DROP TABLE hls_tasks")
+        .execute(&pool)
+        .await
+        .expect("drop hls_tasks to inject a state read failure");
+
+    let error = engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("state read failure must fail the download");
+    let message = error.to_string();
+    assert!(
+        message.contains("hls_state_read_failed"),
+        "expected the hls_state_read_failed code, got: {message}"
+    );
+    pool.close().await;
+}
