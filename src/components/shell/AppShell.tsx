@@ -28,6 +28,8 @@ import type {
   ResolveTaskAttentionInput,
   TaskPriority,
 } from "@/generated/bindings";
+import { useClipboardLinkMonitor } from "@/hooks/use-clipboard-link-monitor";
+import { useFileDropMonitor } from "@/hooks/use-file-drop-monitor";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import type { TranslationKey } from "@/i18n";
 import { localizedErrorMessage } from "@/lib/errors";
@@ -45,13 +47,10 @@ import {
   bulkTaskAction,
   bulkTaskActionGlobal,
   deleteTask,
-  type FileDropDragState,
   finishLiveRecording,
   getSettings,
   listTasksCursor,
-  onClipboardLinkDetected,
   onCompletionActionRequested,
-  onFileDrop,
   onSettingsChanged,
   onTrayNewDownloadRequested,
   onTraySettingsRequested,
@@ -941,9 +940,20 @@ export function AppShell() {
       }
 
       if (action === "choose_another_folder") {
-        const saveDir = await openDirectoryPicker();
-        if (!saveDir) return;
-        submitAttentionResolution(task, action, { saveDir });
+        // UX-25: the picker await runs outside any caller's try/catch, so an
+        // IPC failure needs its own feedback path instead of dying silently.
+        try {
+          const saveDir = await openDirectoryPicker();
+          if (!saveDir) return;
+          submitAttentionResolution(task, action, { saveDir });
+        } catch (err) {
+          log.error("attention folder picker failed", err);
+          addToast({
+            tone: "error",
+            title: t("toast.actionFailed"),
+            description: localizedErrorMessage(err, t),
+          });
+        }
         return;
       }
 
@@ -958,7 +968,11 @@ export function AppShell() {
   );
 
   useEffect(() => {
-    void getPlatform().then(setPlatform);
+    // UX-25: getPlatform already falls back internally; this catch is hygiene
+    // so the one-off effect can never produce an unhandled rejection.
+    getPlatform()
+      .then(setPlatform)
+      .catch((err) => log.warn("platform detection failed", err));
   }, []);
 
   useEffect(() => {
@@ -1038,43 +1052,33 @@ export function AppShell() {
     };
   }, [openNewDownload, setDetailOpen]);
 
-  useEffect(() => {
-    let cancelled = false;
-    let unlistenClipboard: (() => void) | undefined;
-
-    void (async () => {
-      unlistenClipboard = await onClipboardLinkDetected((payload) => {
-        if (payload.urls.length === 0) return;
-        if (newDownloadOpen && newDownloadDraftDirty) {
-          addToast({
-            tone: "info",
-            title:
-              payload.urls.length > 1
-                ? t("toast.clipboardLinksDetected", { count: payload.urls.length })
-                : t("toast.clipboardLinkDetected"),
-            description:
-              payload.urls.length > 1
-                ? t("toast.clipboardLinksDetectedDescription", {
-                    count: payload.urls.length,
-                  })
-                : sanitizeUrlForDisplay(payload.primaryUrl),
-            action: {
-              label: t("toast.useClipboardLink"),
-              onClick: () => applyClipboardDownload(payload.id, payload.urls),
-            },
-          });
-          return;
-        }
-        applyClipboardDownload(payload.id, payload.urls);
+  // UX-23: the dialog-state read happens inside the handler on every event, so
+  // the listener registers once and never misses the await-window between
+  // unlisten and re-listen.
+  useClipboardLinkMonitor((payload) => {
+    if (payload.urls.length === 0) return;
+    if (newDownloadOpen && newDownloadDraftDirty) {
+      addToast({
+        tone: "info",
+        title:
+          payload.urls.length > 1
+            ? t("toast.clipboardLinksDetected", { count: payload.urls.length })
+            : t("toast.clipboardLinkDetected"),
+        description:
+          payload.urls.length > 1
+            ? t("toast.clipboardLinksDetectedDescription", {
+                count: payload.urls.length,
+              })
+            : sanitizeUrlForDisplay(payload.primaryUrl),
+        action: {
+          label: t("toast.useClipboardLink"),
+          onClick: () => applyClipboardDownload(payload.id, payload.urls),
+        },
       });
-      if (cancelled) unlistenClipboard?.();
-    })();
-
-    return () => {
-      cancelled = true;
-      unlistenClipboard?.();
-    };
-  }, [addToast, applyClipboardDownload, newDownloadDraftDirty, newDownloadOpen, t]);
+      return;
+    }
+    applyClipboardDownload(payload.id, payload.urls);
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -1111,67 +1115,54 @@ export function AppShell() {
     setNewDownloadOpen(true);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    let unlistenFileDrop: (() => void) | undefined;
-
-    void (async () => {
-      unlistenFileDrop = await onFileDrop(
-        async (paths) => {
-          const supported = paths.filter((path) => isSupportedLocalFile(path.split(/[/\\]/).pop() ?? path));
-          if (supported.length === 0) {
-            addToast({
-              tone: "error",
-              title: t("toast.unsupportedDroppedFiles"),
-              description: t("toast.unsupportedDroppedFilesDescription"),
-            });
-            return;
-          }
-          const firstPath = supported[0];
-          const name = firstPath.split(/[/\\]/).pop() ?? firstPath;
-          try {
-            const resolved = await resolveLocalFile(firstPath, name);
-            if (newDownloadOpen && newDownloadDraftDirty) {
-              addToast({
-                tone: "info",
-                title: t("toast.droppedFileReady"),
-                description: name,
-                action: {
-                  label: t("toast.useDroppedFile"),
-                  onClick: () =>
-                    applyDroppedFile({
-                      sourceId: `drop-${Date.now()}`,
-                      url: resolved.url,
-                      batchInput: resolved.batchInput,
-                    }),
-                },
-              });
-              return;
-            }
-            applyDroppedFile({
-              sourceId: `drop-${Date.now()}`,
-              url: resolved.url,
-              batchInput: resolved.batchInput,
-            });
-          } catch (err) {
-            log.error("dropped file resolve failed", err);
-            addToast({
-              tone: "error",
-              title: t("toast.actionFailed"),
-              description: localizedErrorMessage(err, t),
-            });
-          }
-        },
-        (state: FileDropDragState) => setDropActive(state.active),
-      );
-      if (cancelled) unlistenFileDrop?.();
-    })();
-
-    return () => {
-      cancelled = true;
-      unlistenFileDrop?.();
-    };
-  }, [addToast, applyDroppedFile, newDownloadDraftDirty, newDownloadOpen, t]);
+  useFileDropMonitor({
+    onDrop: async (paths) => {
+      const supported = paths.filter((path) => isSupportedLocalFile(path.split(/[/\\]/).pop() ?? path));
+      if (supported.length === 0) {
+        addToast({
+          tone: "error",
+          title: t("toast.unsupportedDroppedFiles"),
+          description: t("toast.unsupportedDroppedFilesDescription"),
+        });
+        return;
+      }
+      const firstPath = supported[0];
+      const name = firstPath.split(/[/\\]/).pop() ?? firstPath;
+      try {
+        const resolved = await resolveLocalFile(firstPath, name);
+        if (newDownloadOpen && newDownloadDraftDirty) {
+          addToast({
+            tone: "info",
+            title: t("toast.droppedFileReady"),
+            description: name,
+            action: {
+              label: t("toast.useDroppedFile"),
+              onClick: () =>
+                applyDroppedFile({
+                  sourceId: `drop-${Date.now()}`,
+                  url: resolved.url,
+                  batchInput: resolved.batchInput,
+                }),
+            },
+          });
+          return;
+        }
+        applyDroppedFile({
+          sourceId: `drop-${Date.now()}`,
+          url: resolved.url,
+          batchInput: resolved.batchInput,
+        });
+      } catch (err) {
+        log.error("dropped file resolve failed", err);
+        addToast({
+          tone: "error",
+          title: t("toast.actionFailed"),
+          description: localizedErrorMessage(err, t),
+        });
+      }
+    },
+    onDragStateChange: (state) => setDropActive(state.active),
+  });
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

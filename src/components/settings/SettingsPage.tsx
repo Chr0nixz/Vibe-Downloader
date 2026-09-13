@@ -863,20 +863,38 @@ export function SettingsPage() {
   }
 
   async function chooseDirectory() {
-    const selected = await openDirectoryPicker();
-    if (selected) setDefaultSaveDir(selected);
+    try {
+      const selected = await openDirectoryPicker();
+      if (selected) setDefaultSaveDir(selected);
+    } catch (err) {
+      log.warn("save-dir picker failed", err);
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: localizedErrorMessage(err, t),
+      });
+    }
   }
 
   async function handleBrowseFfmpegPath() {
     const filters = navigator.platform.toLowerCase().includes("win")
       ? [{ name: "ffmpeg", extensions: ["exe"] }]
       : undefined;
-    const selected = await openFilePicker(filters);
-    if (selected?.path) {
-      setFfmpegPath(selected.path);
-      // Reset stale detection state when the path changes.
-      setFfmpegVersion(null);
-      setFfmpegProbeError(null);
+    try {
+      const selected = await openFilePicker(filters);
+      if (selected?.path) {
+        setFfmpegPath(selected.path);
+        // Reset stale detection state when the path changes.
+        setFfmpegVersion(null);
+        setFfmpegProbeError(null);
+      }
+    } catch (err) {
+      log.warn("ffmpeg path picker failed", err);
+      addToast({
+        tone: "error",
+        title: t("toast.actionFailed"),
+        description: localizedErrorMessage(err, t),
+      });
     }
   }
 
