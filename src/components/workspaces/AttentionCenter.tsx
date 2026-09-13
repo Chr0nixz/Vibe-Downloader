@@ -260,12 +260,15 @@ export function AttentionCenter({
                       </h2>
                       <span className="font-mono text-xs text-text-muted">{group.tasks.length}</span>
                     </div>
-                    {/* Arrow/Home/End navigation lives on the listbox rather than a plain
-                        wrapper so the handler sits on an element with interactive semantics.
-                        Focus stays on the option rows, so keydown still bubbles here, and
-                        handleListKeyDown walks the flattened task list across groups. */}
+                    {/* UX-18: use the same list/listitem semantics as TaskList and
+                        QueueCenter (listbox/option here was the odd one out).
+                        Arrow/Home/End navigation still lives on this container —
+                        keydown bubbles up from the focused row, and
+                        handleListKeyDown walks the flattened task list across
+                        groups. */}
+                    {/* biome-ignore lint/a11y/useSemanticElements: keep parity with the TaskList/QueueCenter list containers — a semantic <ul> would fight the grouped layout and key handling. */}
                     <div
-                      role="listbox"
+                      role="list"
                       aria-label={t(`attentionCenter.category.${group.category}`)}
                       onKeyDown={handleListKeyDown}
                     >
@@ -330,13 +333,21 @@ function AttentionTaskRow({
   const { t } = useTranslation();
   const updated = formatDateTime(task.updatedAt, "dateTime");
   return (
-    <button
+    /* biome-ignore lint/a11y/useSemanticElements: the row keeps the same listitem semantics as TaskList/QueueCenter rows — a semantic <li> would fight the grouped layout and key handling. */
+    <div
       id={`attention-task-${task.id}`}
-      type="button"
-      role="option"
-      aria-selected={selected}
+      role="listitem"
+      aria-current={selected ? "true" : undefined}
       tabIndex={selected ? 0 : -1}
       onClick={onSelect}
+      onKeyDown={(event) => {
+        // Row is a div like TaskRow's: Enter/Space must activate the
+        // selection the way the old <button> row did.
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
       className={`grid min-h-16 w-full min-w-0 grid-cols-[1.75rem_minmax(0,1fr)_auto] items-center gap-2 border-b border-border-divider px-3 py-2 text-left transition-colors duration-ui focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent-primary md:px-4 lg:min-h-12 lg:py-1.5 ${
         selected ? "bg-accent-primary/12" : "hover:bg-surface-hover"
       }`}
@@ -354,7 +365,7 @@ function AttentionTaskRow({
         <span className="block truncate text-xs text-text-secondary">{task.sourceKey}</span>
         <span className="block font-mono text-xs leading-4 text-text-muted">{updated}</span>
       </span>
-    </button>
+    </div>
   );
 }
 

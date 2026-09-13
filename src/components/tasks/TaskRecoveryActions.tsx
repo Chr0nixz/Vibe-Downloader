@@ -5,8 +5,11 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import type { RecoveryAction } from "@/generated/bindings";
 import { formatErrorForReport, localizedErrorMessage, recoveryActionsForError } from "@/lib/errors";
+import { createLogger } from "@/lib/logger";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
+
+const log = createLogger("recovery");
 
 export function TaskRecoveryActions({
   task,
@@ -20,14 +23,22 @@ export function TaskRecoveryActions({
   const recoveryActions = task.recoveryActions ?? [];
   const actions = recoveryActions.length > 0 ? recoveryActions : recoveryActionsForError(task.errorMessage);
 
-  const handleCopy = useCallback(() => {
+  const handleCopy = useCallback(async () => {
     if (!task.errorMessage) return;
     const text = formatErrorForReport(task.errorMessage, t, { taskId: task.id, url: task.url });
-    navigator.clipboard.writeText(text).catch(() => {});
-    addToast({
-      tone: "info",
-      title: t("recovery.errorCopied"),
-    });
+    // UX-24: report the clipboard outcome instead of toasting success
+    // unconditionally — a swallowed rejection told the user "copied" while
+    // the report never left the app.
+    try {
+      await navigator.clipboard.writeText(text);
+      addToast({
+        tone: "info",
+        title: t("recovery.errorCopied"),
+      });
+    } catch (err) {
+      log.warn("copy diagnostics failed", err);
+      addToast({ tone: "error", title: t("contextmenu.task.copyFailed") });
+    }
   }, [addToast, task.errorMessage, task.id, task.url, t]);
 
   if (!task.errorMessage || actions.length === 0) return null;

@@ -324,6 +324,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **影响**：`listitem` 是非交互角色，屏幕阅读器会进入「列表浏览」而非「选择」模式，用户听到「列表项 3，共 50 项」而不是「选项 3，已选中」。设置页的数值 clamp 超限时，键盘用户得不到任何反馈。
 - **修复方向**：TaskList 统一到 `listbox` + `aria-multiselectable="true"`，行改 `option` + `aria-selected`；在 `SettingsRow` 这一层内置 `aria-invalid` / `aria-describedby` 关联，一处改动覆盖整个设置页。
 - **验收**：三个列表使用同一 ARIA 模型；校验失败时输入框与错误文案有程序化关联；用 `jest-axe` 补测试（`QueueCenter.a11y.test.tsx` 是现成模板）。
+- **2026-09-13 部分修复 + 证据修正**：核实发现 QueueCenter 早已改为 `list`/`listitem` + `aria-current`（本条证据过时）——真正的孤儿是 AttentionCenter 的 `listbox`/`option`。现已把 AttentionCenter 统一到 `list`/`listitem` + `aria-current` + 单一 tab stop，键盘导航保持不变（新增 `AttentionCenter.a11y.test.tsx` 两条断言）。**剩余**（TaskRow `task-option-${id}` 改名与 NDD 其余校验输入的 `aria-invalid`/`aria-describedby` 关联）因相关文件被并行特性开发占用而暂缓；设置页数值 clamp 的完整校验 UI 按修复方向的原 note 继续沿 `SettingsRow` 层方案另行处理。
 
 ### UX-19（P2，Open）：Toast 达到 20 条上限时静默驱逐待撤销删除，任务被隐藏且无法删除
 
@@ -356,6 +357,8 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **影响**：后端重初始化期间一次 IPC 抖动直接进失败页——即使数百毫秒后 ready 也需要用户注意到并手动 Retry。
 - **修复方向**：catch 中按次数上限指数退避继续轮询，超阈值再转失败页。
 - **验收**：前 N 次 invoke reject、之后 resolve 时 gate 自行进入就绪态。
+- **2026-09-13 修复**：轮询循环加连续失败预算（3 次，1s/2s/4s 指数退避）——预算内继续自动轮询（用户停留在 splash），任何一次成功即清零预算；预算耗尽才落 StartupFailedPage，手动 Retry 路径保持不变（重置 pollKey 即重置预算）。
+- **验证测试**：`StartupGate.test.tsx` 两条新用例（假定时器）：两次失败后第三次成功自动进入就绪、无失败页；持续失败耗尽预算后失败页出现且手动 Retry 恢复（原「单次错误即需手动 Retry」用例随行为更新为预算耗尽场景）。
 
 ### UX-23（P3，Open）：剪贴板 / file-drop 监听器随对话框状态拆除重建，窗口期内事件丢失
 
@@ -370,6 +373,8 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **影响**：webview 失焦/权限拒绝是 Chromium 标准拒绝场景——用户以为诊断报告已复制、实际什么都没有，故障上报流程悄悄断裂。
 - **修复方向**：对齐其他 copy 处理器的错误 toast 分支。
 - **验收**：mock writeText reject 断言出现错误提示且无成功提示。
+- **2026-09-13 修复**：`handleCopy` 改 await + try/catch——成功才弹 `recovery.errorCopied`，失败弹 `contextmenu.task.copyFailed`（与 AppShell.copyTaskUrl 等处理器同款分支）并记 warn 日志。
+- **验证测试**：`TaskRecoveryActions.test.tsx` 两条新用例：writeText resolve → 成功 toast；reject → 错误 toast、无成功提示（toast store 由 mock 换回真实 store 以便断言）。
 
 ### UX-25（P3，Open）：refreshTasks / getPlatform / 目录选择器的 await 无捕获，产生无声 unhandled rejection
 

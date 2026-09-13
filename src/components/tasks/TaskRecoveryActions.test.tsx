@@ -1,6 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RecoveryAction } from "@/generated/bindings";
+import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 import { TaskRecoveryActions } from "./TaskRecoveryActions";
 
@@ -15,11 +16,6 @@ vi.mock("react-i18next", async (importOriginal) => {
     }),
   };
 });
-
-// Mock toast store: useToastStore is a selector hook, return a no-op fn.
-vi.mock("@/stores/toast-store", () => ({
-  useToastStore: () => vi.fn(),
-}));
 
 function makeTask(overrides: Partial<Task> = {}): Task {
   const now = "2026-01-01T00:00:00.000Z";
@@ -70,6 +66,11 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 }
 
 describe("TaskRecoveryActions", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    useToastStore.setState({ toasts: [] });
+  });
+
   it("renders nothing when there is no error message", () => {
     const task = makeTask({ errorMessage: null });
     const onResolve = vi.fn();
@@ -120,5 +121,40 @@ describe("TaskRecoveryActions", () => {
     // The copy-error button has an accessible label from the i18n key.
     const copyButton = screen.getByLabelText("recovery.copyError");
     expect(copyButton).toBeInTheDocument();
+  });
+
+  it("toasts copy success only after the clipboard write resolves (UX-24)", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const task = makeTask({
+      errorMessage: "disk_write_failed: No space left on device",
+      recoveryActions: ["free_disk_space"] as RecoveryAction[],
+    });
+    render(<TaskRecoveryActions task={task} onResolve={vi.fn()} />);
+
+    fireEvent.click(screen.getByLabelText("recovery.copyError"));
+    await waitFor(() => {
+      const toasts = useToastStore.getState().toasts;
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0].title).toBe("recovery.errorCopied");
+    });
+  });
+
+  it("toasts copy failure instead of swallowing clipboard errors (UX-24)", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("clipboard blocked"));
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const task = makeTask({
+      errorMessage: "disk_write_failed: No space left on device",
+      recoveryActions: ["free_disk_space"] as RecoveryAction[],
+    });
+    render(<TaskRecoveryActions task={task} onResolve={vi.fn()} />);
+
+    fireEvent.click(screen.getByLabelText("recovery.copyError"));
+    await waitFor(() => {
+      const toasts = useToastStore.getState().toasts;
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0].tone).toBe("error");
+      expect(toasts[0].title).toBe("contextmenu.task.copyFailed");
+    });
   });
 });

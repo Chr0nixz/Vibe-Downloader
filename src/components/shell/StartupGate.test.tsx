@@ -160,33 +160,47 @@ describe("StartupGate", () => {
     await waitFor(() => expect(screen.getByText("App ready")).toBeInTheDocument());
   });
 
-  it("recovers from a transient status IPC error via Retry", async () => {
-    getStartupStatus.mockRejectedValueOnce(new Error("ipc timeout")).mockResolvedValue({
-      mode: "ready",
-      reason: null,
-      message: null,
-      code: null,
-      databasePath: null,
-      backupPath: null,
-      backupVerified: false,
-      canReset: false,
-      logPath: null,
-      dataPath: null,
-    });
+  it("recovers from persistent poll errors via the manual Retry button (UX-22)", async () => {
+    vi.useFakeTimers();
+    try {
+      getStartupStatus.mockRejectedValue(new Error("ipc timeout"));
 
-    render(
-      <StartupGate>
-        <p>App ready</p>
-      </StartupGate>,
-    );
+      render(
+        <StartupGate>
+          <p>App ready</p>
+        </StartupGate>,
+      );
 
-    await waitFor(() => expect(screen.getByText("Error: ipc timeout")).toBeInTheDocument());
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /startupFailed.retry/ }));
-    });
-    // Transient IPC errors retry polling without calling backend retry_startup_init.
-    expect(retryStartupInit).not.toHaveBeenCalled();
-    await waitFor(() => expect(screen.getByText("App ready")).toBeInTheDocument());
+      // Exhaust the auto-retry budget: initial failure + 3 backoff retries
+      // (1s, 2s, 4s) must surface the manual recovery page, not die silently.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000 + 2_000 + 4_000);
+      });
+      expect(getStartupStatus).toHaveBeenCalledTimes(4);
+      expect(screen.getByText("Error: ipc timeout")).toBeInTheDocument();
+
+      // Manual Retry resets the budget and auto-polling picks up the
+      // recovered backend without further user input.
+      getStartupStatus.mockResolvedValue({
+        mode: "ready",
+        reason: null,
+        message: null,
+        code: null,
+        databasePath: null,
+        backupPath: null,
+        backupVerified: false,
+        canReset: false,
+        logPath: null,
+        dataPath: null,
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /startupFailed.retry/ }));
+        await vi.advanceTimersByTimeAsync(300);
+      });
+      expect(screen.getByText("App ready")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps Retry available after opening logs or data folders", async () => {
@@ -240,5 +254,43 @@ describe("StartupGate", () => {
     const logo = screen.getByRole("status").querySelector("img");
     expect(logo).toBeTruthy();
     expect(logo?.getAttribute("style") ?? "").not.toContain("animation:");
+  });
+
+  it("auto-recovers from transient poll errors via bounded backoff (UX-22)", async () => {
+    vi.useFakeTimers();
+    try {
+      getStartupStatus
+        .mockRejectedValueOnce(new Error("ipc hiccup 1"))
+        .mockRejectedValueOnce(new Error("ipc hiccup 2"))
+        .mockResolvedValue({
+          mode: "ready",
+          reason: null,
+          message: null,
+          code: null,
+          databasePath: null,
+          backupPath: null,
+          backupVerified: false,
+          canReset: false,
+          logPath: null,
+          dataPath: null,
+        });
+
+      render(
+        <StartupGate>
+          <p>App ready</p>
+        </StartupGate>,
+      );
+
+      // Initial poll fails → 1s backoff → retry fails → 2s backoff → ready.
+      // No manual recovery page may appear during the backoff window.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000 + 2_000);
+      });
+      expect(getStartupStatus).toHaveBeenCalledTimes(3);
+      expect(screen.getByText("App ready")).toBeInTheDocument();
+      expect(screen.queryByText(/startupFailed/)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

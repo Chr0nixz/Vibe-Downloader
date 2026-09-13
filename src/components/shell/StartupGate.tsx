@@ -17,6 +17,13 @@ import {
   retryStartupInit,
 } from "@/lib/tauri";
 
+/** UX-22: consecutive poll errors tolerated before falling back to the
+ * manual recovery page. Transient IPC hiccups (backend busy right after the
+ * window shows) must not kill auto-polling forever. */
+const STARTUP_POLL_MAX_CONSECUTIVE_ERRORS = 3;
+/** UX-22: backoff between poll retries — 1s, 2s, 4s. */
+const STARTUP_POLL_RETRY_BASE_MS = 1000;
+
 export function StartupGate({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<StartupStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -31,11 +38,14 @@ export function StartupGate({ children }: { children: ReactNode }) {
     // on the first poll and never mount AppShell.
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let consecutiveErrors = 0;
 
     const check = async () => {
       try {
         const next = await getStartupStatus();
         if (cancelled) return;
+        // UX-22: any successful poll resets the transient-error budget.
+        consecutiveErrors = 0;
         setLoadError(null);
         setStatus(next);
         if (next.mode === "ready" || next.mode === "database_recovery_required" || next.mode === "startup_failed") {
@@ -43,6 +53,11 @@ export function StartupGate({ children }: { children: ReactNode }) {
         }
       } catch (error) {
         if (cancelled) return;
+        consecutiveErrors += 1;
+        if (consecutiveErrors <= STARTUP_POLL_MAX_CONSECUTIVE_ERRORS) {
+          timer = setTimeout(check, STARTUP_POLL_RETRY_BASE_MS * 2 ** (consecutiveErrors - 1));
+          return;
+        }
         setLoadError(String(error));
         return;
       }
