@@ -387,7 +387,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：统一经 safeInvoke 包装（失败 toast）；至少给上述五处补 catch。
 - **验收**：mock 各自 reject 时均有用户可见反馈。
 - **2026-09-13 修复（部分，5 处中 4 处）**：refreshTasks 包 try/catch + 错误 toast（右键 Refresh、重排回滚等 fire-and-forget 调用不再产生无声 rejection）；resolveAttention 的 choose_another_folder picker 补 try/catch + 错误 toast；SettingsPage 的 chooseDirectory/handleBrowseFfmpegPath 对齐同页 syncAutostart 范本补 catch + 错误 toast；getPlatform 补 `.catch` 卫生（其内部已有 fallback，此为防 unhandled rejection 的最后一道）。**剩余**：NewDownloadDialog 三处 picker——该文件正被并行特性开发整文件重写（400+ 行在途改动），为避免冲突推迟，待其落地后按同一范本补齐并闭合本条。
-- **验证测试**：`SettingsPage.test.tsx` 两条新用例——save-dir picker 与 ffmpeg path picker mock reject 后断言真实 toast store 出现 `toast.actionFailed` 错误项（ffmpeg 用例经 aria-controls 定位展开默认折叠的 External tools 区块）。refreshTasks 的失败分支由 `TaskList.scroll.test.tsx` 同款挂载路径覆盖类型与回归，未单列 reject 用例（AppShell 无全量 mock 基建）。
+- **验证测试**：`SettingsPage.test.tsx` 两条新用例——save-dir picker 与 ffmpeg path picker mock reject 后断言真实 toast store 出现 `toast.actionFailed` 错误项（ffmpeg 用例经 aria-controls 定位展开默认折叠的 External tools 区块）。refreshTasks 与 resolveAttention picker 的失败分支未单列自动化用例——AppShell 无全量 mock 基建，为各自 4 行 catch 搭建整机挂载不成比例，以类型检查与全量回归覆盖；若后续建立 AppShell 测试基建可补。
 
 ## 六、程序功能丰富性和完整性
 

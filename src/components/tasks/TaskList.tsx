@@ -382,7 +382,13 @@ export const TaskList = memo(function TaskList({
   // each page load; the latest list is read through filteredRef instead.
   const lastScrolledSelectedIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!selectedId || lastScrolledSelectedIdRef.current === selectedId) return;
+    // UX-17: clear on deselect so re-selecting the same task later still
+    // scrolls it into view instead of being treated as an already-scrolled id.
+    if (!selectedId) {
+      lastScrolledSelectedIdRef.current = null;
+      return;
+    }
+    if (lastScrolledSelectedIdRef.current === selectedId) return;
     const index = filteredRef.current.indexOf(selectedId);
     if (index < 0) return;
     lastScrolledSelectedIdRef.current = selectedId;

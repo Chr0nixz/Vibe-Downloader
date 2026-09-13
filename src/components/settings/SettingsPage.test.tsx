@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AppSettings, BrowserCaptureSettings, BrowserIntegrationStatus } from "@/generated/bindings";
+import { openDirectoryPicker, openFilePicker } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settings-store";
+import { useToastStore } from "@/stores/toast-store";
 import { SettingsPage } from "./SettingsPage";
 
 const mocks = vi.hoisted(() => ({
@@ -303,5 +305,42 @@ describe("SettingsPage", () => {
 
     const results = await axe(view.container);
     expect(results.violations).toEqual([]);
+  });
+
+  // UX-25: a rejecting picker previously died as a silent unhandled rejection.
+  it("shows an error toast when the save-dir picker rejects", async () => {
+    vi.mocked(openDirectoryPicker).mockRejectedValueOnce(new Error("picker down"));
+    useToastStore.setState({ toasts: [] });
+
+    renderSettings();
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "settings.chooseDirectory", hidden: true }));
+    await act(async () => {});
+
+    expect(
+      useToastStore.getState().toasts.some((toast) => toast.tone === "error" && toast.title === "toast.actionFailed"),
+    ).toBe(true);
+  });
+
+  it("shows an error toast when the ffmpeg path picker rejects", async () => {
+    vi.mocked(openFilePicker).mockRejectedValueOnce(new Error("picker down"));
+    useToastStore.setState({ toasts: [] });
+
+    renderSettings();
+    await act(async () => {});
+    // External tools is collapsed by default; find its expand trigger by the
+    // panel id it controls, then reach the browse button.
+    const expandTrigger = screen
+      .getAllByRole("button", { hidden: true })
+      .find((button) => button.getAttribute("aria-controls") === "external-tools-settings-section-panel");
+    expect(expandTrigger).toBeDefined();
+    fireEvent.click(expandTrigger!);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "settings.ffmpegPath.browse", hidden: true }));
+    await act(async () => {});
+
+    expect(
+      useToastStore.getState().toasts.some((toast) => toast.tone === "error" && toast.title === "toast.actionFailed"),
+    ).toBe(true);
   });
 });

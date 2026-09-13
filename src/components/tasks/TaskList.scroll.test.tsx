@@ -205,4 +205,28 @@ describe("TaskList selection scroll (UX-17)", () => {
     await waitFor(() => expect(scrollToIndex).toHaveBeenCalledTimes(before + 1));
     expect(scrollToIndex).toHaveBeenLastCalledWith(2, { align: "center" });
   });
+
+  it("scrolls again when the same task is re-selected after a deselect", async () => {
+    listTasksCursor.mockResolvedValue(
+      page([sampleTask("a", "a.bin"), sampleTask("b", "b.bin"), sampleTask("c", "c.bin")], null),
+    );
+    renderList();
+
+    await waitFor(() => expect(useTaskDataStore.getState().taskIds).toEqual(["a", "b", "c"]));
+
+    await act(async () => {
+      useTaskUIStore.getState().selectTask("c");
+    });
+    const afterFirst = scrollToIndex.mock.calls.length;
+    expect(afterFirst).toBeGreaterThanOrEqual(1);
+
+    await act(async () => {
+      useTaskUIStore.getState().selectTask(null);
+    });
+    await act(async () => {
+      useTaskUIStore.getState().selectTask("c");
+    });
+    await waitFor(() => expect(scrollToIndex).toHaveBeenCalledTimes(afterFirst + 1));
+    expect(scrollToIndex).toHaveBeenLastCalledWith(2, { align: "center" });
+  });
 });
