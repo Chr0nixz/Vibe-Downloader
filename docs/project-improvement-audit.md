@@ -319,13 +319,13 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：分页追加不改变滚动位置；用键盘或命令面板切换选中项时仍会滚动到目标行。
 - **2026-09-13 修复**（`61517d5`，簿记补录于 `a9f5831` 之后）：`TaskList` 的 `scrollToIndex` effect 改用 `lastScrolledSelectedIdRef` 按**选中项**去重（而非按 `filtered` 数组引用重跑），并改经已有的 `filteredRef` 读取最新列表，把 `filtered` 移出依赖数组——分页追加生成新数组引用不再触发回滚；取消选中时清空去重标记，保证下次选中仍能滚入视口。验收测试 [TaskList.scroll.test.tsx](../src/components/tasks/TaskList.scroll.test.tsx) 三例：追加加载后视口不回滚（沿用 loadPage 灌入的首屏数据而非手动 setState，避开 mock 时序差异）、新选中项仍滚入视口、取消选中后再选中恢复滚动；`219cc6c` 补充了重选同项的覆盖。
 
-### UX-18（P2，Open）：列表 ARIA 模型不一致，表单校验缺程序化关联
+### UX-18（P2，Closed）：列表 ARIA 模型不一致，表单校验缺程序化关联
 
 - **证据**：三个任务列表用了三种模型——[`TaskList.tsx`](../src/components/tasks/TaskList.tsx#L769) 用 `list`/`listitem` 但给行加了 `tabIndex` 与 `aria-current`，而 [`AttentionCenter.tsx`](../src/components/workspaces/AttentionCenter.tsx#L262) 和 `QueueCenter.tsx` 用的是 `listbox`/`option`。`TaskRow` 的 DOM id 本身就叫 `task-option-${id}`，说明原始设计意图是 option。另外全仓库只有 1 处 `aria-invalid`（`NewDownloadDialog.tsx:900`），而 `role="alert"` 的错误文案有 20 处，二者之间没有 `aria-describedby` 关联。
 - **影响**：`listitem` 是非交互角色，屏幕阅读器会进入「列表浏览」而非「选择」模式，用户听到「列表项 3，共 50 项」而不是「选项 3，已选中」。设置页的数值 clamp 超限时，键盘用户得不到任何反馈。
 - **修复方向**：TaskList 统一到 `listbox` + `aria-multiselectable="true"`，行改 `option` + `aria-selected`；在 `SettingsRow` 这一层内置 `aria-invalid` / `aria-describedby` 关联，一处改动覆盖整个设置页。
 - **验收**：三个列表使用同一 ARIA 模型；校验失败时输入框与错误文案有程序化关联；用 `jest-axe` 补测试（`QueueCenter.a11y.test.tsx` 是现成模板）。
-- **2026-09-13 部分修复 + 证据修正**：核实发现 QueueCenter 早已改为 `list`/`listitem` + `aria-current`（本条证据过时）——真正的孤儿是 AttentionCenter 的 `listbox`/`option`。现已把 AttentionCenter 统一到 `list`/`listitem` + `aria-current` + 单一 tab stop，键盘导航保持不变（新增 `AttentionCenter.a11y.test.tsx` 两条断言）。**剩余**（TaskRow `task-option-${id}` 改名与 NDD 其余校验输入的 `aria-invalid`/`aria-describedby` 关联）因相关文件被并行特性开发占用而暂缓；设置页数值 clamp 的完整校验 UI 按修复方向的原 note 继续沿 `SettingsRow` 层方案另行处理。
+- **2026-09-13 部分修复 + 证据修正**：核实发现 QueueCenter 早已改为 `list`/`listitem` + `aria-current`（本条证据过时）——真正的孤儿是 AttentionCenter 的 `listbox`/`option`。现已把 AttentionCenter 统一到 `list`/`listitem` + `aria-current` + 单一 tab stop，键盘导航保持不变（新增 `AttentionCenter.a11y.test.tsx` 两条断言）。**剩余**（TaskRow `task-option-${id}` 改名与 NDD 其余校验输入的 `aria-invalid`/`aria-describedby` 关联）相关文件随并行工作流落地后已于 2026-09-15 收尾闭合：①遗留的 `task-option-${id}` DOM id 改名 `task-row-${id}`（TaskRow、TaskList 焦点、AppShell 焦点三处同步），三个列表的 ARIA 模型同构且命名不再误导；②NDD URL 输入的 aria-invalid/aria-describedby → role="alert" 错误区关联已随并行重写落地（复核确认）；③设置页四个数值字段（分段数/每主机连接/最大活动任务/完成倒计时）原先静默 clamp，现共用 `ClampedNumberInput`：clamp 生效时输入框经 aria-describedby 关联 role="status" 范围提示（新增 `settings.valueClampedToRange`，七个 locale 全量补齐），原方案的 `SettingsRow` 层抽象由该组件等价实现。验收测试：`AttentionCenter.a11y.test.tsx`（列表模型，2026-09-13）+ `SettingsPage.test.tsx` 新用例（输入 99 → 提示出现、关联建立、值钳到上限；输入 5 → 提示与关联解除）。
 
 ### UX-19（P2，Closed）：Toast 达到 20 条上限时静默驱逐待撤销删除，任务被隐藏且无法删除
 
@@ -381,7 +381,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-13 修复**：`handleCopy` 改 await + try/catch——成功才弹 `recovery.errorCopied`，失败弹 `contextmenu.task.copyFailed`（与 AppShell.copyTaskUrl 等处理器同款分支）并记 warn 日志。
 - **验证测试**：`TaskRecoveryActions.test.tsx` 两条新用例：writeText resolve → 成功 toast；reject → 错误 toast、无成功提示（toast store 由 mock 换回真实 store 以便断言）。
 
-### UX-25（P3，Open）：refreshTasks / getPlatform / 目录选择器的 await 无捕获，产生无声 unhandled rejection
+### UX-25（P3，Closed）：refreshTasks / getPlatform / 目录选择器的 await 无捕获，产生无声 unhandled rejection
 
 - **证据**：[`AppShell.tsx`](../src/components/shell/AppShell.tsx#L187) 的 refreshTasks 无 try/catch，经 `void refreshTasks()`（`:379-381`）接到列表右键 Refresh（TaskList.tsx:769）；`:909` 的 `void getPlatform().then(setPlatform)` 无 `.catch`；[`SettingsPage.tsx`](../src/components/settings/SettingsPage.tsx#L866) 的 chooseDirectory/handleBrowseFfmpegPath 裸 await 且直接绑 onClick（`:1354`、`:2076`），NewDownloadDialog.tsx:694-697/:1054/:1548 同型；resolveAttention 的 choose_another_folder 分支（AppShell.tsx:891-896）在 try 范围外 await picker，由 TaskRow.tsx:932-935 fire-and-forget 调用。对照组：TaskList.loadPage 有完整 error state + `role="alert"` 重试横幅。
 - **影响**：IPC 失败时按钮毫无反馈地死掉；同一场故障走列表自身加载路径有横幅、走右键 Refresh 什么都没有。
@@ -389,6 +389,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：mock 各自 reject 时均有用户可见反馈。
 - **2026-09-13 修复（部分，5 处中 4 处）**：refreshTasks 包 try/catch + 错误 toast（右键 Refresh、重排回滚等 fire-and-forget 调用不再产生无声 rejection）；resolveAttention 的 choose_another_folder picker 补 try/catch + 错误 toast；SettingsPage 的 chooseDirectory/handleBrowseFfmpegPath 对齐同页 syncAutostart 范本补 catch + 错误 toast；getPlatform 补 `.catch` 卫生（其内部已有 fallback，此为防 unhandled rejection 的最后一道）。**剩余**：NewDownloadDialog 三处 picker——该文件正被并行特性开发整文件重写（400+ 行在途改动），为避免冲突推迟，待其落地后按同一范本补齐并闭合本条。
 - **验证测试**：`SettingsPage.test.tsx` 两条新用例——save-dir picker 与 ffmpeg path picker mock reject 后断言真实 toast store 出现 `toast.actionFailed` 错误项（ffmpeg 用例经 aria-controls 定位展开默认折叠的 External tools 区块）。refreshTasks 与 resolveAttention picker 的失败分支未单列自动化用例——AppShell 无全量 mock 基建，为各自 4 行 catch 搭建整机挂载不成比例，以类型检查与全量回归覆盖；若后续建立 AppShell 测试基建可补。
+- **2026-09-15 修复（收尾闭合）**：并行重写落地后复核，NewDownloadDialog 的 SSH-key 与 manifest picker 已在重写中自带 try/catch + 对话框内错误区展示，仅剩 save-dir picker 是裸 await——按同对话框兄弟 picker 的范本补 catch，反馈走对话框自身错误区（对话框有现成错误槽，toast 反而不一致，偏离 toast 方案并在此记录）。验收测试：`NewDownloadDialog.test.tsx` 新用例 mock picker reject → 断言 role="alert" 错误区出现且 picker 被调用一次。证据中的五处现全部有用户可见反馈，状态 Closed。
 
 ## 六、程序功能丰富性和完整性
 
@@ -1331,6 +1332,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
   另一个值得记录的操作陷阱：强制终止正在编译的 cargo 会留下损坏的增量缓存，表现为 rustc ICE（`Res::Err but no error emitted`）和 `rlib format not found`。恢复只需删除 `target/debug/incremental`、`deps/tauri_app_lib*` 与 `.fingerprint/vibe-downloader-*`，不必全量 `cargo clean`（后者会重编译 900 多个依赖 crate）。
 - **2026-08-26 复核**：`zz_dump_schema.rs` 仍在树中且无 `#[ignore]`，固定路径 `temp_dir()/vibe_schema_new.txt` + `.expect("write dump")` 每次全量测试执行并遗留产物。一点更正：Windows 上 Rust std 以 FILE_SHARE_READ|WRITE|DELETE 打开文件，两进程并发 `fs::write` 同一路径通常表现为交错写入而非 sharing-violation panic——早先「并发必炸」的推断过强；卫生缺陷本身（一次性诊断、固定路径、残留产物、ENG-03 Open 登记属实）成立。
 - **2026-09-14 修复**（`9d7b1ff`，Partial）：① `install_test_secret_key` / `install_intranet_test_bypass` 改走库内 debug 门控的进程内钩子（`secure_headers::install_test_secret_key`、`download::ssrf::install_test_intranet_bypass`），集成套件不再调用 `std::env::set_var`；env 回退保留给 lib 自身单元测试，bt.rs 单元测试一并迁移。② `TestPaths` 实现 Drop 自清理——目录从 `temp.parent()` 推导、不新增字段，6 处结构体字面量构造点（含并行在途文件内的）零改动兼容。③ 删除 `zz_dump_schema.rs`（文件头自述"验证后删除"）；删除 metalink_engine.rs 中紧邻无条件 cooldown 覆盖的多余 1100ms 阻塞 sleep。④ README 的 `-j 1` 按本条 2026-08-13 实证结论改写为 `-j 2` 并注明真实根因（链接阶段页面文件耗尽，非测试干扰）。保持 Partial 的残余：`test_pool` 的 .sqlite/-wal/-shm 仍随进程遗留——175 个调用点，改签名会与并行在途的 6 个测试文件冲突，待其落地后迁移 `(pool, TempDir)`；`db/task_credentials.rs` 单元 helper 仍用 set_var（该文件被并行占用）；ROADMAP 的 `-j 1` 说明同因待改。验证：暂存树 checkout-index 物化后独立 `cargo check --tests` 通过；metalink 34 / webdav 15 / sftp 22 / hls 20 全绿。
+- **2026-09-15 修复（尾巴收尾，Partial 保持）**：并行工作流落地后三项尾巴完成。①`test_pool` 迁移为 `(TestDbGuard, SqlitePool)`——17 个逐文件本地副本收敛为委托、153 个调用点解构守卫，Drop 删除 .sqlite/-wal/-shm；②`db::task_credentials` 单元 helper 迁到进程内密钥钩子，本条证据中的 set_var 站点全部清零；③ROADMAP 的 `-j 1` 说明按 README 同款改写为 `-j 2`。残余如实记录：sqlx 池的关闭在最后一个句柄 drop 后是异步的，current-thread `#[tokio::test]` 结束时 runtime 不再 poll 关闭任务，同步 Drop 无法等待它（scratch-runtime close 与池内部任务死锁，运行时上下文内再入被拒）；守卫以短重试 + 分离线程尽力回收，multi-thread 套件全清，Windows 上一次全量运行仍残留约 61 个文件（迁移前每轮 2000+）。彻底清零需要测试体内显式 `pool.close().await` 或 nextest 进程级隔离，留作后续方向。实测：TestPaths 临时目录零泄漏保持；全量 cargo test 与 clippy --all-targets -D warnings 通过。
 
 ### ENG-04（P2，Open）：没有任何覆盖率度量
 
@@ -1356,13 +1358,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：`pnpm verify` 覆盖 CI 全集；四份文档不再各自维护清单；`--locked` 可在全线启用。
 - **2026-08-26 复核（文档漂移实锤三件）**：其一，[`AGENTS.md`](../AGENTS.md#L94) 的 Useful checks 仍列 `cargo check` 与不带 `--all-targets` 的 clippy，而 ci.yml:85 已是 `cargo clippy --locked --all-targets -- -D warnings`——按 AGENTS.md 本地自查恰好放过 CI 会拦的 test-target warning。其二，本文第十四章旧文曾写「CI 当前尚未加上 (--all-targets)」，与本章 ENG-01 已完成的记录自相矛盾（本次修订已一并改正）。其三，ENG-05 曾称根目录缺 `.gitattributes`，与同章 ENG-02 已添加的记录冲突（已在上条更正）。「`pnpm verify` 单入口」仍是根治此类漂移的结构性解法。
 
-### ENG-07（P2，Partial）：六个引擎测试的无 deadline 轮询循环把回归放大成 30 分钟 CI 挂起
+### ENG-07（P2，Closed）：六个引擎测试的无 deadline 轮询循环把回归放大成 30 分钟 CI 挂起
 
 - **证据**：ftp_engine.rs:450-473（join :476-479）、sftp_engine.rs:899-911（join :914-917）、hls_engine.rs:512-523 与 1412-1423、dash_engine.rs:443-454 与 789-800、webdav_engine.rs:440-452 均为 `loop { sleep(25ms) }` 无 deadline 轮询，且 spawn 出的 engine.download JoinHandle 错误只在循环跳出后才被读取。同文件已有 deadline 范式（hls_engine.rs:777-779,887-889,1338；dash_engine.rs:640；metalink_engine.rs:2315）但未推广。package.json 的 test:rust 是裸 `cargo test` 无超时；ci.yml:44 rust matrix timeout-minutes:30、fail-fast:false。
 - **影响**：任何「早退且不写 checkpoint」的引擎回归（例如 ARC-33 类改动失误）→ 循环永不退出、真实错误永不可见，烧满 30 分钟超时且双 OS leg 信号全失。
 - **修复方向**：抽 tests/common 的 `wait_for_segment_progress(deadline)` helper（Instant deadline + 超时 panic 时附带 JoinHandle 错误），替换六处循环。
 - **验收**：人为早退的 stub engine 下测试秒级失败并显示真实错误。
 - **2026-09-14 修复**（`0a1222f`，Partial）：抽 [`common::wait_for_segment_progress`](../src-tauri/tests/common/mod.rs)——条件是逐次装箱的 async 闭包（等待需要重查数据库），超时且 worker 已退出时先 await 它，让 panic 携带引擎真实错误而非笼统超时。已转换干净测试文件中的 5 处循环：sftp_engine.rs ×2（其一是 ARC-42 验收共用的 `pause_sftp_download_mid_transfer` fixture——2026-09-15 复盘的全仓裸轮询扫描发现它被原证据清单漏列，补录转换）、hls_engine.rs ×2、webdav_engine.rs（deadline 60s，仍远小于 30 分钟腿超时），并新增验收自测 `eng07_early_exit_stub_fails_fast_with_real_error`——stub 提前带错误退出时 ~0.2s 内 panic 且 payload 含该错误，而旧行为下同一 stub 会无限轮询。保持 Partial 的原因：ftp_engine.rs 与 dash_engine.rs 的 3 处循环位于并行在途文件未转换，待其落地后按同一范本收尾。
+- **2026-09-15 修复（尾巴收尾闭合）**：并行工作流落地后转换剩余 5 处——ftp_engine 三处（pause-resume 含 ARC-19 在途不变量断言、arc31-drain、共用 fixture）与 dash_engine 两处（staging recovery、process restart），deadline 60s。全仓裸轮询扫描复核：剩余 loop 站点均为事件驱动服务器连接循环或已带 Instant deadline，无同类残留。九处转换全部完成，自测 `eng07_early_exit_stub_fails_fast_with_real_error` 保持通过，ftp 19 / dash 18 套件全绿，状态 Closed。
 
 ### ENG-08（P3，Open）：sync-stable-error-i18n.mjs 以硬编码哨兵键区分「已同步 / regex 未命中」，且零测试覆盖
 
