@@ -1,3 +1,5 @@
+mod common;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::{AssertSqlSafe, Row};
@@ -9,21 +11,15 @@ use tauri_app_lib::{
     },
 };
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-migration-{label}-{id}.sqlite"));
-    db::connect(&path)
-        .await
-        .expect("database connect with migrations")
-        .pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 #[tokio::test]
 async fn full_migration_on_fresh_database() {
-    let pool = test_pool("fresh").await;
+    let (_db, pool) = test_pool("fresh").await;
 
     // Baseline consolidation: the original 14 incremental migrations were
     // merged into a single `001_init.sql`, followed by metalink health, HLS track
@@ -40,7 +36,7 @@ async fn full_migration_on_fresh_database() {
 
 #[tokio::test]
 async fn key_tables_exist_after_migration() {
-    let pool = test_pool("schema").await;
+    let (_db, pool) = test_pool("schema").await;
 
     let tables = [
         "tasks",
@@ -78,7 +74,7 @@ async fn key_tables_exist_after_migration() {
 
 #[tokio::test]
 async fn tasks_table_has_expected_columns() {
-    let pool = test_pool("columns").await;
+    let (_db, pool) = test_pool("columns").await;
 
     let columns = sqlx::query("PRAGMA table_info(tasks)")
         .fetch_all(&pool)
@@ -115,7 +111,7 @@ async fn baseline_contains_all_evolved_columns() {
     // Guards against accidental column loss during the baseline consolidation.
     // Each entry below was originally added by an ALTER TABLE in migrations
     // 002-014 and must remain present in the merged baseline.
-    let pool = test_pool("evolved").await;
+    let (_db, pool) = test_pool("evolved").await;
 
     let cases: &[(&str, &[&str])] = &[
         (
@@ -188,7 +184,7 @@ async fn baseline_contains_all_evolved_columns() {
 #[tokio::test]
 async fn source_key_active_unique_index_is_absent() {
     // ARC-01: host-level source_key must not uniquely constrain active tasks.
-    let pool = test_pool("dedup").await;
+    let (_db, pool) = test_pool("dedup").await;
 
     let indexes =
         sqlx::query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks'")
@@ -258,7 +254,7 @@ fn sample_task(id: &str, url: &str, source_key: &str, status: TaskStatus) -> Tas
 #[tokio::test]
 async fn same_host_different_urls_can_coexist_when_active() {
     // ARC-01: two different URLs sharing a host-level source_key may be active together.
-    let pool = test_pool("same-host").await;
+    let (_db, pool) = test_pool("same-host").await;
     let host_key = "cdn.example.com";
 
     db::insert_task_record(
@@ -380,7 +376,7 @@ async fn migration_004_drops_legacy_source_key_unique_on_upgrade() {
 #[tokio::test]
 async fn duplicate_bt_info_hash_still_rejected() {
     // ARC-01: BT uniqueness remains on torrent_tasks.info_hash, not tasks.source_key.
-    let pool = test_pool("bt-dedup").await;
+    let (_db, pool) = test_pool("bt-dedup").await;
     let info_hash = "0123456789abcdef0123456789abcdef01234567";
 
     let mut first = sample_task(
@@ -457,7 +453,7 @@ async fn migration_002_adds_metalink_health_columns() {
     //  - cooldown_until (TEXT, NULL on existing rows)
     //  - avg_speed_bps (INTEGER NOT NULL DEFAULT 0)
     //  - supports_range (INTEGER NOT NULL DEFAULT 1)
-    let pool = test_pool("metalink-health").await;
+    let (_db, pool) = test_pool("metalink-health").await;
 
     let rows = sqlx::query("PRAGMA table_info(metalink_resources)")
         .fetch_all(&pool)
@@ -841,7 +837,7 @@ async fn explicit_reset_after_dirty_produces_clean_schema() {
 /// (backwards-compatible with tasks created before F-6).
 #[tokio::test]
 async fn migration_003_adds_hls_track_selection_columns() {
-    let pool = test_pool("hls-track-selection").await;
+    let (_db, pool) = test_pool("hls-track-selection").await;
 
     let rows = sqlx::query("PRAGMA table_info(hls_tasks)")
         .fetch_all(&pool)

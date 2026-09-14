@@ -24,11 +24,7 @@
 
 mod common;
 
-use std::{
-    collections::HashMap,
-    io::SeekFrom,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, io::SeekFrom};
 
 use common::sftp_server::{
     connect_sftp, start_sftp_server, start_sftp_server_with_files, SftpServerConfig,
@@ -42,13 +38,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 // ===== helpers =====
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-sftp-{label}-{id}.sqlite"));
-    db::connect(&path).await.expect("connect").pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 fn new_engine() -> SftpEngine {
@@ -122,7 +115,7 @@ async fn probe_succeeds_and_reports_supports_parallel() {
     let mut files = HashMap::new();
     files.insert("/file.bin".to_string(), vec![0xA5u8; 4096]);
     let server = start_sftp_server_with_files(files).await;
-    let pool = test_pool("probe-parallel").await;
+    let (_db, pool) = test_pool("probe-parallel").await;
     let engine = new_engine();
 
     let output = engine
@@ -154,7 +147,7 @@ async fn probe_tofu_first_connection_records_host_key() {
     let mut files = HashMap::new();
     files.insert("/file.bin".to_string(), vec![0x11u8; 1024]);
     let server = start_sftp_server_with_files(files).await;
-    let pool = test_pool("probe-tofu").await;
+    let (_db, pool) = test_pool("probe-tofu").await;
     let engine = new_engine();
     let url = sftp_url(server.addr, "file.bin");
 
@@ -212,7 +205,7 @@ async fn probe_fails_on_authentication_failure() {
         deny_open: false,
     })
     .await;
-    let pool = test_pool("probe-auth-fail").await;
+    let (_db, pool) = test_pool("probe-auth-fail").await;
     let engine = new_engine();
 
     let error = engine
@@ -235,7 +228,7 @@ async fn probe_fails_on_host_key_mismatch() {
     let mut files = HashMap::new();
     files.insert("/file.bin".to_string(), vec![0x22u8; 2048]);
     let server = start_sftp_server_with_files(files).await;
-    let pool = test_pool("probe-hostkey-mismatch").await;
+    let (_db, pool) = test_pool("probe-hostkey-mismatch").await;
     seed_mismatched_host_key(&pool, &server.addr.ip().to_string(), server.addr.port()).await;
     let engine = new_engine();
 
@@ -266,7 +259,7 @@ async fn arc15_list_and_forget_known_host_then_retofu() {
     let mut files = HashMap::new();
     files.insert("/file.bin".to_string(), vec![0x44u8; 1024]);
     let server = start_sftp_server_with_files(files).await;
-    let pool = test_pool("arc15-list-forget").await;
+    let (_db, pool) = test_pool("arc15-list-forget").await;
     let host = server.addr.ip().to_string();
     let port = server.addr.port();
     seed_mismatched_host_key(&pool, &host, port).await;
@@ -326,7 +319,7 @@ async fn probe_directory_url_returns_error() {
     // Probing a directory URL (path ends with `/`) should be rejected at
     // URL parse time before any network call is made.
     let server = start_sftp_server_with_files(HashMap::new()).await;
-    let pool = test_pool("probe-directory").await;
+    let (_db, pool) = test_pool("probe-directory").await;
     let engine = new_engine();
 
     let error = engine
@@ -608,7 +601,7 @@ async fn download_uses_persisted_sftp_credentials() {
     let mut files = HashMap::new();
     files.insert("/protected.bin".to_string(), payload.clone());
     let server = start_sftp_server_with_files(files).await;
-    let pool = common::test_pool("sftp-cred-rotation").await;
+    let (_db, pool) = common::test_pool("sftp-cred-rotation").await;
     seed_matching_host_key(
         &pool,
         &server.addr.ip().to_string(),
@@ -662,7 +655,7 @@ async fn download_uses_persisted_sftp_private_key_credentials() {
     let mut files = HashMap::new();
     files.insert("/key-protected.bin".to_string(), payload.clone());
     let server = start_sftp_server_with_files(files).await;
-    let pool = common::test_pool("sftp-key-cred-rotation").await;
+    let (_db, pool) = common::test_pool("sftp-key-cred-rotation").await;
     seed_matching_host_key(
         &pool,
         &server.addr.ip().to_string(),
@@ -735,7 +728,7 @@ async fn download_fails_on_permission_denied_open() {
         ..Default::default()
     })
     .await;
-    let pool = common::test_pool("sftp-perm-denied").await;
+    let (_db, pool) = common::test_pool("sftp-perm-denied").await;
     seed_matching_host_key(
         &pool,
         &server.addr.ip().to_string(),
@@ -785,7 +778,7 @@ async fn download_host_key_mismatch_then_forget_and_retry() {
     let mut files = HashMap::new();
     files.insert("/file.bin".to_string(), payload.clone());
     let server = start_sftp_server_with_files(files).await;
-    let pool = common::test_pool("sftp-hostkey-download").await;
+    let (_db, pool) = common::test_pool("sftp-hostkey-download").await;
     let host = server.addr.ip().to_string();
     let port = server.addr.port();
     seed_mismatched_host_key(&pool, &host, port).await;
@@ -860,7 +853,7 @@ async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
         ..Default::default()
     })
     .await;
-    let pool = common::test_pool("sftp-pause-resume").await;
+    let (_db, pool) = common::test_pool("sftp-pause-resume").await;
     seed_matching_host_key(
         &pool,
         &server.addr.ip().to_string(),
@@ -1021,7 +1014,7 @@ async fn download_fails_when_socks5_proxy_is_unreachable() {
     let mut files = HashMap::new();
     files.insert("/via-proxy.bin".to_string(), b"x".to_vec());
     let server = start_sftp_server_with_files(files).await;
-    let pool = common::test_pool("sftp-proxy-fail").await;
+    let (_db, pool) = common::test_pool("sftp-proxy-fail").await;
     seed_matching_host_key(
         &pool,
         &server.addr.ip().to_string(),
@@ -1082,7 +1075,7 @@ async fn download_rejects_non_socks5_custom_proxy() {
     let mut files = HashMap::new();
     files.insert("/file.bin".to_string(), vec![1u8; 8]);
     let server = start_sftp_server_with_files(files).await;
-    let pool = common::test_pool("sftp-proxy-unsupported").await;
+    let (_db, pool) = common::test_pool("sftp-proxy-unsupported").await;
     seed_matching_host_key(
         &pool,
         &server.addr.ip().to_string(),
@@ -1141,7 +1134,7 @@ async fn fun20_task_proxy_off_bypasses_unreachable_global_during_probe() {
     let mut files = HashMap::new();
     files.insert("/file.bin".to_string(), vec![0xA5u8; 1024]);
     let server = start_sftp_server_with_files(files).await;
-    let pool = test_pool("fun20-sftp-off").await;
+    let (_db, pool) = test_pool("fun20-sftp-off").await;
 
     // Global proxy: unreachable SOCKS5. The request-level Off must win.
     let shared = std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -1172,7 +1165,7 @@ async fn arc26_sftp_probe_with_cancelled_token_converges_immediately() {
     let mut files = HashMap::new();
     files.insert("/file.bin".to_string(), vec![0xA5u8; 1024]);
     let server = start_sftp_server_with_files(files).await;
-    let pool = test_pool("arc26-sftp-cancel").await;
+    let (_db, pool) = test_pool("arc26-sftp-cancel").await;
     let engine = new_engine();
     let token = tokio_util::sync::CancellationToken::new();
     token.cancel();
@@ -1215,7 +1208,7 @@ async fn pause_sftp_download_mid_transfer(task_id: &str) -> Arc42SftpFixture {
         ..Default::default()
     })
     .await;
-    let pool = common::test_pool("sftp-arc42").await;
+    let (_db, pool) = common::test_pool("sftp-arc42").await;
     seed_matching_host_key(
         &pool,
         &server.addr.ip().to_string(),

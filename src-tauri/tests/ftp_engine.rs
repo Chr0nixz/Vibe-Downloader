@@ -458,7 +458,7 @@ async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
         data_chunk_delay: Some(Duration::from_millis(10)),
         ..FtpServerConfig::default()
     });
-    let pool = common::test_pool("ftp-pause-resume").await;
+    let (_db, pool) = common::test_pool("ftp-pause-resume").await;
     let paths = common::TestPaths::new("ftp-pause-resume");
     let task = common::download_task(
         "ftp-pause-resume",
@@ -481,30 +481,41 @@ async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
         async move { engine.download(context).await }
     });
 
-    let partial = loop {
-        let segments = db::list_segment_records(&pool, "ftp-pause-resume")
-            .await
-            .expect("list FTP segments");
-        if let Some(downloaded) = segments
-            .first()
-            .map(|segment| segment.downloaded_until)
-            .filter(|downloaded| *downloaded > 0)
-        {
-            // ARC-19: check the invariant while the transfer is still live, not
-            // just after cancel. A checkpoint may never describe more bytes than
-            // the file actually holds, because an aborted worker gets no chance
-            // to flush afterwards.
-            let durable = std::fs::metadata(&paths.temp)
-                .map(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX))
-                .unwrap_or(0);
-            assert!(
-                durable >= downloaded,
-                "ARC-19: live checkpoint {downloaded} leads durable bytes {durable}"
-            );
-            break downloaded;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    };
+    let partial = std::sync::atomic::AtomicI64::new(0);
+    let first_download = common::wait_for_segment_progress(
+        || {
+            Box::pin(async {
+                let segments = db::list_segment_records(&pool, "ftp-pause-resume")
+                    .await
+                    .expect("list FTP segments");
+                if let Some(downloaded) = segments
+                    .first()
+                    .map(|segment| segment.downloaded_until)
+                    .filter(|downloaded| *downloaded > 0)
+                {
+                    // ARC-19: check the invariant while the transfer is still live, not
+                    // just after cancel. A checkpoint may never describe more bytes than
+                    // the file actually holds, because an aborted worker gets no chance
+                    // to flush afterwards.
+                    let durable = std::fs::metadata(&paths.temp)
+                        .map(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX))
+                        .unwrap_or(0);
+                    assert!(
+                        durable >= downloaded,
+                        "ARC-19: live checkpoint {downloaded} leads durable bytes {durable}"
+                    );
+                    partial.store(downloaded, std::sync::atomic::Ordering::SeqCst);
+                    return true;
+                }
+                false
+            })
+        },
+        first_download,
+        Duration::from_secs(60),
+        "ftp-pause-resume first segment progress",
+    )
+    .await;
+    let partial = partial.load(std::sync::atomic::Ordering::SeqCst);
     assert!(partial < payload.len() as i64);
     cancel.cancel();
     first_download
@@ -623,7 +634,7 @@ async fn download_uses_persisted_ftp_credentials() {
         files,
         ..FtpServerConfig::default()
     });
-    let pool = common::test_pool("ftp-cred-rotation").await;
+    let (_db, pool) = common::test_pool("ftp-cred-rotation").await;
     let paths = common::TestPaths::new("ftp-cred-rotation");
     // URL has no embedded credentials — runtime must load encrypted DB row.
     let task = common::download_task(
@@ -664,7 +675,7 @@ async fn download_fails_when_server_returns_550_on_retr() {
     let mut config = config_with_file("/denied.bin", 1024);
     config.reject_retr = true;
     let server = FtpTestServer::start(config);
-    let pool = common::test_pool("ftp-retr-denied").await;
+    let (_db, pool) = common::test_pool("ftp-retr-denied").await;
     let paths = common::TestPaths::new("ftp-retr-denied");
     let task = common::download_task(
         "ftp-retr-denied",
@@ -703,7 +714,7 @@ async fn download_fails_when_socks5_proxy_is_unreachable() {
         files,
         ..FtpServerConfig::default()
     });
-    let pool = common::test_pool("ftp-proxy-fail").await;
+    let (_db, pool) = common::test_pool("ftp-proxy-fail").await;
     let paths = common::TestPaths::new("ftp-proxy-fail");
     let task = common::download_task(
         "ftp-proxy-fail",
@@ -858,7 +869,7 @@ async fn arc31_parallel_cancel_drains_workers_before_checkpoint() {
         data_chunk_delay: Some(Duration::from_millis(10)),
         ..FtpServerConfig::default()
     });
-    let pool = common::test_pool("ftp-arc31-drain").await;
+    let (_db, pool) = common::test_pool("ftp-arc31-drain").await;
     let paths = common::TestPaths::new("ftp-arc31-drain");
     let task = common::download_task(
         "ftp-arc31-drain",
@@ -882,15 +893,21 @@ async fn arc31_parallel_cancel_drains_workers_before_checkpoint() {
     });
 
     // Cancel once real progress exists.
-    loop {
-        let segments = db::list_segment_records(&pool, "ftp-arc31-drain")
-            .await
-            .expect("list segments");
-        if segments.iter().any(|segment| segment.downloaded_until > 0) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let download = common::wait_for_segment_progress(
+        || {
+            Box::pin(async {
+                db::list_segment_records(&pool, "ftp-arc31-drain")
+                    .await
+                    .expect("list segments")
+                    .iter()
+                    .any(|segment| segment.downloaded_until > 0)
+            })
+        },
+        download,
+        Duration::from_secs(60),
+        "ftp-arc31-drain first segment progress",
+    )
+    .await;
     cancel.cancel();
 
     let result = tokio::time::timeout(Duration::from_secs(30), download)
@@ -944,7 +961,7 @@ async fn pause_ftp_download_mid_transfer(task_id: &str, payload_len: i64) -> Arc
         data_chunk_delay: Some(Duration::from_millis(10)),
         ..FtpServerConfig::default()
     });
-    let pool = common::test_pool("ftp-arc42").await;
+    let (_db, pool) = common::test_pool("ftp-arc42").await;
     let paths = common::TestPaths::new("ftp-arc42");
     let mut task = common::download_task(
         task_id,
@@ -969,19 +986,22 @@ async fn pause_ftp_download_mid_transfer(task_id: &str, payload_len: i64) -> Arc
         let context = common::headless_download_context(pool.clone(), task, cancel.clone());
         async move { engine.download(context).await }
     });
-    loop {
-        let segments = db::list_segment_records(&pool, task_id)
-            .await
-            .expect("list FTP segments");
-        if segments
-            .first()
-            .map(|segment| segment.downloaded_until)
-            .is_some_and(|downloaded| downloaded > 0)
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    let first_download = common::wait_for_segment_progress(
+        || {
+            Box::pin(async {
+                db::list_segment_records(&pool, task_id)
+                    .await
+                    .expect("list FTP segments")
+                    .first()
+                    .map(|segment| segment.downloaded_until)
+                    .is_some_and(|downloaded| downloaded > 0)
+            })
+        },
+        first_download,
+        Duration::from_secs(60),
+        "ftp fixture first segment progress",
+    )
+    .await;
     assert!(
         std::fs::metadata(&paths.temp)
             .map(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX))

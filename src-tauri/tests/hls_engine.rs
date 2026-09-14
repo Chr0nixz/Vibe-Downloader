@@ -480,7 +480,7 @@ async fn download_resumes_staging_without_redownloading_completed_segments() {
     let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
     let server =
         start_recovery_server(Arc::new(generate_test_transport_stream()), requests.clone());
-    let pool = common::test_pool("hls-staging-recovery").await;
+    let (_db, pool) = common::test_pool("hls-staging-recovery").await;
     let mut paths = common::TestPaths::new("hls-staging-recovery");
     let root = paths
         .final_path
@@ -638,7 +638,7 @@ async fn live_idle_polls_enter_waiting_network() {
         }
     });
 
-    let pool = common::test_pool("hls-live-idle").await;
+    let (_db, pool) = common::test_pool("hls-live-idle").await;
     let mut paths = common::TestPaths::new("hls-live-idle");
     let root = paths
         .final_path
@@ -739,7 +739,7 @@ async fn oversized_target_duration_poll_sleep_is_clamped() {
         let _ = stream.write_all(&body);
     });
 
-    let pool = common::test_pool("hls-target-clamp").await;
+    let (_db, pool) = common::test_pool("hls-target-clamp").await;
     let mut paths = common::TestPaths::new("hls-target-clamp");
     let root = paths
         .final_path
@@ -848,7 +848,7 @@ async fn cancel_during_live_poll_sleep_pauses_cleanly() {
         }
     });
 
-    let pool = common::test_pool("hls-cancel-sleep").await;
+    let (_db, pool) = common::test_pool("hls-cancel-sleep").await;
     let mut paths = common::TestPaths::new("hls-cancel-sleep");
     let root = paths
         .final_path
@@ -1030,7 +1030,7 @@ video.m3u8\n";
         "probe must resolve relative audio URI, got {audio_uri}"
     );
 
-    let pool = common::test_pool("hls-fun10-relative").await;
+    let (_db, pool) = common::test_pool("hls-fun10-relative").await;
     let mut paths = common::TestPaths::new("hls-fun10-relative");
     let root = paths
         .final_path
@@ -1154,7 +1154,7 @@ async fn fun10_selected_track_404_fails_visibly() {
         let _ = stream.write_all(&body);
     });
 
-    let pool = common::test_pool("hls-fun10-fail").await;
+    let (_db, pool) = common::test_pool("hls-fun10-fail").await;
     let mut paths = common::TestPaths::new("hls-fun10-fail");
     let root = paths
         .final_path
@@ -1307,7 +1307,7 @@ async fn download_uses_persisted_hls_credentials() {
     let expected = b64_basic("hlsuser", "hlspass");
     let observed = Arc::new(std::sync::Mutex::new(None));
     let server = start_auth_hls_server(expected, observed.clone());
-    let pool = common::test_pool("hls-cred-rotation").await;
+    let (_db, pool) = common::test_pool("hls-cred-rotation").await;
     let mut paths = common::TestPaths::new("hls-cred-rotation");
     let root = paths.final_path.parent().expect("root").to_path_buf();
     paths.temp = root.join("staging");
@@ -1387,7 +1387,7 @@ async fn download_reenters_after_reset_interrupted_tasks() {
     let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
     let server =
         start_recovery_server(Arc::new(generate_test_transport_stream()), requests.clone());
-    let pool = common::test_pool("hls-process-restart").await;
+    let (_db, pool) = common::test_pool("hls-process-restart").await;
     let mut paths = common::TestPaths::new("hls-process-restart");
     let root = paths
         .final_path
@@ -1538,7 +1538,7 @@ async fn arc37_internal_segment_failure_does_not_cancel_user_token() {
         let _ = stream.write_all(&body);
     });
 
-    let pool = common::test_pool("hls-arc37-token").await;
+    let (_db, pool) = common::test_pool("hls-arc37-token").await;
     let mut paths = common::TestPaths::new("hls-arc37-token");
     let root = paths
         .final_path
@@ -1687,7 +1687,7 @@ video.m3u8\n";
         .find_map(|track| track.uri.clone())
         .expect("audio track uri");
 
-    let pool = common::test_pool("hls-arc36-order").await;
+    let (_db, pool) = common::test_pool("hls-arc36-order").await;
     let mut paths = common::TestPaths::new("hls-arc36-order");
     let root = paths
         .final_path
@@ -1804,7 +1804,7 @@ async fn fun27_hls_state_read_failure_fails_task() {
     });
 
     let engine = new_engine();
-    let pool = common::test_pool("hls-fun27-state-read").await;
+    let (_db, pool) = common::test_pool("hls-fun27-state-read").await;
     let mut paths = common::TestPaths::new("hls-fun27-state-read");
     let root = paths
         .final_path

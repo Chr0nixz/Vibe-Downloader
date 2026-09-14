@@ -40,7 +40,7 @@ async fn sweep_removes_orphan_and_completed_staging_keeps_resumable() {
     let save_dir = base.join("downloads");
     fs::create_dir_all(&save_dir).expect("create save dir");
 
-    let pool = common::test_pool("arc38-sweep").await;
+    let (_db, pool) = common::test_pool("arc38-sweep").await;
 
     let now = chrono::Utc::now().to_rfc3339();
     for (id, status) in [
@@ -127,7 +127,7 @@ async fn sweep_tolerates_save_dirs_without_staging_root() {
     let save_dir = base.join("plain");
     fs::create_dir_all(&save_dir).expect("create save dir");
 
-    let pool = common::test_pool("arc38-sweep-no-root").await;
+    let (_db, pool) = common::test_pool("arc38-sweep-no-root").await;
     let record = common::download_task(
         "plain-task",
         "https://example.com/plain.bin".to_string(),

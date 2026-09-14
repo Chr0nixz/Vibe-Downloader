@@ -20,7 +20,7 @@ fn sha256_hex(payload: &[u8]) -> String {
 
 #[tokio::test]
 async fn fun05_delayed_sidecar_on_completed_task_verifies() {
-    let pool = common::test_pool("fun05-sidecar").await;
+    let (_db, pool) = common::test_pool("fun05-sidecar").await;
     let paths = common::TestPaths::new("fun05-sidecar");
     let payload = b"fun05-sidecar-payload";
     std::fs::write(&paths.final_path, payload).expect("write completed file");
@@ -89,7 +89,7 @@ async fn fun05_delayed_sidecar_on_completed_task_verifies() {
 
 #[tokio::test]
 async fn fun05_delayed_sidecar_mismatch_marks_failed() {
-    let pool = common::test_pool("fun05-sidecar-fail").await;
+    let (_db, pool) = common::test_pool("fun05-sidecar-fail").await;
     let paths = common::TestPaths::new("fun05-sidecar-fail");
     let payload = b"fun05-mismatch";
     std::fs::write(&paths.final_path, payload).expect("write completed file");

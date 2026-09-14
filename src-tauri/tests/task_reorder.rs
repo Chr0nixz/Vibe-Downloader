@@ -1,17 +1,14 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
 use tauri_app_lib::{
     db,
     models::{HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus},
 };
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-reorder-{label}-{id}.sqlite"));
-    db::connect(&path).await.expect("connect").pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 fn sample_task(id: &str, queue_position: i64) -> TaskRecord {
@@ -79,7 +76,7 @@ async fn queue_position_of(pool: &sqlx::SqlitePool, id: &str) -> i64 {
 
 #[tokio::test]
 async fn reorder_queued_tasks_reorders_correctly() {
-    let pool = test_pool("reorder-correct").await;
+    let (_db, pool) = test_pool("reorder-correct").await;
     // Three queued tasks with initial positions 1000, 2000, 3000.
     let t1 = sample_task("task-1", 1000);
     let t2 = sample_task("task-2", 2000);
@@ -109,7 +106,7 @@ async fn reorder_queued_tasks_reorders_correctly() {
 
 #[tokio::test]
 async fn reorder_queued_tasks_empty_input_no_op() {
-    let pool = test_pool("reorder-empty").await;
+    let (_db, pool) = test_pool("reorder-empty").await;
     let t1 = sample_task("task-1", 1000);
     let t2 = sample_task("task-2", 2000);
     db::insert_task_record(&pool, &t1).await.expect("insert t1");
@@ -128,7 +125,7 @@ async fn reorder_queued_tasks_empty_input_no_op() {
 
 #[tokio::test]
 async fn reorder_queued_tasks_partial_subset_only_updates_passed() {
-    let pool = test_pool("reorder-partial").await;
+    let (_db, pool) = test_pool("reorder-partial").await;
     let t1 = sample_task("task-1", 1000);
     let t2 = sample_task("task-2", 2000);
     let t3 = sample_task("task-3", 3000);

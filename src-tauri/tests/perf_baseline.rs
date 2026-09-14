@@ -3,12 +3,13 @@
 //! Default CI smoke seeds 1k tasks and asserts result schema + successful queries.
 //! Scale to 10k with: `cargo test --test perf_baseline -- --ignored --nocapture`
 //! Optional artifact dir: `VIBE_PERF_ARTIFACT_DIR` (writes `baseline-*.json`).
-
 #![cfg(debug_assertions)]
+
+mod common;
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use serde::Serialize;
 use sqlx::Row;
@@ -79,13 +80,10 @@ fn distribution_for_scale(total: u32) -> ScaleStateDistribution {
     }
 }
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-db-perf-{label}-{id}.sqlite"));
-    db::connect(&path).await.expect("connect").pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 fn base_query(nav: &str, search: &str, sort_key: &str) -> TaskListQuery {
@@ -244,7 +242,7 @@ async fn run_baseline(scale: u32, label: &str) -> BaselineReport {
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_REPS);
     let dist = distribution_for_scale(scale);
-    let pool = test_pool(label).await;
+    let (_db, pool) = test_pool(label).await;
 
     let seed_started = Instant::now();
     let seeded = seed_scale_data(&pool, &dist, true)

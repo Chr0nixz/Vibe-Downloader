@@ -1,19 +1,15 @@
 //! UX-05: global pause/resume must select targets from the full DB set.
-
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
 use tauri_app_lib::{
     db,
     models::{HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus},
 };
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-bulk-global-{label}-{id}.sqlite"));
-    db::connect(&path).await.expect("connect").pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 fn sample_task(id: &str, status: TaskStatus, queue_position: i64) -> TaskRecord {
@@ -73,7 +69,7 @@ fn sample_task(id: &str, status: TaskStatus, queue_position: i64) -> TaskRecord 
 
 #[tokio::test]
 async fn list_task_ids_by_statuses_covers_full_db_beyond_page_size() {
-    let pool = test_pool("page").await;
+    let (_db, pool) = test_pool("page").await;
 
     // Seed >100 pauseable tasks plus completed noise, mirroring a filtered UI page.
     for i in 0..120 {

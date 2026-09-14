@@ -1,4 +1,5 @@
 //! ARC-02: concurrent final-path reservation.
+mod common;
 
 use std::{
     collections::HashSet,
@@ -6,7 +7,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use sqlx::SqlitePool;
 use tauri_app_lib::{
     commands::task_file_planning::{task_temp_file_path, unique_final_path_among},
     db,
@@ -17,16 +17,10 @@ use tauri_app_lib::{
 };
 use tokio::sync::Barrier;
 
-async fn test_pool(label: &str) -> SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-path-reserve-{label}-{id}.sqlite"));
-    db::connect(&path)
-        .await
-        .expect("database connect with migrations")
-        .pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 fn queued_task(id: &str, final_path: &str, temp_path: &str) -> TaskRecord {
@@ -78,7 +72,8 @@ fn queued_task(id: &str, final_path: &str, temp_path: &str) -> TaskRecord {
 async fn concurrent_same_name_creates_reserve_unique_final_paths() {
     // N concurrent reservations must yield unique final paths (CI-stable N=20).
     const N: usize = 20;
-    let pool = Arc::new(test_pool("concurrent").await);
+    let (_db, pool) = test_pool("concurrent").await;
+    let pool = Arc::new(pool);
     let dir = std::env::temp_dir().join(format!(
         "vibe-concurrent-paths-{}",
         SystemTime::now()
@@ -197,7 +192,7 @@ async fn arc20_file_row_conflict_rolls_back_the_task_row() {
     const WORKERS: usize = 32;
     const FILES_PER_TASK: usize = 8;
 
-    let pool = test_pool("arc20-atomic").await;
+    let (_db, pool) = test_pool("arc20-atomic").await;
     let dir = std::env::temp_dir().join(format!("vibe-arc20-atomic-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create dir");
 
@@ -273,7 +268,7 @@ async fn arc21_concurrent_multi_file_creates_all_commit() {
     const WORKERS: usize = 32;
     const FILES_PER_TASK: usize = 8;
 
-    let pool = test_pool("arc21-immediate").await;
+    let (_db, pool) = test_pool("arc21-immediate").await;
     let dir = std::env::temp_dir().join(format!("vibe-arc21-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create dir");
 
@@ -324,7 +319,7 @@ async fn arc21_concurrent_multi_file_creates_all_commit() {
 
 #[tokio::test]
 async fn final_path_active_unique_index_exists() {
-    let pool = test_pool("index").await;
+    let (_db, pool) = test_pool("index").await;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_tasks_final_path_active')",
     )

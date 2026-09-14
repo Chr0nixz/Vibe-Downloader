@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
 use sqlx::Row;
 use tauri_app_lib::{
@@ -9,13 +9,10 @@ use tauri_app_lib::{
     },
 };
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-db-{label}-{id}.sqlite"));
-    db::connect(&path).await.expect("connect").pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 fn sample_record(task_id: &str) -> RequestDiagnosticRecord {
@@ -121,7 +118,7 @@ async fn set_all_created_at(pool: &sqlx::SqlitePool, task_id: &str, iso: &str) {
 
 #[tokio::test]
 async fn prune_caps_rows_per_task_to_maximum() {
-    let pool = test_pool("prune-cap").await;
+    let (_db, pool) = test_pool("prune-cap").await;
     let task_id = "task-cap";
     seed_task(&pool, task_id).await;
     // Insert one more row than the per-task cap.
@@ -147,7 +144,7 @@ async fn prune_caps_rows_per_task_to_maximum() {
 
 #[tokio::test]
 async fn prune_removes_rows_older_than_max_age() {
-    let pool = test_pool("prune-age").await;
+    let (_db, pool) = test_pool("prune-age").await;
     let task_id = "task-age";
     seed_task(&pool, task_id).await;
     for _ in 0..5 {
@@ -169,7 +166,7 @@ async fn prune_removes_rows_older_than_max_age() {
 
 #[tokio::test]
 async fn prune_caps_independently_per_task() {
-    let pool = test_pool("prune-multi").await;
+    let (_db, pool) = test_pool("prune-multi").await;
     let task_a = "task-a";
     let task_b = "task-b";
     seed_task(&pool, task_a).await;
@@ -204,7 +201,7 @@ async fn prune_caps_independently_per_task() {
 
 #[tokio::test]
 async fn prune_keeps_most_recent_rows_for_task() {
-    let pool = test_pool("prune-recency").await;
+    let (_db, pool) = test_pool("prune-recency").await;
     let task_id = "task-recency";
     seed_task(&pool, task_id).await;
     // Insert MAX rows normally, then push one extra row whose URL we mark

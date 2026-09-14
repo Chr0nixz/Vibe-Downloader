@@ -408,7 +408,7 @@ async fn download_resumes_staging_without_redownloading_completed_segments() {
     }
     let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
     let server = start_recovery_server(Arc::new(generate_test_mp4()), requests.clone());
-    let pool = common::test_pool("dash-staging-recovery").await;
+    let (_db, pool) = common::test_pool("dash-staging-recovery").await;
     let mut paths = common::TestPaths::new("dash-staging-recovery");
     let root = paths
         .final_path
@@ -441,18 +441,23 @@ async fn download_resumes_staging_without_redownloading_completed_segments() {
         async move { engine.download(context).await }
     });
 
-    loop {
-        let segments = db::list_dash_segments(&pool, "dash-staging-recovery")
-            .await
-            .expect("list DASH segments");
-        let first_completed = segments.iter().any(|segment| {
-            segment.segment_index == 0 && segment.status == SegmentStatus::Completed
-        });
-        if first_completed && requests[1].load(Ordering::SeqCst) > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let first_download = common::wait_for_segment_progress(
+        || {
+            Box::pin(async {
+                let segments = db::list_dash_segments(&pool, "dash-staging-recovery")
+                    .await
+                    .expect("list DASH segments");
+                let first_completed = segments.iter().any(|segment| {
+                    segment.segment_index == 0 && segment.status == SegmentStatus::Completed
+                });
+                first_completed && requests[1].load(Ordering::SeqCst) > 0
+            })
+        },
+        first_download,
+        Duration::from_secs(60),
+        "dash-staging-recovery first segment completion",
+    )
+    .await;
     cancel.cancel();
     first_download
         .await
@@ -608,7 +613,7 @@ async fn download_uses_persisted_dash_credentials() {
         }
     });
 
-    let pool = common::test_pool("dash-cred-rotation").await;
+    let (_db, pool) = common::test_pool("dash-cred-rotation").await;
     let mut paths = common::TestPaths::new("dash-cred-rotation");
     let root = paths.final_path.parent().expect("root").to_path_buf();
     paths.temp = root.join("temp.mp4");
@@ -711,7 +716,7 @@ async fn download_retries_transient_segment_failures() {
         }
     });
 
-    let pool = common::test_pool("dash-segment-retry").await;
+    let (_db, pool) = common::test_pool("dash-segment-retry").await;
     let mut paths = common::TestPaths::new("dash-segment-retry");
     let root = paths.final_path.parent().expect("root").to_path_buf();
     paths.temp = root.join("temp.mp4");
@@ -762,7 +767,7 @@ async fn download_reenters_after_reset_interrupted_tasks() {
     }
     let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
     let server = start_recovery_server(Arc::new(generate_test_mp4()), requests.clone());
-    let pool = common::test_pool("dash-process-restart").await;
+    let (_db, pool) = common::test_pool("dash-process-restart").await;
     let mut paths = common::TestPaths::new("dash-process-restart");
     let root = paths.final_path.parent().expect("root").to_path_buf();
     paths.temp = root.join("temp.mp4");
@@ -787,18 +792,23 @@ async fn download_reenters_after_reset_interrupted_tasks() {
         let context = common::headless_download_context(pool.clone(), task, cancel.clone());
         async move { engine.download(context).await }
     });
-    loop {
-        let segments = db::list_dash_segments(&pool, "dash-process-restart")
-            .await
-            .expect("list");
-        if segments
-            .iter()
-            .any(|segment| segment.segment_index == 0 && segment.status == SegmentStatus::Completed)
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let first = common::wait_for_segment_progress(
+        || {
+            Box::pin(async {
+                db::list_dash_segments(&pool, "dash-process-restart")
+                    .await
+                    .expect("list")
+                    .iter()
+                    .any(|segment| {
+                        segment.segment_index == 0 && segment.status == SegmentStatus::Completed
+                    })
+            })
+        },
+        first,
+        Duration::from_secs(60),
+        "dash-process-restart first segment completion",
+    )
+    .await;
     cancel.cancel();
     first.abort();
     let _ = first.await;
@@ -905,7 +915,7 @@ async fn arc37_internal_segment_failure_does_not_cancel_user_token() {
         let _ = stream.write_all(&body);
     });
 
-    let pool = common::test_pool("dash-arc37-token").await;
+    let (_db, pool) = common::test_pool("dash-arc37-token").await;
     let mut paths = common::TestPaths::new("dash-arc37-token");
     let root = paths.final_path.parent().expect("root").to_path_buf();
     paths.temp = root.join("temp.mp4");
@@ -979,7 +989,7 @@ async fn fun20_task_proxy_off_bypasses_unreachable_global_during_probe() {
 /// display field. A genuine manifest change (duration shift) still resets.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fun25_signed_url_change_preserves_completed_segments() {
-    let pool = common::test_pool("fun25-dash-signature").await;
+    let (_db, pool) = common::test_pool("fun25-dash-signature").await;
     let task_id = "fun25-dash-task";
 
     // dash_segments has an FK to tasks(id).
@@ -1201,7 +1211,7 @@ async fn fun24_padded_number_template_downloads_padded_urls() {
         }
     });
 
-    let pool = common::test_pool("dash-fun24-padded").await;
+    let (_db, pool) = common::test_pool("dash-fun24-padded").await;
     let paths = common::TestPaths::new("dash-fun24-padded");
     let task = common::download_task(
         "dash-fun24-padded",

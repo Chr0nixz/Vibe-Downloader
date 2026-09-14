@@ -3,10 +3,9 @@
 //! These tests verify that the scale seeder generates the correct number of
 //! tasks per state, creates associated segments/events/request-diagnostics,
 //! and respects the `clear_before` flag for append vs. replace semantics.
-
 #![cfg(debug_assertions)]
 
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
 use tauri_app_lib::{
     commands::tasks::seed_scale_data,
@@ -14,13 +13,10 @@ use tauri_app_lib::{
     models::{ScaleStateDistribution, TaskStatus},
 };
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-db-scale-{label}-{id}.sqlite"));
-    db::connect(&path).await.expect("connect").pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 fn distribution(
@@ -39,7 +35,7 @@ fn distribution(
 
 #[tokio::test]
 async fn generates_correct_total_count() {
-    let pool = test_pool("total-count").await;
+    let (_db, pool) = test_pool("total-count").await;
     let dist = distribution(10, 20, 30, 40);
     let count = seed_scale_data(&pool, &dist, true).await.expect("seed");
     assert_eq!(count, 100);
@@ -47,7 +43,7 @@ async fn generates_correct_total_count() {
 
 #[tokio::test]
 async fn generates_correct_state_distribution() {
-    let pool = test_pool("state-dist").await;
+    let (_db, pool) = test_pool("state-dist").await;
     let dist = distribution(5, 8, 12, 3);
     seed_scale_data(&pool, &dist, true).await.expect("seed");
 
@@ -77,7 +73,7 @@ async fn generates_correct_state_distribution() {
 
 #[tokio::test]
 async fn clear_before_wipes_existing_tasks() {
-    let pool = test_pool("clear-wipe").await;
+    let (_db, pool) = test_pool("clear-wipe").await;
     // First batch: 5 tasks
     seed_scale_data(&pool, &distribution(2, 1, 1, 1), true)
         .await
@@ -93,7 +89,7 @@ async fn clear_before_wipes_existing_tasks() {
 
 #[tokio::test]
 async fn append_mode_preserves_existing_tasks() {
-    let pool = test_pool("append").await;
+    let (_db, pool) = test_pool("append").await;
     seed_scale_data(&pool, &distribution(3, 0, 0, 0), true)
         .await
         .expect("first seed");
@@ -123,7 +119,7 @@ async fn append_mode_preserves_existing_tasks() {
 
 #[tokio::test]
 async fn generates_segments_for_non_queued_tasks() {
-    let pool = test_pool("segments").await;
+    let (_db, pool) = test_pool("segments").await;
     seed_scale_data(&pool, &distribution(1, 1, 1, 1), true)
         .await
         .expect("seed");
@@ -157,7 +153,7 @@ async fn generates_segments_for_non_queued_tasks() {
 
 #[tokio::test]
 async fn generates_events_for_all_tasks() {
-    let pool = test_pool("events").await;
+    let (_db, pool) = test_pool("events").await;
     seed_scale_data(&pool, &distribution(1, 1, 1, 1), true)
         .await
         .expect("seed");
@@ -187,7 +183,7 @@ async fn generates_events_for_all_tasks() {
 
 #[tokio::test]
 async fn generates_request_diagnostics_for_non_queued_tasks() {
-    let pool = test_pool("requests").await;
+    let (_db, pool) = test_pool("requests").await;
     seed_scale_data(&pool, &distribution(1, 1, 1, 1), true)
         .await
         .expect("seed");
@@ -219,7 +215,7 @@ async fn generates_request_diagnostics_for_non_queued_tasks() {
 
 #[tokio::test]
 async fn failed_tasks_have_error_metadata() {
-    let pool = test_pool("errors").await;
+    let (_db, pool) = test_pool("errors").await;
     seed_scale_data(&pool, &distribution(0, 0, 0, 5), true)
         .await
         .expect("seed");

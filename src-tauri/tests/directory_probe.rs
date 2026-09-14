@@ -305,7 +305,7 @@ async fn fun04_sftp_directory_probe_uses_private_key_credentials() {
     })
     .await;
     // Pre-seed TOFU so connect does not fail host-key verification.
-    let pool = common::test_pool("fun04-sftp-dir").await;
+    let (_db, pool) = common::test_pool("fun04-sftp-dir").await;
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
         r#"
@@ -382,7 +382,7 @@ async fn fun04_sftp_directory_probe_uses_socks5_proxy() {
         ..Default::default()
     })
     .await;
-    let pool = common::test_pool("fun04-sftp-dir-proxy").await;
+    let (_db, pool) = common::test_pool("fun04-sftp-dir-proxy").await;
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
         r#"

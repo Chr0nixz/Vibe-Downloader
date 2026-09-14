@@ -1,7 +1,5 @@
 //! FUN-03: auth-header recovery helpers and same-URL header refresh.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use tauri_app_lib::{
     commands::browser::is_auth_header_recovery_candidate,
     db,
@@ -57,16 +55,10 @@ fn sample_task(id: &str, status: TaskStatus, error_code: Option<&str>) -> TaskRe
     }
 }
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-fun03-{label}-{id}.sqlite"));
-    db::connect(&path)
-        .await
-        .expect("database connect with migrations")
-        .pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 #[test]
@@ -96,7 +88,7 @@ fn fun03_recovery_candidate_only_auth_attention_or_failed() {
 #[tokio::test]
 async fn fun03_expired_headers_refresh_and_requeue_same_task() {
     common::install_test_secret_key();
-    let pool = test_pool("refresh").await;
+    let (_db, pool) = test_pool("refresh").await;
     let task = sample_task(
         "fun03-expired",
         TaskStatus::NeedsAttention,

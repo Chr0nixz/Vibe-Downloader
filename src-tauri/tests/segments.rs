@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
 use tauri_app_lib::{
     commands::tasks::{local_resume_error, resume_mismatch_message, segment_resume_error},
@@ -12,7 +12,7 @@ use tauri_app_lib::{
 
 #[tokio::test]
 async fn ensure_single_segment_creates_task_range() {
-    let pool = test_pool("create-segment").await;
+    let (_db, pool) = test_pool("create-segment").await;
     let task = sample_task("task-create", 100);
     db::insert_task_record(&pool, &task)
         .await
@@ -31,7 +31,7 @@ async fn ensure_single_segment_creates_task_range() {
 
 #[tokio::test]
 async fn small_or_no_range_tasks_keep_one_segment() {
-    let pool = test_pool("single-planning").await;
+    let (_db, pool) = test_pool("single-planning").await;
     let small = sample_task(
         "task-small",
         db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES - 1,
@@ -60,7 +60,7 @@ async fn small_or_no_range_tasks_keep_one_segment() {
 
 #[tokio::test]
 async fn large_range_task_generates_four_non_overlapping_segments() {
-    let pool = test_pool("multi-planning").await;
+    let (_db, pool) = test_pool("multi-planning").await;
     let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES + 7;
     let task = sample_task("task-large", total_size);
     db::insert_task_record(&pool, &task)
@@ -91,7 +91,7 @@ async fn large_range_task_generates_four_non_overlapping_segments() {
 
 #[tokio::test]
 async fn configurable_threshold_and_segment_count_plan_new_segments() {
-    let pool = test_pool("configurable-planning").await;
+    let (_db, pool) = test_pool("configurable-planning").await;
     let task = sample_task("task-configurable", 4 * 1024 * 1024);
     db::insert_task_record(&pool, &task)
         .await
@@ -149,7 +149,7 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
 
 #[tokio::test]
 async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
-    let pool = test_pool("ftp-planning").await;
+    let (_db, pool) = test_pool("ftp-planning").await;
     let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES * 4;
     let mut task = sample_task("task-ftp", total_size);
     task.url = "ftp://user:password@example.com/file.bin".to_string();
@@ -214,7 +214,7 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
 
 #[tokio::test]
 async fn sftp_task_creates_single_file_work_unit() {
-    let pool = test_pool("sftp-planning").await;
+    let (_db, pool) = test_pool("sftp-planning").await;
     let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES * 4;
     let mut task = sample_task("task-sftp", total_size);
     task.url = "sftp://example.com/remote/file.bin".to_string();
@@ -244,7 +244,7 @@ async fn sftp_task_creates_single_file_work_unit() {
 
 #[tokio::test]
 async fn sftp_parallel_task_creates_two_range_segments() {
-    let pool = test_pool("sftp-parallel-planning").await;
+    let (_db, pool) = test_pool("sftp-parallel-planning").await;
     let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES * 4;
     let mut task = sample_task("task-sftp-parallel", total_size);
     task.url = "sftp://example.com/remote/large.bin".to_string();
@@ -277,7 +277,7 @@ async fn sftp_parallel_task_creates_two_range_segments() {
 
 #[tokio::test]
 async fn sftp_parallel_task_below_threshold_keeps_single_segment() {
-    let pool = test_pool("sftp-below-threshold").await;
+    let (_db, pool) = test_pool("sftp-below-threshold").await;
     let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES / 2;
     let mut task = sample_task("task-sftp-small", total_size);
     task.url = "sftp://example.com/remote/small.bin".to_string();
@@ -305,7 +305,7 @@ async fn sftp_parallel_task_below_threshold_keeps_single_segment() {
 
 #[tokio::test]
 async fn bt_task_creates_single_piece_work_unit() {
-    let pool = test_pool("bt-planning").await;
+    let (_db, pool) = test_pool("bt-planning").await;
     let mut task = sample_task("task-bt", 0);
     task.url = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel".to_string();
     task.final_url = Some("bt:08ada5a7a6183aae1e09d831df6748d566095a10".to_string());
@@ -336,7 +336,7 @@ async fn bt_task_creates_single_piece_work_unit() {
 
 #[tokio::test]
 async fn splitting_largest_remaining_segment_keeps_ranges_contiguous() {
-    let pool = test_pool("split-segment").await;
+    let (_db, pool) = test_pool("split-segment").await;
     let total_size = db::DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES + 7;
     let task = sample_task("task-split", total_size);
     db::insert_task_record(&pool, &task)
@@ -375,7 +375,7 @@ async fn splitting_largest_remaining_segment_keeps_ranges_contiguous() {
 
 #[tokio::test]
 async fn progress_updates_task_and_segment_together() {
-    let pool = test_pool("progress-segment").await;
+    let (_db, pool) = test_pool("progress-segment").await;
     let task = sample_task("task-progress", 100);
     db::insert_task_record(&pool, &task)
         .await
@@ -413,7 +413,7 @@ async fn progress_updates_task_and_segment_together() {
 
 #[tokio::test]
 async fn settings_defaults_use_download_dir_and_two_active_tasks() {
-    let pool = test_pool("settings-defaults").await;
+    let (_db, pool) = test_pool("settings-defaults").await;
     let settings = db::get_settings(&pool, "C:\\Downloads".to_string())
         .await
         .expect("settings");
@@ -442,7 +442,7 @@ async fn settings_defaults_use_download_dir_and_two_active_tasks() {
 
 #[tokio::test]
 async fn settings_upsert_and_clamp_active_task_count() {
-    let pool = test_pool("settings-upsert").await;
+    let (_db, pool) = test_pool("settings-upsert").await;
     db::upsert_settings(
         &pool,
         &AppSettings {
@@ -550,7 +550,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
 
 #[tokio::test]
 async fn recovery_target_update_preserves_progress_and_retargets_temp_path() {
-    let pool = test_pool("recovery-target").await;
+    let (_db, pool) = test_pool("recovery-target").await;
     let mut task = sample_task("task-recovery-target", 1024);
     task.downloaded_bytes = 512;
     task.status = TaskStatus::NeedsAttention;
@@ -596,7 +596,7 @@ async fn recovery_target_update_preserves_progress_and_retargets_temp_path() {
 
 #[tokio::test]
 async fn restart_reset_clears_progress_and_segments() {
-    let pool = test_pool("restart-reset").await;
+    let (_db, pool) = test_pool("restart-reset").await;
     let mut task = sample_task("task-restart-reset", 4096);
     task.downloaded_bytes = 2048;
     task.speed_bps = 999;
@@ -644,7 +644,7 @@ fn task_updated_payload_serializes() {
 
 #[tokio::test]
 async fn browser_messages_track_duplicates_and_latest_error() {
-    let pool = test_pool("browser-messages").await;
+    let (_db, pool) = test_pool("browser-messages").await;
     assert!(!db::browser_message_exists(&pool, "request-1")
         .await
         .expect("exists"));
@@ -679,7 +679,7 @@ async fn browser_messages_track_duplicates_and_latest_error() {
 
 #[tokio::test]
 async fn queued_task_query_uses_fifo_order() {
-    let pool = test_pool("queued-fifo").await;
+    let (_db, pool) = test_pool("queued-fifo").await;
     let mut first = sample_task("task-first", 100);
     first.created_at = "2024-01-01T00:00:00Z".to_string();
     first.updated_at = first.created_at.clone();
@@ -709,7 +709,7 @@ async fn queued_task_query_uses_fifo_order() {
 
 #[tokio::test]
 async fn cursor_task_query_pages_and_maps_failure_categories() {
-    let pool = test_pool("cursor-tasks").await;
+    let (_db, pool) = test_pool("cursor-tasks").await;
     for index in 0..12 {
         let mut task = sample_task(&format!("task-cursor-{index:02}"), 100);
         task.updated_at = format!("2024-01-01T00:{index:02}:00Z");
@@ -813,7 +813,7 @@ async fn cursor_task_query_pages_and_maps_failure_categories() {
 
 #[tokio::test]
 async fn task_query_indexes_are_created() {
-    let pool = test_pool("task-query-indexes").await;
+    let (_db, pool) = test_pool("task-query-indexes").await;
     let indexes: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT name
@@ -845,7 +845,7 @@ async fn task_query_indexes_are_created() {
 
 #[tokio::test]
 async fn task_stats_snapshot_uses_full_database_counts() {
-    let pool = test_pool("task-stats").await;
+    let (_db, pool) = test_pool("task-stats").await;
     let mut downloading = sample_task("stats-downloading", 1_000);
     downloading.status = TaskStatus::Downloading;
     downloading.downloaded_bytes = 250;
@@ -892,7 +892,7 @@ async fn task_stats_snapshot_uses_full_database_counts() {
 
 #[tokio::test]
 async fn browser_realtime_task_query_returns_active_plus_recent() {
-    let pool = test_pool("browser-realtime-query").await;
+    let (_db, pool) = test_pool("browser-realtime-query").await;
     for index in 0..60 {
         let mut task = sample_task(&format!("browser-recent-{index:02}"), 100);
         task.status = TaskStatus::Completed;
@@ -932,7 +932,7 @@ async fn browser_realtime_task_query_returns_active_plus_recent() {
 
 #[tokio::test]
 async fn reset_interrupted_tasks_pauses_active_records() {
-    let pool = test_pool("reset-interrupted").await;
+    let (_db, pool) = test_pool("reset-interrupted").await;
     let mut downloading = sample_task("task-downloading", 100);
     downloading.status = TaskStatus::Downloading;
     let mut retrying = sample_task("task-retrying", 100);
@@ -977,7 +977,7 @@ async fn reset_interrupted_tasks_pauses_active_records() {
 
 #[tokio::test]
 async fn reset_interrupted_tasks_can_queue_active_records_for_startup_resume() {
-    let pool = test_pool("reset-interrupted-auto-resume").await;
+    let (_db, pool) = test_pool("reset-interrupted-auto-resume").await;
     let mut downloading = sample_task("task-downloading", 100);
     downloading.status = TaskStatus::Downloading;
     let mut retrying = sample_task("task-retrying", 100);
@@ -1026,7 +1026,7 @@ async fn non_http_protocols_share_process_restart_recovery_contract() {
     const PROTOCOLS: [&str; 7] = ["ftp", "sftp", "bt", "hls", "dash", "webdav", "metalink"];
 
     for auto_resume in [false, true] {
-        let pool = test_pool(if auto_resume {
+        let (_db, pool) = test_pool(if auto_resume {
             "protocol-restart-auto"
         } else {
             "protocol-restart-paused"
@@ -1075,7 +1075,7 @@ async fn non_http_protocols_share_process_restart_recovery_contract() {
 #[tokio::test]
 async fn non_http_protocols_share_explicit_restart_reset_contract() {
     const PROTOCOLS: [&str; 7] = ["ftp", "sftp", "bt", "hls", "dash", "webdav", "metalink"];
-    let pool = test_pool("protocol-explicit-restart").await;
+    let (_db, pool) = test_pool("protocol-explicit-restart").await;
 
     for protocol in PROTOCOLS {
         let mut task = sample_task(&format!("{protocol}-explicit-restart"), 1024);
@@ -1114,7 +1114,7 @@ async fn non_http_protocols_share_explicit_restart_reset_contract() {
 #[tokio::test]
 async fn non_http_protocols_share_cancellation_state_contract() {
     const PROTOCOLS: [&str; 7] = ["ftp", "sftp", "bt", "hls", "dash", "webdav", "metalink"];
-    let pool = test_pool("protocol-cancel-state").await;
+    let (_db, pool) = test_pool("protocol-cancel-state").await;
 
     for protocol in PROTOCOLS {
         let mut task = sample_task(&format!("{protocol}-cancel"), 1024);
@@ -1157,7 +1157,7 @@ async fn non_http_protocols_share_cancellation_state_contract() {
 #[tokio::test]
 async fn non_http_protocols_share_atomic_pause_resume_persistence_contract() {
     const PROTOCOLS: [&str; 7] = ["ftp", "sftp", "bt", "hls", "dash", "webdav", "metalink"];
-    let pool = test_pool("protocol-pause-resume").await;
+    let (_db, pool) = test_pool("protocol-pause-resume").await;
     let root = std::env::temp_dir().join(format!(
         "vibe-protocol-pause-resume-{}",
         uuid::Uuid::new_v4()
@@ -1486,13 +1486,10 @@ fn resume_error_code(payload: Option<&str>) -> Option<String> {
     )
 }
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-db-{label}-{id}.sqlite"));
-    db::connect(&path).await.expect("connect").pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 fn sample_task(id: &str, total_size: i64) -> TaskRecord {

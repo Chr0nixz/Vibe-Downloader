@@ -729,9 +729,9 @@ mod tests {
     }
 
     fn install_test_secret_key() {
-        std::env::set_var(
-            "VIBE_DOWNLOADER_TEST_SECRET_KEY",
-            STANDARD.encode([7_u8; 32]),
-        );
+        // ENG-03: std::env::set_var from a test thread races with concurrent
+        // getenv; use the library's debug-gated in-process hook (same key the
+        // integration suites use).
+        crate::secure_headers::install_test_secret_key(&STANDARD.encode([7_u8; 32]));
     }
 }

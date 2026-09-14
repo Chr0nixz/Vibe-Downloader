@@ -3,7 +3,7 @@ pub mod sftp_server;
 
 use std::{
     net::{TcpListener, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
@@ -148,18 +148,80 @@ pub fn install_test_secret_key() {
     );
 }
 
-/// Opens an isolated migrated database for a real engine integration test.
+/// Deletes the test database files on drop (ENG-03). sqlite keeps the main
+/// db plus `-wal`/`-shm` sidecars; removing them while connections are still
+/// open is safe (Unix unlink / Windows delete-pending) and no new connections
+/// are opened after the test body returns.
 #[allow(dead_code)]
-pub async fn test_pool(label: &str) -> SqlitePool {
+pub struct TestDbGuard {
+    path: PathBuf,
+}
+
+#[allow(dead_code)]
+impl TestDbGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl TestDbGuard {
+    fn remove_files(path: &Path) -> bool {
+        // Main db first; sqlite deletes its own -wal/-shm on a clean close,
+        // so a missing sidecar is not an error.
+        let mut name = path.as_os_str().to_os_string();
+        name.push("");
+        let main_removed = std::fs::remove_file(PathBuf::from(name)).is_ok();
+        for suffix in ["-wal", "-shm"] {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(name));
+        }
+        main_removed
+    }
+}
+
+impl Drop for TestDbGuard {
+    fn drop(&mut self) {
+        // Dropping the last pool handle only schedules sqlx's asynchronous
+        // shutdown on the ambient runtime, which stops being polled when the
+        // test future returns — so a synchronous removal here usually races
+        // an open handle on Windows. Retry briefly, then keep trying on a
+        // detached thread for the rest of the test binary's lifetime.
+        for _ in 0..5 {
+            if Self::remove_files(&self.path) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let path = self.path.clone();
+        std::thread::spawn(move || {
+            for _ in 0..240 {
+                if TestDbGuard::remove_files(&path) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+    }
+}
+
+/// Opens an isolated migrated database for a real engine integration test.
+///
+/// Returns a guard that closes the pool and removes the database files on
+/// drop; destructure and keep it alive for the test body (binding as `_db`
+/// suffices).
+#[allow(dead_code)]
+pub async fn test_pool(label: &str) -> (TestDbGuard, SqlitePool) {
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time")
         .as_nanos();
     let path = std::env::temp_dir().join(format!("vibe-engine-{label}-{id}.sqlite"));
-    db::connect(&path)
+    let pool = db::connect(&path)
         .await
         .expect("database connect with migrations")
-        .pool
+        .pool;
+    (TestDbGuard::new(path), pool)
 }
 
 /// Builds the single-file task shape consumed by protocol download engines.

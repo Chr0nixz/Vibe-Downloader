@@ -415,7 +415,7 @@ async fn probe_rejects_directory_url() {
 async fn download_pauses_mid_transfer_and_resumes_through_http_engine() {
     let payload = resume_payload();
     let server = start_test_server(WebDavHandlerState::new());
-    let pool = common::test_pool("webdav-pause-resume").await;
+    let (_db, pool) = common::test_pool("webdav-pause-resume").await;
     let paths = common::TestPaths::new("webdav-pause-resume");
     let task = common::download_task(
         "webdav-pause-resume",
@@ -534,7 +534,7 @@ async fn download_uses_persisted_webdav_credentials() {
     let state = WebDavHandlerState::with_required_auth("davuser", "davpass");
     let observed = state.observed_authorization.clone();
     let server = start_test_server(state);
-    let pool = common::test_pool("webdav-cred-rotation").await;
+    let (_db, pool) = common::test_pool("webdav-cred-rotation").await;
     let paths = common::TestPaths::new("webdav-cred-rotation");
     // No embedded credentials in the task URL.
     let task = common::download_task(
@@ -623,7 +623,7 @@ async fn directory_probe_fails_when_propfind_returns_403() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn download_fails_when_server_returns_403() {
     let server = start_test_server(WebDavHandlerState::new());
-    let pool = common::test_pool("webdav-403-download").await;
+    let (_db, pool) = common::test_pool("webdav-403-download").await;
     let paths = common::TestPaths::new("webdav-403-download");
     let task = common::download_task(
         "webdav-403-download",

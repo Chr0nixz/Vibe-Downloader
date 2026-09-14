@@ -4,8 +4,9 @@
 //! `transition_task` now uses `BEGIN IMMEDIATE` with bounded BUSY retries.
 //! These tests hammer checkpoints against pause/fail/retry transitions and
 //! assert zero Database errors plus a coherent terminal control-plane status.
+mod common;
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use tauri_app_lib::{
     db,
@@ -59,16 +60,10 @@ fn sample_task_record(id: &str, status: TaskStatus) -> TaskRecord {
     }
 }
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-arc06-stress-{label}-{id}.sqlite"));
-    db::connect(&path)
-        .await
-        .expect("database connect with migrations")
-        .pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 fn is_database_error(error: &TransitionError) -> bool {
@@ -78,7 +73,7 @@ fn is_database_error(error: &TransitionError) -> bool {
 /// Concurrent checkpoints + pause/fail transitions: no BUSY_SNAPSHOT Database errors.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn arc06_checkpoint_and_control_plane_stress() {
-    let pool = test_pool("checkpoint-control").await;
+    let (_db, pool) = test_pool("checkpoint-control").await;
     let task_count = 4;
     let mut task_ids = Vec::new();
     for i in 0..task_count {
@@ -259,7 +254,7 @@ async fn arc06_checkpoint_and_control_plane_stress() {
 /// BEGIN IMMEDIATE path still preserves R-1 conditional UPDATE semantics.
 #[tokio::test]
 async fn arc06_transition_conflict_still_surfaces() {
-    let pool = test_pool("conflict-regression").await;
+    let (_db, pool) = test_pool("conflict-regression").await;
     let task = sample_task_record("arc06-conflict", TaskStatus::Queued);
     db::insert_task_record(&pool, &task).await.expect("insert");
 

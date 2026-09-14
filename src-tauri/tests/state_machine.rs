@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
 use tauri_app_lib::db;
 use tauri_app_lib::models::task::now_iso;
@@ -6,16 +6,10 @@ use tauri_app_lib::models::{
     HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus,
 };
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-state-{label}-{id}.sqlite"));
-    db::connect(&path)
-        .await
-        .expect("database connect with migrations")
-        .pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 fn sample_task_record(id: &str, status: TaskStatus) -> TaskRecord {
@@ -165,7 +159,7 @@ fn test_completed_is_terminal() {
 /// `TransitionError::Conflict` in `transition_task`.
 #[tokio::test]
 async fn conditional_update_returns_none_when_status_changed_concurrently() {
-    let pool = test_pool("conflict").await;
+    let (_db, pool) = test_pool("conflict").await;
     let task = sample_task_record("task-conflict", TaskStatus::Queued);
     db::insert_task_record(&pool, &task)
         .await
@@ -230,7 +224,7 @@ async fn conditional_update_returns_none_when_status_changed_concurrently() {
 /// so the update returns `Ok(None)` and the terminal state is preserved.
 #[tokio::test]
 async fn conditional_update_does_not_overwrite_terminal_state() {
-    let pool = test_pool("terminal").await;
+    let (_db, pool) = test_pool("terminal").await;
     let task = sample_task_record("task-terminal", TaskStatus::Downloading);
     db::insert_task_record(&pool, &task)
         .await

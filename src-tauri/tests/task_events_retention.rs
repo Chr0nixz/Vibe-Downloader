@@ -1,6 +1,5 @@
 //! PERF-05: task_events retention mirrors request diagnostics (cap + age).
-
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
 use tauri_app_lib::{
     db,
@@ -9,13 +8,10 @@ use tauri_app_lib::{
     },
 };
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-db-events-{label}-{id}.sqlite"));
-    db::connect(&path).await.expect("connect").pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 async fn seed_task(pool: &sqlx::SqlitePool, task_id: &str, status: TaskStatus) {
@@ -66,7 +62,7 @@ async fn seed_task(pool: &sqlx::SqlitePool, task_id: &str, status: TaskStatus) {
 
 #[tokio::test]
 async fn prune_enforces_per_task_cap() {
-    let pool = test_pool("cap").await;
+    let (_db, pool) = test_pool("cap").await;
     seed_task(&pool, "t1", TaskStatus::Completed).await;
 
     let over = db::TASK_EVENTS_MAX_PER_TASK + 25;
@@ -88,7 +84,7 @@ async fn prune_enforces_per_task_cap() {
 
 #[tokio::test]
 async fn prune_removes_old_events_but_keeps_latest_pause_for_paused_tasks() {
-    let pool = test_pool("age-pause").await;
+    let (_db, pool) = test_pool("age-pause").await;
     seed_task(&pool, "paused-sched", TaskStatus::Paused).await;
     seed_task(&pool, "done", TaskStatus::Completed).await;
 

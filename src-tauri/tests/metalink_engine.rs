@@ -489,16 +489,10 @@ async fn probe_parses_checksum_metadata_from_manifest() {
 
 // --- DB health-tracking tests ----------------------------------------------
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-metalink-{label}-{id}.sqlite"));
-    db::connect(&path)
-        .await
-        .expect("database connect with migrations")
-        .pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 /// Seed a task + file + N mirror resources. Returns the file_id and the
@@ -610,7 +604,7 @@ async fn seed_mirrors(
 
 #[tokio::test]
 async fn list_healthy_mirrors_returns_all_initial_mirrors_in_priority_order() {
-    let pool = test_pool("healthy-initial").await;
+    let (_db, pool) = test_pool("healthy-initial").await;
     let (file_id, resource_ids) = seed_mirrors(
         &pool,
         "healthy-initial",
@@ -639,7 +633,7 @@ async fn list_healthy_mirrors_returns_all_initial_mirrors_in_priority_order() {
 
 #[tokio::test]
 async fn list_healthy_mirrors_excludes_those_in_cooldown() {
-    let pool = test_pool("cooldown").await;
+    let (_db, pool) = test_pool("cooldown").await;
     let (file_id, resource_ids) = seed_mirrors(
         &pool,
         "cooldown",
@@ -689,7 +683,7 @@ async fn list_healthy_mirrors_excludes_those_in_cooldown() {
 
 #[tokio::test]
 async fn list_healthy_mirrors_excludes_unsupported_range_mirrors() {
-    let pool = test_pool("no-range").await;
+    let (_db, pool) = test_pool("no-range").await;
     let (file_id, resource_ids) = seed_mirrors(
         &pool,
         "no-range",
@@ -732,7 +726,7 @@ async fn list_healthy_mirrors_excludes_unsupported_range_mirrors() {
 
 #[tokio::test]
 async fn set_metalink_mirror_cooldown_overrides_default_window() {
-    let pool = test_pool("explicit-cooldown").await;
+    let (_db, pool) = test_pool("explicit-cooldown").await;
     let (file_id, resource_ids) = seed_mirrors(
         &pool,
         "explicit-cooldown",
@@ -764,7 +758,7 @@ async fn set_metalink_mirror_cooldown_overrides_default_window() {
 
 #[tokio::test]
 async fn mark_metalink_resource_completed_clears_cooldown() {
-    let pool = test_pool("complete-clears").await;
+    let (_db, pool) = test_pool("complete-clears").await;
     let (file_id, resource_ids) = seed_mirrors(
         &pool,
         "complete-clears",
@@ -809,7 +803,7 @@ async fn mark_metalink_resource_completed_clears_cooldown() {
 
 #[tokio::test]
 async fn update_mirror_speed_persists_observed_value() {
-    let pool = test_pool("speed").await;
+    let (_db, pool) = test_pool("speed").await;
     let (file_id, resource_ids) =
         seed_mirrors(&pool, "speed", &["http://mirror-a.example.com/file.bin"]).await;
 
@@ -830,7 +824,7 @@ async fn update_mirror_speed_persists_observed_value() {
 
 #[tokio::test]
 async fn mark_metalink_resource_attempted_stamps_last_attempt_without_failing() {
-    let pool = test_pool("attempted").await;
+    let (_db, pool) = test_pool("attempted").await;
     let (file_id, resource_ids) = seed_mirrors(
         &pool,
         "attempted",
@@ -880,7 +874,7 @@ async fn list_healthy_mirrors_orders_by_priority_then_failure_count_then_speed()
     //   1. priority ASC wins first -> B (priority 0)
     //   2. then A (priority 1)
     // The speed tiebreaker only kicks in when priority is equal.
-    let pool = test_pool("ordering").await;
+    let (_db, pool) = test_pool("ordering").await;
     let (_file_id, resource_ids) = seed_mirrors(
         &pool,
         "ordering",
@@ -1021,7 +1015,7 @@ async fn f4_parallel_range_download_assembles_complete_file() {
     let range_log = Arc::new(Mutex::new(Vec::new()));
     let server = start_mirror_server(payload.clone(), range_log, None, false);
 
-    let pool = test_pool("f4-assemble").await;
+    let (_db, pool) = test_pool("f4-assemble").await;
     let mirror_url = format!("{}/payload.bin", server.base_url);
     let (file_id, _resource_ids) = seed_mirrors(&pool, "f4-assemble", &[&mirror_url]).await;
     let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
@@ -1078,7 +1072,7 @@ async fn f4_parallel_download_progress_is_monotonic() {
     let range_log = Arc::new(Mutex::new(Vec::new()));
     let server = start_mirror_server(payload.clone(), range_log, None, true);
 
-    let pool = test_pool("f4-monotonic").await;
+    let (_db, pool) = test_pool("f4-monotonic").await;
     let mirror_url = format!("{}/payload.bin", server.base_url);
     let (file_id, _resource_ids) = seed_mirrors(&pool, "f4-monotonic", &[&mirror_url]).await;
     let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
@@ -1147,7 +1141,7 @@ async fn f4_parallel_download_resumes_from_existing_part_files() {
     let range_log = Arc::new(Mutex::new(Vec::new()));
     let server = start_mirror_server(payload.clone(), range_log.clone(), None, false);
 
-    let pool = test_pool("f4-resume").await;
+    let (_db, pool) = test_pool("f4-resume").await;
     let mirror_url = format!("{}/payload.bin", server.base_url);
     let (file_id, _resource_ids) = seed_mirrors(&pool, "f4-resume", &[&mirror_url]).await;
     let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
@@ -1226,7 +1220,7 @@ async fn f4_parallel_download_returns_error_on_mirror_failure() {
     let range_log = Arc::new(Mutex::new(Vec::new()));
     let server = start_mirror_server(payload, range_log, Some(500), false);
 
-    let pool = test_pool("f4-error").await;
+    let (_db, pool) = test_pool("f4-error").await;
     let mirror_url = format!("{}/payload.bin", server.base_url);
     let (file_id, _resource_ids) = seed_mirrors(&pool, "f4-error", &[&mirror_url]).await;
     let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
@@ -1298,7 +1292,7 @@ async fn g1_metalink_worker_failovers_to_healthy_mirror() {
         false,
     );
 
-    let pool = test_pool("g1-failover").await;
+    let (_db, pool) = test_pool("g1-failover").await;
 
     let mirror_urls = [
         format!("{}/payload.bin", failing_server.base_url),
@@ -1401,7 +1395,7 @@ async fn g1_metalink_worker_returns_error_when_all_mirrors_fail() {
         false,
     );
 
-    let pool = test_pool("g1-all-fail").await;
+    let (_db, pool) = test_pool("g1-all-fail").await;
 
     let mirror_urls = [
         format!("{}/payload.bin", failing_server_1.base_url),
@@ -1475,7 +1469,7 @@ async fn fun09_same_mirror_resume_persists_validators() {
     let range_log = Arc::new(Mutex::new(Vec::new()));
     let server = start_mirror_server_with_etag(payload.clone(), range_log.clone(), "\"etag-1\"");
 
-    let pool = test_pool("fun09-validators").await;
+    let (_db, pool) = test_pool("fun09-validators").await;
     let mirror_url = format!("{}/payload.bin", server.base_url);
     let (file_id, resource_ids) = seed_mirrors(&pool, "fun09-validators", &[&mirror_url]).await;
     let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
@@ -1528,7 +1522,7 @@ async fn fun09_cross_mirror_without_checksum_restarts_part() {
     let range_log = Arc::new(Mutex::new(Vec::new()));
     let server = start_mirror_server(payload.clone(), range_log.clone(), None, false);
 
-    let pool = test_pool("fun09-cross-nohash").await;
+    let (_db, pool) = test_pool("fun09-cross-nohash").await;
     let mirror_url = format!("{}/payload.bin", server.base_url);
     let (file_id, _) = seed_mirrors(&pool, "fun09-cross-nohash", &[&mirror_url]).await;
     let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
@@ -1585,7 +1579,7 @@ async fn fun09_cross_mirror_with_checksum_allows_resume() {
     let range_log = Arc::new(Mutex::new(Vec::new()));
     let server = start_mirror_server(payload.clone(), range_log.clone(), None, false);
 
-    let pool = test_pool("fun09-cross-hash").await;
+    let (_db, pool) = test_pool("fun09-cross-hash").await;
     let mirror_url = format!("{}/payload.bin", server.base_url);
     let (file_id, _) = seed_mirrors(&pool, "fun09-cross-hash", &[&mirror_url]).await;
     let now = now_iso();
@@ -1680,7 +1674,7 @@ async fn fun09_mismatched_content_range_rejects_resume() {
         }
     });
 
-    let pool = test_pool("fun09-bad-range").await;
+    let (_db, pool) = test_pool("fun09-bad-range").await;
     let mirror_url = format!("{}/payload.bin", server.base_url);
     let (file_id, resource_ids) = seed_mirrors(&pool, "fun09-bad-range", &[&mirror_url]).await;
     db::update_metalink_resource_validators(&pool, &resource_ids[0], Some("\"bad\""), None)
@@ -2029,7 +2023,7 @@ async fn probe_uses_persisted_metalink_credentials() {
     let expected = b64_basic("meta-user", "meta-pass");
     let observed = Arc::new(Mutex::new(None));
     let server = start_auth_manifest_server(expected, observed.clone());
-    let pool = test_pool("c5-probe-cred").await;
+    let (_db, pool) = test_pool("c5-probe-cred").await;
     let task_id = "metalink-c5-probe-cred";
     let now = now_iso();
     db::insert_task_record(
@@ -2115,7 +2109,7 @@ async fn download_uses_persisted_metalink_credentials_serial() {
     let expected = b64_basic("mirror-user", "mirror-pass");
     let observed = Arc::new(Mutex::new(Vec::new()));
     let server = start_auth_mirror_server(payload.clone(), expected, observed.clone(), false);
-    let pool = test_pool("c5-dl-cred-serial").await;
+    let (_db, pool) = test_pool("c5-dl-cred-serial").await;
     let mut paths = common::TestPaths::new("c5-dl-cred-serial");
     let root = paths.final_path.parent().expect("root").to_path_buf();
     paths.temp = root.join("payload.bin.tmp");
@@ -2173,7 +2167,7 @@ async fn parallel_mirror_download_forwards_authorization_header() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let server =
         start_auth_mirror_server(payload.clone(), expected.clone(), observed.clone(), false);
-    let pool = test_pool("c5-parallel-auth").await;
+    let (_db, pool) = test_pool("c5-parallel-auth").await;
     let mirror_url = format!("{}/payload.bin", server.base_url);
     let (file_id, _resource_ids) = seed_mirrors(&pool, "c5-parallel-auth", &[&mirror_url]).await;
     let mirrors = db::list_metalink_resources_for_file(&pool, &file_id)
@@ -2240,7 +2234,7 @@ async fn probe_via_unreachable_socks5_fails_without_bypass() {
 async fn download_fails_when_all_mirrors_return_401() {
     let hits = Arc::new(Mutex::new(0usize));
     let server = start_always_401_server(hits.clone());
-    let pool = test_pool("c5-all-401").await;
+    let (_db, pool) = test_pool("c5-all-401").await;
     let mut paths = common::TestPaths::new("c5-all-401");
     let root = paths.final_path.parent().expect("root").to_path_buf();
     paths.temp = root.join("payload.bin.tmp");
@@ -2281,7 +2275,7 @@ async fn download_reenters_after_reset_interrupted_tasks() {
     let payload = Arc::new(payload);
     let range_log = Arc::new(Mutex::new(Vec::new()));
     let server = start_mirror_server(payload.clone(), range_log, None, true);
-    let pool = test_pool("c5-process-restart").await;
+    let (_db, pool) = test_pool("c5-process-restart").await;
     let mut paths = common::TestPaths::new("c5-process-restart");
     let root = paths.final_path.parent().expect("root").to_path_buf();
     paths.temp = root.join("payload.bin.tmp");
@@ -2387,7 +2381,7 @@ async fn arc34_plan_identity_mismatch_discards_stale_parts() {
     let range_log = Arc::new(Mutex::new(Vec::new()));
     let server = start_mirror_server(payload.clone(), range_log.clone(), None, false);
 
-    let pool = test_pool("arc34-plan").await;
+    let (_db, pool) = test_pool("arc34-plan").await;
     let mirror_url = format!("{}/payload.bin", server.base_url);
     // metalink_resources has UNIQUE(file_id, url): give each mirror a
     // distinct query so three rows actually land.

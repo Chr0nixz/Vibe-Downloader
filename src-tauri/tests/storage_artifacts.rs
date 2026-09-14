@@ -49,7 +49,7 @@ async fn scan_and_sweep_classify_reclaimable_and_resumable_artifacts() {
     let base = unique_base("mixed");
     let save_dir = base.join("downloads");
     fs::create_dir_all(&save_dir).expect("create save dir");
-    let pool = common::test_pool("storage-mixed").await;
+    let (_db, pool) = common::test_pool("storage-mixed").await;
 
     let make_task = |id: &str, status: TaskStatus, stem: &str, temp: Option<String>| {
         let final_path = save_dir.join(format!("{stem}.bin"));
@@ -208,7 +208,7 @@ async fn sweep_reports_per_entry_failure_on_locked_file() {
     let base = unique_base("locked");
     let save_dir = base.join("downloads");
     fs::create_dir_all(&save_dir).expect("create save dir");
-    let pool = common::test_pool("storage-locked").await;
+    let (_db, pool) = common::test_pool("storage-locked").await;
 
     // Orphan artifacts, no task row at all. A handle opened without
     // FILE_SHARE_DELETE makes DeleteFile fail with a sharing violation — a
@@ -245,7 +245,7 @@ async fn sweep_covers_extra_save_dirs_without_tasks() {
     let base = unique_base("extra");
     let save_dir = base.join("empty-default");
     fs::create_dir_all(&save_dir).expect("create save dir");
-    let pool = common::test_pool("storage-extra").await;
+    let (_db, pool) = common::test_pool("storage-extra").await;
 
     let orphan_temp = temp_file_path(&save_dir, "orphan", TEST_TASK_ID);
     write_file(&orphan_temp, 2048);
@@ -293,7 +293,7 @@ async fn stale_dht_states_are_reported_and_swept() {
         "the backdated dht file is reported as stale"
     );
 
-    let pool = common::test_pool("storage-dht").await;
+    let (_db, pool) = common::test_pool("storage-dht").await;
     let summary = artifacts::sweep_orphan_artifacts(
         &pool,
         &[],

@@ -5,6 +5,7 @@
 //!   1. Under the scheduler lock: insert pending control + Queued→Downloading.
 //!   2. Outside the lock: await prepare/probe (possibly slow).
 //!   3. On prepare failure: remove pending control so host/active slots cannot leak.
+mod common;
 
 use std::{
     collections::HashMap,
@@ -12,7 +13,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use tauri_app_lib::{
@@ -68,16 +69,10 @@ fn sample_task_record(id: &str, source_key: &str) -> TaskRecord {
     }
 }
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-arc05-dispatch-{label}-{id}.sqlite"));
-    db::connect(&path)
-        .await
-        .expect("database connect with migrations")
-        .pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 /// Mirrors ARC-05 lock-held reservation: pending control + conditional start.
@@ -159,7 +154,7 @@ fn host_used(downloads: &HashMap<String, DownloadControl>, source_key: &str) -> 
 /// Slow resume probe on host A must not delay host B entering Downloading.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn arc05_slow_probe_does_not_block_other_host() {
-    let pool = test_pool("slow-probe").await;
+    let (_db, pool) = test_pool("slow-probe").await;
     let task_a = sample_task_record("arc05-a", "slow.example");
     let task_b = sample_task_record("arc05-b", "fast.example");
     db::insert_task_record(&pool, &task_a)
@@ -228,7 +223,7 @@ async fn arc05_slow_probe_does_not_block_other_host() {
 /// Two concurrent reservations of the same queued task: only one transition wins.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn arc05_double_dispatch_single_winner() {
-    let pool = test_pool("double-dispatch").await;
+    let (_db, pool) = test_pool("double-dispatch").await;
     let task = sample_task_record("arc05-dup", "dup.example");
     db::insert_task_record(&pool, &task).await.expect("insert");
 
@@ -273,7 +268,7 @@ async fn arc05_double_dispatch_single_winner() {
 /// Prepare/probe failure must release the pending control and host slots.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn arc05_probe_failure_releases_slot() {
-    let pool = test_pool("probe-fail").await;
+    let (_db, pool) = test_pool("probe-fail").await;
     let task = sample_task_record("arc05-fail", "fail.example");
     db::insert_task_record(&pool, &task).await.expect("insert");
 

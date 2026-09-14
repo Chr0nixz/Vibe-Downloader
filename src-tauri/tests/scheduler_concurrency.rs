@@ -9,8 +9,7 @@
 //! serialization mechanism that prevents a worker's terminal write from
 //! overwriting a user-initiated state change. These tests verify that it
 //! holds under genuine contention.
-
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
 use tauri_app_lib::{
     db,
@@ -65,16 +64,10 @@ fn sample_task_record(id: &str, protocol: &str) -> TaskRecord {
     }
 }
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-g2-concurrency-{label}-{id}.sqlite"));
-    db::connect(&path)
-        .await
-        .expect("database connect with migrations")
-        .pool
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
+    common::test_pool(label).await
 }
 
 async fn insert_queued_task(pool: &sqlx::SqlitePool, id: &str) {
@@ -112,7 +105,7 @@ async fn fetch_task_status(pool: &sqlx::SqlitePool, id: &str) -> TaskStatus {
 /// UPDATE must succeed; the other must be a no-op (return None).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g2_concurrent_dispatch_and_cancel_only_one_wins() {
-    let pool = test_pool("g2-dispatch-cancel").await;
+    let (_db, pool) = test_pool("g2-dispatch-cancel").await;
     let task_id = "g2-dispatch-cancel-task";
     insert_queued_task(&pool, task_id).await;
 
@@ -184,7 +177,7 @@ async fn g2_concurrent_dispatch_and_cancel_only_one_wins() {
 /// one must win; the other must be a no-op.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g2_concurrent_worker_failure_and_pause_only_one_wins() {
-    let pool = test_pool("g2-fail-pause").await;
+    let (_db, pool) = test_pool("g2-fail-pause").await;
     let task_id = "g2-fail-pause-task";
     insert_downloading_task(&pool, task_id).await;
 
@@ -253,7 +246,7 @@ async fn g2_concurrent_worker_failure_and_pause_only_one_wins() {
 /// one conditional UPDATE (Queued → Downloading) must succeed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g2_concurrent_multiple_dispatch_only_one_wins() {
-    let pool = test_pool("g2-multi-dispatch").await;
+    let (_db, pool) = test_pool("g2-multi-dispatch").await;
     let task_id = "g2-multi-dispatch-task";
     insert_queued_task(&pool, task_id).await;
 
@@ -304,7 +297,7 @@ async fn g2_concurrent_multiple_dispatch_only_one_wins() {
 /// must succeed; the task cannot be both Paused and Failed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g2_concurrent_pause_and_fail_only_one_wins() {
-    let pool = test_pool("g2-pause-fail").await;
+    let (_db, pool) = test_pool("g2-pause-fail").await;
     let task_id = "g2-pause-fail-task";
     insert_downloading_task(&pool, task_id).await;
 

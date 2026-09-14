@@ -158,7 +158,7 @@ async fn download_uses_persisted_basic_auth_credentials() {
     // FUN-01: credentials stored at create must authorize the real download path.
     common::install_test_secret_key();
     let server = start_test_server();
-    let pool = common::test_pool("http-basic-auth").await;
+    let (_db, pool) = common::test_pool("http-basic-auth").await;
     let paths = TestPaths::new("http-basic-auth");
     let url = format!("{}/basic-auth", server.base_url);
     let task = common::download_task(

@@ -8,7 +8,9 @@ use tauri_app_lib::{
     models::{HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus},
 };
 
-async fn test_pool(label: &str) -> sqlx::SqlitePool {
+async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    // ENG-03: delegate to the shared helper so the database files are removed
+    // on drop instead of accumulating in the temp directory.
     common::test_pool(label).await
 }
 
@@ -75,7 +77,7 @@ async fn seed_paused_with_event(pool: &sqlx::SqlitePool, id: &str, obey: bool, e
 
 #[tokio::test]
 async fn fun07_disabling_schedule_resumes_schedule_paused_tasks() {
-    let pool = test_pool("fun07-resume-schedule").await;
+    let (_db, pool) = test_pool("fun07-resume-schedule").await;
     seed_paused_with_event(&pool, "sched-paused", true, "paused_by_schedule").await;
 
     let selected = list_tasks_paused_by_schedule(&pool).await.expect("list");
@@ -96,7 +98,7 @@ async fn fun07_disabling_schedule_resumes_schedule_paused_tasks() {
 
 #[tokio::test]
 async fn fun07_disabling_schedule_skips_manual_pause() {
-    let pool = test_pool("fun07-skip-manual").await;
+    let (_db, pool) = test_pool("fun07-skip-manual").await;
     seed_paused_with_event(&pool, "manual-paused", true, "paused").await;
 
     let selected = list_tasks_paused_by_schedule(&pool).await.expect("list");
@@ -117,7 +119,7 @@ async fn fun07_disabling_schedule_skips_manual_pause() {
 
 #[tokio::test]
 async fn fun07_schedule_then_manual_pause_not_resumed_on_disable() {
-    let pool = test_pool("fun07-override-manual").await;
+    let (_db, pool) = test_pool("fun07-override-manual").await;
     seed_paused_with_event(&pool, "then-manual", true, "paused_by_schedule").await;
     // Later manual pause becomes the latest pause reason.
     db::insert_task_event(&pool, "then-manual", "paused", None)
@@ -144,7 +146,7 @@ async fn fun07_schedule_then_manual_pause_not_resumed_on_disable() {
 
 #[tokio::test]
 async fn fun07_disabling_schedule_skips_obey_schedule_false() {
-    let pool = test_pool("fun07-obey-false").await;
+    let (_db, pool) = test_pool("fun07-obey-false").await;
     seed_paused_with_event(&pool, "no-obey", false, "paused_by_schedule").await;
 
     let selected = list_tasks_paused_by_schedule(&pool).await.expect("list");

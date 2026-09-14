@@ -299,7 +299,9 @@ For Rust command, model, database, scheduler, or engine changes:
 ```bash
 pnpm specta
 pnpm check:bindings
-cargo test --manifest-path src-tauri/Cargo.toml -j 1
+# -j 2 只与链接阶段内存有关：Windows 上默认并行度可能在链接 lib 时
+# 耗尽页面文件（error 1455），与测试间干扰无关，不要用 -j 1 掩盖。
+cargo test --manifest-path src-tauri/Cargo.toml -j 2
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 ```
