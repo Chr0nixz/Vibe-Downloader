@@ -34,7 +34,6 @@ use std::{
     net::TcpStream,
     path::PathBuf,
     sync::{Arc, Mutex},
-    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -907,9 +906,9 @@ async fn list_healthy_mirrors_orders_by_priority_then_failure_count_then_speed()
     db::mark_metalink_resource_failed(&pool, &resource_ids[1], "first failure")
         .await
         .expect("fail b");
-    // Wait briefly so the cooldown window elapses, making B eligible again.
-    thread::sleep(Duration::from_millis(1100));
-    // Override cooldown to the past so B is re-included.
+    // Override cooldown to the past so B is re-included. ENG-03: the old
+    // 1100 ms sleep here was redundant — the next line overrides the cooldown
+    // unconditionally, so the wait only wasted wall-clock time.
     let past = now_iso_plus_hours(-1);
     db::set_metalink_mirror_cooldown(&pool, &resource_ids[1], &past)
         .await

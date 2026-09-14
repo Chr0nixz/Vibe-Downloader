@@ -89,6 +89,11 @@ impl Drop for TestServer {
 }
 
 /// Temporary file paths for download tests.
+///
+/// The directory containing `temp` is removed on drop so a full test run no
+/// longer leaks one timestamped directory per call (ENG-03). Struct-literal
+/// construction elsewhere in the suites keeps working because no field was
+/// added — the directory is derived from `temp`'s parent.
 #[allow(dead_code)]
 pub struct TestPaths {
     pub temp: PathBuf,
@@ -111,11 +116,23 @@ impl TestPaths {
     }
 }
 
+impl Drop for TestPaths {
+    fn drop(&mut self) {
+        // Best-effort: an engine that still holds a file open (Windows) must
+        // not turn cleanup into a test failure.
+        if let Some(dir) = self.temp.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
 /// Test-only escape hatch for the SEC-10/12 intranet guards. Every fake
 /// server in the suites listens on loopback; call this before dialing.
 #[allow(dead_code)]
 pub fn install_intranet_test_bypass() {
-    std::env::set_var("VIBE_TEST_ALLOW_INTRANET", "1");
+    // ENG-03: `std::env::set_var` here raced with concurrent `getenv` in
+    // other test threads; the library exposes an in-process hook instead.
+    tauri_app_lib::download::ssrf::install_test_intranet_bypass();
 }
 
 /// Fixed ChaCha20 key so credential encryption works without an OS keyring (CI).
@@ -124,8 +141,9 @@ pub fn install_intranet_test_bypass() {
 /// honors `VIBE_DOWNLOADER_TEST_SECRET_KEY` under `debug_assertions`.
 #[allow(dead_code)]
 pub fn install_test_secret_key() {
-    std::env::set_var(
-        "VIBE_DOWNLOADER_TEST_SECRET_KEY",
+    // ENG-03: same rationale as `install_intranet_test_bypass` — inject the
+    // key in-process instead of mutating process env from parallel tests.
+    tauri_app_lib::secure_headers::install_test_secret_key(
         "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
     );
 }

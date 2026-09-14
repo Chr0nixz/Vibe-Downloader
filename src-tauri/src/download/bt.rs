@@ -2186,7 +2186,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_torrent_source_http_downloads_and_parses_private_flag() {
-        std::env::set_var("VIBE_TEST_ALLOW_INTRANET", "1");
+        crate::download::ssrf::install_test_intranet_bypass();
         // A minimal private torrent with info.private=1.
         let private_torrent =
             b"d4:infod4:name3:foo12:piece lengthi16384e6:pieces6:xxxxxx6:lengthi1e7:privatei1eee";
@@ -2225,7 +2225,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_torrent_source_http_fallback_on_download_failure() {
-        std::env::set_var("VIBE_TEST_ALLOW_INTRANET", "1");
+        crate::download::ssrf::install_test_intranet_bypass();
         // Bind to a port but immediately close the connection to simulate download failure.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

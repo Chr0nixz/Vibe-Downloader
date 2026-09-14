@@ -99,14 +99,35 @@ fn classify_keyring_read(entry: &keyring::Entry) -> KeyringRead {
     }
 }
 
+/// ENG-03: in-process injection point for the integration suites so they
+/// never call `std::env::set_var` (a data race with concurrent `getenv` in
+/// other test threads). Compile-gated like the env fallback below.
+#[cfg(any(test, debug_assertions))]
+static TEST_SECRET_KEY_OVERRIDE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+/// Install the fixed credential-encryption key used by the integration
+/// suites. The env-var fallback (`VIBE_DOWNLOADER_TEST_SECRET_KEY`) remains
+/// for the lib's own unit-test helper, which still sets it directly.
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub fn install_test_secret_key(key_b64: &str) {
+    let key = decode_key(key_b64).expect("integration tests must pass a valid base64 key");
+    let _ = TEST_SECRET_KEY_OVERRIDE.set(key);
+}
+
 fn encryption_key() -> Result<[u8; 32], String> {
     // First-use auto-generates a 256-bit key and stores it in the OS keyring. Key loss is
     // unrecoverable — all encrypted credentials become undecryptable (no rotation/escrow).
     // The env-var override is gated on `debug_assertions` (not just `test`) so integration
     // tests in debug builds can use a fixed key; release builds always use the keyring.
     #[cfg(any(test, debug_assertions))]
-    if let Ok(value) = std::env::var("VIBE_DOWNLOADER_TEST_SECRET_KEY") {
-        return decode_key(&value);
+    {
+        if let Some(key) = TEST_SECRET_KEY_OVERRIDE.get() {
+            return Ok(*key);
+        }
+        if let Ok(value) = std::env::var("VIBE_DOWNLOADER_TEST_SECRET_KEY") {
+            return decode_key(&value);
+        }
     }
 
     let entry = keyring::Entry::new(SERVICE, ACCOUNT)

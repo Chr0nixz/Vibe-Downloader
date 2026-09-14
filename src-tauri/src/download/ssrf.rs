@@ -111,12 +111,35 @@ pub async fn is_hostname_private_via_dns(host: &str) -> bool {
     }
 }
 
+/// ENG-03: in-process injection point so the integration suites never call
+/// `std::env::set_var` (a data race with concurrent `getenv` in other test
+/// threads). Compile-gated like the env fallback below, which remains for
+/// the lib's own unit tests.
+#[cfg(any(test, debug_assertions))]
+static TEST_INTRANET_BYPASS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+/// Test-only escape hatch for the SEC-10/12 SSRF guards: install the bypass
+/// before dialing loopback fake servers.
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub fn install_test_intranet_bypass() {
+    let _ = TEST_INTRANET_BYPASS.set(());
+}
+
 /// Test-only escape hatch for the SEC-10/12 guards: every fake server in the
 /// integration suites listens on loopback, which the guards correctly reject.
 /// Mirrors the `VIBE_DOWNLOADER_TEST_SECRET_KEY` pattern — compile-gated to
 /// debug/test builds so release binaries ignore the variable entirely.
 fn intranet_guard_bypassed() -> bool {
-    cfg!(any(test, debug_assertions)) && std::env::var_os("VIBE_TEST_ALLOW_INTRANET").is_some()
+    #[cfg(any(test, debug_assertions))]
+    {
+        TEST_INTRANET_BYPASS.get().is_some()
+            || std::env::var_os("VIBE_TEST_ALLOW_INTRANET").is_some()
+    }
+    #[cfg(not(any(test, debug_assertions)))]
+    {
+        false
+    }
 }
 
 /// SEC-10: synchronous authority pre-flight for targets sent through factory
