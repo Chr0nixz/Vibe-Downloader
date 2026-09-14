@@ -311,12 +311,13 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验证测试**：`StartupGate.test.tsx` reduced-motion 用例。
 - **验收**：开启减少动态效果后只保留静态状态文本。
 
-### UX-17（P1，Open）：无限滚动加载后列表被强制滚回选中行
+### UX-17（P1，Closed）：无限滚动加载后列表被强制滚回选中行
 
 - **证据**：[`TaskList.tsx`](../src/components/tasks/TaskList.tsx#L347) 的 `scrollToIndex` effect 依赖 `filtered`，而 `filtered` 来自 `taskIds`；`setTaskCursorPage(..., append=true)` 追加一页会生成新数组引用，effect 因此重跑。
 - **影响**：用户向下滚动触发加载更多，新数据到达后列表立刻跳回选中行（首次加载会 `selectTask(items[0].id)`，通常是列表顶部）。滚动被打断，表现上像「加载更多没生效」。该 effect 还会与筛选变化时的 `scrollToOffset(0)` 竞争。
 - **修复方向**：该 effect 的真实意图是「选中项变化时把它滚进视口」，不是「列表变化就重新居中」。用 `lastScrolledIdRef` 去重，并改用已有的 `filteredRef` 读取最新列表，把 `filtered` 移出依赖数组。
 - **验收**：分页追加不改变滚动位置；用键盘或命令面板切换选中项时仍会滚动到目标行。
+- **2026-09-13 修复**（`61517d5`，簿记补录于 `a9f5831` 之后）：`TaskList` 的 `scrollToIndex` effect 改用 `lastScrolledSelectedIdRef` 按**选中项**去重（而非按 `filtered` 数组引用重跑），并改经已有的 `filteredRef` 读取最新列表，把 `filtered` 移出依赖数组——分页追加生成新数组引用不再触发回滚；取消选中时清空去重标记，保证下次选中仍能滚入视口。验收测试 [TaskList.scroll.test.tsx](../src/components/tasks/TaskList.scroll.test.tsx) 三例：追加加载后视口不回滚（沿用 loadPage 灌入的首屏数据而非手动 setState，避开 mock 时序差异）、新选中项仍滚入视口、取消选中后再选中恢复滚动；`219cc6c` 补充了重选同项的覆盖。
 
 ### UX-18（P2，Open）：列表 ARIA 模型不一致，表单校验缺程序化关联
 
