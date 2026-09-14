@@ -404,6 +404,7 @@ const ko = {
     segmentCountTip: "각 다운로드의 분할 수. 많으면 큰 파일이 빨라지지만 서버에 부하를 줄 수 있습니다. 권장: 4–8",
     maxConnectionsPerHostTip:
       "하나의 서버에 대한 최대 동시 연결 수. 높으면 빨라지지만 서버에서 제한할 수 있습니다. 권장: 8–16",
+    valueClampedToRange: "허용 범위({{min}}–{{max}})로 조정했습니다.",
     deleteToTrash: "삭제된 파일을 휴지통으로 이동",
     deleteToTrashTip: "활성화하면 태스크 파일 삭제 시 영구 삭제 대신 OS 휴지통으로 보냅니다.",
     speedUnit: "속도 단위",

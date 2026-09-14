@@ -418,6 +418,7 @@ const es = {
       "En cuántas partes se divide cada descarga. Más segmentos acelera archivos grandes pero puede sobrecargar el servidor. Recomendado: 4–8",
     maxConnectionsPerHostTip:
       "Máximo de conexiones paralelas a un mismo servidor. Más alto es más rápido, pero algunos servidores limitan. Recomendado: 8–16",
+    valueClampedToRange: "Se ajustó al rango permitido {{min}}–{{max}}.",
     deleteToTrash: "Mover archivos eliminados a la papelera",
     deleteToTrashTip:
       "Cuando está activado, eliminar los archivos de una tarea los envía a la papelera del sistema en lugar de borrarlos permanentemente.",

@@ -450,7 +450,7 @@ export const TaskRow = memo(function TaskRow({
     >
       {/* biome-ignore lint/a11y/useSemanticElements: The virtualizer inserts a measured div between the list and each row, so an explicit listitem role preserves the accessibility tree. */}
       <div
-        id={`task-option-${task.id}`}
+        id={`task-row-${task.id}`}
         role="listitem"
         aria-current={selected ? "true" : undefined}
         aria-posinset={position}

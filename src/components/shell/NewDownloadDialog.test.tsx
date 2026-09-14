@@ -335,3 +335,28 @@ describe("NewDownloadDialog HLS track picker", () => {
     expect(screen.getByRole("button", { name: "newDownload.hlsShowMoreTracks" })).toBeInTheDocument();
   });
 });
+
+// UX-25: a rejected directory picker must surface the failure in the
+// dialog's error region instead of dying as a silent unhandled rejection.
+describe("NewDownloadDialog picker failure feedback", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mocks.openDirectoryPicker.mockReset();
+    mocks.openFilePicker.mockReset();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows the error region when the directory picker rejects", async () => {
+    mocks.openDirectoryPicker.mockRejectedValueOnce(new Error("picker denied"));
+    renderDialog();
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: "newDownload.chooseDirectory" })[0]);
+    });
+
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(mocks.openDirectoryPicker).toHaveBeenCalledTimes(1);
+  });
+});

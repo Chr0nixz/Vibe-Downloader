@@ -218,6 +218,21 @@ describe("SettingsPage", () => {
     expect(mocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ maxActiveTasks: 4 }));
   });
 
+  it("associates a clamped numeric setting with a programmatic range hint (UX-18)", () => {
+    renderSettings();
+    const input = screen.getByLabelText("settings.maxActiveTasks");
+    fireEvent.change(input, { target: { value: "99" } });
+
+    const hint = screen.getByText("settings.valueClampedToRange");
+    expect(hint).toHaveAttribute("id", "max-active-tasks-range-hint");
+    expect(input).toHaveAttribute("aria-describedby", "max-active-tasks-range-hint");
+    expect(input).toHaveValue(8);
+
+    fireEvent.change(input, { target: { value: "5" } });
+    expect(screen.queryByText("settings.valueClampedToRange")).not.toBeInTheDocument();
+    expect(input).not.toHaveAttribute("aria-describedby");
+  });
+
   it("cancels a pending save when the settings page unmounts", async () => {
     vi.useFakeTimers();
     const view = renderSettings();

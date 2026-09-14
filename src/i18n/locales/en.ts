@@ -414,6 +414,7 @@ const en = {
       "How many parts each download is split into. More segments can speed up large files but may strain the server. Recommended: 4\u20138",
     maxConnectionsPerHostTip:
       "Maximum parallel connections to a single server. Higher values speed up downloads but some servers limit too many. Recommended: 8\u201316",
+    valueClampedToRange: "Adjusted to the allowed range {{min}}–{{max}}.",
     deleteToTrash: "Move deleted files to trash",
     deleteToTrashTip:
       "When enabled, deleting a task's files sends them to the OS recycle bin instead of permanent deletion.",

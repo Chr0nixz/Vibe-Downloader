@@ -399,6 +399,7 @@ const zhCN = {
     multiConnectionThresholdTip: "文件大于此阈值时才会使用多连接加速。小文件用单连接更高效",
     segmentCountTip: "每个下载任务的分段数。更多分段可加速大文件下载，但过多会增加服务器压力。推荐：4–8",
     maxConnectionsPerHostTip: "每个主机允许的最大并行连接数。提高可加速下载，但某些服务器会限制过多连接。推荐：8–16",
+    valueClampedToRange: "已调整到允许范围 {{min}}–{{max}}。",
     deleteToTrash: "删除文件时移至回收站",
     deleteToTrashTip: "启用后，删除任务文件会移至系统回收站，而非永久删除。",
     speedUnit: "速度单位",

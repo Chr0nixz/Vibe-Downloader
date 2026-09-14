@@ -373,7 +373,7 @@ export const TaskList = memo(function TaskList({
       }
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          document.getElementById(`task-option-${taskId}`)?.focus();
+          document.getElementById(`task-row-${taskId}`)?.focus();
         });
       });
     },

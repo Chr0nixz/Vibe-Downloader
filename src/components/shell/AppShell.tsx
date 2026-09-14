@@ -1455,7 +1455,7 @@ export function AppShell() {
                 const focusId = selectedId;
                 if (focusId) {
                   requestAnimationFrame(() => {
-                    document.getElementById(`task-option-${focusId}`)?.focus();
+                    document.getElementById(`task-row-${focusId}`)?.focus();
                   });
                 }
               }}

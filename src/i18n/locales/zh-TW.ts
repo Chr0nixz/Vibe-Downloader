@@ -399,6 +399,7 @@ const zhTW = {
     multiConnectionThresholdTip: "檔案大於此閾值時才會使用多連線加速。小檔案用單連線更有效率",
     segmentCountTip: "每個下載任務的分段數。更多分段可加速大檔案下載，但過多會增加伺服器壓力。建議：4–8",
     maxConnectionsPerHostTip: "每個主機允許的最大並行連線數。提高可加速下載，但某些伺服器會限制過多連線。建議：8–16",
+    valueClampedToRange: "已調整到允許範圍 {{min}}–{{max}}。",
     deleteToTrash: "刪除檔案時移至回收筒",
     deleteToTrashTip: "啟用後，刪除任務檔案會移至系統回收筒，而非永久刪除。",
     speedUnit: "速度單位",

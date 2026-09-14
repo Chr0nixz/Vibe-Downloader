@@ -714,8 +714,15 @@ export function NewDownloadDialog({
   }
 
   async function chooseDirectory() {
-    const selected = await openDirectoryPicker();
-    if (selected) setSaveDir(selected);
+    // UX-25: a rejected picker must not become a silent unhandled rejection;
+    // surface it in the dialog's error region like the sibling pickers.
+    try {
+      const selected = await openDirectoryPicker();
+      if (selected) setSaveDir(selected);
+    } catch (err) {
+      log.error("directory picker failed", err);
+      setError(localizedErrorMessage(err, t));
+    }
   }
 
   async function chooseLocalFile() {

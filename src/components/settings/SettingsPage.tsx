@@ -1407,19 +1407,12 @@ export function SettingsPage() {
                   tip={t("settings.maxActiveTasksTip")}
                   searchKey="max_active_tasks"
                 >
-                  <Input
+                  <ClampedNumberInput
                     id="max-active-tasks"
-                    type="number"
                     min={1}
                     max={8}
-                    step={1}
                     value={maxActiveTasks}
-                    onChange={(event) => {
-                      const next = event.target.valueAsNumber;
-                      if (Number.isFinite(next)) {
-                        setMaxActiveTasks(Math.min(8, Math.max(1, next)));
-                      }
-                    }}
+                    onCommit={setMaxActiveTasks}
                     disabled={controlsDisabled}
                     className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
                   />
@@ -1481,19 +1474,12 @@ export function SettingsPage() {
                   htmlFor="segment-count"
                   tip={t("settings.segmentCountTip")}
                 >
-                  <Input
+                  <ClampedNumberInput
                     id="segment-count"
-                    type="number"
                     min={1}
                     max={MAX_SEGMENT_COUNT}
-                    step={1}
                     value={segmentCount}
-                    onChange={(event) => {
-                      const next = event.target.valueAsNumber;
-                      if (Number.isFinite(next)) {
-                        setSegmentCount(Math.min(MAX_SEGMENT_COUNT, Math.max(1, Math.floor(next))));
-                      }
-                    }}
+                    onCommit={(next) => setSegmentCount(Math.floor(next))}
                     disabled={controlsDisabled}
                     className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
                   />
@@ -1505,19 +1491,12 @@ export function SettingsPage() {
                   tip={t("settings.maxConnectionsPerHostTip")}
                   searchKey="max_connections"
                 >
-                  <Input
+                  <ClampedNumberInput
                     id="max-connections-per-host"
-                    type="number"
                     min={1}
                     max={MAX_CONNECTIONS_PER_HOST}
-                    step={1}
                     value={maxConnectionsPerHost}
-                    onChange={(event) => {
-                      const next = event.target.valueAsNumber;
-                      if (Number.isFinite(next)) {
-                        setMaxConnectionsPerHost(Math.min(MAX_CONNECTIONS_PER_HOST, Math.max(1, Math.floor(next))));
-                      }
-                    }}
+                    onCommit={(next) => setMaxConnectionsPerHost(Math.floor(next))}
                     disabled={controlsDisabled}
                     className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
                   />
@@ -1683,19 +1662,13 @@ export function SettingsPage() {
                   htmlFor="completion-countdown"
                   tip={t("settings.completionCountdownTip")}
                 >
-                  <Input
+                  <ClampedNumberInput
                     id="completion-countdown"
-                    type="number"
                     min={5}
                     max={300}
                     step={5}
                     value={completionCountdownSeconds}
-                    onChange={(event) => {
-                      const next = event.target.valueAsNumber;
-                      if (Number.isFinite(next)) {
-                        setCompletionCountdownSeconds(Math.min(300, Math.max(5, Math.floor(next))));
-                      }
-                    }}
+                    onCommit={(next) => setCompletionCountdownSeconds(Math.floor(next))}
                     disabled={controlsDisabled || completionAction === "none"}
                     className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
                   />
@@ -2576,6 +2549,61 @@ function SettingsToggle({
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
       />
+    </div>
+  );
+}
+
+/**
+ * UX-18: numeric settings clamp out-of-range input silently, so the row needs
+ * a programmatic bridge — while a clamp is active the input points at a range
+ * hint via aria-describedby (role="status" so screen readers announce it).
+ */
+function ClampedNumberInput({
+  id,
+  min,
+  max,
+  step = 1,
+  value,
+  onCommit,
+  disabled,
+  className,
+}: {
+  id: string;
+  min: number;
+  max: number;
+  step?: number;
+  value: number;
+  onCommit: (value: number) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const { t } = useTranslation();
+  const [clamped, setClamped] = useState(false);
+  return (
+    <div className="flex flex-col gap-1">
+      <Input
+        id={id}
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        aria-describedby={clamped ? `${id}-range-hint` : undefined}
+        onChange={(event) => {
+          const next = event.target.valueAsNumber;
+          if (!Number.isFinite(next)) return;
+          const bounded = Math.min(max, Math.max(min, next));
+          setClamped(bounded !== next);
+          onCommit(bounded);
+        }}
+        disabled={disabled}
+        className={className}
+      />
+      {clamped ? (
+        <p id={`${id}-range-hint`} role="status" aria-live="polite" className="text-xs text-status-danger">
+          {t("settings.valueClampedToRange", { min, max })}
+        </p>
+      ) : null}
     </div>
   );
 }
