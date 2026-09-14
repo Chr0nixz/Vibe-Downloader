@@ -5,6 +5,7 @@
   "license": "GPL-3.0-only",
   "author": "Chr0nixz",
   "type": "module",
+  "packageManager": "pnpm@10.7.1",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

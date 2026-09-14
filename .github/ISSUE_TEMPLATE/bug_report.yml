@@ -1,0 +1,66 @@
+name: Bug report
+description: Something is broken in the desktop app, the browser extension, or the native messaging host.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please search existing issues first.
+        Security vulnerabilities must go through private reporting (see the Security tab), not this form.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Desktop app
+        - Browser extension / handoff
+        - Native messaging host
+        - Documentation
+    validations:
+      required: true
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Protocol (if relevant)
+      options:
+        - Not applicable
+        - HTTP/HTTPS
+        - FTP/FTPS
+        - SFTP
+        - BitTorrent
+        - HLS
+        - DASH
+        - WebDAV
+        - Metalink
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      placeholder: e.g. 0.5.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: What you did, what you expected, and what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Excerpts from the in-app Logs view or the log file. Redact URLs and credentials you do not want to share.
