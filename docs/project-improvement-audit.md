@@ -1317,7 +1317,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-08-13 修复**：6 处乱码统一改为 ASCII 连字符（而非改回 em dash），从根本上避免第三次复发。7 项 lint 中 5 项由 `lint:fix` 处理，两项需人工判断：`globals.css:162` 的 `!important` 位于 `@media (prefers-reduced-motion: reduce)` 内、用于覆盖 Tailwind 的 `animate-pulse`，Biome 建议的「删除该样式」会直接破坏 DESIGN.md 的减少动效契约，因此改为 `biome-ignore` 并写明理由；`AttentionCenter.tsx:249` 把 `onKeyDown` 下移到已有 `role="listbox"` 的容器上（焦点在 option 行，事件照常冒泡，跨分组导航行为不变）。`check-bundle-budget.mjs` 未使用的 `argv` 参数直接删除而非加下划线。新增 [`.gitattributes`](../.gitattributes)：显式声明行尾与二进制，但**不做** `git add --renormalize`（会产生巨大 diff 且触碰未提交改动）。
 - **验证**：`pnpm lint` 与 `cargo clippy --locked --all-targets -- -D warnings` 均为 exit 0。
 
-### ENG-03（P2，Open）：测试基础设施的隔离与清理缺陷
+### ENG-03（P2，Partial）：测试基础设施的隔离与清理缺陷
 
 - **证据**：[`tests/common/mod.rs`](../src-tauri/tests/common/mod.rs#L118) 的 `install_test_secret_key()` 在多线程测试中无保护地调用 `std::env::set_var`（Rust 1.80+ 已把它与并发 `getenv` 定义为数据竞争，edition 2024 将变为 `unsafe`）；`TestPaths::new` 与 `test_pool` 用纳秒时间戳命名且无 `Drop`，每次全量测试泄漏数百个临时目录与 `.sqlite`/`-wal`/`-shm`；[`metalink_engine.rs`](../src-tauri/tests/metalink_engine.rs#L909) 在 async 测试中用阻塞的 `thread::sleep(1100ms)`，而紧接着的两行又手动把冷却时间改成过去时刻，这个 sleep 是多余的；`tests/zz_dump_schema.rs` 是一次性诊断测试，文件头自己写明「验证后删除」，却仍在每次 `cargo test` 时建库并写入固定路径。
 - **影响**：`set_var` 是测试并行不稳定的真实候选根因（不是 `-j 1` 传说中的那个）。临时文件泄漏影响长期开发体验。
@@ -1326,6 +1326,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-08-13 实证**：本轮在本机复现了那个被长期误解的现象——默认并行度下 `cargo test` 以 `error[E0786]: found invalid metadata files for crate tauri_app_lib` 失败，附带 `failed to mmap ... (os error 1455)`（页面文件太小）。降到 `-j 2` 后全量通过。这确证根因是**链接阶段内存不足**而非测试间干扰，`-j 1` 之所以「有效」纯属副作用，它限制的是编译并行度。
   另一个值得记录的操作陷阱：强制终止正在编译的 cargo 会留下损坏的增量缓存，表现为 rustc ICE（`Res::Err but no error emitted`）和 `rlib format not found`。恢复只需删除 `target/debug/incremental`、`deps/tauri_app_lib*` 与 `.fingerprint/vibe-downloader-*`，不必全量 `cargo clean`（后者会重编译 900 多个依赖 crate）。
 - **2026-08-26 复核**：`zz_dump_schema.rs` 仍在树中且无 `#[ignore]`，固定路径 `temp_dir()/vibe_schema_new.txt` + `.expect("write dump")` 每次全量测试执行并遗留产物。一点更正：Windows 上 Rust std 以 FILE_SHARE_READ|WRITE|DELETE 打开文件，两进程并发 `fs::write` 同一路径通常表现为交错写入而非 sharing-violation panic——早先「并发必炸」的推断过强；卫生缺陷本身（一次性诊断、固定路径、残留产物、ENG-03 Open 登记属实）成立。
+- **2026-09-14 修复**（`9d7b1ff`，Partial）：① `install_test_secret_key` / `install_intranet_test_bypass` 改走库内 debug 门控的进程内钩子（`secure_headers::install_test_secret_key`、`download::ssrf::install_test_intranet_bypass`），集成套件不再调用 `std::env::set_var`；env 回退保留给 lib 自身单元测试，bt.rs 单元测试一并迁移。② `TestPaths` 实现 Drop 自清理——目录从 `temp.parent()` 推导、不新增字段，6 处结构体字面量构造点（含并行在途文件内的）零改动兼容。③ 删除 `zz_dump_schema.rs`（文件头自述"验证后删除"）；删除 metalink_engine.rs 中紧邻无条件 cooldown 覆盖的多余 1100ms 阻塞 sleep。④ README 的 `-j 1` 按本条 2026-08-13 实证结论改写为 `-j 2` 并注明真实根因（链接阶段页面文件耗尽，非测试干扰）。保持 Partial 的残余：`test_pool` 的 .sqlite/-wal/-shm 仍随进程遗留——175 个调用点，改签名会与并行在途的 6 个测试文件冲突，待其落地后迁移 `(pool, TempDir)`；`db/task_credentials.rs` 单元 helper 仍用 set_var（该文件被并行占用）；ROADMAP 的 `-j 1` 说明同因待改。验证：暂存树 checkout-index 物化后独立 `cargo check --tests` 通过；metalink 34 / webdav 15 / sftp 22 / hls 20 全绿。
 
 ### ENG-04（P2，Open）：没有任何覆盖率度量
 
@@ -1334,13 +1335,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：接入 `cargo-llvm-cov` 与 `@vitest/coverage-v8`，用当前实测值作为阈值基线且只允许上升，在 ubuntu 上跑一次并上传为 artifact（不必接外部服务）。优先补三类最高价值缺口：安全（`sanitize_url`）、竞态（`file_ops`）、业务规则（settings clamp、错误码映射）。
 - **验收**：CI 产出覆盖率报告；阈值配置生效并能拦截下降。
 
-### ENG-05（P2，Open）：仓库治理文件缺失
+### ENG-05（P2，Closed）：仓库治理文件缺失
 
 - **证据**：仓库根目录与 `.github/` 下均无 `.gitattributes`、`SECURITY.md`、`CHANGELOG.md`、`CODE_OF_CONDUCT.md`、`.editorconfig`、`dependabot.yml`、`CODEOWNERS` 与 issue/PR 模板；`package.json` 也没有 `packageManager` 字段。另有一个遗留的本地临时脚本 `_apply_f6.ps1` 在仓库根目录，它引用的 `src-tauri/src/download/hls.rs` 已被删除。
 - **影响**：缺 `.gitattributes` 导致 git 持续报告行尾转换，跨平台协作会产生噪音 diff；作为 GPL 开源项目缺 `SECURITY.md` 意味着没有漏洞报告渠道；已发布到 0.4.0 却无 CHANGELOG（ROADMAP 明确声明自己不是变更日志）；`deny.toml` 已 ignore 3 个 RUSTSEC 条目，更需要 dependabot 来尽快消除这些 ignore。
 - **修复方向**：补齐上述文件；`dependabot.yml` 覆盖 npm、cargo 与 github-actions 三个生态并按 radix/tauri/react 分组；删除 `_apply_f6.ps1` 并在 `.gitignore` 中加 `_*.ps1`；加 `"packageManager": "pnpm@10.x.x"` 让 corepack 自动对齐版本。
 - **验收**：`git status` 不再出现行尾警告；有明确的漏洞报告渠道与版本变更记录。
 - **2026-08-26 更正**：`.gitattributes` 已随 `ENG-02` 修复批次落地（2026-08-15），本条证据中「仓库根目录无 `.gitattributes`」子项过时，且与同章 `ENG-02` 的修复记录自相矛盾；其余治理文件（SECURITY.md / CHANGELOG.md / CODEOWNERS / dependabot.yml / packageManager 等）与 `_apply_f6.ps1` 残留经复核仍属实。
+- **2026-09-14 修复**（`c2a9861`）：补齐 [SECURITY.md](../SECURITY.md)（GitHub 私密漏洞上报渠道、支持版本、作用域与 out-of-scope 说明）、[CHANGELOG.md](../CHANGELOG.md)（Keep a Changelog 格式，v0.1.1..v0.5.0 条目从实际 release tag 的提交区间推导，Unreleased 只记录已提交内容）、CODE_OF_CONDUCT.md、.editorconfig（对齐 Biome 缩进与行宽）、.github/dependabot.yml（npm/cargo/github-actions 三生态，radix/tauri/react 分组）、.github/CODEOWNERS、issue/PR 模板；package.json 增加 `"packageManager": "pnpm@10.7.1"`。复核更正：`_apply_f6.ps1` 已不在仓库且 `.gitignore` 已含 `_*.ps1` 规则，该子项无需动作。验证：提交树经 checkout-index 物化后独立 `cargo check --tests` 通过；lint-staged 对 package.json 的 biome 检查通过。
 
 ### ENG-06（P2，Open）：验证入口分散，四份文档的检查清单与 CI 不一致
 
@@ -1350,12 +1352,13 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：`pnpm verify` 覆盖 CI 全集；四份文档不再各自维护清单；`--locked` 可在全线启用。
 - **2026-08-26 复核（文档漂移实锤三件）**：其一，[`AGENTS.md`](../AGENTS.md#L94) 的 Useful checks 仍列 `cargo check` 与不带 `--all-targets` 的 clippy，而 ci.yml:85 已是 `cargo clippy --locked --all-targets -- -D warnings`——按 AGENTS.md 本地自查恰好放过 CI 会拦的 test-target warning。其二，本文第十四章旧文曾写「CI 当前尚未加上 (--all-targets)」，与本章 ENG-01 已完成的记录自相矛盾（本次修订已一并改正）。其三，ENG-05 曾称根目录缺 `.gitattributes`，与同章 ENG-02 已添加的记录冲突（已在上条更正）。「`pnpm verify` 单入口」仍是根治此类漂移的结构性解法。
 
-### ENG-07（P2，Open）：六个引擎测试的无 deadline 轮询循环把回归放大成 30 分钟 CI 挂起
+### ENG-07（P2，Partial）：六个引擎测试的无 deadline 轮询循环把回归放大成 30 分钟 CI 挂起
 
 - **证据**：ftp_engine.rs:450-473（join :476-479）、sftp_engine.rs:899-911（join :914-917）、hls_engine.rs:512-523 与 1412-1423、dash_engine.rs:443-454 与 789-800、webdav_engine.rs:440-452 均为 `loop { sleep(25ms) }` 无 deadline 轮询，且 spawn 出的 engine.download JoinHandle 错误只在循环跳出后才被读取。同文件已有 deadline 范式（hls_engine.rs:777-779,887-889,1338；dash_engine.rs:640；metalink_engine.rs:2315）但未推广。package.json 的 test:rust 是裸 `cargo test` 无超时；ci.yml:44 rust matrix timeout-minutes:30、fail-fast:false。
 - **影响**：任何「早退且不写 checkpoint」的引擎回归（例如 ARC-33 类改动失误）→ 循环永不退出、真实错误永不可见，烧满 30 分钟超时且双 OS leg 信号全失。
 - **修复方向**：抽 tests/common 的 `wait_for_segment_progress(deadline)` helper（Instant deadline + 超时 panic 时附带 JoinHandle 错误），替换六处循环。
 - **验收**：人为早退的 stub engine 下测试秒级失败并显示真实错误。
+- **2026-09-14 修复**（`0a1222f`，Partial）：抽 [`common::wait_for_segment_progress`](../src-tauri/tests/common/mod.rs)——条件是逐次装箱的 async 闭包（等待需要重查数据库），超时且 worker 已退出时先 await 它，让 panic 携带引擎真实错误而非笼统超时。已转换干净测试文件中的 4 处循环：sftp_engine.rs、hls_engine.rs ×2、webdav_engine.rs（deadline 60s，仍远小于 30 分钟腿超时），并新增验收自测 `eng07_early_exit_stub_fails_fast_with_real_error`——stub 提前带错误退出时 ~0.2s 内 panic 且 payload 含该错误，而旧行为下同一 stub 会无限轮询。保持 Partial 的原因：ftp_engine.rs 与 dash_engine.rs 的 3 处循环位于并行在途文件未转换，待其落地后按同一范本收尾。
 
 ### ENG-08（P3，Open）：sync-stable-error-i18n.mjs 以硬编码哨兵键区分「已同步 / regex 未命中」，且零测试覆盖
 
