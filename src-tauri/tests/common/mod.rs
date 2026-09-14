@@ -9,7 +9,7 @@ use std::{
         mpsc, Arc,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use sqlx::SqlitePool;
@@ -223,5 +223,43 @@ pub fn headless_download_context(
         connection_limit: 1,
         request_headers: Vec::new(),
         proxy_config: ResolvedProxyConfig::default(),
+    }
+}
+
+/// ENG-07: bounded replacement for the bare `loop { sleep; check }` waits
+/// around spawned `engine.download` workers.
+///
+/// A regression that makes an engine exit early without publishing progress
+/// used to spin these loops forever, burning the 30-minute CI timeout on
+/// every matrix leg while hiding the real failure. The condition is an async
+/// closure (boxed per poll) because the waits re-query the database. On
+/// timeout the exited worker is awaited so the panic carries the engine's
+/// actual error instead of an opaque "still running" message.
+#[allow(dead_code)]
+pub async fn wait_for_segment_progress<'a, T>(
+    mut condition: impl FnMut()
+        -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>,
+    worker: tokio::task::JoinHandle<T>,
+    deadline: Duration,
+    context: &str,
+) -> tokio::task::JoinHandle<T>
+where
+    T: Send + std::fmt::Debug + 'static,
+{
+    let started = Instant::now();
+    loop {
+        if condition().await {
+            return worker;
+        }
+        if started.elapsed() >= deadline {
+            if worker.is_finished() {
+                let outcome = worker.await;
+                panic!(
+                    "[{context}] no progress within {deadline:?}; worker already exited with {outcome:?}"
+                );
+            }
+            panic!("[{context}] no progress within {deadline:?}; worker still running");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }

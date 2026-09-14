@@ -438,19 +438,30 @@ async fn download_pauses_mid_transfer_and_resumes_through_http_engine() {
         async move { engine.download(context).await }
     });
 
-    let partial = loop {
-        let segments = db::list_segment_records(&pool, "webdav-pause-resume")
-            .await
-            .expect("list WebDAV segments");
-        if let Some(downloaded) = segments
-            .first()
-            .map(|segment| segment.downloaded_until)
-            .filter(|downloaded| *downloaded > 0)
-        {
-            break downloaded;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    };
+    let partial = std::sync::atomic::AtomicI64::new(0);
+    let first_download = common::wait_for_segment_progress(
+        || {
+            Box::pin(async {
+                let segments = db::list_segment_records(&pool, "webdav-pause-resume")
+                    .await
+                    .expect("list WebDAV segments");
+                if let Some(downloaded) = segments
+                    .first()
+                    .map(|segment| segment.downloaded_until)
+                    .filter(|downloaded| *downloaded > 0)
+                {
+                    partial.store(downloaded, std::sync::atomic::Ordering::SeqCst);
+                    return true;
+                }
+                false
+            })
+        },
+        first_download,
+        Duration::from_secs(60),
+        "webdav-pause-resume first segment progress",
+    )
+    .await;
+    let partial = partial.load(std::sync::atomic::Ordering::SeqCst);
     assert!(partial < payload.len() as i64);
     cancel.cancel();
     first_download
@@ -642,4 +653,45 @@ async fn download_fails_when_server_returns_403() {
     );
     assert!(!paths.final_path.exists());
     pool.close().await;
+}
+
+// ENG-07 acceptance: a stub worker that exits early without ever publishing
+// progress must fail within the deadline, and the panic must carry the
+// worker's real error instead of hanging until the CI leg times out.
+#[tokio::test]
+async fn eng07_early_exit_stub_fails_fast_with_real_error() {
+    let started = std::time::Instant::now();
+    let probe = tokio::spawn(async {
+        common::wait_for_segment_progress(
+            || Box::pin(async { false }),
+            tokio::spawn(async {
+                Err::<(), String>("engine boom: early exit without checkpoint".to_string())
+            }),
+            std::time::Duration::from_millis(200),
+            "eng07 stub",
+        )
+        .await;
+    });
+    let join_error = probe
+        .await
+        .expect_err("the wait helper must panic on the stub");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "helper must fail in seconds, took {:?}",
+        started.elapsed()
+    );
+    let payload = join_error.into_panic();
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&'static str>()
+                .map(|s| s.to_string())
+        })
+        .expect("panic payload should be a string");
+    assert!(
+        message.contains("engine boom: early exit without checkpoint"),
+        "panic must surface the worker's real error, got: {message}"
+    );
 }

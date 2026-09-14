@@ -510,18 +510,23 @@ async fn download_resumes_staging_without_redownloading_completed_segments() {
         async move { engine.download(context).await }
     });
 
-    loop {
-        let segments = db::list_hls_segments(&pool, "hls-staging-recovery")
-            .await
-            .expect("list HLS segments");
-        let first_completed = segments.iter().any(|segment| {
-            segment.media_sequence == 0 && segment.status == SegmentStatus::Completed
-        });
-        if first_completed && requests[1].load(Ordering::SeqCst) > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let first_download = common::wait_for_segment_progress(
+        || {
+            Box::pin(async {
+                let segments = db::list_hls_segments(&pool, "hls-staging-recovery")
+                    .await
+                    .expect("list HLS segments");
+                let first_completed = segments.iter().any(|segment| {
+                    segment.media_sequence == 0 && segment.status == SegmentStatus::Completed
+                });
+                first_completed && requests[1].load(Ordering::SeqCst) > 0
+            })
+        },
+        first_download,
+        Duration::from_secs(60),
+        "hls-staging-recovery first segment completion",
+    )
+    .await;
     cancel.cancel();
     first_download
         .await
@@ -1410,18 +1415,22 @@ async fn download_reenters_after_reset_interrupted_tasks() {
         let context = common::headless_download_context(pool.clone(), task.clone(), cancel.clone());
         async move { engine.download(context).await }
     });
-    loop {
-        let segments = db::list_hls_segments(&pool, "hls-process-restart")
-            .await
-            .expect("list HLS segments");
-        let first_completed = segments.iter().any(|segment| {
-            segment.media_sequence == 0 && segment.status == SegmentStatus::Completed
-        });
-        if first_completed {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let first = common::wait_for_segment_progress(
+        || {
+            Box::pin(async {
+                let segments = db::list_hls_segments(&pool, "hls-process-restart")
+                    .await
+                    .expect("list HLS segments");
+                segments.iter().any(|segment| {
+                    segment.media_sequence == 0 && segment.status == SegmentStatus::Completed
+                })
+            })
+        },
+        first,
+        Duration::from_secs(60),
+        "hls-process-restart first segment completion",
+    )
+    .await;
     cancel.cancel();
     // Abort without waiting for clean pause so DB can still look like a crashed
     // Downloading worker (process-interrupt contract).

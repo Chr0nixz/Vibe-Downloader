@@ -898,19 +898,30 @@ async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
         async move { engine.download(context).await }
     });
 
-    let partial = loop {
-        let segments = db::list_segment_records(&pool, "sftp-pause-resume")
-            .await
-            .expect("list segments");
-        if let Some(downloaded) = segments
-            .first()
-            .map(|segment| segment.downloaded_until)
-            .filter(|downloaded| *downloaded > 0)
-        {
-            break downloaded;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    };
+    let partial = std::sync::atomic::AtomicI64::new(0);
+    let first = common::wait_for_segment_progress(
+        || {
+            Box::pin(async {
+                let segments = db::list_segment_records(&pool, "sftp-pause-resume")
+                    .await
+                    .expect("list segments");
+                if let Some(downloaded) = segments
+                    .first()
+                    .map(|segment| segment.downloaded_until)
+                    .filter(|downloaded| *downloaded > 0)
+                {
+                    partial.store(downloaded, std::sync::atomic::Ordering::SeqCst);
+                    return true;
+                }
+                false
+            })
+        },
+        first,
+        std::time::Duration::from_secs(60),
+        "sftp-pause-resume first segment progress",
+    )
+    .await;
+    let partial = partial.load(std::sync::atomic::Ordering::SeqCst);
     assert!(partial < payload.len() as i64);
     cancel.cancel();
     first
