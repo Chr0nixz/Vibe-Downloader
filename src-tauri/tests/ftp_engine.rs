@@ -241,7 +241,7 @@ fn handle_ftp_session(
                 if let Ok((mut data_stream, _)) = listener.accept() {
                     let swap_files = swap.lock().expect("swap state").files.clone();
                     let payload = swap_files.get(&path).or_else(|| config.files.get(&path));
-                    if let Some(payload) = payload.as_deref() {
+                    if let Some(payload) = payload {
                         let start = usize::try_from(rest_offset).unwrap_or(0);
                         if start < payload.len() {
                             if let Some(delay) = config.data_chunk_delay {
