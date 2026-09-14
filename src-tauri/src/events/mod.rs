@@ -26,6 +26,7 @@ pub const EVENT_TRAY_SETTINGS_REQUESTED: &str = "tray-settings-requested";
 pub const EVENT_CLIPBOARD_LINK_DETECTED: &str = "clipboard-link-detected";
 pub const EVENT_COMPLETION_ACTION_REQUESTED: &str = "completion-action-requested";
 pub const EVENT_PROBE_PHASE: &str = "probe-phase";
+pub const EVENT_STORAGE_CLEANUP_PROGRESS: &str = "storage-cleanup-progress";
 
 const DEFAULT_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -399,6 +400,24 @@ pub fn emit_completion_action_requested(
 /// UX-6: Emit a probe-phase event. Not broadcast to browser_realtime.
 pub fn emit_probe_phase(app: &AppHandle, payload: &ProbePhasePayload) {
     emit_payload(app, EVENT_PROBE_PHASE, payload);
+}
+
+/// Storage & Cleanup Center: progress of one cleanup run, correlated by
+/// `request_id` like probe phases. Emitted at throttled intervals between
+/// deletion chunks so big cleanups stay observable without event flooding.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageCleanupProgressPayload {
+    pub request_id: String,
+    pub processed: u32,
+    pub total: u32,
+    pub removed: u32,
+    pub failed: u32,
+    pub reclaimed_bytes: String,
+}
+
+pub fn emit_storage_cleanup_progress(app: &AppHandle, payload: &StorageCleanupProgressPayload) {
+    emit_payload(app, EVENT_STORAGE_CLEANUP_PROGRESS, payload);
 }
 
 fn emit_empty(app: &AppHandle, event: &str) {

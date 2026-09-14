@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{db, models::AppErrorPayload};
 
-const TEMP_DOWNLOAD_SUFFIX: &str = ".vibe-downloading";
+use super::artifacts::TEMP_DOWNLOAD_SUFFIX;
 
 /// Publish a completed download to its reserved final path without clobbering.
 ///

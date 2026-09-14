@@ -70,6 +70,43 @@ export function localizedErrorMessage(error: unknown, t: TFunction): string {
 }
 
 /**
+ * Error families whose recovery banner gets a one-line mechanism ("cause").
+ * The localized message names the verdict ("Cannot resume"); the cause explains
+ * why it happened so the user can judge whether the recovery action is safe.
+ * Codes without an entry render message-only — never invent causes. Frontend
+ * code-to-key tables are invisible to check:i18n's literal scan, so
+ * errors.test.ts walks every locale and asserts each key exists.
+ */
+export const ERROR_CAUSE_I18N_MAP: Record<string, TranslationKey> = {
+  final_path_conflict: "errors.cause.finalPathConflict",
+  remote_changed: "errors.cause.remoteChanged",
+  resume_unavailable: "errors.cause.resumeUnavailable",
+  resume_mismatch: "errors.cause.resumeMismatch",
+  temp_file_missing: "errors.cause.tempFileMissing",
+  temp_file_smaller_than_progress: "errors.cause.tempFileSmallerThanProgress",
+  disk_write_failed: "errors.cause.diskWriteFailed",
+  auth_headers_expired: "errors.cause.authHeaders",
+  auth_headers_unavailable: "errors.cause.authHeaders",
+  http_denied: "errors.cause.httpDenied",
+  http_not_found: "errors.cause.httpNotFound",
+  server_rate_limited: "errors.cause.serverRateLimited",
+  hls_ffmpeg_missing: "errors.cause.ffmpegRequired",
+  dash_ffmpeg_missing: "errors.cause.ffmpegRequired",
+  ffmpeg_missing: "errors.cause.ffmpegRequired",
+  ffmpeg_not_found: "errors.cause.ffmpegRequired",
+  sftp_host_key_changed: "errors.cause.sftpHostKeyChanged",
+};
+
+/** Localized mechanism line for a structured error, or undefined when the code
+ * has no cause copy (including plain/legacy strings without a matched code). */
+export function localizedErrorCause(error: unknown, t: TFunction): string | undefined {
+  const payload = parseAppError(error);
+  if (!payload) return undefined;
+  const key = ERROR_CAUSE_I18N_MAP[payload.code];
+  return key ? t(key) : undefined;
+}
+
+/**
  * Format an error (structured payload, plain string, or unknown) into a
  * multi-line plain-text report suitable for copying to the clipboard when
  * the user wants to share diagnostics. Optional context (task id, url) is

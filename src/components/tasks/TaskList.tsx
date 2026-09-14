@@ -4,7 +4,6 @@ import { useReducedMotion } from "motion/react";
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueueReasons } from "@/hooks/use-queue-reasons";
-import { useShellLayout } from "@/hooks/use-shell-layout";
 import { handleMenuKeyDown } from "@/lib/menu-keyboard";
 
 const SettingsPage = lazy(() =>
@@ -28,6 +27,24 @@ const AttentionCenter = lazy(() =>
 const QueueCenter = lazy(() =>
   import("@/components/workspaces/QueueCenter").then((m) => ({
     default: m.QueueCenter,
+  })),
+);
+
+const StorageCenter = lazy(() =>
+  import("@/components/workspaces/StorageCenter").then((m) => ({
+    default: m.StorageCenter,
+  })),
+);
+
+const RecoveryCenter = lazy(() =>
+  import("@/components/workspaces/RecoveryCenter").then((m) => ({
+    default: m.RecoveryCenter,
+  })),
+);
+
+const BackupCenter = lazy(() =>
+  import("@/components/workspaces/BackupCenter").then((m) => ({
+    default: m.BackupCenter,
   })),
 );
 
@@ -127,7 +144,6 @@ export const TaskList = memo(function TaskList({
   const filterOptions = useTaskDataStore((s) => s.filterOptions);
   const nav = useTaskUIStore((s) => s.nav);
   const search = useTaskUIStore((s) => s.search);
-  const shellCompact = useShellLayout() === "narrow";
   const rowDensity = useTaskUIStore((s) => s.rowDensity);
   const setRowDensity = useTaskUIStore((s) => s.setRowDensity);
   const compactRows = rowDensity === "compact";
@@ -486,6 +502,39 @@ export const TaskList = memo(function TaskList({
           onReorder={onReorder}
           onShowDetails={onShowDetails}
           onUpdateOptions={onUpdateQueueOptions}
+        />
+      </Suspense>
+    );
+  }
+
+  if (nav === "storage") {
+    return (
+      <Suspense fallback={<SurfaceLoadingSkeleton label={t("storageCenter.loading")} />}>
+        <StorageCenter />
+      </Suspense>
+    );
+  }
+
+  if (nav === "backup") {
+    return (
+      <Suspense fallback={<SurfaceLoadingSkeleton label={t("backupCenter.loading")} />}>
+        <BackupCenter />
+      </Suspense>
+    );
+  }
+
+  if (nav === "recovery") {
+    return (
+      <Suspense fallback={<SurfaceLoadingSkeleton label={t("recoveryCenter.loading")} />}>
+        <RecoveryCenter
+          taskIds={filtered}
+          loading={loading}
+          error={error}
+          hasMore={hasMore}
+          onLoadMore={() => void loadPage(nextCursor, true)}
+          onRetryLoad={() => void loadPage(null, false)}
+          onResolve={onResolveAttention}
+          onShowDetails={onShowDetails}
         />
       </Suspense>
     );
@@ -896,7 +945,6 @@ export const TaskList = memo(function TaskList({
                         onCopyUrl={onCopyUrl}
                         onCopyLocalPath={onCopyLocalPath}
                         onShowDetails={onShowDetails}
-                        shellCompact={shellCompact}
                         queueReason={queueReasons.get(taskId)}
                         compact={compactRows}
                       />

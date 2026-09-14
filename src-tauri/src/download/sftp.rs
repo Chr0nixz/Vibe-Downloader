@@ -269,10 +269,12 @@ impl SftpEngine {
         if let Some(credentials) =
             db::resolve_task_credentials(&context.pool, &context.task.id).await?
         {
-            target.username = credentials.username;
-            target.password = credentials.password;
-            target.private_key_data = credentials.private_key_data;
-            target.private_key_passphrase = credentials.private_key_passphrase;
+            // Clones, not moves: TaskCredentials zeroizes on drop, so its
+            // fields cannot be partially moved out (SEC-05).
+            target.username = credentials.username.clone();
+            target.password = credentials.password.clone();
+            target.private_key_data = credentials.private_key_data.clone();
+            target.private_key_passphrase = credentials.private_key_passphrase.clone();
         }
         if target.username.is_empty() {
             return Err(engine_error(
@@ -338,10 +340,10 @@ impl DownloadEngine for SftpEngine {
                         .await
                         .map_err(DownloadError::Other)?
                     {
-                        target.username = credentials.username;
-                        target.password = credentials.password;
-                        target.private_key_data = credentials.private_key_data;
-                        target.private_key_passphrase = credentials.private_key_passphrase;
+                        target.username = credentials.username.clone();
+                        target.password = credentials.password.clone();
+                        target.private_key_data = credentials.private_key_data.clone();
+                        target.private_key_passphrase = credentials.private_key_passphrase.clone();
                     }
                 }
             }

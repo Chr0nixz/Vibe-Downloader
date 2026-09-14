@@ -32,6 +32,7 @@ import type {
   BatchImportResult,
   ChecksumAlgorithm,
   FtpDirectoryProbe,
+  HlsMediaTrack,
   ProbedFile,
   ProbeTaskPayload,
   SftpDirectoryProbe,
@@ -1239,198 +1240,26 @@ export function NewDownloadDialog({
                   </label>
                 ) : null}
 
-                {/* F-6: HLS audio track picker */}
+                {/* F-6: HLS audio track picker (capped, see HlsTrackPicker) */}
                 {isHlsProbe && probe && probe.hlsAudioTracks.length > 0 ? (
-                  <div className="flex flex-col gap-1 text-xs text-text-muted">
-                    <span>{t("newDownload.hlsAudioTracks")}</span>
-                    <div className="flex flex-col gap-1">
-                      {probe.hlsAudioTracks.map((track, index) => {
-                        const trackUri = track.uri ?? "";
-                        const disabled = !track.uri;
-                        const checked = selectedHlsAudioTrackUris.includes(trackUri);
-                        const checkboxId = `new-download-hls-audio-${index}`;
-                        return (
-                          <label
-                            key={`${track.groupId}-${track.name}`}
-                            htmlFor={checkboxId}
-                            className={`flex items-center gap-2 ${disabled ? "opacity-50" : ""}`}
-                          >
-                            <Checkbox
-                              id={checkboxId}
-                              checked={checked}
-                              disabled={disabled}
-                              onChange={(e) => {
-                                if (disabled) return;
-                                setSelectedHlsAudioTrackUris((prev) =>
-                                  e.target.checked ? [...prev, trackUri] : prev.filter((u) => u !== trackUri),
-                                );
-                              }}
-                              aria-label={track.name}
-                            />
-                            <span>
-                              {track.name}
-                              {track.language ? ` (${track.language})` : ""}
-                              {track.default ? ` · ${t("newDownload.hlsTrackDefault")}` : ""}
-                              {disabled ? ` · ${t("newDownload.hlsTrackEmbedded")}` : ""}
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <HlsTrackPicker
+                    heading={t("newDownload.hlsAudioTracks")}
+                    tracks={probe.hlsAudioTracks}
+                    selectedUris={selectedHlsAudioTrackUris}
+                    onToggle={setSelectedHlsAudioTrackUris}
+                    idPrefix="new-download-hls-audio"
+                  />
                 ) : null}
 
-                {/* F-6: HLS subtitle track picker */}
+                {/* F-6: HLS subtitle track picker (capped, see HlsTrackPicker) */}
                 {isHlsProbe && probe && probe.hlsSubtitleTracks.length > 0 ? (
-                  <div className="flex flex-col gap-1 text-xs text-text-muted">
-                    <span>{t("newDownload.hlsSubtitleTracks")}</span>
-                    <div className="flex flex-col gap-1">
-                      {probe.hlsSubtitleTracks.map((track, index) => {
-                        const trackUri = track.uri ?? "";
-                        const disabled = !track.uri;
-                        const checked = selectedHlsSubtitleTrackUris.includes(trackUri);
-                        const checkboxId = `new-download-hls-subtitle-${index}`;
-                        return (
-                          <label
-                            key={`${track.groupId}-${track.name}`}
-                            htmlFor={checkboxId}
-                            className={`flex items-center gap-2 ${disabled ? "opacity-50" : ""}`}
-                          >
-                            <Checkbox
-                              id={checkboxId}
-                              checked={checked}
-                              disabled={disabled}
-                              onChange={(e) => {
-                                if (disabled) return;
-                                setSelectedHlsSubtitleTrackUris((prev) =>
-                                  e.target.checked ? [...prev, trackUri] : prev.filter((u) => u !== trackUri),
-                                );
-                              }}
-                              aria-label={track.name}
-                            />
-                            <span>
-                              {track.name}
-                              {track.language ? ` (${track.language})` : ""}
-                              {track.default ? ` · ${t("newDownload.hlsTrackDefault")}` : ""}
-                              {disabled ? ` · ${t("newDownload.hlsTrackEmbedded")}` : ""}
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : null}
-
-                {/* Credentials disclosure: most URLs are public, so auth is opt-in
-                rather than always shown when Advanced is open. The underlying
-                state is preserved across toggles; detect/submit pass null when
-                this is off. */}
-                {!isTorrentProbe && !isMetalinkProbe && !isHlsProbe && !isDashProbe ? (
-                  <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
-                    <label htmlFor="new-download-use-credentials" className="flex cursor-pointer items-start gap-2">
-                      <Checkbox
-                        id="new-download-use-credentials"
-                        checked={useCredentials}
-                        onChange={(event) => setUseCredentials(event.target.checked)}
-                        aria-label={t("newDownload.useCredentials")}
-                      />
-                      <span>
-                        <span className="block text-xs font-medium text-text-secondary">
-                          {t("newDownload.useCredentials")}
-                        </span>
-                        <span className="block text-[11px] leading-4 text-text-muted">
-                          {t("newDownload.useCredentialsHint")}
-                        </span>
-                      </span>
-                    </label>
-                    {useCredentials ? (
-                      <div className="flex flex-col gap-2">
-                        <div className="grid grid-cols-2 gap-2">
-                          <label
-                            htmlFor="new-download-username"
-                            className="flex flex-col gap-1 text-xs text-text-muted"
-                          >
-                            {t("newDownload.authUsername")}
-                            <Input
-                              id="new-download-username"
-                              value={username}
-                              onChange={(event) => setUsername(event.target.value)}
-                              placeholder={t("newDownload.authUsernamePlaceholder")}
-                              className="h-8"
-                              autoComplete="username"
-                            />
-                          </label>
-                          <label
-                            htmlFor="new-download-password"
-                            className="flex flex-col gap-1 text-xs text-text-muted"
-                          >
-                            {t("newDownload.authPassword")}
-                            <Input
-                              id="new-download-password"
-                              type="password"
-                              value={password}
-                              onChange={(event) => setPassword(event.target.value)}
-                              placeholder={t("newDownload.authPasswordPlaceholder")}
-                              className="h-8"
-                              autoComplete="current-password"
-                            />
-                          </label>
-                        </div>
-                        {isSftpUrl ? (
-                          <div className="flex flex-col gap-2">
-                            <span className="text-xs font-medium text-text-secondary">
-                              {t("newDownload.sshKeyAuth")}
-                            </span>
-                            <div className="flex items-center gap-2">
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                onClick={chooseSshKeyFile}
-                                className="shrink-0"
-                              >
-                                <FolderOpen className="mr-1 size-3.5" />
-                                {t("newDownload.sshKeyBrowse")}
-                              </Button>
-                              {privateKeyData ? (
-                                <span className="truncate text-xs text-text-secondary">
-                                  {t("newDownload.sshKeyLoaded")}
-                                </span>
-                              ) : null}
-                              {privateKeyData ? (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => setPrivateKeyData("")}
-                                  className="shrink-0"
-                                  aria-label={t("newDownload.sshKeyClear")}
-                                >
-                                  <X className="size-3.5" />
-                                </Button>
-                              ) : null}
-                            </div>
-                            <label
-                              htmlFor="new-download-ssh-passphrase"
-                              className="flex flex-col gap-1 text-xs text-text-muted"
-                            >
-                              {t("newDownload.sshKeyPassphrase")}
-                              <Input
-                                id="new-download-ssh-passphrase"
-                                type="password"
-                                value={privateKeyPassphrase}
-                                onChange={(event) => setPrivateKeyPassphrase(event.target.value)}
-                                placeholder={t("newDownload.sshKeyPassphrasePlaceholder")}
-                                className="h-8"
-                                autoComplete="current-password"
-                                disabled={!privateKeyData}
-                              />
-                            </label>
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </div>
+                  <HlsTrackPicker
+                    heading={t("newDownload.hlsSubtitleTracks")}
+                    tracks={probe.hlsSubtitleTracks}
+                    selectedUris={selectedHlsSubtitleTrackUris}
+                    onToggle={setSelectedHlsSubtitleTrackUris}
+                    idPrefix="new-download-hls-subtitle"
+                  />
                 ) : null}
 
                 {/* Advanced options toggle */}
@@ -1448,6 +1277,118 @@ export function NewDownloadDialog({
                 {/* Advanced section */}
                 {advancedOpen ? (
                   <div className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3">
+                    {/* Credentials sit behind the Advanced gate like every other
+                    override: most URLs are public, and probe failures that need
+                    auth surface the denied hint above. The underlying state is
+                    preserved across toggles; detect/submit pass null when off. */}
+                    {!isTorrentProbe && !isMetalinkProbe && !isHlsProbe && !isDashProbe ? (
+                      <div className="flex flex-col gap-2">
+                        <label htmlFor="new-download-use-credentials" className="flex cursor-pointer items-start gap-2">
+                          <Checkbox
+                            id="new-download-use-credentials"
+                            checked={useCredentials}
+                            onChange={(event) => setUseCredentials(event.target.checked)}
+                            aria-label={t("newDownload.useCredentials")}
+                          />
+                          <span>
+                            <span className="block text-xs font-medium text-text-secondary">
+                              {t("newDownload.useCredentials")}
+                            </span>
+                            <span className="block text-[11px] leading-4 text-text-muted">
+                              {t("newDownload.useCredentialsHint")}
+                            </span>
+                          </span>
+                        </label>
+                        {useCredentials ? (
+                          <div className="flex flex-col gap-2">
+                            <div className="grid grid-cols-2 gap-2">
+                              <label
+                                htmlFor="new-download-username"
+                                className="flex flex-col gap-1 text-xs text-text-muted"
+                              >
+                                {t("newDownload.authUsername")}
+                                <Input
+                                  id="new-download-username"
+                                  value={username}
+                                  onChange={(event) => setUsername(event.target.value)}
+                                  placeholder={t("newDownload.authUsernamePlaceholder")}
+                                  className="h-8"
+                                  autoComplete="username"
+                                />
+                              </label>
+                              <label
+                                htmlFor="new-download-password"
+                                className="flex flex-col gap-1 text-xs text-text-muted"
+                              >
+                                {t("newDownload.authPassword")}
+                                <Input
+                                  id="new-download-password"
+                                  type="password"
+                                  value={password}
+                                  onChange={(event) => setPassword(event.target.value)}
+                                  placeholder={t("newDownload.authPasswordPlaceholder")}
+                                  className="h-8"
+                                  autoComplete="current-password"
+                                />
+                              </label>
+                            </div>
+                            {isSftpUrl ? (
+                              <div className="flex flex-col gap-2">
+                                <span className="text-xs font-medium text-text-secondary">
+                                  {t("newDownload.sshKeyAuth")}
+                                </span>
+                                <div className="flex items-center gap-2">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={chooseSshKeyFile}
+                                    className="shrink-0"
+                                  >
+                                    <FolderOpen className="mr-1 size-3.5" />
+                                    {t("newDownload.sshKeyBrowse")}
+                                  </Button>
+                                  {privateKeyData ? (
+                                    <span className="truncate text-xs text-text-secondary">
+                                      {t("newDownload.sshKeyLoaded")}
+                                    </span>
+                                  ) : null}
+                                  {privateKeyData ? (
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => setPrivateKeyData("")}
+                                      className="shrink-0"
+                                      aria-label={t("newDownload.sshKeyClear")}
+                                    >
+                                      <X className="size-3.5" />
+                                    </Button>
+                                  ) : null}
+                                </div>
+                                <label
+                                  htmlFor="new-download-ssh-passphrase"
+                                  className="flex flex-col gap-1 text-xs text-text-muted"
+                                >
+                                  {t("newDownload.sshKeyPassphrase")}
+                                  <Input
+                                    id="new-download-ssh-passphrase"
+                                    type="password"
+                                    value={privateKeyPassphrase}
+                                    onChange={(event) => setPrivateKeyPassphrase(event.target.value)}
+                                    placeholder={t("newDownload.sshKeyPassphrasePlaceholder")}
+                                    className="h-8"
+                                    autoComplete="current-password"
+                                    disabled={!privateKeyData}
+                                  />
+                                </label>
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+
                     {!isTorrentProbe && !isMetalinkProbe && !isHlsProbe && !isDashProbe ? (
                       <div className="flex flex-col gap-1 text-xs text-text-muted">
                         <label htmlFor="new-download-hash-algorithm">{t("newDownload.hashAlgorithm")}</label>
@@ -1774,6 +1715,91 @@ function FileRow({
         {formatBytes(size)}
       </span>
     </label>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  HLS track picker                                                    */
+/* ------------------------------------------------------------------ */
+
+// Cap the always-rendered track rows. Long-tail manifests (sports and event
+// streams) carry hundreds of audio/subtitle renditions; an unbounded checkbox
+// wall made the dialog unusable long before the submit button. 6 keeps every
+// realistic single-language media fully visible without a toggle.
+const HLS_TRACK_VISIBLE_LIMIT = 6;
+
+function HlsTrackPicker({
+  heading,
+  tracks,
+  selectedUris,
+  onToggle,
+  idPrefix,
+}: {
+  heading: string;
+  tracks: HlsMediaTrack[];
+  selectedUris: string[];
+  onToggle: (update: (prev: string[]) => string[]) => void;
+  idPrefix: string;
+}) {
+  const { t } = useTranslation();
+  const [showAll, setShowAll] = useState(false);
+  // Collapsed keeps selected tracks visible beyond the cap, so an auto-selected
+  // default never hides its own checked state.
+  const visibleTracks = tracks
+    .map((track, index) => ({ track, index }))
+    .filter(
+      ({ track, index }) =>
+        showAll || index < HLS_TRACK_VISIBLE_LIMIT || (track.uri != null && selectedUris.includes(track.uri)),
+    );
+  const hiddenCount = tracks.length - visibleTracks.length;
+
+  return (
+    <div className="flex flex-col gap-1 text-xs text-text-muted">
+      <span>{heading}</span>
+      <div className="flex flex-col gap-1">
+        {visibleTracks.map(({ track, index }) => {
+          const trackUri = track.uri ?? "";
+          const disabled = !track.uri;
+          const checked = selectedUris.includes(trackUri);
+          const checkboxId = `${idPrefix}-${index}`;
+          return (
+            <label
+              key={`${track.groupId}-${track.name}`}
+              htmlFor={checkboxId}
+              className={`flex items-center gap-2 ${disabled ? "opacity-50" : ""}`}
+            >
+              <Checkbox
+                id={checkboxId}
+                checked={checked}
+                disabled={disabled}
+                onChange={(e) => {
+                  if (disabled) return;
+                  onToggle((prev) => (e.target.checked ? [...prev, trackUri] : prev.filter((u) => u !== trackUri)));
+                }}
+                aria-label={track.name}
+              />
+              <span>
+                {track.name}
+                {track.language ? ` (${track.language})` : ""}
+                {track.default ? ` · ${t("newDownload.hlsTrackDefault")}` : ""}
+                {disabled ? ` · ${t("newDownload.hlsTrackEmbedded")}` : ""}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+      {/* Stay mounted while expanded so the list can be collapsed again. */}
+      {showAll || hiddenCount > 0 ? (
+        <button
+          type="button"
+          aria-expanded={showAll}
+          onClick={() => setShowAll((value) => !value)}
+          className="self-start text-[11px] text-accent-primary transition-colors hover:text-accent-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+        >
+          {showAll ? t("newDownload.hlsFewerTracks") : t("newDownload.hlsShowMoreTracks", { n: hiddenCount })}
+        </button>
+      ) : null}
+    </div>
   );
 }
 

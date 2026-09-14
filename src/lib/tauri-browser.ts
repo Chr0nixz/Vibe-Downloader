@@ -6,6 +6,9 @@ import type {
   BrowserExtensionExportResult,
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
+  BulkRecoveryAction,
+  BulkRecoveryResult,
+  CleanupMode,
   ClipboardLinkDetectedPayload,
   CompletionActionRequestedPayload,
   CreateTaskInput,
@@ -22,18 +25,24 @@ import type {
   ProbeTaskPayload,
   QueueChangedPayload,
   RecoveryAction,
+  RecoveryHistoryRecord,
   RequestDiagnostic,
   ResolveTaskAttentionInput,
   SchedulerSnapshot,
   SegmentSummary,
   SftpDirectoryProbe,
   StartupStatus,
+  StorageCleanupProgressPayload,
+  StorageCleanupResult,
+  StorageScanResult,
+  StorageSweepRecord,
   TaskEvent,
   TaskProxySettings,
   TaskProxySettingsInput,
   TaskStatsSnapshot,
   TorrentRuntimeSnapshot,
   UpdateSettingsInput,
+  UpdateTaskCredentialsInput,
   UpdateTaskTransferOptionsInput,
   UpdateTorrentFileSelectionInput,
   UpdateTorrentSeedingInput,
@@ -1529,6 +1538,7 @@ export async function createAppBackup(destinationPath: string) {
     path: destinationPath,
     schemaVersion: "6",
     credentialsPolicy: "machine_bound_ciphertext",
+    usedCopyFallback: false,
   };
 }
 
@@ -1540,16 +1550,103 @@ export async function validateAppBackup(backupPath: string) {
     createdAt: nowIso(),
     credentialsPolicy: "machine_bound_ciphertext",
     databaseBytes: "0",
+    contents: {
+      tasksTotal: 3,
+      tasksCompleted: 2,
+      tasksFailed: 0,
+      classificationRules: 1,
+      siteRules: 2,
+      tasksWithChecksums: 1,
+      tasksWithCredentials: 0,
+      tasksWithRequestHeaders: 0,
+      settingsKeys: 33,
+      taskEvents: 12,
+    },
+    pathPolicy: { violationCount: 0, sampleViolations: [], offendingSaveDirs: [] },
+    disk: { freeBytes: "512000000000", requiredBytes: "268435456" },
+    settingsPreview: {
+      ffmpegConfigured: true,
+      completionAction: "shutdown",
+      proxyPasswordSaved: false,
+      defaultSaveDir: "C:\\Downloads",
+    },
   };
 }
 
-export async function restoreAppBackup(backupPath: string) {
+export async function restoreAppBackup(backupPath: string, _remapRoot: string | null) {
   return {
     requiresRestart: true,
     preRestoreBackupPath: `${backupPath}.pre-restore`,
     pendingRestorePath: `${backupPath}.pending`,
     credentialsPolicy: "machine_bound_ciphertext",
+    remappedPaths: 0,
   };
+}
+
+export async function describeBackupSource() {
+  return {
+    tasksTotal: tasks.length,
+    tasksCompleted: tasks.filter((task) => task.status === "completed").length,
+    tasksFailed: tasks.filter((task) => task.status === "failed" || task.status === "needs_attention").length,
+    classificationRules: 1,
+    siteRules: 2,
+    tasksWithChecksums: 1,
+    tasksWithCredentials: 0,
+    tasksWithRequestHeaders: 0,
+    settingsKeys: 33,
+    taskEvents: 12,
+  };
+}
+
+export async function restoreBackupSubset(
+  _backupPath: string,
+  selection: { tasks: boolean; rules: boolean; settings: boolean },
+) {
+  return {
+    tasksInserted: selection.tasks ? 1 : 0,
+    tasksSkipped: selection.tasks ? 1 : 0,
+    tasksNormalized: 0,
+    rulesInserted: selection.rules ? 2 : 0,
+    rulesSkipped: 0,
+    settingsReplaced: selection.settings ? 33 : 0,
+  };
+}
+
+// §3.7 post-restore report mock state; null once dismissed.
+let browserRestoreReport: {
+  schemaVersion: string;
+  restoredAt: string;
+  backupCreatedAt: string | null;
+  preRestoreBackupPath: string | null;
+  tasksWithCredentials: number;
+  tasksWithPerTaskProxy: number;
+  globalProxyNeedsReentry: boolean;
+  ffmpegWasConfigured: boolean;
+  completionActionReset: boolean;
+  missingSaveDirs: string[];
+  missingSaveDirsTotal: number;
+} | null = {
+  schemaVersion: "6",
+  restoredAt: nowIso(),
+  backupCreatedAt: nowIso(),
+  preRestoreBackupPath: "C:\\Downloads\\vibe.db.bak-1",
+  tasksWithCredentials: 2,
+  tasksWithPerTaskProxy: 1,
+  globalProxyNeedsReentry: true,
+  ffmpegWasConfigured: true,
+  completionActionReset: true,
+  missingSaveDirs: ["D:\\OldDownloads"],
+  missingSaveDirsTotal: 1,
+};
+
+export async function getLastRestoreReport() {
+  return browserRestoreReport;
+}
+
+export async function dismissRestoreReport(): Promise<boolean> {
+  const existed = browserRestoreReport !== null;
+  browserRestoreReport = null;
+  return existed;
 }
 
 export async function readLocalTextFile(_path: string, _kind: "batch_text" | "ssh_key"): Promise<string> {
@@ -2131,6 +2228,180 @@ export function onCompletionActionRequested(
 /** UX-6: No-op mock for browser preview — probe-phase events only exist in Tauri. */
 export function onProbePhase(_handler: (payload: ProbePhasePayload) => void): Promise<() => void> {
   return Promise.resolve(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Storage & Cleanup Center (browser preview mocks)
+// ---------------------------------------------------------------------------
+
+const storageCleanupListeners = new Set<(payload: StorageCleanupProgressPayload) => void>();
+
+function browserStorageScan(): StorageScanResult {
+  const saveDir = settings.defaultSaveDir || "~/Downloads";
+  const reclaimable = tasks
+    .filter((task) => task.status === "failed")
+    .slice(0, 2)
+    .map((task, index) => ({
+      id: `${saveDir}/orphan-${index}.vibe-downloading`,
+      kind: "temp_file" as const,
+      saveDir,
+      fileName: `${task.fileName}.vibe-downloading`,
+      bytes: "1048576",
+      modifiedAt: null,
+      reclaimable: true,
+      reason: "no_owner" as const,
+      ownerTaskId: null,
+      taskFileName: null,
+      ownerProtocol: null,
+    }));
+  const resumable = tasks
+    .filter((task) => task.status === "paused" || task.status === "failed")
+    .map((task) => ({
+      id: `${saveDir}/${task.fileName}.vibe-downloading`,
+      kind: "temp_file" as const,
+      saveDir,
+      fileName: `${task.fileName}.vibe-downloading`,
+      bytes: String(task.totalSize || 0),
+      modifiedAt: null,
+      reclaimable: false,
+      reason: "owner_resumable" as const,
+      ownerTaskId: task.id,
+      taskFileName: task.fileName,
+      ownerProtocol: task.protocol,
+    }));
+  return {
+    scanId: `browser-${Date.now()}`,
+    scannedAt: new Date().toISOString(),
+    dirs: [
+      {
+        path: saveDir,
+        totalBytes: "512110190592",
+        availableBytes: "107374182400",
+        reclaimableBytes: reclaimable.reduce((sum, item) => sum + Number(item.bytes), 0).toString(),
+        resumableBytes: resumable.reduce((sum, item) => sum + Number(item.bytes), 0).toString(),
+        estimatedCompletableTasks: "42",
+        truncated: false,
+      },
+    ],
+    items: [...reclaimable, ...resumable],
+  };
+}
+
+export async function scanStorage(): Promise<StorageScanResult> {
+  return browserStorageScan();
+}
+
+export async function cleanStorageArtifacts(mode: CleanupMode, itemIds?: string[]): Promise<StorageCleanupResult> {
+  const scan = browserStorageScan();
+  const targets = scan.items.filter(
+    (item) => item.reclaimable && (itemIds ? itemIds.includes(item.id) : mode !== "selected"),
+  );
+  return {
+    requestId: `browser-${Date.now()}`,
+    mode,
+    removedCount: targets.length,
+    skippedCount: 0,
+    failedCount: 0,
+    reclaimedBytes: targets.reduce((sum, item) => sum + Number(item.bytes), 0).toString(),
+    outcomes: targets.map((item) => ({
+      itemId: item.id,
+      outcome: "removed" as const,
+      bytes: item.bytes,
+      errorCode: null,
+    })),
+    resumeDiscarded: false,
+  };
+}
+
+export async function cleanupTaskTempFiles(taskId: string): Promise<StorageCleanupResult> {
+  const task = tasks.find((entry) => entry.id === taskId);
+  void task;
+  return {
+    requestId: `browser-${Date.now()}`,
+    mode: "selected",
+    removedCount: 1,
+    skippedCount: 0,
+    failedCount: 0,
+    reclaimedBytes: "0",
+    outcomes: [],
+    resumeDiscarded: true,
+  };
+}
+
+export async function getLastStorageSweep(): Promise<StorageSweepRecord | null> {
+  return {
+    id: "browser-sweep",
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    finishedAt: new Date(Date.now() - 58_000).toISOString(),
+    mode: "startup",
+    removedCount: 2,
+    failedCount: 0,
+    reclaimedBytes: "2097152",
+  };
+}
+
+export function onStorageCleanupProgress(
+  handler: (payload: StorageCleanupProgressPayload) => void,
+): Promise<() => void> {
+  storageCleanupListeners.add(handler);
+  return Promise.resolve(() => {
+    storageCleanupListeners.delete(handler);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Center (browser preview mocks)
+// ---------------------------------------------------------------------------
+
+const recoveryHistory: RecoveryHistoryRecord[] = [];
+
+function pushRecoveryHistory(task: Task, action: string): void {
+  recoveryHistory.unshift({
+    id: `recovery-${Date.now()}-${recoveryHistory.length}`,
+    taskId: task.id,
+    taskFileName: task.fileName,
+    action,
+    source: "recovery_center",
+    errorCode: task.errorCode ?? null,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+export async function bulkResolveAttention(ids: string[], action: BulkRecoveryAction): Promise<BulkRecoveryResult> {
+  let succeeded = 0;
+  let skipped = 0;
+  // The preview mock never produces per-item failures; the count exists to
+  // mirror the backend result shape.
+  const failed = 0;
+  for (const id of ids) {
+    const task = tasks.find((entry) => entry.id === id);
+    if (!task || (task.status !== "failed" && task.status !== "needs_attention")) {
+      skipped += 1;
+      continue;
+    }
+    const updated = updateTask(id, {
+      status: "queued",
+      healthSummary: "taskDiagnostics.queued",
+      errorMessage: null,
+      errorCode: null,
+    });
+    logTaskEvent(id, "retrying", "Resolved from the Recovery Center.");
+    pushRecoveryHistory(updated, action);
+    succeeded += 1;
+  }
+  return { succeeded, skipped, failed };
+}
+
+export async function updateTaskCredentials(input: UpdateTaskCredentialsInput): Promise<Task> {
+  const task = tasks.find((entry) => entry.id === input.taskId);
+  if (!task) throw new Error(`Task not found: ${input.taskId}`);
+  logTaskEvent(input.taskId, "task_credentials_updated");
+  pushRecoveryHistory(task, "update_credentials");
+  return task;
+}
+
+export async function listRecoveryHistory(limit?: number): Promise<RecoveryHistoryRecord[]> {
+  return recoveryHistory.slice(0, limit ?? 30);
 }
 
 /**

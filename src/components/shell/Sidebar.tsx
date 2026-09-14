@@ -4,10 +4,13 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  DatabaseBackup,
   Download,
   Filter,
+  HardDrive,
   Info,
   LayoutGrid,
+  LifeBuoy,
   ListOrdered,
   MoreHorizontal,
   PanelLeftClose,
@@ -46,6 +49,9 @@ const secondaryFilterItems: NavItemDef[] = [
   { id: "queue", labelKey: "nav.queue", icon: ListOrdered },
   { id: "paused", labelKey: "nav.paused", icon: PauseCircle },
   { id: "failed", labelKey: "nav.failed", icon: AlertCircle },
+  { id: "storage", labelKey: "nav.storage", icon: HardDrive },
+  { id: "recovery", labelKey: "nav.recovery", icon: LifeBuoy },
+  { id: "backup", labelKey: "nav.backup", icon: DatabaseBackup },
 ];
 
 const settingsItem: NavItemDef = {
@@ -96,14 +102,14 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
     paused: taskStats.paused,
     completed: taskStats.completed,
     failed: taskStats.failed,
+    // Recovery Center spans both failure classes.
+    recovery: taskStats.failed + taskStats.attention,
   };
 
   const secondaryActive = secondaryFilterItems.some((item) => item.id === nav);
   // Tasks hidden behind the overflow that warrant a look. Previously signalled by
   // a bare red dot, which said "something" but never "how much".
   const secondaryAttentionCount = (counts.failed ?? 0) + (counts.queue ?? 0);
-  const mobileMoreActive =
-    secondaryActive || nav === "queue" || nav === "paused" || nav === "failed" || nav === "settings" || nav === "about";
 
   return (
     <RegionContextMenu
@@ -120,24 +126,23 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
     >
       <nav
         className={cn(
-          // ── Mobile: horizontal bottom bar ──
-          "order-3 flex h-12 w-full shrink-0 flex-row items-center gap-1 border-t px-1 py-0.5",
-          // ── Surface ──
-          "bg-surface-base",
-          "border-border-subtle",
-          // ── Tablet: vertical compact column (always compact width) ──
-          "md:order-none md:h-auto md:w-[var(--shell-nav-width-compact)]",
-          "md:flex-col md:items-stretch md:justify-between md:gap-1",
-          "md:border-r md:border-t-0 md:p-1.5",
+          // ── Vertical compact rail at every width; `lg` expands it when not
+          // collapsed. The former phone-style bottom bar fought the desktop
+          // window context (PRODUCT.md "native desktop feel"): a narrow window
+          // is a snapped desktop surface with pointer + keyboard, so the icon
+          // rail is the native answer at every size.
+          "flex h-auto w-[var(--shell-nav-width-compact)] shrink-0 flex-col items-stretch justify-between gap-1",
+          "border-r border-border-subtle bg-surface-base p-1.5",
           // ── Desktop: expand only when not collapsed ──
           !collapsed && "lg:w-[var(--shell-nav-width)] lg:p-2",
-          // ── Width transition ──
-          "transition-[width,padding] duration-[var(--motion-ui)] ease-out",
+          // No width/padding transition: animating layout properties forces a
+          // reflow every frame on a container bordering the virtualized task
+          // list. The collapse reads instantly from the content change itself.
         )}
         aria-label={t("app.navAria")}
       >
-        {/* ── View group (top on md+) ── */}
-        <div className="flex flex-1 flex-row items-center justify-around gap-1 md:flex-col md:items-stretch md:justify-start md:gap-0.5 lg:justify-start">
+        {/* ── View group ── */}
+        <div className="flex flex-1 flex-col items-stretch justify-start gap-0.5">
           {/* Group label — only when expanded (wide). These entries switch views;
               the filter facets live in the CommandBar tool panel, so labelling
               this group "Filters" sent users to the wrong control. */}
@@ -183,8 +188,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
                 }
                 aria-current={secondaryActive ? "page" : undefined}
                 className={cn(
-                  "relative hidden h-11 min-w-10 flex-1 gap-1.5 px-1 text-xs md:flex",
-                  "md:h-10 md:w-full md:flex-none md:flex-col md:items-start md:justify-start md:gap-1 md:px-1",
+                  "relative h-10 w-full flex-none flex-col items-start justify-start gap-1 px-1 text-xs",
                   "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
                   collapsed && "lg:justify-center lg:px-0",
                   "transition-[color,background-color,box-shadow,border-color] duration-[var(--motion-ui)] ease-out",
@@ -199,7 +203,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
                 <MoreHorizontal className="h-[18px] w-[18px] shrink-0" aria-hidden />
                 <span
                   className={cn(
-                    "hidden max-w-16 truncate text-[10px] leading-tight md:inline md:max-w-none lg:text-sm lg:leading-normal",
+                    "max-w-none text-xs leading-tight lg:text-sm lg:leading-normal",
                     collapsed && "lg:hidden",
                   )}
                 >
@@ -223,7 +227,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
                 )}
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="start" side="right" className="hidden w-52 p-1 md:block">
+            <PopoverContent align="start" side="right" className="w-52 p-1">
               {secondaryFilterItems.map((item) => (
                 <MobileNavMenuItem
                   key={item.id}
@@ -238,9 +242,9 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
           </Popover>
         </div>
 
-        {/* ── Separator + Settings + Collapse toggle (bottom on md+) ── */}
-        <div className="flex flex-none flex-row items-center gap-1 md:flex-col md:items-stretch md:gap-0.5">
-          <div className="hidden md:mx-2 md:mb-1 md:block lg:mx-3">
+        {/* ── Separator + Settings + Collapse toggle ── */}
+        <div className="flex flex-none flex-col items-stretch gap-0.5">
+          <div className="mx-2 mb-1 lg:mx-3">
             <div className="h-px bg-border-subtle/50" />
           </div>
           <NavItem
@@ -249,7 +253,6 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
             label={t(settingsItem.labelKey)}
             count={0}
             compact={collapsed}
-            mobileHidden
             onClick={() => setNav("settings")}
           />
           <NavItem
@@ -258,74 +261,11 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
             label={t(aboutItem.labelKey)}
             count={0}
             compact={collapsed}
-            mobileHidden
             onClick={() => setNav("about")}
           />
 
-          {/* Mobile bottom-bar overflow */}
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                aria-label={
-                  secondaryAttentionCount > 0
-                    ? t("nav.moreNeedsAttentionCount", { count: secondaryAttentionCount })
-                    : t("nav.more")
-                }
-                aria-current={mobileMoreActive ? "page" : undefined}
-                className={cn(
-                  "relative h-11 min-w-10 flex-1 flex-col gap-0.5 px-1 text-[10px] md:hidden",
-                  mobileMoreActive
-                    ? "bg-accent-primary/15 font-medium text-accent-primary shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]"
-                    : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
-                )}
-              >
-                <MoreHorizontal className="h-[18px] w-[18px]" aria-hidden />
-                <span>{t("nav.more")}</span>
-                {secondaryAttentionCount > 0 && (
-                  <span
-                    className={cn(
-                      "absolute right-0 top-0 inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-4 tabular-nums",
-                      (counts.failed ?? 0) > 0
-                        ? "bg-status-danger/12 text-status-danger"
-                        : "bg-status-warning/14 text-status-warning",
-                    )}
-                    aria-hidden
-                  >
-                    {secondaryAttentionCount > 99 ? "99+" : secondaryAttentionCount}
-                  </span>
-                )}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent align="end" side="top" className="w-52 p-1 md:hidden">
-              {secondaryFilterItems.map((item) => (
-                <MobileNavMenuItem
-                  key={item.id}
-                  item={item}
-                  label={t(item.labelKey)}
-                  active={nav === item.id}
-                  count={counts[item.id] ?? 0}
-                  onClick={() => setNav(item.id)}
-                />
-              ))}
-              <MobileNavMenuItem
-                item={settingsItem}
-                label={t(settingsItem.labelKey)}
-                active={nav === "settings"}
-                onClick={() => setNav("settings")}
-              />
-              <MobileNavMenuItem
-                item={aboutItem}
-                label={t(aboutItem.labelKey)}
-                active={nav === "about"}
-                onClick={() => setNav("about")}
-              />
-            </PopoverContent>
-          </Popover>
-
           {/* Collapse / expand toggle */}
-          <div className="hidden md:mx-1.5 md:mt-0.5 md:block lg:mx-2.5">
+          <div className="mx-1.5 mt-0.5 lg:mx-2.5">
             <div className="h-px bg-border-subtle/40" />
           </div>
           <Button
@@ -334,10 +274,9 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
             onClick={toggleCollapse}
             aria-label={collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
             className={cn(
-              "group hidden h-8 w-8 flex-none justify-center p-0 md:flex",
+              "group mt-1 flex h-10 w-full flex-none flex-row justify-center gap-2 p-0",
               "text-text-muted",
               "hover:bg-accent-primary/10 hover:text-accent-primary",
-              "md:mt-1 md:h-10 md:w-full md:flex-row md:gap-2",
               "transition-[color,background-color] duration-[var(--motion-ui)]",
             )}
           >
@@ -354,7 +293,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
                 <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
               )}
             </span>
-            <span className={cn("hidden text-xs font-medium md:inline lg:hidden", collapsed && "lg:hidden")}>
+            <span className={cn("text-xs font-medium lg:hidden")}>
               {collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
             </span>
           </Button>
@@ -365,7 +304,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
 }
 
 /* ──────────────────────────────────────────────────────────
-   Single nav item — handles all three responsive tiers
+   Single nav item — compact rail by default, expanded rail at lg
    ────────────────────────────────────────────────────────── */
 
 function NavItem({
@@ -374,7 +313,6 @@ function NavItem({
   label,
   count,
   compact,
-  mobileHidden = false,
   onClick,
   contextMenuItems,
 }: {
@@ -383,7 +321,6 @@ function NavItem({
   label: string;
   count: number;
   compact: boolean;
-  mobileHidden?: boolean;
   onClick: () => void;
   /** Optional context-menu items for this nav entry (filter items only). */
   contextMenuItems?: React.ReactNode;
@@ -401,10 +338,8 @@ function NavItem({
           aria-current={active ? "page" : undefined}
           aria-label={showBadge ? `${label} (${count})` : label}
           className={cn(
-            // ── Mobile bottom bar: icon stacked over label, same as the More trigger ──
-            "relative h-11 min-w-10 flex-1 flex-col gap-0.5 px-1 text-[10px]",
-            mobileHidden && "hidden md:flex",
-            "md:h-10 md:w-full md:flex-none md:items-start md:justify-start md:gap-1 md:px-1",
+            // ── Compact rail: full-width row, icon stacked over the label ──
+            "relative h-10 w-full flex-none flex-col items-start justify-start gap-1 px-1 text-xs",
             "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
             // ── Collapsed (lg): label and badge are hidden, so center the
             // lone icon within the compact nav column instead of left-aligning it.
@@ -422,7 +357,6 @@ function NavItem({
             ],
             // ── Inactive ──
             !active && ["text-text-secondary", "hover:bg-surface-raised hover:text-text-primary"],
-            active && "min-w-20 flex-[1.45] md:min-w-0 md:flex-none",
           )}
         >
           {/* Icon — left-aligned (no mx-auto) */}

@@ -171,6 +171,9 @@ pub async fn resolve_task_proxy_config(
                 .and_then(|value| proxy::normalize_proxy_url(&value))
                 .ok_or_else(|| proxy_protocol_error(protocol, "Custom proxy URL is invalid."))?;
             validate_task_proxy_protocol(protocol, &url)?;
+            // SEC-05: the decrypted password is wiped when this scope ends;
+            // the long-lived copy inside ResolvedProxyConfig keeps the struct's
+            // existing (plain) field type shared with the global settings path.
             let password = match (&record.proxy_password_ciphertext, &record.nonce) {
                 (Some(ciphertext), Some(nonce)) => Some(
                     crate::secure_headers::decrypt_secret(
@@ -179,7 +182,9 @@ pub async fn resolve_task_proxy_config(
                         "task proxy password",
                         task_id.as_bytes(),
                     )
-                    .map_err(proxy_secret_decrypt_error)?,
+                    .map_err(proxy_secret_decrypt_error)?
+                    .as_str()
+                    .to_owned(),
                 ),
                 _ => None,
             };

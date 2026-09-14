@@ -58,6 +58,9 @@ axum = { version = "0.8.9", features = ["ws"] }
 futures-util = "0.3"
 base64 = "0.22.1"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
+# SEC-05: wipe credential/key buffers on drop so process dumps and pagefiles
+# stop retaining plaintext secrets.
+zeroize = { version = "1", features = ["derive"] }
 keyring = "4"
 librqbit = { version = "9.0.0-rc.0", default-features = false, features = ["rust-tls"] }
 quick-xml = "0.41.0"
@@ -79,6 +82,10 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    # SEC-04: bootstrap-file DACL restriction to the current user.
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
 ] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
@@ -90,6 +97,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSWork
 [target.'cfg(target_os = "linux")'.dependencies]
 freedesktop = { version = "0.0.3", default-features = false, features = ["icon"] }
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+
+# statvfs-based free-space reporting for the backup pre-restore disk check.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 
 [dev-dependencies]

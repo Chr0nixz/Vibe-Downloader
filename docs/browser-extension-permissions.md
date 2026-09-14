@@ -45,7 +45,7 @@
 扩展只做以下数据传递：
 
 1. **用户主动发起**：用户点击扩展图标、右键菜单、或浏览器原生下载触发时，扩展才会读取当前标签页 URL 和（如启用）相关 Cookie/header。
-2. **本地传递**：所有数据通过 Native Messaging（stdin/stdout）或本地 WebSocket（端口 48365，仅 `127.0.0.1`）传给桌面应用。
+2. **本地传递**：所有数据通过 Native Messaging（stdin/stdout）或本地 WebSocket（端口 48365，仅 `127.0.0.1`）传给桌面应用。WebSocket 握手同时校验本地 token 与 `Origin`（仅接受 `chrome-extension://` / `moz-extension://`），`createDownload` 有每分钟配额，超配额请求被结构化拒绝且不会回落到 Native Messaging；扩展侧消息监听只接受本扩展自身的消息（SEC-04）。
 3. **不外传**：扩展**不会**把用户数据发送到任何远程服务器。所有数据只发往本机的 Vibe Downloader 进程。
 
 ### Header 转发的 Allowlist

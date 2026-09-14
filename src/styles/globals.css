@@ -11,6 +11,7 @@
   --color-surface-base: var(--surface-base);
   --color-surface-raised: var(--surface-raised);
   --color-surface-track: var(--surface-track);
+  --color-progress-fill-inactive: var(--progress-fill-inactive);
   --color-surface-overlay: var(--surface-overlay);
   --color-surface-scrim: var(--surface-scrim);
   --color-surface-hover: var(--surface-hover);

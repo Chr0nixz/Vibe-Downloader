@@ -24,6 +24,9 @@ export type NavFilter =
   | "paused"
   | "completed"
   | "failed"
+  | "storage"
+  | "recovery"
+  | "backup"
   | "settings"
   | "about";
 

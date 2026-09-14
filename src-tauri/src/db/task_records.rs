@@ -366,6 +366,12 @@ fn append_task_filters(query: &mut QueryBuilder<Sqlite>, input: &TaskListQuery) 
         "paused" => push_static_filter(query, &mut has_where, "status = 'paused'"),
         "queue" => push_static_filter(query, &mut has_where, "status = 'queued'"),
         "attention" => push_static_filter(query, &mut has_where, "status = 'needs_attention'"),
+        // Recovery Center: both failure classes the page offers to recover.
+        "recovery" => push_static_filter(
+            query,
+            &mut has_where,
+            "status IN ('failed', 'needs_attention')",
+        ),
         "completed" => push_static_filter(query, &mut has_where, "status = 'completed'"),
         "failed" => push_static_filter(query, &mut has_where, "status = 'failed'"),
         "settings" | "about" => push_static_filter(query, &mut has_where, "0 = 1"),
@@ -1206,6 +1212,41 @@ pub async fn list_staging_task_refs(pool: &SqlitePool) -> Result<Vec<StagingTask
             id: row.get("id"),
             save_dir: row.get("save_dir"),
             status: row.get("status"),
+        })
+        .collect())
+}
+
+/// Minimal task projection for artifact ownership resolution
+/// (`download::artifacts`): temp/final paths let a name-only artifact find
+/// its live owner without loading full task records. `protocol`/`file_name`
+/// feed the Storage Center's per-task view.
+pub struct ArtifactTaskRef {
+    pub id: String,
+    pub save_dir: String,
+    pub status: String,
+    pub protocol: String,
+    pub file_name: String,
+    pub temp_path: Option<String>,
+    pub final_path: Option<String>,
+}
+
+pub async fn list_artifact_task_refs(pool: &SqlitePool) -> Result<Vec<ArtifactTaskRef>, String> {
+    let rows = sqlx::query(
+        "SELECT id, save_dir, status, protocol, file_name, temp_path, final_path FROM tasks",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ArtifactTaskRef {
+            id: row.get("id"),
+            save_dir: row.get("save_dir"),
+            status: row.get("status"),
+            protocol: row.get("protocol"),
+            file_name: row.get("file_name"),
+            temp_path: row.get("temp_path"),
+            final_path: row.get("final_path"),
         })
         .collect())
 }

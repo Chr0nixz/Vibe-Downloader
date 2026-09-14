@@ -2,14 +2,17 @@ import type { TFunction } from "i18next";
 import {
   Check,
   CircleAlert,
+  DatabaseBackup,
   Eye,
   EyeOff,
   File,
   Filter,
   FolderOpen,
   Gauge,
+  HardDrive,
   Info,
   LayoutList,
+  LifeBuoy,
   ListChecks,
   ListOrdered,
   Moon,
@@ -717,6 +720,42 @@ function buildCommands({
     run: () => onSetNav("attention"),
   });
   push({
+    id: "app.storage",
+    label: t("nav.storage"),
+    description: t("storageCenter.subtitle"),
+    group: "app",
+    icon: HardDrive,
+    keywords: keyword("storage", "disk", "cleanup", "temp", "staging", "存储", "清理", "磁盘"),
+    enabled: true,
+    active: nav === "storage",
+    featured: true,
+    run: () => onSetNav("storage"),
+  });
+  push({
+    id: "app.recovery",
+    label: t("nav.recovery"),
+    description: t("recoveryCenter.subtitle"),
+    group: "app",
+    icon: LifeBuoy,
+    keywords: keyword("recovery", "failed", "attention", "retry", "恢复", "失败", "重试"),
+    enabled: true,
+    active: nav === "recovery",
+    featured: true,
+    run: () => onSetNav("recovery"),
+  });
+  push({
+    id: "app.backup",
+    label: t("nav.backup"),
+    description: t("backupCenter.subtitle"),
+    group: "app",
+    icon: DatabaseBackup,
+    keywords: keyword("backup", "restore", "migrate", "export", "备份", "恢复", "迁移", "导出"),
+    enabled: true,
+    active: nav === "backup",
+    featured: true,
+    run: () => onSetNav("backup"),
+  });
+  push({
     id: "app.settings",
     label: t("palette.commands.openSettings"),
     description: t("palette.descriptions.openSettings"),
@@ -969,24 +1008,24 @@ function buildCommands({
     run: () => onResumeAll(),
   });
 
-  (["all", "downloading", "queue", "attention", "paused", "completed", "failed", "settings"] as const).forEach(
-    (nextNav) => {
-      const digit = navShortcutDigit(nextNav);
-      push({
-        id: `view.${nextNav}`,
-        label: t(`nav.${nextNav}`),
-        description: t("palette.descriptions.view"),
-        group: "views",
-        icon: nextNav === "settings" ? Settings : ListChecks,
-        keywords: keyword("view", "filter", nextNav, "视图", "导航"),
-        shortcut: digit ? `${mod}${digit}` : undefined,
-        enabled: true,
-        active: nav === nextNav,
-        featured: nextNav !== "settings",
-        run: () => onSetNav(nextNav),
-      });
-    },
-  );
+  (
+    ["all", "downloading", "queue", "attention", "paused", "completed", "failed", "storage", "settings"] as const
+  ).forEach((nextNav) => {
+    const digit = navShortcutDigit(nextNav);
+    push({
+      id: `view.${nextNav}`,
+      label: t(`nav.${nextNav}`),
+      description: t("palette.descriptions.view"),
+      group: "views",
+      icon: nextNav === "settings" ? Settings : ListChecks,
+      keywords: keyword("view", "filter", nextNav, "视图", "导航"),
+      shortcut: digit ? `${mod}${digit}` : undefined,
+      enabled: true,
+      active: nav === nextNav,
+      featured: nextNav !== "settings",
+      run: () => onSetNav(nextNav),
+    });
+  });
 
   // Density lives in the tool panel, which collapses below `md`; the palette is
   // the only route to it on a narrow window.

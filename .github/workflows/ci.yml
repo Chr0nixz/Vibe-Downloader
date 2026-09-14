@@ -38,10 +38,12 @@ jobs:
   rust:
     strategy:
       fail-fast: false
+      # ENG-01: macOS ships objc2 platform code that was previously compiled
+      # only in release builds — never tested, never clippy-checked.
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -66,6 +68,9 @@ jobs:
       - name: Install Windows dependencies
         if: matrix.os == 'windows-latest'
         run: choco install ffmpeg -y --no-progress
+      - name: Install macOS dependencies
+        if: matrix.os == 'macos-latest'
+        run: brew install ffmpeg
       - name: Install cargo-deny
         if: matrix.os == 'ubuntu-latest'
         uses: taiki-e/install-action@v2
@@ -84,4 +89,7 @@ jobs:
       # escaped the gate entirely.
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: pnpm test:rust
-      - run: pnpm check:bindings
+      # ENG-01: bindings regeneration is newline-sensitive; running it on every
+      # OS turned CRLF checkouts into false failures and cost extra specta runs.
+      - if: matrix.os == 'ubuntu-latest'
+        run: pnpm check:bindings

@@ -5,6 +5,7 @@ import {
   Clock3,
   ExternalLink,
   FolderCog,
+  LifeBuoy,
   Link2,
   RotateCcw,
   Settings2,
@@ -210,6 +211,12 @@ export function AttentionCenter({
             ))}
           </SelectContent>
         </Select>
+        {/* §3.3: Attention Center keeps the light entry; complex handling
+            lives in the Recovery Center workspace. */}
+        <Button variant="outline" size="sm" className="h-8" onClick={() => setNav("recovery")}>
+          <LifeBuoy className="h-3.5 w-3.5" aria-hidden />
+          {t("nav.recovery")}
+        </Button>
       </header>
 
       {error ? (

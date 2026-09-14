@@ -27,6 +27,9 @@ The repository contains:
 - First-pass FTP/FTPS, SFTP, BitTorrent, HLS, static DASH, WebDAV, and Metalink engines.
 - Queue scheduling, priority, per-host slots, scheduled windows, completion actions, encrypted credentials, task proxy records, checksum records, and SFTP TOFU storage.
 - A cursor-paged and virtualized task UI with filtering, sorting, batch actions, command palette, details, diagnostics, settings, responsive navigation, themes, and seven locales.
+- A Storage & Cleanup Center backed by a shared artifact contract (`download::artifacts`): per-directory disk overview, classified temp/staging/metalink-part/publish-staging/DHT inventory, aggregate and selected cleanup, per-task abandon-resume cleanup, and an extended startup sweep.
+- A Recovery Center with cause-grouped failed/needs-attention tasks, per-group safe bulk retry, shared credential repair, a per-task recovery playbook with consequence descriptions, and a durable recovery-history log (migration 009). Queued start failures are visible since the ARC-41 predicate fix.
+- A Backup & Migration Center over the versioned `.vibe-backup` container: live and archive content inventories, a never-exported list, pre-restore checks (schema, disk headroom, SEC-02 path report, settings-whitelist preview), an explicit migration path-remap opt-in, safe subset restore (tasks/rules/settings, additive and policy-gated), export diagnostics (cross-volume fallback), and a sidecar post-restore reconfiguration report.
 - Native Messaging and WebSocket browser integration with manual HTTP/HTTPS hand-off in minimal-permission builds.
 - CI, multi-platform Tauri build workflows, release tooling, updater configuration, and a substantial Rust and frontend test suite.
 

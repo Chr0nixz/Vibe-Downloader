@@ -5,6 +5,9 @@
   --surface-base: oklch(0.955 0.006 255);
   --surface-raised: oklch(1 0.002 255);
   --surface-track: oklch(0.88 0.008 255);
+  /* Inactive progress fill: ~4:1 on the light track (border-subtle was ~1.2:1,
+     effectively invisible). Same token name as dark; value tuned per theme. */
+  --progress-fill-inactive: oklch(0.45 0.014 255);
   --surface-overlay: oklch(1 0.002 255 / 0.94);
   --surface-scrim: oklch(0.975 0.004 255 / 0.72);
   --surface-hover: oklch(0.93 0.007 255);
@@ -156,6 +159,10 @@
   --surface-base: oklch(0.18 0.008 255);
   --surface-raised: oklch(0.25 0.011 255);
   --surface-track: oklch(0.1 0.008 255);
+  /* Inactive progress fill: dedicated token because border-subtle on the track
+     sits at ~2.4:1, below the 3:1 WCAG 1.4.11 floor for non-text graphics.
+     oklch 0.45 clears ~3.4:1 on the dark track. */
+  --progress-fill-inactive: oklch(0.45 0.012 255);
   --surface-overlay: oklch(0.255 0.013 255 / 0.82);
   --surface-scrim: oklch(0.145 0.006 255 / 0.72);
   --surface-hover: oklch(0.3 0.012 255);

@@ -8,6 +8,9 @@ use super::task_file_planning::unique_final_path;
 pub use super::task_resume::{
     local_resume_error, resume_decision_message, resume_mismatch_message, segment_resume_error,
 };
+// Shared with the Storage Center's cleanup commands (not part of the IPC
+// surface).
+pub(crate) use super::tasks::actions::{delete_paths_off_runtime, FileDeleteRequest};
 
 use crate::{
     db,
@@ -29,6 +32,11 @@ pub struct ResolveTaskAttentionInput {
     pub action: RecoveryAction,
     pub file_name: Option<String>,
     pub save_dir: Option<String>,
+    /// Which surface performed the resolution (`recovery_center`, `manual`,
+    /// ...). Defaults to `manual` for existing callers; recorded in the
+    /// recovery history for state-changing actions.
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
@@ -624,7 +632,7 @@ pub(crate) async fn queue_task_for_retry_with_event(
     queue_task_for_retry_at(app, state, id, None, Some(event_type), event_message).await
 }
 
-async fn queue_task_for_retry_at(
+pub(crate) async fn queue_task_for_retry_at(
     app: &AppHandle,
     state: &AppState,
     id: &str,
@@ -735,6 +743,20 @@ async fn restart_task_from_beginning(
             tracing::warn!(task_id = %task.id, path = %temp_path, error = %error, "restart: stale temp removal failed, continuing");
         }
     }
+    // Restart-from-beginning discards every resumable artifact, not just the
+    // recorded temp: DASH staging survived here (its recorded temp is the
+    // remux output, not the staging dir) and metalink `.part-N` siblings were
+    // never removed at all (enumeration lives in download::artifacts).
+    let file_temps: Vec<String> = db::list_task_file_records(&state.pool, &task.id)
+        .await?
+        .iter()
+        .filter_map(|file| file.temp_path.clone())
+        .collect();
+    for artifact in crate::download::artifacts::task_auxiliary_artifacts(task, &file_temps).await {
+        if let Err(error) = remove_task_path(&artifact.to_string_lossy()) {
+            tracing::warn!(task_id = %task.id, path = %artifact.to_string_lossy(), error = %error, "restart: stale artifact removal failed, continuing");
+        }
+    }
 
     let engine = state.engine_registry.engine_for_uri(&task.url)?;
     let request_headers =
@@ -798,7 +820,7 @@ async fn restart_task_from_beginning(
     require_task(&state.pool, &task.id).await
 }
 
-fn restart_required_error_code(code: &str) -> bool {
+pub(crate) fn restart_required_error_code(code: &str) -> bool {
     matches!(
         code,
         "remote_changed"

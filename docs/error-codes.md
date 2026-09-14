@@ -18,3 +18,17 @@ This table documents the structured task error fields used by the backend and UI
 `RetryLater` keeps the task queued and sets `retry_after_at` to five minutes in the future. The scheduler skips queued tasks until the timestamp expires, including after app restart.
 
 The current `check_url` and `restart` actions do not attach newly forwarded browser headers to an existing recoverable task. UI copy must not promise “send from browser again” until the `FUN-03` recovery flow in [project-improvement-audit.md](project-improvement-audit.md) is closed.
+
+
+## Storage & Cleanup Center command codes
+
+These codes surface on the Storage & Cleanup Center commands (scan, cleanup,
+abandon-resume). They are command-level errors and carry no task
+`failure_category`. English copy lives in `STABLE_ERROR_MESSAGES_EN`; localized
+copy is generated into `errors.*` by `scripts/sync-stable-error-i18n.mjs`.
+
+| Code | Recoverable | User Message | Source |
+| --- | --- | --- | --- |
+| `storage_scan_failed` | Yes | Scanning download directories for temporary files failed. | `commands/storage.rs` |
+| `storage_cleanup_failed` | Yes | Cleaning up storage artifacts failed. Some items may remain. | `commands/storage.rs` |
+| `storage_task_busy` | Yes | The task is not in a state that allows cleaning its temporary files. | `cleanup_task_temp_files` |

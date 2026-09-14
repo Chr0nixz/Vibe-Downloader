@@ -970,10 +970,11 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
         .map(PathBuf::from)
         .ok_or_else(|| "DASH task is missing a final path.".to_string())?;
 
-    // ARC-02: isolate staging under save_dir/.vibe-staging/{task_id}.
-    let staging_dir = PathBuf::from(&task.save_dir)
-        .join(".vibe-staging")
-        .join(&task.id);
+    // ARC-02: isolate staging under save_dir/.vibe-staging/{task_id}. Derived
+    // via the shared artifact contract so the sweep and Storage Center see
+    // the same path this engine writes.
+    let staging_dir =
+        crate::download::artifacts::task_staging_dir(Path::new(&task.save_dir), &task.id);
     fs::create_dir_all(&staging_dir).await.map_err(|e| {
         AppErrorPayload::disk_write_failed(format!("Could not create DASH staging folder: {e}"))
             .command_error()

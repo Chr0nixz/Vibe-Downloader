@@ -6,13 +6,17 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
-    db,
     download::ProbeOutput,
     models::{ProbedFile, TaskFileRecord, TaskRecord, TaskStatus},
 };
 
-pub const TEMP_DOWNLOAD_SUFFIX: &str = ".vibe-downloading";
-pub const STAGING_DIR_NAME: &str = ".vibe-staging";
+// Path derivation authority lives in `download::artifacts` (shared with the
+// artifact sweep and the Storage Center scan); re-exported so existing
+// callers keep their import paths.
+pub use crate::download::artifacts::{
+    legacy_temp_file_path, task_staging_dir, task_stored_temp_path, task_temp_file_path,
+    STAGING_DIR_NAME, TEMP_DOWNLOAD_SUFFIX,
+};
 
 pub fn normalized_probe_files(probe: &ProbeOutput) -> Vec<ProbedFile> {
     if probe.files.is_empty() {
@@ -25,48 +29,8 @@ pub fn normalized_probe_files(probe: &ProbeOutput) -> Vec<ProbedFile> {
     probe.files.clone()
 }
 
-/// Per-task temp file path. Includes task UUID so concurrent same-name downloads
-/// never share a temporary file.
-pub fn task_temp_file_path(final_path: &Path, task_id: &str) -> PathBuf {
-    PathBuf::from(format!(
-        "{}.{task_id}{TEMP_DOWNLOAD_SUFFIX}",
-        final_path.display()
-    ))
-}
-
-/// Legacy temp path used before ARC-02 (`{final}.vibe-downloading`).
-pub fn legacy_temp_file_path(final_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}{TEMP_DOWNLOAD_SUFFIX}", final_path.display()))
-}
-
-/// Prefer an existing legacy temp file for resume compatibility; otherwise use
-/// the UUID-qualified temp path for new downloads.
-pub fn resolve_temp_file_path(final_path: &Path, task_id: &str) -> PathBuf {
-    let legacy = legacy_temp_file_path(final_path);
-    if legacy.exists() {
-        return legacy;
-    }
-    task_temp_file_path(final_path, task_id)
-}
-
-/// HLS/DASH staging directory isolated per task under the save directory.
-pub fn task_staging_dir(save_dir: &Path, task_id: &str) -> PathBuf {
-    save_dir.join(STAGING_DIR_NAME).join(task_id)
-}
-
-/// Temp path stored on the task row: staging dir for HLS, UUID temp file otherwise.
-pub fn task_stored_temp_path(
-    protocol: &str,
-    save_dir: &Path,
-    final_path: &Path,
-    task_id: &str,
-) -> PathBuf {
-    if protocol == "hls" {
-        task_staging_dir(save_dir, task_id)
-    } else {
-        task_temp_file_path(final_path, task_id)
-    }
-}
+// Legacy temp path used before ARC-02 (`{final}.vibe-downloading`) is kept
+// resumable; the UUID-qualified temp path is used for new downloads.
 
 #[allow(clippy::too_many_arguments)]
 pub fn task_file_records_from_probe(
@@ -283,71 +247,8 @@ fn sanitize_file_name(value: &str) -> String {
     }
 }
 
-/// ARC-38: startup sweep for orphaned staging directories.
-///
-/// Removes `.vibe-staging/{task_id}` under every known save directory when the
-/// owning task no longer exists (delete-path leak) or is Completed (pre-fix
-/// leftovers after the final file was published). Resumable tasks keep their
-/// staging — retry and resume semantics depend on it, exactly like HTTP temp
-/// files, so only unresumable state is garbage-collected here.
-pub async fn sweep_orphan_staging_dirs(pool: &sqlx::SqlitePool) -> Result<usize, String> {
-    let tasks = db::list_staging_task_refs(pool).await?;
-    // Group references by save dir so each `.vibe-staging` root is listed once.
-    let mut refs_by_dir: std::collections::HashMap<String, Vec<&db::StagingTaskRef>> =
-        std::collections::HashMap::new();
-    for task in &tasks {
-        refs_by_dir
-            .entry(task.save_dir.clone())
-            .or_default()
-            .push(task);
-    }
-
-    let completed_status = TaskStatus::Completed.as_str();
-    let mut removed = 0_usize;
-    for (save_dir, refs) in refs_by_dir {
-        let staging_root = Path::new(&save_dir).join(STAGING_DIR_NAME);
-        let mut entries = match tokio::fs::read_dir(&staging_root).await {
-            Ok(entries) => entries,
-            // No staging root under this save dir — nothing to sweep.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!(
-                    "Could not read {}: {error}",
-                    staging_root.display()
-                ))
-            }
-        };
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| format!("Could not list {}: {e}", staging_root.display()))?
-        {
-            if !entry
-                .file_type()
-                .await
-                .map_err(|e| format!("Could not inspect {}: {e}", entry.path().display()))?
-                .is_dir()
-            {
-                continue;
-            }
-            let task_id = entry.file_name().to_string_lossy().to_string();
-            // Orphan (task row gone): the directory can never resume. Completed
-            // tasks published their final file. Resumable states keep staging.
-            let removable = match refs.iter().find(|task| task.id == task_id) {
-                None => true,
-                Some(task) => task.status == completed_status,
-            };
-            if removable {
-                tokio::fs::remove_dir_all(entry.path())
-                    .await
-                    .map_err(|e| format!("Could not remove {}: {e}", entry.path().display()))?;
-                removed += 1;
-            }
-        }
-    }
-    Ok(removed)
-}
-
+// The ARC-38 startup sweep moved to `download::artifacts::sweep_orphan_artifacts`,
+// which generalizes the staging-dir rule to every derivable artifact kind.
 #[cfg(test)]
 mod tests {
     use super::*;

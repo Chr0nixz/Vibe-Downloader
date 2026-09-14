@@ -1,4 +1,6 @@
 mod backup;
+mod backup_contents;
+mod backup_subset;
 mod browser_messages;
 mod classification_rules;
 mod connection;
@@ -7,12 +9,15 @@ mod events;
 mod hash;
 mod hls;
 mod metalink;
+mod recovery;
 mod request_diagnostics;
 mod request_headers;
+mod restore_report;
 mod segment_planner;
 mod segments;
 mod settings;
 mod sftp;
+mod storage;
 mod task_checksums;
 mod task_credentials;
 mod task_files;
@@ -21,11 +26,15 @@ mod task_records;
 mod task_state;
 mod torrent;
 pub use self::backup::{
-    apply_pending_restore_if_any, current_schema_version, enforce_backup_path_policy,
-    materialize_and_verify_backup_db, pack_backup_file, parse_backup_bytes, pending_restore_path,
-    read_backup_file, snapshot_database_to_path, write_backup_file, BackupManifest,
-    BACKUP_FORMAT_VERSION, CREDENTIALS_POLICY_MACHINE_BOUND,
+    apply_pending_restore_if_any, backup_settings_preview, current_schema_version,
+    enforce_backup_path_policy, materialize_and_verify_backup_db, pack_backup_file,
+    parse_backup_bytes, pending_restore_path, read_backup_file, remap_backup_paths,
+    scan_backup_path_policy, snapshot_database_to_path, verify_backup_integrity, write_backup_file,
+    BackupManifest, RestoreScrubObservation, BACKUP_FORMAT_VERSION,
+    CREDENTIALS_POLICY_MACHINE_BOUND,
 };
+pub use self::backup_contents::{count_contents, count_scalar, distinct_save_dirs};
+pub use self::backup_subset::restore_subset;
 pub use self::browser_messages::{
     browser_message_exists, insert_browser_message, latest_browser_error, prune_browser_messages,
     update_browser_message_status,
@@ -68,6 +77,7 @@ pub use self::metalink::{
     upsert_metalink_file_plan, upsert_metalink_task, MetalinkFilePlan, MetalinkResourceInsert,
     MetalinkResourceRecord, MetalinkTaskUpsert,
 };
+pub use self::recovery::{insert_recovery_record, list_recovery_history};
 pub use self::request_diagnostics::{
     insert_request_diagnostic, list_request_diagnostics_page, prune_request_diagnostics,
     REQUEST_DIAGNOSTICS_MAX_AGE_DAYS, REQUEST_DIAGNOSTICS_MAX_PER_TASK,
@@ -76,6 +86,9 @@ pub use self::request_headers::{
     clear_all_task_request_headers, clear_expired_task_request_headers,
     delete_task_request_headers, resolve_task_request_headers, upsert_task_request_headers,
     TASK_REQUEST_HEADERS_TTL_HOURS,
+};
+pub use self::restore_report::{
+    dismiss_restore_report, read_restore_report, write_staging_meta, RestoreStagingMeta,
 };
 pub use self::segment_planner::{
     planned_segment_count, planned_segment_count_with_plan, planned_segments_for_task,
@@ -101,13 +114,16 @@ pub use self::settings::{
 pub use self::sftp::{
     forget_sftp_known_host, list_sftp_known_hosts, verify_or_record_sftp_host_key, SftpKnownHost,
 };
+pub use self::storage::{
+    completed_avg_task_size_by_save_dir, insert_sweep_record, latest_sweep_record,
+};
 pub use self::task_checksums::{
     insert_task_checksum_record, list_task_checksum_records, list_task_checksum_records_for_file,
     list_task_checksum_records_for_tasks, update_task_checksum_record,
 };
 pub use self::task_credentials::{
     legacy_credentials_from_url, migrate_legacy_ftp_credentials, resolve_task_credentials,
-    upsert_task_credentials, TaskCredentials,
+    upsert_task_credentials, LegacyCredentials, TaskCredentials,
 };
 pub use self::task_files::{
     bump_task_files_version, bump_task_files_version_in_tx, insert_task_file_record,
@@ -122,22 +138,23 @@ pub use self::task_proxy::{
 pub use self::task_records::{
     find_duplicate_task_record, get_task_record, get_task_record_in_tx, insert_task_record,
     insert_task_record_in_tx, insert_task_with_files, insert_task_with_files_in_tx,
-    list_browser_realtime_task_records, list_paused_schedulable_tasks, list_queued_task_records,
-    list_reserved_final_paths, list_staging_task_refs, list_task_ids_by_statuses,
-    list_task_records, list_task_records_by_ids, list_task_records_cursor, list_task_records_page,
-    next_queue_position, next_retry_after_at, reorder_queued_tasks, task_filter_options,
-    task_stats_snapshot, update_task_transfer_options, StagingTaskRef, TaskFilterOptions,
-    TaskListPage, TaskListQuery, TaskTransferOptionsUpdate,
+    list_artifact_task_refs, list_browser_realtime_task_records, list_paused_schedulable_tasks,
+    list_queued_task_records, list_reserved_final_paths, list_staging_task_refs,
+    list_task_ids_by_statuses, list_task_records, list_task_records_by_ids,
+    list_task_records_cursor, list_task_records_page, next_queue_position, next_retry_after_at,
+    reorder_queued_tasks, task_filter_options, task_stats_snapshot, update_task_transfer_options,
+    ArtifactTaskRef, StagingTaskRef, TaskFilterOptions, TaskListPage, TaskListQuery,
+    TaskTransferOptionsUpdate,
 };
 pub use self::task_state::{
     checkpoint_task_progress, clear_tasks, complete_segment, complete_task, complete_task_segment,
     complete_unknown_size_task, delete_segments_for_task, delete_task_files_for_task,
     delete_task_record, delete_task_records_batch, mark_task_failed_if_active,
-    mark_task_failed_if_queued,
-    reset_interrupted_tasks, reset_task_download_state, update_task_and_segment_progress,
-    update_task_final_path, update_task_health_summary, update_task_progress,
-    update_task_retry_after, update_task_retry_after_in_tx, update_task_runtime_progress,
-    update_task_save_target, update_task_status, update_task_status_in_tx, TaskProgressCheckpoint,
+    mark_task_failed_if_queued, reset_interrupted_tasks, reset_task_download_state,
+    update_task_and_segment_progress, update_task_final_path, update_task_health_summary,
+    update_task_progress, update_task_retry_after, update_task_retry_after_in_tx,
+    update_task_runtime_progress, update_task_save_target, update_task_status,
+    update_task_status_in_tx, TaskProgressCheckpoint,
 };
 pub use self::torrent::{
     get_torrent_runtime_snapshot, torrent_seed_ratio_limit, torrent_seed_time_limit_seconds,

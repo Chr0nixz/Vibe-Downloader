@@ -1,8 +1,15 @@
+pub mod backup;
 pub mod browser;
 pub mod classification;
 pub mod environment;
+pub mod recovery;
+pub mod storage;
 pub mod task;
 
+pub use backup::{
+    BackupContents, BackupDiskCheck, BackupPathPolicySummary, BackupSettingsPreview,
+    BackupSubsetRestoreResult, BackupSubsetSelection, RestoreReport,
+};
 pub use browser::{
     BrowserCaptureSettings, BrowserCaptureSettingsInput, BrowserExtensionExportResult,
     BrowserExtensionPackage, BrowserForwardHeadersMode, BrowserForwardedHeader,
@@ -18,6 +25,11 @@ pub use environment::{
     EnvironmentFixAction, EnvironmentFixInput, EnvironmentFixKind, EnvironmentFixResult,
     EnvironmentHealthItem, EnvironmentHealthReport, EnvironmentHealthStatus, EnvironmentText,
     EnvironmentTextCode, EnvironmentTextParams,
+};
+pub use recovery::{BulkRecoveryResult, RecoveryHistoryRecord, UpdateTaskCredentialsInput};
+pub use storage::{
+    ArtifactKind, ArtifactReason, CleanupItemOutcome, CleanupMode, CleanupOutcome, SaveDirOverview,
+    StorageArtifactItem, StorageCleanupResult, StorageScanResult, StorageSweepRecord,
 };
 pub use task::{
     AppAccentColor, AppErrorPayload, AppSettings, BatchImportItem, BatchImportResult,

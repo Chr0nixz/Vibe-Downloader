@@ -213,7 +213,14 @@ export function AppShell() {
   const addToast = useToastStore((s) => s.addToast);
   const updateToast = useToastStore((s) => s.updateToast);
 
-  const taskSurfaceActive = nav !== "settings" && nav !== "about" && nav !== "attention" && nav !== "queue";
+  const taskSurfaceActive =
+    nav !== "settings" &&
+    nav !== "about" &&
+    nav !== "attention" &&
+    nav !== "queue" &&
+    nav !== "storage" &&
+    nav !== "recovery" &&
+    nav !== "backup";
 
   const refreshTasks = useCallback(
     async (selectId?: string) => {
@@ -1403,12 +1410,15 @@ export function AppShell() {
         onNewDownload={openNewDownload}
         inputRef={searchInputRef}
       />
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
+      {/* Sidebar sits left at every width — narrow windows are snapped desktop
+          surfaces with pointer + keyboard, so they get the compact rail instead
+          of a phone-style bottom bar. */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-row">
         <Sidebar onNewDownload={openNewDownload} />
         <main
           id="main-content"
           tabIndex={-1}
-          className="order-1 flex min-h-0 min-w-0 flex-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary md:order-none"
+          className="flex min-h-0 min-w-0 flex-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary"
         >
           <TaskList
             onToggleTransfer={toggleTransfer}

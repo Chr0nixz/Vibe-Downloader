@@ -33,6 +33,52 @@ pub fn app_log_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Free space (bytes) available to unprivileged users on the volume hosting
+/// `path`. `None` means "query unavailable on this platform or it failed" —
+/// callers must degrade to a skip, never to a hard failure.
+pub fn free_disk_bytes(path: &Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut free: u64 = 0;
+        let mut total: u64 = 0;
+        let mut remaining: u64 = 0;
+        let result = unsafe {
+            GetDiskFreeSpaceExW(
+                PCWSTR(wide.as_ptr()),
+                Some(&mut free),
+                Some(&mut total),
+                Some(&mut remaining),
+            )
+        };
+        result.ok().map(|_| free)
+    }
+
+    #[cfg(not(windows))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `c_path` outlives the call and `stat` is a valid, fully
+        // initialized statvfs buffer owned by this frame.
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+        if rc != 0 {
+            return None;
+        }
+        Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+    }
+}
+
 pub fn db_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = app
         .path()

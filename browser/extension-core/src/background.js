@@ -135,7 +135,14 @@ api.contextMenus.onClicked.addListener((info, tab) => {
   });
 });
 
-api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+// SEC-04: only accept messages sent from within this extension. The check
+// also covers our own content scripts (same extension id); anything else —
+// another extension, an embedded page frame — must not be able to trigger
+// downloads through this listener.
+api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (sender?.id !== api.runtime.id) {
+    return undefined;
+  }
   if (message?.type === "vibe-download-current-tab") {
     sendDownloadUrl({
       url: message.url,
@@ -287,6 +294,12 @@ async function sendDownloadUrl({
       return response;
     }
   } catch (error) {
+    // SEC-04: bridge rejections (rate limit) must surface, not reroute —
+    // falling back to native messaging would bypass the bridge quota.
+    if (error?.bridgeRejected) {
+      recordRecentHandoff(payload, "rejected", String(error?.message ?? error));
+      throw error;
+    }
     log.warn("realtime create failed, falling back to native messaging", error);
   }
 
@@ -365,10 +378,17 @@ function handleWsMessage(raw) {
     return;
   }
   if (message.type === "error") {
+    const reason = message.payload?.message ?? "Realtime request failed.";
+    // SEC-04: the bridge's structured rejections (rate limit) are quota
+    // decisions, not transport failures — the caller must not retry the same
+    // handoff through native messaging, which would bypass the limit.
+    const rejected = reason.startsWith("bridge_rate_limited");
     for (const [id, pending] of pendingWs) {
       pendingWs.delete(id);
       clearTimeout(pending.timeoutId);
-      pending.reject(new Error(message.payload?.message ?? "Realtime request failed."));
+      const error = new Error(reason);
+      if (rejected) error.bridgeRejected = true;
+      pending.reject(error);
       break;
     }
     return;

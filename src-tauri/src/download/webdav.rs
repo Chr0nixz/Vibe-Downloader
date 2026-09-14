@@ -107,8 +107,8 @@ impl WebDavEngine {
         let credentials = db::resolve_task_credentials(&context.pool, &context.task.id)
             .await?
             .map(|credentials| WebDavCredentials {
-                username: credentials.username,
-                password: credentials.password,
+                username: credentials.username.clone(),
+                password: credentials.password.clone(),
             })
             .or_else(|| url_target.credentials.clone())
             .or_else(|| final_target.credentials.clone());
@@ -275,8 +275,8 @@ async fn resolve_probe_credentials(
     Ok(db::resolve_task_credentials(pool, task_id)
         .await?
         .map(|credentials| WebDavCredentials {
-            username: credentials.username,
-            password: credentials.password,
+            username: credentials.username.clone(),
+            password: credentials.password.clone(),
         }))
 }
 

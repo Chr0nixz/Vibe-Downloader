@@ -1,15 +1,44 @@
 import { describe, expect, it } from "vitest";
 
+import { SUPPORTED_LOCALES } from "@/i18n";
+import en from "@/i18n/locales/en";
+import es from "@/i18n/locales/es";
+import ja from "@/i18n/locales/ja";
+import ko from "@/i18n/locales/ko";
+import ru from "@/i18n/locales/ru";
+import zhCN from "@/i18n/locales/zh-CN";
+import zhTW from "@/i18n/locales/zh-TW";
 import {
+  ERROR_CAUSE_I18N_MAP,
   errorCodeToI18nKey,
   errorMessage,
   isRecoveryAction,
+  localizedErrorCause,
   localizedErrorMessage,
   localizedMessage,
   parseAppError,
   recoveryActionsForError,
 } from "./errors";
 import { ERROR_CODE_I18N_MAP, STABLE_ERROR_CODES, STABLE_ERROR_MESSAGES_EN } from "./stable-error-codes";
+
+const LOCALE_BUNDLES: Record<string, unknown> = {
+  en,
+  "zh-CN": zhCN,
+  "zh-TW": zhTW,
+  ja,
+  ko,
+  ru,
+  es,
+};
+
+function resolveKey(bundle: unknown, key: string): unknown {
+  return key.split(".").reduce<unknown>((node, part) => {
+    if (node && typeof node === "object" && part in (node as Record<string, unknown>)) {
+      return (node as Record<string, unknown>)[part];
+    }
+    return undefined;
+  }, bundle);
+}
 
 describe("app error helpers", () => {
   it("parses structured app errors and filters supported actions", () => {
@@ -101,5 +130,42 @@ describe("app error helpers", () => {
       actions: [],
     });
     expect(localizedErrorMessage(encoded, t)).toBe("localized:errors.unknownError");
+  });
+});
+
+describe("error cause copy", () => {
+  it("maps every cause code to a stable code and to existing copy in every locale", () => {
+    // The code→key table is invisible to check:i18n's literal scan, so this
+    // walk is the guard that keeps every locale's cause copy present.
+    const stableCodes: readonly string[] = STABLE_ERROR_CODES;
+    for (const locale of SUPPORTED_LOCALES) {
+      const bundle = LOCALE_BUNDLES[locale];
+      expect(bundle, `locale bundle for ${locale}`).toBeTruthy();
+      for (const [code, key] of Object.entries(ERROR_CAUSE_I18N_MAP)) {
+        expect(stableCodes, `${code} must be a stable code`).toContain(code);
+        const value = resolveKey(bundle, key);
+        expect(typeof value === "string" && value.length > 0, `${key} missing in ${locale}`).toBe(true);
+      }
+    }
+  });
+
+  it("resolves causes for structured errors and stays silent otherwise", () => {
+    const t = ((key: string) => `localized:${key}`) as never;
+    const structured = JSON.stringify({
+      code: "resume_unavailable",
+      message: "Resume unavailable",
+      recoverable: true,
+      actions: ["restart"],
+    });
+    expect(localizedErrorCause(structured, t)).toBe("localized:errors.cause.resumeUnavailable");
+
+    const unmapped = JSON.stringify({
+      code: "dns_failure",
+      message: "DNS lookup failed",
+      recoverable: true,
+      actions: [],
+    });
+    expect(localizedErrorCause(unmapped, t)).toBeUndefined();
+    expect(localizedErrorCause("plain string failure", t)).toBeUndefined();
   });
 });

@@ -1,4 +1,4 @@
-import { Info, Keyboard, RefreshCw, X } from "lucide-react";
+import { AlertTriangle, ArrowDownToLine, Info, Keyboard, RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -108,42 +108,89 @@ export function StatusBar({
         </span>
         <span className="flex min-w-0 items-center justify-end gap-2">
           {updateVersion ? (
-            <span className="hidden items-center gap-2 sm:flex">
-              <span className="truncate text-accent-primary">
-                {t("statusBar.updateAvailable", { version: updateVersion })}
+            <>
+              {/* Full banner from `sm` up; below `sm` the text would overflow the
+                  480px bar, so the narrow tier gets icon-only controls instead of
+                  losing update visibility entirely. */}
+              <span className="hidden items-center gap-2 sm:flex">
+                <span className="truncate text-accent-primary">
+                  {t("statusBar.updateAvailable", { version: updateVersion })}
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 shrink-0 px-2 text-xs"
+                  disabled={installing}
+                  onClick={() => void installUpdate()}
+                >
+                  {installing ? t("statusBar.updating") : t("statusBar.installUpdate")}
+                </Button>
+                {!installing ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 shrink-0 text-text-muted hover:text-text-primary"
+                        aria-label={t("settings.dismissUpdate")}
+                        onClick={dismissUpdate}
+                      >
+                        <X className="h-3.5 w-3.5" aria-hidden />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t("settings.dismissUpdate")}</TooltipContent>
+                  </Tooltip>
+                ) : null}
               </span>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-8 shrink-0 px-2 text-xs"
-                disabled={installing}
-                onClick={() => void installUpdate()}
-              >
-                {installing ? t("statusBar.updating") : t("statusBar.installUpdate")}
-              </Button>
-              {!installing ? (
+              <span className="flex items-center gap-1 sm:hidden">
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="h-8 w-8 shrink-0 text-text-muted hover:text-text-primary"
-                      aria-label={t("settings.dismissUpdate")}
-                      onClick={dismissUpdate}
+                      className="h-8 w-8 shrink-0 text-accent-primary hover:text-accent-primary"
+                      aria-label={t("statusBar.updateAvailable", { version: updateVersion })}
+                      disabled={installing}
+                      onClick={() => void installUpdate()}
                     >
-                      <X className="h-3.5 w-3.5" />
+                      <ArrowDownToLine className="h-3.5 w-3.5" aria-hidden />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>{t("settings.dismissUpdate")}</TooltipContent>
+                  <TooltipContent>{t("statusBar.updateAvailable", { version: updateVersion })}</TooltipContent>
                 </Tooltip>
-              ) : null}
-            </span>
+                {!installing ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 shrink-0 text-text-muted hover:text-text-primary"
+                        aria-label={t("settings.dismissUpdate")}
+                        onClick={dismissUpdate}
+                      >
+                        <X className="h-3.5 w-3.5" aria-hidden />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t("settings.dismissUpdate")}</TooltipContent>
+                  </Tooltip>
+                ) : null}
+              </span>
+            </>
           ) : error ? (
-            <span className="hidden truncate text-status-danger sm:inline" title={error}>
-              {t("statusBar.updateFailed")}
-            </span>
+            <>
+              <span className="hidden truncate text-status-danger sm:inline" title={error}>
+                {t("statusBar.updateFailed")}
+              </span>
+              {/* Narrow-tier text would overflow; a labelled icon keeps the
+                  failure state announced instead of silently hidden. */}
+              <span role="img" aria-label={t("statusBar.updateFailed")} title={error} className="shrink-0 sm:hidden">
+                <AlertTriangle className="h-3.5 w-3.5 text-status-danger" aria-hidden />
+              </span>
+            </>
           ) : null}
           {/* Rendered unconditionally: an update banner used to occupy this slot
               exclusively, which hid the only narrow-tier path to the speed cap. */}

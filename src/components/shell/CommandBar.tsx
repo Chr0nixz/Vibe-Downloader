@@ -72,7 +72,10 @@ export function CommandBar({ platform, onOpenPalette, onNewDownload, inputRef }:
             onClick={onNewDownload}
           >
             <Plus className="h-4 w-4" />
-            <span className="hidden md:inline">{t("commandBar.newDownload")}</span>
+            {/* The label stays on at every width: below `md` the shell is a
+                snapped desktop window with a compact icon rail, so the primary
+                action is never reduced to a bare "+" glyph. */}
+            <span className="inline">{t("commandBar.newDownload")}</span>
           </Button>
         </TooltipTrigger>
         <TooltipContent className={firstRunTip ? "max-w-56 text-balance" : undefined}>

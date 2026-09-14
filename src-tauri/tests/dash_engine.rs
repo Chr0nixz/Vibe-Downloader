@@ -1110,3 +1110,225 @@ async fn fun25_signed_url_change_preserves_completed_segments() {
     assert_eq!(segment.downloaded_bytes, 0);
     pool.close().await;
 }
+
+const PADDED_TEMPLATE_MPD: &str = r#"
+<MPD type="static" mediaPresentationDuration="PT4S" xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4" contentType="video">
+      <Representation id="v0" bandwidth="500000">
+        <SegmentTemplate media="seg-$Number%05d$.m4s" initialization="init.m4s" startNumber="1" duration="2" timescale="1" />
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>
+"#;
+
+const NUMBER_IN_INIT_MPD: &str = r#"
+<MPD type="static" mediaPresentationDuration="PT4S" xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4" contentType="video">
+      <Representation id="v0" bandwidth="500000">
+        <SegmentTemplate media="seg-$Number$.m4s" initialization="init-$Number$.m4s" startNumber="1" duration="2" timescale="1" />
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>
+"#;
+
+const EXTREME_RANGE_MPD: &str = r#"
+<MPD type="static" mediaPresentationDuration="PT10S" xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4" contentType="video">
+      <Representation id="v0" bandwidth="500000">
+        <BaseURL>video.mp4</BaseURL>
+        <SegmentBase>
+          <Initialization range="0-9223372036854775807" />
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>
+"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun24_padded_number_template_downloads_padded_urls() {
+    // FUN-24: `$Number%05d$` passed validation but was never substituted —
+    // every segment fetch 404ed. The download must request zero-padded URLs.
+    // Remux of the dummy bytes may fail (or ffmpeg may be absent); the
+    // contract under test is the requested URL set, recorded during the
+    // segment phase.
+    let requested: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let server = TestServer::start({
+        let requested = requested.clone();
+        move |mut stream| {
+            let mut buffer = [0_u8; 4096];
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            let path = request
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .to_string();
+            requested
+                .lock()
+                .expect("requested paths")
+                .push(path.clone());
+            let (status, content_type, body): (u16, &str, Vec<u8>) = match path.as_str() {
+                "/padded.mpd" => (
+                    200,
+                    "application/dash+xml",
+                    PADDED_TEMPLATE_MPD.as_bytes().to_vec(),
+                ),
+                "/init.m4s" | "/seg-00001.m4s" | "/seg-00002.m4s" => {
+                    (200, "video/mp4", vec![0_u8; 64])
+                }
+                _ => (404, "text/plain", b"not found".to_vec()),
+            };
+            let response = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+
+    let pool = common::test_pool("dash-fun24-padded").await;
+    let paths = common::TestPaths::new("dash-fun24-padded");
+    let task = common::download_task(
+        "dash-fun24-padded",
+        format!("{}/padded.mpd", server.base_url),
+        "dash",
+        "padded.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert DASH task");
+    db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("insert DASH runtime unit");
+
+    let _ = new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await;
+
+    // Clone out of the guard so it drops before pool.close().await (the
+    // guard must not be held across an await point).
+    let requested = requested.lock().expect("requested paths").clone();
+    assert!(
+        requested
+            .iter()
+            .any(|path| path.ends_with("/seg-00001.m4s")),
+        "padded segment URL must be requested, got: {requested:?}"
+    );
+    assert!(
+        requested
+            .iter()
+            .any(|path| path.ends_with("/seg-00002.m4s")),
+        "second padded segment must be requested, got: {requested:?}"
+    );
+    assert!(
+        !requested.iter().any(|path| path.contains('$')),
+        "no raw template placeholder may reach the wire, got: {requested:?}"
+    );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun24_number_in_initialization_template_is_rejected() {
+    // FUN-24: DASH reserves $Number for media templates and this engine never
+    // expands it in Initialization. The old base-prefix check let it pass
+    // validation and 404 the init fetch; it must now be rejected at probe.
+    let server = TestServer::start(|mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let body = NUMBER_IN_INIT_MPD.as_bytes();
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/dash+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(body);
+    });
+    let error = new_engine()
+        .probe(new_probe_request(format!(
+            "{}/number-init.mpd",
+            server.base_url
+        )))
+        .await
+        .expect_err("$Number in initialization must fail probe");
+    let payload: AppErrorPayload =
+        serde_json::from_str(&error.to_string()).expect("structured dash_template_unsupported");
+    assert_eq!(payload.code, "dash_template_unsupported");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc48_extreme_initialization_range_does_not_overflow() {
+    // ARC-48: `end - start + 1` overflowed (debug panic) on an extreme
+    // Initialization @range. The saturating parser must keep the probe path
+    // panic-free; the outcome (ok or structured error) is secondary.
+    let server = TestServer::start(|mut stream| {
+        let mut buffer = [0_u8; 4096];
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/");
+        let (status, content_type, body): (u16, &str, Vec<u8>) = match path {
+            "/extreme.mpd" => (
+                200,
+                "application/dash+xml",
+                EXTREME_RANGE_MPD.as_bytes().to_vec(),
+            ),
+            "/video.mp4" => (200, "video/mp4", vec![0_u8; 64]),
+            _ => (404, "text/plain", b"not found".to_vec()),
+        };
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(&body);
+    });
+    let probe = new_engine()
+        .probe(new_probe_request(format!(
+            "{}/extreme.mpd",
+            server.base_url
+        )))
+        .await;
+    if let Ok(output) = probe {
+        assert!(
+            output.total_size >= 0,
+            "saturated range arithmetic must not wrap total_size negative"
+        );
+    }
+}

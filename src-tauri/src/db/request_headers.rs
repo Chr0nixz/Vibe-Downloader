@@ -78,6 +78,8 @@ pub async fn resolve_task_request_headers(
 
     let ciphertext: Option<String> = row.get("headers_ciphertext");
     let nonce: Option<String> = row.get("nonce");
+    // SEC-05: the decrypted header JSON (including Cookie values) is wiped
+    // when this scope ends; the legacy plaintext column gets the same wrap.
     let headers_json = match (ciphertext, nonce) {
         (Some(ciphertext), Some(nonce)) if !ciphertext.is_empty() && !nonce.is_empty() => {
             crate::secure_headers::decrypt_headers(&ciphertext, &nonce).map_err(|error| {
@@ -95,7 +97,7 @@ pub async fn resolve_task_request_headers(
             if let Ok(headers) = serde_json::from_str::<Vec<(String, String)>>(&raw) {
                 let _ = upsert_task_request_headers(pool, task_id, &headers, None).await;
             }
-            raw
+            zeroize::Zeroizing::new(raw)
         }
     };
 

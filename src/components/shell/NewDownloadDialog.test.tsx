@@ -259,3 +259,79 @@ describe("NewDownloadDialog probe flow", () => {
     expect(screen.getByRole("button", { name: "newDownload.createBatch" })).toBeInTheDocument();
   });
 });
+
+describe("NewDownloadDialog HLS track picker", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    mocks.phaseHandler = undefined;
+    useSettingsStore.setState({ settings: null, loading: false, error: null });
+  });
+
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  it("caps the rendered track rows and reveals the rest on demand", async () => {
+    // Long-tail manifests carry hundreds of renditions; the picker must not
+    // render an unbounded checkbox wall. Collapsed shows the first 6 rows.
+    const tracks = Array.from({ length: 8 }, (_, i) => ({
+      kind: "AUDIO",
+      groupId: "audio",
+      name: `Track ${i + 1}`,
+      language: null,
+      default: false,
+      autoSelect: false,
+      uri: `https://example.com/audio-${i + 1}.m3u8`,
+    }));
+    const probe: ProbeTaskPayload = {
+      ...makeProbe("https://example.com/live.m3u8", "live.m3u8"),
+      protocol: "hls",
+      hlsAudioTracks: tracks,
+      hlsSubtitleTracks: [],
+    };
+    mocks.probeTask.mockResolvedValue(probe);
+    renderDialog();
+
+    await startAutomaticProbe("https://example.com/live.m3u8");
+
+    expect(screen.getAllByRole("checkbox")).toHaveLength(6);
+    const toggle = screen.getByRole("button", { name: "newDownload.hlsShowMoreTracks" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(toggle);
+
+    expect(screen.getAllByRole("checkbox")).toHaveLength(8);
+    expect(screen.getByRole("button", { name: "newDownload.hlsFewerTracks" })).toBeInTheDocument();
+  });
+
+  it("keeps a selected track beyond the cap visible while collapsed", async () => {
+    // An auto-selected default must never hide its own checked state, so the
+    // collapsed picker keeps selected rows in view next to the first 6.
+    const tracks = Array.from({ length: 8 }, (_, i) => ({
+      kind: "AUDIO",
+      groupId: "audio",
+      name: `Track ${i + 1}`,
+      language: null,
+      default: i === 7,
+      autoSelect: i === 7,
+      uri: `https://example.com/audio-${i + 1}.m3u8`,
+    }));
+    const probe: ProbeTaskPayload = {
+      ...makeProbe("https://example.com/live.m3u8", "live.m3u8"),
+      protocol: "hls",
+      hlsAudioTracks: tracks,
+      hlsSubtitleTracks: [],
+    };
+    mocks.probeTask.mockResolvedValue(probe);
+    renderDialog();
+
+    await startAutomaticProbe("https://example.com/live.m3u8");
+
+    const boxes = screen.getAllByRole("checkbox");
+    expect(boxes).toHaveLength(7);
+    expect(boxes.some((box) => box.getAttribute("aria-label") === "Track 8")).toBe(true);
+    expect(screen.getByRole("button", { name: "newDownload.hlsShowMoreTracks" })).toBeInTheDocument();
+  });
+});

@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::models::{task::now_iso, AppErrorPayload};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// SEC-05: plaintext credentials are wiped from memory when this value is
+/// dropped (including every clone), so process dumps and pagefiles stop
+/// retaining SFTP key passphrases and passwords.
+#[derive(Debug, Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct TaskCredentials {
     pub username: String,
     pub password: String,
@@ -11,7 +15,7 @@ pub struct TaskCredentials {
     pub private_key_passphrase: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct TaskCredentialsSecret {
     username: String,
     password: String,
@@ -31,13 +35,17 @@ pub async fn upsert_task_credentials(
     private_key_passphrase: Option<&str>,
 ) -> Result<(), String> {
     let now = now_iso();
-    let secret = serde_json::to_string(&TaskCredentialsSecret {
-        username: username.to_string(),
-        password: password.to_string(),
-        private_key_data: private_key_data.map(|s| s.to_string()),
-        private_key_passphrase: private_key_passphrase.map(|s| s.to_string()),
-    })
-    .map_err(|e| format!("Could not serialize task credentials: {e}"))?;
+    // SEC-05: the serialized plaintext exists only to hand to the encryptor;
+    // wrap it so the buffer is wiped when this scope ends.
+    let secret = Zeroizing::new(
+        serde_json::to_string(&TaskCredentialsSecret {
+            username: username.to_string(),
+            password: password.to_string(),
+            private_key_data: private_key_data.map(|s| s.to_string()),
+            private_key_passphrase: private_key_passphrase.map(|s| s.to_string()),
+        })
+        .map_err(|e| format!("Could not serialize task credentials: {e}"))?,
+    );
     let (credentials_ciphertext, nonce) =
         crate::secure_headers::encrypt_secret(&secret, "task credentials", task_id.as_bytes())
             .map_err(|error| task_credentials_encrypt_error(&error))?;
@@ -95,11 +103,13 @@ pub async fn resolve_task_credentials(
     .map_err(|error| task_credentials_decrypt_error(&error))?;
     let credentials: TaskCredentialsSecret = serde_json::from_str(&secret)
         .map_err(|_| task_credentials_invalid_error("Stored task credentials are invalid."))?;
+    // The fields are cloned, not moved: TaskCredentialsSecret zeroizes on
+    // drop, and a type with a Drop impl cannot be partially moved out of.
     Ok(Some(TaskCredentials {
-        username: credentials.username,
-        password: credentials.password,
-        private_key_data: credentials.private_key_data,
-        private_key_passphrase: credentials.private_key_passphrase,
+        username: credentials.username.clone(),
+        password: credentials.password.clone(),
+        private_key_data: credentials.private_key_data.clone(),
+        private_key_passphrase: credentials.private_key_passphrase.clone(),
     }))
 }
 
@@ -147,13 +157,15 @@ pub async fn migrate_legacy_ftp_credentials(pool: &SqlitePool) -> Result<(), Str
             .or(final_url.as_deref());
 
         // Encrypt credentials (non-SQL side effect; keyring write).
-        let secret = serde_json::to_string(&TaskCredentialsSecret {
-            username: legacy.username.clone(),
-            password: legacy.password.clone(),
-            private_key_data: None,
-            private_key_passphrase: None,
-        })
-        .map_err(|e| format!("Could not serialize task credentials: {e}"))?;
+        let secret = Zeroizing::new(
+            serde_json::to_string(&TaskCredentialsSecret {
+                username: legacy.username.clone(),
+                password: legacy.password.clone(),
+                private_key_data: None,
+                private_key_passphrase: None,
+            })
+            .map_err(|e| format!("Could not serialize task credentials: {e}"))?,
+        );
 
         let (credentials_ciphertext, nonce) = match crate::secure_headers::encrypt_secret(
             &secret,
@@ -251,10 +263,21 @@ pub async fn migrate_legacy_ftp_credentials(pool: &SqlitePool) -> Result<(), Str
     Ok(())
 }
 
+/// SEC-05: URL-embedded credentials live in this struct across many await
+/// points during task creation, so the plaintext password is wiped on drop.
+/// Because the Drop impl forbids partial moves, consumers must destructure
+/// instead of moving single fields out.
 pub struct LegacyCredentials {
     pub username: String,
     pub password: String,
     pub sanitized_url: String,
+}
+
+impl Drop for LegacyCredentials {
+    fn drop(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+    }
 }
 
 fn task_credentials_encrypt_error(error: &str) -> String {
@@ -521,6 +544,130 @@ mod tests {
         assert!(invalid.contains("task_credentials_invalid"));
         assert!(!encrypt.contains("task_credentials_decrypt_failed"));
         assert!(!decrypt.contains("task_credentials_encrypt_failed"));
+    }
+
+    #[test]
+    fn task_credentials_zeroize_wipes_the_password_buffer() {
+        const PASSWORD: &str = "zeroize-probe-s3cret";
+        let mut creds = TaskCredentials {
+            username: "alice".to_string(),
+            password: PASSWORD.to_string(),
+            private_key_data: None,
+            private_key_passphrase: None,
+        };
+        // The buffer stays allocated after zeroize (only its contents are
+        // wiped), so the saved pointer remains valid for the post-check.
+        let buffer = creds.password.as_ptr();
+        let before = unsafe { volatile_snapshot(buffer, PASSWORD.len()) };
+        assert!(
+            contains_ascii(&before, PASSWORD.as_bytes()),
+            "guard: password bytes must be present before zeroize"
+        );
+
+        creds.zeroize();
+
+        let after = unsafe { volatile_snapshot(buffer, PASSWORD.len()) };
+        assert!(
+            !contains_ascii(&after, PASSWORD.as_bytes()),
+            "SEC-05: password buffer must be wiped after zeroize"
+        );
+    }
+
+    #[test]
+    fn task_credentials_are_wiped_on_drop() {
+        const PASSWORD: &str = "drop-probe-s3cret";
+        let buffer_ptr;
+        {
+            let creds = Box::new(TaskCredentials {
+                username: "alice".to_string(),
+                password: PASSWORD.to_string(),
+                private_key_data: None,
+                private_key_passphrase: None,
+            });
+            buffer_ptr = creds.password.as_ptr();
+            let before = unsafe { volatile_snapshot(buffer_ptr, PASSWORD.len()) };
+            assert!(
+                contains_ascii(&before, PASSWORD.as_bytes()),
+                "guard: password bytes must be present before drop"
+            );
+            // ZeroizeOnDrop's generated Drop wipes the buffer during the
+            // drop glue, so the plain Box drop must leave nothing behind.
+            drop(creds);
+        }
+        // SAFETY: the freed heap block for a small string stays mapped and
+        // intact in practice; the volatile read keeps the check observable.
+        // This mirrors how zeroization is verified end-to-end — the buffer
+        // has just been released by the very drop under test.
+        let after = unsafe { volatile_snapshot(buffer_ptr, PASSWORD.len()) };
+        assert!(
+            !contains_ascii(&after, PASSWORD.as_bytes()),
+            "SEC-05: password buffer must be wiped after drop"
+        );
+    }
+
+    #[test]
+    fn deserialized_credentials_secret_is_wiped_on_drop() {
+        const PASSWORD: &str = "serde-probe-s3cret";
+        let json = format!(r#"{{"username":"alice","password":"{PASSWORD}"}}"#);
+        let buffer_ptr;
+        {
+            // The serde product is a second plaintext copy of the secret; it
+            // must be covered by the same ZeroizeOnDrop contract.
+            let secret = Box::new(
+                serde_json::from_str::<TaskCredentialsSecret>(&json)
+                    .expect("deserialize credentials"),
+            );
+            buffer_ptr = secret.password.as_ptr();
+            let before = unsafe { volatile_snapshot(buffer_ptr, PASSWORD.len()) };
+            assert!(
+                contains_ascii(&before, PASSWORD.as_bytes()),
+                "guard: password bytes must be present before drop"
+            );
+            drop(secret);
+        }
+        let after = unsafe { volatile_snapshot(buffer_ptr, PASSWORD.len()) };
+        assert!(
+            !contains_ascii(&after, PASSWORD.as_bytes()),
+            "SEC-05: deserialized secret must be wiped after drop"
+        );
+    }
+
+    #[test]
+    fn legacy_url_credentials_are_wiped_on_drop() {
+        const PASSWORD: &str = "url-probe-s3cret";
+        let buffer_ptr;
+        {
+            let legacy = legacy_credentials_from_url(&format!(
+                "ftp://alice:{PASSWORD}@example.com/file.bin"
+            ))
+            .expect("legacy credentials");
+            buffer_ptr = legacy.password.as_ptr();
+            let before = unsafe { volatile_snapshot(buffer_ptr, PASSWORD.len()) };
+            assert!(
+                contains_ascii(&before, PASSWORD.as_bytes()),
+                "guard: password bytes must be present before drop"
+            );
+            drop(legacy);
+        }
+        let after = unsafe { volatile_snapshot(buffer_ptr, PASSWORD.len()) };
+        assert!(
+            !contains_ascii(&after, PASSWORD.as_bytes()),
+            "SEC-05: URL-embedded password must be wiped after drop"
+        );
+    }
+
+    /// Read raw memory with volatile loads so the optimizer cannot fold the
+    /// wipe away and prove the check vacuous.
+    unsafe fn volatile_snapshot(ptr: *const u8, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|offset| std::ptr::read_volatile(ptr.add(offset)))
+            .collect()
+    }
+
+    fn contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
     }
 
     async fn credential_pool() -> sqlx::SqlitePool {

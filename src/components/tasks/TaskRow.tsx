@@ -24,7 +24,12 @@ import {
 import { AnimatePresence, motion } from "motion/react";
 import { type MouseEventHandler, memo, type ReactNode, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { recoveryActionsForTask, rowShowsRetry, rowTransferMode } from "@/components/tasks/row-recovery";
+import {
+  hasInlineRecovery,
+  recoveryActionsForTask,
+  rowShowsRetry,
+  rowTransferMode,
+} from "@/components/tasks/row-recovery";
 import { describeSpeedTrend, SpeedSparkline } from "@/components/tasks/SpeedSparkline";
 import { type ReorderAction, TaskContextMenu } from "@/components/tasks/TaskContextMenu";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
@@ -35,9 +40,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import type { QueueTaskDecision, RecoveryAction, TaskStatus } from "@/generated/bindings";
 import { useSystemFileIcon } from "@/hooks/use-system-file-icon";
 import type { TranslationKey } from "@/i18n";
-import { localizedErrorMessage, localizedMessage } from "@/lib/errors";
+import { localizedErrorCause, localizedErrorMessage, localizedMessage } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
-import { cn, formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
+import { cn, formatBytes, formatEta, formatPercent, formatSpeed, formatStalledSpeed } from "@/lib/utils";
 import type { SpeedSample } from "@/stores/speed-history-store";
 import { useSpeedHistoryStore } from "@/stores/speed-history-store";
 import { useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
@@ -68,7 +73,6 @@ interface TaskRowProps {
   onCopyUrl?: (task: Task) => void;
   onCopyLocalPath?: (task: Task) => void;
   onShowDetails?: (task: Task) => void;
-  shellCompact: boolean;
   /** Scheduler wait decision, when this task is queued. Supplied by the list from
    * a single shared poll (`useQueueReasons`) rather than fetched per row. */
   queueReason?: QueueTaskDecision;
@@ -337,7 +341,6 @@ export const TaskRow = memo(function TaskRow({
   onCopyUrl,
   onCopyLocalPath,
   onShowDetails,
-  shellCompact,
   queueReason,
   compact,
 }: TaskRowProps) {
@@ -413,6 +416,11 @@ export const TaskRow = memo(function TaskRow({
   const diagnosticLabel = task.errorMessage
     ? localizedErrorMessage(task.errorMessage, t)
     : retryLaterLabel || healthSummary || statusFact;
+  // The badge already names the state, and the recovery banner already carries
+  // message + cause for recoverable failures — a diagnostic line that only
+  // repeats one of them wastes the row's single free-text slot.
+  const badgeLabel = t(`task.status.${task.status}`);
+  const showDiagnostic = diagnosticLabel !== badgeLabel && !hasInlineRecovery(task);
   const baseId = `task-${task.id}`;
   const nameId = `${baseId}-name`;
   const statusId = `${baseId}-status`;
@@ -448,7 +456,7 @@ export const TaskRow = memo(function TaskRow({
         aria-posinset={position}
         aria-setsize={setSize}
         aria-labelledby={nameId}
-        aria-describedby={`${statusId} ${hostId} ${diagnosticId}`}
+        aria-describedby={showDiagnostic ? `${statusId} ${hostId} ${diagnosticId}` : `${statusId} ${hostId}`}
         tabIndex={selected || isFirstFocusable ? 0 : -1}
         onClick={(event) => {
           if ((event.target as HTMLElement).closest("[data-row-action]")) return;
@@ -615,68 +623,49 @@ export const TaskRow = memo(function TaskRow({
               </div>
             </div>
 
-            <p
-              id={diagnosticId}
-              title={compact ? undefined : diagnosticLabel}
-              className={cn(
-                compact
-                  ? "sr-only"
-                  : cn(
-                      "truncate text-xs",
-                      speedTrend.tone === "warning" && !task.healthSummary
-                        ? "font-medium text-status-warning"
-                        : "text-text-secondary",
-                    ),
-              )}
-            >
-              {diagnosticLabel}
-            </p>
+            {showDiagnostic ? (
+              <p
+                id={diagnosticId}
+                title={compact ? undefined : diagnosticLabel}
+                className={cn(
+                  compact
+                    ? "sr-only"
+                    : cn(
+                        "truncate text-xs",
+                        speedTrend.tone === "warning" && !task.healthSummary
+                          ? "font-medium text-status-warning"
+                          : "text-text-secondary",
+                      ),
+                )}
+              >
+                {diagnosticLabel}
+              </p>
+            ) : null}
 
-            <ProgressBar
-              value={progress}
-              label={progressLabel}
-              active={isActive}
-              smooth={!isActive}
-              size={compact ? "compact" : "default"}
-              className={completionFlash ? "completion-flash-progress" : undefined}
-            />
+            {/* A completed row's bar is permanently pinned at 100% — pure
+                redundancy next to the size line, so terminal rows skip it and
+                spend the vertical budget on one more visible row instead. */}
+            {task.status !== "completed" ? (
+              <ProgressBar
+                value={progress}
+                label={progressLabel}
+                active={isActive}
+                smooth={!isActive}
+                size={compact ? "compact" : "default"}
+                className={completionFlash ? "completion-flash-progress" : undefined}
+              />
+            ) : null}
 
             <TaskMeta task={task} isActive={isActive} layout="inline" compact={compact} />
           </div>
         </div>
 
-        {!shellCompact ? (
-          <div className="hidden min-w-52 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-right font-mono text-xs md:grid">
-            <TaskMeta task={task} isActive={isActive} layout="rail" compact={compact} />
-            <RowActions
-              task={task}
-              expanded={expanded}
-              expandedId={expandedId}
-              onToggleExpanded={onToggleExpanded}
-              onToggleTransfer={onToggleTransfer}
-              onRetry={onRetry}
-              onFinishLiveRecording={onFinishLiveRecording}
-              onOpenFile={onOpenFile}
-              onOpenFolder={onOpenFolder}
-              compact={compact}
-              // Compact parks the actions beside the two meta lines (spanning both
-              // rows) instead of giving them a row of their own — that single saved
-              // row is most of the height difference between the two densities.
-              className={
-                compact
-                  ? cn(
-                      "col-start-2 row-start-1 row-span-2 self-center justify-self-end",
-                      // Fading rather than unmounting: the buttons stay in the a11y
-                      // tree and tabbable, and group-focus-within reveals them for
-                      // keyboard users. Hovering a button always hovers the row, so
-                      // an invisible target can never be clicked by surprise.
-                      "md:opacity-0 md:transition-opacity md:duration-ui md:group-hover:opacity-100 md:group-focus-within:opacity-100",
-                    )
-                  : "col-span-2 justify-self-end"
-              }
-            />
-          </div>
-        ) : (
+        {/* Both action surfaces stay mounted and CSS alone decides visibility:
+            the rail at `md`+, the stacked row below it. The old code unmounted
+            one branch based on the JS resize tier, so any missed resize event
+            left the row with no actions at all. */}
+        <div className="hidden min-w-52 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-right font-mono text-xs md:grid">
+          <TaskMeta task={task} isActive={isActive} layout="rail" compact={compact} />
           <RowActions
             task={task}
             expanded={expanded}
@@ -688,14 +677,42 @@ export const TaskRow = memo(function TaskRow({
             onOpenFile={onOpenFile}
             onOpenFolder={onOpenFolder}
             compact={compact}
-            className={cn("flex md:hidden", compact && "sm:col-start-2 sm:row-start-1 sm:self-center")}
+            // Compact parks the actions beside the two meta lines (spanning both
+            // rows) instead of giving them a row of their own — that single saved
+            // row is most of the height difference between the two densities.
+            className={
+              compact
+                ? cn(
+                    "col-start-2 row-start-1 row-span-2 self-center justify-self-end",
+                    // Fading rather than unmounting: the buttons stay in the a11y
+                    // tree and tabbable, and group-focus-within reveals them for
+                    // keyboard users. Hovering a button always hovers the row, so
+                    // an invisible target can never be clicked by surprise.
+                    "md:opacity-0 md:transition-opacity md:duration-ui md:group-hover:opacity-100 md:group-focus-within:opacity-100",
+                  )
+                : "col-span-2 justify-self-end"
+            }
           />
-        )}
+        </div>
+        <RowActions
+          task={task}
+          expanded={expanded}
+          expandedId={expandedId}
+          onToggleExpanded={onToggleExpanded}
+          onToggleTransfer={onToggleTransfer}
+          onRetry={onRetry}
+          onFinishLiveRecording={onFinishLiveRecording}
+          onOpenFile={onOpenFile}
+          onOpenFolder={onOpenFolder}
+          compact={compact}
+          className={cn("flex md:hidden", compact && "sm:col-start-2 sm:row-start-1 sm:self-center")}
+        />
 
         {task.status === "failed" || task.status === "needs_attention" ? (
           <InlineRecovery
             task={task}
             expanded={expanded}
+            expandedId={expandedId}
             compact={compact}
             onToggleExpanded={onToggleExpanded}
             onResolve={onResolveAttention}
@@ -774,11 +791,21 @@ const TaskMeta = memo(function TaskMeta({
   compact: boolean;
 }) {
   const { t } = useTranslation();
-  const speed = formatSpeed(task.speedBps);
+  // A stalled transfer (active, 0 B/s) is a fact worth surfacing as "0 KB/s"
+  // with a warning tone; for every non-active state no speed applies, so the
+  // slot is dropped entirely instead of spending the rail's most prominent
+  // position on an em-dash placeholder.
+  const stalled = isActive && task.speedBps <= 0;
+  const speed = stalled ? formatStalledSpeed() : formatSpeed(task.speedBps);
   const bytes = `${formatBytes(task.downloadedBytes)} / ${formatBytes(task.totalSize)}`;
   const percent = formatPercent(task.downloadedBytes, task.totalSize);
   const eta = formatEta(task.downloadedBytes, task.totalSize, task.speedBps);
   const connections = task.connectionCount > 0 ? t("task.connections", { count: task.connectionCount }) : null;
+  // A completed row states its size once — "3.9 GB / 3.9 GB" under a bar pinned
+  // at 100% repeated the same fact three times on the list's most common row.
+  const isCompleted = task.status === "completed";
+  const sizeOnce = formatBytes(task.totalSize > 0 ? task.totalSize : task.downloadedBytes);
+  const summary = [sizeOnce, connections].filter(Boolean).join(" · ");
   // Connections ride along on the progress line rather than taking a rail row of
   // their own — a rail row costs ~20px, a third of a compact row's whole budget.
   const progress = [
@@ -787,6 +814,7 @@ const TaskMeta = memo(function TaskMeta({
   ]
     .filter(Boolean)
     .join(" · ");
+  const speedClass = stalled ? "font-semibold text-status-warning" : "font-semibold text-accent-primary";
 
   if (layout === "inline") {
     return (
@@ -796,13 +824,19 @@ const TaskMeta = memo(function TaskMeta({
           compact ? "gap-y-0.5" : "gap-y-1",
         )}
       >
-        <span className={cn("text-text-primary", isActive && "text-xs font-semibold text-accent-primary")}>
-          {speed}
-        </span>
-        {compact ? null : <span className={META_MUTED}>{bytes}</span>}
-        <span className={META_MUTED} title={compact ? bytes : undefined}>
-          {progress}
-        </span>
+        {isActive ? <span className={cn("text-text-primary", speedClass)}>{speed}</span> : null}
+        {isCompleted ? (
+          <span className={META_MUTED} title={compact ? bytes : undefined}>
+            {summary}
+          </span>
+        ) : (
+          <>
+            {compact ? null : <span className={META_MUTED}>{bytes}</span>}
+            <span className={META_MUTED} title={compact ? bytes : undefined}>
+              {progress}
+            </span>
+          </>
+        )}
       </div>
     );
   }
@@ -810,15 +844,24 @@ const TaskMeta = memo(function TaskMeta({
   if (compact) {
     // Two-line rail: bytes drop to the tooltip because percent already carries
     // the progress signal, and the freed line is what lets the row hit ~48px.
+    if (!isActive) {
+      if (isCompleted) {
+        return (
+          <span data-slot="size" title={bytes} className={cn("col-start-1 row-start-1 min-w-0 truncate", META_MUTED)}>
+            {summary}
+          </span>
+        );
+      }
+      // No speed applies — the progress line takes the rail's top slot.
+      return (
+        <span data-slot="progress" title={bytes} className={cn("col-start-1 row-start-1 min-w-0 truncate", META_MUTED)}>
+          {progress}
+        </span>
+      );
+    }
     return (
       <>
-        <span
-          data-slot="speed"
-          className={cn(
-            "col-start-1 row-start-1 min-w-0 truncate text-sm",
-            isActive ? "font-semibold text-accent-primary" : "text-text-primary",
-          )}
-        >
+        <span data-slot="speed" className={cn("col-start-1 row-start-1 min-w-0 truncate text-sm", speedClass)}>
           {speed}
         </span>
         <span data-slot="progress" title={bytes} className={cn("col-start-1 row-start-2 min-w-0 truncate", META_MUTED)}>
@@ -828,15 +871,34 @@ const TaskMeta = memo(function TaskMeta({
     );
   }
 
+  if (!isActive) {
+    if (isCompleted) {
+      // Terminal rows collapse to a single rail line: the total size stated
+      // once. The bar is gone and percent is always 100% here, so this line
+      // is the row's only measurement.
+      return (
+        <span data-slot="size" className={cn("col-span-2 min-w-0 truncate", META_MUTED)}>
+          {summary}
+        </span>
+      );
+    }
+    // Idle rows collapse to two rail lines: the byte count takes the
+    // full-width slot the em-dash used to hold, progress stays beneath it.
+    return (
+      <>
+        <span data-slot="bytes" className={cn("col-span-2 min-w-0 truncate", META_MUTED)}>
+          {bytes}
+        </span>
+        <span data-slot="progress" className={cn("col-span-2 min-w-0 truncate", META_MUTED)}>
+          {progress}
+        </span>
+      </>
+    );
+  }
+
   return (
     <>
-      <span
-        data-slot="speed"
-        className={cn(
-          "col-start-1 min-w-0 truncate text-sm",
-          isActive ? "font-semibold text-accent-primary" : "text-text-primary",
-        )}
-      >
+      <span data-slot="speed" className={cn("col-start-1 min-w-0 truncate text-sm", speedClass)}>
         {speed}
       </span>
       <span data-slot="bytes" className={cn("col-start-2 min-w-0 truncate", META_MUTED)}>
@@ -895,9 +957,10 @@ function RowActions({
     <div
       className={cn(
         "flex gap-1 [&_[data-row-icon-button]]:h-10 [&_[data-row-icon-button]]:w-10 md:[&_[data-row-icon-button]]:h-8 md:[&_[data-row-icon-button]]:w-8",
-        // Compact still clears WCAG 2.5.8's 24px minimum while fitting the rail.
-        compact &&
-          "[&_[data-row-icon-button]]:h-9 [&_[data-row-icon-button]]:w-9 md:[&_[data-row-icon-button]]:h-7 md:[&_[data-row-icon-button]]:w-7",
+        // Compact shrinks touch targets only below `md` (36px still clears WCAG
+        // 2.5.8); at `md`+ it keeps the shared 32px floor — the two-line rail,
+        // not the buttons, drives compact row height.
+        compact && "[&_[data-row-icon-button]]:h-9 [&_[data-row-icon-button]]:w-9",
         className,
       )}
       data-row-action
@@ -1022,12 +1085,14 @@ const ActionButton = memo(function ActionButton({
 const InlineRecovery = memo(function InlineRecovery({
   task,
   expanded,
+  expandedId,
   compact,
   onToggleExpanded,
   onResolve,
 }: {
   task: Task;
   expanded: boolean;
+  expandedId: string;
   compact: boolean;
   onToggleExpanded: () => void;
   onResolve: (task: Task, action: RecoveryAction) => void;
@@ -1041,11 +1106,19 @@ const InlineRecovery = memo(function InlineRecovery({
   if (recoveryActions.length === 0) return null;
 
   const primaryAction = recoveryActions[0];
-  const hasMoreActions = recoveryActions.length > 1;
+  const moreFixes = recoveryActions.slice(1);
   const message = localizedErrorMessage(task.errorMessage, t);
-  // Compact clamps the message to one line and shrinks the buttons at `md`+ only:
-  // below `md` they are touch targets and must keep the 32px height.
-  const buttonClass = compact ? "px-2 text-xs md:h-7 md:min-h-7" : "px-2 text-xs";
+  // The message names the verdict ("Cannot resume"); the cause line surfaces the
+  // mechanism the backend already knows ("server dropped Range support") so the
+  // user can judge whether the recovery action is safe before pressing it.
+  const cause = localizedErrorCause(task.errorMessage, t);
+  const moreFixesTitle =
+    moreFixes.length > 1
+      ? t("actions.moreFixesTitle", { fixes: moreFixes.map((action) => t(`recovery.${action}`)).join(", ") })
+      : undefined;
+  // Compact clamps the message to one line; the buttons keep the 32px height at
+  // every width (DESIGN.md minimum for dense desktop UI).
+  const buttonClass = "px-2 text-xs";
 
   return (
     // Alert container: a real callout box instead of loose inline elements.
@@ -1060,15 +1133,29 @@ const InlineRecovery = memo(function InlineRecovery({
       data-no-drag
     >
       <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-danger" aria-hidden />
-      <span
-        className={cn("min-w-0 text-xs leading-snug text-status-danger", compact ? "line-clamp-1" : "line-clamp-2")}
-        title={message}
-      >
-        {message}
-      </span>
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span
+          className={cn("min-w-0 text-xs leading-snug text-status-danger", compact ? "line-clamp-1" : "line-clamp-2")}
+          title={message}
+        >
+          {message}
+        </span>
+        {cause ? (
+          <span
+            className={cn("text-[11px] leading-4 text-text-secondary", compact ? "line-clamp-1" : "line-clamp-2")}
+            title={cause}
+          >
+            {cause}
+          </span>
+        ) : null}
+      </div>
       <div className="ml-auto flex shrink-0 items-center gap-1">
+        {/* Restart discards downloaded bytes, so it wears the same danger tint
+            here as in the expanded TaskRecoveryActions — never the accent that
+            marks the recommended action. */}
         <Button
           size="sm"
+          variant={primaryAction === "restart" ? "danger" : "default"}
           className={buttonClass}
           onClick={(event) => {
             event.stopPropagation();
@@ -1077,17 +1164,36 @@ const InlineRecovery = memo(function InlineRecovery({
         >
           {t(`recovery.${primaryAction}`)}
         </Button>
-        {hasMoreActions ? (
+        {moreFixes.length === 1 ? (
+          // A single alternative is named on its face: a count + hover tooltip
+          // forced the user to memorize the safer branch (often "save as")
+          // before choosing between it and a progress-destroying restart.
+          <Button
+            variant="outline"
+            size="sm"
+            className={buttonClass}
+            onClick={(event) => {
+              event.stopPropagation();
+              onResolve(task, moreFixes[0]);
+            }}
+          >
+            {t(`recovery.${moreFixes[0]}`)}
+          </Button>
+        ) : moreFixes.length > 1 ? (
           <Button
             variant="ghost"
             size="sm"
             className={buttonClass}
+            aria-expanded={expanded}
+            aria-controls={expandedId}
+            aria-label={moreFixesTitle}
+            title={moreFixesTitle}
             onClick={(event) => {
               event.stopPropagation();
               if (!expanded) onToggleExpanded();
             }}
           >
-            {t("actions.moreFixesCount", { count: recoveryActions.length - 1 })}
+            {t("actions.moreFixesCount", { count: moreFixes.length })}
           </Button>
         ) : null}
       </div>

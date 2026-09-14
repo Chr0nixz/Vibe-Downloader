@@ -49,15 +49,26 @@ pub struct MetalinkMirrorView {
 
 // Four workers keep slow recycle-bin/network-volume calls off Tokio without
 // flooding the OS shell or storage device during large batch removals.
-const MAX_CONCURRENT_FILE_DELETES: usize = 4;
+pub(crate) const MAX_CONCURRENT_FILE_DELETES: usize = 4;
 
-#[derive(Debug)]
-struct FileDeleteRequest {
-    path: String,
-    use_trash: bool,
+#[derive(Debug, Clone)]
+pub(crate) struct FileDeleteRequest {
+    pub path: String,
+    pub use_trash: bool,
 }
 
-async fn delete_paths_off_runtime(requests: Vec<FileDeleteRequest>) -> Vec<String> {
+/// One completed delete attempt keyed by path, so callers can report per-item
+/// outcomes — the Storage Center must never show partial success as full
+/// success.
+#[derive(Debug)]
+pub(crate) struct FileDeleteOutcome {
+    pub path: String,
+    pub result: Result<(), String>,
+}
+
+pub(crate) async fn delete_paths_off_runtime(
+    requests: Vec<FileDeleteRequest>,
+) -> Vec<FileDeleteOutcome> {
     let mut seen = HashSet::new();
     let unique = requests
         .into_iter()
@@ -70,15 +81,17 @@ async fn delete_paths_off_runtime(requests: Vec<FileDeleteRequest>) -> Vec<Strin
         })
     }))
     .buffer_unordered(MAX_CONCURRENT_FILE_DELETES);
-    let mut warnings = Vec::new();
+    let mut outcomes = Vec::new();
     while let Some(outcome) = pending.next().await {
         match outcome {
-            Ok((_, Ok(()))) => {}
-            Ok((_, Err(error))) => warnings.push(error),
-            Err(error) => warnings.push(format!("File deletion worker failed: {error}")),
+            Ok((path, result)) => outcomes.push(FileDeleteOutcome { path, result }),
+            Err(error) => outcomes.push(FileDeleteOutcome {
+                path: String::new(),
+                result: Err(format!("File deletion worker failed: {error}")),
+            }),
         }
     }
-    warnings
+    outcomes
 }
 
 fn push_delete_request(requests: &mut Vec<FileDeleteRequest>, path: Option<&str>, use_trash: bool) {
@@ -546,20 +559,26 @@ pub async fn delete_task(
         }
     }
     // ARC-38: staging is intermediate state, not user data — remove it on task
-    // deletion even when delete_file is false. DASH's staging directory cannot
-    // be derived from temp/final paths, so locate it explicitly per protocol.
+    // deletion even when delete_file is false. The artifact contract also
+    // enumerates metalink `.part-N` siblings, which previously leaked on task
+    // deletion because only exact temp/final paths were listed.
     if let Some(task) = task_for_runtime.as_ref() {
-        if matches!(task.protocol.as_str(), "hls" | "dash") {
-            let staging = crate::commands::task_file_planning::task_staging_dir(
-                std::path::Path::new(&task.save_dir),
-                &task.id,
-            );
-            push_delete_request(&mut delete_requests, staging.to_str(), false);
+        let file_temps: Vec<String> = db::list_task_file_records(&state.pool, &id)
+            .await?
+            .iter()
+            .filter_map(|file| file.temp_path.clone())
+            .collect();
+        for artifact in
+            crate::download::artifacts::task_auxiliary_artifacts(task, &file_temps).await
+        {
+            push_delete_request(&mut delete_requests, artifact.to_str(), false);
         }
     }
     let file_warnings = delete_paths_off_runtime(delete_requests).await;
-    for warning in &file_warnings {
-        tracing::warn!(task_id = %id, warning, "file deletion warning during task removal");
+    for outcome in &file_warnings {
+        if let Err(error) = &outcome.result {
+            tracing::warn!(task_id = %id, path = %outcome.path, error, "file deletion warning during task removal");
+        }
     }
 
     db::delete_task_record(&state.pool, &id).await?;
@@ -637,14 +656,19 @@ pub async fn bulk_delete_tasks(
             }
         }
         // ARC-38: staging is intermediate state — remove it for staging-based
-        // protocols even when delete_file is false (see delete_task).
+        // protocols even when delete_file is false (see delete_task). The
+        // artifact contract also covers metalink `.part-N` siblings, which
+        // previously leaked here.
         if let Some(task) = task_for_runtime.as_ref() {
-            if matches!(task.protocol.as_str(), "hls" | "dash") {
-                let staging = crate::commands::task_file_planning::task_staging_dir(
-                    std::path::Path::new(&task.save_dir),
-                    &task.id,
-                );
-                push_delete_request(&mut delete_requests, staging.to_str(), false);
+            let file_temps: Vec<String> = db::list_task_file_records(&state.pool, id)
+                .await?
+                .iter()
+                .filter_map(|file| file.temp_path.clone())
+                .collect();
+            for artifact in
+                crate::download::artifacts::task_auxiliary_artifacts(task, &file_temps).await
+            {
+                push_delete_request(&mut delete_requests, artifact.to_str(), false);
             }
         }
         // R-2.5: Evict the lock entry for this deleted task.
@@ -652,8 +676,10 @@ pub async fn bulk_delete_tasks(
         state.task_runtime_locks.evict(id).await;
     }
     let file_warnings = delete_paths_off_runtime(delete_requests).await;
-    for warning in &file_warnings {
-        tracing::warn!(warning, "file deletion warning during bulk delete");
+    for outcome in &file_warnings {
+        if let Err(error) = &outcome.result {
+            tracing::warn!(path = %outcome.path, error, "file deletion warning during bulk delete");
+        }
     }
 
     // Phase 3: Delete all DB records in a single transaction.
@@ -797,6 +823,14 @@ pub async fn resolve_task_attention(
             }
             let task =
                 queue_task_for_retry_with_event(&app, state.inner(), id, "retrying", None).await?;
+            crate::commands::recovery::record_recovery_history(
+                &state.pool,
+                &task,
+                input.action.as_str(),
+                input.origin.as_deref().unwrap_or("manual"),
+                error_code.as_deref(),
+            )
+            .await;
             task_from_record_with_files(&state.pool, task).await
         }
         RecoveryAction::RetryLater => {
@@ -820,6 +854,14 @@ pub async fn resolve_task_attention(
                 Some(&event_message),
             )
             .await?;
+            crate::commands::recovery::record_recovery_history(
+                &state.pool,
+                &task,
+                input.action.as_str(),
+                input.origin.as_deref().unwrap_or("manual"),
+                error_code.as_deref(),
+            )
+            .await;
             state.scheduler.clone().spawn_dispatch_after(
                 app.clone(),
                 state.pool.clone(),
@@ -837,6 +879,14 @@ pub async fn resolve_task_attention(
                 Some("Recovery target changed."),
             )
             .await?;
+            crate::commands::recovery::record_recovery_history(
+                &state.pool,
+                &task,
+                input.action.as_str(),
+                input.origin.as_deref().unwrap_or("manual"),
+                error_code.as_deref(),
+            )
+            .await;
             task_from_record_with_files(&state.pool, task).await
         }
         RecoveryAction::Restart => {
@@ -848,6 +898,14 @@ pub async fn resolve_task_attention(
             )
             .await?;
             let task = restart_task_from_beginning(&app, state.inner(), &task).await?;
+            crate::commands::recovery::record_recovery_history(
+                &state.pool,
+                &task,
+                input.action.as_str(),
+                input.origin.as_deref().unwrap_or("manual"),
+                error_code.as_deref(),
+            )
+            .await;
             task_from_record_with_files(&state.pool, task).await
         }
         RecoveryAction::OpenFolder
@@ -1266,9 +1324,12 @@ mod tests {
                 use_trash: false,
             },
         ];
-        let warnings = delete_paths_off_runtime(requests).await;
+        let outcomes = delete_paths_off_runtime(requests).await;
 
-        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(
+            outcomes.iter().all(|outcome| outcome.result.is_ok()),
+            "unexpected delete failures: {outcomes:?}"
+        );
         assert!(!first.exists());
         assert!(!second.exists());
         let _ = std::fs::remove_dir_all(root);

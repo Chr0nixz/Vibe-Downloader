@@ -98,7 +98,33 @@ export const commands = {
 	forgetSftpKnownHost: (host: string, port: number) => typedError<boolean, string>(__TAURI_INVOKE("forget_sftp_known_host", { host, port })),
 	createAppBackup: (destinationPath: string) => typedError<BackupCreateResult, string>(__TAURI_INVOKE("create_app_backup", { destinationPath })),
 	validateAppBackup: (backupPath: string) => typedError<BackupValidateResult, string>(__TAURI_INVOKE("validate_app_backup", { backupPath })),
-	restoreAppBackup: (backupPath: string) => typedError<BackupRestoreResult, string>(__TAURI_INVOKE("restore_app_backup", { backupPath })),
+	restoreAppBackup: (backupPath: string, remapRoot: string | null) => typedError<BackupRestoreResult, string>(__TAURI_INVOKE("restore_app_backup", { backupPath, remapRoot })),
+	describeBackupSource: () => typedError<BackupContents, string>(__TAURI_INVOKE("describe_backup_source")),
+	restoreBackupSubset: (backupPath: string, selection: BackupSubsetSelection) => typedError<BackupSubsetRestoreResult, string>(__TAURI_INVOKE("restore_backup_subset", { backupPath, selection })),
+	getLastRestoreReport: () => typedError<{
+	/**  Schema version of the restored database after forward migration. */
+	schemaVersion: string,
+	/**  RFC 3339 timestamp of when the pending file was applied. */
+	restoredAt: string,
+	backupCreatedAt: string | null,
+	/**  Snapshot of the pre-restore database kept for manual rollback. */
+	preRestoreBackupPath: string | null,
+	tasksWithCredentials: number,
+	tasksWithPerTaskProxy: number,
+	/**
+	 *  The backup claimed a global proxy password but this machine's keyring
+	 *  has none — the password must be re-entered in settings.
+	 */
+	globalProxyNeedsReentry: boolean,
+	/**  The backup configured ffmpeg; the SEC-09 scrub cleared the path. */
+	ffmpegWasConfigured: boolean,
+	/**  The backup had a non-notify completion action; the scrub reset it. */
+	completionActionReset: boolean,
+	/**  Distinct task save dirs that do not exist on this machine (bounded). */
+	missingSaveDirs: string[],
+	missingSaveDirsTotal: number,
+} | null, string>(__TAURI_INVOKE("get_last_restore_report")),
+	dismissRestoreReport: () => typedError<boolean, string>(__TAURI_INVOKE("dismiss_restore_report")),
 	readLocalTextFile: (path: string, kind: LocalTextFileKind) => typedError<string, string>(__TAURI_INVOKE("read_local_text_file", { path, kind })),
 	writeExportFile: (path: string, contents: string) => typedError<null, string>(__TAURI_INVOKE("write_export_file", { path, contents })),
 	getStartupStatus: () => typedError<StartupStatus, string>(__TAURI_INVOKE("get_startup_status")),
@@ -208,6 +234,26 @@ export const commands = {
 	bulkTaskActionGlobal: (action: string) => typedError<BulkTaskActionResult, string>(__TAURI_INVOKE("bulk_task_action_global", { action })),
 	openTaskFile: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_file", { id })),
 	openTaskFolder: (id: string) => typedError<null, string>(__TAURI_INVOKE("open_task_folder", { id })),
+	scanStorage: () => typedError<StorageScanResult, string>(__TAURI_INVOKE("scan_storage")),
+	cleanStorageArtifacts: (mode: CleanupMode, itemIds: string[] | null) => typedError<StorageCleanupResult, string>(__TAURI_INVOKE("clean_storage_artifacts", { mode, itemIds })),
+	/**
+	 *  Abandon-resume cleanup: remove every artifact of one paused/failed task.
+	 *  Refuses any other status — a task that is queued/downloading/retrying owns
+	 *  live bytes, and a completed task has nothing left to clean.
+	 */
+	cleanupTaskTempFiles: (taskId: string) => typedError<StorageCleanupResult, string>(__TAURI_INVOKE("cleanup_task_temp_files", { taskId })),
+	getLastStorageSweep: () => typedError<{
+	id: string,
+	startedAt: string,
+	finishedAt: string,
+	mode: string,
+	removedCount: number,
+	failedCount: number,
+	reclaimedBytes: string,
+} | null, string>(__TAURI_INVOKE("get_last_storage_sweep")),
+	bulkResolveAttention: (ids: string[], action: BulkRecoveryAction) => typedError<BulkRecoveryResult, string>(__TAURI_INVOKE("bulk_resolve_attention", { ids, action })),
+	updateTaskCredentials: (input: UpdateTaskCredentialsInput) => typedError<Task, string>(__TAURI_INVOKE("update_task_credentials", { input })),
+	listRecoveryHistory: (limit: number | null) => typedError<RecoveryHistoryRecord[], string>(__TAURI_INVOKE("list_recovery_history", { limit })),
 	seedMockTasks: () => typedError<Task[], string>(__TAURI_INVOKE("seed_mock_tasks")),
 	seedScaleTasks: (distribution: ScaleStateDistribution, clearBefore: boolean | null) => typedError<number, string>(__TAURI_INVOKE("seed_scale_tasks", { distribution, clearBefore })),
 };
@@ -268,10 +314,84 @@ export type AppSettings = {
 	btUploadLimitBps: string | null,
 };
 
+/**
+ *  Category of a temporary download artifact. Mirrors the classification in
+ *  `download::artifacts`.
+ */
+export type ArtifactKind = "temp_file" | "legacy_temp_file" | "staging_dir" | "publish_staging" | "metalink_part" | "dht_state";
+
+/**
+ *  Why an artifact is (or is not) reclaimable. Stable code, mapped to i18n in
+ *  the frontend — never a pre-rendered sentence.
+ */
+export type ArtifactReason = 
+/**  No task row claims it. */
+"no_owner" | 
+/**  The only claiming task is completed; the final file was published. */
+"owner_completed" | 
+/**  BT DHT state file older than the stale threshold. */
+"dht_stale" | 
+/**  A live, non-completed task still needs the bytes for resume/retry. */
+"owner_resumable";
+
+/**
+ *  Row counts describing what a backup — or the live database — contains.
+ *  Produced by the same counter for both sides, so the export preview and the
+ *  restore preview always use identical semantics.
+ */
+export type BackupContents = {
+	tasksTotal: number,
+	tasksCompleted: number,
+	tasksFailed: number,
+	classificationRules: number,
+	siteRules: number,
+	tasksWithChecksums: number,
+	tasksWithCredentials: number,
+	tasksWithRequestHeaders: number,
+	settingsKeys: number,
+	taskEvents: number,
+};
+
 export type BackupCreateResult = {
 	path: string,
 	schemaVersion: string,
 	credentialsPolicy: string,
+	/**
+	 *  FUN-23: true when the snapshot had to be byte-copied because the
+	 *  destination sits on another volume and rename cannot cross devices.
+	 */
+	usedCopyFallback: boolean,
+};
+
+/**
+ *  Free space on the volume hosting the live database versus what a restore
+ *  needs (staged pending file + pre-restore snapshot + WAL headroom).
+ *  `free_bytes` is `None` when the platform query is unavailable — the check
+ *  degrades to "unknown", never to "failed".
+ */
+export type BackupDiskCheck = {
+	/**
+	 *  Byte counts are strings across the IPC boundary (Specta forbids u64);
+	 *  the frontend formats them through the shared byte formatter.
+	 */
+	freeBytes: string | null,
+	requiredBytes: string,
+};
+
+/**
+ *  SEC-02 path-policy scan of a backup in reporting form. Restore itself
+ *  still fails closed on the first offending path; this summary only feeds
+ *  the pre-restore check panel and the remap suggestion.
+ */
+export type BackupPathPolicySummary = {
+	violationCount: number,
+	/**  Bounded sample of offending paths (`table.column of row …`). */
+	sampleViolations: string[],
+	/**
+	 *  Distinct task save dirs outside the allowed roots (bounded), so the UI
+	 *  can explain *which* folders a migration remap would relocate.
+	 */
+	offendingSaveDirs: string[],
 };
 
 export type BackupRestoreResult = {
@@ -279,6 +399,48 @@ export type BackupRestoreResult = {
 	preRestoreBackupPath: string,
 	pendingRestorePath: string,
 	credentialsPolicy: string,
+	remappedPaths: number,
+};
+
+/**
+ *  What the pre-restore scrub will touch, read from the backup itself, so the
+ *  user sees the whitelist consequence *before* committing (§3.7).
+ */
+export type BackupSettingsPreview = {
+	ffmpegConfigured: boolean,
+	completionAction: string,
+	proxyPasswordSaved: boolean,
+	defaultSaveDir: string,
+};
+
+/**
+ *  Outcome counts of a partial (subset) restore. Everything is additive:
+ *  existing rows are never modified or deleted, so a failed attempt leaves
+ *  the live database intact.
+ */
+export type BackupSubsetRestoreResult = {
+	tasksInserted: number,
+	tasksSkipped: number,
+	/**
+	 *  Active statuses from the backup (queued/downloading/retrying/…) that
+	 *  were normalized to `paused` because their temp state cannot be trusted
+	 *  on this machine.
+	 */
+	tasksNormalized: number,
+	rulesInserted: number,
+	rulesSkipped: number,
+	settingsReplaced: number,
+};
+
+/**
+ *  Which safe subsets to merge from a backup. Each flag is independent;
+ *  selecting none is a caller error rejected with `backup_invalid_remap_root`
+ *  family validation (`backup_subset_empty`).
+ */
+export type BackupSubsetSelection = {
+	tasks: boolean,
+	rules: boolean,
+	settings: boolean,
 };
 
 export type BackupValidateResult = {
@@ -288,6 +450,10 @@ export type BackupValidateResult = {
 	createdAt: string,
 	credentialsPolicy: string,
 	databaseBytes: string,
+	contents: BackupContents,
+	pathPolicy: BackupPathPolicySummary,
+	disk: BackupDiskCheck,
+	settingsPreview: BackupSettingsPreview,
 };
 
 export type BatchImportItem = {
@@ -427,6 +593,23 @@ export type BrowserSiteRule = {
 
 export type BrowserSiteRuleMode = "auto" | "ask" | "never";
 
+/**
+ *  Non-destructive re-queue actions allowed in a batch resolution. Restart
+ *  (delete temp artifacts + re-probe) is intentionally excluded from bulk
+ *  use: it stays per-task behind a hard confirmation.
+ */
+export type BulkRecoveryAction = "retry" | "retry_later";
+
+/**
+ *  Outcome counts for a batch attention resolution. Per-task failures are
+ *  logged with their error and counted, never aborting the batch.
+ */
+export type BulkRecoveryResult = {
+	succeeded: number,
+	skipped: number,
+	failed: number,
+};
+
 /**  UX-05: Result of a global pause/resume that selects targets from the DB. */
 export type BulkTaskActionResult = {
 	succeeded: number,
@@ -464,6 +647,33 @@ export type ClassificationRuleInput = {
 	pattern: string | null,
 	targetSubdir: string | null,
 };
+
+/**
+ *  Per-item result of a cleanup run, so partial success is never reported as
+ *  full success.
+ */
+export type CleanupItemOutcome = {
+	itemId: string,
+	outcome: CleanupOutcome,
+	bytes: string,
+	errorCode: string | null,
+};
+
+/**
+ *  Which reclaimable items a cleanup run targets. Appears both as command
+ *  input and inside the result payload, so it derives both directions.
+ */
+export type CleanupMode = 
+/**  Artifacts with no owning task row. */
+"orphans" | 
+/**  Artifacts whose only owner is a completed task. */
+"completed_leftovers" | 
+/**  Both of the above. */
+"all_reclaimable" | 
+/**  Explicit item ids from a previous scan (re-validated before delete). */
+"selected";
+
+export type CleanupOutcome = "removed" | "skipped" | "failed";
 
 export type ClipboardLinkDetectedPayload = {
 	id: string,
@@ -930,6 +1140,22 @@ export type QueueWaitReason = "ready" | "retry_delay" | "active_limit" | "schedu
 
 export type RecoveryAction = "retry" | "retry_later" | "choose_another_name" | "choose_another_folder" | "restart" | "open_folder" | "check_url" | "free_disk_space" | "configure_ffmpeg" | "manage_sftp_host_keys";
 
+/**  One persisted recovery resolution shown in the recovery history. */
+export type RecoveryHistoryRecord = {
+	id: string,
+	taskId: string,
+	/**  Task display name captured at resolution time, when the row existed. */
+	taskFileName: string | null,
+	/**  Stable recovery action identifier (`RecoveryAction::as_str()`). */
+	action: string,
+	/**  Which surface performed it (`recovery_center`, `manual`, `auto`). */
+	source: string,
+	/**  Stable error code active at resolution time, when known. */
+	errorCode: string | null,
+	/**  RFC 3339 timestamp. */
+	createdAt: string,
+};
+
 export type RequestDiagnostic = {
 	id: string,
 	taskId: string,
@@ -952,6 +1178,59 @@ export type ResolveTaskAttentionInput = {
 	action: RecoveryAction,
 	fileName: string | null,
 	saveDir: string | null,
+	/**
+	 *  Which surface performed the resolution (`recovery_center`, `manual`,
+	 *  ...). Defaults to `manual` for existing callers; recorded in the
+	 *  recovery history for state-changing actions.
+	 */
+	origin?: string | null,
+};
+
+/**
+ *  Post-restore "what to reconfigure" report, written next to the database
+ *  after a whole-file restore is applied at startup. Data fields only; the
+ *  page renders them through typed i18n keys.
+ */
+export type RestoreReport = {
+	/**  Schema version of the restored database after forward migration. */
+	schemaVersion: string,
+	/**  RFC 3339 timestamp of when the pending file was applied. */
+	restoredAt: string,
+	backupCreatedAt: string | null,
+	/**  Snapshot of the pre-restore database kept for manual rollback. */
+	preRestoreBackupPath: string | null,
+	tasksWithCredentials: number,
+	tasksWithPerTaskProxy: number,
+	/**
+	 *  The backup claimed a global proxy password but this machine's keyring
+	 *  has none — the password must be re-entered in settings.
+	 */
+	globalProxyNeedsReentry: boolean,
+	/**  The backup configured ffmpeg; the SEC-09 scrub cleared the path. */
+	ffmpegWasConfigured: boolean,
+	/**  The backup had a non-notify completion action; the scrub reset it. */
+	completionActionReset: boolean,
+	/**  Distinct task save dirs that do not exist on this machine (bounded). */
+	missingSaveDirs: string[],
+	missingSaveDirsTotal: number,
+};
+
+/**  Disk usage overview for one save directory. */
+export type SaveDirOverview = {
+	path: string,
+	totalBytes: string,
+	availableBytes: string,
+	/**  Sum of reclaimable artifact bytes under this dir. */
+	reclaimableBytes: string,
+	/**  Sum of bytes still needed by live (non-completed) task artifacts. */
+	resumableBytes: string,
+	/**
+	 *  Available space divided by the average completed task size in this
+	 *  dir; `None` when no completed task provides an average.
+	 */
+	estimatedCompletableTasks: string | null,
+	/**  The directory walk hit the entry cap; numbers are lower bounds. */
+	truncated: boolean,
 };
 
 /**
@@ -1031,6 +1310,75 @@ export type StartupStatus = {
 	canReset: boolean,
 	logPath: string | null,
 	dataPath: string | null,
+};
+
+/**  One artifact listed by a scan. */
+export type StorageArtifactItem = {
+	/**
+	 *  Opaque identity (the absolute path). Echoed back on cleanup; the
+	 *  backend re-validates classification before deleting.
+	 */
+	id: string,
+	kind: ArtifactKind,
+	saveDir: string,
+	fileName: string,
+	bytes: string,
+	/**  RFC 3339 timestamp, if the platform reports one. */
+	modifiedAt: string | null,
+	reclaimable: boolean,
+	reason: ArtifactReason,
+	ownerTaskId: string | null,
+	/**  Owner task display name for the per-task view, when the owner exists. */
+	taskFileName: string | null,
+	/**  Owner protocol, when the owner exists (per-task view context). */
+	ownerProtocol: string | null,
+};
+
+/**
+ *  Storage & Cleanup Center: progress of one cleanup run, correlated by
+ *  `request_id` like probe phases. Emitted at throttled intervals between
+ *  deletion chunks so big cleanups stay observable without event flooding.
+ */
+export type StorageCleanupProgressPayload = {
+	requestId: string,
+	processed: number,
+	total: number,
+	removed: number,
+	failed: number,
+	reclaimedBytes: string,
+};
+
+export type StorageCleanupResult = {
+	requestId: string,
+	mode: CleanupMode,
+	removedCount: number,
+	skippedCount: number,
+	failedCount: number,
+	reclaimedBytes: string,
+	outcomes: CleanupItemOutcome[],
+	/**
+	 *  Set for `cleanup_task_temp_files`: the task will restart from zero on
+	 *  its next start.
+	 */
+	resumeDiscarded: boolean,
+};
+
+export type StorageScanResult = {
+	scanId: string,
+	scannedAt: string,
+	dirs: SaveDirOverview[],
+	items: StorageArtifactItem[],
+};
+
+/**  Persisted record of one sweep (startup or manual), shown on the page. */
+export type StorageSweepRecord = {
+	id: string,
+	startedAt: string,
+	finishedAt: string,
+	mode: string,
+	removedCount: number,
+	failedCount: number,
+	reclaimedBytes: string,
 };
 
 export type SystemFileIcon = {
@@ -1305,6 +1653,18 @@ export type UpdateSettingsInput = {
 	 *  the value unchanged; `Some(None)` clears the limit (unlimited).
 	 */
 	btUploadLimitBps: string | null,
+};
+
+/**
+ *  Replacement credentials for a task that failed with an auth error.
+ *  SEC-05: the plaintext fields are wiped when this value is dropped.
+ */
+export type UpdateTaskCredentialsInput = {
+	taskId: string,
+	username: string,
+	password: string,
+	privateKeyData: string | null,
+	privateKeyPassphrase: string | null,
 };
 
 export type UpdateTaskTransferOptionsInput = {

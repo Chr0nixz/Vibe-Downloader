@@ -232,7 +232,7 @@ function ClassificationTryPanel({ disabled }: { disabled?: boolean }) {
   return (
     <div className="grid gap-2 rounded-md border border-border-divider p-3">
       <div>
-        <h5 className="text-xs font-medium text-text-primary">{t("settings.classificationTryTitle")}</h5>
+        <h4 className="text-xs font-medium text-text-primary">{t("settings.classificationTryTitle")}</h4>
         <p className="mt-1 text-xs text-text-muted">{t("settings.classificationTryHint")}</p>
       </div>
       <Field label={t("settings.classificationTryUrl")}>

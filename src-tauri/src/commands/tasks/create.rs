@@ -351,14 +351,24 @@ fn selected_total_size(
 }
 
 fn storage_url_for_input(url: &str) -> String {
+    // LegacyCredentials wipes its password on drop; full destructuring is
+    // required because partial moves out of a Drop type are forbidden.
     db::legacy_credentials_from_url(url)
-        .map(|credentials| credentials.sanitized_url)
+        .map(
+            // Clone, not move: LegacyCredentials wipes its password on drop,
+            // and no field can be moved out of a Drop type.
+            |credentials| credentials.sanitized_url.clone(),
+        )
         .unwrap_or_else(|| url.to_string())
 }
 
 fn storage_url_for_probe(probe: &ProbeOutput) -> String {
     db::legacy_credentials_from_url(&probe.resolved_uri)
-        .map(|credentials| credentials.sanitized_url)
+        .map(
+            // Clone, not move: LegacyCredentials wipes its password on drop,
+            // and no field can be moved out of a Drop type.
+            |credentials| credentials.sanitized_url.clone(),
+        )
         .unwrap_or_else(|| probe.resolved_uri.clone())
 }
 

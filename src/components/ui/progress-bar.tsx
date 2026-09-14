@@ -24,7 +24,9 @@ const toneFill: Record<NonNullable<ProgressBarProps["tone"]>, string> = {
   primary: "bg-accent-primary",
   success: "bg-status-success",
   danger: "bg-status-danger",
-  neutral: "bg-border-subtle",
+  // Inactive fills use the dedicated ≥3:1 token, not border-subtle — the bar is
+  // the row's primary graphic for paused/failed tasks (WCAG 1.4.11).
+  neutral: "bg-progress-fill-inactive",
 };
 
 const toneGlow: Record<NonNullable<ProgressBarProps["tone"]>, string> = {

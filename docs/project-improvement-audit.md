@@ -1216,19 +1216,21 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 修复**：抽出 [`download/net_factory.rs`](../src-tauri/src/download/net_factory.rs) 的 `NetworkClientFactory`（`build_client` + 指纹缓存自 HttpEngine 迁入），HTTP、四个派生引擎与 BT 共享同一工厂实例（`set_proxy_config` 一次失效全部）。三处裸构建点收编：`bt.rs::download_torrent_bytes` 改走工厂（Off 即 `no_proxy()`，修复系统代理泄漏；保留 60s 控制面预算）；`.torrent` URL 的 `AddTorrent::from_url` fallback 删除（librqbit 内部 client 是最后一个绕过点，失败返回结构化 `bt_torrent_fetch_failed`）；`create.rs` sidecar 校验和发现改走工厂并接入任务级代理（每请求 3s 预算）；`webdav.rs` 目录探测改用缓存 client。
 - **验证测试**：新增 [`tests/source_hygiene.rs`](../src-tauri/tests/source_hygiene.rs) 源码扫描门禁（`src/download`/`src/commands`/`src/bin` 下 `Client::builder(` 只允许出现在工厂文件）；`add_torrent_source_http_fallback_on_download_failure` 改写为断言结构化失败而非 URL 回退。Off 语义回归由 `fun20_*` 与 `bt_engine` 的 SOCKS5 不绕行测试共同覆盖。
 
-### SEC-04（P1，Open）：WebSocket 桥缺速率限制，Windows 引导文件权限不足
+### SEC-04（P1，Closed）：WebSocket 桥缺速率限制，Windows 引导文件权限不足
 
 - **证据**：桥正确绑定 `127.0.0.1`（[`browser_realtime.rs`](../src-tauri/src/browser_realtime.rs#L128)）并使用 UUIDv4 token 校验（`:183`），但 `handle_client_message` 对 `createDownload` 没有任何节流或配额，也没有 `Origin` 校验。引导文件路径可预测（`:441`），Unix 上有 `0o400` 保护，Windows 上只设了 readonly 属性（`:422`）——**readonly 不是 ACL**，同用户的任意进程都能读到 token。
 - **影响**：本机同用户进程读取 token 后即可无限调用 `createDownload`，用于耗尽磁盘或把应用当作流量放大器。
 - **修复方向**：Windows 上把引导文件 DACL 收敛为仅当前用户，或改用命名管道传递 token 而不落盘；给 `createDownload` 加令牌桶（建议 10 次/分钟，突发 5）；补 `Origin` 白名单（`chrome-extension://` / `moz-extension://`）作为纵深；把 token 从 query string 移到 `Sec-WebSocket-Protocol` 或首帧握手消息，避免出现在访问日志中。另外扩展侧 `background.js:138` 的 `api.runtime.onMessage` 忽略了 `_sender`，应校验 `sender.id === chrome.runtime.id`。
 - **验收**：超过配额的创建请求返回结构化错误；Windows 上非当前用户进程无法读取引导文件；扩展消息校验发送方身份。
+- **2026-09-15 修复（落地并行工作流，记录代拟）**：`browser_realtime.rs` 新增 `CreateDownloadRateLimiter`——令牌桶突发 5、每分钟 10，`createDownload` 超额返回结构化错误；`origin_allowed` 仅放行 `chrome-extension://`/`moz-extension://`，空 Origin 一律拒绝（纵深防御，浏览器 WebSocket 升级总会带 Origin）；Windows 引导文件经 `restrict_bootstrap_dacl`（`SetEntriesInAclW` + `PROTECTED_DACL_SECURITY_INFORMATION`，丢弃全部继承 ACE）把 DACL 收敛为仅当前用户——readonly 属性不再是唯一防线；扩展侧 `background.js` 的 `onMessage` 校验 `sender.id === api.runtime.id`。验收测试：`limiter_enforces_burst_then_refills_over_time`、`only_extension_origins_may_connect`、`bootstrap_dacl_grants_only_the_current_user`（均在模块单测）；扩展消息校验为静态实现，扩展侧无测试设施，如实记录。
 
-### SEC-05（P1，Open）：明文口令、私钥与密钥全程无 zeroize
+### SEC-05（P1，Closed）：明文口令、私钥与密钥全程无 zeroize
 
 - **证据**：`zeroize` 只作为传递依赖出现在 `Cargo.lock`，`src-tauri/src` 中零引用。[`task_credentials.rs`](../src-tauri/src/db/task_credentials.rs#L6) 的 `TaskCredentials` 四个敏感字段都是普通 `String`；`resolve_task_credentials` 解密过程中还经过 `serde_json::from_str` 产生额外副本；`encryption_key()` 返回按值拷贝的 `[u8; 32]`；`decrypt_headers` 返回的 Cookie JSON 同理。
 - **影响**：进程崩溃转储、Windows 页面文件、休眠镜像或同用户进程读取内存，都能捞到 SFTP 私钥口令与 Cookie 明文。对一个明确以「加密存储凭据」为卖点的模块，这是承诺与实现之间的缺口。
 - **修复方向**：给 `TaskCredentials` 与 `TaskCredentialsSecret` 加 `ZeroizeOnDrop`（需覆盖 serde 反序列化产物），`encryption_key` 返回 `Zeroizing<[u8; 32]>`，解密中间的 `Vec<u8>` 与返回的 `String` 改用 `Zeroizing`/`SecretString`。至少覆盖 password、private_key_data、private_key_passphrase 与解密后的 headers JSON。
 - **验收**：上述四类敏感数据在作用域结束时被擦除；新增测试验证 Drop 后缓冲区不含原文。
+- **2026-09-15 修复（落地并行工作流，记录代拟）**：`TaskCredentials`/`TaskCredentialsSecret` 派生 `Zeroize + ZeroizeOnDrop`（serde 反序列化产物随字段一并覆盖），解密中间缓冲与派生密钥改用 `Zeroizing`，`secure_headers::encryption_key` 返回 `Zeroizing<[u8; 32]>`（integration 侧固定密钥钩子同步迁移到 Zeroizing 形态）。验收测试：`task_credentials_zeroize_wipes_the_password_buffer`——先断言缓冲区确含原文（防恒真），`zeroize` 后断言原文消失。
 
 ### SEC-06（P2，Closed）：`browser_messages` 永久保留含凭据的完整 URL
 
@@ -1300,14 +1302,15 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 
 本章为 2026-08-13 复审新增，记录「门禁本身」的问题。它们不直接影响运行时，但决定了其余条目能否被及时发现。
 
-### ENG-01（P1，Partial）：多处质量门禁的实际覆盖面小于其表观
+### ENG-01（P1，Closed）：多处质量门禁的实际覆盖面小于其表观
 
 - **证据**：四处独立确认。其一，[`ci.yml`](../.github/workflows/ci.yml#L81) 的 `cargo clippy` 没有 `--all-targets`，因此测试目标不受 `-D warnings` 约束；本地补齐后立即暴露 3 个 `items_after_test_module` 错误。其二，[`ci.yml`](../.github/workflows/ci.yml#L79) 只执行 `cargo deny check licenses advisories`，而 [`deny.toml`](../src-tauri/deny.toml#L48) 配置的 `[bans]` 与 `[sources]` 从未执行——这正是 `PERF-13` 的双密码学后端长期无人察觉的原因。其三，`ci.yml:42` 的 Rust 矩阵只有 ubuntu 与 windows，**macOS 的 objc2 平台代码只在 release 构建中被编译，从不被测试也从不被 clippy 检查**。其四，`check-i18n-completeness.ts` 只比 key 不比 value（见 `FUN-21`）。此外 `ci.yml:80` 的 `cargo check` 与 `clippy` 双跑是一整轮全量编译的浪费；`cargo` 命令均未加 `--locked`；advisories 只在 push/PR 触发，没有定时扫描。
 - **影响**：每一处都像是有防护而实际没防住。macOS 平台 bug 可以完整逃逸到发布。
 - **修复方向**：clippy 改为 `--locked --all-targets` 并删除冗余的 `cargo check`（估算每平台省 3-6 分钟）；`cargo deny` 加 `bans sources`；Rust 矩阵加 `macos-latest`（brew 装 ffmpeg）；新建定时执行的 `security.yml`；`check:bindings` 加 `if: ubuntu` 以避免 CRLF 假失败并省一次 specta 编译；全线加 `--locked`（需同时修 `sync-version.mjs` 同步 `Cargo.lock`，见 `ENG-06`）。
 - **验收**：`cargo clippy --all-targets -- -D warnings` 在 CI 通过；`cargo deny check bans sources` 在 CI 执行；macOS 跑完整 Rust 测试与 clippy；`check:i18n` 能检出值层面未翻译项。
 - **2026-08-13 已做**：[`ci.yml`](../.github/workflows/ci.yml) 删除冗余的 `cargo check`、clippy 改为 `--locked --all-targets`、`cargo deny` 加 `bans sources`。改动前已本地核实两项前提：`--locked` 可通过，且 `Cargo.lock` 中所有依赖的 source 均为 crates.io（唯一无 source 的是本地包自身），因此 `sources` 检查不会让 CI 意外变红；`bans` 为 `warn` 级别同样不会。
-- **仍未做**：macOS Rust 矩阵、定时安全扫描、`check:bindings` 限定 ubuntu。`check:i18n` 的 value 校验已在 `FUN-21` Closed。
+- **2026-09-15 补完（落地并行工作流，记录代拟）**：余下三项全部落地——ci.yml Rust 矩阵加 `macos-latest`（brew 安装 ffmpeg，job timeout 30→45 分钟）；`check:bindings` 限定 ubuntu（消除 CRLF 假失败并省一次 specta 编译）；新建 [`.github/workflows/security.yml`](../.github/workflows/security.yml) 每周一 03:00 UTC 以 cargo-deny 扫描 advisories（支持 workflow_dispatch）。至此本条四项证据全部闭环，`FUN-21` 的 value 校验此前已 Closed，状态成立。
+
 
 ### ENG-02（P1，Closed）：当前工作区未通过 lint 与 clippy，且含 UTF-8 乱码
 

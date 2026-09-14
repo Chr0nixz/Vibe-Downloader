@@ -59,11 +59,13 @@ pub async fn current_schema_version(pool: &SqlitePool) -> Result<i64, String> {
 }
 
 /// Snapshot the live database into a verified SQLite file via VACUUM INTO.
+/// Returns whether the cross-volume copy fallback was used (FUN-23) so the
+/// export result can surface it as a diagnostic.
 pub async fn snapshot_database_to_path(
     pool: &SqlitePool,
     db_path: &Path,
     destination: &Path,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     wal_checkpoint(pool).await?;
     if destination.exists() {
         std::fs::remove_file(destination)
@@ -85,8 +87,9 @@ pub async fn snapshot_database_to_path(
             });
         let _ = std::fs::remove_file(&verified);
         copied?;
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 /// FUN-23: cross-volume move fallback — byte copy followed by a full-content
@@ -398,7 +401,7 @@ fn stored_path_is_allowed(value: Option<&str>, allowed_roots: &[PathBuf]) -> boo
 /// to write to or delete.
 fn collect_path_offenders(
     table: &str,
-    rows: Vec<sqlx::sqlite::SqliteRow>,
+    rows: &[sqlx::sqlite::SqliteRow],
     allowed_roots: &[PathBuf],
     offenders: &mut Vec<String>,
 ) {
@@ -414,6 +417,61 @@ fn collect_path_offenders(
             }
         }
     }
+}
+
+/// SEC-02 path-policy scan in reporting form. `validate_app_backup` feeds this
+/// to the pre-restore check panel; the restore command itself still fails
+/// closed through [`enforce_backup_path_policy`].
+#[derive(Debug, Default)]
+pub struct BackupPathScan {
+    pub offenders: Vec<String>,
+    /// Distinct task save dirs outside the allowed roots, in first-seen order.
+    pub offending_save_dirs: Vec<String>,
+}
+
+/// Scan a materialized backup database for stored paths outside `roots`.
+/// Read-only: never rewrites rows, so the result can be shown to the user
+/// without consuming the backup.
+pub async fn scan_backup_path_policy(
+    pool: &SqlitePool,
+    allowed_roots: &[PathBuf],
+) -> Result<BackupPathScan, String> {
+    // Static SQL only - sqlx's injection audit rejects `format!`-built queries,
+    // and keeping the strings literal preserves that guarantee here too.
+    let fetched = async {
+        let tasks = sqlx::query("SELECT id AS row_id, save_dir, temp_path, final_path FROM tasks")
+            .fetch_all(pool)
+            .await?;
+        let files =
+            sqlx::query("SELECT id AS row_id, save_dir, temp_path, final_path FROM task_files")
+                .fetch_all(pool)
+                .await?;
+        Ok::<_, sqlx::Error>((tasks, files))
+    }
+    .await;
+    let (task_rows, file_rows) = fetched.map_err(|e| {
+        engine_backup_error(
+            "backup_invalid_database",
+            format!("Could not read task paths from the backup: {e}"),
+        )
+    })?;
+
+    let mut scan = BackupPathScan::default();
+    collect_path_offenders("tasks", &task_rows, allowed_roots, &mut scan.offenders);
+    collect_path_offenders("task_files", &file_rows, allowed_roots, &mut scan.offenders);
+
+    // Distinct disallowed save dirs give the migration UI something concrete
+    // to show ("these folders will move"). Save_dir is NOT NULL in the schema.
+    for row in &task_rows {
+        let save_dir: String = row.try_get("save_dir").unwrap_or_default();
+        if !save_dir.is_empty()
+            && !scan.offending_save_dirs.iter().any(|d| d == &save_dir)
+            && !stored_path_is_allowed(Some(&save_dir), allowed_roots)
+        {
+            scan.offending_save_dirs.push(save_dir);
+        }
+    }
+    Ok(scan)
 }
 
 /// SEC-02: Reject a backup whose task rows point outside the allowed roots.
@@ -455,38 +513,17 @@ pub async fn enforce_backup_path_policy(
                 format!("Could not open the backup database for validation: {e}"),
             )
         })?;
-
-    // Static SQL only - sqlx's injection audit rejects `format!`-built queries,
-    // and keeping the strings literal preserves that guarantee here too.
-    let fetched = async {
-        let tasks = sqlx::query("SELECT id AS row_id, save_dir, temp_path, final_path FROM tasks")
-            .fetch_all(&pool)
-            .await?;
-        let files =
-            sqlx::query("SELECT id AS row_id, save_dir, temp_path, final_path FROM task_files")
-                .fetch_all(&pool)
-                .await?;
-        Ok::<_, sqlx::Error>((tasks, files))
-    }
-    .await;
+    let scan = scan_backup_path_policy(&pool, allowed_roots).await;
     pool.close().await;
-    let (task_rows, file_rows) = fetched.map_err(|e| {
-        engine_backup_error(
-            "backup_invalid_database",
-            format!("Could not read task paths from the backup: {e}"),
-        )
-    })?;
+    let scan = scan?;
 
-    let mut offenders: Vec<String> = Vec::new();
-    collect_path_offenders("tasks", task_rows, allowed_roots, &mut offenders);
-    collect_path_offenders("task_files", file_rows, allowed_roots, &mut offenders);
-
-    if offenders.is_empty() {
+    if scan.offenders.is_empty() {
         return Ok(());
     }
     // Only the first few are reported: the message reaches the UI and a hostile
     // backup could otherwise pad it arbitrarily.
-    let shown = offenders
+    let shown = scan
+        .offenders
         .iter()
         .take(3)
         .cloned()
@@ -496,9 +533,302 @@ pub async fn enforce_backup_path_policy(
         "backup_unsafe_paths",
         format!(
             "This backup contains {} file path(s) outside your download folders and was rejected: {shown}",
-            offenders.len()
+            scan.offenders.len()
         ),
     ))
+}
+
+/// Subdirectory under a migration remap root where files that lived outside
+/// the old default save dir are relocated.
+const REMAP_MIGRATED_DIR: &str = "migrated";
+
+/// Rewrite every stored task path in a materialized backup so restore can
+/// proceed on a machine whose download roots differ (cross-machine migration).
+///
+/// Rule: paths under `old_default` keep their relative structure under
+/// `new_root`; everything else is relocated to `new_root/migrated/<file_name>`
+/// — collision-free for distinct file names, and disambiguated with a numeric
+/// suffix when the unique `final_path` index would otherwise reject the row.
+///
+/// This is the only sanctioned escape hatch from the SEC-02 fail-closed
+/// policy, and it must stay an explicit user choice: the caller passes
+/// `remap_root` and the rewritten database is re-verified against the new
+/// roots afterwards. Returns the number of rewritten path values.
+pub async fn remap_backup_paths(
+    verified_db: &Path,
+    new_root: &Path,
+    old_default: Option<&Path>,
+) -> Result<u32, String> {
+    if !new_root.is_absolute() {
+        return Err(engine_backup_error(
+            "backup_invalid_remap_root",
+            "The migration target folder must be an absolute path.",
+        ));
+    }
+    let url = format!("sqlite:{}?mode=rw", verified_db.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .map_err(|e| {
+            engine_backup_error(
+                "backup_invalid_database",
+                format!("Could not open the backup database for remapping: {e}"),
+            )
+        })?;
+    let result = remap_in_pool(&pool, new_root, old_default).await;
+    pool.close().await;
+    result
+}
+
+async fn remap_in_pool(
+    pool: &SqlitePool,
+    new_root: &Path,
+    old_default: Option<&Path>,
+) -> Result<u32, String> {
+    let fetched = async {
+        let tasks = sqlx::query("SELECT id, save_dir, temp_path, final_path FROM tasks")
+            .fetch_all(pool)
+            .await?;
+        let files = sqlx::query("SELECT id, save_dir, temp_path, final_path FROM task_files")
+            .fetch_all(pool)
+            .await?;
+        Ok::<_, sqlx::Error>((tasks, files))
+    }
+    .await;
+    let (task_rows, file_rows) = fetched.map_err(|e| {
+        engine_backup_error(
+            "backup_invalid_database",
+            format!("Could not read task paths for remapping: {e}"),
+        )
+    })?;
+
+    let mut remapped: u32 = 0;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Could not begin remap transaction: {e}"))?;
+
+    // Static SQL per table: sqlx's injection audit requires literal query
+    // strings, and both statements share the exact same column shape.
+    remapped += remap_rows(
+        &mut tx,
+        &task_rows,
+        "UPDATE tasks SET save_dir = ?, temp_path = ?, final_path = ? WHERE id = ?",
+        new_root,
+        old_default,
+    )
+    .await?;
+    remapped += remap_rows(
+        &mut tx,
+        &file_rows,
+        "UPDATE task_files SET save_dir = ?, temp_path = ?, final_path = ? WHERE id = ?",
+        new_root,
+        old_default,
+    )
+    .await?;
+
+    sqlx::query("UPDATE settings SET value = ? WHERE key = 'default_save_dir'")
+        .bind(new_root.to_string_lossy().to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Could not remap default_save_dir: {e}"))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("Could not commit path remap: {e}"))?;
+    Ok(remapped)
+}
+
+/// Rewrite one table's path columns inside the remap transaction. Rows whose
+/// values are already acceptable (empty, relative, or unmapped) are skipped.
+async fn remap_rows(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    rows: &[sqlx::sqlite::SqliteRow],
+    update_sql: &'static str,
+    new_root: &Path,
+    old_default: Option<&Path>,
+) -> Result<u32, String> {
+    let mut remapped: u32 = 0;
+    for row in rows {
+        let row_id: String = row.try_get("id").unwrap_or_default();
+        let save_dir: String = row.try_get("save_dir").unwrap_or_default();
+        let temp_path: Option<String> = row.try_get("temp_path").unwrap_or(None);
+        let final_path: Option<String> = row.try_get("final_path").unwrap_or(None);
+
+        let new_save = remap_path_value(&save_dir, new_root, old_default);
+        let new_temp = temp_path
+            .as_deref()
+            .and_then(|value| remap_path_value(value, new_root, old_default));
+        let new_final = final_path
+            .as_deref()
+            .and_then(|value| remap_path_value(value, new_root, old_default));
+        // A computed value equal to the stored one is NOT a remap: when the
+        // chosen root equals the old default, the whole snapshot is a no-op
+        // and must report zero changes instead of rewriting identical text.
+        let save_changed = new_save.as_deref().is_some_and(|value| value != save_dir);
+        let temp_changed = new_temp
+            .as_deref()
+            .is_some_and(|value| Some(value) != temp_path.as_deref());
+        let final_changed = new_final
+            .as_deref()
+            .is_some_and(|value| Some(value) != final_path.as_deref());
+        let changed = save_changed as u32 + temp_changed as u32 + final_changed as u32;
+        if changed == 0 {
+            continue;
+        }
+        let mut final_value = new_final.clone();
+        // The unique index on tasks.final_path covers every rewritten row;
+        // two migrated files with the same name would collide, so suffix the
+        // file name until the update sticks (bounded attempts).
+        let mut updated = false;
+        for attempt in 0..100u32 {
+            let result = sqlx::query(update_sql)
+                .bind(new_save.clone().unwrap_or_else(|| save_dir.clone()))
+                .bind(new_temp.clone().or_else(|| temp_path.clone()))
+                .bind(final_value.clone().or_else(|| final_path.clone()))
+                .bind(&row_id)
+                .execute(&mut **tx)
+                .await;
+            match result {
+                Ok(_) => {
+                    updated = true;
+                    break;
+                }
+                Err(error) if is_unique_violation(&error) && new_final.is_some() => {
+                    let path = Path::new(new_final.as_deref().unwrap_or_default());
+                    final_value = Some(suffixed_path(path, attempt + 2));
+                }
+                Err(error) => {
+                    return Err(engine_backup_error(
+                        "backup_remap_failed",
+                        format!("Could not rewrite stored path for row {row_id}: {error}"),
+                    ));
+                }
+            }
+        }
+        if !updated {
+            return Err(engine_backup_error(
+                "backup_remap_failed",
+                format!("Could not find a collision-free path for row {row_id}."),
+            ));
+        }
+        remapped += changed;
+    }
+    Ok(remapped)
+}
+
+/// True when the SQLite error is the unique-constraint failure our collision
+/// fallback knows how to resolve.
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db) if db.is_unique_violation())
+}
+
+/// Append `-migrated-<n>` before the extension so `a.bin` becomes
+/// `a-migrated-2.bin` on the second collision.
+fn suffixed_path(path: &Path, n: u32) -> String {
+    let file = path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let (stem, ext) = match file.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
+        _ => (file.clone(), String::new()),
+    };
+    path.with_file_name(format!("{stem}-migrated-{n}{ext}"))
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Compute the replacement for one stored path, or `None` when the value must
+/// stay untouched (empty, relative — SEC-02 rejects those later — or when the
+/// backup predates any configured default dir and the file name would be
+/// ambiguous). Membership under `old_default` is judged on the normalized
+/// (separator/case-folded) text, while the rewritten value is built from the
+/// original string so non-ASCII names survive byte-for-byte.
+fn remap_path_value(value: &str, new_root: &Path, old_default: Option<&Path>) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    if !path.is_absolute() {
+        return None;
+    }
+    if let Some(old) = old_default {
+        if is_within_root(path, old) {
+            let norm_old = normalize_for_compare(old);
+            let norm_old = norm_old.trim_end_matches('/');
+            let norm_value = normalize_for_compare(path);
+            if norm_value.as_bytes().get(norm_old.len()) == Some(&b'/') {
+                let relative = &trimmed[norm_old.len() + 1..];
+                return Some(new_root.join(relative).to_string_lossy().to_string());
+            }
+            // The value IS the old default root itself.
+            return Some(new_root.to_string_lossy().to_string());
+        }
+    }
+    let file_name = path.file_name()?;
+    Some(
+        new_root
+            .join(REMAP_MIGRATED_DIR)
+            .join(file_name)
+            .to_string_lossy()
+            .to_string(),
+    )
+}
+
+/// Read the machine-relevant settings rows from a backup snapshot so the
+/// pre-restore panel can show what the SEC-09 scrub will reset.
+pub async fn backup_settings_preview(
+    pool: &SqlitePool,
+) -> Result<crate::models::backup::BackupSettingsPreview, String> {
+    use crate::models::backup::BackupSettingsPreview;
+
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| format!("Could not read backup settings: {e}"))?;
+    let ffmpeg = read_optional_setting(&mut conn, "ffmpeg_path").await?;
+    let completion_action = read_optional_setting(&mut conn, "completion_action").await?;
+    let proxy_saved = read_optional_setting(&mut conn, "proxy_password_saved").await?;
+    let default_save_dir = read_optional_setting(&mut conn, "default_save_dir").await?;
+    Ok(BackupSettingsPreview {
+        ffmpeg_configured: ffmpeg.is_some_and(|value| !value.trim().is_empty()),
+        completion_action: completion_action.unwrap_or_else(|| "notify".to_string()),
+        proxy_password_saved: proxy_saved.is_some_and(|value| value == "true"),
+        default_save_dir: default_save_dir.unwrap_or_default(),
+    })
+}
+
+/// Re-run `PRAGMA integrity_check` on a materialized backup database, e.g.
+/// after a path remap rewrote its rows.
+pub async fn verify_backup_integrity(verified_db: &Path) -> Result<(), String> {
+    let url = format!("sqlite:{}?mode=ro", verified_db.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .map_err(|e| {
+            engine_backup_error(
+                "backup_invalid_database",
+                format!("Could not reopen the backup database: {e}"),
+            )
+        })?;
+    let integrity: Result<String, _> = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await;
+    pool.close().await;
+    match integrity {
+        Ok(value) if value == "ok" => Ok(()),
+        Ok(value) => Err(engine_backup_error(
+            "backup_invalid_database",
+            format!("Backup integrity check failed: {value}"),
+        )),
+        Err(e) => Err(engine_backup_error(
+            "backup_invalid_database",
+            format!("Backup integrity check failed: {e}"),
+        )),
+    }
 }
 
 pub fn pending_restore_path(db_path: &Path) -> PathBuf {
@@ -507,7 +837,7 @@ pub fn pending_restore_path(db_path: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Apply a staged restore before opening the live pool (startup path).
+/// Replace live DB + sidecars with the pending restored file.
 pub async fn apply_pending_restore_if_any(db_path: &Path) -> Result<bool, String> {
     let pending = pending_restore_path(db_path);
     if !pending.exists() {
@@ -528,8 +858,19 @@ pub async fn apply_pending_restore_if_any(db_path: &Path) -> Result<bool, String
     }
     std::fs::rename(&pending, db_path)
         .map_err(|e| format!("Could not apply pending restore database: {e}"))?;
-    if let Err(error) = post_restore_scrub(db_path).await {
-        tracing::warn!(error = %error, "post-restore settings scrub failed");
+    let scrub = match post_restore_scrub(db_path).await {
+        Ok(observation) => Some(observation),
+        Err(error) => {
+            tracing::warn!(error = %error, "post-restore settings scrub failed");
+            None
+        }
+    };
+    // §3.7: the Backup Center surfaces "what to reconfigure" after the swap.
+    // Best-effort — a report failure must never block startup.
+    if let Err(error) =
+        super::restore_report::write_report_after_swap(db_path, scrub.as_ref()).await
+    {
+        tracing::warn!(error = %error, "post-restore report could not be written");
     }
     tracing::info!(
         db_path = %db_path.display(),
@@ -538,16 +879,50 @@ pub async fn apply_pending_restore_if_any(db_path: &Path) -> Result<bool, String
     Ok(true)
 }
 
+/// What the pre-restore settings looked like, captured before the
+/// machine-bound scrub rewrites them; feeds the post-restore report.
+#[derive(Debug, Default, Clone)]
+pub struct RestoreScrubObservation {
+    pub proxy_password_saved_in_backup: Option<bool>,
+    pub ffmpeg_was_configured: bool,
+    pub completion_action_was: Option<String>,
+}
+
 /// FUN-26 + SEC-09: run right after the restored database replaced the live
 /// one. A previous fix wrote `proxy_password_saved=false` into the live DB —
 /// which this swap then overwrote, so the restored row claimed a password the
 /// local keyring never had. Fix the flag against keyring reality here, and
 /// scrub settings that must never silently execute after a restore from
 /// another machine.
-async fn post_restore_scrub(db_path: &Path) -> Result<(), String> {
+async fn post_restore_scrub(db_path: &Path) -> Result<RestoreScrubObservation, String> {
     let connection = sqlite_connect_single(db_path).await?;
     let proxy_password_present =
         crate::proxy::load_proxy_password().is_ok_and(|value| value.is_some());
+    let mut conn = connection
+        .acquire()
+        .await
+        .map_err(|e| format!("Could not acquire the restored database connection: {e}"))?;
+    let result = run_restore_scrub_core(&mut conn, proxy_password_present).await;
+    drop(conn);
+    connection.close().await;
+    result
+}
+
+/// Scrub core operating on an open connection, shared by the startup swap
+/// path and the settings-subset restore. Returns the pre-scrub observation.
+pub(crate) async fn run_restore_scrub_core(
+    connection: &mut sqlx::SqliteConnection,
+    proxy_password_present: bool,
+) -> Result<RestoreScrubObservation, String> {
+    let observation = RestoreScrubObservation {
+        proxy_password_saved_in_backup: read_optional_setting(connection, "proxy_password_saved")
+            .await?
+            .map(|value| value == "true"),
+        ffmpeg_was_configured: read_optional_setting(connection, "ffmpeg_path")
+            .await?
+            .is_some_and(|value| !value.trim().is_empty()),
+        completion_action_was: read_optional_setting(connection, "completion_action").await?,
+    };
     sqlx::query(
         "INSERT INTO settings(key, value) VALUES('proxy_password_saved', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -557,7 +932,7 @@ async fn post_restore_scrub(db_path: &Path) -> Result<(), String> {
     } else {
         "false"
     })
-    .execute(&connection)
+    .execute(&mut *connection)
     .await
     .map_err(|e| e.to_string())?;
     // SEC-09: completion commands and the ffmpeg path are machine-specific and
@@ -573,12 +948,23 @@ async fn post_restore_scrub(db_path: &Path) -> Result<(), String> {
         )
         .bind(key)
         .bind(value)
-        .execute(&connection)
+        .execute(&mut *connection)
         .await
         .map_err(|e| e.to_string())?;
     }
-    connection.close().await;
-    Ok(())
+    Ok(observation)
+}
+
+async fn read_optional_setting(
+    connection: &mut sqlx::SqliteConnection,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(connection)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(row.map(|(value,)| value))
 }
 
 /// Opens a single short-lived connection for the post-restore scrub (the pool

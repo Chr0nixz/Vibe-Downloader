@@ -6,9 +6,12 @@ import type {
   BrowserExtensionExportResult,
   BrowserIntegrationStatus,
   BrowserIntegrationUpdateInput,
+  BulkRecoveryAction,
+  BulkRecoveryResult,
   ChecksumAlgorithm,
   ClassificationRule,
   ClassificationRuleInput,
+  CleanupMode,
   ClipboardLinkDetectedPayload,
   CompletionActionRequestedPayload,
   CreateTaskInput,
@@ -35,6 +38,7 @@ import type {
   ProbeTaskInput,
   ProbeTaskPayload,
   QueueChangedPayload,
+  RecoveryHistoryRecord,
   RequestDiagnostic,
   ResolveTaskAttentionInput,
   SchedulerSnapshot,
@@ -42,6 +46,10 @@ import type {
   SftpDirectoryProbe,
   SftpKnownHost,
   StartupStatus,
+  StorageCleanupProgressPayload,
+  StorageCleanupResult,
+  StorageScanResult,
+  StorageSweepRecord,
   SystemFileIcon,
   TaskEvent,
   TaskProxySettings,
@@ -51,6 +59,7 @@ import type {
   TorrentRuntimeSnapshot,
   TrayMenuAction,
   UpdateSettingsInput,
+  UpdateTaskCredentialsInput,
   UpdateTaskTransferOptionsInput,
   UpdateTorrentFileSelectionInput,
   UpdateTorrentSeedingInput,
@@ -514,12 +523,47 @@ export async function validateAppBackup(backupPath: string) {
   return runCommand("validateAppBackup", () => commands.validateAppBackup(backupPath));
 }
 
-export async function restoreAppBackup(backupPath: string) {
+export async function restoreAppBackup(backupPath: string, remapRoot?: string | null) {
   if (!isTauriRuntime()) {
-    return (await loadBrowserAdapter()).restoreAppBackup(backupPath);
+    return (await loadBrowserAdapter()).restoreAppBackup(backupPath, remapRoot ?? null);
   }
   const commands = await loadNativeCommands();
-  return runCommand("restoreAppBackup", () => commands.restoreAppBackup(backupPath));
+  return runCommand("restoreAppBackup", () => commands.restoreAppBackup(backupPath, remapRoot ?? null));
+}
+
+export async function describeBackupSource() {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).describeBackupSource();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("describeBackupSource", () => commands.describeBackupSource());
+}
+
+export async function restoreBackupSubset(
+  backupPath: string,
+  selection: { tasks: boolean; rules: boolean; settings: boolean },
+) {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).restoreBackupSubset(backupPath, selection);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("restoreBackupSubset", () => commands.restoreBackupSubset(backupPath, selection));
+}
+
+export async function getLastRestoreReport() {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getLastRestoreReport();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("getLastRestoreReport", () => commands.getLastRestoreReport());
+}
+
+export async function dismissRestoreReport(): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).dismissRestoreReport();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("dismissRestoreReport", () => commands.dismissRestoreReport());
 }
 
 export async function readLocalTextFile(path: string, kind: LocalTextFileKind): Promise<string> {
@@ -1100,6 +1144,85 @@ export function onFileDrop(
 }
 
 export { isTauriRuntime };
+
+// ---------------------------------------------------------------------------
+// Storage & Cleanup Center
+// ---------------------------------------------------------------------------
+
+export const EVENT_STORAGE_CLEANUP_PROGRESS = "storage-cleanup-progress";
+
+export async function scanStorage(): Promise<StorageScanResult> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).scanStorage();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("scanStorage", () => commands.scanStorage());
+}
+
+export async function cleanStorageArtifacts(mode: CleanupMode, itemIds?: string[]): Promise<StorageCleanupResult> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).cleanStorageArtifacts(mode, itemIds);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("cleanStorageArtifacts", () => commands.cleanStorageArtifacts(mode, itemIds ?? null));
+}
+
+export async function cleanupTaskTempFiles(taskId: string): Promise<StorageCleanupResult> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).cleanupTaskTempFiles(taskId);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("cleanupTaskTempFiles", () => commands.cleanupTaskTempFiles(taskId));
+}
+
+export async function getLastStorageSweep(): Promise<StorageSweepRecord | null> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getLastStorageSweep();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("getLastStorageSweep", () => commands.getLastStorageSweep());
+}
+
+export function onStorageCleanupProgress(
+  handler: (payload: StorageCleanupProgressPayload) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return import("@/lib/tauri-browser").then((adapter) => adapter.onStorageCleanupProgress(handler));
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<StorageCleanupProgressPayload>(EVENT_STORAGE_CLEANUP_PROGRESS, (event) => {
+      handler(event.payload);
+    }).then((unlisten) => unlisten),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Center
+// ---------------------------------------------------------------------------
+
+export async function bulkResolveAttention(ids: string[], action: BulkRecoveryAction): Promise<BulkRecoveryResult> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).bulkResolveAttention(ids, action);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("bulkResolveAttention", () => commands.bulkResolveAttention(ids, action));
+}
+
+export async function updateTaskCredentials(input: UpdateTaskCredentialsInput): Promise<Task> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).updateTaskCredentials(input);
+  }
+  const commands = await loadNativeCommands();
+  return normalizeTask(await runCommand("updateTaskCredentials", () => commands.updateTaskCredentials(input)));
+}
+
+export async function listRecoveryHistory(limit?: number): Promise<RecoveryHistoryRecord[]> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).listRecoveryHistory(limit);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("listRecoveryHistory", () => commands.listRecoveryHistory(limit ?? null));
+}
 
 export async function getAppVersion(): Promise<string> {
   if (!isTauriRuntime()) {

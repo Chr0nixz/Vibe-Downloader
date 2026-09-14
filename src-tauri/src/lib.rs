@@ -261,6 +261,10 @@ macro_rules! vibe_commands_base {
             commands::backup::create_app_backup,
             commands::backup::validate_app_backup,
             commands::backup::restore_app_backup,
+            commands::backup::describe_backup_source,
+            commands::backup::restore_backup_subset,
+            commands::backup::get_last_restore_report,
+            commands::backup::dismiss_restore_report,
             commands::local_files::read_local_text_file,
             commands::local_files::write_export_file,
             commands::startup::get_startup_status,
@@ -324,6 +328,13 @@ macro_rules! vibe_commands_base {
             commands::tasks::bulk_task_action_global,
             commands::tasks::open_task_file,
             commands::tasks::open_task_folder,
+            commands::storage::scan_storage,
+            commands::storage::clean_storage_artifacts,
+            commands::storage::cleanup_task_temp_files,
+            commands::storage::get_last_storage_sweep,
+            commands::recovery::bulk_resolve_attention,
+            commands::recovery::update_task_credentials,
+            commands::recovery::list_recovery_history,
             $($extra)*
         ]
     };
@@ -354,6 +365,23 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::TaskProgressPayload>()
         .typ::<events::QueueChangedPayload>()
         .typ::<events::ProbePhasePayload>()
+        .typ::<events::StorageCleanupProgressPayload>()
+        .typ::<models::storage::StorageScanResult>()
+        .typ::<models::storage::StorageCleanupResult>()
+        .typ::<models::storage::StorageSweepRecord>()
+        .typ::<models::storage::CleanupMode>()
+        .typ::<models::recovery::RecoveryHistoryRecord>()
+        .typ::<models::backup::BackupContents>()
+        .typ::<models::backup::BackupPathPolicySummary>()
+        .typ::<models::backup::BackupDiskCheck>()
+        .typ::<models::backup::BackupSettingsPreview>()
+        .typ::<models::backup::BackupSubsetSelection>()
+        .typ::<models::backup::BackupSubsetRestoreResult>()
+        .typ::<models::backup::RestoreReport>()
+        .typ::<models::recovery::BulkRecoveryAction>()
+        .typ::<models::recovery::BulkRecoveryResult>()
+        .typ::<models::recovery::UpdateTaskCredentialsInput>()
+        .typ::<models::RecoveryAction>()
         .typ::<models::TaskStatsSnapshot>()
         .typ::<models::TaskFailureCategory>()
         .typ::<models::TorrentRuntimeSnapshot>()
@@ -659,16 +687,42 @@ async fn run_startup_init_inner(handle: &tauri::AppHandle) -> Result<(), String>
                 tracing::warn!(error = %error, "browser messages prune failed");
             }
         }
-        match commands::task_file_planning::sweep_orphan_staging_dirs(&pool).await {
-            Ok(0) => {}
-            Ok(removed) => {
-                tracing::info!(removed, "startup staging directory sweep");
+        // Hoisted before the sweep so the artifact sweep also covers the
+        // default save dir even when no task row references it yet.
+        let default_dir = commands::settings::default_download_dir(handle)?;
+        let sweep_started = chrono::Utc::now().to_rfc3339();
+        match download::artifacts::sweep_orphan_artifacts(
+            &pool,
+            std::slice::from_ref(&default_dir),
+            download::artifacts::SweepOptions { include_dht: true },
+        )
+        .await
+        {
+            Ok(summary) => {
+                if summary.removed > 0 || summary.failed > 0 {
+                    tracing::info!(
+                        removed = summary.removed,
+                        failed = summary.failed,
+                        "startup artifact sweep"
+                    );
+                }
+                let record = models::StorageSweepRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    started_at: sweep_started,
+                    finished_at: chrono::Utc::now().to_rfc3339(),
+                    mode: "startup".to_string(),
+                    removed_count: u32::try_from(summary.removed).unwrap_or(u32::MAX),
+                    failed_count: u32::try_from(summary.failed).unwrap_or(u32::MAX),
+                    reclaimed_bytes: summary.reclaimed_bytes.to_string(),
+                };
+                if let Err(error) = db::insert_sweep_record(&pool, &record, "{}").await {
+                    tracing::warn!(error = %error, "could not persist startup sweep record");
+                }
             }
             Err(error) => {
-                tracing::warn!(error = %error, "staging directory sweep failed");
+                tracing::warn!(error = %error, "artifact sweep failed");
             }
         }
-        let default_dir = commands::settings::default_download_dir(handle)?;
         let settings = db::get_settings(&pool, default_dir).await?;
         db::reset_interrupted_tasks(&pool, settings.auto_resume_on_startup).await?;
         let speed_limiter = Arc::new(download::GlobalSpeedLimiter::new(

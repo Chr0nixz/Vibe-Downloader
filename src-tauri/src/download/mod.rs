@@ -1,3 +1,4 @@
+pub mod artifacts;
 mod bt;
 pub(crate) mod checksum;
 mod dash;

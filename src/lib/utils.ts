@@ -58,6 +58,15 @@ export function formatSpeed(bps: number): string {
   return i18n.t("format.speed", { value: formatted, unit });
 }
 
+/** Speed label for an active transfer that is moving 0 B/s right now (stalled).
+ * formatSpeed renders "—" for <=0, which is the right placeholder where no
+ * speed applies (paused rows, idle totals) but wrong where the stall itself is
+ * the diagnostic fact the row should surface. */
+export function formatStalledSpeed(): string {
+  const unit = i18n.t(BYTE_UNIT_KEYS[1]);
+  return i18n.t("format.speed", { value: numberFormatter(i18n.language, 0).format(0), unit });
+}
+
 export function formatEta(downloaded: number, total: number, speedBps: number): string {
   if (total <= 0 || downloaded >= total) return "—";
   if (speedBps <= 0) return "—";

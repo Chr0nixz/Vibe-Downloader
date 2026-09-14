@@ -12,7 +12,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use tauri_app_lib::{commands::task_file_planning, db, models::TaskStatus};
+use tauri_app_lib::commands::task_file_planning;
+use tauri_app_lib::{db, download::artifacts, models::TaskStatus};
 
 mod common;
 
@@ -78,9 +79,10 @@ async fn sweep_removes_orphan_and_completed_staging_keeps_resumable() {
     make_staging_dir(&save_dir, "task-deleted"); // No task row → remove
     make_staging_dir(&save_dir, "never-existed"); // No task row → remove
 
-    let removed = task_file_planning::sweep_orphan_staging_dirs(&pool)
+    let summary = artifacts::sweep_orphan_artifacts(&pool, &[], artifacts::SweepOptions::default())
         .await
         .expect("sweep");
+    let removed = summary.removed;
 
     assert_eq!(
         removed, 3,
@@ -142,9 +144,10 @@ async fn sweep_tolerates_save_dirs_without_staging_root() {
         .await
         .expect("insert");
 
-    let removed = task_file_planning::sweep_orphan_staging_dirs(&pool)
+    let removed = artifacts::sweep_orphan_artifacts(&pool, &[], artifacts::SweepOptions::default())
         .await
-        .expect("sweep must not fail when a save dir has no .vibe-staging root");
+        .expect("sweep must not fail when a save dir has no .vibe-staging root")
+        .removed;
     assert_eq!(removed, 0);
 
     let _ = fs::remove_dir_all(&base);

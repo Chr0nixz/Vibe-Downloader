@@ -185,6 +185,9 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const [showResetDialog, setShowResetDialog] = useState(false);
+  // Restore replaces the database on restart, so it goes through the same
+  // themed hard-confirm dialog as reset-defaults instead of window.confirm.
+  const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [settingsSearch, setSettingsSearch] = useState("");
   const [browserStatus, setBrowserStatus] = useState<BrowserIntegrationStatus | null>(null);
@@ -1218,12 +1221,21 @@ export function SettingsPage() {
     }
   }
 
+  // Opens the themed confirmation dialog; the actual restore runs from the
+  // dialog's confirm button via handleRestoreBackup.
+  function requestRestoreBackup() {
+    if (!isTauriRuntime()) {
+      addToast({ tone: "error", title: t("settings.dataBackupUnavailable") });
+      return;
+    }
+    setRestoreConfirmOpen(true);
+  }
+
   async function handleRestoreBackup() {
     if (!isTauriRuntime()) {
       addToast({ tone: "error", title: t("settings.dataBackupUnavailable") });
       return;
     }
-    if (!window.confirm(t("settings.dataBackupRestoreConfirm"))) return;
     setBackupBusy(true);
     try {
       const { restoreSelectedAppBackup } = await import("@/lib/backup");
@@ -2158,7 +2170,7 @@ export function SettingsPage() {
                       variant="outline"
                       className="h-11 md:h-8"
                       disabled={controlsDisabled || backupBusy}
-                      onClick={() => void handleRestoreBackup()}
+                      onClick={requestRestoreBackup}
                     >
                       <RotateCcw className="h-4 w-4" />
                       {t("settings.dataBackupRestore")}
@@ -2291,6 +2303,32 @@ export function SettingsPage() {
                   <RotateCcw className="mr-1.5 h-4 w-4" />
                 )}
                 {t("settings.resetDefaults")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={restoreConfirmOpen} onOpenChange={setRestoreConfirmOpen}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>{t("settings.dataBackupRestoreTitle")}</DialogTitle>
+              <DialogDescription>{t("settings.dataBackupRestoreConfirm")}</DialogDescription>
+            </DialogHeader>
+            <DialogBody />
+            <DialogFooter className="gap-2 sm:gap-2">
+              <Button variant="outline" onClick={() => setRestoreConfirmOpen(false)} disabled={backupBusy}>
+                {t("actions.cancel")}
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  setRestoreConfirmOpen(false);
+                  void handleRestoreBackup();
+                }}
+                disabled={backupBusy}
+              >
+                <RotateCcw className="mr-1.5 h-4 w-4" />
+                {t("settings.dataBackupRestore")}
               </Button>
             </DialogFooter>
           </DialogContent>
