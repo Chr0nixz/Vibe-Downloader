@@ -1255,19 +1255,22 @@ async fn pause_sftp_download_mid_transfer(task_id: &str) -> Arc42SftpFixture {
         let context = common::headless_download_context(pool.clone(), task, cancel.clone());
         async move { engine.download(context).await }
     });
-    loop {
-        let segments = db::list_segment_records(&pool, task_id)
-            .await
-            .expect("list segments");
-        if segments
-            .first()
-            .map(|segment| segment.downloaded_until)
-            .is_some_and(|downloaded| downloaded > 0)
-        {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    let first = common::wait_for_segment_progress(
+        || {
+            Box::pin(async {
+                db::list_segment_records(&pool, task_id)
+                    .await
+                    .expect("list segments")
+                    .first()
+                    .map(|segment| segment.downloaded_until)
+                    .is_some_and(|downloaded| downloaded > 0)
+            })
+        },
+        first,
+        std::time::Duration::from_secs(60),
+        "sftp fixture first segment progress",
+    )
+    .await;
     assert!(
         std::fs::metadata(&paths.temp)
             .map(|meta| i64::try_from(meta.len()).unwrap_or(i64::MAX))

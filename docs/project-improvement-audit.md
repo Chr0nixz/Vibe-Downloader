@@ -1359,7 +1359,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **影响**：任何「早退且不写 checkpoint」的引擎回归（例如 ARC-33 类改动失误）→ 循环永不退出、真实错误永不可见，烧满 30 分钟超时且双 OS leg 信号全失。
 - **修复方向**：抽 tests/common 的 `wait_for_segment_progress(deadline)` helper（Instant deadline + 超时 panic 时附带 JoinHandle 错误），替换六处循环。
 - **验收**：人为早退的 stub engine 下测试秒级失败并显示真实错误。
-- **2026-09-14 修复**（`0a1222f`，Partial）：抽 [`common::wait_for_segment_progress`](../src-tauri/tests/common/mod.rs)——条件是逐次装箱的 async 闭包（等待需要重查数据库），超时且 worker 已退出时先 await 它，让 panic 携带引擎真实错误而非笼统超时。已转换干净测试文件中的 4 处循环：sftp_engine.rs、hls_engine.rs ×2、webdav_engine.rs（deadline 60s，仍远小于 30 分钟腿超时），并新增验收自测 `eng07_early_exit_stub_fails_fast_with_real_error`——stub 提前带错误退出时 ~0.2s 内 panic 且 payload 含该错误，而旧行为下同一 stub 会无限轮询。保持 Partial 的原因：ftp_engine.rs 与 dash_engine.rs 的 3 处循环位于并行在途文件未转换，待其落地后按同一范本收尾。
+- **2026-09-14 修复**（`0a1222f`，Partial）：抽 [`common::wait_for_segment_progress`](../src-tauri/tests/common/mod.rs)——条件是逐次装箱的 async 闭包（等待需要重查数据库），超时且 worker 已退出时先 await 它，让 panic 携带引擎真实错误而非笼统超时。已转换干净测试文件中的 5 处循环：sftp_engine.rs ×2（其一是 ARC-42 验收共用的 `pause_sftp_download_mid_transfer` fixture——2026-09-15 复盘的全仓裸轮询扫描发现它被原证据清单漏列，补录转换）、hls_engine.rs ×2、webdav_engine.rs（deadline 60s，仍远小于 30 分钟腿超时），并新增验收自测 `eng07_early_exit_stub_fails_fast_with_real_error`——stub 提前带错误退出时 ~0.2s 内 panic 且 payload 含该错误，而旧行为下同一 stub 会无限轮询。保持 Partial 的原因：ftp_engine.rs 与 dash_engine.rs 的 3 处循环位于并行在途文件未转换，待其落地后按同一范本收尾。
 
 ### ENG-08（P3，Open）：sync-stable-error-i18n.mjs 以硬编码哨兵键区分「已同步 / regex 未命中」，且零测试覆盖
 
