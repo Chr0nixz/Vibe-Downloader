@@ -27,7 +27,7 @@ use self::{
 };
 
 pub(crate) use error::format_http_status as format_http_status_error;
-pub(crate) use request::{headers_for_origin, merge_basic_auth_headers, url_host};
+pub(crate) use request::{headers_for_origin, merge_basic_auth_headers, url_origin};
 
 use super::engine::EngineFuture;
 use super::{DownloadContext, DownloadEngine, DownloadError, ProbeOutput, ProbeRequest};

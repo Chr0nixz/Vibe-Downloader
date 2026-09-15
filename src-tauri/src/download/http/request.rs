@@ -130,20 +130,22 @@ pub(super) fn retry_after_duration(response: &Response) -> Option<Duration> {
 
 /// SEC-11: bind credential-bearing headers to the origin that produced them.
 ///
-/// Authorization/Cookie may only travel to the origin host — manifest-declared
-/// mirrors and cross-source media hosts are third parties from the origin's
-/// perspective. Non-sensitive forwarded headers (User-Agent, Referer, ...)
-/// still flow. Fail-closed: when the target URL cannot be parsed, credentials
-/// are stripped.
+/// Authorization/Cookie may only travel to the origin that produced them —
+/// manifest-declared mirrors and cross-source media hosts are third parties
+/// from the origin's perspective. Non-sensitive forwarded headers (User-Agent,
+/// Referer, ...) still flow. Fail-closed: when the target URL cannot be
+/// parsed, credentials are stripped.
+///
+/// `origin` is the full origin (scheme + host + port, default ports
+/// normalized) of the task URL. Comparing ports matters: a different port on
+/// the same host is a different service in the web origin model and must not
+/// receive credentials either.
 pub(crate) fn headers_for_origin(
     headers: &[(String, String)],
-    origin_host: &str,
+    origin: &str,
     target_url: &str,
 ) -> Vec<(String, String)> {
-    let same_origin = reqwest::Url::parse(target_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .is_some_and(|host| host.eq_ignore_ascii_case(origin_host));
+    let same_origin = url_origin(target_url).is_some_and(|target| target == origin);
     if same_origin {
         headers.to_vec()
     } else {
@@ -157,17 +159,19 @@ pub(crate) fn headers_for_origin(
     }
 }
 
-/// Extracts the host of a URL string for origin comparisons; `None` when the
-/// URL is unparseable or hostless.
-pub(crate) fn url_host(url: &str) -> Option<String> {
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_string))
+/// Normalizes a URL to its origin (`scheme://host:port` with default ports
+/// resolved) for SEC-11 comparisons; `None` when the URL is unparseable or
+/// hostless, which callers must treat as "strip credentials".
+pub(crate) fn url_origin(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let port = parsed.port_or_known_default()?;
+    Some(format!("{}://{}:{}", parsed.scheme(), host, port))
 }
 
 #[cfg(test)]
 mod origin_binding_tests {
-    use super::headers_for_origin;
+    use super::{headers_for_origin, url_origin};
 
     fn sample_headers() -> Vec<(String, String)> {
         vec![
@@ -188,11 +192,8 @@ mod origin_binding_tests {
     #[test]
     fn same_origin_keeps_credentials() {
         let headers = sample_headers();
-        let bound = headers_for_origin(
-            &headers,
-            "origin.example",
-            "https://origin.example/seg-1.ts",
-        );
+        let origin = url_origin("https://origin.example").expect("origin");
+        let bound = headers_for_origin(&headers, &origin, "https://origin.example/seg-1.ts");
         assert_eq!(bound.len(), headers.len());
         assert!(bound.iter().any(|(n, _)| n == "Authorization"));
         assert!(bound.iter().any(|(n, _)| n == "Cookie"));
@@ -202,22 +203,42 @@ mod origin_binding_tests {
     #[test]
     fn cross_origin_strips_credentials_only() {
         let headers = sample_headers();
-        let bound = headers_for_origin(
-            &headers,
-            "origin.example",
-            "https://cdn.other.example/seg-1.ts",
-        );
+        let origin = url_origin("https://origin.example").expect("origin");
+        let bound = headers_for_origin(&headers, &origin, "https://cdn.other.example/seg-1.ts");
         assert!(bound.iter().all(|(n, _)| n != "Authorization"));
         assert!(bound.iter().all(|(n, _)| n != "Cookie"));
         assert!(bound.iter().any(|(n, _)| n == "User-Agent"));
         assert!(bound.iter().any(|(n, _)| n == "Referer"));
     }
 
+    /// SEC-11: a different port on the same host is a different origin and
+    /// must not receive credentials either (web origin model).
+    #[test]
+    fn same_host_different_port_strips_credentials() {
+        let headers = sample_headers();
+        let origin = url_origin("http://127.0.0.1:8001").expect("origin");
+        let bound = headers_for_origin(&headers, &origin, "http://127.0.0.1:8002/seg-1.ts");
+        assert!(bound.iter().all(|(n, _)| n != "Authorization"));
+        assert!(bound.iter().all(|(n, _)| n != "Cookie"));
+        assert!(bound.iter().any(|(n, _)| n == "User-Agent"));
+    }
+
+    /// SEC-11: default ports normalize away — `:443` on an https origin is
+    /// the same origin as the bare host.
+    #[test]
+    fn default_ports_normalize_to_same_origin() {
+        let headers = sample_headers();
+        let origin = url_origin("https://origin.example").expect("origin");
+        let bound = headers_for_origin(&headers, &origin, "https://origin.example:443/seg-1.ts");
+        assert!(bound.iter().any(|(n, _)| n == "Authorization"));
+    }
+
     /// SEC-11: fail closed — an unparseable target strips credentials too.
     #[test]
     fn unparseable_target_strips_credentials() {
         let headers = sample_headers();
-        let bound = headers_for_origin(&headers, "origin.example", "not a url");
+        let origin = url_origin("https://origin.example").expect("origin");
+        let bound = headers_for_origin(&headers, &origin, "not a url");
         assert!(bound.iter().all(|(n, _)| n != "Authorization"));
     }
 }

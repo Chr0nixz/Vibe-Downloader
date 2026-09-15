@@ -886,8 +886,9 @@ async fn download_hls_segments(
     db_write_gate: &mut DbWriteGate,
     fetch_cache: Arc<HlsTaskFetchCache>,
 ) -> Result<i64, String> {
-    // SEC-11: credential headers may only travel to the origin host.
-    let origin_host = crate::download::http::url_host(&task.url).unwrap_or_default();
+    // SEC-11: credential headers may only travel to the task URL origin
+    // (scheme + host + port — a different port is a different origin).
+    let origin = crate::download::http::url_origin(&task.url).unwrap_or_default();
     let mut pending = plans.into_iter();
     let mut workers = JoinSet::new();
     let mut active = 0_usize;
@@ -905,7 +906,7 @@ async fn download_hls_segments(
             let speed_limiter = speed_limiter.clone();
             let cancel_token = cancel_token.clone();
             let fetch_cache = fetch_cache.clone();
-            let origin_host = origin_host.clone();
+            let origin = origin.clone();
             workers.spawn(async move {
                 download_hls_segment(
                     &pool,
@@ -915,7 +916,7 @@ async fn download_hls_segments(
                     cancel_token,
                     plan,
                     fetch_cache,
-                    origin_host,
+                    origin,
                 )
                 .await
             });
@@ -986,7 +987,7 @@ async fn download_hls_segment(
     cancel_token: tokio_util::sync::CancellationToken,
     plan: SegmentDownloadPlan,
     fetch_cache: Arc<HlsTaskFetchCache>,
-    origin_host: String,
+    origin: String,
 ) -> SegmentDownloadResult {
     let retry_policy = RetryPolicy::hls_segment();
     let mut retry_count = 0;
@@ -997,7 +998,7 @@ async fn download_hls_segment(
             pool,
             client,
             &request_headers,
-            &origin_host,
+            &origin,
             &speed_limiter,
             &cancel_token,
             &plan,
@@ -1095,7 +1096,7 @@ async fn download_hls_segment_once(
     pool: &SqlitePool,
     client: &Client,
     request_headers: &[(String, String)],
-    origin_host: &str,
+    origin: &str,
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: &tokio_util::sync::CancellationToken,
     plan: &SegmentDownloadPlan,
@@ -1112,7 +1113,7 @@ async fn download_hls_segment_once(
         ensure_hls_init_map(
             client,
             request_headers,
-            origin_host,
+            origin,
             speed_limiter,
             cancel_token,
             init_map,
@@ -1127,7 +1128,7 @@ async fn download_hls_segment_once(
     )?;
     // SEC-11: strip Authorization/Cookie when the segment lives on another host.
     let bound_headers =
-        crate::download::http::headers_for_origin(request_headers, origin_host, &plan.uri);
+        crate::download::http::headers_for_origin(request_headers, origin, &plan.uri);
     let mut response = apply_forwarded_headers(client.get(&plan.uri), &bound_headers)
         .header(ACCEPT_ENCODING, "identity");
     if let Some(range) = &plan.byte_range {
@@ -1151,7 +1152,7 @@ async fn download_hls_segment_once(
         stream_encrypted_hls_segment(
             client,
             request_headers,
-            origin_host,
+            origin,
             speed_limiter,
             cancel_token,
             response,
@@ -1229,7 +1230,7 @@ async fn download_hls_segment_once(
 async fn ensure_hls_init_map(
     client: &Client,
     request_headers: &[(String, String)],
-    origin_host: &str,
+    origin: &str,
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: &tokio_util::sync::CancellationToken,
     init_map: &ResolvedHlsInitMap,
@@ -1262,7 +1263,7 @@ async fn ensure_hls_init_map(
                 &init_map.uri,
                 &request_headers,
                 init_map.byte_range.as_ref().map(byte_range_header),
-                origin_host,
+                origin,
             )
             .await?;
             if cancel_token.is_cancelled() {
@@ -1322,7 +1323,7 @@ async fn ensure_hls_init_map(
 async fn hls_decryptor(
     client: &Client,
     request_headers: &[(String, String)],
-    origin_host: &str,
+    origin: &str,
     key: &HlsKey,
     media_sequence: i64,
     fetch_cache: &Arc<HlsTaskFetchCache>,
@@ -1346,7 +1347,7 @@ async fn hls_decryptor(
     let uri_owned = uri.to_string();
     let key_bytes = fetch_cache
         .get_or_fetch_key(uri, || async move {
-            fetch_bytes(&client, &uri_owned, &request_headers, None, origin_host)
+            fetch_bytes(&client, &uri_owned, &request_headers, None, origin)
                 .await?
                 .try_into()
                 .map_err(|_| {
@@ -1371,7 +1372,7 @@ async fn hls_decryptor(
 async fn stream_encrypted_hls_segment(
     client: &Client,
     request_headers: &[(String, String)],
-    origin_host: &str,
+    origin: &str,
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: &tokio_util::sync::CancellationToken,
     mut response: reqwest::Response,
@@ -1382,7 +1383,7 @@ async fn stream_encrypted_hls_segment(
     let mut decryptor = hls_decryptor(
         client,
         request_headers,
-        origin_host,
+        origin,
         key,
         plan.media_sequence,
         fetch_cache,
@@ -1636,7 +1637,7 @@ async fn download_hls_rendition(
         pool,
         client,
         request_headers,
-        crate::download::http::url_host(media_url).unwrap_or_default(),
+        crate::download::http::url_origin(media_url).unwrap_or_default(),
         speed_limiter,
         cancel_token,
         connection_limit,
@@ -1702,7 +1703,7 @@ async fn poll_live_external_track(
         pool,
         client,
         request_headers,
-        crate::download::http::url_host(&track.url).unwrap_or_default(),
+        crate::download::http::url_origin(&track.url).unwrap_or_default(),
         speed_limiter,
         cancel_token,
         connection_limit,
@@ -1719,7 +1720,7 @@ async fn download_hls_rendition_segments(
     pool: &SqlitePool,
     client: &Client,
     request_headers: &[(String, String)],
-    origin_host: String,
+    origin: String,
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: &tokio_util::sync::CancellationToken,
     connection_limit: usize,
@@ -1755,7 +1756,7 @@ async fn download_hls_rendition_segments(
                 .and_then(|value| value.to_str())
                 .unwrap_or("segment.ts")
                 .to_string();
-            let origin_host = origin_host.clone();
+            let origin = origin.clone();
             workers.spawn(async move {
                 let result = download_hls_segment(
                     &pool,
@@ -1765,7 +1766,7 @@ async fn download_hls_rendition_segments(
                     cancel_token,
                     plan,
                     fetch_cache,
-                    origin_host,
+                    origin,
                 )
                 .await;
                 (
@@ -2232,9 +2233,10 @@ async fn fetch_text(
     url: &str,
     headers: &[(String, String)],
 ) -> Result<String, String> {
-    // Self-origin binding: playlist fetches are same-host by construction.
-    let own_host = crate::download::http::url_host(url).unwrap_or_default();
-    let bytes = fetch_bytes(client, url, headers, None, &own_host).await?;
+    // Self-origin binding: a playlist fetch always targets its own URL, so
+    // the comparison is trivially same-origin; the helper still fail-closes.
+    let own_origin = crate::download::http::url_origin(url).unwrap_or_default();
+    let bytes = fetch_bytes(client, url, headers, None, &own_origin).await?;
     String::from_utf8(bytes).map_err(|_| {
         engine_error(
             "hls_invalid_playlist",
@@ -2249,14 +2251,14 @@ async fn fetch_bytes(
     url: &str,
     headers: &[(String, String)],
     range: Option<String>,
-    origin_host: &str,
+    origin: &str,
 ) -> Result<Vec<u8>, String> {
     // SEC-10: literal-authority pre-flight.
     crate::download::ssrf::assert_public_authority(
         &reqwest::Url::parse(url).map_err(|e| format!("Could not request HLS resource: {e}"))?,
     )?;
     // SEC-11: keys and init sections are as origin-bound as the segments.
-    let bound_headers = crate::download::http::headers_for_origin(headers, origin_host, url);
+    let bound_headers = crate::download::http::headers_for_origin(headers, origin, url);
     let headers = bound_headers.as_slice();
     let mut request = apply_forwarded_headers(client.get(url), headers);
     if let Some(range) = range {

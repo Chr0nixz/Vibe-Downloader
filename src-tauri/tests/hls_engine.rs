@@ -5,7 +5,7 @@ use std::{
     net::TcpStream,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -13,7 +13,9 @@ use std::{
 use common::TestServer;
 use tauri_app_lib::{
     db,
-    download::{DownloadEngine, HlsEngine, HttpEngine, ProbeRequest},
+    download::{
+        DownloadContext, DownloadEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine, ProbeRequest,
+    },
     models::{AppErrorPayload, SegmentStatus, TaskStatus},
     proxy::ResolvedProxyConfig,
     state_machine,
@@ -1360,6 +1362,213 @@ async fn download_uses_persisted_hls_credentials() {
     pool.close().await;
 }
 
+/// Captured outbound request for the SEC-11 header assertions.
+#[derive(Debug, Clone)]
+struct Sec11CapturedRequest {
+    path: String,
+    headers: Vec<(String, String)>,
+}
+
+impl Sec11CapturedRequest {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(captured, _)| captured == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// Serves an origin media playlist whose segment URI is absolute and points
+/// at `127.0.0.1` (rebuilt from the request's Host header so the listener
+/// stays port-agnostic), plus a placeholder segment. Every request's headers
+/// are captured for outbound-credential assertions.
+fn sec11_handle_connection(stream: TcpStream, observed: Arc<Mutex<Vec<Sec11CapturedRequest>>>) {
+    let mut stream = stream;
+    let mut buffer = [0_u8; 8192];
+    let Ok(read) = stream.read(&mut buffer) else {
+        return;
+    };
+    if read == 0 {
+        return;
+    }
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let mut lines = request.lines();
+    let request_line = lines.next().unwrap_or_default();
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .to_string();
+    let mut headers = Vec::new();
+    for line in lines.by_ref() {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+        }
+    }
+    let host = headers
+        .iter()
+        .find(|(name, _)| name == "host")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    let port = host.rsplit(':').next().unwrap_or("0").to_string();
+
+    let (status, content_type, body): (u16, &str, Vec<u8>) = if path.starts_with("/origin.m3u8") {
+        let playlist = format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:5.0,\nhttp://127.0.0.1:{port}/seg0.ts\n#EXT-X-ENDLIST\n"
+        );
+        (200, "application/vnd.apple.mpegurl", playlist.into_bytes())
+    } else if path.starts_with("/seg") {
+        (200, "video/mp2t", vec![0_u8; 188])
+    } else {
+        (404, "text/plain", b"not found".to_vec())
+    };
+    observed
+        .lock()
+        .expect("lock")
+        .push(Sec11CapturedRequest { path, headers });
+
+    let response = format!(
+        "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.write_all(&body);
+}
+
+/// Mirror listener on `[::1]` for the same port: the origin side of the
+/// cross-origin pair is the `[::1]` literal, and both stacks need to reach
+/// the same serving logic.
+fn start_sec11_v6_mirror(port: u16, observed: Arc<Mutex<Vec<Sec11CapturedRequest>>>) {
+    let listener = std::net::TcpListener::bind(("::1", port)).expect("bind ::1 mirror");
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            sec11_handle_connection(stream, Arc::clone(&observed));
+        }
+    });
+}
+
+/// SEC-11 integration evidence: credential-bearing forwarded headers are
+/// bound to the origin that produced them. The task URL uses the `[::1]`
+/// loopback literal so the same-origin playlist fetch keeps every header,
+/// while the playlist declares an absolute segment URI on `127.0.0.1` — a
+/// different host that reaches the same test logic via the IPv4 listener.
+/// The segment request must arrive without Authorization/Cookie but with
+/// non-sensitive headers intact. (Metalink mirrors are a documented product
+/// exemption, so the HLS segment path is the integration-level cross-origin
+/// arm.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sec11_cross_origin_segment_fetch_strips_credentials() {
+    common::install_intranet_test_bypass();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let observed_server = Arc::clone(&observed);
+    let server = TestServer::start(move |stream| {
+        sec11_handle_connection(stream, Arc::clone(&observed_server));
+    });
+    let port = server
+        .authority()
+        .rsplit(':')
+        .next()
+        .expect("bound port")
+        .to_string();
+    start_sec11_v6_mirror(
+        port.parse::<u16>().expect("numeric port"),
+        Arc::clone(&observed),
+    );
+    let (_db, pool) = common::test_pool("hls-sec11-origin-binding").await;
+    let mut paths = common::TestPaths::new("hls-sec11-origin-binding");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("sec11.mp4");
+    let task = common::download_task(
+        "hls-sec11-origin-binding",
+        // Origin host is the IPv6 loopback literal; the engine's hickory
+        // resolver cannot resolve `localhost`, so both sides of the pair use
+        // IP literals (`[::1]` origin vs `127.0.0.1` segment target) —
+        // different hosts, no DNS involved.
+        format!("http://[::1]:{port}/origin.m3u8"),
+        "hls",
+        "sec11.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert HLS task");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let download = tokio::spawn({
+        let engine = new_engine();
+        let context = DownloadContext {
+            app: None,
+            pool: pool.clone(),
+            task: task.clone(),
+            cancel_token: cancel.clone(),
+            finish: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            finish_notify: Arc::new(tokio::sync::Notify::new()),
+            speed_limiter: GlobalSpeedLimiter::disabled(),
+            connection_limit: 1,
+            request_headers: vec![
+                (
+                    "Authorization".to_string(),
+                    "Basic dXNlcjpwYXNz".to_string(),
+                ),
+                ("Cookie".to_string(), "session=abc".to_string()),
+                ("X-Vibe-Neutral".to_string(), "keep-me".to_string()),
+            ],
+            proxy_config: ResolvedProxyConfig::default(),
+        };
+        async move { engine.download(context).await }
+    });
+
+    // Wait until both the same-origin playlist fetch and the cross-origin
+    // segment fetch have been captured, then assert the binding on the wire.
+    let started = std::time::Instant::now();
+    loop {
+        let captured = observed.lock().expect("lock").clone();
+        let playlist = captured.iter().find(|r| r.path.starts_with("/origin.m3u8"));
+        let segment = captured.iter().find(|r| r.path.starts_with("/seg"));
+        if let (Some(playlist), Some(segment)) = (playlist, segment) {
+            assert_eq!(
+                playlist.header("authorization"),
+                Some("Basic dXNlcjpwYXNz"),
+                "same-origin playlist fetch must keep Authorization"
+            );
+            assert_eq!(playlist.header("cookie"), Some("session=abc"));
+            assert_eq!(
+                segment.header("authorization"),
+                None,
+                "cross-origin segment fetch must not receive Authorization"
+            );
+            assert_eq!(
+                segment.header("cookie"),
+                None,
+                "cross-origin segment fetch must not receive Cookie"
+            );
+            assert_eq!(
+                segment.header("x-vibe-neutral"),
+                Some("keep-me"),
+                "non-sensitive headers still flow to cross-origin targets"
+            );
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(15) {
+            cancel.cancel();
+            let result = download.await;
+            panic!(
+                "timed out waiting for cross-origin segment fetch; captured: {captured:?}; engine result: {result:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    cancel.cancel();
+    let _ = download.await;
+    pool.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_fails_when_playlist_returns_401() {
     let expected = b64_basic("alice", "secret");
@@ -1844,5 +2053,152 @@ async fn fun27_hls_state_read_failure_fails_task() {
         message.contains("hls_state_read_failed"),
         "expected the hls_state_read_failed code, got: {message}"
     );
+    pool.close().await;
+}
+
+// SEC-11: cross-origin (same host, different port) segment fetches must not
+// receive Authorization/Cookie, while the same-origin playlist request keeps
+// them. The segment URI is absolute, so the engine's origin binding is the
+// only mechanism that can strip the credentials en route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sec11_cross_origin_segment_requests_strip_credentials() {
+    if !ffmpeg_available() {
+        eprintln!("skipping SEC-11 HLS cross-origin test: ffmpeg not in PATH");
+        return;
+    }
+    type RequestLog = Arc<std::sync::Mutex<Vec<String>>>;
+    let ts_fixture = Arc::new(generate_test_transport_stream());
+
+    // Cross-origin server: the playlist lives on a different port, and the
+    // SEC-11 comparison is scheme+host+port, so credentials must be stripped
+    // before these requests leave the engine.
+    let cross_log: RequestLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let cross_server = TestServer::start({
+        let cross_log = cross_log.clone();
+        let ts_fixture = ts_fixture.clone();
+        move |mut stream| {
+            let mut buffer = [0_u8; 4096];
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            cross_log.lock().expect("cross log lock").push(request);
+            let body: &[u8] = &ts_fixture;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+
+    // Origin server: serves the media playlist, whose single segment is an
+    // absolute URL pointing at the cross-origin server.
+    let origin_log: RequestLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let origin_server = TestServer::start({
+        let origin_log = origin_log.clone();
+        let cross_base = cross_server.base_url.clone();
+        move |mut stream| {
+            let mut buffer = [0_u8; 4096];
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            origin_log.lock().expect("origin log lock").push(request);
+            let playlist = format!(
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:5.0,\n{cross_base}/seg0.ts\n#EXT-X-ENDLIST\n"
+            );
+            let body = playlist.as_bytes();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+
+    let (_db, pool) = common::test_pool("hls-sec11-cross-origin").await;
+    let mut paths = common::TestPaths::new("hls-sec11-cross-origin");
+    let root = paths
+        .final_path
+        .parent()
+        .expect("HLS test root")
+        .to_path_buf();
+    paths.temp = root.join("staging");
+    paths.final_path = root.join("sec11.mp4");
+    let task = common::download_task(
+        "hls-sec11-cross-origin",
+        format!("{}/media.m3u8", origin_server.base_url),
+        "hls",
+        "sec11.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert HLS task");
+
+    let context = tauri_app_lib::download::DownloadContext {
+        request_headers: vec![
+            (
+                "Authorization".to_string(),
+                "Basic dXNlcjpwYXNz".to_string(),
+            ),
+            ("Cookie".to_string(), "session=sec11".to_string()),
+            ("X-App-Client".to_string(), "vibe-test".to_string()),
+        ],
+        ..common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        )
+    };
+
+    new_engine()
+        .download(context)
+        .await
+        .expect("cross-origin HLS download completes");
+
+    let has_header = |raw: &str, name: &str| {
+        raw.lines().any(|line| {
+            line.split_once(':')
+                .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case(name))
+        })
+    };
+
+    // Same-origin regression: the playlist fetch keeps every forwarded header.
+    let origin_requests = origin_log.lock().expect("origin log lock").clone();
+    assert!(
+        origin_requests
+            .iter()
+            .any(|raw| has_header(raw, "authorization") && has_header(raw, "cookie")),
+        "playlist fetch (same origin) must carry Authorization and Cookie; got {origin_requests:?}"
+    );
+
+    // Cross-origin: credentials never arrive; non-sensitive headers still flow.
+    let cross_requests = cross_log.lock().expect("cross log lock").clone();
+    assert!(
+        !cross_requests.is_empty(),
+        "the segment must have been fetched from the cross-origin server"
+    );
+    for raw in &cross_requests {
+        assert!(
+            !has_header(raw, "authorization") && !has_header(raw, "cookie"),
+            "cross-origin segment request leaked credentials: {raw}"
+        );
+        assert!(
+            has_header(raw, "x-app-client"),
+            "non-sensitive forwarded headers must still flow cross-origin: {raw}"
+        );
+    }
     pool.close().await;
 }
