@@ -176,7 +176,8 @@ pnpm build:extensions
 | `pnpm typecheck` | TypeScript 类型检查 |
 | `pnpm lint` | Biome lint 和格式检查，不包含类型检查 |
 | `pnpm check:i18n` | 检查 7 个 locale 的 key、插值占位符和未翻译英文 |
-| `pnpm check` | typecheck、lint 和 i18n 组合检查 |
+| `pnpm check` | typecheck、lint 和 i18n 组合检查（别名 `check:static`） |
+| `pnpm check:docs` | 文档一致性门禁：版本声明与阻断条目须与审计一致（ARC-18） |
 | `pnpm test:frontend` | 运行 Vitest |
 | `pnpm test:rust` | 运行 Rust 单元和集成测试 |
 | `pnpm build` | TypeScript 编译和前端生产构建 |
@@ -186,23 +187,19 @@ pnpm build:extensions
 | `pnpm verify:extensions` | 构建并校验扩展 manifest |
 | `pnpm verify:protocol-matrix` | 校验协议矩阵结构 |
 | `pnpm test:release-tools` | 运行发布脚本测试 |
+| `pnpm verify:frontend` | 前端完整门禁，与 CI frontend job 一一对应 |
+| `pnpm verify:rust` | Rust 完整门禁（fmt、clippy `--all-targets`、`--locked` 测试） |
+| `pnpm verify` | 前端 + Rust 全量门禁，与 CI 等价 |
 
-推荐完整检查：
+推荐完整检查（ENG-06：此即 CI 实际执行集合，不再另行维护清单）：
 
 ```bash
-pnpm check
-pnpm test:frontend
-pnpm build
-pnpm check:bindings
-pnpm verify:extensions
-pnpm verify:protocol-matrix
-pnpm test:release-tools
-# -j 2 只与链接阶段内存有关：Windows 上默认并行度可能在链接 lib 时
-# 耗尽页面文件（error 1455），与测试间干扰无关，不要用 -j 1 掩盖。
-cargo test --manifest-path src-tauri/Cargo.toml -j 2
-cargo check --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+pnpm verify
 ```
+
+提示：若 Windows 本机在链接测试二进制时耗尽页面文件（error 1455），
+用 `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2` 重试；
+这只与链接阶段内存有关，与测试间干扰无关，不要用 `-j 1` 掩盖。
 
 ## 项目结构
 

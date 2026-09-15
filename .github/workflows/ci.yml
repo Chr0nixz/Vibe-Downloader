@@ -23,17 +23,11 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm lint
-      - run: pnpm test:frontend
-      - run: pnpm test:release-tools
-      - run: pnpm check:i18n
-      - run: pnpm verify:protocol-matrix
-      - name: Version consistency check
-        run: node scripts/sync-version.mjs --check
-      - run: pnpm build
-      - run: pnpm check:bundle
-      - run: pnpm verify:extensions
+      # ENG-06: the aggregate script is the single canonical check list; the
+      # steps it runs mirror this job one-to-one (typecheck, lint, vitest,
+      # release-tools, i18n, protocol matrix, version sync, doc gate, build,
+      # bundle budget, extensions).
+      - run: pnpm verify:frontend
 
   rust:
     strategy:
@@ -76,19 +70,12 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - name: Check formatting
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check
-      # ENG-01: bans/sources are configured in deny.toml but were never executed,
-      # which is how two rustls crypto backends (ring + aws-lc-rs) went unnoticed.
       - name: Check licenses, advisories, bans and sources
         if: matrix.os == 'ubuntu-latest'
         run: cargo deny --manifest-path src-tauri/Cargo.toml check licenses advisories bans sources
-      # ENG-01: `cargo check` was redundant - clippy performs the same analysis.
-      # `--all-targets` extends -D warnings to test targets, which previously
-      # escaped the gate entirely.
-      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: pnpm test:rust
+      # ENG-06: fmt check + clippy --all-targets + tests live in the aggregate
+      # script so local runs and CI cannot drift apart.
+      - run: pnpm verify:rust
       # ENG-01: bindings regeneration is newline-sensitive; running it on every
       # OS turned CRLF checkouts into false failures and cost extra specta runs.
       - if: matrix.os == 'ubuntu-latest'

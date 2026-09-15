@@ -768,12 +768,13 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收（Partial）**：公共行为不变；抽出的 parser / query controller 可直接测试。全量六域拆分不在本批 Closed。
 - **验证**：`cargo test -j 1 --manifest-path src-tauri/Cargo.toml --lib download::hls::`；`cargo test -j 1 --manifest-path src-tauri/Cargo.toml --test hls_engine`；`pnpm test:frontend`（TaskDetails）。
 
-### ARC-18（P2，Fixed locally）：文档版本和能力声明漂移
+### ARC-18（P2，Closed）：文档版本和能力声明漂移
 
 - **实现**：README、AGENTS、ROADMAP、performance baseline、浏览器说明和发布示例已同步到 `0.3.0` 当前事实；`0.2.0` 专项审计保留原版本并明确标记为历史快照。
 - **剩余风险**：协议实现或发布 profile 变化后，README、协议矩阵、浏览器权限说明和商店材料仍可能再次漂移。
 - **验收**：增加自动文档检查，覆盖主要当前态文档的版本、release capture 边界和关键能力声明；在此之前保持 Fixed locally，不标记 Closed。
 - **2026-08-13 复核**：漂移已按预期复发，且代价高于预期。`AGENTS.md` 与 README 曾把 6 项已修复的 P0 继续列为 active blockers，`AGENTS.md` 常量表有 4 项过时（设置 29→33 键、分区 7→11、`hls.rs` 路径、`ARC-11` 描述、以及一条代码中不存在的「DASH progress interval 500ms」）。本轮已人工修正，但**只要自动检查不落地，下一轮仍会复发**。这是所有文档类问题的根因，优先级应从 P2 提升到 P1。
+- **2026-09-16 修复（Closed）**：自动文档检查随 `ENG-06` 落地——[`scripts/check-doc-consistency.mjs`](../scripts/check-doc-consistency.mjs) 三项客观检查：①README/AGENTS 引用的每个审计 ID 必须在主审计中存在（防虚构/拼写漂移）；②README「当前发布阻断」与 AGENTS「Active release blockers」中以列表行首出现的 ID 必须为 Closed 状态（句中交叉引用如「并入 `ARC-31`」不算；这正是 2026-08-13 复核抓到的复发模式——已修复 P0 仍被列为阻断）；③AGENTS.md 的 "The project is currently at X.Y.Z" 必须等于 package.json 版本。检查经 `check:docs` 进入 `pnpm verify` 与 CI，对当前文档全绿；7 项单测（真实文档 + 合成反例）随 `test:release-tools` 运行。此前预言的「不落地就会复发」的窗口就此关闭。
 
 ### ARC-19（P0，Closed；协调器排空残留见下）：FTP/SFTP 取消时中止未落盘的 worker，续传写出零字节空洞
 
@@ -1354,11 +1355,12 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-08-26 更正**：`.gitattributes` 已随 `ENG-02` 修复批次落地（2026-08-15），本条证据中「仓库根目录无 `.gitattributes`」子项过时，且与同章 `ENG-02` 的修复记录自相矛盾；其余治理文件（SECURITY.md / CHANGELOG.md / CODEOWNERS / dependabot.yml / packageManager 等）与 `_apply_f6.ps1` 残留经复核仍属实。
 - **2026-09-14 修复**（`c2a9861`）：补齐 [SECURITY.md](../SECURITY.md)（GitHub 私密漏洞上报渠道、支持版本、作用域与 out-of-scope 说明）、[CHANGELOG.md](../CHANGELOG.md)（Keep a Changelog 格式，v0.1.1..v0.5.0 条目从实际 release tag 的提交区间推导，Unreleased 只记录已提交内容）、CODE_OF_CONDUCT.md、.editorconfig（对齐 Biome 缩进与行宽）、.github/dependabot.yml（npm/cargo/github-actions 三生态，radix/tauri/react 分组）、.github/CODEOWNERS、issue/PR 模板；package.json 增加 `"packageManager": "pnpm@10.7.1"`。复核更正：`_apply_f6.ps1` 已不在仓库且 `.gitignore` 已含 `_*.ps1` 规则，该子项无需动作。验证：提交树经 checkout-index 物化后独立 `cargo check --tests` 通过；lint-staged 对 package.json 的 biome 检查通过。
 
-### ENG-06（P2，Open）：验证入口分散，四份文档的检查清单与 CI 不一致
+### ENG-06（P2，Closed）：验证入口分散，四份文档的检查清单与 CI 不一致
 
 - **证据**：`package.json` 有 32 个 script，其中检查类 12 个。完整检查清单在仓库中有四个互不一致的版本：README（10 项）、CONTRIBUTING（9 项）、`docs/RELEASE.md`（10 项，**漏了 `pnpm lint`、`check:i18n`、`test:frontend`、`check:bundle`**）、AGENTS.md（列举式）。CI 实际执行 15 项，是唯一权威。另外 `scripts/sync-version.mjs` 同步了 `package.json`/`tauri.conf.json`/`Cargo.toml` 三处，但**不同步 `Cargo.lock` 中的包版本**，因此发布构建必然静默重写 lock 文件，这也是 `ENG-01` 无法直接加 `--locked` 的原因。`docs/RELEASE.md:167` 还指引读者「取消 release.yml 第 75-84 行的注释」，而该处实际是已生效的赋值，无注释代码。
 - **影响**：没有一份文档等于 CI 实际跑的集合，`docs/RELEASE.md` 那份尤其危险。发布前的人工检查依赖记忆。
 - **修复方向**：新增 `pnpm verify:frontend` / `verify:rust` / `verify` 三个聚合脚本，与 CI 一一对应，然后让 CI 的两个 job 退化为单行调用、四份文档统统改为引用 `pnpm verify`——这样**文档与 CI 结构性地不可能漂移**。`pnpm check` 目前只做 typecheck+lint+i18n，名字比内容大，建议改名 `check:static`。`sync-version.mjs` 补上 `Cargo.lock` 同步与 `--check` 校验。修正 `docs/RELEASE.md:167` 的错误指引。另建议在 release preflight 中加一道自动门禁，校验 README 与 AGENTS.md 中列出的 blocker ID 在本文中确为 Closed（这同时是 `ARC-18` 的验收手段）。
+- **2026-09-16 修复（Closed）**：按修复方向全量落地。①`package.json` 新增 `verify:frontend`（typecheck → lint → vitest → release-tools → i18n → 协议矩阵 → 版本一致性 → 文档门禁 → build → bundle 预算 → extensions，与 CI frontend job 逐步对应）、`verify:rust`（fmt --check → clippy `--locked --all-targets -D warnings` → `test:rust`）、`verify`（前端 + Rust）；`check` 增加 `check:static` 别名并新增 `check:docs`。②`sync-version.mjs` 同步与校验扩展到 `Cargo.lock` 的 `vibe-downloader` 包条目（vibe-native-host 是其 `[[bin]]`，无独立条目）；`test:rust` 加 `--locked`——ENG-01 的「全线 `--locked`」达成。③CI 的 frontend/rust 两 job 检查步骤退化为 `pnpm verify:frontend` / `pnpm verify:rust` 单行调用（OS 条件步骤 cargo-deny、check:bindings 保留在 job 内）。④四份文档（README、CONTRIBUTING、docs/RELEASE.md、AGENTS.md）的检查清单统一改为引用 `pnpm verify`，不再各自维护清单；AGENTS Useful checks 同步修正（去掉 `cargo check` 与不带 `--all-targets` 的 clippy——2026-08-26 复核实锤的漂移点）；docs/RELEASE.md 的「取消 release.yml 75-84 行注释」错误指引改为实际状态（extension ID env 已生效、OS 签名步骤尚未接入 workflow）。⑤新增 [`check-doc-consistency.mjs`](../scripts/check-doc-consistency.mjs) 自动文档门禁（详见 `ARC-18` 记录），其 7 项测试经 `test:release-tools` 的 glob 自动纳入。Windows 本机 `check:static`、`check:docs`、doc-gate 测试、`sync-version 0.5.0` 同版本 round-trip 全部通过；`verify:frontend` 全量通过（含 build 与 extensions）。
 - **验收**：`pnpm verify` 覆盖 CI 全集；四份文档不再各自维护清单；`--locked` 可在全线启用。
 - **2026-08-26 复核（文档漂移实锤三件）**：其一，[`AGENTS.md`](../AGENTS.md#L94) 的 Useful checks 仍列 `cargo check` 与不带 `--all-targets` 的 clippy，而 ci.yml:85 已是 `cargo clippy --locked --all-targets -- -D warnings`——按 AGENTS.md 本地自查恰好放过 CI 会拦的 test-target warning。其二，本文第十四章旧文曾写「CI 当前尚未加上 (--all-targets)」，与本章 ENG-01 已完成的记录自相矛盾（本次修订已一并改正）。其三，ENG-05 曾称根目录缺 `.gitattributes`，与同章 ENG-02 已添加的记录冲突（已在上条更正）。「`pnpm verify` 单入口」仍是根治此类漂移的结构性解法。
 

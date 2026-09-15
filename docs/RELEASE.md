@@ -164,7 +164,7 @@ GitHub Actions -> `Release` -> `Run workflow`，输入 tag，例如 `v0.5.0`，�
    - `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID`（用于 notarization）
    - `WINDOWS_CERTIFICATE`（Windows `.pfx` Base64）
    - `WINDOWS_CERTIFICATE_PASSWORD`
-2. 取消 [`.github/workflows/release.yml`](../.github/workflows/release.yml) 中第 75-84 行的对应 env 注释。
+2. OS 代码签名步骤尚未接入 release workflow：除上述 secret 外，还需在 release.yml 中新增签名步骤（tauri-action 签名参数或 afterBuildCommand）。extension ID 的 env 已是生效赋值，无需取消注释。
 3. 推送测试 tag 验证签名后的安装包在 macOS/Windows 上的 Gatekeeper / SmartScreen 表现。
 4. 更新本章节为"已配置正式签名"，并移除 README.md 的未签名提示段落。
 
@@ -173,14 +173,13 @@ Tauri updater 签名独立于 OS 代码签名，始终生效，不受上述决�
 ## 发布前本地验证
 
 ```bash
-pnpm typecheck
-pnpm build
+# CI 等价全量门禁（含 typecheck/build/clippy/test/i18n/版本同步/文档门禁）：
+pnpm verify
+
+# 发布构建前补充（verify 之外的发布专项）：
 pnpm check:bindings
-pnpm test:release-tools
 pnpm verify:extensions
-pnpm verify:protocol-matrix
-pnpm test:rust
-cargo check --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 VIBE_BROWSER_PROFILE=candidate pnpm tauri build --config src-tauri/tauri.ci.conf.json
 ```
+
+版本号一致性由 `node scripts/sync-version.mjs --check` 校验（含 Cargo.lock，`pnpm verify` 已覆盖）。

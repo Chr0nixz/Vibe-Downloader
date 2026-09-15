@@ -82,17 +82,21 @@ pnpm tauri dev
 Useful checks:
 
 ```bash
+# Full CI-equivalent gate (ENG-06): frontend + rust in one entry point.
+pnpm verify
+
+# Granular commands (verify:frontend / verify:rust run the CI set):
 pnpm typecheck      # TypeScript type checking (tsc --noEmit)
 pnpm lint           # Biome static analysis (NOT type checking)
-pnpm check          # typecheck + lint + i18n completeness
+pnpm check          # typecheck + lint + i18n completeness (alias: check:static)
+pnpm check:docs     # ARC-18 gate: version + blocker IDs must match the audit
 pnpm check:i18n
 pnpm test:frontend
 pnpm build
 pnpm check:bundle    # PERF-10 bundle budget; runs in CI right after `pnpm build`
 pnpm check:bindings
-pnpm test:rust
-cargo check --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+pnpm test:rust       # cargo test --locked
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 pnpm build:extensions
 pnpm verify:extensions
 pnpm verify:protocol-matrix

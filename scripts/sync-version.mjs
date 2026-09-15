@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 /**
  * Sync app version from a git tag (e.g. v0.2.0) into package.json,
- * src-tauri/tauri.conf.json, and src-tauri/Cargo.toml.
+ * src-tauri/tauri.conf.json, src-tauri/Cargo.toml, and the vibe-downloader
+ * entry in src-tauri/Cargo.lock (ENG-06: the lockfile was previously left
+ * stale, so release builds silently rewrote it and made `--locked` gates
+ * impossible).
  *
- * With --check: verifies that all three files report the same version
+ * With --check: verifies that all four sources report the same version
  * and exits non-zero on mismatch (for CI).
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -15,6 +18,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageJsonPath = resolve(root, "package.json");
 const tauriConfPath = resolve(root, "src-tauri/tauri.conf.json");
 const cargoTomlPath = resolve(root, "src-tauri/Cargo.toml");
+const cargoLockPath = resolve(root, "src-tauri/Cargo.lock");
 
 function readVersionFromPackageJson() {
   return JSON.parse(readFileSync(packageJsonPath, "utf8")).version;
@@ -29,6 +33,20 @@ function readVersionFromCargoToml() {
   const match = cargoToml.match(/^version = "(.*)"$/m);
   if (!match) {
     throw new Error("Could not find version in Cargo.toml");
+  }
+  return match[1];
+}
+
+/**
+ * Reads the version of the `vibe-downloader` package entry in Cargo.lock.
+ * Only that entry (and vibe-native-host's) tracks the workspace version;
+ * every other entry is a dependency pin that must not be touched.
+ */
+function readVersionFromCargoLock(packageName = "vibe-downloader") {
+  const cargoLock = readFileSync(cargoLockPath, "utf8");
+  const match = cargoLock.match(new RegExp(`\\[\\[package\\]\\]\\nname = "${packageName}"\\nversion = "(.*)"\\n`, "m"));
+  if (!match) {
+    throw new Error(`Could not find ${packageName} in Cargo.lock`);
   }
   return match[1];
 }
@@ -49,6 +67,7 @@ if (isCheckMode) {
     "package.json": readVersionFromPackageJson(),
     "src-tauri/tauri.conf.json": readVersionFromTauriConf(),
     "src-tauri/Cargo.toml": readVersionFromCargoToml(),
+    "src-tauri/Cargo.lock": readVersionFromCargoLock(),
   };
   const uniqueVersions = new Set(Object.values(versions));
 
@@ -64,7 +83,7 @@ if (isCheckMode) {
   process.exit(1);
 }
 
-// --- Sync mode: write version from tag into all three files -----------------
+// --- Sync mode: write version from tag into all four sources ----------------
 
 const tag = process.argv[2];
 if (!tag) {
@@ -86,5 +105,12 @@ writeFileSync(tauriConfPath, `${JSON.stringify(tauriConf, null, 2)}\n`);
 let cargoToml = readFileSync(cargoTomlPath, "utf8");
 cargoToml = cargoToml.replace(/^version = ".*"$/m, `version = "${version}"`);
 writeFileSync(cargoTomlPath, cargoToml);
+
+let cargoLock = readFileSync(cargoLockPath, "utf8");
+// vibe-native-host is a [[bin]] inside the vibe-downloader package, so this
+// single entry is the only workspace version in the lockfile; dependency
+// pins keep their own versions.
+cargoLock = cargoLock.replace(/(\[\[package\]\]\nname = "vibe-downloader"\nversion = )"(.*?)"/m, `$1"${version}"`);
+writeFileSync(cargoLockPath, cargoLock);
 
 console.log(`Synced version ${version} from tag ${tag}`);
