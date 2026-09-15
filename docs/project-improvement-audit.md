@@ -1290,6 +1290,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-12 实现（Fixed locally）**：`http/request.rs` 新增 `headers_for_origin(headers, origin_host, target_url)`——目标 host 与 origin 一致时保留全部转发头，不一致（或 URL 不可解析，fail-closed）时剥离 Authorization/Cookie、保留其余头。接入点：HLS 段/密钥/init/外挂轨道（origin = 任务 URL host，外挂轨道 = 轨道 playlist host）、DASH 段（origin = 任务 URL host）。
 - **记录在案的产品偏离**：Metalink 镜像**有意豁免**该绑定。评审建议对镜像也做源绑定，但本仓库的既有产品语义（C5/FUN-18）是任务级凭据即镜像凭据——manifest 与镜像分属不同 host 是受支持的合法形态（测试 `download_uses_persisted_metalink_credentials_serial` 即为 manifest 在 example.com、镜像在回环服务器并要求 Basic Auth）。对镜像剥离会静默破坏已验收的镜像认证能力；按镜像粒度的凭据作用域留作后续产品项。跨源场景的集成级证据尚缺（现有覆盖为 `headers_for_origin` 单测三臂：同源保留/跨源仅剥凭据/不可解析 fail-closed），故状态为 Fixed locally 而非 Closed。
 - **2026-09-16 补验（Closed）**：`tests/hls_engine.rs` 新增 `sec11_cross_origin_segment_fetch_strips_credentials` 集成测试——origin 侧任务 URL 用 `[::1]` 字面量、playlist 声明 `127.0.0.1` 绝对段 URI（引擎客户端走 hickory resolver，`localhost` 不可解析，故两侧均用 IP 字面量；v4/v6 双栈监听同一 handler）。线上断言：同源 playlist 请求携带 Authorization/Cookie；跨源段请求两者皆无而中性头（X-Vibe-Neutral）保留。同域回归由 `download_uses_persisted_hls_credentials` 覆盖。同批将比较语义从 host 收紧为完整 web origin（`url_origin`：scheme://host:port，默认端口归一化）——同主机不同端口同样剥离凭据，跨子域按 web origin 模型处理；单测新增同主机异端口与默认端口归一化两臂。验收达成，状态 Closed。
+- **2026-09-16 DASH 侧补证**：`tests/dash_engine.rs` 新增 `sec11_cross_origin_segment_requests_strip_credentials`——同主机异端口双服务器（恰好覆盖本批收紧后的端口语义），manifest 要求 Basic Auth（同源凭据回归在测试内成立），单一 `SegmentURL` 用绝对 URL 指向跨源服务器；断言跨源段请求无 Authorization/Cookie 且成品 MP4 完整产出（凭据剥离不破坏跨源下载）。
 
 ### SEC-12（P2，Closed）：FTP/SFTP 建连对目标地址无任何私有/保留 IP 审查（引擎层 SSRF 的最后残余）
 

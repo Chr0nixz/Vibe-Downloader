@@ -628,6 +628,11 @@ async fn download_uses_persisted_dash_credentials() {
         true,
     );
     db::insert_task_record(&pool, &task).await.expect("insert");
+    // finalize_dash_task completes unknown-size tasks through the first
+    // task_work_units row; the runtime unit needs seeding up front.
+    db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments");
     db::upsert_task_credentials(&pool, &task.id, "dash", "dashuser", "dashpass", None, None)
         .await
         .expect("creds");
@@ -1341,4 +1346,177 @@ async fn arc48_extreme_initialization_range_does_not_overflow() {
             "saturated range arithmetic must not wrap total_size negative"
         );
     }
+}
+
+// SEC-11: cross-origin (same host, different port) segment fetches must not
+// receive the merged task credentials, while the same-origin manifest fetch
+// keeps them. Mirrors the HLS coverage; the manifest's single SegmentURL is
+// an absolute URL pointing at the cross-origin server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sec11_cross_origin_segment_requests_strip_credentials() {
+    if !ffmpeg_available() {
+        eprintln!("skipping SEC-11 DASH cross-origin test: ffmpeg not in PATH");
+        return;
+    }
+    common::install_test_secret_key();
+    let expected = b64_basic("dashuser", "dashpass");
+    let mp4_fixture = Arc::new(generate_test_mp4());
+    type RequestLog = Arc<std::sync::Mutex<Vec<String>>>;
+
+    let cross_log: RequestLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let cross_server = TestServer::start({
+        let cross_log = cross_log.clone();
+        let mp4_fixture = mp4_fixture.clone();
+        move |mut stream| {
+            let mut buffer = [0_u8; 8192];
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            cross_log.lock().expect("cross log lock").push(request);
+            let body: &[u8] = &mp4_fixture;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+
+    // Origin server: requires the task's Basic credentials for the manifest,
+    // proving credentials flow to the origin while the test runs.
+    let origin_log: RequestLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let origin_server = TestServer::start({
+        let origin_log = origin_log.clone();
+        let cross_base = cross_server.base_url.clone();
+        let expected = expected.clone();
+        move |mut stream| {
+            let mut buffer = [0_u8; 8192];
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            origin_log
+                .lock()
+                .expect("origin log lock")
+                .push(request.clone());
+            let authorization = request.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("authorization") {
+                    Some(value.trim().to_string())
+                } else {
+                    None
+                }
+            });
+            let provided = authorization
+                .as_deref()
+                .and_then(|value| value.strip_prefix("Basic ").map(str::trim));
+            if provided != Some(expected.as_str()) {
+                let body = b"auth required";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+                return;
+            }
+            let mpd = format!(
+                r#"
+<MPD type="static" mediaPresentationDuration="PT10S" xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4" contentType="video">
+      <Representation id="v0" bandwidth="500000">
+        <SegmentList>
+          <SegmentURL media="{cross_base}/seg0.mp4" />
+        </SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>
+"#
+            );
+            let body = mpd.as_bytes();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/dash+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+
+    let (_db, pool) = common::test_pool("dash-sec11-cross-origin").await;
+    let mut paths = common::TestPaths::new("dash-sec11-cross-origin");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("temp.mp4");
+    paths.final_path = root.join("sec11.mp4");
+    let task = common::download_task(
+        "dash-sec11-cross-origin",
+        format!("{}/secure.mpd", origin_server.base_url),
+        "dash",
+        "sec11.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task).await.expect("insert");
+    // finalize_dash_task completes unknown-size tasks through the first
+    // task_work_units row; the runtime unit needs seeding up front.
+    db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments");
+    db::upsert_task_credentials(&pool, &task.id, "dash", "dashuser", "dashpass", None, None)
+        .await
+        .expect("creds");
+
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("cross-origin DASH download completes");
+    assert!(
+        paths.final_path.exists(),
+        "the cross-origin DASH download must produce the remuxed output"
+    );
+
+    let has_header = |raw: &str, name: &str| {
+        raw.lines().any(|line| {
+            line.split_once(':')
+                .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case(name))
+        })
+    };
+
+    // Same-origin regression: the manifest fetch carried the Basic credentials.
+    let origin_requests = origin_log.lock().expect("origin log lock").clone();
+    assert!(
+        origin_requests
+            .iter()
+            .any(|raw| has_header(raw, "authorization")),
+        "manifest fetch (same origin) must carry Authorization; got {origin_requests:?}"
+    );
+
+    // Cross-origin: the merged credentials never reach the segment host.
+    let cross_requests = cross_log.lock().expect("cross log lock").clone();
+    assert!(
+        !cross_requests.is_empty(),
+        "the segment must have been fetched from the cross-origin server"
+    );
+    for raw in &cross_requests {
+        assert!(
+            !has_header(raw, "authorization") && !has_header(raw, "cookie"),
+            "cross-origin DASH segment request leaked credentials: {raw}"
+        );
+    }
+    pool.close().await;
 }
