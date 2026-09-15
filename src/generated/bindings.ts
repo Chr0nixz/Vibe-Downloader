@@ -92,6 +92,8 @@ export const commands = {
 	getTaskProxySettings: (taskId: string) => typedError<TaskProxySettings, string>(__TAURI_INVOKE("get_task_proxy_settings", { taskId })),
 	listTaskEventsPage: (input: CursorPageInput) => typedError<TaskEventsPageResult, string>(__TAURI_INVOKE("list_task_events_page", { input })),
 	listTaskRequestsPage: (input: CursorPageInput) => typedError<TaskRequestsPageResult, string>(__TAURI_INVOKE("list_task_requests_page", { input })),
+	/**  Feature proposal §2.4: read-only integrity passport for one task. */
+	getTaskIntegrityPassport: (taskId: string) => typedError<IntegrityPassport, string>(__TAURI_INVOKE("get_task_integrity_passport", { taskId })),
 	getSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("get_settings")),
 	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
 	listSftpKnownHosts: () => typedError<SftpKnownHost[], string>(__TAURI_INVOKE("list_sftp_known_hosts")),
@@ -973,6 +975,42 @@ export type ImportUrlsInput = {
 	proxyNoProxy: string | null,
 };
 
+export type IntegrityPassport = {
+	taskId: string,
+	fileName: string,
+	/**  Stored task URL — already credential-sanitized at creation (FUN-01). */
+	sourceUrl: string,
+	finalUrl: string | null,
+	protocol: string,
+	taskKind: TaskKind,
+	status: TaskStatus,
+	/**
+	 *  Specta cannot map u64, so byte counts cross IPC as strings
+	 *  (models/storage.rs convention). `None` when the size is unknown.
+	 */
+	totalBytes: string | null,
+	downloadedBytes: string | null,
+	createdAt: string,
+	/**  First `started` event time; `None` when pruned by event retention. */
+	startedAt: string | null,
+	/**  Last `completed` event time; `None` when pruned by event retention. */
+	completedAt: string | null,
+	/**  Number of observed resumes (`resumed` events). */
+	resumeCount: number,
+	/**
+	 *  Sum of per-segment retry counters — segment-level errors that were
+	 *  recovered in-flight. This is the honest derivable stand-in for the
+	 *  proposal's "checkpoints" stat; checkpoint flushes are not counted.
+	 */
+	segmentRetries: number,
+	supportsResume: boolean,
+	remoteValidators: RemoteValidatorKind[],
+	checksums: PassportChecksum[],
+	checksumState: PassportChecksumState,
+	stagingCleanup: PassportStagingCleanup,
+	finalPath: string | null,
+};
+
 export type ListSegmentsInput = {
 	taskId: string,
 	page: number | null,
@@ -1036,6 +1074,36 @@ export type MetalinkMirrorView = {
 	/**  Task file this mirror belongs to (multi-file Metalink manifests). */
 	fileId: string | null,
 };
+
+export type PassportChecksum = {
+	algorithm: string,
+	status: HashVerificationStatus,
+	actualHash: string | null,
+	verifiedAt: string | null,
+	isPrimary: boolean,
+	weak: boolean,
+	sourceKind: string,
+	errorMessage: string | null,
+};
+
+/**  Verification outcome of one checksum entry in the passport. */
+export type PassportChecksumState = "verified" | "failed" | "pending" | 
+/**
+ *  No checksum was ever configured for this task. The passport must say
+ *  so explicitly instead of leaving the section blank (honesty rule).
+ */
+"not_provided";
+
+/**  Proof state of post-download staging cleanup for the task output. */
+export type PassportStagingCleanup = 
+/**  All known output paths exist on disk and no temp/staging residue. */
+"complete" | 
+/**  Output present but temp/staging residue remains on disk. */
+"incomplete" | 
+/**  At least one known output path no longer exists on disk. */
+"missing_output" | 
+/**  Task is not completed — cleanup proof does not apply yet. */
+"not_applicable";
 
 export type PreviewClassificationInput = {
 	url: string,
@@ -1155,6 +1223,12 @@ export type RecoveryHistoryRecord = {
 	/**  RFC 3339 timestamp. */
 	createdAt: string,
 };
+
+/**
+ *  Remote validator evidence the download relied on. Tokens are stable
+ *  identifiers; the frontend maps them to localized labels.
+ */
+export type RemoteValidatorKind = "etag" | "last_modified" | "range";
 
 export type RequestDiagnostic = {
 	id: string,

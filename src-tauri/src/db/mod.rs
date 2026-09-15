@@ -8,6 +8,7 @@ mod dash;
 mod events;
 mod hash;
 mod hls;
+mod integrity;
 mod metalink;
 mod recovery;
 mod request_diagnostics;
@@ -66,6 +67,9 @@ pub use self::hls::{
     list_hls_segments, list_hls_segments_page, request_hls_finish, reset_hls_segments_for_task,
     update_hls_last_media_sequence, update_hls_segment_status, upsert_hls_segment, upsert_hls_task,
     HlsSegmentRecord, HlsSegmentUpsert, HlsTaskRecord, HlsTaskUpsert,
+};
+pub use self::integrity::{
+    count_task_resumes, sum_task_segment_retries, task_milestones, TaskMilestones,
 };
 pub use self::metalink::{
     delete_metalink_file_plan, get_metalink_file_plan, insert_metalink_resource,

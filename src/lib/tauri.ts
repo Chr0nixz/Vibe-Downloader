@@ -26,6 +26,7 @@ import type {
   HashVerificationState,
   HlsSegmentView,
   ImportUrlsInput,
+  IntegrityPassport,
   ListTasksCursorInput,
   ListTasksCursorResult,
   ListTasksInput,
@@ -345,6 +346,14 @@ export async function listTaskRequestsPage(input: CursorPageInput): Promise<Curs
   }
   const commands = await loadNativeCommands();
   return runCommand("listTaskRequestsPage", () => commands.listTaskRequestsPage(input));
+}
+
+export async function getIntegrityPassport(taskId: string): Promise<IntegrityPassport> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).getIntegrityPassport(taskId);
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("getIntegrityPassport", () => commands.getTaskIntegrityPassport(taskId));
 }
 
 export async function seedMockTasks(): Promise<Task[]> {

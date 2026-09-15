@@ -2,6 +2,8 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { ChevronDown, Clipboard, ClipboardCopy, Hash, RefreshCw, X } from "lucide-react";
 import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { TaskPassportCard } from "@/components/shell/TaskPassportCard";
+import { TaskTimeline } from "@/components/shell/TaskTimeline";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -388,6 +390,8 @@ function TaskDetailsPanel({
     segmentSummaryError,
     ftpSftpEvents,
     sftpKnownHosts,
+    passport,
+    passportError,
     loadMoreSegments,
     loadMoreHlsSegments,
     loadMoreDashSegments,
@@ -674,6 +678,7 @@ function TaskDetailsPanel({
           {/* Status-priority panel: failed → recovery first; completed → hash first */}
           {isFailedOrAttention ? recoveryActions : null}
           {isCompleted && !isFailedOrAttention ? hashPanel : null}
+          <TaskPassportCard task={task} passport={passport} error={passportError} />
           {/* Protocol runtime panels */}
           <TorrentRuntimePanel task={task} snapshot={torrentSnapshot} error={torrentSnapshotError} />
           <MetalinkFilesPanel task={task} />
@@ -692,6 +697,7 @@ function TaskDetailsPanel({
           {/* Non-priority hash/recovery */}
           {!isCompleted || isFailedOrAttention ? hashPanel : null}
           {!isFailedOrAttention ? recoveryActions : null}
+          <TaskTimeline events={events} error={eventsError} onOpenLogs={() => setActiveTab("logs")} />
           {/* Advanced settings (collapsed by default to reduce cognitive load) */}
           <AdvancedSettingsDisclosure task={task} />
         </TabsContent>

@@ -2,6 +2,7 @@ pub mod backup;
 pub mod browser;
 pub mod classification;
 pub mod environment;
+pub mod integrity;
 pub mod recovery;
 pub mod storage;
 pub mod task;
@@ -25,6 +26,10 @@ pub use environment::{
     EnvironmentFixAction, EnvironmentFixInput, EnvironmentFixKind, EnvironmentFixResult,
     EnvironmentHealthItem, EnvironmentHealthReport, EnvironmentHealthStatus, EnvironmentText,
     EnvironmentTextCode, EnvironmentTextParams,
+};
+pub use integrity::{
+    IntegrityPassport, PassportChecksum, PassportChecksumState, PassportStagingCleanup,
+    RemoteValidatorKind,
 };
 pub use recovery::{BulkRecoveryResult, RecoveryHistoryRecord, UpdateTaskCredentialsInput};
 pub use storage::{

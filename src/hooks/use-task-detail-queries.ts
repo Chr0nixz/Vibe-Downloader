@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type {
   DashSegmentView,
   HlsSegmentView,
+  IntegrityPassport,
   RequestDiagnostic,
   SegmentSummary,
   SftpKnownHost,
@@ -11,6 +12,7 @@ import type {
 import { errorMessage } from "@/lib/errors";
 import { isDashProtocol, isFtpSftpProtocol, isHlsProtocol, isTorrentProtocol } from "@/lib/task-diagnostics";
 import {
+  getIntegrityPassport,
   getSegmentSummary,
   getTorrentRuntimeSnapshot,
   listDashSegmentsPage,
@@ -80,6 +82,8 @@ export function useTaskDetailQueries(options: { task: Task; activeTab: string; d
   const [segmentSummaryError, setSegmentSummaryError] = useState<string | null>(null);
   const [ftpSftpEvents, setFtpSftpEvents] = useState<TaskEvent[]>([]);
   const [sftpKnownHosts, setSftpKnownHosts] = useState<SftpKnownHost[]>([]);
+  const [passport, setPassport] = useState<IntegrityPassport | null>(null);
+  const [passportError, setPassportError] = useState<string | null>(null);
 
   // Reset query panes when the selected task changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: task.id identity is the intentional reset trigger.
@@ -105,6 +109,8 @@ export function useTaskDetailQueries(options: { task: Task; activeTab: string; d
     setSegmentSummaryError(null);
     setFtpSftpEvents([]);
     setSftpKnownHosts([]);
+    setPassport(null);
+    setPassportError(null);
   }, [task.id]);
 
   // PERF-02: HTTP/FTP/etc work-unit segments — not used for HLS/DASH (dedicated panes) or BT (hidden).
@@ -472,7 +478,7 @@ export function useTaskDetailQueries(options: { task: Task; activeTab: string; d
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
 
-    if (activeTab !== "logs") {
+    if (activeTab !== "logs" && activeTab !== "overview") {
       setEvents([]);
       setEventsError(null);
       return;
@@ -503,6 +509,34 @@ export function useTaskDetailQueries(options: { task: Task; activeTab: string; d
       if (intervalId) clearInterval(intervalId);
     };
   }, [activeTab, task.id, task.status]);
+
+  // Integrity passport: fetched while Overview is visible; no polling, but
+  // the status dependency refetches when a task transitions to completed.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: task.status is the intentional refetch trigger (not read inside the effect).
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!overviewVisible) {
+      setPassport(null);
+      setPassportError(null);
+      return;
+    }
+
+    void getIntegrityPassport(task.id)
+      .then((result) => {
+        if (!cancelled) {
+          setPassport(result);
+          setPassportError(null);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setPassportError(errorMessage(error));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [overviewVisible, task.id, task.status]);
 
   const loadMoreSegments = useCallback(async () => {
     if (!segmentsCursor) return;
@@ -606,6 +640,8 @@ export function useTaskDetailQueries(options: { task: Task; activeTab: string; d
     segmentSummaryError,
     ftpSftpEvents,
     sftpKnownHosts,
+    passport,
+    passportError,
     loadMoreSegments,
     loadMoreHlsSegments,
     loadMoreDashSegments,

@@ -1,8 +1,8 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
 import { TooltipProvider } from "@/components/ui/tooltip";
+import type { IntegrityPassport } from "@/generated/bindings";
 import { useTaskDataStore } from "@/stores/task-store";
 import type { Task } from "@/types/task";
 import { TaskDetails } from "./TaskDetails";
@@ -11,6 +11,7 @@ const layout = vi.hoisted(() => ({ compact: false }));
 const mocks = vi.hoisted(() => ({
   computeFileHash: vi.fn(),
   finishLiveRecording: vi.fn(),
+  getIntegrityPassport: vi.fn(),
   getSegmentSummary: vi.fn(),
   getTaskProxySettings: vi.fn(),
   getTorrentRuntimeSnapshot: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock("@/hooks/use-shell-layout", () => ({
 vi.mock("@/lib/tauri", () => ({
   computeFileHash: mocks.computeFileHash,
   finishLiveRecording: mocks.finishLiveRecording,
+  getIntegrityPassport: mocks.getIntegrityPassport,
   getSegmentSummary: mocks.getSegmentSummary,
   getTaskProxySettings: mocks.getTaskProxySettings,
   getTorrentRuntimeSnapshot: mocks.getTorrentRuntimeSnapshot,
@@ -124,6 +126,32 @@ function seedTasks(tasks: Task[]) {
   });
 }
 
+function makePassport(taskId: string, overrides: Partial<IntegrityPassport> = {}): IntegrityPassport {
+  return {
+    taskId,
+    fileName: `${taskId}.zip`,
+    sourceUrl: "https://example.com/x.zip",
+    finalUrl: null,
+    protocol: "https",
+    taskKind: "single_file",
+    status: "completed",
+    totalBytes: "1024",
+    downloadedBytes: "1024",
+    createdAt: "2026-07-14T00:00:00.000Z",
+    startedAt: null,
+    completedAt: "2026-07-14T01:00:00.000Z",
+    resumeCount: 0,
+    segmentRetries: 0,
+    supportsResume: true,
+    remoteValidators: ["range"],
+    checksums: [],
+    checksumState: "not_provided",
+    stagingCleanup: "complete",
+    finalPath: "D:\\Downloads\\x.zip",
+    ...overrides,
+  };
+}
+
 function renderDetails(taskId: string, onClose = vi.fn()) {
   const view = render(
     <TooltipProvider>
@@ -152,6 +180,7 @@ describe("TaskDetails", () => {
     });
     mocks.listSftpKnownHosts.mockResolvedValue([]);
     mocks.finishLiveRecording.mockResolvedValue({});
+    mocks.getIntegrityPassport.mockResolvedValue(makePassport("task-details"));
     mocks.onTaskUpdated.mockResolvedValue(mocks.unlisten);
     // ScrollArea (Radix) needs ResizeObserver in jsdom.
     globalThis.ResizeObserver = class {
@@ -176,8 +205,61 @@ describe("TaskDetails", () => {
     expect(screen.getByText("taskDetails.noChunks")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "taskDetails.logs" }));
-    await waitFor(() => expect(mocks.listTaskEventsPage).toHaveBeenCalledTimes(1));
+    // The Overview timeline also loads events, so this is the second fetch.
+    await waitFor(() => expect(mocks.listTaskEventsPage).toHaveBeenCalledTimes(2));
     expect(screen.getByText("taskDetails.noLogs")).toBeInTheDocument();
+  });
+
+  it("shows the integrity passport with honest checksum copy on completed tasks", async () => {
+    const task = makeTask("task-passport", "iso.zip", { status: "completed" });
+    mocks.getIntegrityPassport.mockResolvedValue(makePassport(task.id));
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    await waitFor(() => expect(mocks.getIntegrityPassport).toHaveBeenCalledWith(task.id));
+    expect(screen.getByText("taskDetails.passport.title")).toBeInTheDocument();
+    // Honesty rule: an unconfigured checksum says so explicitly.
+    expect(screen.getByText("taskDetails.passport.checksumState.notProvided")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "taskDetails.passport.copyReport" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "taskDetails.passport.exportJson" })).toBeInTheDocument();
+    // No verified hash → the compute action is offered.
+    expect(screen.getByRole("button", { name: "taskDetails.passport.computeHash" })).toBeInTheDocument();
+  });
+
+  it("hides the passport card for tasks that are not completed", async () => {
+    const task = makeTask("task-active", "active.zip", { status: "downloading" });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    expect(screen.queryByText("taskDetails.passport.title")).not.toBeInTheDocument();
+  });
+
+  it("renders timeline milestones with trigger badges on the overview tab", async () => {
+    const task = makeTask("task-timeline", "tl.zip", { status: "downloading" });
+    mocks.listTaskEventsPage.mockResolvedValue({
+      items: [
+        { id: "3", taskId: task.id, eventType: "started", payload: null, createdAt: "2026-07-14T02:00:00.000Z" },
+        {
+          id: "2",
+          taskId: task.id,
+          eventType: "bt_metadata_fetching",
+          payload: null,
+          createdAt: "2026-07-14T01:30:00.000Z",
+        },
+        { id: "1", taskId: task.id, eventType: "created", payload: null, createdAt: "2026-07-14T01:00:00.000Z" },
+      ],
+      nextCursor: null,
+    });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    expect(screen.getByText("taskDetails.timeline.title")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("taskEvent.started")).toBeInTheDocument());
+    expect(screen.getByText("taskEvent.created")).toBeInTheDocument();
+    // Engine chatter stays in the Logs tab.
+    expect(screen.queryByText("bt_metadata_fetching")).not.toBeInTheDocument();
+    expect(screen.getByText("taskDetails.timeline.trigger.scheduler")).toBeInTheDocument();
+    expect(screen.getByText("taskDetails.timeline.trigger.user")).toBeInTheDocument();
   });
 
   it("loads torrent runtime snapshot only on the overview tab", async () => {

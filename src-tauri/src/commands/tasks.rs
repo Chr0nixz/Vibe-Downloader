@@ -75,6 +75,10 @@ mod actions;
 
 pub use actions::*;
 
+mod integrity;
+
+pub use integrity::*;
+
 #[cfg(debug_assertions)]
 mod mock_seed;
 

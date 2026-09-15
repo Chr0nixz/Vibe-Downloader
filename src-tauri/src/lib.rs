@@ -254,6 +254,7 @@ macro_rules! vibe_commands_base {
             commands::tasks::get_task_proxy_settings,
             commands::tasks::list_task_events_page,
             commands::tasks::list_task_requests_page,
+            commands::tasks::get_task_integrity_passport,
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::list_sftp_known_hosts,
@@ -378,6 +379,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::backup::BackupSubsetSelection>()
         .typ::<models::backup::BackupSubsetRestoreResult>()
         .typ::<models::backup::RestoreReport>()
+        .typ::<models::integrity::IntegrityPassport>()
+        .typ::<models::integrity::PassportChecksum>()
+        .typ::<models::integrity::PassportChecksumState>()
+        .typ::<models::integrity::PassportStagingCleanup>()
+        .typ::<models::integrity::RemoteValidatorKind>()
         .typ::<models::recovery::BulkRecoveryAction>()
         .typ::<models::recovery::BulkRecoveryResult>()
         .typ::<models::recovery::UpdateTaskCredentialsInput>()

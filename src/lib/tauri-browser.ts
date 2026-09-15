@@ -17,6 +17,7 @@ import type {
   FtpDirectoryProbe,
   HashVerificationState,
   ImportUrlsInput,
+  IntegrityPassport,
   ListTasksCursorInput,
   ListTasksCursorResult,
   ListTasksInput,
@@ -1886,6 +1887,61 @@ export async function verifyTaskHash(id: string): Promise<HashVerificationState>
     status: task.hashStatus,
     errorMessage: task.hashError,
     verifiedAt: task.hashVerifiedAt,
+  };
+}
+
+export async function getIntegrityPassport(taskId: string): Promise<IntegrityPassport> {
+  const task = tasks.find((entry) => entry.id === taskId);
+  if (!task) throw new Error(`Task not found: ${taskId}`);
+  // Browser preview cannot verify staging residue on a real disk, so the
+  // mock reports not_applicable/unknown-shaped data instead of fake proof.
+  const completed = task.status === "completed";
+  const validators: IntegrityPassport["remoteValidators"] = [];
+  if (task.etag) validators.push("etag");
+  if (task.lastModified) validators.push("last_modified");
+  if (task.supportsResume) validators.push("range");
+  const checksummed = Boolean(task.expectedHashSha256);
+  return {
+    taskId,
+    fileName: task.fileName,
+    sourceUrl: task.url,
+    finalUrl: task.finalUrl,
+    protocol: task.protocol,
+    taskKind: task.taskKind,
+    status: task.status,
+    totalBytes: task.totalSize > 0 ? String(task.totalSize) : null,
+    downloadedBytes: String(task.downloadedBytes),
+    createdAt: task.createdAt,
+    startedAt: completed ? task.createdAt : null,
+    completedAt: completed ? task.updatedAt : null,
+    resumeCount: 0,
+    segmentRetries: 0,
+    supportsResume: task.supportsResume,
+    remoteValidators: validators,
+    checksums: checksummed
+      ? [
+          {
+            algorithm: "sha256",
+            status: task.hashStatus,
+            actualHash: task.actualHashSha256,
+            verifiedAt: task.hashVerifiedAt,
+            isPrimary: true,
+            weak: false,
+            sourceKind: "manual",
+            errorMessage: task.hashError,
+          },
+        ]
+      : [],
+    checksumState: checksummed
+      ? task.hashStatus === "verified"
+        ? "verified"
+        : task.hashStatus === "failed"
+          ? "failed"
+          : "pending"
+      : "not_provided",
+    // No real FS in browser preview — never claim staging proof.
+    stagingCleanup: "not_applicable",
+    finalPath: task.finalPath,
   };
 }
 
