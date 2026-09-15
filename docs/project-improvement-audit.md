@@ -879,12 +879,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验证测试**：`sync_session_*` 函数为 librqbit 运行时 API 的直接薄封装（既有单测覆盖 non_zero 语义）；tick 路径的调用由结构位置保证每秒执行。真实带宽变化验证依赖外部 tracker 环境，归入 FUN-18 的人工验收面。
 - **2026-09-13 加固**：新增单测 `sync_session_download_limit_updates_live_session`——在真实 librqbit session 上断言创建时限速到达 limiter、tick 同款 `sync_session_download_limit` 实时改写 `get_download_bps`、非正数与 `None` 清除上限、`sync_session_upload_limit` 同样生效。真实带宽下的端到端变化仍归 FUN-18。
 
-### ARC-30（P2，Open）：错误分类仍有多处依赖英文子串（`ARC-16` 遗留面）
+### ARC-30（P2，Closed）：错误分类仍有多处依赖英文子串（`ARC-16` 遗留面）
 
 - **证据**：`ARC-16` 已让 resume 路径改用结构化 payload，但以下位置仍在匹配文案：[`dash.rs`](../src-tauri/src/download/dash.rs#L1542) 用 `error.contains("canceled")` 判断取消（而 `run_cancellable` 返回的是硬编码英文 `"Download canceled."`）；[`actions.rs`](../src-tauri/src/commands/tasks/actions.rs#L732) 用 `contains("concurrently")`/`contains("already")` 统计批量操作的 skipped；[`sftp.rs`](../src-tauri/src/download/sftp.rs#L869) 用 `contains("permission")`；[`probe_error.rs`](../src-tauri/src/download/probe_error.rs#L53) 有 20 余条基于 OS/库英文错误串的分类。
 - **影响**：DASH 的取消判定最危险——文案一旦改动或本地化，取消会被当作真实失败上报为 `dash_ffmpeg_failed`。批量操作的成功/跳过/失败统计也会随措辞漂移。
 - **修复方向**：取消判定改用 `cancel_token.is_cancelled()` 这一权威来源；批量统计改按 `AppErrorPayload.code` 分派；SQLite BUSY 判定改用 sqlx 的结构化 error code；`probe_error.rs` 优先使用 reqwest 的类型化谓词与 `std::io::ErrorKind`，英文子串只作最后兜底并记录 debug 日志。`task_resume.rs` 已有的 `resume_errors_dispatch_on_code_not_message_text` 测试确立了这条原则，只是没有推广。
 - **验收**：修改任意错误文案不影响取消判定、批量统计与状态分流；新增对应回归测试。
+- **2026-09-16 修复（Closed）**：四处全部落地。①DASH：remux 结果分流改为 `is_remux_cancellation(cancel_token)`（token 是唯一权威；ffmpeg stderr 自身可能含有 "canceled" 字样，旧守卫会把真实失败误报为干净取消）。②批量统计：`bulk_task_action_global` 的 skipped 判定改为 `bulk_action_is_skippable`——只认 `AppErrorPayload` JSON 的稳定 code；`pause_task` 的 Conflict 分支与 `resume_task` 的 Completed 分支改发结构化 payload，新增稳定码 `task_state_changed` / `task_already_completed`（STABLE_ERROR_CODES + 7 locale `errors.*` 同步补齐；旧裸字符串一律计为 failed，两处来源已不再产生裸字符串）。③SFTP：open 失败分类改为 `is_sftp_permission_denied`——匹配 russh-sftp `Error::Status` 的 `SSH_FX_PERMISSION_DENIED` 状态码（服务器 error_message 可本地化，子串匹配本就不可靠）。④probe_error：`classify_error_source_chain` 抽出共享，`std::io::ErrorKind`（ConnectionRefused/TimedOut/NetworkUnreachable）类型化判定优先，英文子串退为无稳定 kind 的 OS/DNS 文案兜底，且每次兜底命中记录 `tracing::debug!`（修复方向中的「SQLite BUSY 结构化判定」已在 ARC-06/21 的 sqlx 错误处理中落实，无需另改）。
+- **验证测试**：dash `remux_cancellation_ignores_message_text`（token 未取消 + 旧 "canceled" 文案 → 不再判为取消，旧代码该用例变红）；actions `skippable_codes_dispatch_on_code_not_message_text` + `unknown_codes_and_plain_strings_count_as_failures`（改写 message 不影响 code 分派；旧裸文案不再被识别）；sftp `sftp_permission_denied_classified_by_status_code`（状态码 PermissionDenied + 无 "permission" 字样的 message → 正确分类）；probe_error `io_error_kinds_classify_independently_of_message_text` + `message_fallback_covers_dns_and_defaults_to_connection_refused`（ErrorKind 决定分流，与文案无关）。四组 lib 测试 20/4/10/5 全绿，`pnpm typecheck`、`pnpm check:i18n` 通过。
 
 ### ARC-31（P2，Partial）：超大模块与跨引擎重复代码（`ARC-17` 的量化补充）
 

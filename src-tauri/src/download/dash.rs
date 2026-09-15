@@ -1677,7 +1677,11 @@ async fn run_ffmpeg_remux(
         .arg(output);
     match super::ffmpeg::run_cancellable(command, cancel_token).await {
         Ok(()) => Ok(()),
-        Err(error) if error.contains("canceled") => {
+        // ARC-30: the token is the only authoritative cancellation signal.
+        // ffmpeg stderr may legitimately contain the word "canceled" while
+        // the user never cancelled — a real failure must not be misreported
+        // as a clean cancel.
+        Err(error) if is_remux_cancellation(cancel_token) => {
             let _ = fs::remove_file(output).await;
             Err(error)
         }
@@ -1690,6 +1694,12 @@ async fn run_ffmpeg_remux(
             ))
         }
     }
+}
+
+/// ARC-30: cancellation of the remux is decided solely by the cancel token,
+/// never by message text.
+fn is_remux_cancellation(cancel_token: &tokio_util::sync::CancellationToken) -> bool {
+    cancel_token.is_cancelled()
 }
 
 // ---------------------------------------------------------------------------
@@ -2311,5 +2321,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("dash_no_duration"));
+    }
+    /// ARC-30: remux cancellation must be decided by the token, not by
+    /// message text. The old guard matched `error.contains("canceled")`, so
+    /// a real ffmpeg failure echoing that word was misreported as a clean
+    /// cancel.
+    #[test]
+    fn remux_cancellation_ignores_message_text() {
+        let token = tokio_util::sync::CancellationToken::new();
+        assert!(
+            !super::is_remux_cancellation(&token),
+            "a live token must classify as a real failure even when the error text mentions cancellation"
+        );
+        token.cancel();
+        assert!(super::is_remux_cancellation(&token));
     }
 }

@@ -45,36 +45,56 @@ pub(crate) fn reqwest_error_to_structured(error: &reqwest::Error) -> String {
 }
 
 /// Classify a connect-phase `reqwest::Error` by inspecting the error chain.
+///
+/// ARC-30: typed predicates come first — `std::io::ErrorKind` survives
+/// reworded library messages, while the substring tables only back OS- and
+/// library-specific texts that have no stable kind. Substring decisions are
+/// logged so a rewording cannot silently change classification.
 fn classify_connect_error(error: &reqwest::Error) -> &'static str {
-    // Walk the source chain looking for DNS and connection-specific errors.
-    let mut source: Option<&dyn std::error::Error> = error.source();
+    classify_error_source_chain(error.source())
+}
+
+/// Walk an error source chain looking for DNS and connection-specific
+/// failures; shared by the reqwest path and the message fallback so both
+/// stay in sync.
+fn classify_error_source_chain(source: Option<&(dyn std::error::Error + 'static)>) -> &'static str {
+    let mut source = source;
     while let Some(err) = source {
+        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            match io_err.kind() {
+                std::io::ErrorKind::ConnectionRefused => return "connection_refused",
+                std::io::ErrorKind::TimedOut => return "timeout",
+                std::io::ErrorKind::NetworkUnreachable => return "network_unreachable",
+                _ => {}
+            }
+        }
         let msg = err.to_string().to_lowercase();
-        if msg.contains("dns")
+        let fallback = if msg.contains("dns")
             || msg.contains("resolve")
             || msg.contains("name or service not known")
             || msg.contains("getaddrinfo")
             || msg.contains("no such host")
             || msg.contains("nodename nor servname")
         {
-            return "dns_failure";
-        }
-        // Prefer proxy-tagged failures over generic connection_refused so
-        // SOCKS/HTTP proxy misconfig does not look like a direct-origin outage.
-        if msg.contains("socks") || msg.contains("proxy") {
-            return "proxy_connection_failed";
-        }
-        if msg.contains("connection refused") || msg.contains("actively refused") {
-            return "connection_refused";
-        }
-        if msg.contains("unreachable") || msg.contains("network is down") {
-            return "network_unreachable";
-        }
-        if msg.contains("timed out") || msg.contains("timeout") || msg.contains("deadline") {
-            return "timeout";
-        }
-        if msg.contains("certificate") || msg.contains("ssl") || msg.contains("tls") {
-            return "tls_error";
+            Some("dns_failure")
+        } else if msg.contains("socks") || msg.contains("proxy") {
+            // Prefer proxy-tagged failures over generic connection_refused so
+            // SOCKS/HTTP proxy misconfig does not look like a direct-origin outage.
+            Some("proxy_connection_failed")
+        } else if msg.contains("connection refused") || msg.contains("actively refused") {
+            Some("connection_refused")
+        } else if msg.contains("unreachable") || msg.contains("network is down") {
+            Some("network_unreachable")
+        } else if msg.contains("timed out") || msg.contains("timeout") || msg.contains("deadline") {
+            Some("timeout")
+        } else if msg.contains("certificate") || msg.contains("ssl") || msg.contains("tls") {
+            Some("tls_error")
+        } else {
+            None
+        };
+        if let Some(code) = fallback {
+            tracing::debug!(message = %msg, code, "probe error classified by message-text fallback");
+            return code;
         }
         source = err.source();
     }
@@ -207,5 +227,58 @@ mod tests {
         let payload: AppErrorPayload = serde_json::from_str(&result).unwrap();
         assert_eq!(payload.code, "unknown_error");
         assert_eq!(payload.message, "Random unknown error");
+    }
+    /// ARC-30: a typed io::ErrorKind decides the code regardless of message
+    /// wording; the message-fallback path only handles kinds without a
+    /// stable mapping (e.g. DNS resolution text).
+    #[test]
+    fn io_error_kinds_classify_independently_of_message_text() {
+        use std::io::Error as IoError;
+        use std::io::ErrorKind;
+
+        #[derive(Debug)]
+        struct Chain(std::io::Error);
+        impl std::fmt::Display for Chain {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "wrapper without keywords")
+            }
+        }
+        impl std::error::Error for Chain {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let refused = Chain(IoError::new(ErrorKind::ConnectionRefused, "server said no"));
+        assert_eq!(
+            classify_error_source_chain(Some(&refused)),
+            "connection_refused"
+        );
+
+        let timed_out = Chain(IoError::new(ErrorKind::TimedOut, "gave up eventually"));
+        assert_eq!(classify_error_source_chain(Some(&timed_out)), "timeout");
+
+        let unreachable = Chain(IoError::new(ErrorKind::NetworkUnreachable, "no path"));
+        assert_eq!(
+            classify_error_source_chain(Some(&unreachable)),
+            "network_unreachable"
+        );
+    }
+
+    /// ARC-30: the message fallback still routes OS/library texts that have
+    /// no stable kind (DNS wording arrives via io::Error with kind
+    /// Uncategorized), and unrelated texts fall through to the default.
+    #[test]
+    fn message_fallback_covers_dns_and_defaults_to_connection_refused() {
+        use std::io::Error as IoError;
+        use std::io::ErrorKind;
+
+        let dns = IoError::new(ErrorKind::Other, "No such host is known. (os error 11001)");
+        assert_eq!(classify_error_source_chain(Some(&dns)), "dns_failure");
+
+        assert_eq!(
+            classify_error_source_chain(Some(&IoError::new(ErrorKind::Other, "something novel"))),
+            "connection_refused"
+        );
     }
 }

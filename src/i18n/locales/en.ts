@@ -1996,6 +1996,8 @@ const en = {
     storageCleanupFailed: "Cleaning up storage artifacts failed. Some items may remain.",
     storageScanFailed: "Scanning download directories for temporary files failed.",
     storageTaskBusy: "The task is not in a state that allows cleaning its temporary files.",
+    taskAlreadyCompleted: "This download is already completed.",
+    taskStateChanged: "Task state changed concurrently, please refresh.",
     taskCredentialsDecryptFailed: "Stored task credentials could not be decrypted.",
     taskCredentialsEncryptFailed: "Task credentials could not be encrypted for storage.",
     taskCredentialsInvalid: "Task credentials are invalid.",

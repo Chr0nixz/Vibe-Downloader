@@ -2032,6 +2032,8 @@ const es = {
     storageCleanupFailed: "Error al limpiar los archivos temporales. Es posible que algunos elementos permanezcan.",
     storageScanFailed: "Error al analizar los directorios de descargas en busca de archivos temporales.",
     storageTaskBusy: "El estado actual de la tarea no permite limpiar sus archivos temporales.",
+    taskAlreadyCompleted: "Esta descarga ya se ha completado.",
+    taskStateChanged: "El estado de la tarea cambió; actualiza la lista.",
     taskCredentialsDecryptFailed: "No se pudieron descifrar las credenciales de tarea guardadas.",
     taskCredentialsEncryptFailed: "No se pudieron cifrar las credenciales de tarea para guardarlas.",
     taskCredentialsInvalid: "Las credenciales de la tarea no son válidas.",

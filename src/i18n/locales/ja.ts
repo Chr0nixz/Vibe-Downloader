@@ -1988,6 +1988,8 @@ const ja = {
     storageCleanupFailed: "一時ファイルのクリーンアップに失敗しました。一部の項目は残っている可能性があります。",
     storageScanFailed: "ダウンロードディレクトリの一時ファイルのスキャンに失敗しました。",
     storageTaskBusy: "現在のタスク状態では一時ファイルをクリーンアップできません。",
+    taskAlreadyCompleted: "このダウンロードはすでに完了しています。",
+    taskStateChanged: "タスクの状態が変更されました。更新してください。",
     taskCredentialsDecryptFailed: "保存済みのタスク資格情報を復号できませんでした。",
     taskCredentialsEncryptFailed: "保存用にタスク資格情報を暗号化できませんでした。",
     taskCredentialsInvalid: "タスク資格情報が無効です。",

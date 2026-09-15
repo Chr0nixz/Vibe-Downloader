@@ -1932,6 +1932,8 @@ const zhCN = {
     storageCleanupFailed: "清理临时文件失败，部分项目可能仍保留在磁盘上。",
     storageScanFailed: "扫描下载目录中的临时文件失败。",
     storageTaskBusy: "当前任务状态不允许清理其临时文件。",
+    taskAlreadyCompleted: "该下载已完成。",
+    taskStateChanged: "任务状态已发生变化，请刷新。",
     taskCredentialsDecryptFailed: "无法解密已保存的任务凭据。",
     taskCredentialsEncryptFailed: "无法加密任务凭据以供存储。",
     taskCredentialsInvalid: "任务凭据无效。",

@@ -18,8 +18,8 @@ use crate::{
         evict_task_files_version, evict_task_files_versions,
     },
     models::{
-        task::now_iso, ChecksumAlgorithm, HashVerificationState, HashVerificationStatus,
-        RecoveryAction, Task, TaskPriority, TaskStatus,
+        task::now_iso, AppErrorPayload, ChecksumAlgorithm, HashVerificationState,
+        HashVerificationStatus, RecoveryAction, Task, TaskPriority, TaskStatus,
     },
     platform,
     state_machine::TransitionError,
@@ -277,7 +277,15 @@ pub async fn pause_task(
     {
         Ok(_) => {}
         Err(TransitionError::Conflict { .. }) => {
-            return Err("Task state changed concurrently, please refresh.".to_string());
+            // ARC-30: a stable code, not free text — bulk statistics and the
+            // frontend dispatch on the code, so message rewording is inert.
+            return Err(AppErrorPayload::new(
+                "task_state_changed",
+                "Task state changed concurrently, please refresh.",
+                false,
+                Vec::new(),
+            )
+            .command_error());
         }
         Err(error) => return Err(error.into()),
     }
@@ -302,7 +310,14 @@ pub async fn resume_task(
     tracing::info!(task_id = %id, "resuming task");
     let task = require_task(&state.pool, &id).await?;
     if matches!(task.status, TaskStatus::Completed) {
-        return Err("This download is already completed.".to_string());
+        // ARC-30: stable code instead of free text (see pause_task).
+        return Err(AppErrorPayload::new(
+            "task_already_completed",
+            "This download is already completed.",
+            false,
+            Vec::new(),
+        )
+        .command_error());
     }
     if matches!(task.status, TaskStatus::NeedsAttention) {
         return Err("Remote file changed. Restart download to avoid corruption.".to_string());
@@ -776,8 +791,10 @@ pub async fn bulk_task_action_global(
         match result {
             Ok(_) => succeeded += 1,
             Err(err) => {
-                let lower = err.to_ascii_lowercase();
-                if lower.contains("concurrently") || lower.contains("already") {
+                // ARC-30: skipped-vs-failed keys off the stable error code,
+                // never message wording (ARC-16 established the same rule
+                // for resume errors).
+                if bulk_action_is_skippable(&err) {
                     tracing::info!(task_id = %id, error = %err, "bulk global action skipped");
                     skipped += 1;
                 } else {
@@ -1417,5 +1434,57 @@ mod tests {
 
         pool.close().await;
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// ARC-30: a raced transition or an already-completed resume is a *skip*
+/// (the task was not in an actionable state), not a failure of the bulk
+/// operation. Only structured `AppErrorPayload` codes decide this; plain
+/// legacy strings are failures.
+fn bulk_action_is_skippable(error: &str) -> bool {
+    let payload = serde_json::from_str::<AppErrorPayload>(error).ok();
+    matches!(
+        payload.as_ref().map(|p| p.code.as_str()),
+        Some("task_state_changed") | Some("task_already_completed")
+    )
+}
+
+#[cfg(test)]
+mod arc30_tests {
+    use super::bulk_action_is_skippable;
+    use crate::models::AppErrorPayload;
+
+    fn payload(code: &str, message: &str) -> String {
+        AppErrorPayload::new(code, message, false, Vec::new()).command_error()
+    }
+
+    /// ARC-30: changing any error wording must not affect bulk statistics.
+    #[test]
+    fn skippable_codes_dispatch_on_code_not_message_text() {
+        assert!(bulk_action_is_skippable(&payload(
+            "task_state_changed",
+            "totally reworded phrasing"
+        )));
+        assert!(bulk_action_is_skippable(&payload(
+            "task_already_completed",
+            "another arbitrary wording"
+        )));
+    }
+
+    #[test]
+    fn unknown_codes_and_plain_strings_count_as_failures() {
+        assert!(!bulk_action_is_skippable(&payload(
+            "hls_segment_failed",
+            "unrelated failure"
+        )));
+        // Pre-ARC-30 plain-text forms of the same situations are no longer
+        // classified — the structured payload is the single contract.
+        assert!(!bulk_action_is_skippable(
+            "Task state changed concurrently, please refresh."
+        ));
+        assert!(!bulk_action_is_skippable(
+            "This download is already completed."
+        ));
+        assert!(!bulk_action_is_skippable("not json at all"));
     }
 }

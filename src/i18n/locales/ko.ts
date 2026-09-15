@@ -1966,6 +1966,8 @@ const ko = {
     storageCleanupFailed: "임시 파일 정리에 실패했습니다. 일부 항목이 남아 있을 수 있습니다.",
     storageScanFailed: "다운로드 디렉터리의 임시 파일 검사에 실패했습니다.",
     storageTaskBusy: "현재 작업 상태에서는 임시 파일을 정리할 수 없습니다.",
+    taskAlreadyCompleted: "이 다운로드는 이미 완료되었습니다.",
+    taskStateChanged: "작업 상태가 변경되었습니다. 새로고침해 주세요.",
     taskCredentialsDecryptFailed: "저장된 작업 자격 증명을 복호화할 수 없습니다.",
     taskCredentialsEncryptFailed: "저장을 위해 작업 자격 증명을 암호화할 수 없습니다.",
     taskCredentialsInvalid: "작업 자격 증명이 잘못되었습니다.",

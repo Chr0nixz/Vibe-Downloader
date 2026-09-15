@@ -17,6 +17,7 @@ use russh::{
     },
 };
 use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::StatusCode;
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 use tokio::{
@@ -971,13 +972,15 @@ async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, Str
     .await?;
 
     let mut remote = session.open(&request.target.path).await.map_err(|e| {
-        let message = e.to_string();
-        let code = if message.to_ascii_lowercase().contains("permission") {
+        // ARC-30: the SSH_FX_PERMISSION_DENIED status code is authoritative —
+        // server error strings are remote-controlled and may not mention
+        // "permission" at all.
+        let code = if is_sftp_permission_denied(&e) {
             "sftp_permission_denied"
         } else {
             "sftp_open_failed"
         };
-        engine_error(code, format!("Could not open SFTP file: {message}"), true)
+        engine_error(code, format!("Could not open SFTP file: {e}"), true)
     })?;
     if offset > 0 {
         remote
@@ -1729,6 +1732,16 @@ fn percent_decode_lossy(value: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+/// ARC-30: SSH_FX_PERMISSION_DENIED is a typed protocol status, not message
+/// text — servers localize `error_message`, so match the status code.
+fn is_sftp_permission_denied(error: &russh_sftp::client::error::Error) -> bool {
+    matches!(
+        error,
+        russh_sftp::client::error::Error::Status(status)
+            if status.status_code == StatusCode::PermissionDenied
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1771,5 +1784,32 @@ mod tests {
             sftp_file_url(&target, "/dir/file name.bin"),
             "sftp://alice:pass@example.com:2200/dir/file%20name.bin"
         );
+    }
+    /// ARC-30: classification keys off the SFTP status code, never the
+    /// server-provided message text.
+    #[test]
+    fn sftp_permission_denied_classified_by_status_code() {
+        use russh_sftp::client::error::Error as SftpError;
+        use russh_sftp::protocol::Status;
+
+        let denied = SftpError::Status(Status {
+            id: 0,
+            status_code: StatusCode::PermissionDenied,
+            // A server may phrase the failure without the word "permission";
+            // the pre-ARC-30 substring match would misclassify this.
+            error_message: "access rejected by policy".to_string(),
+            language_tag: "en".to_string(),
+        });
+        assert!(is_sftp_permission_denied(&denied));
+
+        let other = SftpError::Status(Status {
+            id: 0,
+            status_code: StatusCode::NoSuchFile,
+            error_message: "permission implied by wording".to_string(),
+            language_tag: "en".to_string(),
+        });
+        assert!(!is_sftp_permission_denied(&other));
+
+        assert!(!is_sftp_permission_denied(&SftpError::UnexpectedPacket));
     }
 }

@@ -1932,6 +1932,8 @@ const zhTW = {
     storageCleanupFailed: "清理暫存檔案失敗，部分項目可能仍保留在磁碟上。",
     storageScanFailed: "掃描下載目錄中的暫存檔案失敗。",
     storageTaskBusy: "目前任務狀態不允許清理其暫存檔案。",
+    taskAlreadyCompleted: "此下載已完成。",
+    taskStateChanged: "任務狀態已發生變化，請重新整理。",
     taskCredentialsDecryptFailed: "無法解密已儲存的任務憑證。",
     taskCredentialsEncryptFailed: "無法加密任務憑證以供儲存。",
     taskCredentialsInvalid: "任務憑證無效。",
