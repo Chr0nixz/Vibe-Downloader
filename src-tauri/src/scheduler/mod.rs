@@ -1201,6 +1201,78 @@ mod convergence_tests {
     }
 
     #[tokio::test]
+    async fn corrupt_headers_leave_queue_and_do_not_block_next_reservation() {
+        use base64::Engine as _;
+        crate::secure_headers::install_test_secret_key(
+            &base64::engine::general_purpose::STANDARD.encode([3; 32]),
+        );
+        let pool = test_pool("corrupt-metadata").await;
+        for id in ["bad-headers", "good-next"] {
+            db::insert_task_record(&pool, &task_record(id, TaskStatus::Queued))
+                .await
+                .unwrap();
+        }
+        db::upsert_task_request_headers(
+            &pool,
+            "bad-headers",
+            &[("cookie".into(), "session=private".into())],
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE task_request_headers SET nonce = '' WHERE task_id = 'bad-headers'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let headers: TaskRequestHeaders = Arc::default();
+        let mut started = Vec::new();
+        // Drive the production reservation precondition and failure convergence
+        // with real encrypted rows. No AppHandle or fake decryption is needed.
+        for task in db::list_queued_task_records(&pool, 8).await.unwrap() {
+            match crate::commands::tasks::resolve_task_request_headers(
+                &pool,
+                headers.clone(),
+                &task.id,
+            )
+            .await
+            {
+                Err(error) => super::handle_start_failure(None, &pool, &task.id, error).await,
+                Ok(_) => {
+                    db::update_task_status(
+                        &pool,
+                        &task.id,
+                        TaskStatus::Downloading,
+                        Some(TaskStatus::Queued),
+                        0,
+                        1,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    started.push(task.id);
+                }
+            }
+        }
+        assert_eq!(started, ["good-next"]);
+        assert!(db::list_queued_task_records(&pool, 8)
+            .await
+            .unwrap()
+            .is_empty());
+        let failed = db::get_task_record(&pool, "bad-headers")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            failed.error_code.as_deref(),
+            Some("auth_headers_unavailable")
+        );
+        assert_ne!(failed.status, TaskStatus::Downloading);
+        pool.close().await;
+    }
+
+    #[tokio::test]
     async fn arc41_queued_start_failure_becomes_visible_failure() {
         // ARC-41: a start failure on a still-Queued row (header/proxy
         // resolution or transition error) must produce a visible failure, not

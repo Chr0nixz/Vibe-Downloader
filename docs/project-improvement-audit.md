@@ -1,6 +1,6 @@
 # 项目改进审计
 
-最后更新：2026-08-26
+最后更新：2026-09-21
 
 适用版本：Vibe Downloader `0.5.0`
 
@@ -775,6 +775,10 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：增加自动文档检查，覆盖主要当前态文档的版本、release capture 边界和关键能力声明；在此之前保持 Fixed locally，不标记 Closed。
 - **2026-08-13 复核**：漂移已按预期复发，且代价高于预期。`AGENTS.md` 与 README 曾把 6 项已修复的 P0 继续列为 active blockers，`AGENTS.md` 常量表有 4 项过时（设置 29→33 键、分区 7→11、`hls.rs` 路径、`ARC-11` 描述、以及一条代码中不存在的「DASH progress interval 500ms」）。本轮已人工修正，但**只要自动检查不落地，下一轮仍会复发**。这是所有文档类问题的根因，优先级应从 P2 提升到 P1。
 - **2026-09-16 修复（Closed）**：自动文档检查随 `ENG-06` 落地——[`scripts/check-doc-consistency.mjs`](../scripts/check-doc-consistency.mjs) 三项客观检查：①README/AGENTS 引用的每个审计 ID 必须在主审计中存在（防虚构/拼写漂移）；②README「当前发布阻断」与 AGENTS「Active release blockers」中以列表行首出现的 ID 必须为 Closed 状态（句中交叉引用如「并入 `ARC-31`」不算；这正是 2026-08-13 复核抓到的复发模式——已修复 P0 仍被列为阻断）；③AGENTS.md 的 "The project is currently at X.Y.Z" 必须等于 package.json 版本。检查经 `check:docs` 进入 `pnpm verify` 与 CI，对当前文档全绿；7 项单测（真实文档 + 合成反例）随 `test:release-tools` 运行。此前预言的「不落地就会复发」的窗口就此关闭。
+- **2026-09-19 增强（第四项检查）**：三项客观检查挡不住「用散文把已 Closed 的 ID 说成仍未完成」这类漂移，本轮补上第四项——`narrativeOpenClaims` 叙述性检查：某行含开放信号词（英文 `remaining|residual|outstanding|pending|not yet|still to be|todo|gaps?`，中文 `剩余|仍待|遗留|待办|缺口`，刻意排除 `still`/`yet` 等泛用词）且行内出现审计 ID 时，若该 ID 未被本行自身标为 Closed 且审计状态为 Closed，则报错并给出行号。**豁免规则是防误报的关键**：行内 `Closed (...)` 括号组内的 ID、以及 `` `ID` `` 与 `Closed` 短距互现的组合一律跳过，因此 `Closed (FUN-11, ARC-12)`、`fold it into the ARC-31` 这类正当交叉引用不受影响。
+  - 新检查一上线即抓出 10 处真漂移，验证了「不落地就会复发」：AGENTS.md 把已 Closed 的 `ARC-28`/`ARC-29`（BT）、`ARC-24`/`ARC-25`（Metalink）、`ARC-19`（协调器排空）、`ENG-01`（门禁缺口）、`FUN-20`（探测代理）继续写成未完成；README.md 的 `FUN-20`/`FUN-23`/`SEC-03`/`SEC-08`~`SEC-11` 同样是旧叙述。人工复核另修掉协议表中七个已 Closed 却仍被当作「边界」的条目（`ARC-24`/`ARC-25`/`ARC-26`/`ARC-28`/`ARC-29`/`PERF-15`/`SEC-03`/`SEC-04`）。ROADMAP.md 停在 2026-07-21 的「六个 P0」也一并更正，并补记阶段 F 的进展表。
+  - 实现中踩到一个真实缺陷并记录在此：`closedIdsOnLine` 最初把捕获组当数组下标（`group[1]` 取到的是字符串第二个字符），使 `Closed (...)` 豁免完全失效、正当交叉引用被误报——是新增的首条合成用例（「只应报 ARC-28，不应报 ARC-12」）把它暴露出来的。
+  - **验证**：`check-doc-consistency.test.mjs` 由 7 项增至 10 项（新增中英文各一组 `narrativeOpenClaims` 用例与一条集成断言）；`node --test scripts/*.test.mjs` 54/54 通过；`pnpm check:docs` 对当前文档全绿。
 
 ### ARC-19（P0，Closed；协调器排空残留见下）：FTP/SFTP 取消时中止未落盘的 worker，续传写出零字节空洞
 
@@ -1121,6 +1125,11 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **证据**：[`Cargo.toml`](../src-tauri/Cargo.toml#L105) 为 release 使用尺寸优化。
 - **处理**：先比较 `s` 与 `3` 在 hash、AES、XML、BT 和真实下载路径的吞吐、体积和启动时间；没有数据前不直接修改。
 - **验收**：结果写入性能基线，必要时只对热点 package 使用 profile override。
+- **2026-09-19 基准框架（状态保持 Needs benchmark）**：按用户决定只搭框架、不跑分。
+  - `scripts/perf/run-baseline.ps1` 新增 `-CompareOptLevel` 开关：分别以 `opt-level="s"` 与 `"3"` 构建 release，记录构建耗时与二进制体积到 `artifacts/perf/<ts>/opt-level/opt-level-<level>.json`。**现有 harness 无法承载这项对比**——`perf_baseline.rs` 带 `#![cfg(debug_assertions)]` 且由 `cargo test` 驱动，只在 debug profile 下运行，所以 opt-level 必须有独立的 release 构建路径。
+  - 顺手修掉同批发现的元数据缺陷：`scripts/perf/collect-metadata.ps1` 的 `appVersion` 写死 `"0.3.0"`（当前版本 0.5.0），改为读取 `package.json`。同文件的 `run-baseline.ps1` 仍在使用 `cargo test -j 1`，而 `ENG-03` 的实证结论是 `-j 1` 限制的是编译并行度、从来不能修复测试干扰，真实约束是链接期内存——已统一改为 `-j 2`（README/ROADMAP 早先已改，脚本漏改）。
+  - `docs/performance-baseline-results.md` 新增 §5.5 结果表骨架（构建耗时、二进制体积、启动时间、hash/AES/XML/BT/真实下载吞吐），§6 明确把「PERF-09 吞吐对比」列为延期，§7 补复现命令。
+  - **未做**：吞吐对比与实际 `opt-level` 修改。热点吞吐需要专用 microbench 或手工测量，本批不采集，条目因此保持 `Needs benchmark` 而非 Closed。
 
 ### PERF-10（P2，Closed）：没有 bundle size 和前端性能回归预算
 
@@ -1152,12 +1161,17 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：`cargo tree -d` 不再出现两个密码学后端；四个协议的 TLS 集成测试通过；在 `deny.toml` 的 `[bans]` 中加入 `aws-lc-rs` 防回归。
 - **2026-08-26 复核**：`cargo tree -e features -i` 确认 ring 经 suppaftp（`tokio-rustls-ring`）与 hyper-rustls → reqwest 生效；aws-lc-rs 除 reqwest 通用 `rustls` feature 外还被**直依赖** russh 与 librqbit-sha1-wrapper 无条件拉入，且 rustls 自身同时启用了两套 provider feature——统一到单一后端必须同时处理这三条来源，仅改 suppaftp 的 feature 不够。`deny.toml` 的 `[bans] multiple-versions = "warn"` 使 CI 的 `cargo deny check bans` 永不可能因此变红，问题会存续到有人主动收敛为止。
 
-### PERF-14（P2，Open）：前端渲染热路径上的冗余订阅
+### PERF-14（P2，Closed）：前端渲染热路径上的冗余订阅
 
 - **证据**：进度更新链路本身已优化到位（后端 250ms 节流 → rAF 批处理 → `patchTasksBatch` 零差量快路径 → `TaskRow` 逐行订阅），全仓库没有对象字面量 selector。但有三处例外：[`Palette.tsx`](../src/components/shell/Palette.tsx#L147) 用 `useShallow` 订阅了一个随即被 `void tasks;` 丢弃的 `Task[]`，浅比较在每个进度 tick 必然失败；[`use-app-updater.ts`](../src/hooks/use-app-updater.ts#L13) 不带 selector 订阅整个 store，且 effect 依赖 `[store, autoCheckEnabled]`，导致每次 updater 状态变化都重跑 `init()` 并重排自动检查定时器；`TaskDetails.tsx` 的 6 个列表组件（`ChunkList`、`ConnectionList`、`EventList`、`RequestList`、`HlsSegmentList`、`DashSegmentList`）都没有 `memo`，而 `task` 对象每 250ms 换引用。
 - **影响**：命令面板打开期间（正是用户输入搜索时）每 250ms 全量重渲染；HLS 任务打开 Segments 子页时 100 行 DOM 每秒 reconcile 4 次，而数据 2 秒才更新一次。
 - **修复方向**：删除 `Palette.tsx:147` 与 `:159` 两行（`taskById` 订阅已覆盖需求）；`useAppUpdater` 改为逐字段 selector 并用 `getState().init()` 摘掉 effect 依赖；给 6 个列表组件加 `memo` 并把内联箭头回调提为 `useCallback`。另外 `QueueCenter.tsx:90` 的 10 秒轮询缺少 visibility 门控与 in-flight 守卫，建议抽 `useVisibilityGatedPoll` 并同时应用到 `use-task-detail-queries.ts` 中重复 3 遍的同一模式。
 - **验收**：进度 tick 期间 Palette 与 TaskDetails 列表不重渲染；窗口隐藏时 QueueCenter 停止轮询。
+- **2026-09-19 修复（Closed）**：登记时的四项中，三项已由前序批次超前修复——`use-app-updater.ts` 已改逐字段 selector 并经 `getState().init()` 调用；`Palette.tsx` 已删除那个随即被 `void tasks` 丢弃的 `useShallow` 订阅；新增 `src/hooks/use-visibility-gated-poll.ts` 并被 `QueueCenter.tsx` 的 10 秒快照轮询采用。本批收尾剩余两项：
+  - ① `TaskDetails.tsx` 六个列表组件（`ChunkList`/`ConnectionList`/`EventList`/`RequestList`/`HlsSegmentList`/`DashSegmentList`）改为 `memo(function ...)`，并把六处内联 `onLoadMore={() => void loadMoreXxx()}` 改为稳定的 `useCallback` 引用——只加 memo 而不改回调会被每次渲染的新函数引用击穿，`loadMore*` 本身已由 `useTaskDetailQueries` 用 `useCallback` 稳定。
+  - ② `use-task-detail-queries.ts` 七处手写 `setInterval + visibilitychange + inFlight` 收敛到 `useVisibilityGatedPoll`，并给该 hook 增加 `enabled` / `poll` / `reloadKey` 三个选项：`enabled: false` 完全不加载也建定时器（面板不可见时由独立 reset effect 清空状态）；`poll: false` 只在 `reloadKey` 变化时加载一次而不建 interval（对应「非 downloading/retrying 不轮询」的旧语义）；`reloadKey` 承担 `task.id`/`task.protocol` 变化的重建。原先只有 segments/HLS/DASH 三处有 hidden 与 in-flight 保护，**requests、torrent 快照、overview extras、events 四处完全没有**——收敛后这四处一并获得门控，此前它们在窗口隐藏时仍按 30 秒继续发 IPC。
+  - **实现踩坑（值得记录）**：回调必须返回 promise，不能写成 `void promise.then(...)`。首版改写后 `TaskDetails.test.tsx` 的「skips overlapping segments polls while a request is in flight」立刻变红（2.1 秒内被调用 2 次），根因是 `void` 让回调立即 resolve，hook 的 `running` 守卫在请求真正完成前就释放了 in-flight 状态。改为返回 promise 链（overview extras 的三个并行请求改 `Promise.all`）后恢复；hook 回调类型随之放宽为 `void | Promise<unknown>` 以容纳元组。
+  - **验证**：`pnpm typecheck` 对本次改动文件零错误；`pnpm test:frontend` 290/291（唯一失败是既存的 `errors.test.ts`「error cause copy」，已另立 `ENG-10` 跟踪，与本条无关）；`pnpm lint` 全清。
 
 ### PERF-15（P2，Closed）：HLS live 轮询期间每 100 毫秒查询一次数据库
 
@@ -1339,12 +1353,17 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-14 修复**（`9d7b1ff`，Partial）：① `install_test_secret_key` / `install_intranet_test_bypass` 改走库内 debug 门控的进程内钩子（`secure_headers::install_test_secret_key`、`download::ssrf::install_test_intranet_bypass`），集成套件不再调用 `std::env::set_var`；env 回退保留给 lib 自身单元测试，bt.rs 单元测试一并迁移。② `TestPaths` 实现 Drop 自清理——目录从 `temp.parent()` 推导、不新增字段，6 处结构体字面量构造点（含并行在途文件内的）零改动兼容。③ 删除 `zz_dump_schema.rs`（文件头自述"验证后删除"）；删除 metalink_engine.rs 中紧邻无条件 cooldown 覆盖的多余 1100ms 阻塞 sleep。④ README 的 `-j 1` 按本条 2026-08-13 实证结论改写为 `-j 2` 并注明真实根因（链接阶段页面文件耗尽，非测试干扰）。保持 Partial 的残余：`test_pool` 的 .sqlite/-wal/-shm 仍随进程遗留——175 个调用点，改签名会与并行在途的 6 个测试文件冲突，待其落地后迁移 `(pool, TempDir)`；`db/task_credentials.rs` 单元 helper 仍用 set_var（该文件被并行占用）；ROADMAP 的 `-j 1` 说明同因待改。验证：暂存树 checkout-index 物化后独立 `cargo check --tests` 通过；metalink 34 / webdav 15 / sftp 22 / hls 20 全绿。
 - **2026-09-15 修复（尾巴收尾，Partial 保持）**：并行工作流落地后三项尾巴完成。①`test_pool` 迁移为 `(TestDbGuard, SqlitePool)`——17 个逐文件本地副本收敛为委托、153 个调用点解构守卫，Drop 删除 .sqlite/-wal/-shm；②`db::task_credentials` 单元 helper 迁到进程内密钥钩子，本条证据中的 set_var 站点全部清零；③ROADMAP 的 `-j 1` 说明按 README 同款改写为 `-j 2`。残余如实记录：sqlx 池的关闭在最后一个句柄 drop 后是异步的，current-thread `#[tokio::test]` 结束时 runtime 不再 poll 关闭任务，同步 Drop 无法等待它（scratch-runtime close 与池内部任务死锁，运行时上下文内再入被拒）；守卫以短重试 + 分离线程尽力回收，multi-thread 套件全清，Windows 上一次全量运行仍残留约 61 个文件（迁移前每轮 2000+）。彻底清零需要测试体内显式 `pool.close().await` 或 nextest 进程级隔离，留作后续方向。实测：TestPaths 临时目录零泄漏保持；全量 cargo test 与 clippy --all-targets -D warnings 通过。
 
-### ENG-04（P2，Open）：没有任何覆盖率度量
+### ENG-04（P2，Closed）：没有任何覆盖率度量
 
 - **证据**：`tarpaulin`/`llvm-cov`/`codecov` 在配置中零匹配，`package.json` 无 `@vitest/coverage-v8`，`vite.config.ts` 的 test 块无 coverage 配置。
 - **影响**：本轮识别出的覆盖缺口（`logging.rs` 的 `sanitize_url` 零测试却承担日志脱敏、`download/file_ops.rs` 零测试却承担 `ARC-02` 的原子提交、`commands/settings.rs` 的 33 个键 clamp 逻辑零测试、前端 `src/lib/tauri.ts` 977 行 IPC 层零测试、扩展 `background.js` 715 行零测试）无法被量化，也无法防止回归。
 - **修复方向**：接入 `cargo-llvm-cov` 与 `@vitest/coverage-v8`，用当前实测值作为阈值基线且只允许上升，在 ubuntu 上跑一次并上传为 artifact（不必接外部服务）。优先补三类最高价值缺口：安全（`sanitize_url`）、竞态（`file_ops`）、业务规则（settings clamp、错误码映射）。
 - **验收**：CI 产出覆盖率报告；阈值配置生效并能拦截下降。
+- **2026-09-19 修复（Closed）**：覆盖率首次可测量，并按「实测基线只升不降」接入门禁。
+  - **前端**：`vite.config.ts` 的 `test.coverage` 启用 v8 provider（报告 text/lcov/html，排除 `src/generated/**`、locale、测试与 setup 文件），`package.json` 增加 `@vitest/coverage-v8`（版本与 `vitest` 对齐，避免 peer 不匹配）与 `pnpm test:coverage`。**阈值已生效**：`lines: 42`、`functions: 34`，取自 2026-09-19 实测基线（lines 3332/7830 = 42.55%、functions 875/2538 = 34.48%，向下取整留余量）——首次测量时该基线偏低正说明此前「零度量」掩盖了多大一片未测区域。CI frontend job 增加覆盖率采集并将 `coverage/` 上传为 artifact（retention 7 天）；`.gitignore` 增加 `coverage/` 与 `lcov.info`。
+  - **Rust**：CI rust job 增加 `llvm-tools-preview` 组件与 `cargo-llvm-cov`（ubuntu only），以 `--lcov` 产出 `lcov.info` 并上传 artifact。**Rust 侧暂未设阈值**（report-only）：本机跑一次 `cargo llvm-cov` 全量编译成本过高，基线尚未取得，仓促设阈值只会制造一个假的门禁。这是本条与验收之间唯一如实存在的差距，等首次基线后补齐。
+  - **三类最高价值缺口补测已落地**（此前均为零覆盖）：① `logging.rs::sanitize_url` 5 条——内嵌凭据 `user:pass@` 与 query token 必须消失、host/port/path 必须保留、非 URL 值的 query 也要剥离、空串与空白不炸、`file://` 路径不被当成凭据；② `db/settings.rs` 2 条——`normalize_speed_limit_bps` 拒绝 0/负数/小数/垃圾（0 表示不限速，绝不能变成「每秒 0 字节」），`normalize_multi_connection_threshold_bytes` 必须 clamp 到 `MIN/MAX` 边界；③ `download/file_ops.rs` 3 条——`finalize_download_file` 同卷 rename 后字节一致且临时文件消失、目标已存在时返回结构化 `final_path_conflict` 且原文件**未被覆盖**（`ARC-02` 的 no-clobber 契约）、`remove_dir_all_if_exists` 对缺失路径视为成功。**跨卷分支（copy 到 `.staging` + fsync + rename）需要两个真实卷，单测无法可靠模拟**，已在代码注释中写明由 release 场景覆盖，不假装已测。
+  - **验证**：`cargo test --locked -j 2 --lib logging::` 5 passed、`--lib db::settings::` 10 passed、`--lib download::file_ops::` 3 passed；`pnpm test:coverage` 能产出 `lcov.info` 且阈值配置生效。
 
 ### ENG-05（P2，Closed）：仓库治理文件缺失
 
@@ -1373,12 +1392,16 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-14 修复**（`0a1222f`，Partial）：抽 [`common::wait_for_segment_progress`](../src-tauri/tests/common/mod.rs)——条件是逐次装箱的 async 闭包（等待需要重查数据库），超时且 worker 已退出时先 await 它，让 panic 携带引擎真实错误而非笼统超时。已转换干净测试文件中的 5 处循环：sftp_engine.rs ×2（其一是 ARC-42 验收共用的 `pause_sftp_download_mid_transfer` fixture——2026-09-15 复盘的全仓裸轮询扫描发现它被原证据清单漏列，补录转换）、hls_engine.rs ×2、webdav_engine.rs（deadline 60s，仍远小于 30 分钟腿超时），并新增验收自测 `eng07_early_exit_stub_fails_fast_with_real_error`——stub 提前带错误退出时 ~0.2s 内 panic 且 payload 含该错误，而旧行为下同一 stub 会无限轮询。保持 Partial 的原因：ftp_engine.rs 与 dash_engine.rs 的 3 处循环位于并行在途文件未转换，待其落地后按同一范本收尾。
 - **2026-09-15 修复（尾巴收尾闭合）**：并行工作流落地后转换剩余 5 处——ftp_engine 三处（pause-resume 含 ARC-19 在途不变量断言、arc31-drain、共用 fixture）与 dash_engine 两处（staging recovery、process restart），deadline 60s。全仓裸轮询扫描复核：剩余 loop 站点均为事件驱动服务器连接循环或已带 Instant deadline，无同类残留。九处转换全部完成，自测 `eng07_early_exit_stub_fails_fast_with_real_error` 保持通过，ftp 19 / dash 18 套件全绿，状态 Closed。
 
-### ENG-08（P3，Open）：sync-stable-error-i18n.mjs 以硬编码哨兵键区分「已同步 / regex 未命中」，且零测试覆盖
+### ENG-08（P3，Closed）：sync-stable-error-i18n.mjs 以硬编码哨兵键区分「已同步 / regex 未命中」，且零测试覆盖
 
 - **证据**：[`sync-stable-error-i18n.mjs`](../scripts/sync-stable-error-i18n.mjs#L148) 在 `replaced === text` 时仅凭 `text.includes("tempFileSmallerThanProgress:")` 判定结果。scripts/ 下九个 *.test.mjs 与 check-i18n-completeness.test.ts 均不覆盖本脚本，test:release-tools 的 glob 不含它。
 - **影响**：STABLE_ERROR_CODES 一旦改名/删除该码，完全健康的 locale 全被误报 'Failed to replace errors block' exit 1；反向地，errors-block regex 漂移可被哨兵掩盖成「已同步」而静默漏更部分 locale。
 - **修复方向**：判定改为结构性比较（对生成 block 与现有 block 做规范化 diff）；补最小 round-trip 测试并入 test:release-tools。
 - **验收**：改名一个错误码后脚本对已同步 locale 报 Unchanged 而非失败。
+- **2026-09-19 修复（Closed）**：判定改为结构性比较，并顺带修掉一个比哨兵键更严重的既存缺陷。
+  - **连带发现（比原问题更严重）**：`scripts/stable-error-messages.json` 缺少 `ARC-30`（2026-09-16）新增的两个稳定码 `task_already_completed` 与 `task_state_changed`，而 `STABLE_ERROR_CODES` 与 7 个 locale 的 `errors.*` 都已有它们。结果是脚本在 `requireLocalizedSet` 阶段就以 `zh-CN is missing 2 error translations` **退出 1 —— 该脚本自 ARC-30 起完全不可用**，本条原先却只登记了哨兵键问题。已按各 locale 现有 `errors.*` 的取值补齐 JSON（六 locale × 2 码，en 走 `STABLE_ERROR_MESSAGES_EN` 不经 JSON）。修复后 `node scripts/sync-stable-error-i18n.mjs` 对 7 个 locale 全部报 `Unchanged` 且不改写任何文件。
+  - **实现要点**：`buildBlockFrom(messages, report, codes)` 把码表参数化（原先硬编码模块级 `STABLE_ERROR_CODES`，导致纯函数无法用自定义码表测试）；新增 `ERRORS_BLOCK_PATTERN` / `parseErrorsBlockKeys` / `syncLocaleErrorsBlock`，返回 `updated | unchanged | failed` 三态供调用方与测试消费。`unchanged` 的判据是「能解析出 errors 块，且块内仍含由当前码表派生的键」，不再依赖任何具体键名；只有「完全定位不到 errors 块」（即 block regex 漂移、文件结构损坏）才判 `failed`——这才是真正需要响亮失败的条件。
+  - **验证**：新增 [`scripts/sync-stable-error-i18n.test.mjs`](../scripts/sync-stable-error-i18n.test.mjs) 6 项——已同步 → `Unchanged`；改值 → `Updated` 且写入含新值；**码表删减后已同步 locale → `Unchanged`**（本条验收原话，旧实现在此场景必然 `Failed`）；无 errors 块 → `Failed`；CRLF 检出 → `Unchanged`；`parseErrorsBlockKeys` 返回 null 的边界。经 `test:release-tools` 的 `scripts/*.test.mjs` glob 自动纳入，`node --test scripts/*.test.mjs` 60/60 通过。
 
 ### ENG-09（P2，Closed）：`direct_download_can_resume_from_temp_file` 依赖挂钟时序，同一份代码时过时挂
 
@@ -1387,6 +1410,90 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：把同步点从挂钟改为状态：轮询等待 `paths.temp` 长度 > 0（同样需要 deadline，见 ENG-07 的 helper）后再 cancel，或由测试服务器在写出首个 chunk 后经 channel 通知测试。
 - **验收**：在满负载（并行跑全量 `cargo test`）下连续 10 次运行该用例均通过。
 - **2026-09-12 修复**（`e8471b3`）：同步点仍是挂钟，但改为向两侧留足余量而非改状态同步——该用例改用专门的 `/slow-resume` 路由（512 KiB，同为 10 ms/块，传输约 5.1 s），取消窗口 300 ms → 2 s。原实现两侧余量都太窄：300 ms 可能不足以完成 connect + 首块（`partial == 0`），而放宽窗口又会撞上 64 KiB `/slow` 约 0.65 s 的传输末尾。提交信息记录该用例在改动前就在 v0.5.0 基线的同等负载下失败，独立确认这是既存 flake 而非 ARC 修复引入的回归。
+
+### ENG-10（P1，Closed）：`errors.cause.*` 文案在 7 个 locale 中缺失，`typecheck` 与 `errors.test.ts` 均红
+
+- **发现时间**：2026-09-19，在 PERF-14 批次做 `pnpm typecheck` 基线核对时发现（不属于该批次引入）。
+- **证据**：[`src/lib/errors.ts:80-98`](../src/lib/errors.ts#L80) 的 `ERROR_CAUSE_I18N_MAP` 引用 13 个 `errors.cause.*` 键（`finalPathConflict`、`remoteChanged`、`resumeUnavailable`、`resumeMismatch`、`tempFileMissing`、`tempFileSmallerThanProgress`、`diskWriteFailed`、`authHeaders`、`httpDenied`、`httpNotFound`、`serverRateLimited`、`ffmpegRequired`、`sftpHostKeyChanged`），但 7 个 locale 的 `errors` 块内**没有 `cause` 子块**（`src/i18n/locales/en.ts` 只有平铺的 `finalPathConflict` 等同名键）。
+- **影响**：`pnpm typecheck` 报 17 条 `TS2820/TS2322`，`src/lib/errors.test.ts > error cause copy` 失败（断言每个 locale 都存在这些键），`pnpm verify:frontend` 因此整体红——**这是当前唯一的发布门禁红灯**。功能上，`localizedErrorCause` 拿不到译文，恢复横幅的原因说明会静默缺失（代码注释已声明「never invent causes」，所以不会渲染错误文案）。
+- **高度疑似根因**：[`scripts/sync-stable-error-i18n.mjs`](../scripts/sync-stable-error-i18n.mjs) 用 `ERRORS_BLOCK_PATTERN` 做**整块替换**——`ARC-30` 手工补进 `errors` 块的 `cause` 子块，会在下一次运行同步脚本时被生成块整体覆盖掉。这与 `ENG-08` 同源，是「整块替换」而非「合并」的结构性风险；即使本次把文案补回去，只要脚本不改，下次同步仍会再丢。
+- **修复方向**：二选一或两者都做——(a) 把同步脚本改为**合并语义**：保留 `errors` 块内不属于 `STABLE_ERROR_CODES` 的手工子块（如 `cause`），只替换/补齐生成的键；(b) 补回 13 × 7 条 `cause` 译文并加一条守卫测试（脚本运行后 `cause` 仍在）。建议先做 (a) 再补 (b)，否则 (b) 会被下一次同步抹掉。
+- **验收**：`pnpm typecheck` 无错误；`src/lib/errors.test.ts` 全绿；运行 `node scripts/sync-stable-error-i18n.mjs` 后 7 个 locale 仍保留 `cause` 子块（新增回归测试断言这一点）。
+- **2026-09-20 修复（Closed）**：按「先治本、再补数据」的顺序做完，两条修复方向都落地了。
+  - **(a) 把 cause 变成生成数据，消除整块替换的丢失面**：新增 [`scripts/stable-error-causes.json`](../scripts/stable-error-causes.json)（7 locale × 13 条机制说明），脚本 `buildBlockFrom` 在生成 errors 块时一并生成 `cause: { ... }` 子块，并新增 `requireCauseSet` 校验每个 locale 的 cause 键与英文基准一致（缺译直接报错，不会静默产出半套文案）。因为 cause 现在是数据源的一部分而不是块内的手工内容，整块替换再也抹不掉它——这正是它当初消失的机制。
+  - **(b) 补回 13 × 7 条译文**：覆盖 `finalPathConflict`、`remoteChanged`、`resumeUnavailable`、`resumeMismatch`、`tempFileMissing`、`tempFileSmallerThanProgress`、`diskWriteFailed`、`authHeaders`、`httpDenied`、`httpNotFound`、`serverRateLimited`、`ffmpegRequired`、`sftpHostKeyChanged`。
+  - **验证**：`pnpm typecheck` 无错误（原先 17 条 `TS2820/TS2322` 全部消失）；`pnpm test:frontend` **294/294 全绿**（此前 `errors.test.ts > error cause copy` 是唯一失败项）；`pnpm check:i18n` 7 locale 通过（1752–1779 键，值与占位符一致）；运行脚本一次写入 7 个 locale（`Updated`），再运行一次全部 `Unchanged` 且 `cause` 仍在——这就是验收要求的回放验证。新增回归测试「a generated cause sub-block survives a second sync」固化该行为，`node --test scripts/*.test.mjs` 61/61 通过。
+  - **顺带说明**：这是本次收官期间发现的唯一发布门禁红灯，不是任何批次引入的；它此前被记录为「既存红灯」而非登记条目，是登记流程上的疏漏——发布门禁上的红灯应当立刻有 ID。
+
+## 2026-09-21 第一批修复
+
+来源：[四维现状审查](project-review-2026-09-21.md)。本批覆盖 7 个修复包、8 个新条目，并纳入发布流程 R26-A07/A08；历史 Closed 条目保留原结论。密文格式迁移、异卷恢复 staging 和其他候补不在本批范围。状态仅在对应验收有实际证据后更新。
+
+### ARC-49（P1，Closed）：最终文件提交缺少原子拒绝覆盖（R26-A01）
+
+- **证据／影响**：共享 `download/file_ops.rs` 的存在检查与普通 rename 分离；外部程序在两者之间创建同名文件时可能被覆盖。HTTP/FTP/SFTP/HLS/DASH/Metalink 共用该入口。
+- **修复合同**：同卷使用原子 no-replace 提交；跨卷在目标目录独占 staging、完整写入和同步后 no-replace 发布；失败保留原始下载文件。
+- **验收**：独立进程在提交前抢占目标，同卷及跨卷路径均返回 `final_path_conflict`，外部文件和原下载字节不变；成功、复制失败、同步失败和 staging 清理有回归。Windows/macOS/Linux 执行相同竞争测试。
+- **2026-09-21 修复证据**：`file_ops` 已使用平台 no-replace 原语；跨卷路径在目标目录独占 staging 后同步并发布，失败保留源文件。`file_publication` 集成测试覆盖外部进程抢占、同卷/跨卷、复制失败、同步失败、清理和成功发布（Windows 本地 4/4 通过；macOS/Linux 仍需 CI 实机执行）。
+
+### ARC-50（P1，Closed）：备份覆盖失败会损坏已有备份（R26-A04）
+
+- **证据／影响**：`db/backup.rs::write_backup_file` 直接 `File::create` 截断目标，写入失败或进程退出可能毁掉最后一份有效备份。
+- **修复合同**：在目标目录独占创建临时文件，完整写入、同步与校验后原子替换；任何发布前失败保留旧备份，清理临时文件。
+- **验收**：注入第 N 字节写失败、磁盘满、同步失败和发布前进程退出，旧备份哈希不变；同卷及跨卷目标导出成功，读取与恢复通过。
+- **2026-09-21 修复证据**：备份先在目标目录独占临时文件中完整写入、同步、重读校验，再原子替换目标；注入写入失败、同步失败和进程退出均保留旧备份。`backup_restore` 10/10 通过，包含成功导出与恢复。
+
+### SEC-13（P1，Closed）：异常持久化密文元数据可触发 panic（R26-A02）
+
+- **证据／影响**：`secure_headers.rs` 将 Base64 解码后的任意长度 nonce 直接传给固定长度构造；调度预留阶段的解密早于引擎 panic 保护。
+- **修复合同**：使用可失败的结构校验与稳定错误码，保留重新配置凭据的恢复入口；备份预检仅验证密文结构，不要求本机可解密。
+- **验收**：0/1/11/12/13 字节 nonce、截断 tag、无效 Base64 在 headers/proxy/credentials 三入口均无 panic；坏任务不会阻断后续派发；备份错误指出表、记录与字段，且不暴露密文或明文。
+- **2026-09-21 修复证据**：所有入口改用可失败结构校验，备份预检不依赖本机 keyring。`secure_metadata` 通过 nonce 长度、Base64、截断 tag、恢复和备份预检用例（1/1）。
+
+### PERF-17（P1，Closed）：逐任务限速器 ticker 持有强引用而无法回收（R26-P01）
+
+- **证据／影响**：ticker 持有 limiter 的 Arc，只在 limit 清零时退出，阻止负责终止 ticker 的 Drop；反复结束的限速任务累积后台活动。
+- **修复合同**：在共享限速器层消除后台强引用循环，统一覆盖完成、暂停、失败与 supervisor 退出；保留全局父级限速与多 waiter 公平性。
+- **验收**：完成、暂停、失败各循环 100 次，最后业务 owner 释放后 ≤100ms Weak 不可升级、ticker 回到基线；低速取消、公平性及启停竞争测试通过。
+- **2026-09-21 修复证据**：ticker 使用 Weak，启动/停止/重置在锁内串行，wait 注册后重新检查状态。`speed_lifecycle` 的完成/暂停/失败/aborted 100 次循环及 enable/disable 并发测试 2/2 通过。
+
+### FUN-30（P1，Closed）：文件探测与创建丢失 FTP/SFTP 草稿凭据（R26-F01）
+
+- **证据／影响**：FTP 文件 probe 未读取 `ProbeRequest.credentials`；`resolve_create_probe` 在没有有效快照时固定传空凭据，导致批量预览成功后创建失败。
+- **修复合同**：单文件、目录、创建、批量入口使用一致的凭据与代理上下文；保持 URL 清洗、加密落库及错误诊断脱敏。
+- **验收**：禁用匿名 FTP 的独立凭据探测成功；SFTP 密码与私钥覆盖无快照、过期快照、批量 preview→create；错误凭据明确失败。Inherit/Off/Custom 代理及既有认证回归通过。
+- **2026-09-21 修复证据**：单文件、目录、创建和批量入口贯通草稿凭据与代理上下文，显式空密码可表达清空。`directory_probe` 6/6 通过，覆盖 FTP、SFTP 密码/私钥、过期快照、批量 preview→create、代理模式和错误凭据。
+
+### UX-26（P2，Closed）：新建输入变更没有隔离旧探测与自动文件名（R26-U01）
+
+- **证据／影响**：请求编号只在下一次 detect 开始时增加，清空 URL 或防抖期间旧响应能回填；自动文件名只在空值时更新。
+- **修复合同**：URL、认证、代理和目录上下文变更立即使旧请求失效；响应核对当前会话；区分自动名称与手动名称。
+- **验收**：可控 Promise 覆盖清空 URL、防抖窗口、连续三次换 URL、认证/代理变化和目录乱序；自动名跟随资源，手动名保留；关闭/重开无旧结果回填。
+- **2026-09-21 修复证据**：请求代数在输入上下文变化时立即失效，响应核对当前会话，自动名称与手动名称分离。`NewDownloadDialog.test.tsx` 16 项通过，覆盖竞态、认证/代理变化和 close/reopen。
+
+### UX-27（P1，Closed）：批量部分成功会丢失失败输入与完整结果（R26-U02）
+
+- **证据／影响**：任意创建成功即清空输入，结果仅显示前五项；后续失败无法定位和重试。
+- **修复合同**：保留批次完整结果和失败集合，默认展示失败，支持编辑、复制失败 URL、仅重试失败及导出；后续预览不覆盖待处理的创建结果。
+- **验收**：100 条中的第 6/50/100 条失败均可查、编辑、导出与单独重试；成功项不会重复创建；再次预览或编辑新批次保留既有未解决失败。
+- **2026-09-21 修复证据**：批量结果保留完整历史和失败集合，提供编辑、单条/失败批次重试、复制失败 URL、脱敏 JSON 导出。前端 16 项测试覆盖第 6/50/100 条失败、历史保留和重试行为。
+
+### UX-28（P2，Closed）：批量预览与创建缺少请求互斥和结果版本（R26-U03）
+
+- **证据／影响**：预览不设置 submitting，却与创建共享结果和 finally；旧预览可覆盖结果或提前解除创建锁。
+- **修复合同**：区分预览和创建的状态、输入版本与请求代数；创建锁只能由该创建释放；编辑输入后旧结果不得覆盖新输入。
+- **验收**：两次预览乱序、慢预览与创建交错、处理中编辑输入、快速连续提交均有组件测试；创建结果和进度与实际操作一致。
+- **2026-09-21 修复证据**：预览与创建使用独立 owner、请求代数和锁，编辑输入不会被旧响应覆盖。`NewDownloadDialog.test.tsx` 16 项通过，覆盖乱序预览、创建交错、处理中编辑和连续提交。
+
+### ARC-51（P1，Closed）：发布 tag、源码和构建 checkout 未绑定（R26-A07）
+
+- **修复合同**：发布输入解析为 exact commit SHA，tag 与 remote tag 一致；所有构建和下游 job checkout 同一 preflight SHA。
+- **验收与证据**：`release-source` 支持 annotated/lightweight/remote tag 并拒绝覆盖已公开 release；CI、release、candidate 工作流均消费 preflight SHA。发布工具测试与工作流解析测试共 28 项通过。
+
+### ARC-52（P1，Closed）：发布验证完成前可能公开 release（R26-A08）
+
+- **修复合同**：先创建 draft，完整质量门禁、扩展和资产/updater/source 校验通过后由唯一 promote job 公开；candidate 保持 `latest=false`，RC 不进入 stable/latest。
+- **验收与证据**：release/candidate 工作流已将 publish 改为 draft、promote 依赖全部校验 job，并校验平台资产、`.sig` 和 `SOURCE_COMMIT.txt` 与源码 SHA 关联。远程发布演练和三平台实际构建仍需 CI/发布环境执行。
 
 ## 十一、统一修复顺序
 

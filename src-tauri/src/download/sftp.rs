@@ -326,9 +326,7 @@ impl DownloadEngine for SftpEngine {
                 if !creds.username.is_empty() {
                     target.username = creds.username.clone();
                 }
-                if !creds.password.is_empty() {
-                    target.password = creds.password.clone();
-                }
+                target.password = creds.password.clone();
                 if creds.private_key_data.is_some() {
                     target.private_key_data = creds.private_key_data.clone();
                     target.private_key_passphrase = creds.private_key_passphrase.clone();
@@ -384,9 +382,7 @@ pub async fn probe_sftp_directory_url(
         if !creds.username.is_empty() {
             target.username = creds.username.clone();
         }
-        if !creds.password.is_empty() {
-            target.password = creds.password.clone();
-        }
+        target.password = creds.password.clone();
         if creds.private_key_data.is_some() {
             target.private_key_data = creds.private_key_data.clone();
             target.private_key_passphrase = creds.private_key_passphrase.clone();

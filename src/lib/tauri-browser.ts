@@ -1339,6 +1339,7 @@ export async function getBrowserIntegrationStatus(): Promise<BrowserIntegrationS
       displayName: browserDisplayName(browser),
       supportedOnPlatform: browser !== "safari",
       detected: browser !== "safari",
+      browserVersion: null,
       manifestInstalled: browserIntegrationInstalled.has(browser),
       manifestPath: `~/Library/Application Support/${browser}/NativeMessagingHosts/com.vibe_downloader.native_host.json`,
       extensionLoadPath: "browser/dist/chromium",

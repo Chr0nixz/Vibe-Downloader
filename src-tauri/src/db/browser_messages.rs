@@ -1,6 +1,15 @@
 use sqlx::{Row, SqlitePool};
 
-use crate::models::BrowserKind;
+use crate::models::{BrowserHandoffRecord, BrowserKind};
+
+/// Totals for the whole `browser_messages` table (not just the recent
+/// window), so the integration center can show "recent N entries" and
+/// cumulative counts without implying they cover the same rows.
+pub struct BrowserMessageSummary {
+    pub received_count: u32,
+    pub failed_count: u32,
+    pub last_created_at: Option<String>,
+}
 
 pub async fn browser_message_exists(pool: &SqlitePool, request_id: &str) -> Result<bool, String> {
     let row = sqlx::query("SELECT 1 FROM browser_messages WHERE request_id = ?")
@@ -99,6 +108,68 @@ pub async fn latest_browser_error(
     .map_err(|e| e.to_string())?;
 
     Ok(row.map(|row| row.get("error_message")))
+}
+
+/// §3.9: recent handoff records for the integration center history panel.
+/// The table is pruned (30 days / 200 per browser), so a missing row means
+/// "not recorded or pruned", never "the handoff never happened". Rows whose
+/// browser kind cannot be parsed (written by a newer build) are skipped
+/// rather than surfaced as broken entries.
+pub async fn recent_browser_messages(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<BrowserHandoffRecord>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT request_id, browser, url, status, error_message, created_at
+        FROM browser_messages
+        ORDER BY created_at DESC, request_id DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let browser_raw: String = row.try_get("browser").ok()?;
+            let browser = BrowserKind::from_db_str(&browser_raw)?;
+            Some(BrowserHandoffRecord {
+                request_id: row.try_get("request_id").ok()?,
+                browser,
+                url: row.try_get("url").ok()?,
+                status: row.try_get("status").ok()?,
+                error_message: row.try_get("error_message").ok()?,
+                created_at: row.try_get("created_at").ok()?,
+            })
+        })
+        .collect())
+}
+
+/// `MAX(created_at)` is lexically correct here because `now_iso()` emits a
+/// fixed-offset UTC string (same invariant as `prune_browser_messages`).
+pub async fn browser_message_summary(pool: &SqlitePool) -> Result<BrowserMessageSummary, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            COALESCE(SUM(CASE WHEN status = 'received' THEN 1 ELSE 0 END), 0) AS received_count,
+            COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+            MAX(created_at) AS last_created_at
+        FROM browser_messages
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(BrowserMessageSummary {
+        received_count: row.try_get("received_count").map_err(|e| e.to_string())?,
+        failed_count: row.try_get("failed_count").map_err(|e| e.to_string())?,
+        last_created_at: row.try_get("last_created_at").map_err(|e| e.to_string())?,
+    })
 }
 
 /// SEC-06: prune diagnostics rows — browser handoff records are transient

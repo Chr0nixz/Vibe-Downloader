@@ -30,7 +30,6 @@ import {
 import { useTheme } from "next-themes";
 import { type ComponentType, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useShallow } from "zustand/react/shallow";
 import { navShortcutDigit } from "@/components/shell/nav-shortcuts";
 import {
   Dialog,
@@ -144,19 +143,16 @@ export function Palette({
   const [activeIndex, setActiveIndex] = useState(0);
   const [runningId, setRunningId] = useState<string | null>(null);
 
-  const tasks = useTaskDataStore(useShallow((s) => s.tasks));
   // ARC-08: palette search/filter runs against the entity cache, not only the
   // current page view, so off-view matches remain discoverable.
   const taskById = useTaskDataStore((s) => s.taskById);
   const entities = useMemo(() => Object.values(taskById), [taskById]);
   // UX-05: pause/resume-all eligibility uses global stats, not the loaded page.
   const globalStats = useTaskDataStore((s) => s.globalTaskStats ?? s.taskStats);
-  // Derive selectedTask from the store so AppShell doesn't need to subscribe
-  // to the task object (which changes every progress tick). Palette already
-  // re-renders on progress ticks via the `tasks` subscription above, so this
-  // adds no new re-renders. Keep the binding live so the subscription is not
-  // tree-shaken as unused.
-  void tasks;
+  // PERF-14: no whole-`tasks` subscription here — the array reference changes
+  // on every progress tick (250ms), and only the entity cache and global
+  // stats are actually consulted below. selectedTask derives from the same
+  // entity cache, so removing the subscription keeps selection live.
   const selectedTask = useTaskDataStore((s) => (selectedId ? (s.taskById[selectedId] ?? null) : null));
   const selectedIds = useTaskUIStore((s) => s.selectedIds);
   const nav = useTaskUIStore((s) => s.nav);

@@ -11,7 +11,7 @@ import {
   Pencil,
   X,
 } from "lucide-react";
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -67,10 +67,11 @@ import {
 const log = createLogger("new-download");
 
 import { getLocalFileKind, pathToFileUrl, readFileAsText } from "@/lib/local-file";
-import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
+import { formatBytes } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
 import type { Task } from "@/types/task";
 import { normalizeTask, parseByteCount } from "@/types/task";
+import { BatchImportResults, isFailedBatchItem } from "./BatchImportResults";
 
 /* ------------------------------------------------------------------ */
 /*  Probe phase tracking                                             */
@@ -388,6 +389,9 @@ export function NewDownloadDialog({
   const [probeUrl, setProbeUrl] = useState("");
   const [batchInput, setBatchInput] = useState("");
   const [batchResult, setBatchResult] = useState<BatchImportResult | null>(null);
+  const [batchHistory, setBatchHistory] = useState<Array<{ id: string; result: BatchImportResult }>>([]);
+  const [batchPreviewing, setBatchPreviewing] = useState(false);
+  const [batchCreating, setBatchCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rawError, setRawError] = useState<unknown>(null);
   const [username, setUsername] = useState("");
@@ -461,7 +465,13 @@ export function NewDownloadDialog({
   const [selectedHlsAudioTrackUris, setSelectedHlsAudioTrackUris] = useState<string[]>([]);
   const [selectedHlsSubtitleTrackUris, setSelectedHlsSubtitleTrackUris] = useState<string[]>([]);
 
-  const probeRequestId = useRef(0);
+  const probeRequestId = useRef("");
+  const directoryProbeRequestId = useRef("");
+  const latestUrlRef = useRef(url);
+  const fileNameEditedRef = useRef(false);
+  const batchPreviewOwner = useRef<symbol | null>(null);
+  const batchCreateOwner = useRef<symbol | null>(null);
+  const batchInputVersion = useRef(0);
   const batchInputRef = useRef<HTMLTextAreaElement | null>(null);
   const appliedInitialSourceId = useRef<string | undefined>(undefined);
   const isTorrentProbe = probe?.protocol === "bt" || probe?.protocol === "magnet";
@@ -482,6 +492,45 @@ export function NewDownloadDialog({
     /\.(torrent|meta4|metalink|m3u8|mpd)(?:[?#].*)?$/i.test(url.trim());
   const fileSelectionRequired = isSelectableMultiFileProbe && isMultiFile && selectedFiles.size === 0;
   const canProbeRemoteDirectory = /^(ftp|ftps|sftp|webdav|webdavs):\/\//i.test(url.trim()) && url.trim().endsWith("/");
+
+  latestUrlRef.current = url;
+
+  function clearAutomaticFileName() {
+    if (fileNameEditedRef.current) return;
+    setFileName("");
+    setEditingName(false);
+  }
+
+  function setUserFileName(value: string) {
+    fileNameEditedRef.current = true;
+    setFileName(value);
+  }
+
+  function invalidateProbe() {
+    probeRequestId.current = "";
+    directoryProbeRequestId.current = "";
+    setProbe(null);
+    setProbeUrl("");
+    setProbePhase({ kind: "idle" });
+    setRemoteDirectoryProbe(null);
+    setProbing(false);
+    setRemoteDirectoryLoading(false);
+  }
+
+  function changeUrl(nextUrl: string) {
+    if (nextUrl === url) {
+      setUrl(nextUrl);
+      return;
+    }
+    // Invalidate synchronously from the input handler. Waiting for the URL
+    // effect would leave a small window where an old response could win.
+    latestUrlRef.current = nextUrl;
+    invalidateProbe();
+    clearAutomaticFileName();
+    setSubmitStatus(null);
+    setDuplicateOverrideAvailable(false);
+    setUrl(nextUrl);
+  }
 
   // Initialize selectedFiles when probe changes
   useEffect(() => {
@@ -505,32 +554,37 @@ export function NewDownloadDialog({
 
   async function detect(nextUrl = url.trim(), automatic = false) {
     if (!nextUrl) return;
-    const requestId = ++probeRequestId.current;
+    // URL changes already advance the session before the debounce fires. A
+    // manual re-probe gets a fresh id so two same-URL requests cannot collide.
+    const requestId = crypto.randomUUID();
+    probeRequestId.current = requestId;
     setProbing(true);
     setProbePhase(inferProbePhaseFromUrl(nextUrl));
     setDuplicateOverrideAvailable(false);
     if (!automatic) clearFormError();
     setProbe(null);
     setProbeUrl("");
-    setRemoteDirectoryProbe(null);
     try {
       const draft = buildSharedDraft({ skipHash: true });
       const nextProbe = await probeTask(toProbeTaskInput(nextUrl, draft, String(requestId)));
-      if (requestId !== probeRequestId.current) return;
+      if (requestId !== probeRequestId.current || latestUrlRef.current.trim() !== nextUrl.trim()) return;
       setProbe(nextProbe);
       setProbeUrl(nextUrl);
       setProbePhase({ kind: "done" });
-      if (!fileName.trim()) {
+      if (!fileNameEditedRef.current) {
         setFileName(nextProbe.fileName);
       }
       clearFormError();
     } catch (err) {
-      if (requestId !== probeRequestId.current) return;
+      if (requestId !== probeRequestId.current || latestUrlRef.current.trim() !== nextUrl.trim()) return;
       log.warn("probe failed", err);
       setFormError(err);
       setProbePhase({ kind: "failed" });
     } finally {
-      if (requestId === probeRequestId.current) setProbing(false);
+      if (requestId === probeRequestId.current) {
+        setProbing(false);
+        probeRequestId.current = "";
+      }
     }
   }
 
@@ -558,45 +612,102 @@ export function NewDownloadDialog({
 
   async function runRemoteDirectoryProbe() {
     const nextUrl = url.trim();
+    const requestId = crypto.randomUUID();
+    directoryProbeRequestId.current = requestId;
     setRemoteDirectoryLoading(true);
     setError(null);
     try {
       const draft = buildSharedDraft({ skipHash: true });
       const input = toDirectoryProbeInput(nextUrl, draft);
-      setRemoteDirectoryProbe(
-        /^webdavs?:\/\//i.test(nextUrl)
-          ? await probeWebdavDirectory(input)
-          : /^sftp:\/\//i.test(nextUrl)
-            ? await probeSftpDirectory(input)
-            : await probeFtpDirectory(input),
-      );
+      const result = /^webdavs?:\/\//i.test(nextUrl)
+        ? await probeWebdavDirectory(input)
+        : /^sftp:\/\//i.test(nextUrl)
+          ? await probeSftpDirectory(input)
+          : await probeFtpDirectory(input);
+      if (requestId !== directoryProbeRequestId.current || latestUrlRef.current.trim() !== nextUrl.trim()) return;
+      setRemoteDirectoryProbe(result);
     } catch (err) {
-      setError(localizedErrorMessage(err, t));
+      if (requestId === directoryProbeRequestId.current && latestUrlRef.current.trim() === nextUrl.trim()) {
+        setError(localizedErrorMessage(err, t));
+      }
     } finally {
-      setRemoteDirectoryLoading(false);
+      if (requestId === directoryProbeRequestId.current) setRemoteDirectoryLoading(false);
     }
   }
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: URL changes own the debounce; detect reads the latest form options when the timer fires.
+  const probeContext = JSON.stringify([
+    open,
+    mode,
+    url,
+    useCredentials,
+    username,
+    password,
+    privateKeyData,
+    privateKeyPassphrase,
+    proxyMode,
+    proxyUrl,
+    proxyUsername,
+    proxyPassword,
+    proxyNoProxy,
+  ]);
+  const batchContext = JSON.stringify([
+    saveDir,
+    expectedHash,
+    expectedHashAlgorithm,
+    priority,
+    categoryKey,
+    speedAmount,
+    speedUnit,
+    useCredentials,
+    username,
+    password,
+    privateKeyData,
+    privateKeyPassphrase,
+    proxyMode,
+    proxyUrl,
+    proxyUsername,
+    proxyPassword,
+    proxyNoProxy,
+  ]);
+  const latestDetect = useRef(detect);
+  latestDetect.current = detect;
+
+  // Invalidate at commit, including programmatic edits and close/reopen. UUIDs
+  // prevent events from a prior mount matching this dialog's active request.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the serialized context is the complete resource identity.
+  useLayoutEffect(() => {
+    invalidateProbe();
+    clearAutomaticFileName();
+    clearFormError();
+    return () => {
+      probeRequestId.current = "";
+      directoryProbeRequestId.current = "";
+    };
+  }, [probeContext]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: restart for each context change and read the latest draft at dispatch.
   useEffect(() => {
-    const nextUrl = url.trim();
-    setSubmitStatus(null);
-    setDuplicateOverrideAvailable(false);
-    if (!nextUrl) {
-      setProbe(null);
-      setProbeUrl("");
-      setProbePhase({ kind: "idle" });
-      setRemoteDirectoryProbe(null);
-      setError(null);
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      void detect(nextUrl, true);
-    }, 650);
-
+    if (!open || mode !== "single" || !url.trim() || canProbeRemoteDirectory) return;
+    const timeoutId = window.setTimeout(() => void latestDetect.current(url.trim(), true), 650);
     return () => window.clearTimeout(timeoutId);
-  }, [url]);
+  }, [probeContext]);
+
+  function invalidateBatchPreview() {
+    batchInputVersion.current += 1;
+    batchPreviewOwner.current = null;
+    setBatchPreviewing(false);
+    setBatchResult(null);
+  }
+
+  function changeBatchInput(input: string) {
+    invalidateBatchPreview();
+    setBatchInput(input);
+  }
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: all shared creation fields participate in the batch version.
+  useLayoutEffect(() => {
+    invalidateBatchPreview();
+  }, [batchContext, open]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -677,6 +788,12 @@ export function NewDownloadDialog({
   }
 
   function resetForm() {
+    probeRequestId.current = "";
+    invalidateBatchPreview();
+    batchInputVersion.current += 1;
+    directoryProbeRequestId.current = "";
+    fileNameEditedRef.current = false;
+    latestUrlRef.current = "";
     setUrl("");
     setSaveDir("");
     setFileName("");
@@ -684,8 +801,10 @@ export function NewDownloadDialog({
     setExpectedHashAlgorithm("sha256");
     setProbe(null);
     setProbeUrl("");
+    setProbing(false);
     setBatchInput("");
     setBatchResult(null);
+
     setRemoteDirectoryProbe(null);
     setDuplicateOverrideAvailable(false);
     setSubmitStatus(null);
@@ -739,15 +858,12 @@ export function NewDownloadDialog({
 
       if (kind === "torrent" || kind === "metalink" || kind === "dash") {
         const fileUrl = pathToFileUrl(picked.path);
-        setUrl(fileUrl);
-        setProbe(null);
-        setProbeUrl("");
-        setRemoteDirectoryProbe(null);
+        changeUrl(fileUrl);
       } else {
         try {
           const text = await readFileAsText(picked.path, "batch_text");
           // UX-04: enter batch mode and preview immediately, matching handoff.
-          setBatchInput(text);
+          changeBatchInput(text);
           setMode("batch");
           setAdvancedOpen(true);
           void runBatch(false, text);
@@ -788,32 +904,61 @@ export function NewDownloadDialog({
       selectedLocalFile?.kind === "metalink" ||
       selectedLocalFile?.kind === "dash"
     ) {
-      setUrl("");
-      setProbe(null);
-      setProbeUrl("");
+      changeUrl("");
     }
   }
 
-  async function runBatch(create: boolean, inputOverride?: string) {
+  async function runBatch(create: boolean, inputOverride?: string, retry?: { batchId: string; indices: number[] }) {
     const input = inputOverride ?? batchInput;
-    if (!input.trim()) return;
-    setSubmitting(create);
+    // Refs exclude same-tick clicks and alternate entry points before React
+    // renders the disabled controls. An edit can supersede a read-only preview.
+    if (!input.trim() || batchCreateOwner.current || batchPreviewOwner.current) return;
+    const owner = Symbol();
+    const version = batchInputVersion.current;
+    if (create) {
+      batchCreateOwner.current = owner;
+      setBatchCreating(true);
+    } else {
+      batchPreviewOwner.current = owner;
+      setBatchPreviewing(true);
+    }
     setError(null);
     try {
       const draft = buildSharedDraft({ allowDuplicate: false });
       const result = await importUrls(toImportUrlsInput(input, saveDir.trim() || null, create, draft));
-      setBatchResult(result);
-      for (const item of result.items) {
-        if (item.task) onCreated(normalizeTask(item.task));
-      }
-      if (create && result.createdCount > 0) {
-        setBatchInput("");
+      if (create) {
+        // Creation has durable side effects even if the draft changes during
+        // IPC. Always retain its outcome and notify the task store.
+        setBatchHistory((history) =>
+          retry
+            ? history.map((batch) =>
+                batch.id !== retry.batchId
+                  ? batch
+                  : {
+                      ...batch,
+                      result: mergeBatchRetry(batch.result, retry.indices, result),
+                    },
+              )
+            : [...history, { id: crypto.randomUUID(), result }],
+        );
+        for (const item of result.items) if (item.task) onCreated(normalizeTask(item.task));
+        if (!retry && version === batchInputVersion.current) changeBatchInput(removeCreatedBatchLines(input, result));
+      } else if (owner === batchPreviewOwner.current && version === batchInputVersion.current) {
+        setBatchResult(result);
       }
     } catch (err) {
-      log.error("batch import failed", err);
-      setError(localizedErrorMessage(err, t));
+      if (create || (owner === batchPreviewOwner.current && version === batchInputVersion.current)) {
+        setError(localizedErrorMessage(err, t));
+      }
     } finally {
-      setSubmitting(false);
+      if (create && batchCreateOwner.current === owner) {
+        batchCreateOwner.current = null;
+        setBatchCreating(false);
+      }
+      if (!create && batchPreviewOwner.current === owner) {
+        batchPreviewOwner.current = null;
+        setBatchPreviewing(false);
+      }
     }
   }
 
@@ -826,13 +971,13 @@ export function NewDownloadDialog({
     const nextBatchInput = initialBatchInput?.trim() ? initialBatchInput : "";
     const nextUrl = initialUrl?.trim() ? initialUrl : "";
     if (nextBatchInput) {
-      setBatchInput(nextBatchInput);
+      changeBatchInput(nextBatchInput);
       setMode("batch");
       void runBatch(false, nextBatchInput);
       return;
     }
     if (nextUrl) {
-      setUrl(nextUrl);
+      changeUrl(nextUrl);
       setMode("single");
     }
   }, [initialBatchInput, initialSourceId, initialUrl]);
@@ -932,10 +1077,7 @@ export function NewDownloadDialog({
                       aria-invalid={!!error}
                       aria-describedby={error ? "new-download-error" : undefined}
                       onChange={(event) => {
-                        setUrl(event.target.value);
-                        setProbe(null);
-                        setProbeUrl("");
-                        setRemoteDirectoryProbe(null);
+                        changeUrl(event.target.value);
                         if (
                           selectedLocalFile?.kind === "torrent" ||
                           selectedLocalFile?.kind === "metalink" ||
@@ -1015,7 +1157,7 @@ export function NewDownloadDialog({
                           disabled={!entry.probableFileUrl}
                           onClick={() => {
                             if (entry.probableFileUrl) {
-                              setUrl(entry.probableFileUrl);
+                              changeUrl(entry.probableFileUrl);
                               setRemoteDirectoryProbe(null);
                             }
                           }}
@@ -1176,7 +1318,7 @@ export function NewDownloadDialog({
                           {editingName ? (
                             <Input
                               value={fileName}
-                              onChange={(e) => setFileName(e.target.value)}
+                              onChange={(e) => setUserFileName(e.target.value)}
                               onBlur={() => setEditingName(false)}
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") {
@@ -1470,7 +1612,9 @@ export function NewDownloadDialog({
                     id="batch-urls-input"
                     ref={batchInputRef}
                     value={batchInput}
-                    onChange={(event) => setBatchInput(event.target.value)}
+                    onChange={(event) => {
+                      changeBatchInput(event.target.value);
+                    }}
                     placeholder={t("newDownload.batchUrlsPlaceholder")}
                     className="min-h-32 resize-y rounded-md border border-border-subtle bg-surface-base px-3 py-2 font-mono text-xs text-text-primary outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                   />
@@ -1481,7 +1625,7 @@ export function NewDownloadDialog({
                       size="sm"
                       className="h-8"
                       onClick={() => void runBatch(false)}
-                      disabled={submitting || !batchInput.trim()}
+                      disabled={batchPreviewing || batchCreating || !batchInput.trim()}
                     >
                       {t("newDownload.previewBatch")}
                     </Button>
@@ -1491,12 +1635,25 @@ export function NewDownloadDialog({
                       size="sm"
                       className="h-8"
                       onClick={() => void runBatch(true)}
-                      disabled={submitting || !batchInput.trim()}
+                      disabled={batchPreviewing || batchCreating || !batchInput.trim()}
                     >
                       {t("newDownload.createBatch")}
                     </Button>
                   </div>
-                  {batchResult ? <BatchResultSummary result={batchResult} /> : null}
+                  {(batchPreviewing || batchCreating) && (
+                    <p role="status" className="text-xs text-text-muted">
+                      {t(batchCreating ? "newDownload.batchCreating" : "newDownload.batchPreviewing")}
+                    </p>
+                  )}
+                  {batchHistory.map((batch) => (
+                    <BatchImportResults
+                      key={batch.id}
+                      result={batch.result}
+                      busy={batchPreviewing || batchCreating}
+                      onRetry={(indices, urls) => void runBatch(true, urls.join("\n"), { batchId: batch.id, indices })}
+                    />
+                  ))}
+                  {batchResult && <BatchImportResults result={batchResult} busy={batchPreviewing || batchCreating} />}
                 </div>
 
                 {/* Save directory (batch tasks use this via runBatch) */}
@@ -1957,34 +2114,31 @@ function SharedCreateDraftFields({
   );
 }
 
-function BatchResultSummary({ result }: { result: BatchImportResult }) {
-  const { t } = useTranslation();
-  return (
-    <div role="status" aria-live="polite" className="grid gap-2 text-xs">
-      <p className="text-text-secondary">
-        {t("newDownload.batchSummary", {
-          total: result.items.length,
-          created: result.createdCount,
-          failed: result.failedCount,
-          duplicate: result.duplicateCount,
-        })}
-      </p>
-      {result.items.slice(0, 5).map((item) => (
-        <div
-          key={`${item.inputUrl}-${item.normalizedUrl ?? "invalid"}`}
-          className="grid gap-1 rounded-md border border-border-divider bg-surface-raised/50 px-2 py-1"
-        >
-          <span
-            className="truncate font-mono text-text-primary"
-            title={item.fileName ?? sanitizeUrlForDisplay(item.normalizedUrl ?? item.inputUrl)}
-          >
-            {item.fileName ?? sanitizeUrlForDisplay(item.normalizedUrl ?? item.inputUrl)}
-          </span>
-          <span className={item.valid ? "text-text-muted" : "text-status-danger"}>
-            {item.errorMessage ?? (item.task ? t("newDownload.batchCreated") : t("newDownload.batchReady"))}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
+function removeCreatedBatchLines(input: string, result: BatchImportResult): string {
+  let resultIndex = 0;
+  return input
+    .split(/\r?\n/)
+    .filter((line) => {
+      if (!line.trim()) return true;
+      const item = result.items[resultIndex++];
+      return !item?.task;
+    })
+    .join("\n");
+}
+
+function mergeBatchRetry(
+  previous: BatchImportResult,
+  indices: number[],
+  retried: BatchImportResult,
+): BatchImportResult {
+  const items = [...previous.items];
+  indices.forEach((originalIndex, retryIndex) => {
+    if (retried.items[retryIndex]) items[originalIndex] = retried.items[retryIndex];
+  });
+  return {
+    items,
+    createdCount: items.filter((item) => item.task).length,
+    failedCount: items.filter(isFailedBatchItem).length,
+    duplicateCount: items.filter((item) => item.duplicate).length,
+  };
 }

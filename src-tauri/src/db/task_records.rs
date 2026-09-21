@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use sqlx::{Executor, QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::models::{
-    AppErrorPayload, HashVerificationStatus, RecoveryAction, TaskFileRecord, TaskKind,
-    TaskPriority, TaskRecord, TaskStatsSnapshot, TaskStatus,
+    AppErrorPayload, ExpiredAuthHeaderTask, HashVerificationStatus, RecoveryAction, TaskFileRecord,
+    TaskKind, TaskPriority, TaskRecord, TaskStatsSnapshot, TaskStatus,
 };
 
 use super::MAX_TASK_PAGE_SIZE;
@@ -728,6 +728,42 @@ pub async fn list_task_ids_by_statuses(
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows.iter().map(|row| row.get::<String, _>("id")).collect())
+}
+
+/// §3.9: tasks still failing because their browser-supplied auth headers
+/// expired (`auth_headers_expired` / `auth_headers_unavailable`). The fixed
+/// code list keeps the SQL literal (same injection-audit rule as
+/// `list_task_ids_by_statuses`); the `(error_code, updated_at DESC)` index
+/// serves this scan directly. Recovery is FUN-03: re-sending the same URL
+/// from the browser refreshes the headers and requeues the task.
+pub async fn list_expired_auth_header_tasks(
+    pool: &SqlitePool,
+) -> Result<Vec<ExpiredAuthHeaderTask>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, file_name, url, status, error_code, updated_at
+        FROM tasks
+        WHERE error_code IN ('auth_headers_expired', 'auth_headers_unavailable')
+          AND status IN ('failed', 'needs_attention')
+        ORDER BY updated_at DESC
+        LIMIT 20
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| ExpiredAuthHeaderTask {
+            task_id: row.get("id"),
+            file_name: row.get("file_name"),
+            url: row.get("url"),
+            status: row.get("status"),
+            error_code: row.get("error_code"),
+            updated_at: row.get("updated_at"),
+        })
+        .collect())
 }
 
 /// Lists task IDs that are paused and obey the schedule (replaces raw SQL in check_schedule_preemption).

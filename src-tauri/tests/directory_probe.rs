@@ -29,6 +29,202 @@ fn b64(value: &str) -> String {
 
 // --- WebDAV password directory ---------------------------------------------
 
+#[cfg(debug_assertions)]
+fn creation_state(pool: sqlx::SqlitePool) -> tauri_app_lib::AppState {
+    use tauri_app_lib::{
+        download::{EngineRegistry, GlobalSpeedLimiter},
+        scheduler::Scheduler,
+    };
+    let downloads = Arc::default();
+    let request_headers = Arc::default();
+    let speed_limiter = GlobalSpeedLimiter::disabled();
+    let engine_registry = Arc::new(EngineRegistry::new().unwrap());
+    let task_runtime_locks = Arc::default();
+    let scheduler = Arc::new(Scheduler::new(
+        Arc::clone(&downloads),
+        Arc::clone(&request_headers),
+        speed_limiter.clone(),
+        engine_registry.clone(),
+        Arc::clone(&task_runtime_locks),
+    ));
+    tauri_app_lib::AppState {
+        pool,
+        downloads,
+        request_headers,
+        speed_limiter,
+        engine_registry,
+        task_runtime_locks,
+        scheduler,
+        browser_realtime: tauri_app_lib::browser_realtime::BrowserRealtimeState::new(),
+        quit_requested: Arc::default(),
+    }
+}
+
+#[cfg(debug_assertions)]
+async fn exercise_authenticated_creation(
+    state: &tauri_app_lib::AppState,
+    url: &str,
+    username: &str,
+    password: Option<&str>,
+    key: Option<&str>,
+) {
+    use tauri_app_lib::commands::tasks::{create_task_headless, import_urls_headless};
+    let paths = common::TestPaths::new("credential-creation");
+    let input = serde_json::json!({ "url": url, "input": url, "saveDir": paths.temp.parent().unwrap(), "username": username, "password": password, "privateKeyData": key, "allowDuplicate": true, "create": true });
+    for proxy_mode in ["inherit", "off", "custom"] {
+        // Off must bypass a broken inherited proxy. Custom must override it.
+        state
+            .engine_registry
+            .set_proxy_config(ResolvedProxyConfig {
+                mode: AppProxyMode::Custom,
+                url: Some("socks5://127.0.0.1:1".into()),
+                ..Default::default()
+            })
+            .await;
+        let (relay, proxy_url) = start_creation_proxy().await;
+        if proxy_mode == "inherit" {
+            state
+                .engine_registry
+                .set_proxy_config(ResolvedProxyConfig {
+                    mode: AppProxyMode::Custom,
+                    url: Some(proxy_url.clone()),
+                    ..Default::default()
+                })
+                .await;
+        }
+        let mut fields = input.clone();
+        fields["proxyMode"] = proxy_mode.into();
+        if proxy_mode == "custom" {
+            fields["proxyUrl"] = proxy_url.into();
+        }
+        let task = create_task_headless(state, serde_json::from_value(fields.clone()).unwrap())
+            .await
+            .expect("creation without snapshot");
+        let stored = db::resolve_task_credentials(&state.pool, &task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.username, username);
+        assert_eq!(stored.password, password.unwrap_or_default());
+        assert_eq!(stored.private_key_data.as_deref(), key);
+        assert!(!task.url.contains(username));
+        let ciphertext: String = sqlx::query_scalar(
+            "SELECT credentials_ciphertext FROM task_credentials WHERE task_id = ?",
+        )
+        .bind(&task.id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert!(!ciphertext.contains(username));
+        let record = db::get_task_record(&state.pool, &task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let expired = serde_json::json!({
+            "inputUrl": url, "finalUrl": url, "fileName": "obsolete.bin", "protocol": record.protocol,
+            "taskKind": "single_file", "capabilities": {"supportsResume": true,"supportsParallel": false,"supportsMultiFile": false},
+            "files": [], "totalSize": "999", "sourceKey": record.source_key, "contentType": null,"etag": null,"lastModified": null,
+            "hlsVariants": [],"hlsAudioTracks": [],"hlsSubtitleTracks": [],"probedAt": "2000-01-01T00:00:00Z"
+        });
+        fields["probeSnapshot"] = expired;
+        let task = create_task_headless(state, serde_json::from_value(fields.clone()).unwrap())
+            .await
+            .expect("expired snapshot re-probes with credentials");
+        assert_ne!(task.file_name, "obsolete.bin");
+        fields["create"] = false.into();
+        let preview = import_urls_headless(state, serde_json::from_value(fields.clone()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(preview.failed_count, 0, "{preview:?}");
+        fields["create"] = true.into();
+        let created = import_urls_headless(state, serde_json::from_value(fields.clone()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(created.created_count, 1, "{created:?}");
+        fields["username"] = "wrong-account".into();
+        fields["probeSnapshot"] = serde_json::Value::Null;
+        let error = create_task_headless(state, serde_json::from_value(fields).unwrap())
+            .await
+            .unwrap_err();
+        assert!(!error.contains(password.unwrap_or("never-log-secret")) || password.is_none());
+        relay.abort();
+    }
+}
+
+#[cfg(debug_assertions)]
+async fn start_creation_proxy() -> (tokio::task::JoinHandle<()>, String) {
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("socks5://{}", listener.local_addr().unwrap());
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut greeting = [0; 2];
+                stream.read_exact(&mut greeting).await.unwrap();
+                let mut methods = vec![0; greeting[1] as usize];
+                stream.read_exact(&mut methods).await.unwrap();
+                stream.write_all(&[5, 0]).await.unwrap();
+                let mut header = [0; 4];
+                stream.read_exact(&mut header).await.unwrap();
+                let count = match header[3] {
+                    1 => 4,
+                    4 => 16,
+                    3 => stream.read_u8().await.unwrap() as usize,
+                    _ => panic!("invalid SOCKS address"),
+                };
+                let mut address = vec![0; count];
+                stream.read_exact(&mut address).await.unwrap();
+                let port = stream.read_u16().await.unwrap();
+                let mut upstream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .unwrap();
+                stream
+                    .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                    .await
+                    .unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+            });
+        }
+    });
+    (handle, url)
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fun30_ftp_and_sftp_credentials_survive_creation_and_batch_reprobe() {
+    common::install_test_secret_key();
+    common::install_intranet_test_bypass();
+    let (_guard, pool) = common::test_pool("fun30-create").await;
+    let state = creation_state(pool.clone());
+    let ftp = FtpDirServer::start(FtpDirConfig {
+        required_user: Some("ftpuser".into()),
+        required_pass: Some("ftppass".into()),
+        files: vec!["a.bin".into()],
+    });
+    exercise_authenticated_creation(
+        &state,
+        &format!("{}a.bin", ftp.url()),
+        "ftpuser",
+        Some("ftppass"),
+        None,
+    )
+    .await;
+    let server = common::sftp_server::start_sftp_server(common::sftp_server::SftpServerConfig {
+        files: HashMap::from([("/pub/a.bin".into(), b"fixture".to_vec())]),
+        required_credentials: Some(("sftpuser".into(), "sftppass".into())),
+        ..Default::default()
+    })
+    .await;
+    let url = format!("sftp://{}/pub/a.bin", server.addr);
+    exercise_authenticated_creation(&state, &url, "sftpuser", Some("sftppass"), None).await;
+    let key = russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+        .unwrap()
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .unwrap()
+        .to_string();
+    exercise_authenticated_creation(&state, &url, "sftpuser", None, Some(&key)).await;
+    pool.close().await;
+}
+
 #[derive(Clone)]
 struct WebDavDirState {
     require_basic_auth: bool,
@@ -220,6 +416,12 @@ fn handle_ftp_dir_session(mut stream: TcpStream, config: FtpDirConfig) {
             } else {
                 let _ = writeln!(stream, "530 Login incorrect");
             }
+        } else if upper.starts_with("SIZE ") {
+            let _ = writeln!(stream, "213 12");
+        } else if upper.starts_with("MDTM ") {
+            let _ = writeln!(stream, "213 20260921000000");
+        } else if upper.starts_with("REST ") {
+            let _ = writeln!(stream, "350 Restart accepted");
         } else if upper.starts_with("TYPE ") {
             let _ = writeln!(stream, "200 Type set");
         } else if upper.starts_with("CWD ") || upper == "CWD" {

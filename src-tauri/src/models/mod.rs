@@ -14,9 +14,10 @@ pub use backup::{
 pub use browser::{
     BrowserCaptureSettings, BrowserCaptureSettingsInput, BrowserExtensionExportResult,
     BrowserExtensionPackage, BrowserForwardHeadersMode, BrowserForwardedHeader,
-    BrowserHandoffInput, BrowserHandoffResult, BrowserIntegrationEntry, BrowserIntegrationStatus,
-    BrowserIntegrationUpdateInput, BrowserKind, BrowserRealtimeStatus, BrowserSiteRule,
-    BrowserSiteRuleMode,
+    BrowserHandoffHistory, BrowserHandoffInput, BrowserHandoffRecord, BrowserHandoffResult,
+    BrowserIntegrationEntry, BrowserIntegrationStatus, BrowserIntegrationUpdateInput, BrowserKind,
+    BrowserNativeHostSelfCheck, BrowserRealtimeStatus, BrowserSiteRule, BrowserSiteRuleMode,
+    ExpiredAuthHeaderTask,
 };
 pub use classification::{
     ClassificationMatchKind, ClassificationRule, ClassificationRuleInput,

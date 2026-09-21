@@ -22,6 +22,7 @@
     "format:check": "biome format",
     "specta": "cargo run --manifest-path src-tauri/Cargo.toml --bin export-bindings",
     "test:frontend": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test": "pnpm test:frontend && pnpm test:rust",
     "test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml",
     "verify:frontend": "pnpm typecheck && pnpm lint && pnpm test:frontend && pnpm test:release-tools && pnpm check:i18n && pnpm verify:protocol-matrix && node scripts/sync-version.mjs --check && pnpm check:docs && pnpm build && pnpm check:bundle && pnpm verify:extensions",
@@ -88,6 +89,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
+    "@vitest/coverage-v8": "4.1.9",
     "cross-env": "^10.1.0",
     "fflate": "^0.8.2",
     "husky": "^9.1.7",
@@ -97,7 +99,8 @@
     "tailwindcss": "^4.3.0",
     "typescript": "~6.0.3",
     "vite": "^8.1.0",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.9",
+    "yaml": "^2.9.1"
   },
   "lint-staged": {
     "*.{ts,tsx,js,jsx,json,css,md}": "biome check --fix --no-errors-on-unmatched"

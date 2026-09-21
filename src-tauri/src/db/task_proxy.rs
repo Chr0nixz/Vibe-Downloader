@@ -186,7 +186,12 @@ pub async fn resolve_task_proxy_config(
                     .as_str()
                     .to_owned(),
                 ),
-                _ => None,
+                (None, None) => None,
+                _ => {
+                    return Err(proxy_secret_decrypt_error(
+                        "Stored proxy authentication metadata is incomplete.".to_string(),
+                    ))
+                }
             };
             Ok(ResolvedProxyConfig {
                 mode: AppProxyMode::Custom,

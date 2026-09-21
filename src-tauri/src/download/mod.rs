@@ -25,6 +25,9 @@ pub use bt::BtEngine;
 pub use dash::DashEngine;
 pub use engine::{DownloadContext, DownloadEngine, EngineRegistry, ProbeOutput, ProbeRequest};
 pub use error::DownloadError;
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use file_ops::testing as publication_testing;
 pub use ftp::{probe_ftp_directory_url, FtpEngine};
 pub use hls::HlsEngine;
 pub use http::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine, ProbeResult};

@@ -6,6 +6,7 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use reqwest::Url;
@@ -25,9 +26,9 @@ use crate::{
     models::{
         BrowserCaptureSettings, BrowserCaptureSettingsInput, BrowserExtensionExportResult,
         BrowserExtensionPackage, BrowserForwardHeadersMode, BrowserForwardedHeader,
-        BrowserHandoffInput, BrowserHandoffResult, BrowserIntegrationEntry,
+        BrowserHandoffHistory, BrowserHandoffInput, BrowserHandoffResult, BrowserIntegrationEntry,
         BrowserIntegrationStatus, BrowserIntegrationUpdateInput, BrowserKind,
-        BrowserRealtimeStatus, TaskStatus,
+        BrowserNativeHostSelfCheck, BrowserRealtimeStatus, ExpiredAuthHeaderTask, TaskStatus,
     },
     AppState,
 };
@@ -181,6 +182,202 @@ pub async fn create_browser_handoff_task(
     input: BrowserHandoffInput,
 ) -> Result<BrowserHandoffResult, String> {
     create_browser_handoff_task_with_state(app, state.inner(), input).await
+}
+
+const HANDOFF_HISTORY_DEFAULT_LIMIT: u32 = 20;
+const HANDOFF_HISTORY_MAX_LIMIT: u32 = 50;
+
+/// §3.9: recent handoff diagnostics for the integration center. The window
+/// (`entries`) and the totals (`received_count`/`failed_count`/`last_handoff_at`)
+/// have different scopes on purpose — the table is pruned, so totals can
+/// legitimately exceed the window's rows.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_browser_handoff_history(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<BrowserHandoffHistory, String> {
+    let limit = limit
+        .unwrap_or(HANDOFF_HISTORY_DEFAULT_LIMIT)
+        .clamp(1, HANDOFF_HISTORY_MAX_LIMIT) as i64;
+    let entries = db::recent_browser_messages(&state.pool, limit).await?;
+    let summary = db::browser_message_summary(&state.pool).await?;
+    Ok(BrowserHandoffHistory {
+        entries,
+        received_count: summary.received_count,
+        failed_count: summary.failed_count,
+        last_handoff_at: summary.last_created_at,
+    })
+}
+
+/// §3.9 dry-run of the handoff boundary: runs the exact production validation
+/// (scheme, embedded credentials, SSRF + DNS rebinding, engine routing) plus
+/// the request-id duplicate check without inserting a `browser_messages` row,
+/// creating a task, or emitting events. Single-instance forwarding and the
+/// handoff-file transfer path are only exercised by a real extension send.
+/// Split from the command wrapper (like `create_browser_handoff_task_with_state`)
+/// so integration tests can drive it with a bare pool + registry.
+pub async fn validate_browser_handoff_with_state(
+    pool: &sqlx::SqlitePool,
+    engine_registry: &EngineRegistry,
+    input: BrowserHandoffInput,
+) -> Result<BrowserHandoffResult, String> {
+    let request_id = input.request_id.trim().to_string();
+    if request_id.is_empty() {
+        return Err("Browser handoff request id is required.".to_string());
+    }
+    if db::browser_message_exists(pool, &request_id).await? {
+        return Ok(BrowserHandoffResult {
+            request_id,
+            status: "duplicate".to_string(),
+            task: None,
+            error_message: None,
+        });
+    }
+    let capture_settings = browser_capture_settings(pool).await?;
+    let status = match validate_handoff(
+        &input,
+        engine_registry,
+        capture_settings.allow_intranet_handoff,
+    )
+    .await
+    {
+        Ok(_) => "validated",
+        Err(error) => {
+            return Ok(BrowserHandoffResult {
+                request_id,
+                status: "failed".to_string(),
+                task: None,
+                error_message: Some(error),
+            });
+        }
+    };
+    Ok(BrowserHandoffResult {
+        request_id,
+        status: status.to_string(),
+        task: None,
+        error_message: None,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn validate_browser_handoff(
+    state: State<'_, AppState>,
+    input: BrowserHandoffInput,
+) -> Result<BrowserHandoffResult, String> {
+    validate_browser_handoff_with_state(&state.pool, &state.engine_registry, input).await
+}
+
+/// §3.9: tasks still failing because their browser-supplied auth headers
+/// expired. The recovery path is FUN-03 (re-send the same URL from the
+/// browser) or manual credential update in the Recovery Center.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_expired_auth_header_tasks(
+    state: State<'_, AppState>,
+) -> Result<Vec<ExpiredAuthHeaderTask>, String> {
+    db::list_expired_auth_header_tasks(&state.pool).await
+}
+
+/// §3.9: run the native host's `--self-check` mode (sibling-app co-location
+/// and protocol version). Never hard-fails: an unrunnable host is itself the
+/// diagnostic result the page wants to show.
+#[tauri::command]
+#[specta::specta]
+pub async fn run_browser_native_host_self_check() -> Result<BrowserNativeHostSelfCheck, String> {
+    run_native_host_self_check().await
+}
+
+const NATIVE_HOST_SELF_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Mirror of the host binary's `SelfCheckOutput` (camelCase JSON on stdout);
+/// the binary is a separate crate, so its struct cannot be imported here.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeHostSelfCheckOutput {
+    ok: bool,
+    version: String,
+    protocol_version: u32,
+    native_host_path: String,
+    app_path: String,
+}
+
+fn unavailable_self_check(host_path: Option<String>, error: String) -> BrowserNativeHostSelfCheck {
+    BrowserNativeHostSelfCheck {
+        available: false,
+        ok: false,
+        version: None,
+        protocol_version: None,
+        native_host_path: host_path,
+        app_path: None,
+        error_message: Some(error),
+    }
+}
+
+async fn run_native_host_self_check() -> Result<BrowserNativeHostSelfCheck, String> {
+    let host = match native_host_path() {
+        Ok(path) => path,
+        Err(error) => return Ok(unavailable_self_check(None, error)),
+    };
+    let host_display = host.to_string_lossy().to_string();
+    // The self-check verifies co-location and protocol version without
+    // touching the bridge, so 5s is generous; a slower host is stuck, which
+    // is exactly the diagnostic the page should surface.
+    let output = match tokio::time::timeout(
+        NATIVE_HOST_SELF_CHECK_TIMEOUT,
+        tokio::process::Command::new(&host)
+            .arg("--self-check")
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return Ok(unavailable_self_check(
+                Some(host_display),
+                format!("Could not run native host self-check: {error}"),
+            ));
+        }
+        Err(_) => {
+            return Ok(unavailable_self_check(
+                Some(host_display),
+                "Native host self-check timed out.".to_string(),
+            ));
+        }
+    };
+    if !output.status.success() {
+        // The host prints its failure reason to stderr on the error path.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        let message = if detail.is_empty() {
+            format!(
+                "Native host self-check exited with status {}.",
+                output.status
+            )
+        } else {
+            detail.to_string()
+        };
+        return Ok(unavailable_self_check(Some(host_display), message));
+    }
+    let parsed: NativeHostSelfCheckOutput = match serde_json::from_slice(&output.stdout) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Ok(unavailable_self_check(
+                Some(host_display),
+                format!("Could not parse native host self-check output: {error}"),
+            ));
+        }
+    };
+    Ok(BrowserNativeHostSelfCheck {
+        available: true,
+        ok: parsed.ok,
+        version: Some(parsed.version),
+        protocol_version: Some(parsed.protocol_version),
+        native_host_path: Some(parsed.native_host_path),
+        app_path: Some(parsed.app_path),
+        error_message: None,
+    })
 }
 
 pub async fn create_browser_handoff_task_with_state(
@@ -982,11 +1179,19 @@ pub(crate) async fn integration_status(
         let manifest_path = manifest_path(app, browser).ok();
         let manifest_installed = manifest_path.as_ref().is_some_and(|path| path.exists());
         let last_error = db::latest_browser_error(&state.pool, browser).await?;
+        let detected = browser_detected(app, browser);
         browsers.push(BrowserIntegrationEntry {
             browser,
             display_name: browser.display_name().to_string(),
             supported_on_platform: browser_supported_on_platform(browser),
-            detected: browser_detected(app, browser),
+            detected,
+            // Skip the registry probe for undetected browsers — a version
+            // would be misleading next to "not detected" anyway.
+            browser_version: if detected {
+                browser_version(browser)
+            } else {
+                None
+            },
             manifest_installed,
             manifest_path: manifest_path.map(|path| path.to_string_lossy().to_string()),
             extension_load_path: extension_core_path.clone(),
@@ -1685,6 +1890,90 @@ fn windows_registry_key(browser: BrowserKind) -> String {
     format!("HKCU\\Software\\{vendor}\\NativeMessagingHosts\\{NATIVE_HOST_NAME}")
 }
 
+/// §3.9 best-effort browser version probe. Windows-only for now: one fast
+/// `reg query` per detected browser. Other platforms return `None` and the
+/// UI shows an honest "unknown" instead of a guessed version.
+#[cfg(target_os = "windows")]
+fn browser_version(browser: BrowserKind) -> Option<String> {
+    windows_browser_version(browser)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn browser_version(_browser: BrowserKind) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn windows_browser_version(browser: BrowserKind) -> Option<String> {
+    // Chromium-family browsers publish the running version under BLBeacon;
+    // Firefox keeps a single `CurrentVersion` value instead.
+    let (key, value_name) = match browser {
+        BrowserKind::Safari => return None,
+        BrowserKind::Firefox => (
+            "HKCU\\Software\\Mozilla\\Mozilla Firefox".to_string(),
+            "CurrentVersion",
+        ),
+        other => (
+            format!(
+                "HKCU\\Software\\{}\\BLBeacon",
+                windows_version_vendor(other)
+            ),
+            "version",
+        ),
+    };
+    let output = Command::new("reg")
+        .args(["query", &key, "/v", value_name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_reg_version_value(&stdout)
+        .as_deref()
+        .and_then(normalize_browser_version)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_version_vendor(browser: BrowserKind) -> &'static str {
+    match browser {
+        BrowserKind::Chrome => "Google\\Chrome",
+        BrowserKind::Edge => "Microsoft\\Edge",
+        BrowserKind::Firefox => "Mozilla\\Mozilla Firefox",
+        BrowserKind::Brave => "BraveSoftware\\Brave-Browser",
+        BrowserKind::Opera => "Opera Software",
+        BrowserKind::Vivaldi => "Vivaldi",
+        BrowserKind::Chromium => "Chromium",
+        BrowserKind::Safari => "Apple\\Safari",
+    }
+}
+
+/// Extracts the data value from `reg query` output. A successful query emits
+/// lines like `    version    REG_SZ    141.0.7390.122`; the data is
+/// everything after the `REG_SZ` marker on the matching line.
+fn parse_reg_version_value(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (_, value) = line.split_once("REG_SZ")?;
+        let value = value.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    })
+}
+
+/// Firefox reports `141.0.3 (x64 zh-CN)`; keep the leading version token and
+/// require digit-prefixed dot-separated digits so locale tails or garbage
+/// never reach the UI as a "version".
+fn normalize_browser_version(raw: &str) -> Option<String> {
+    let token = raw.split_whitespace().next()?;
+    let digits_and_dots = !token.is_empty()
+        && token.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && token.chars().all(|c| c.is_ascii_digit() || c == '.');
+    digits_and_dots.then(|| token.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1775,5 +2064,33 @@ mod tests {
             enforced.forward_headers_mode,
             BrowserForwardHeadersMode::Disabled
         ));
+    }
+
+    #[test]
+    fn reg_query_version_parses_the_data_after_reg_sz() {
+        let output = "\r\nHKEY_CURRENT_USER\\Software\\Google\\Chrome\\BLBeacon\r\n\
+                      \x20\x20\x20\x20version    REG_SZ    141.0.7390.122\r\n\r\n";
+        assert_eq!(
+            parse_reg_version_value(output).as_deref(),
+            Some("141.0.7390.122")
+        );
+        assert_eq!(parse_reg_version_value("no reg_sz here"), None);
+        assert_eq!(parse_reg_version_value("version    REG_SZ    "), None);
+    }
+
+    #[test]
+    fn browser_version_normalization_keeps_leading_semver_tokens_only() {
+        // Firefox appends architecture/locale tails to CurrentVersion.
+        assert_eq!(
+            normalize_browser_version("141.0.3 (x64 zh-CN)").as_deref(),
+            Some("141.0.3")
+        );
+        assert_eq!(
+            normalize_browser_version("141.0.7390.122").as_deref(),
+            Some("141.0.7390.122")
+        );
+        assert_eq!(normalize_browser_version("unknown"), None);
+        assert_eq!(normalize_browser_version(""), None);
+        assert_eq!(normalize_browser_version("v141.0"), None);
     }
 }

@@ -708,6 +708,42 @@ mod tests {
         assert!(err.contains("Invalid boolean value for setting 'clipboard_monitor_enabled'"));
     }
 
+    // ENG-04: these two decide what a user-typed speed limit / threshold
+    // becomes. The clamp bounds are the product contract, and neither function
+    // had direct coverage.
+    #[test]
+    fn normalize_speed_limit_bps_rejects_non_positive_and_junk() {
+        assert_eq!(normalize_speed_limit_bps("1024"), Some("1024".to_string()));
+        assert_eq!(
+            normalize_speed_limit_bps(" 2048 "),
+            Some("2048".to_string())
+        );
+        // Zero and negatives are how the UI expresses "no limit"; they must not
+        // silently become a hard "0 bytes per second" limit.
+        assert_eq!(normalize_speed_limit_bps("0"), None);
+        assert_eq!(normalize_speed_limit_bps("-1"), None);
+        assert_eq!(normalize_speed_limit_bps("1.5"), None);
+        assert_eq!(normalize_speed_limit_bps("abc"), None);
+        assert_eq!(normalize_speed_limit_bps(""), None);
+    }
+
+    #[test]
+    fn normalize_multi_connection_threshold_clamps_to_declared_bounds() {
+        assert_eq!(
+            normalize_multi_connection_threshold_bytes("-5"),
+            Some(MIN_MULTI_CONNECTION_THRESHOLD_BYTES.to_string())
+        );
+        assert_eq!(
+            normalize_multi_connection_threshold_bytes("999999999999999999"),
+            Some(MAX_MULTI_CONNECTION_THRESHOLD_BYTES.to_string())
+        );
+        assert_eq!(
+            normalize_multi_connection_threshold_bytes("1048576"),
+            Some("1048576".to_string())
+        );
+        assert_eq!(normalize_multi_connection_threshold_bytes("junk"), None);
+    }
+
     async fn temp_pool() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)

@@ -201,6 +201,7 @@ async fn resolve_create_probe(
     url: &str,
     snapshot: Option<&ProbeTaskPayload>,
     request_headers: &[(String, String)],
+    credentials: Option<&db::TaskCredentials>,
     proxy_mode: Option<TaskProxyMode>,
     proxy_url: Option<&str>,
     proxy_username: Option<&str>,
@@ -229,7 +230,7 @@ async fn resolve_create_probe(
             request_headers: request_headers.to_vec(),
             pool: Some(state.pool.clone()),
             task_id: None,
-            credentials: None,
+            credentials: credentials.cloned(),
             proxy_config: Some(proxy_config),
             app: None,
             request_id: None,
@@ -430,6 +431,14 @@ pub async fn import_urls(
     state: State<'_, AppState>,
     input: ImportUrlsInput,
 ) -> Result<BatchImportResult, String> {
+    import_urls_core(Some(&app), state.inner(), input).await
+}
+
+async fn import_urls_core(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    input: ImportUrlsInput,
+) -> Result<BatchImportResult, String> {
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
     let mut created_count = 0_i32;
@@ -437,6 +446,7 @@ pub async fn import_urls(
     let mut duplicate_count = 0_i32;
     let should_probe = input.probe.unwrap_or(true);
     let should_create = input.create.unwrap_or(false);
+    let allow_duplicate = input.allow_duplicate.unwrap_or(false);
     let batch_request_headers =
         basic_auth_headers(input.username.as_deref(), input.password.as_deref());
     let batch_credentials = if input.username.is_some()
@@ -508,7 +518,7 @@ pub async fn import_urls(
             }
         };
         let normalized_url = parsed.to_string();
-        if !seen.insert(normalized_url.clone()) {
+        if !seen.insert(normalized_url.clone()) && !allow_duplicate {
             duplicate_count += 1;
             items.push(BatchImportItem {
                 input_url: raw_url.to_string(),
@@ -538,6 +548,7 @@ pub async fn import_urls(
             error_message: None,
             task: None,
         };
+        let mut probe_snapshot = None;
 
         if should_probe {
             let probe_result = match state.engine_registry.engine_for_uri(&normalized_url) {
@@ -575,22 +586,26 @@ pub async fn import_urls(
             };
             match probe_result {
                 Ok(probe) => {
+                    probe_snapshot =
+                        Some(probe_payload_from_output(&normalized_url, probe.clone()));
                     item.file_name = Some(probe.display_name.clone());
                     item.total_size = Some(probe.total_size.to_string());
                     item.content_type = probe.content_type.clone();
                     item.supports_resume = probe.capabilities.supports_resume;
                     let storage_final_url = storage_url_for_probe(&probe);
-                    if let Some(duplicate) = duplicate_task_for_probe(
-                        state.inner(),
-                        &storage_url,
-                        &storage_final_url,
-                        &probe,
-                    )
-                    .await?
-                    {
-                        duplicate_count += 1;
-                        items.push(duplicate_import_item(raw_url, normalized_url, &duplicate));
-                        continue;
+                    if !allow_duplicate {
+                        if let Some(duplicate) = duplicate_task_for_probe(
+                            state,
+                            &storage_url,
+                            &storage_final_url,
+                            &probe,
+                        )
+                        .await?
+                        {
+                            duplicate_count += 1;
+                            items.push(duplicate_import_item(raw_url, normalized_url, &duplicate));
+                            continue;
+                        }
                     }
                 }
                 Err(error) => {
@@ -601,18 +616,20 @@ pub async fn import_urls(
                     continue;
                 }
             }
-        } else if let Some(duplicate) =
-            db::find_duplicate_task_record(&state.pool, &storage_url, None, None).await?
-        {
-            duplicate_count += 1;
-            items.push(duplicate_import_item(raw_url, normalized_url, &duplicate));
-            continue;
+        } else if !allow_duplicate {
+            if let Some(duplicate) =
+                db::find_duplicate_task_record(&state.pool, &storage_url, None, None).await?
+            {
+                duplicate_count += 1;
+                items.push(duplicate_import_item(raw_url, normalized_url, &duplicate));
+                continue;
+            }
         }
 
         if should_create {
-            match create_task_with_state(
-                app.clone(),
-                state.inner(),
+            match create_task_core(
+                app,
+                state,
                 CreateTaskInput {
                     url: normalized_url,
                     save_dir: input.save_dir.clone(),
@@ -623,9 +640,9 @@ pub async fn import_urls(
                     task_speed_limit_bps: input.task_speed_limit_bps.clone(),
                     priority: input.priority,
                     category_key: input.category_key.clone(),
-                    probe_snapshot: None,
+                    probe_snapshot,
                     selected_file_paths: None,
-                    allow_duplicate: input.allow_duplicate.or(Some(false)),
+                    allow_duplicate: Some(allow_duplicate),
                     username: input.username.clone(),
                     password: input.password.clone(),
                     private_key_data: input.private_key_data.clone(),
@@ -639,6 +656,8 @@ pub async fn import_urls(
                     proxy_password: input.proxy_password.clone(),
                     proxy_no_proxy: input.proxy_no_proxy.clone(),
                 },
+                Vec::new(),
+                None,
             )
             .await
             {
@@ -680,11 +699,45 @@ pub(crate) async fn create_task_with_state_and_headers(
     request_headers: Vec<(String, String)>,
     source_browser: Option<BrowserKind>,
 ) -> Result<Task, String> {
+    create_task_core(Some(&app), state, input, request_headers, source_browser).await
+}
+
+async fn create_task_core(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    input: CreateTaskInput,
+    request_headers: Vec<(String, String)>,
+    source_browser: Option<BrowserKind>,
+) -> Result<Task, String> {
     let url = input.url.trim();
     if url.is_empty() {
         return Err("Enter a download URL.".to_string());
     }
     let captured_credentials = db::legacy_credentials_from_url(url);
+    let draft_credentials = if input
+        .username
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+        || input.password.is_some()
+        || input.private_key_data.is_some()
+        || input.private_key_passphrase.is_some()
+    {
+        Some(db::TaskCredentials {
+            username: input.username.clone().unwrap_or_default(),
+            password: input.password.clone().unwrap_or_default(),
+            private_key_data: input.private_key_data.clone(),
+            private_key_passphrase: input.private_key_passphrase.clone(),
+        })
+    } else {
+        captured_credentials
+            .as_ref()
+            .map(|credentials| db::TaskCredentials {
+                username: credentials.username.clone(),
+                password: credentials.password.clone(),
+                private_key_data: None,
+                private_key_passphrase: None,
+            })
+    };
     let has_credentials =
         captured_credentials.is_some() || input.username.as_deref().is_some_and(|u| !u.is_empty());
     if has_credentials {
@@ -712,6 +765,7 @@ pub(crate) async fn create_task_with_state_and_headers(
         url,
         input.probe_snapshot.as_ref(),
         &auth_headers,
+        draft_credentials.as_ref(),
         input.proxy_mode,
         input.proxy_url.as_deref(),
         input.proxy_username.as_deref(),
@@ -733,7 +787,13 @@ pub(crate) async fn create_task_with_state_and_headers(
     }
     let settings = db::get_settings(
         &state.pool,
-        super::super::settings::default_download_dir(&app)?,
+        match app {
+            Some(app) => super::super::settings::default_download_dir(app)?,
+            None => input
+                .save_dir
+                .clone()
+                .ok_or("Headless creation requires a save directory")?,
+        },
     )
     .await?;
     let save_dir = match input
@@ -1114,38 +1174,29 @@ pub(crate) async fn create_task_with_state_and_headers(
         };
         db::insert_task_checksum_record(&state.pool, &checksum).await?;
     }
-    spawn_checksum_sidecar_discovery(
-        &app,
-        &state.pool,
-        &record.id,
-        probe.resolved_uri.as_str(),
-        &request_headers,
-        &record.created_at,
-    );
-    if let (Some(user), Some(pass)) = (input.username.as_deref(), input.password.as_deref()) {
-        if !user.is_empty() {
+    if let Some(app) = app {
+        spawn_checksum_sidecar_discovery(
+            app,
+            &state.pool,
+            &record.id,
+            probe.resolved_uri.as_str(),
+            &request_headers,
+            &record.created_at,
+        );
+    }
+    if let Some(credentials) = draft_credentials.as_ref() {
+        if !credentials.username.is_empty() {
             db::upsert_task_credentials(
                 &state.pool,
                 &record.id,
                 &record.protocol,
-                user,
-                pass,
-                input.private_key_data.as_deref(),
-                input.private_key_passphrase.as_deref(),
+                &credentials.username,
+                &credentials.password,
+                credentials.private_key_data.as_deref(),
+                credentials.private_key_passphrase.as_deref(),
             )
             .await?;
         }
-    } else if let Some(credentials) = captured_credentials {
-        db::upsert_task_credentials(
-            &state.pool,
-            &record.id,
-            &record.protocol,
-            &credentials.username,
-            &credentials.password,
-            None,
-            None,
-        )
-        .await?;
     }
     if input.proxy_mode.is_some() {
         db::upsert_task_proxy_settings(
@@ -1228,16 +1279,39 @@ pub(crate) async fn create_task_with_state_and_headers(
         total_size = record.total_size,
         "task created"
     );
-    emit_queue_changed_with_ids(&app, Some(vec![record.id.clone()]));
-    state
-        .scheduler
-        .clone()
-        .dispatch(app.clone(), state.pool.clone())
-        .await;
-
+    if let Some(app) = app {
+        emit_queue_changed_with_ids(app, Some(vec![record.id.clone()]));
+        state
+            .scheduler
+            .clone()
+            .dispatch(app.clone(), state.pool.clone())
+            .await;
+    }
     let task = task_payload(&state.pool, &record.id).await?;
-    emit_task_updated(&app, &task);
+    if let Some(app) = app {
+        emit_task_updated(app, &task);
+    }
     Ok(task)
+}
+
+// Integration tests run the production creation path without UI events or
+// automatic dispatch, then inspect the queued task and encrypted persistence.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub async fn create_task_headless(
+    state: &AppState,
+    input: CreateTaskInput,
+) -> Result<Task, String> {
+    create_task_core(None, state, input, Vec::new(), None).await
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub async fn import_urls_headless(
+    state: &AppState,
+    input: ImportUrlsInput,
+) -> Result<BatchImportResult, String> {
+    import_urls_core(None, state, input).await
 }
 
 fn spawn_checksum_sidecar_discovery(

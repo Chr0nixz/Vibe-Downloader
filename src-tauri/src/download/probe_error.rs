@@ -271,13 +271,12 @@ mod tests {
     #[test]
     fn message_fallback_covers_dns_and_defaults_to_connection_refused() {
         use std::io::Error as IoError;
-        use std::io::ErrorKind;
 
-        let dns = IoError::new(ErrorKind::Other, "No such host is known. (os error 11001)");
+        let dns = IoError::other("No such host is known. (os error 11001)");
         assert_eq!(classify_error_source_chain(Some(&dns)), "dns_failure");
 
         assert_eq!(
-            classify_error_source_chain(Some(&IoError::new(ErrorKind::Other, "something novel"))),
+            classify_error_source_chain(Some(&IoError::other("something novel"))),
             "connection_refused"
         );
     }

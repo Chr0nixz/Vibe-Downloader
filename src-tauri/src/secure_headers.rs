@@ -50,6 +50,8 @@ pub fn decrypt_secret(
     label: &str,
     aad: &[u8],
 ) -> Result<Zeroizing<String>, String> {
+    validate_secret_structure(ciphertext, nonce)
+        .map_err(|field| format!("Stored {label} {field} is invalid."))?;
     let key = encryption_key()?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
     let raw = Zeroizing::new(
@@ -62,7 +64,14 @@ pub fn decrypt_secret(
             .decode(nonce)
             .map_err(|_| format!("Stored {label} nonce is invalid."))?,
     );
-    let nonce_ref = Nonce::from_slice(&nonce_bytes);
+    // A malformed backup can contain valid Base64 with an arbitrary nonce
+    // length. `Nonce::from_slice` asserts its fixed 12-byte shape, so validate
+    // before constructing it and keep the corruption on the Result path.
+    let nonce_array: [u8; 12] = nonce_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("Stored {label} nonce has invalid length."))?;
+    let nonce_ref = Nonce::from_slice(&nonce_array);
 
     // Dispatch on version byte.
     let raw_plaintext = if raw.first() == Some(&CIPHERTEXT_VERSION) {
@@ -89,6 +98,21 @@ pub fn decrypt_secret(
             Err(format!("Stored {label} are not valid UTF-8."))
         }
     }
+}
+
+/// Validate portable storage structure without consulting this machine's key.
+/// A backup made elsewhere may be well formed but not locally decryptable.
+pub fn validate_secret_structure(ciphertext: &str, nonce: &str) -> Result<(), &'static str> {
+    let nonce = Zeroizing::new(STANDARD.decode(nonce).map_err(|_| "nonce")?);
+    if nonce.len() != 12 {
+        return Err("nonce");
+    }
+    let raw = Zeroizing::new(STANDARD.decode(ciphertext).map_err(|_| "ciphertext")?);
+    let prefix = usize::from(raw.first() == Some(&CIPHERTEXT_VERSION));
+    if raw.len() < prefix + 16 {
+        return Err("ciphertext");
+    }
+    Ok(())
 }
 
 pub fn ensure_secret_encryption_available() -> Result<(), String> {
@@ -186,4 +210,27 @@ fn decode_key(value: &str) -> Result<Zeroizing<[u8; 32]>, String> {
     }
     key.copy_from_slice(&raw);
     Ok(Zeroizing::new(key))
+}
+
+#[cfg(test)]
+mod malformed_input_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_nonce_lengths_return_errors_without_panicking() {
+        let key = STANDARD.encode([7_u8; 32]);
+        install_test_secret_key(&key);
+        let ciphertext = STANDARD.encode(vec![CIPHERTEXT_VERSION]);
+        for length in [0, 1, 11, 13] {
+            let nonce = STANDARD.encode(vec![0_u8; length]);
+            let result = std::panic::catch_unwind(|| {
+                decrypt_secret(&ciphertext, &nonce, "test secret", b"task")
+            });
+            assert!(result.is_ok(), "nonce length {length} panicked");
+            assert!(
+                result.unwrap().is_err(),
+                "nonce length {length} was accepted"
+            );
+        }
+    }
 }

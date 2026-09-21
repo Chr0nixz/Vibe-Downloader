@@ -3,14 +3,18 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { resolveBrowserProfile, resolveExtensionIdentity } from "./release-config.mjs";
+import { validateReleaseTag } from "./release-source.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-export function validateReleasePreflight({ tag, versions, profile, env }) {
+export function validateReleasePreflight({ tag, versions, profile, env, stable = false, candidate = false }) {
   const normalizedProfile = resolveBrowserProfile(profile, "candidate");
-  const normalizedTag = String(tag ?? "").trim();
-  if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(normalizedTag)) {
-    throw new Error(`Release tag must be v-prefixed semver; received ${normalizedTag || "(empty)"}.`);
+  const normalizedTag = validateReleaseTag(tag);
+  if (stable && normalizedTag.includes("-")) {
+    throw new Error(`Stable release tags cannot include a prerelease suffix: ${normalizedTag}.`);
+  }
+  if (candidate && !normalizedTag.includes("-")) {
+    throw new Error(`Candidate release tags must include a prerelease suffix: ${normalizedTag}.`);
   }
   const version = normalizedTag.slice(1);
   for (const [source, actual] of Object.entries(versions)) {
@@ -79,12 +83,16 @@ async function assertRequiredFiles(workspaceRoot) {
 async function main() {
   const tagIndex = process.argv.indexOf("--tag");
   const profileIndex = process.argv.indexOf("--profile");
+  const stable = process.argv.includes("--stable");
+  const candidate = process.argv.includes("--candidate");
   const tag = tagIndex >= 0 ? process.argv[tagIndex + 1] : process.env.GITHUB_REF_NAME;
   const profile = profileIndex >= 0 ? process.argv[profileIndex + 1] : process.env.VIBE_BROWSER_PROFILE;
   await assertRequiredFiles(root);
   const result = validateReleasePreflight({
     tag,
     profile,
+    stable,
+    candidate,
     versions: await readWorkspaceVersions(root),
     env: process.env,
   });

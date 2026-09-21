@@ -57,3 +57,31 @@ test("release preflight can skip store extension IDs when allowed", () => {
   assert.equal(result.identity.profile, "release");
   assert.equal(result.identity.usingCandidateFallback, true);
 });
+
+test("stable preflight rejects prerelease tags", () => {
+  assert.throws(
+    () =>
+      validateReleasePreflight({
+        tag: "v0.2.0-rc.1",
+        versions,
+        profile: "release",
+        stable: true,
+        env: { TAURI_SIGNING_PRIVATE_KEY: "test-key" },
+      }),
+    /cannot include a prerelease suffix/,
+  );
+});
+
+test("candidate preflight rejects stable tags", () => {
+  assert.throws(
+    () =>
+      validateReleasePreflight({
+        tag: "v0.2.0",
+        versions: { "package.json": "0.2.0", "src-tauri/tauri.conf.json": "0.2.0", "src-tauri/Cargo.toml": "0.2.0" },
+        profile: "candidate",
+        candidate: true,
+        env: { TAURI_SIGNING_PRIVATE_KEY: "test-key" },
+      }),
+    /must include a prerelease suffix/,
+  );
+});

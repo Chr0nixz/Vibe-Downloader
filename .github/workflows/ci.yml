@@ -4,9 +4,14 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ inputs.source_sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -15,6 +20,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -28,6 +35,18 @@ jobs:
       # release-tools, i18n, protocol matrix, version sync, doc gate, build,
       # bundle budget, extensions).
       - run: pnpm verify:frontend
+      # ENG-04: coverage is collected as an artifact only; no threshold is
+      # enforced in CI yet (see audit ENG-04 for the baseline ratchet plan).
+      - name: Frontend coverage
+        run: pnpm test:coverage
+      - name: Upload frontend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: coverage/
+          if-no-files-found: warn
+          retention-days: 7
 
   rust:
     strategy:
@@ -40,9 +59,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -70,6 +91,23 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
+      - name: Install cargo-llvm-cov
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # ENG-04: report-only coverage; thresholds stay a local ratchet for now.
+      - name: Rust coverage
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --lcov --output-path lcov.info
+      - name: Upload rust coverage
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage
+          path: lcov.info
+          if-no-files-found: warn
+          retention-days: 7
       - name: Check licenses, advisories, bans and sources
         if: matrix.os == 'ubuntu-latest'
         run: cargo deny --manifest-path src-tauri/Cargo.toml check licenses advisories bans sources

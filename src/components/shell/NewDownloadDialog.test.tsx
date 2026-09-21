@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { ProbePhasePayload, ProbeTaskPayload } from "@/generated/bindings";
+import type { BatchImportResult, ProbePhasePayload, ProbeTaskPayload } from "@/generated/bindings";
 import { useSettingsStore } from "@/stores/settings-store";
 import type { Task } from "@/types/task";
 import { NewDownloadDialog } from "./NewDownloadDialog";
@@ -19,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   probeWebdavDirectory: vi.fn(),
   phaseHandler: undefined as ((payload: ProbePhasePayload) => void) | undefined,
   unlisten: vi.fn(),
+  writeExportFile: vi.fn(),
+  save: vi.fn(),
 }));
 
 vi.mock("react-i18next", async (importOriginal) => {
@@ -26,7 +28,7 @@ vi.mock("react-i18next", async (importOriginal) => {
   return {
     ...actual,
     useTranslation: () => ({
-      t: (key: string) => key,
+      t: (key: string, params?: { line?: number }) => (params?.line ? `${key} ${params.line}` : key),
     }),
   };
 });
@@ -38,6 +40,7 @@ vi.mock("@/lib/local-file", () => ({
 }));
 
 vi.mock("@/lib/tauri", () => ({
+  writeExportFile: mocks.writeExportFile,
   createTask: mocks.createTask,
   importUrls: mocks.importUrls,
   onProbePhase: mocks.onProbePhase,
@@ -48,6 +51,9 @@ vi.mock("@/lib/tauri", () => ({
   probeTask: mocks.probeTask,
   probeWebdavDirectory: mocks.probeWebdavDirectory,
 }));
+
+vi.mock("@/lib/runtime", () => ({ isTauriRuntime: () => true }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ save: mocks.save }));
 
 function makeProbe(url: string, fileName: string): ProbeTaskPayload {
   return {
@@ -127,7 +133,7 @@ describe("NewDownloadDialog probe flow", () => {
 
     await startAutomaticProbe(url);
 
-    expect(mocks.probeTask).toHaveBeenCalledWith(expect.objectContaining({ url, requestId: "1" }));
+    expect(mocks.probeTask).toHaveBeenCalledWith(expect.objectContaining({ url, requestId: expect.any(String) }));
     expect(screen.getByText("release.zip")).toBeInTheDocument();
 
     await act(async () => {
@@ -177,6 +183,49 @@ describe("NewDownloadDialog probe flow", () => {
     expect(screen.getByText("new.zip")).toBeInTheDocument();
   });
 
+  it("ignores a probe that resolves after the URL is cleared", async () => {
+    const pending = deferred<ProbeTaskPayload>();
+    mocks.probeTask.mockReturnValue(pending.promise);
+    renderDialog();
+
+    await startAutomaticProbe("https://example.com/old.zip");
+    fireEvent.change(screen.getByLabelText("newDownload.url"), { target: { value: "" } });
+
+    await act(async () => pending.resolve(makeProbe("https://example.com/old.zip", "old.zip")));
+
+    expect(screen.queryByText("old.zip")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("newDownload.url")).toHaveValue("");
+  });
+
+  it("refreshes automatic names while preserving a manually edited name", async () => {
+    const first = deferred<ProbeTaskPayload>();
+    const second = deferred<ProbeTaskPayload>();
+    mocks.probeTask.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+    renderDialog();
+
+    await startAutomaticProbe("https://example.com/old.zip");
+    await act(async () => first.resolve(makeProbe("https://example.com/old.zip", "old.zip")));
+    expect(screen.getByText("old.zip")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("newDownload.url"), {
+      target: { value: "https://example.com/new.zip" },
+    });
+    await act(async () => vi.advanceTimersByTime(650));
+    await act(async () => second.resolve(makeProbe("https://example.com/new.zip", "new.zip")));
+    expect(screen.getByText("new.zip")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("newDownload.editFileName"));
+    fireEvent.change(screen.getByLabelText("newDownload.fileName"), { target: { value: "keep-name.bin" } });
+    fireEvent.change(screen.getByLabelText("newDownload.url"), {
+      target: { value: "https://example.com/final.zip" },
+    });
+    const finalProbe = makeProbe("https://example.com/final.zip", "final.zip");
+    mocks.probeTask.mockResolvedValueOnce(finalProbe);
+    await act(async () => vi.advanceTimersByTime(650));
+
+    expect(screen.getByDisplayValue("keep-name.bin")).toBeInTheDocument();
+  });
+
   it("accepts only probe-phase events for the active request", async () => {
     const pending = deferred<ProbeTaskPayload>();
     mocks.probeTask.mockReturnValue(pending.promise);
@@ -189,10 +238,152 @@ describe("NewDownloadDialog probe flow", () => {
     act(() => mocks.phaseHandler?.({ requestId: "stale", kind: "checking_ffmpeg", protocol: "hls" }));
     expect(screen.queryByText("newDownload.probePhaseCheckingFfmpeg")).not.toBeInTheDocument();
 
-    act(() => mocks.phaseHandler?.({ requestId: "1", kind: "querying_metadata", protocol: "https" }));
+    act(() =>
+      mocks.phaseHandler?.({
+        requestId: mocks.probeTask.mock.calls[mocks.probeTask.mock.calls.length - 1]?.[0].requestId,
+        kind: "querying_metadata",
+        protocol: "https",
+      }),
+    );
     expect(screen.getByText("newDownload.probePhaseQueryingMetadata")).toBeInTheDocument();
 
     await act(async () => pending.resolve(makeProbe("https://example.com/phase.zip", "phase.zip")));
+  });
+
+  it("rejects responses during debounce, re-probes changed credentials, and ignores closed sessions", async () => {
+    const pending = deferred<ProbeTaskPayload>();
+    mocks.probeTask.mockReturnValueOnce(pending.promise);
+    const view = renderDialog();
+    await startAutomaticProbe("https://example.com/a.zip");
+    fireEvent.change(screen.getByLabelText("newDownload.url"), { target: { value: "https://example.com/b.zip" } });
+    fireEvent.change(screen.getByLabelText("newDownload.url"), { target: { value: "https://example.com/c.zip" } });
+    await act(async () => pending.resolve(makeProbe("https://example.com/a.zip", "stale.zip")));
+    expect(screen.queryByText("stale.zip")).not.toBeInTheDocument();
+    const next = deferred<ProbeTaskPayload>();
+    mocks.probeTask.mockReturnValueOnce(next.promise);
+    await act(async () => vi.advanceTimersByTime(650));
+    view.rerender(
+      <TooltipProvider>
+        <NewDownloadDialog open={false} onOpenChange={view.onOpenChange} onCreated={view.onCreated} />
+      </TooltipProvider>,
+    );
+    await act(async () => next.resolve(makeProbe("https://example.com/c.zip", "closed.zip")));
+    view.rerender(
+      <TooltipProvider>
+        <NewDownloadDialog open onOpenChange={view.onOpenChange} onCreated={view.onCreated} />
+      </TooltipProvider>,
+    );
+    expect(screen.queryByText("closed.zip")).not.toBeInTheDocument();
+  });
+
+  it("retains 100 results with editable failures at 6, 50 and 100 across later previews", async () => {
+    const items = Array.from({ length: 100 }, (_, index) => {
+      const line = index + 1;
+      const failed = [6, 50, 100].includes(line);
+      const url = `https://example.com/${line}.zip`;
+      return {
+        inputUrl: url,
+        normalizedUrl: url,
+        duplicate: false,
+        valid: !failed,
+        fileName: `${line}.zip`,
+        totalSize: "1",
+        contentType: null,
+        supportsResume: true,
+        errorMessage: failed ? `failed-${line}` : null,
+        task: failed ? null : { id: `task-${line}`, url, fileName: `${line}.zip` },
+      };
+    });
+    const result = { items, createdCount: 97, failedCount: 3, duplicateCount: 0 } as BatchImportResult;
+    mocks.importUrls.mockResolvedValueOnce(result);
+    mocks.save.mockResolvedValue("C:/report.json");
+    mocks.writeExportFile.mockResolvedValue(undefined);
+    const copy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: copy } });
+    renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.modeBatch" }));
+    fireEvent.change(screen.getByLabelText("newDownload.batchUrls"), {
+      target: { value: items.map((item) => item.inputUrl).join("\n") },
+    });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "newDownload.createBatch" })));
+    for (const line of [6, 50, 100]) {
+      expect(screen.getByText(`failed-${line}`)).toBeInTheDocument();
+      expect(screen.getByText(`failed-${line}`).closest("details")).toBeNull();
+      fireEvent.change(screen.getByLabelText(`newDownload.batchEditUrl ${line}`), {
+        target: { value: `https://example.com/fixed-${line}.zip` },
+      });
+    }
+    expect(screen.getByLabelText("newDownload.batchUrls")).toHaveValue(
+      [6, 50, 100].map((line) => `https://example.com/${line}.zip`).join("\n"),
+    );
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "newDownload.batchCopyFailedUrls" })));
+    expect(copy).toHaveBeenCalledWith([6, 50, 100].map((line) => `https://example.com/fixed-${line}.zip`).join("\n"));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "taskList.exportJson" })));
+    const exported = JSON.parse(mocks.writeExportFile.mock.calls[0][1]);
+    expect(exported).toHaveLength(100);
+    expect(exported[99]).toMatchObject({ line: 100, status: "failed", url: "https://example.com/fixed-100.zip" });
+    expect(exported[0]).not.toHaveProperty("task");
+    fireEvent.change(screen.getByLabelText("newDownload.batchUrls"), {
+      target: { value: "https://example.com/new.zip" },
+    });
+    mocks.importUrls.mockResolvedValueOnce({ items: [], createdCount: 0, failedCount: 0, duplicateCount: 0 });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "newDownload.previewBatch" })));
+    expect(screen.getByText("failed-100")).toBeInTheDocument();
+    for (const line of [6, 50, 100]) {
+      mocks.importUrls.mockResolvedValueOnce({
+        items: [{ ...items[line - 1], valid: true, errorMessage: null, task: { id: `retry-${line}` } }],
+        createdCount: 1,
+        failedCount: 0,
+        duplicateCount: 0,
+      });
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: `newDownload.batchRetryOne ${line}` })));
+      expect(mocks.importUrls.mock.calls[mocks.importUrls.mock.calls.length - 1]?.[0].input).toBe(
+        `https://example.com/fixed-${line}.zip`,
+      );
+    }
+    expect(screen.queryByRole("button", { name: "newDownload.batchRetryFailed" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("newDownload.batchUrls")).toHaveValue("https://example.com/new.zip");
+  });
+
+  it("new previews supersede old reads, but cannot release a creation lock or erase its result", async () => {
+    const old = deferred<BatchImportResult>();
+    const newer = deferred<BatchImportResult>();
+    const creating = deferred<BatchImportResult>();
+    mocks.importUrls
+      .mockReturnValueOnce(old.promise)
+      .mockReturnValueOnce(newer.promise)
+      .mockReturnValueOnce(creating.promise);
+    const view = renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.modeBatch" }));
+    const input = screen.getByLabelText("newDownload.batchUrls");
+    fireEvent.change(input, { target: { value: "https://example.com/old" } });
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.previewBatch" }));
+    fireEvent.change(input, { target: { value: "https://example.com/newer" } });
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.previewBatch" }));
+    const empty = { items: [], createdCount: 0, failedCount: 0, duplicateCount: 0 };
+    await act(async () => newer.resolve(empty));
+    act(() => {
+      const create = screen.getByRole("button", { name: "newDownload.createBatch" });
+      fireEvent.click(create);
+      fireEvent.click(create);
+    });
+    expect(mocks.importUrls).toHaveBeenCalledTimes(3);
+    await act(async () => old.resolve(empty));
+    expect(screen.getByRole("button", { name: "newDownload.createBatch" })).toBeDisabled();
+    fireEvent.change(input, { target: { value: "https://example.com/future" } });
+    await act(async () =>
+      creating.resolve({
+        ...empty,
+        createdCount: 1,
+        items: [
+          { inputUrl: "https://example.com/newer", fileName: "created.zip", task: { id: "created" }, valid: true },
+        ],
+      } as BatchImportResult),
+    );
+    expect(view.onCreated).toHaveBeenCalledOnce();
+    expect(screen.getByText("created.zip")).toBeInTheDocument();
+    expect(input).toHaveValue("https://example.com/future");
+    expect(screen.getByRole("button", { name: "newDownload.createBatch" })).not.toBeDisabled();
   });
 
   it("unsubscribes from probe-phase events when unmounted", async () => {
@@ -257,6 +448,144 @@ describe("NewDownloadDialog probe flow", () => {
     );
     expect(screen.getByDisplayValue(/https:\/\/example\.com\/a\.zip/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "newDownload.createBatch" })).toBeInTheDocument();
+  });
+
+  it("keeps every batch result and retries only the remaining failures", async () => {
+    const task = { id: "created-1", url: "https://example.com/1.zip", fileName: "1.zip" } as Task;
+    const result = {
+      items: [
+        {
+          inputUrl: "https://example.com/1.zip",
+          normalizedUrl: "https://example.com/1.zip",
+          duplicate: false,
+          valid: true,
+          fileName: "1.zip",
+          totalSize: "1",
+          contentType: null,
+          supportsResume: true,
+          errorMessage: null,
+          task,
+        },
+        {
+          inputUrl: "https://example.com/2.zip",
+          normalizedUrl: "https://example.com/2.zip",
+          duplicate: false,
+          valid: false,
+          fileName: null,
+          totalSize: null,
+          contentType: null,
+          supportsResume: false,
+          errorMessage: "failed-2",
+          task: null,
+        },
+        {
+          inputUrl: "https://example.com/3.zip",
+          normalizedUrl: "https://example.com/3.zip",
+          duplicate: true,
+          valid: true,
+          fileName: null,
+          totalSize: null,
+          contentType: null,
+          supportsResume: false,
+          errorMessage: "duplicate-3",
+          task: null,
+        },
+        {
+          inputUrl: "https://example.com/4.zip",
+          normalizedUrl: "https://example.com/4.zip",
+          duplicate: false,
+          valid: false,
+          fileName: null,
+          totalSize: null,
+          contentType: null,
+          supportsResume: false,
+          errorMessage: "failed-4",
+          task: null,
+        },
+        {
+          inputUrl: "https://example.com/5.zip",
+          normalizedUrl: "https://example.com/5.zip",
+          duplicate: false,
+          valid: true,
+          fileName: "5.zip",
+          totalSize: "1",
+          contentType: null,
+          supportsResume: true,
+          errorMessage: null,
+          task,
+        },
+        {
+          inputUrl: "https://example.com/6.zip",
+          normalizedUrl: "https://example.com/6.zip",
+          duplicate: false,
+          valid: false,
+          fileName: null,
+          totalSize: null,
+          contentType: null,
+          supportsResume: false,
+          errorMessage: "failed-6",
+          task: null,
+        },
+      ],
+      createdCount: 2,
+      failedCount: 3,
+      duplicateCount: 1,
+    };
+    const retryResult = { ...result, items: result.items.slice(1), createdCount: 0 };
+    mocks.importUrls.mockResolvedValueOnce(result).mockResolvedValueOnce(retryResult);
+    renderDialog();
+
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.modeBatch" }));
+    const input =
+      "https://example.com/1.zip\nhttps://example.com/2.zip\nhttps://example.com/3.zip\nhttps://example.com/4.zip\nhttps://example.com/5.zip\nhttps://example.com/6.zip";
+    fireEvent.change(screen.getByLabelText("newDownload.batchUrls"), { target: { value: input } });
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.createBatch" }));
+    await act(async () => {});
+
+    expect(screen.getByText("https://example.com/6.zip")).toBeInTheDocument();
+    expect(screen.getByText("failed-2")).toBeInTheDocument();
+    expect(screen.getByLabelText("newDownload.batchUrls")).not.toHaveValue(
+      expect.stringContaining("https://example.com/1.zip"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.batchRetryFailed" }));
+    await act(async () => {});
+    expect(mocks.importUrls).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        create: true,
+        input: expect.stringContaining("https://example.com/6.zip"),
+      }),
+    );
+    const lastInput = mocks.importUrls.mock.calls[mocks.importUrls.mock.calls.length - 1]?.[0].input as string;
+    expect(lastInput).not.toContain("https://example.com/1.zip");
+  });
+
+  it("blocks batch create during preview and drops a preview made stale by editing", async () => {
+    const pending = deferred<BatchImportResult>();
+    mocks.importUrls.mockReturnValue(pending.promise);
+    renderDialog();
+
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.modeBatch" }));
+    fireEvent.change(screen.getByLabelText("newDownload.batchUrls"), {
+      target: { value: "https://example.com/old.zip" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.previewBatch" }));
+    expect(screen.getByRole("button", { name: "newDownload.createBatch" })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("newDownload.batchUrls"), {
+      target: { value: "https://example.com/new.zip" },
+    });
+    await act(async () =>
+      pending.resolve({
+        items: [],
+        createdCount: 0,
+        failedCount: 0,
+        duplicateCount: 0,
+      }),
+    );
+
+    expect(screen.queryByText("newDownload.batchSummary")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "newDownload.createBatch" })).not.toBeDisabled();
   });
 });
 

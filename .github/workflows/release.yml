@@ -15,12 +15,20 @@ on:
         type: boolean
         default: true
 
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
 concurrency:
-  group: release-${{ github.workflow }}-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   preflight:
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     env:
@@ -35,6 +43,8 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -43,13 +53,29 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Refuse to overwrite a public release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release-state.mjs
+      - name: Bind release tag to an exact commit
+        id: source
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: node scripts/release-source.mjs --tag "${RELEASE_TAG}" --remote origin
       - name: Sync version from tag
-        run: node scripts/sync-version.mjs "${{ env.RELEASE_TAG }}"
+        shell: bash
+        run: node scripts/sync-version.mjs "${RELEASE_TAG}"
       - name: Validate release identity and signing configuration
-        run: pnpm release:preflight -- --tag "${{ env.RELEASE_TAG }}" --profile release
+        run: pnpm release:preflight -- --tag "${RELEASE_TAG}" --profile release --stable
+
+  quality:
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_sha: ${{ needs.preflight.outputs.source_sha }}
 
   publish:
-    needs: preflight
+    needs: [preflight, quality]
     permissions:
       contents: write
     timeout-minutes: 75
@@ -77,6 +103,8 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -97,7 +125,8 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: pnpm install --frozen-lockfile
       - name: Sync version from tag
-        run: node scripts/sync-version.mjs "${{ env.RELEASE_TAG }}"
+        shell: bash
+        run: node scripts/sync-version.mjs "${RELEASE_TAG}"
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -110,13 +139,14 @@ jobs:
             This release is not signed with Apple Developer ID or Windows Authenticode. macOS users may need to use Finder → Open; Windows users may need to choose SmartScreen → More info → Run anyway. Linux users should verify SHA256SUMS.txt before installation.
 
             Tauri updater artifacts are signed independently and verified by the application.
-          releaseDraft: ${{ github.event_name != 'workflow_dispatch' || inputs.release_draft }}
+          # Never expose a release before extensions and asset verification pass.
+          releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }} --config src-tauri/tauri.bundle.conf.json
 
   build-extensions:
-    needs: publish
+    needs: [preflight, publish]
     permissions:
       contents: write
     timeout-minutes: 20
@@ -130,6 +160,8 @@ jobs:
       VIBE_FIREFOX_EXTENSION_ID: ${{ secrets.VIBE_FIREFOX_EXTENSION_ID }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -139,7 +171,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Sync version from tag
-        run: node scripts/sync-version.mjs "${{ env.RELEASE_TAG }}"
+        shell: bash
+        run: node scripts/sync-version.mjs "${RELEASE_TAG}"
       - name: Build and verify minimal-permission store packages
         run: pnpm verify:extensions
       - name: Upload extension workflow artifact
@@ -154,7 +187,7 @@ jobs:
         run: gh release upload "${RELEASE_TAG}" browser/dist/packages/* --clobber
 
   verify-release:
-    needs: [publish, build-extensions]
+    needs: [preflight, publish, build-extensions]
     permissions:
       contents: write
     timeout-minutes: 20
@@ -163,6 +196,8 @@ jobs:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -175,9 +210,44 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release download "${RELEASE_TAG}" --dir .release-assets
+      - name: Record and attach the verified source commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: |
+          printf '%s\n' "${SOURCE_SHA}" > .release-assets/SOURCE_COMMIT.txt
+          gh release upload "${RELEASE_TAG}" .release-assets/SOURCE_COMMIT.txt --clobber
       - name: Verify release asset coverage and checksums
-        run: pnpm verify:release-assets -- --dir .release-assets --version "${RELEASE_TAG#v}"
+        run: pnpm verify:release-assets -- --dir .release-assets --version "${RELEASE_TAG#v}" --source-sha "${{ needs.preflight.outputs.source_sha }}"
       - name: Attach unified checksum file
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${RELEASE_TAG}" .release-assets/SHA256SUMS.txt --clobber
+
+  promote:
+    needs: [preflight, quality, publish, build-extensions, verify-release]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_draft == false }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Recheck tag and draft before publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/release-source.mjs --tag "${RELEASE_TAG}" --remote origin
+          node scripts/release-state.mjs --require-draft
+      - name: Publish the verified draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${RELEASE_TAG}" --draft=false --prerelease=false

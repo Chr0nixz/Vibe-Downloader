@@ -199,6 +199,7 @@ async fn probe_fails_on_authentication_failure() {
     let server = start_sftp_server(SftpServerConfig {
         files,
         reject_auth: true,
+        required_credentials: None,
         fail_on_read: None,
         stall_on_read: false,
         read_chunk_delay: None,
@@ -475,6 +476,7 @@ async fn concurrent_read_failure_isolates_per_session() {
     let server = start_sftp_server(SftpServerConfig {
         files,
         reject_auth: false,
+        required_credentials: None,
         fail_on_read: Some(0), // first read call fails
         stall_on_read: false,
         read_chunk_delay: None,
@@ -549,6 +551,7 @@ async fn sftp_stalled_read_is_detectable_via_idle_timeout() {
     let server = start_sftp_server(SftpServerConfig {
         files,
         reject_auth: false,
+        required_credentials: None,
         fail_on_read: None,
         stall_on_read: true,
         read_chunk_delay: None,

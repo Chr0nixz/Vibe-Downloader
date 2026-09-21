@@ -220,3 +220,47 @@ impl tracing::field::Visit for EventVisitor {
         let _ = write!(self.fields, "{}={value}", field.name());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_url;
+
+    // ENG-04: sanitize_url is the only thing standing between a credential
+    // and the log file, and it had zero coverage before this.
+
+    #[test]
+    fn strips_embedded_credentials_and_query() {
+        let sanitized = sanitize_url("https://user:hunter2@example.com/report.pdf?token=secret");
+        assert_eq!(sanitized, "https://example.com/report.pdf");
+        assert!(!sanitized.contains("hunter2"));
+        assert!(!sanitized.contains("token"));
+    }
+
+    #[test]
+    fn keeps_host_port_and_path() {
+        assert_eq!(
+            sanitize_url("http://example.com:8080/a/b%20c.bin"),
+            "http://example.com:8080/a/b%20c.bin"
+        );
+    }
+
+    #[test]
+    fn strips_query_for_unparseable_values() {
+        // A non-URL can still carry a secret in its query part.
+        assert_eq!(sanitize_url("not a url?token=secret"), "not a url");
+        assert_eq!(sanitize_url("relative/path"), "relative/path");
+    }
+
+    #[test]
+    fn tolerates_empty_and_whitespace() {
+        assert_eq!(sanitize_url(""), "");
+        assert_eq!(sanitize_url("   "), "");
+    }
+
+    #[test]
+    fn handles_local_file_urls() {
+        // file:// URLs must survive intact: the path is not a credential.
+        let sanitized = sanitize_url("file:///D:/downloads/a b.bin");
+        assert!(sanitized.starts_with("file://"), "got {sanitized}");
+    }
+}

@@ -47,6 +47,8 @@ pub struct SftpServerConfig {
     /// When `true`, the server rejects all password authentication
     /// attempts. Used to exercise `sftp_auth_failed` paths.
     pub reject_auth: bool,
+    /// Optional account enforced by credential-flow integration tests.
+    pub required_credentials: Option<(String, String)>,
     /// When `Some(i)`, the `i`-th read call returns
     /// `SSH_FXP_STATUS permission_denied` instead of data. Used to
     /// exercise concurrent read failure handling. Counting is per
@@ -127,6 +129,7 @@ pub async fn start_sftp_server(config: SftpServerConfig) -> TestSftpServer {
             dir_read_done: Arc::new(Mutex::new(HashMap::new())),
         },
         reject_auth: config.reject_auth,
+        required_credentials: config.required_credentials,
     };
     tokio::spawn(async move {
         let _ = server.run_on_socket(server_config, &listener).await;
@@ -146,6 +149,7 @@ pub async fn start_sftp_server_with_files(files: HashMap<String, Vec<u8>>) -> Te
     start_sftp_server(SftpServerConfig {
         files,
         reject_auth: false,
+        required_credentials: None,
         fail_on_read: None,
         stall_on_read: false,
         read_chunk_delay: None,
@@ -481,6 +485,7 @@ fn list_dir_entries(
 struct TestSshServer {
     fs: InMemFs,
     reject_auth: bool,
+    required_credentials: Option<(String, String)>,
 }
 
 impl russh::server::Server for TestSshServer {
@@ -489,6 +494,7 @@ impl russh::server::Server for TestSshServer {
         SshSession {
             fs: self.fs.clone(),
             reject_auth: self.reject_auth,
+            required_credentials: self.required_credentials.clone(),
             channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -497,14 +503,21 @@ impl russh::server::Server for TestSshServer {
 struct SshSession {
     fs: InMemFs,
     reject_auth: bool,
+    required_credentials: Option<(String, String)>,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
 }
 
 impl russh::server::Handler for SshSession {
     type Error = russh::Error;
 
-    async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
-        if self.reject_auth {
+    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        if self.reject_auth
+            || self.required_credentials.as_ref().is_some_and(
+                |(expected_user, expected_password)| {
+                    user != expected_user || password != expected_password
+                },
+            )
+        {
             Ok(Auth::Reject {
                 proceed_with_methods: None,
                 partial_success: false,
@@ -516,12 +529,17 @@ impl russh::server::Handler for SshSession {
 
     async fn auth_publickey(
         &mut self,
-        _user: &str,
+        user: &str,
         _public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
         // FUN-04 tests authenticate with a generated client key; accept any
         // public key unless the server is configured to reject auth entirely.
-        if self.reject_auth {
+        if self.reject_auth
+            || self
+                .required_credentials
+                .as_ref()
+                .is_some_and(|(expected_user, _)| user != expected_user)
+        {
             Ok(Auth::Reject {
                 proceed_with_methods: None,
                 partial_success: false,

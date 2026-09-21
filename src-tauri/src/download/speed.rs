@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
@@ -50,9 +50,10 @@ pub struct GlobalSpeedLimiter {
     parent: Option<Arc<GlobalSpeedLimiter>>,
     /// Shared wake signal when the ticker refills tokens.
     notify: Notify,
-    ticker_started: AtomicBool,
     /// Holds the JoinHandle so Drop / set_limit(0) can abort the ticker.
     ticker_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[cfg(debug_assertions)]
+    ticker_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl GlobalSpeedLimiter {
@@ -64,8 +65,9 @@ impl GlobalSpeedLimiter {
             last_refill_millis: AtomicU64::new(now_millis()),
             parent: None,
             notify: Notify::new(),
-            ticker_started: AtomicBool::new(false),
             ticker_handle: Mutex::new(None),
+            #[cfg(debug_assertions)]
+            ticker_count: Arc::default(),
         }
     }
 
@@ -81,14 +83,18 @@ impl GlobalSpeedLimiter {
                 last_refill_millis: AtomicU64::new(now_millis()),
                 parent: Some(parent),
                 notify: Notify::new(),
-                ticker_started: AtomicBool::new(false),
                 ticker_handle: Mutex::new(None),
+                #[cfg(debug_assertions)]
+                ticker_count: Arc::default(),
             }),
             _ => parent,
         }
     }
 
     pub async fn set_limit(&self, limit_bps: Option<i64>) {
+        // Serialize disable/re-enable with ticker installation so an old stop
+        // cannot abort a new ticker or leave a detached handle behind.
+        let mut ticker = self.ticker_handle.lock().unwrap_or_else(|e| e.into_inner());
         let limit = limit_bps.unwrap_or(0).max(0);
         self.limit_bps.store(limit, Ordering::Relaxed);
         self.tokens_milli
@@ -96,49 +102,57 @@ impl GlobalSpeedLimiter {
         self.last_refill_millis
             .store(now_millis(), Ordering::Relaxed);
         if limit <= 0 {
-            self.stop_ticker();
+            if let Some(handle) = ticker.take() {
+                handle.abort();
+            }
         }
         self.notify.notify_waiters();
     }
 
     fn stop_ticker(&self) {
-        self.ticker_started.store(false, Ordering::Relaxed);
-        if let Ok(mut guard) = self.ticker_handle.lock() {
-            if let Some(handle) = guard.take() {
-                handle.abort();
-            }
+        let mut guard = self.ticker_handle.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(handle) = guard.take() {
+            handle.abort();
         }
     }
 
     /// Lazy-start a shared ticker so waiters wake together on refill (PERF-08).
     fn ensure_ticker(self: &Arc<Self>) {
-        if self.limit_bps.load(Ordering::Relaxed) <= 0 {
-            return;
-        }
-        if self
-            .ticker_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
+        let mut guard = self.ticker_handle.lock().unwrap_or_else(|e| e.into_inner());
+        if self.limit_bps.load(Ordering::Relaxed) <= 0
+            || guard.as_ref().is_some_and(|handle| !handle.is_finished())
         {
             return;
         }
-        let this = Arc::clone(self);
+        // PERF-17: the ticker must not keep its owner alive while sleeping.
+        // Drop aborts it when the last engine/waiter releases the limiter.
+        let owner = Arc::downgrade(self);
+        #[cfg(debug_assertions)]
+        let ticker_count = TickerCount::new(self.ticker_count.clone());
         let handle = tokio::spawn(async move {
+            #[cfg(debug_assertions)]
+            let _ticker_count = ticker_count;
             let mut interval = tokio::time::interval(Duration::from_millis(TICK_INTERVAL_MS));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
+                let Some(this) = owner.upgrade() else {
+                    break;
+                };
                 if this.limit_bps.load(Ordering::Relaxed) <= 0 {
-                    this.ticker_started.store(false, Ordering::Relaxed);
                     break;
                 }
                 this.refill_now();
                 this.notify.notify_waiters();
             }
         });
-        if let Ok(mut guard) = self.ticker_handle.lock() {
-            *guard = Some(handle);
-        }
+        *guard = Some(handle);
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn ticker_count_for_test(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.ticker_count.clone()
     }
 
     fn refill_now(&self) {
@@ -258,6 +272,14 @@ impl GlobalSpeedLimiter {
                 tokio::pin!(notified);
                 // Register before checking cancel/tokens again to avoid missed wakeups.
                 notified.as_mut().enable();
+                // Disabling the limiter may abort the only ticker between the
+                // first balance check and waiter registration. Recheck after
+                // registering so that transition cannot leave a waiter asleep.
+                if self.limit_bps.load(Ordering::Relaxed) <= 0
+                    || self.tokens_milli.load(Ordering::Relaxed) >= request_milli
+                {
+                    continue;
+                }
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(()),
                     _ = notified => {}
@@ -282,6 +304,24 @@ impl GlobalSpeedLimiter {
 impl Drop for GlobalSpeedLimiter {
     fn drop(&mut self) {
         self.stop_ticker();
+    }
+}
+
+#[cfg(debug_assertions)]
+struct TickerCount(Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(debug_assertions)]
+impl TickerCount {
+    fn new(count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for TickerCount {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

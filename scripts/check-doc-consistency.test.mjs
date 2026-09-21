@@ -6,6 +6,7 @@ import {
   bulletHeadlinedIds,
   checkDocConsistency,
   currentVersionClaim,
+  narrativeOpenClaims,
   parseAuditStatuses,
   referencedAuditIds,
 } from "./check-doc-consistency.mjs";
@@ -40,6 +41,46 @@ test("bullet-headlined IDs are detected document-wide; mid-sentence mentions are
     "- no ID at this bullet start, and `FUN-20` stays mid-sentence",
   ].join("\n");
   assert.deepEqual(bulletHeadlinedIds(doc).sort(), ["ARC-19", "ARC-33"]);
+});
+
+test("narrativeOpenClaims flags only IDs the line does not itself mark Closed", () => {
+  const doc = [
+    "Seeding limits are Closed (`FUN-11`, `ARC-12`); the remaining gaps are probe (`ARC-28`) and speed (`ARC-29`).",
+    "Fold it into the `ARC-31` coordinator merge.",
+    "- `ARC-19` (P2, Closed): drains its JoinSet before checkpointing.",
+    "Metalink gaps: part-file retention (`ARC-24`) and read idle timeout (`ARC-25`).",
+  ].join("\n");
+  assert.deepEqual(narrativeOpenClaims(doc), [
+    { id: "ARC-28", line: 1, signal: "remaining" },
+    { id: "ARC-29", line: 1, signal: "remaining" },
+    { id: "ARC-24", line: 4, signal: "gaps" },
+    { id: "ARC-25", line: 4, signal: "gaps" },
+  ]);
+});
+
+test("narrativeOpenClaims understands Chinese signals", () => {
+  const doc = "发布前仍需清零 P1 项（探测代理缺口 `FUN-20`、跨卷备份 `FUN-23`）";
+  assert.deepEqual(narrativeOpenClaims(doc), [
+    { id: "FUN-20", line: 1, signal: "缺口" },
+    { id: "FUN-23", line: 1, signal: "缺口" },
+  ]);
+});
+
+test("checkDocConsistency catches a narrative that calls a Closed ID open", () => {
+  const agents = [
+    "The project is currently at `0.5.0`.",
+    "Gates: `check:i18n` compares values (`FUN-21` Closed). Remaining gate gaps are in `ENG-01`.",
+  ].join("\n");
+  const audit = `${SAMPLE_AUDIT}### ENG-01（P1，Closed）：门禁覆盖面小于其表观\nbody\n### FUN-21（P1，Closed）：i18n 只比 key 不比 value\nbody\n`;
+  const problems = checkDocConsistency({
+    readme: "",
+    agents,
+    audit,
+    packageVersion: "0.5.0",
+  });
+  assert.deepEqual(problems, [
+    'AGENTS.md:2: narrative says ENG-01 is still open (matched "Remaining") but its audit status is "Closed" — update the narrative',
+  ]);
 });
 
 test("checkDocConsistency passes the checked-in documents", async () => {

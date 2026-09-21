@@ -23,6 +23,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { QueueTaskDecision, QueueWaitReason, SchedulerSnapshot, TaskPriority } from "@/generated/bindings";
+import { useVisibilityGatedPoll } from "@/hooks/use-visibility-gated-poll";
 import { errorMessage } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
 import { getSchedulerSnapshot } from "@/lib/tauri";
@@ -88,11 +89,10 @@ export function QueueCenter({
     }
   }, [queueIdsKey]);
 
-  useEffect(() => {
-    void refreshSnapshot();
-    const timer = window.setInterval(() => void refreshSnapshot(), 10_000);
-    return () => window.clearInterval(timer);
-  }, [refreshSnapshot]);
+  // PERF-14: the snapshot poll suspends while the window is hidden and skips
+  // ticks while a refresh is still in flight (a hidden window used to issue a
+  // scheduler IPC round-trip every 10s regardless of visibility).
+  useVisibilityGatedPoll(refreshSnapshot, 10_000);
 
   const decisions = useMemo(
     () => new Map(snapshot?.decisions.map((decision) => [decision.taskId, decision]) ?? []),

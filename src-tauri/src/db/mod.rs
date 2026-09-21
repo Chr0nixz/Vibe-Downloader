@@ -26,19 +26,23 @@ mod task_proxy;
 mod task_records;
 mod task_state;
 mod torrent;
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use self::backup::write_backup_file_for_test;
 pub use self::backup::{
     apply_pending_restore_if_any, backup_settings_preview, current_schema_version,
     enforce_backup_path_policy, materialize_and_verify_backup_db, pack_backup_file,
     parse_backup_bytes, pending_restore_path, read_backup_file, remap_backup_paths,
-    scan_backup_path_policy, snapshot_database_to_path, verify_backup_integrity, write_backup_file,
-    BackupManifest, RestoreScrubObservation, BACKUP_FORMAT_VERSION,
-    CREDENTIALS_POLICY_MACHINE_BOUND,
+    scan_backup_path_policy, snapshot_database_to_path, validate_backup_secrets,
+    verify_backup_integrity, write_backup_file, BackupManifest, RestoreScrubObservation,
+    BACKUP_FORMAT_VERSION, CREDENTIALS_POLICY_MACHINE_BOUND,
 };
 pub use self::backup_contents::{count_contents, count_scalar, distinct_save_dirs};
 pub use self::backup_subset::restore_subset;
 pub use self::browser_messages::{
-    browser_message_exists, insert_browser_message, latest_browser_error, prune_browser_messages,
-    update_browser_message_status,
+    browser_message_exists, browser_message_summary, insert_browser_message, latest_browser_error,
+    prune_browser_messages, recent_browser_messages, update_browser_message_status,
+    BrowserMessageSummary,
 };
 pub use self::classification_rules::{
     apply_classification_rules, create_classification_rule, delete_classification_rule,
@@ -142,9 +146,9 @@ pub use self::task_proxy::{
 pub use self::task_records::{
     find_duplicate_task_record, get_task_record, get_task_record_in_tx, insert_task_record,
     insert_task_record_in_tx, insert_task_with_files, insert_task_with_files_in_tx,
-    list_artifact_task_refs, list_browser_realtime_task_records, list_paused_schedulable_tasks,
-    list_queued_task_records, list_reserved_final_paths, list_staging_task_refs,
-    list_task_ids_by_statuses, list_task_records, list_task_records_by_ids,
+    list_artifact_task_refs, list_browser_realtime_task_records, list_expired_auth_header_tasks,
+    list_paused_schedulable_tasks, list_queued_task_records, list_reserved_final_paths,
+    list_staging_task_refs, list_task_ids_by_statuses, list_task_records, list_task_records_by_ids,
     list_task_records_cursor, list_task_records_page, next_queue_position, next_retry_after_at,
     reorder_queued_tasks, task_filter_options, task_stats_snapshot, update_task_transfer_options,
     ArtifactTaskRef, StagingTaskRef, TaskFilterOptions, TaskListPage, TaskListQuery,

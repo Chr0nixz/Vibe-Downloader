@@ -154,6 +154,99 @@ async fn fun16_backup_round_trip_preserves_tasks() {
     let _ = std::fs::remove_file(&empty_live);
 }
 
+#[cfg(debug_assertions)]
+#[test]
+fn backup_process_exit_before_publish() {
+    let Some(path) = std::env::var_os("VIBE_TEST_BACKUP_TARGET") else {
+        return;
+    };
+    let bytes = std::fs::read(std::env::var_os("VIBE_TEST_BACKUP_INPUT").unwrap()).unwrap();
+    db::write_backup_file_for_test(
+        std::path::Path::new(&path),
+        &bytes,
+        None,
+        false,
+        Some(Box::new(|| std::process::exit(73))),
+    )
+    .unwrap();
+    panic!("prepublication exit hook did not run");
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn backup_faults_and_process_exit_preserve_a_readable_previous_backup() {
+    use sha2::{Digest, Sha256};
+    use std::{io::ErrorKind, process::Command};
+    let paths = common::TestPaths::new("backup-atomic");
+    let root = paths.temp.parent().unwrap();
+    let live = root.join("live.sqlite");
+    let pool = db::connect(&live).await.unwrap().pool;
+    seed_task(&pool, "old-task").await;
+    let destination = root.join("state.vibe-backup");
+    make_backup_from_pool(&pool, &live, &destination).await;
+    let original = std::fs::read(&destination).unwrap();
+    seed_task(&pool, "new-task").await;
+    let next = root.join("next.vibe-backup");
+    make_backup_from_pool(&pool, &live, &next).await;
+    let replacement = std::fs::read(&next).unwrap();
+    for (fault, sync_failure) in [
+        (Some((37, ErrorKind::WriteZero)), false),
+        (Some((70_000, ErrorKind::StorageFull)), false),
+        (None, true),
+    ] {
+        assert!(db::write_backup_file_for_test(
+            &destination,
+            &replacement,
+            fault,
+            sync_failure,
+            None
+        )
+        .unwrap_err()
+        .contains("backup_write_failed"));
+        assert_eq!(
+            Sha256::digest(std::fs::read(&destination).unwrap()),
+            Sha256::digest(&original)
+        );
+        assert!(std::fs::read_dir(root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".state.vibe-backup.")));
+        read_backup_file(&destination).unwrap();
+    }
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "backup_process_exit_before_publish",
+            "--nocapture",
+        ])
+        .env("VIBE_TEST_BACKUP_TARGET", &destination)
+        .env("VIBE_TEST_BACKUP_INPUT", &next)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(73));
+    assert_eq!(
+        Sha256::digest(std::fs::read(&destination).unwrap()),
+        Sha256::digest(&original)
+    );
+    // An abrupt exit can leave a private .tmp file. A subsequent export must
+    // ignore it, and the visible backup remains the only restore candidate.
+    write_backup_file(&destination, &replacement).unwrap();
+    let parsed = read_backup_file(&destination).unwrap();
+    let schema = db::current_schema_version(&pool).await.unwrap();
+    let verified = db::materialize_and_verify_backup_db(&parsed.database, schema, schema)
+        .await
+        .unwrap();
+    let restored = db::connect(&verified).await.unwrap().pool;
+    assert!(db::get_task_record(&restored, "new-task")
+        .await
+        .unwrap()
+        .is_some());
+    restored.close().await;
+    std::fs::remove_file(verified).unwrap();
+    pool.close().await;
+}
+
 #[tokio::test]
 async fn fun16_corrupt_checksum_is_rejected_without_touching_live() {
     let live = unique_path("live-corrupt.sqlite");

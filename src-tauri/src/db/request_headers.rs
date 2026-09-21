@@ -81,7 +81,7 @@ pub async fn resolve_task_request_headers(
     // SEC-05: the decrypted header JSON (including Cookie values) is wiped
     // when this scope ends; the legacy plaintext column gets the same wrap.
     let headers_json = match (ciphertext, nonce) {
-        (Some(ciphertext), Some(nonce)) if !ciphertext.is_empty() && !nonce.is_empty() => {
+        (Some(ciphertext), Some(nonce)) => {
             crate::secure_headers::decrypt_headers(&ciphertext, &nonce).map_err(|error| {
                 AppErrorPayload::auth_headers_unavailable(format!(
                     "Browser authentication headers are unavailable: {error}"
@@ -89,7 +89,7 @@ pub async fn resolve_task_request_headers(
                 .command_error()
             })?
         }
-        _ => {
+        (None, None) => {
             let raw: String = row.get("headers_json");
             if raw.is_empty() {
                 return Ok(Vec::new());
@@ -98,6 +98,12 @@ pub async fn resolve_task_request_headers(
                 let _ = upsert_task_request_headers(pool, task_id, &headers, None).await;
             }
             zeroize::Zeroizing::new(raw)
+        }
+        _ => {
+            return Err(AppErrorPayload::auth_headers_unavailable(
+                "Stored browser authentication metadata is incomplete.",
+            )
+            .command_error())
         }
     };
 

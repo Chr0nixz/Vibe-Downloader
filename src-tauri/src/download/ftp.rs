@@ -241,9 +241,7 @@ pub async fn probe_ftp_directory_url(
         if !credentials.username.is_empty() {
             target.username = credentials.username.clone();
         }
-        if !credentials.password.is_empty() {
-            target.password = credentials.password.clone();
-        }
+        target.password = credentials.password.clone();
     }
     let mut diagnostics = Vec::new();
     let mut session = connect_session(&target, &proxy_config, None).await?;
@@ -302,7 +300,16 @@ impl DownloadEngine for FtpEngine {
                 "connecting",
                 Some("ftp"),
             );
-            let target = FtpTarget::parse(&request.uri).map_err(DownloadError::Other)?;
+            let mut target = FtpTarget::parse(&request.uri).map_err(DownloadError::Other)?;
+            // FUN-30: file probes must use the same draft credentials as the
+            // directory probe and the eventual task, even when the URL has no
+            // embedded username/password.
+            if let Some(credentials) = &request.credentials {
+                if !credentials.username.is_empty() {
+                    target.username = credentials.username.clone();
+                }
+                target.password = credentials.password.clone();
+            }
             tracing::debug!(url = %target.sanitized_uri, "probing ftp url");
             self.probe_target(
                 target,

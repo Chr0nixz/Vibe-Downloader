@@ -1,9 +1,10 @@
 //! FUN-16 / D3: versioned application database backup format (`.vibe-backup`).
 
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use serde::{Deserialize, Serialize};
@@ -254,6 +255,47 @@ pub fn read_backup_file(path: &Path) -> Result<ParsedBackup, String> {
 }
 
 pub fn write_backup_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_backup_file_impl(path, bytes, BackupWriteOptions::default())
+}
+
+#[derive(Default)]
+struct BackupWriteOptions {
+    #[cfg(debug_assertions)]
+    fail_after: Option<(usize, std::io::ErrorKind)>,
+    #[cfg(debug_assertions)]
+    fail_sync: bool,
+    #[cfg(debug_assertions)]
+    before_publish: Option<Box<dyn FnOnce() + Send>>,
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn write_backup_file_for_test(
+    path: &Path,
+    bytes: &[u8],
+    fail_after: Option<(usize, std::io::ErrorKind)>,
+    fail_sync: bool,
+    before_publish: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<(), String> {
+    write_backup_file_impl(
+        path,
+        bytes,
+        BackupWriteOptions {
+            fail_after,
+            fail_sync,
+            before_publish,
+        },
+    )
+}
+
+/// Write a backup without exposing a partially written replacement to readers.
+/// The temporary file lives beside the destination so the final rename stays
+/// on one volume and is the only operation that changes the visible backup.
+fn write_backup_file_impl(
+    path: &Path,
+    bytes: &[u8],
+    options: BackupWriteOptions,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             engine_backup_error(
@@ -262,20 +304,148 @@ pub fn write_backup_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
             )
         })?;
     }
-    let mut file = File::create(path).map_err(|e| {
+    // Reject malformed payloads before touching an existing destination.
+    parse_backup_bytes(bytes)?;
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("backup.vibe-backup");
+    let mut temp_path = None;
+    let mut file = None;
+    for _ in 0..16 {
+        let token = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), token));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(handle) => {
+                temp_path = Some(candidate);
+                file = Some(handle);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(engine_backup_error(
+                    "backup_write_failed",
+                    format!("Could not create backup staging file: {error}"),
+                ));
+            }
+        }
+    }
+    let temp_path = temp_path.ok_or_else(|| {
         engine_backup_error(
             "backup_write_failed",
-            format!("Could not create backup file: {e}"),
+            "Could not allocate a unique backup staging file.",
         )
     })?;
-    file.write_all(bytes).map_err(|e| {
-        engine_backup_error(
+    let mut file = file.expect("staging handle is present when staging path is present");
+    let write_result = (|| {
+        #[cfg(debug_assertions)]
+        let mut written = 0usize;
+        for chunk in bytes.chunks(64 * 1024) {
+            #[cfg(debug_assertions)]
+            if let Some((limit, kind)) = options.fail_after {
+                if written + chunk.len() > limit {
+                    file.write_all(&chunk[..limit.saturating_sub(written)])?;
+                    return Err(std::io::Error::new(
+                        kind,
+                        "injected backup write interruption",
+                    ));
+                }
+            }
+            file.write_all(chunk)?;
+            #[cfg(debug_assertions)]
+            {
+                written += chunk.len();
+            }
+        }
+        #[cfg(debug_assertions)]
+        if options.fail_sync {
+            return Err(std::io::Error::other("injected backup sync failure"));
+        }
+        file.sync_all()
+    })();
+    if let Err(error) = write_result {
+        drop(file);
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(engine_backup_error(
             "backup_write_failed",
-            format!("Could not write backup file: {e}"),
-        )
-    })?;
+            format!("Could not write backup file: {error}"),
+        ));
+    }
+    drop(file);
+
+    if let Err(error) = read_backup_file(&temp_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    #[cfg(debug_assertions)]
+    if let Some(hook) = options.before_publish {
+        hook();
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = options;
+    if let Err(error) = atomic_replace_file(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(engine_backup_error(
+            "backup_write_failed",
+            format!("Could not publish backup file: {error}"),
+        ));
+    }
+    sync_parent_directory(parent);
     Ok(())
 }
+
+fn atomic_replace_file(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        let source_wide = source
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let destination_wide = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // MOVEFILE_REPLACE_EXISTING performs the replacement as one filesystem
+        // operation, while WRITE_THROUGH asks Windows to flush the metadata.
+        unsafe {
+            MoveFileExW(
+                PCWSTR(source_wide.as_ptr()),
+                PCWSTR(destination_wide.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+            .map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xffff))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(source, destination)
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) {
+    #[cfg(unix)]
+    if let Ok(directory) = File::open(parent) {
+        let _ = directory.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) {}
 
 /// Materialize backup database bytes to a temp path and verify integrity + migrations.
 pub async fn materialize_and_verify_backup_db(
@@ -345,8 +515,74 @@ pub async fn materialize_and_verify_backup_db(
             format!("Backup database could not be migrated: {error}"),
         ));
     }
+    let structure = validate_backup_secrets(&pool).await;
     pool.close().await;
+    if let Err(error) = structure {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
     Ok(path)
+}
+
+/// Inspect only encoding, nonce size and tag size. Never decrypt backup
+/// credentials or include stored values in diagnostics from an untrusted DB.
+pub async fn validate_backup_secrets(pool: &SqlitePool) -> Result<(), String> {
+    for (table, column, query) in [
+        (
+            "task_request_headers",
+            "headers_ciphertext",
+            "SELECT rowid, headers_ciphertext, nonce FROM task_request_headers",
+        ),
+        (
+            "task_credentials",
+            "credentials_ciphertext",
+            "SELECT rowid, credentials_ciphertext, nonce FROM task_credentials",
+        ),
+        (
+            "task_proxy_settings",
+            "proxy_password_ciphertext",
+            "SELECT rowid, proxy_password_ciphertext, nonce FROM task_proxy_settings",
+        ),
+    ] {
+        let rows = sqlx::query(query).fetch_all(pool).await.map_err(|_| {
+            engine_backup_error(
+                "backup_invalid_database",
+                format!("Could not read {table}."),
+            )
+        })?;
+        for row in rows {
+            let id: i64 = row.get("rowid");
+            let ciphertext: Option<String> = row.try_get(column).map_err(|_| {
+                engine_backup_error(
+                    "backup_invalid_database",
+                    format!("Invalid {table} record {id} field {column}."),
+                )
+            })?;
+            let nonce: Option<String> = row.try_get("nonce").map_err(|_| {
+                engine_backup_error(
+                    "backup_invalid_database",
+                    format!("Invalid {table} record {id} field nonce."),
+                )
+            })?;
+            let invalid_field = match (ciphertext.as_deref(), nonce.as_deref()) {
+                (None, None) => None,
+                (Some(ct), Some(nonce)) => {
+                    crate::secure_headers::validate_secret_structure(ct, nonce)
+                        .err()
+                        .map(|field| if field == "nonce" { "nonce" } else { column })
+                }
+                (None, Some(_)) => Some(column),
+                (Some(_), None) => Some("nonce"),
+            };
+            if let Some(field) = invalid_field {
+                return Err(engine_backup_error(
+                    "backup_invalid_database",
+                    format!("Invalid {table} record {id} field {field}."),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// SEC-02: Normalize a path for prefix comparison.
@@ -1028,5 +1264,66 @@ mod tests {
         packed[last] ^= 0xff;
         let err = parse_backup_bytes(&packed).expect_err("must fail");
         assert!(err.contains("backup_checksum_mismatch") || err.contains("checksum"));
+    }
+
+    #[test]
+    fn interrupted_backup_write_preserves_previous_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "vibe-backup-write-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let destination = directory.join("state.vibe-backup");
+        let original = b"previous-good-backup";
+        std::fs::write(&destination, original).expect("write original");
+
+        let database = b"database";
+        let manifest = BackupManifest {
+            format: "vibe-backup".into(),
+            format_version: BACKUP_FORMAT_VERSION,
+            app_version: "0.5.0".into(),
+            schema_version: 1,
+            created_at: "2026-09-21T00:00:00Z".into(),
+            credentials_policy: CREDENTIALS_POLICY_MACHINE_BOUND.into(),
+            includes_global_proxy_password: false,
+            checksum_algorithm: "sha256".into(),
+            checksum: String::new(),
+            database_bytes: 0,
+        };
+        let packed = pack_backup_file(&manifest, database).expect("pack");
+        let error = write_backup_file_impl(
+            &destination,
+            &packed,
+            BackupWriteOptions {
+                fail_after: Some((0, std::io::ErrorKind::WriteZero)),
+                ..Default::default()
+            },
+        )
+        .expect_err("injected write must fail");
+        assert!(error.contains("backup_write_failed"));
+        assert_eq!(
+            std::fs::read(&destination).expect("read original"),
+            original
+        );
+        assert_eq!(
+            std::fs::read_dir(&directory)
+                .expect("list directory")
+                .count(),
+            1,
+            "failed staging file must be removed"
+        );
+
+        write_backup_file(&destination, &packed).expect("publish replacement");
+        assert_eq!(
+            read_backup_file(&destination)
+                .expect("read replacement")
+                .database,
+            database
+        );
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

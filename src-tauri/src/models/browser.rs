@@ -17,6 +17,23 @@ pub enum BrowserKind {
 }
 
 impl BrowserKind {
+    /// Inverse of `as_str` for reading rows back from SQLite; unknown values
+    /// (future kinds written by a newer build) are skipped by callers instead
+    /// of being surfaced as a broken diagnostics entry.
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        Some(match value {
+            "chrome" => Self::Chrome,
+            "edge" => Self::Edge,
+            "firefox" => Self::Firefox,
+            "safari" => Self::Safari,
+            "brave" => Self::Brave,
+            "opera" => Self::Opera,
+            "vivaldi" => Self::Vivaldi,
+            "chromium" => Self::Chromium,
+            _ => return None,
+        })
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Chrome => "chrome",
@@ -64,6 +81,9 @@ pub struct BrowserIntegrationEntry {
     pub display_name: String,
     pub supported_on_platform: bool,
     pub detected: bool,
+    /// Best-effort version read from the OS (Windows registry only today);
+    /// `None` means "unknown", which the UI renders as such — never a guess.
+    pub browser_version: Option<String>,
     pub manifest_installed: bool,
     pub manifest_path: Option<String>,
     pub extension_load_path: Option<String>,
@@ -215,5 +235,62 @@ pub struct BrowserHandoffResult {
     pub request_id: String,
     pub status: String,
     pub task: Option<Task>,
+    pub error_message: Option<String>,
+}
+
+/// One row of the `browser_messages` diagnostics table for the integration
+/// center history panel. `url` is the SEC-06 query-stripped copy stored at
+/// insert time; `status` is `received` or `failed` (duplicates are never
+/// persisted, by design).
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserHandoffRecord {
+    pub request_id: String,
+    pub browser: BrowserKind,
+    pub url: String,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: String,
+}
+
+/// Window + totals for the handoff history panel: `entries` is the recent
+/// window (pruned rows are gone), the counts and `last_handoff_at` cover the
+/// whole table so "最近 N 条" and "累计" never disagree silently.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserHandoffHistory {
+    pub entries: Vec<BrowserHandoffRecord>,
+    pub received_count: u32,
+    pub failed_count: u32,
+    pub last_handoff_at: Option<String>,
+}
+
+/// Tasks whose browser-supplied auth headers expired before success
+/// (`auth_headers_expired` / `auth_headers_unavailable`) and are still in a
+/// failure state — the recovery path is FUN-03: re-sending the same URL from
+/// the browser refreshes the headers and requeues the task.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpiredAuthHeaderTask {
+    pub task_id: String,
+    pub file_name: String,
+    pub url: String,
+    pub status: String,
+    pub error_code: String,
+    pub updated_at: Option<String>,
+}
+
+/// Result of spawning `vibe-native-host --self-check`. `available: false`
+/// means the host binary could not be run or its output could not be trusted;
+/// the separate `ok` flag distinguishes "ran and failed" from "never ran".
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserNativeHostSelfCheck {
+    pub available: bool,
+    pub ok: bool,
+    pub version: Option<String>,
+    pub protocol_version: Option<u32>,
+    pub native_host_path: Option<String>,
+    pub app_path: Option<String>,
     pub error_message: Option<String>,
 }

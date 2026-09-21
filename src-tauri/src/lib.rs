@@ -284,6 +284,10 @@ macro_rules! vibe_commands_base {
             commands::browser::get_browser_capture_settings,
             commands::browser::update_browser_capture_settings,
             commands::browser::create_browser_handoff_task,
+            commands::browser::get_browser_handoff_history,
+            commands::browser::validate_browser_handoff,
+            commands::browser::list_expired_auth_header_tasks,
+            commands::browser::run_browser_native_host_self_check,
             commands::classification::list_classification_rules,
             commands::classification::create_classification_rule,
             commands::classification::update_classification_rule,
@@ -426,6 +430,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::BrowserExtensionPackage>()
         .typ::<models::BrowserExtensionExportResult>()
         .typ::<models::BrowserHandoffResult>()
+        .typ::<models::BrowserHandoffHistory>()
+        .typ::<models::BrowserHandoffRecord>()
+        .typ::<models::ExpiredAuthHeaderTask>()
+        .typ::<models::BrowserNativeHostSelfCheck>()
         .typ::<models::EnvironmentHealthReport>()
         .typ::<models::EnvironmentHealthItem>()
         .typ::<models::EnvironmentHealthStatus>()

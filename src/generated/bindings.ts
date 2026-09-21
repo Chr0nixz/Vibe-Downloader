@@ -155,6 +155,26 @@ export const commands = {
 	getBrowserCaptureSettings: () => typedError<BrowserCaptureSettings, string>(__TAURI_INVOKE("get_browser_capture_settings")),
 	updateBrowserCaptureSettings: (input: BrowserCaptureSettingsInput) => typedError<BrowserCaptureSettings, string>(__TAURI_INVOKE("update_browser_capture_settings", { input })),
 	createBrowserHandoffTask: (input: BrowserHandoffInput) => typedError<BrowserHandoffResult, string>(__TAURI_INVOKE("create_browser_handoff_task", { input })),
+	/**
+	 *  §3.9: recent handoff diagnostics for the integration center. The window
+	 *  (`entries`) and the totals (`received_count`/`failed_count`/`last_handoff_at`)
+	 *  have different scopes on purpose — the table is pruned, so totals can
+	 *  legitimately exceed the window's rows.
+	 */
+	getBrowserHandoffHistory: (limit: number | null) => typedError<BrowserHandoffHistory, string>(__TAURI_INVOKE("get_browser_handoff_history", { limit })),
+	validateBrowserHandoff: (input: BrowserHandoffInput) => typedError<BrowserHandoffResult, string>(__TAURI_INVOKE("validate_browser_handoff", { input })),
+	/**
+	 *  §3.9: tasks still failing because their browser-supplied auth headers
+	 *  expired. The recovery path is FUN-03 (re-send the same URL from the
+	 *  browser) or manual credential update in the Recovery Center.
+	 */
+	listExpiredAuthHeaderTasks: () => typedError<ExpiredAuthHeaderTask[], string>(__TAURI_INVOKE("list_expired_auth_header_tasks")),
+	/**
+	 *  §3.9: run the native host's `--self-check` mode (sibling-app co-location
+	 *  and protocol version). Never hard-fails: an unrunnable host is itself the
+	 *  diagnostic result the page wants to show.
+	 */
+	runBrowserNativeHostSelfCheck: () => typedError<BrowserNativeHostSelfCheck, string>(__TAURI_INVOKE("run_browser_native_host_self_check")),
 	listClassificationRules: () => typedError<ClassificationRule[], string>(__TAURI_INVOKE("list_classification_rules")),
 	createClassificationRule: (input: ClassificationRuleInput) => typedError<ClassificationRule, string>(__TAURI_INVOKE("create_classification_rule", { input })),
 	updateClassificationRule: (id: string, input: ClassificationRuleInput) => typedError<ClassificationRule, string>(__TAURI_INVOKE("update_classification_rule", { id, input })),
@@ -520,6 +540,18 @@ export type BrowserForwardedHeader = {
 	value: string,
 };
 
+/**
+ *  Window + totals for the handoff history panel: `entries` is the recent
+ *  window (pruned rows are gone), the counts and `last_handoff_at` cover the
+ *  whole table so "最近 N 条" and "累计" never disagree silently.
+ */
+export type BrowserHandoffHistory = {
+	entries: BrowserHandoffRecord[],
+	receivedCount: number,
+	failedCount: number,
+	lastHandoffAt: string | null,
+};
+
 export type BrowserHandoffInput = {
 	version: number,
 	requestId: string,
@@ -539,6 +571,21 @@ export type BrowserHandoffInput = {
 	forwardedHeaders: BrowserForwardedHeader[] | null,
 };
 
+/**
+ *  One row of the `browser_messages` diagnostics table for the integration
+ *  center history panel. `url` is the SEC-06 query-stripped copy stored at
+ *  insert time; `status` is `received` or `failed` (duplicates are never
+ *  persisted, by design).
+ */
+export type BrowserHandoffRecord = {
+	requestId: string,
+	browser: BrowserKind,
+	url: string,
+	status: string,
+	errorMessage: string | null,
+	createdAt: string,
+};
+
 export type BrowserHandoffResult = {
 	requestId: string,
 	status: string,
@@ -551,6 +598,11 @@ export type BrowserIntegrationEntry = {
 	displayName: string,
 	supportedOnPlatform: boolean,
 	detected: boolean,
+	/**
+	 *  Best-effort version read from the OS (Windows registry only today);
+	 *  `None` means "unknown", which the UI renders as such — never a guess.
+	 */
+	browserVersion: string | null,
 	manifestInstalled: boolean,
 	manifestPath: string | null,
 	extensionLoadPath: string | null,
@@ -577,6 +629,21 @@ export type BrowserIntegrationUpdateInput = {
 };
 
 export type BrowserKind = "chrome" | "edge" | "firefox" | "safari" | "brave" | "opera" | "vivaldi" | "chromium";
+
+/**
+ *  Result of spawning `vibe-native-host --self-check`. `available: false`
+ *  means the host binary could not be run or its output could not be trusted;
+ *  the separate `ok` flag distinguishes "ran and failed" from "never ran".
+ */
+export type BrowserNativeHostSelfCheck = {
+	available: boolean,
+	ok: boolean,
+	version: string | null,
+	protocolVersion: number | null,
+	nativeHostPath: string | null,
+	appPath: string | null,
+	errorMessage: string | null,
+};
 
 export type BrowserRealtimeStatus = {
 	wsUrl: string | null,
@@ -874,6 +941,21 @@ export type EnvironmentTextParams = {
 	section: string | null,
 	available: string | null,
 	total: string | null,
+};
+
+/**
+ *  Tasks whose browser-supplied auth headers expired before success
+ *  (`auth_headers_expired` / `auth_headers_unavailable`) and are still in a
+ *  failure state — the recovery path is FUN-03: re-sending the same URL from
+ *  the browser refreshes the headers and requeues the task.
+ */
+export type ExpiredAuthHeaderTask = {
+	taskId: string,
+	fileName: string,
+	url: string,
+	status: string,
+	errorCode: string,
+	updatedAt: string | null,
 };
 
 export type FtpDirectoryEntry = {

@@ -19,14 +19,14 @@ Implemented today:
 - Global speed limiting through a Rust token bucket.
 - Per-task speed limits enforced across HTTP/FTP/SFTP/BT, combined with global limit (minimum wins).
 - Task priorities (high/normal/low) used by the queue scheduler to dispatch tasks in priority order.
-- Per-task proxy override models, encrypted settings, protocol-aware validation, and task detail controls. HTTP and its derived engines honor the resolved task proxy at runtime (`FUN-02`), but the DASH/FTP/SFTP probe paths still do not; see `FUN-20`.
+- Per-task proxy override models, encrypted settings, protocol-aware validation, and task detail controls. HTTP and its derived engines honor the resolved task proxy at runtime (`FUN-02`), and the DASH/FTP/SFTP probe paths now resolve the task proxy too (`FUN-20` Closed).
 - FTP/FTPS task creation and downloads with dynamic parallel segments, SOCKS5 proxy support, encrypted credential storage, and directory probing.
 - SFTP task creation and single-file downloads with password or OpenSSH private-key credentials, encrypted credential storage, local-temp pause/resume, directory probing, SOCKS5 proxy support, and TOFU host-key fingerprint verification.
-- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files, with multi-file selection, runtime snapshots (piece map, peers, configured trackers, DHT, seeding), SOCKS5 proxy support, and persisted seeding policy. Seeding limits and session ref-counting are Closed (`FUN-11`, `ARC-12`); the remaining gaps are probe session lifecycle (`ARC-28`) and speed-limit ownership (`ARC-29`).
+- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files, with multi-file selection, runtime snapshots (piece map, peers, configured trackers, DHT, seeding), SOCKS5 proxy support, and persisted seeding policy. Seeding limits and session ref-counting are Closed (`FUN-11`, `ARC-12`); probe session lifecycle (`ARC-28`) and speed-limit ownership (`ARC-29`) are Closed as well.
 - HLS/m3u8 streaming engine with master playlist variant selection, AES-128-CBC decryption, init map (EXT-X-MAP) support, byte range segments, concurrent segment downloads, live polling, and ffmpeg-based MP4 remuxing.
 - DASH (MPEG-DASH / MPD) first-pass engine for a limited static/VOD subset, with ffmpeg-based download, MP4 remuxing, and progress monitoring. Dynamic/live, SegmentTimeline, and several inheritance/template cases are unsupported.
 - WebDAV/WebDAVS engine mapping to HTTP/HTTPS with Basic Auth credentials, PROPFIND directory probing, and delegation to the HTTP engine.
-- Metalink4 engine with manifest parsing, multi-file selection, HTTP/HTTPS mirror failover by priority, per-file progress, and checksum persistence/verification. Multi-hash priority and cross-mirror resume validation are Closed (`FUN-08`, `FUN-09`); the remaining gaps are part-file retention on partial failure (`ARC-24`) and the missing read idle timeout (`ARC-25`).
+- Metalink4 engine with manifest parsing, multi-file selection, HTTP/HTTPS mirror failover by priority, per-file progress, and checksum persistence/verification. Multi-hash priority and cross-mirror resume validation are Closed (`FUN-08`, `FUN-09`); part-file retention on partial failure (`ARC-24`) and the read idle timeout (`ARC-25`) are Closed as well.
 - Encrypted task credential storage (ChaCha20-Poly1305) for FTP/FTPS, SFTP, and WebDAV, with legacy plaintext migration on startup.
 - React task list with store decomposition (task-data, task-ui, speed-history stores), virtualized infinite scroll, cursor pagination, status filters, search, sorting, multi-select, batch actions, command palette, settings page with 11 collapsible sections and search, task details, Chunks/Connections/Requests/Logs views, toast, delete confirmation, recovery actions, 8 accent color themes, floating status window (ball and bar modes), and 7 locales.
 - Clipboard link monitoring for all supported protocols (HTTP/HTTPS, FTP/FTPS, SFTP, WebDAV/WebDAVS, magnet, local manifests) while the desktop app is running.
@@ -46,16 +46,16 @@ Active release blockers:
 
 The original stage-A blockers (`UX-01`, `FUN-01`, `FUN-02`, `ARC-01`, `ARC-02`, `ARC-03`) are all Closed and verified in code. Do not re-open or re-fix them.
 
-The 2026-08-13 review raised six new blockers. All six are now Closed for their P0 correctness/security issues (`ARC-20`, `ARC-21`, `ARC-22`, `SEC-01`, `SEC-02`; `ARC-19` for the corruption itself). Remaining:
+The 2026-08-13 review raised six new blockers. All six are now Closed for their P0 correctness/security issues (`ARC-19`, `ARC-20`, `ARC-21`, `ARC-22`, `SEC-01`, `SEC-02`).
 
-- `ARC-19` (residual, P2): the worker-side invariant is fixed, so cancellation can no longer corrupt output. The coordinator still returns early instead of draining its `JoinSet`, which costs re-downloaded bytes on cancel but is no longer a correctness issue. Fold it into the `ARC-31` coordinator merge.
+The 2026-08-26 round-4 review added another P0 set; those are Closed too (`ARC-32`, `ARC-33`, `ARC-37`, `ARC-38`). The FTP/SFTP coordinator now drains its `JoinSet` before checkpointing; the ~1200-line shared-coordinator refactor stays deferred under `ARC-31`.
 
 Do not weaken, hide, or document around remaining audit items. Fix them with the acceptance tests specified in the main audit, and update the audit status only after those tests pass.
 
 Two cross-cutting root causes explain most of the above, and matter more than any single entry:
 
 1. **Per-engine contract drift.** Proxy resolution, cancellation convergence, timeouts, and SSRF guards are re-implemented per engine instead of being enforced by one shared path. That is why `FUN-02` and `ARC-03` were legitimately Closed for HTTP yet still broken on DASH/FTP/SFTP probe and BT. When you fix any of these, fix the contract for all engines, not just the reported one.
-2. **Gates narrower than they appear.** `cargo clippy` historically ran without `--all-targets`, `cargo deny` skipped `bans`/`sources`, and the log file kept only the last 40 KB. `check:i18n` now compares keys, placeholders, and values (`FUN-21` Closed). Remaining gate gaps are in `ENG-01`.
+2. **Gates narrower than they appear.** `cargo clippy` historically ran without `--all-targets`, `cargo deny` skipped `bans`/`sources`, and the log file kept only the last 40 KB. `check:i18n` now compares keys, placeholders, and values (`FUN-21` Closed). Clippy runs with `--all-targets`, `cargo deny` covers `bans`/`sources`, and log retention is bounded (`ENG-01` Closed); the automated doc gate keeps the check list from drifting again (`ENG-06`, `ARC-18` Closed). Anything unfinished is tracked as an open audit entry, not restated here.
 
 ## Key Directories
 

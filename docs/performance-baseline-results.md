@@ -111,21 +111,42 @@ pnpm build
 pnpm check:bundle
 ```
 
+## 5.5. Release `opt-level` 对比（PERF-09，框架已就位，数据待采集）
+
+`src-tauri/Cargo.toml` 的 `[profile.release]` 当前为 `opt-level = "s"`（配合 `lto = true`、`codegen-units = 1`、`strip = true`）。PERF-09 要求先用数据判断 `s` 是否牺牲了热点吞吐，再决定是否只对热点 package 做 profile override——**没有数据前不改**。
+
+`scripts/perf/run-baseline.ps1 -CompareOptLevel` 已搭好采集骨架：分别以 `opt-level="s"` 与 `"3"` 构建 release，并记录构建耗时与二进制体积到 `artifacts/perf/<ts>/opt-level/opt-level-<level>.json`。
+
+| 指标 | opt-level=`s` | opt-level=`3` | 结论 |
+| --- | --- | ---: | ---: | --- |
+| 构建耗时（冷/热） | 待采集 | 待采集 | — |
+| 二进制体积 | 待采集 | 待采集 | — |
+| 启动时间 | 待采集 | 待采集 | — |
+| 热点吞吐：hash / AES | 待采集 | 待采集 | — |
+| 热点吞吐：XML / BT | 待采集 | 待采集 | — |
+| 真实下载路径吞吐 | 待采集 | 待采集 | — |
+
+吞吐项需要专用 microbench 或手工测量（现有 DB harness 只跑 debug profile，`perf_baseline.rs` 带 `#![cfg(debug_assertions)]`），本批不采集。采集完成后把结论回填本表，并在必要时用 `[profile.release.package.<name>]` 只对热点 crate 覆盖 `opt-level`。
+
 ## 6. 明确延期
 
 - 100k 全矩阵
 - HLS / BT 30min–8h soak
 - 1k 批量删除 soak
 - CI 绝对数值门禁（DB harness；bundle 门禁已启用）
+- PERF-09 `opt-level` 吞吐对比（框架已就位，见 §5.5）
 
 ## 7. 复现命令
 
 ```bash
 # CI / 日常 smoke（仅 1k）
-cargo test -j 1 --manifest-path src-tauri/Cargo.toml --test perf_baseline
+cargo test -j 2 --manifest-path src-tauri/Cargo.toml --test perf_baseline
 
 # 完整本地 1k + 10k + metadata
 pnpm perf:baseline:10k
+
+# PERF-09 opt-level 采集骨架（构建耗时 + 二进制体积）
+pwsh -File scripts/perf/run-baseline.ps1 -CompareOptLevel
 
 # Bundle budget
 pnpm build && pnpm check:bundle

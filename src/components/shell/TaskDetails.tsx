@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { ChevronDown, Clipboard, ClipboardCopy, Hash, RefreshCw, X } from "lucide-react";
-import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { Component, type ErrorInfo, memo, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { TaskPassportCard } from "@/components/shell/TaskPassportCard";
 import { TaskTimeline } from "@/components/shell/TaskTimeline";
@@ -570,7 +570,7 @@ function TaskDetailsPanel({
                     retriesLabel={t("taskDetails.chunkRetries")}
                     hasMore={Boolean(hlsSegmentsCursor)}
                     loadMoreLabel={t("taskDetails.loadMore")}
-                    onLoadMore={() => void loadMoreHlsSegments()}
+                    onLoadMore={loadMoreHlsSegments}
                   />
                 ) : isDashTask ? (
                   <DashSegmentList
@@ -583,7 +583,7 @@ function TaskDetailsPanel({
                     retriesLabel={t("taskDetails.chunkRetries")}
                     hasMore={Boolean(dashSegmentsCursor)}
                     loadMoreLabel={t("taskDetails.loadMore")}
-                    onLoadMore={() => void loadMoreDashSegments()}
+                    onLoadMore={loadMoreDashSegments}
                   />
                 ) : (
                   <>
@@ -608,7 +608,7 @@ function TaskDetailsPanel({
                         speedLabel={t("taskDetails.connectionSpeed")}
                         hasMore={Boolean(segmentsCursor)}
                         loadMoreLabel={t("taskDetails.loadMore")}
-                        onLoadMore={() => void loadMoreSegments()}
+                        onLoadMore={loadMoreSegments}
                       />
                     ) : (
                       <ChunkList
@@ -620,7 +620,7 @@ function TaskDetailsPanel({
                         retryLabel={t("taskDetails.chunkRetries")}
                         hasMore={Boolean(segmentsCursor)}
                         loadMoreLabel={t("taskDetails.loadMore")}
-                        onLoadMore={() => void loadMoreSegments()}
+                        onLoadMore={loadMoreSegments}
                       />
                     )}
                   </>
@@ -634,7 +634,7 @@ function TaskDetailsPanel({
                 emptyLabel={t(diagnosticsRequestsEmptyKey(task.protocol))}
                 hasMore={Boolean(requestsCursor)}
                 loadMoreLabel={t("taskDetails.loadMore")}
-                onLoadMore={() => void loadMoreRequests()}
+                onLoadMore={loadMoreRequests}
               />
             </TabsContent>
           </ScrollArea>
@@ -708,7 +708,7 @@ function TaskDetailsPanel({
             emptyLabel={t("taskDetails.noLogs")}
             hasMore={Boolean(eventsCursor)}
             loadMoreLabel={t("taskDetails.loadMore")}
-            onLoadMore={() => void loadMoreEvents()}
+            onLoadMore={loadMoreEvents}
           />
         </TabsContent>
       </ScrollArea>
@@ -1785,7 +1785,7 @@ function SegmentViewToggle({
   );
 }
 
-function ChunkList({
+const ChunkList = memo(function ChunkList({
   segments,
   error,
   emptyLabel,
@@ -1883,9 +1883,9 @@ function ChunkList({
       <LoadMoreButton visible={hasMore} label={loadMoreLabel} onClick={onLoadMore} />
     </div>
   );
-}
+});
 
-function ConnectionList({
+const ConnectionList = memo(function ConnectionList({
   segments,
   taskSpeedBps,
   error,
@@ -1973,9 +1973,9 @@ function ConnectionList({
       <LoadMoreButton visible={hasMore} label={loadMoreLabel} onClick={onLoadMore} />
     </div>
   );
-}
+});
 
-function EventList({
+const EventList = memo(function EventList({
   events,
   error,
   emptyLabel,
@@ -2027,9 +2027,9 @@ function EventList({
       <LoadMoreButton visible={hasMore} label={loadMoreLabel} onClick={onLoadMore} />
     </div>
   );
-}
+});
 
-function RequestList({
+const RequestList = memo(function RequestList({
   requests,
   error,
   emptyLabel,
@@ -2120,9 +2120,9 @@ function RequestList({
       <LoadMoreButton visible={hasMore} label={loadMoreLabel} onClick={onLoadMore} />
     </div>
   );
-}
+});
 
-function HlsSegmentList({
+const HlsSegmentList = memo(function HlsSegmentList({
   segments,
   error,
   emptyLabel,
@@ -2196,9 +2196,9 @@ function HlsSegmentList({
       <LoadMoreButton visible={hasMore} label={loadMoreLabel} onClick={onLoadMore} />
     </div>
   );
-}
+});
 
-function DashSegmentList({
+const DashSegmentList = memo(function DashSegmentList({
   segments,
   error,
   emptyLabel,
@@ -2271,7 +2271,7 @@ function DashSegmentList({
       <LoadMoreButton visible={hasMore} label={loadMoreLabel} onClick={onLoadMore} />
     </div>
   );
-}
+});
 
 function LoadMoreButton({ visible, label, onClick }: { visible: boolean; label: string; onClick: () => void }) {
   if (!visible) return null;

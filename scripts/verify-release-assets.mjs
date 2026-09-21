@@ -45,9 +45,37 @@ export function assertAssetCoverage(coverage) {
   if (missing.length > 0) throw new Error(`Release assets are incomplete: ${missing.join(", ")}.`);
 }
 
+export async function assertUpdaterAssets({ latest, files, directory, tag, repository }) {
+  for (const platform of ["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"]) {
+    if (!Object.keys(latest.platforms ?? {}).some((key) => key === platform || key.startsWith(`${platform}-`))) {
+      throw new Error(`latest.json is missing ${platform}.`);
+    }
+  }
+  for (const [platform, entry] of Object.entries(latest.platforms)) {
+    const url = new URL(entry.url);
+    const prefix = `/${repository}/releases/download/${tag}/`;
+    if (
+      url.protocol !== "https:" ||
+      url.hostname !== "github.com" ||
+      !decodeURIComponent(url.pathname).startsWith(prefix)
+    ) {
+      throw new Error(`Updater URL for ${platform} does not refer to this release.`);
+    }
+    const asset = decodeURIComponent(url.pathname).slice(prefix.length);
+    if (!files.includes(asset) || !files.includes(`${asset}.sig`)) {
+      throw new Error(`Updater asset or signature for ${platform} is missing.`);
+    }
+    const signature = (await readFile(path.join(directory, `${asset}.sig`), "utf8")).trim();
+    if (!signature || signature !== entry.signature?.trim()) {
+      throw new Error(`Updater signature for ${platform} does not match its asset sidecar.`);
+    }
+  }
+}
+
 async function main() {
   const dirIndex = process.argv.indexOf("--dir");
   const versionIndex = process.argv.indexOf("--version");
+  const sourceIndex = process.argv.indexOf("--source-sha");
   const directory = path.resolve(root, dirIndex >= 0 ? process.argv[dirIndex + 1] : ".release-assets");
   const version = versionIndex >= 0 ? process.argv[versionIndex + 1]?.replace(/^v/, "") : null;
   const files = await listFiles(directory);
@@ -58,6 +86,20 @@ async function main() {
   const latest = JSON.parse(await readFile(path.join(directory, latestPath), "utf8"));
   if (version && latest.version !== version) {
     throw new Error(`latest.json version ${latest.version} does not match expected ${version}.`);
+  }
+  await assertUpdaterAssets({
+    latest,
+    files,
+    directory,
+    tag: `v${version ?? latest.version}`,
+    repository: process.env.GITHUB_REPOSITORY,
+  });
+  const expectedSource = sourceIndex >= 0 ? process.argv[sourceIndex + 1] : null;
+  if (
+    !/^[0-9a-f]{40}$/.test(expectedSource ?? "") ||
+    (await readFile(path.join(directory, "SOURCE_COMMIT.txt"), "utf8")).trim() !== expectedSource
+  ) {
+    throw new Error("Release source record does not match the verified commit.");
   }
 
   const sums = [];

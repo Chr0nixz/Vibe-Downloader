@@ -40,6 +40,10 @@ artifacts/perf/
 *.sln
 *.sw?
 
+# Coverage output (ENG-04)
+coverage/
+lcov.info
+
 # Rust / Tauri
 src-tauri/target/
 src-tauri/binaries/*

@@ -31,12 +31,22 @@ $rustc = try { (rustc --version).Trim() } catch { "unknown" }
 $cargo = try { (cargo --version).Trim() } catch { "unknown" }
 $node = try { (node --version).Trim() } catch { "unknown" }
 
+function Get-AppVersion {
+    try {
+        $package = Get-Content (Join-Path $PSScriptRoot "..\..\package.json") -Raw | ConvertFrom-Json
+        if ($package.version) { return $package.version }
+    } catch {
+        # Fall through to the fallback below.
+    }
+    return "unknown"
+}
+
 $meta = [ordered]@{
     schemaVersion = 1
     collectedAt   = (Get-Date).ToUniversalTime().ToString("o")
     gitCommit     = Get-GitCommit
     gitDirty      = Get-GitDirty
-    appVersion    = "0.3.0"
+    appVersion    = Get-AppVersion
     os            = [ordered]@{
         platform     = "windows"
         caption      = $os.Caption

@@ -19,6 +19,29 @@ export default defineConfig(async () => ({
     exclude: ["**/node_modules/**", "**/.git/**", "**/dist/**", "scripts/**", "src-tauri/**"],
     setupFiles: ["./src/test/setup.ts"],
     globals: true,
+    // ENG-04: coverage is measured with thresholds that only ratchet upward.
+    // The numbers below are the measured baseline, not aspirations — see
+    // docs/project-improvement-audit.md (ENG-04) for the bump procedure.
+    coverage: {
+      provider: "v8",
+      reportsDirectory: "./coverage",
+      include: ["src/**"],
+      exclude: [
+        "src/generated/**",
+        "src/i18n/locales/**",
+        "src/test/**",
+        "src/**/*.test.{ts,tsx}",
+        "src/**/*.spec.{ts,tsx}",
+      ],
+      reporter: ["text", "lcov", "html"],
+      // Baseline measured 2026-09-19 (see audit ENG-04): lines 42.55%,
+      // functions 34.48%. Rounded down so the ratchet has slack; raise these
+      // whenever coverage improves, never lower them.
+      thresholds: {
+        lines: 42,
+        functions: 34,
+      },
+    },
   },
   build: {
     rollupOptions: {

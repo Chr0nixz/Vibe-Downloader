@@ -9,6 +9,7 @@ import type {
   TaskEvent,
   TorrentRuntimeSnapshot,
 } from "@/generated/bindings";
+import { useVisibilityGatedPoll } from "@/hooks/use-visibility-gated-poll";
 import { errorMessage } from "@/lib/errors";
 import { isDashProtocol, isFtpSftpProtocol, isHlsProtocol, isTorrentProtocol } from "@/lib/task-diagnostics";
 import {
@@ -113,402 +114,238 @@ export function useTaskDetailQueries(options: { task: Task; activeTab: string; d
     setPassportError(null);
   }, [task.id]);
 
-  // PERF-02: HTTP/FTP/etc work-unit segments — not used for HLS/DASH (dedicated panes) or BT (hidden).
+  // PERF-02/PERF-14: HTTP/FTP/etc work-unit segments — not used for HLS/DASH (dedicated panes) or BT (hidden).
+  const segmentsEnabled = segmentsVisible && !usesPlaylistSegments(task.protocol);
+
   useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
-    let inFlight = false;
+    if (segmentsEnabled) return;
+    setSegments([]);
+    setSegmentError(null);
+  }, [segmentsEnabled]);
 
-    if (!segmentsVisible || usesPlaylistSegments(task.protocol)) {
-      setSegments([]);
-      setSegmentError(null);
-      return;
-    }
-
-    const loadSegments = () => {
-      if (cancelled || inFlight) return;
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      inFlight = true;
-      void listSegmentsPage({ taskId: task.id, cursor: null, pageSize: 100 })
+  useVisibilityGatedPoll(
+    (isStale) =>
+      listSegmentsPage({ taskId: task.id, cursor: null, pageSize: 100 })
         .then((result) => {
-          if (!cancelled) {
-            setSegments((prev) => {
-              if (
-                prev.length === result.items.length &&
-                prev.every(
-                  (s, i) =>
-                    s.id === result.items[i].id &&
-                    s.status === result.items[i].status &&
-                    s.downloadedUntil === result.items[i].downloadedUntil,
-                )
-              ) {
-                return prev;
-              }
-              return result.items;
-            });
-            setSegmentsCursor(result.nextCursor);
-            setSegmentError(null);
-          }
+          if (isStale()) return;
+          setSegments((prev) => {
+            if (
+              prev.length === result.items.length &&
+              prev.every(
+                (s, i) =>
+                  s.id === result.items[i].id &&
+                  s.status === result.items[i].status &&
+                  s.downloadedUntil === result.items[i].downloadedUntil,
+              )
+            ) {
+              return prev;
+            }
+            return result.items;
+          });
+          setSegmentsCursor(result.nextCursor);
+          setSegmentError(null);
         })
         .catch((error) => {
-          if (!cancelled) setSegmentError(errorMessage(error));
-        })
-        .finally(() => {
-          inFlight = false;
-        });
-    };
-
-    const startPolling = () => {
-      if (intervalId) return;
-      if (task.status === "downloading" || task.status === "retrying") {
-        intervalId = setInterval(loadSegments, SEGMENT_REFRESH_MS);
-      }
-    };
-
-    const stopPolling = () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-        intervalId = undefined;
-      }
-    };
-
-    const onVisibilityChange = () => {
-      if (typeof document === "undefined") return;
-      if (document.visibilityState === "hidden") {
-        stopPolling();
-        return;
-      }
-      loadSegments();
-      startPolling();
-    };
-
-    loadSegments();
-    if (typeof document === "undefined" || document.visibilityState !== "hidden") {
-      startPolling();
-    }
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", onVisibilityChange);
-    }
-
-    return () => {
-      cancelled = true;
-      stopPolling();
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", onVisibilityChange);
-      }
-    };
-  }, [segmentsVisible, task.protocol, task.id, task.status]);
+          if (isStale()) return;
+          setSegmentError(errorMessage(error));
+        }),
+    SEGMENT_REFRESH_MS,
+    {
+      enabled: segmentsEnabled,
+      poll: task.status === "downloading" || task.status === "retrying",
+      reloadKey: `${task.id}:${task.protocol}`,
+    },
+  );
 
   // HLS real playlist segments — only while Segments sub-tab is visible.
+  const hlsSegmentsEnabled = segmentsVisible && isHlsTask;
+
   useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
-    let inFlight = false;
+    if (hlsSegmentsEnabled) return;
+    setHlsSegments([]);
+    setHlsSegmentError(null);
+  }, [hlsSegmentsEnabled]);
 
-    if (!segmentsVisible || !isHlsTask) {
-      setHlsSegments([]);
-      setHlsSegmentError(null);
-      return;
-    }
-
-    const loadHlsSegments = () => {
-      if (cancelled || inFlight) return;
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      inFlight = true;
-      void listHlsSegmentsPage({ taskId: task.id, cursor: null, pageSize: 100 })
+  useVisibilityGatedPoll(
+    (isStale) =>
+      listHlsSegmentsPage({ taskId: task.id, cursor: null, pageSize: 100 })
         .then((result) => {
-          if (!cancelled) {
-            setHlsSegments(result.items);
-            setHlsSegmentsCursor(result.nextCursor);
-            setHlsSegmentError(null);
-          }
+          if (isStale()) return;
+          setHlsSegments(result.items);
+          setHlsSegmentsCursor(result.nextCursor);
+          setHlsSegmentError(null);
         })
         .catch((error) => {
-          if (!cancelled) setHlsSegmentError(errorMessage(error));
-        })
-        .finally(() => {
-          inFlight = false;
-        });
-    };
-
-    const startPolling = () => {
-      if (intervalId) return;
-      if (task.status === "downloading" || task.status === "retrying") {
-        intervalId = setInterval(loadHlsSegments, SEGMENT_REFRESH_MS);
-      }
-    };
-
-    const stopPolling = () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-        intervalId = undefined;
-      }
-    };
-
-    const onVisibilityChange = () => {
-      if (typeof document === "undefined") return;
-      if (document.visibilityState === "hidden") {
-        stopPolling();
-        return;
-      }
-      loadHlsSegments();
-      startPolling();
-    };
-
-    loadHlsSegments();
-    if (typeof document === "undefined" || document.visibilityState !== "hidden") {
-      startPolling();
-    }
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", onVisibilityChange);
-    }
-
-    return () => {
-      cancelled = true;
-      stopPolling();
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", onVisibilityChange);
-      }
-    };
-  }, [segmentsVisible, isHlsTask, task.id, task.status]);
+          if (isStale()) return;
+          setHlsSegmentError(errorMessage(error));
+        }),
+    SEGMENT_REFRESH_MS,
+    {
+      enabled: hlsSegmentsEnabled,
+      poll: task.status === "downloading" || task.status === "retrying",
+      reloadKey: task.id,
+    },
+  );
 
   // DASH real MPD segments — only while Segments sub-tab is visible.
+  const dashSegmentsEnabled = segmentsVisible && isDashTask;
+
   useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
-    let inFlight = false;
+    if (dashSegmentsEnabled) return;
+    setDashSegments([]);
+    setDashSegmentError(null);
+  }, [dashSegmentsEnabled]);
 
-    if (!segmentsVisible || !isDashTask) {
-      setDashSegments([]);
-      setDashSegmentError(null);
-      return;
-    }
-
-    const loadDashSegments = () => {
-      if (cancelled || inFlight) return;
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      inFlight = true;
-      void listDashSegmentsPage({ taskId: task.id, cursor: null, pageSize: 100 })
+  useVisibilityGatedPoll(
+    (isStale) =>
+      listDashSegmentsPage({ taskId: task.id, cursor: null, pageSize: 100 })
         .then((result) => {
-          if (!cancelled) {
-            setDashSegments(result.items);
-            setDashSegmentsCursor(result.nextCursor);
-            setDashSegmentError(null);
-          }
+          if (isStale()) return;
+          setDashSegments(result.items);
+          setDashSegmentsCursor(result.nextCursor);
+          setDashSegmentError(null);
         })
         .catch((error) => {
-          if (!cancelled) setDashSegmentError(errorMessage(error));
-        })
-        .finally(() => {
-          inFlight = false;
-        });
-    };
+          if (isStale()) return;
+          setDashSegmentError(errorMessage(error));
+        }),
+    SEGMENT_REFRESH_MS,
+    {
+      enabled: dashSegmentsEnabled,
+      poll: task.status === "downloading" || task.status === "retrying",
+      reloadKey: task.id,
+    },
+  );
 
-    const startPolling = () => {
-      if (intervalId) return;
-      if (task.status === "downloading" || task.status === "retrying") {
-        intervalId = setInterval(loadDashSegments, SEGMENT_REFRESH_MS);
-      }
-    };
-
-    const stopPolling = () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-        intervalId = undefined;
-      }
-    };
-
-    const onVisibilityChange = () => {
-      if (typeof document === "undefined") return;
-      if (document.visibilityState === "hidden") {
-        stopPolling();
-        return;
-      }
-      loadDashSegments();
-      startPolling();
-    };
-
-    loadDashSegments();
-    if (typeof document === "undefined" || document.visibilityState !== "hidden") {
-      startPolling();
-    }
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", onVisibilityChange);
-    }
-
-    return () => {
-      cancelled = true;
-      stopPolling();
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", onVisibilityChange);
-      }
-    };
-  }, [segmentsVisible, isDashTask, task.id, task.status]);
+  const requestsEnabled = activeTab === "diagnostics" && diagSubTab === "requests";
 
   useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
+    if (requestsEnabled) return;
+    setRequests([]);
+    setRequestsError(null);
+  }, [requestsEnabled]);
 
-    if (activeTab !== "diagnostics" || diagSubTab !== "requests") {
-      setRequests([]);
-      setRequestsError(null);
-      return;
-    }
-
-    const loadRequests = () => {
-      void listTaskRequestsPage({ taskId: task.id, cursor: null, pageSize: 100 })
+  useVisibilityGatedPoll(
+    (isStale) =>
+      listTaskRequestsPage({ taskId: task.id, cursor: null, pageSize: 100 })
         .then((result) => {
-          if (!cancelled) {
-            setRequests(result.items);
-            setRequestsCursor(result.nextCursor);
-            setRequestsError(null);
-          }
+          if (isStale()) return;
+          setRequests(result.items);
+          setRequestsCursor(result.nextCursor);
+          setRequestsError(null);
         })
         .catch((error) => {
-          if (!cancelled) setRequestsError(errorMessage(error));
-        });
-    };
+          if (isStale()) return;
+          setRequestsError(errorMessage(error));
+        }),
+    DETAIL_REFRESH_MS,
+    { enabled: requestsEnabled, poll: isLiveStatus(task.status), reloadKey: task.id },
+  );
 
-    loadRequests();
-
-    if (isLiveStatus(task.status)) {
-      intervalId = setInterval(loadRequests, DETAIL_REFRESH_MS);
-    }
-
-    return () => {
-      cancelled = true;
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [activeTab, diagSubTab, task.id, task.status]);
+  const torrentSnapshotEnabled = isTorrentTask && activeTab === "overview";
 
   useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
+    if (torrentSnapshotEnabled) return;
+    setTorrentSnapshot(null);
+    setTorrentSnapshotError(null);
+  }, [torrentSnapshotEnabled]);
 
-    if (!isTorrentTask || activeTab !== "overview") {
-      setTorrentSnapshot(null);
-      setTorrentSnapshotError(null);
-      return;
-    }
-
-    const loadSnapshot = () => {
-      void getTorrentRuntimeSnapshot(task.id)
+  useVisibilityGatedPoll(
+    (isStale) =>
+      getTorrentRuntimeSnapshot(task.id)
         .then((snapshot) => {
-          if (!cancelled) {
-            setTorrentSnapshot(snapshot);
-            setTorrentSnapshotError(null);
-          }
+          if (isStale()) return;
+          setTorrentSnapshot(snapshot);
+          setTorrentSnapshotError(null);
         })
         .catch((error) => {
-          if (!cancelled) setTorrentSnapshotError(errorMessage(error));
-        });
-    };
-
-    loadSnapshot();
-
-    if (isLiveStatus(task.status)) {
-      intervalId = setInterval(loadSnapshot, DETAIL_REFRESH_MS);
-    }
-
-    return () => {
-      cancelled = true;
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [activeTab, isTorrentTask, task.id, task.status]);
+          if (isStale()) return;
+          setTorrentSnapshotError(errorMessage(error));
+        }),
+    DETAIL_REFRESH_MS,
+    { enabled: torrentSnapshotEnabled, poll: isLiveStatus(task.status), reloadKey: task.id },
+  );
 
   // FTP/SFTP Overview: segment summary + recent events (acceleration) + SFTP known hosts.
+  const overviewExtrasEnabled = overviewVisible && isFtpSftpTask;
+
   useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
+    if (overviewExtrasEnabled) return;
+    setSegmentSummary(null);
+    setSegmentSummaryError(null);
+    setFtpSftpEvents([]);
+    setSftpKnownHosts([]);
+  }, [overviewExtrasEnabled]);
 
-    if (!overviewVisible || !isFtpSftpTask) {
-      setSegmentSummary(null);
-      setSegmentSummaryError(null);
-      setFtpSftpEvents([]);
-      setSftpKnownHosts([]);
-      return;
-    }
-
-    const loadOverviewExtras = () => {
-      void getSegmentSummary(task.id)
-        .then((summary) => {
-          if (!cancelled) {
+  useVisibilityGatedPoll(
+    (isStale) =>
+      Promise.all([
+        getSegmentSummary(task.id)
+          .then((summary) => {
+            if (isStale()) return;
             setSegmentSummary(summary);
             setSegmentSummaryError(null);
-          }
-        })
-        .catch((error) => {
-          if (!cancelled) setSegmentSummaryError(errorMessage(error));
-        });
-
-      void listTaskEventsPage({ taskId: task.id, cursor: null, pageSize: 50 })
-        .then((result) => {
-          if (!cancelled) setFtpSftpEvents(result.items);
-        })
-        .catch(() => {
-          if (!cancelled) setFtpSftpEvents([]);
-        });
-
-      if (task.protocol === "sftp") {
-        void listSftpKnownHosts()
-          .then((hosts) => {
-            if (!cancelled) setSftpKnownHosts(hosts);
+          })
+          .catch((error) => {
+            if (isStale()) return;
+            setSegmentSummaryError(errorMessage(error));
+          }),
+        listTaskEventsPage({ taskId: task.id, cursor: null, pageSize: 50 })
+          .then((result) => {
+            if (isStale()) return;
+            setFtpSftpEvents(result.items);
           })
           .catch(() => {
-            if (!cancelled) setSftpKnownHosts([]);
-          });
-      } else if (!cancelled) {
-        setSftpKnownHosts([]);
-      }
-    };
+            if (isStale()) return;
+            setFtpSftpEvents([]);
+          }),
+        task.protocol === "sftp"
+          ? listSftpKnownHosts()
+              .then((hosts) => {
+                if (isStale()) return;
+                setSftpKnownHosts(hosts);
+              })
+              .catch(() => {
+                if (isStale()) return;
+                setSftpKnownHosts([]);
+              })
+          : Promise.resolve().then(() => {
+              if (isStale()) return;
+              setSftpKnownHosts([]);
+            }),
+      ]),
+    DETAIL_REFRESH_MS,
+    {
+      enabled: overviewExtrasEnabled,
+      poll: isLiveStatus(task.status),
+      reloadKey: `${task.id}:${task.protocol}`,
+    },
+  );
 
-    loadOverviewExtras();
-
-    if (isLiveStatus(task.status)) {
-      intervalId = setInterval(loadOverviewExtras, DETAIL_REFRESH_MS);
-    }
-
-    return () => {
-      cancelled = true;
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [overviewVisible, isFtpSftpTask, task.id, task.protocol, task.status]);
+  const eventsEnabled = activeTab === "logs" || activeTab === "overview";
 
   useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | undefined;
+    if (eventsEnabled) return;
+    setEvents([]);
+    setEventsError(null);
+  }, [eventsEnabled]);
 
-    if (activeTab !== "logs" && activeTab !== "overview") {
-      setEvents([]);
-      setEventsError(null);
-      return;
-    }
-
-    const loadEvents = () => {
-      void listTaskEventsPage({ taskId: task.id, cursor: null, pageSize: 100 })
+  useVisibilityGatedPoll(
+    (isStale) =>
+      listTaskEventsPage({ taskId: task.id, cursor: null, pageSize: 100 })
         .then((result) => {
-          if (!cancelled) {
-            setEvents(result.items);
-            setEventsCursor(result.nextCursor);
-            setEventsError(null);
-          }
+          if (isStale()) return;
+          setEvents(result.items);
+          setEventsCursor(result.nextCursor);
+          setEventsError(null);
         })
         .catch((error) => {
-          if (!cancelled) setEventsError(errorMessage(error));
-        });
-    };
-
-    loadEvents();
-
-    if (isLiveStatus(task.status)) {
-      intervalId = setInterval(loadEvents, DETAIL_REFRESH_MS);
-    }
-
-    return () => {
-      cancelled = true;
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [activeTab, task.id, task.status]);
+          if (isStale()) return;
+          setEventsError(errorMessage(error));
+        }),
+    DETAIL_REFRESH_MS,
+    { enabled: eventsEnabled, poll: isLiveStatus(task.status), reloadKey: task.id },
+  );
 
   // Integrity passport: fetched while Overview is visible; no polling, but
   // the status dependency refetches when a task transitions to completed.

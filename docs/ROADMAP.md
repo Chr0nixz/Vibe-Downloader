@@ -1,6 +1,6 @@
 # Vibe Downloader Roadmap
 
-Last updated: 2026-07-21
+Last updated: 2026-09-19
 
 Current baseline: `0.5.0`
 
@@ -35,9 +35,11 @@ The repository contains:
 - Native Messaging and WebSocket browser integration with manual HTTP/HTTPS hand-off in minimal-permission builds.
 - CI, multi-platform Tauri build workflows, release tooling, updater configuration, and a substantial Rust and frontend test suite.
 
-This baseline is not yet a stable release. Six active P0 issues can cause core workflow failure, policy mismatch, or data corruption. They are tracked below and in the main audit.
+This baseline is not yet a stable release. The 2026-08-13 review raised six new P0 blockers; all six are now Closed for their P0 correctness and security issues, and the 2026-08-26 round-4 batch (F1–F5) is Closed as well. What keeps a public stable release out of reach is no longer open P0 defects but external verification — real installer smoke on three platforms, browser store identities, OS code signing, GUI E2E — plus a small set of P2/P3 items. Active risks and acceptance criteria live in [project-improvement-audit.md](project-improvement-audit.md); this document keeps the phase structure as the forward plan.
 
 ## Phase A: Release Blockers
+
+**Status: all six Closed** — `UX-01`, `FUN-01`, `FUN-02`, `ARC-01`, `ARC-02`, `ARC-03` (plus `ARC-04` cancellation-aware speed limiting). Do not re-open or re-fix them; the sections below are kept as the repair record.
 
 Phase A must finish before any public stable release or expansion of product scope.
 
@@ -259,6 +261,21 @@ Audit IDs: `ARC-16`, `ARC-17`
 - Migrate download errors from strings to stable typed categories.
 - Split large modules along parser, plan, transfer, process, persistence, and UI orchestration boundaries.
 - Preserve existing public contracts and move tests toward extracted pure modules.
+
+## Phase F: 2026-08-26 第 4 轮复审批次
+
+Added after the round-4 review (`UX-19`~`UX-25`, `FUN-23`~`FUN-27`, `ARC-32`~`ARC-48`, `SEC-08`~`SEC-12`, `ENG-07`~`ENG-08`). Batch order was stop-the-bleeding first, then data integrity, then security, then resource lifecycle.
+
+| 批次 | 内容 | 状态 |
+| --- | --- | --- |
+| F1 | `ARC-32` dispatch 死锁、`SEC-08` keyring 安全、`ARC-41` queued 启动失败、`FUN-23` 跨卷备份导出 | Closed |
+| F2 | `ARC-33` BufWriter flush、`ARC-34`/`ARC-35`/`ARC-24` Metalink、`ARC-36` 音轨顺序、`ARC-37` 引擎自取消、`ARC-42` FTP/SFTP resume 重验 | Closed |
+| F3 | `SEC-09` restore settings 白名单、`SEC-11` 凭据头源绑定、`SEC-03`/`SEC-10`/`SEC-12` 统一 connect 前置校验 | Closed |
+| F4 | `ARC-39` BT session 拓扑、`ARC-43` 按 (source_key, task_id) 精确删除 | Closed |
+| F5 | `ARC-38` staging 清理、`ARC-40` catch_unwind、`ARC-47` part 清理、`ENG-07` deadline helper | Closed |
+| F6 | 其余 P2/P3：`PERF-13`/`PERF-14`/`PERF-16`、`ENG-04`/`ENG-08`、`ARC-17`/`ARC-31` 重构收尾 | In progress |
+
+The round-4 root causes worth carrying forward: engine self-cancellation must stay decoupled from user cancellation (`ARC-37`); second-class engines (Metalink/BT) must inherit the contracts the HTTP engine already enforces; and trust boundaries fail at the last metre — guards on a shared client do not cover paths that bypass it.
 
 ## Later Product Scope
 

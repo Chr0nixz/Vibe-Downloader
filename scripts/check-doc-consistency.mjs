@@ -13,6 +13,9 @@
  *      are Closed in the audit doc. Mid-sentence mentions are cross
  *      references (e.g. "fold into ARC-31") and are exempt.
  *   3. AGENTS.md's "currently at X.Y.Z" matches package.json.
+ *   4. Narratives do not call an audit ID open when the audit says Closed.
+ *      A line that marks the ID Closed itself is exempt, so cross references
+ *      such as "Closed (`FUN-11`)" or "fold into `ARC-31`" stay untouched.
  *
  * With --fix-less design: the script never rewrites docs; it exits 1 with a
  * file-anchored message so the doc owner fixes the wording.
@@ -60,6 +63,62 @@ export function bulletHeadlinedIds(markdown) {
   return [...ids];
 }
 
+/**
+ * Signals that a narrative claims an audit ID is still open.
+ *
+ * Deliberately conservative: generic words such as "still" or "yet" are not
+ * signals on their own, because they appear in plenty of legitimate prose
+ * ("is no longer reachable"). Each pattern is a phrase that only makes sense
+ * when something has not been finished.
+ */
+export const NARRATIVE_OPEN_SIGNALS = [
+  /\b(?:remaining|residual|outstanding|pending|not yet|still to be|todo|gaps?)\b/iu,
+  /(?:剩余|仍待|遗留|待办|缺口)/u,
+];
+
+/** Audit IDs a single line explicitly marks as Closed. */
+export function closedIdsOnLine(line) {
+  const ids = new Set();
+  // "Closed (`FUN-11`, `ARC-12`)" / "(`ENG-01` Closed)"
+  for (const [, group] of line.matchAll(/[Cc]losed\s*\(([^)]*)\)/gu)) {
+    for (const id of group.match(AUDIT_ID_PATTERN) ?? []) ids.add(id);
+  }
+  // "`ARC-19` (P2, Closed)" and "Closed ... `ARC-19`" within a short span.
+  for (const [, id] of line.matchAll(/`([A-Z]+-\d{2,3})`[^`]{0,24}?[Cc]losed/gu)) ids.add(id);
+  for (const [, id] of line.matchAll(/[Cc]losed[^`]{0,24}?`([A-Z]+-\d{2,3})`/gu)) ids.add(id);
+  return ids;
+}
+
+/**
+ * IDs a narrative asserts are still open, with the matched signal.
+ *
+ * IDs the line itself marks Closed are exempt: "are Closed (`FUN-11`); the
+ * remaining gaps are `ARC-28`" must flag ARC-28 without touching FUN-11, and
+ * "fold it into `ARC-31`" carries no signal and is never flagged.
+ */
+export function narrativeOpenClaims(markdown) {
+  const claims = [];
+  markdown.split(/\r?\n/u).forEach((line, index) => {
+    const ids = [...new Set(line.match(AUDIT_ID_PATTERN) ?? [])];
+    if (ids.length === 0) return;
+    let signal = null;
+    for (const pattern of NARRATIVE_OPEN_SIGNALS) {
+      const match = line.match(pattern);
+      if (match) {
+        signal = match[0];
+        break;
+      }
+    }
+    if (signal === null) return;
+    const closed = closedIdsOnLine(line);
+    for (const id of ids) {
+      if (closed.has(id)) continue;
+      claims.push({ id, line: index + 1, signal });
+    }
+  });
+  return claims;
+}
+
 /** All audit IDs referenced anywhere in the document. */
 export function referencedAuditIds(markdown) {
   return [...new Set(markdown.match(AUDIT_ID_PATTERN) ?? [])];
@@ -93,6 +152,14 @@ export function checkDocConsistency({ readme, agents, audit, packageVersion }) {
       if (status !== undefined && !isClosed(status)) {
         problems.push(
           `${name}: blocker section headlines ${id}, whose audit status is "${status}" — update the audit to Closed or rewrite the bullet`,
+        );
+      }
+    }
+    for (const claim of narrativeOpenClaims(markdown)) {
+      const status = statuses.get(claim.id);
+      if (status !== undefined && isClosed(status)) {
+        problems.push(
+          `${name}:${claim.line}: narrative says ${claim.id} is still open (matched "${claim.signal}") but its audit status is "${status}" — update the narrative`,
         );
       }
     }

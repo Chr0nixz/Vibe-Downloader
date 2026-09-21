@@ -17,12 +17,20 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+
 concurrency:
-  group: release-candidate-${{ inputs.tag }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   preflight:
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     env:
@@ -31,6 +39,8 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -39,11 +49,27 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: node scripts/sync-version.mjs "${{ inputs.tag }}"
-      - run: pnpm release:preflight -- --tag "${{ inputs.tag }}" --profile candidate
+      - name: Refuse to overwrite a public release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release-state.mjs
+      - name: Bind candidate tag to an exact commit
+        id: source
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node scripts/release-source.mjs --tag "${RELEASE_TAG}" --remote origin
+      - run: node scripts/sync-version.mjs "${RELEASE_TAG}"
+        shell: bash
+      - run: pnpm release:preflight -- --tag "${RELEASE_TAG}" --profile candidate --candidate
+
+  quality:
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_sha: ${{ needs.preflight.outputs.source_sha }}
 
   publish:
-    needs: preflight
+    needs: [preflight, quality]
     permissions:
       contents: write
     timeout-minutes: 75
@@ -74,6 +100,8 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -93,10 +121,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: pnpm install --frozen-lockfile
-      - run: node scripts/sync-version.mjs "${{ inputs.tag }}"
+      - run: node scripts/sync-version.mjs "${RELEASE_TAG}"
+        shell: bash
       - name: Configure tag-specific updater rehearsal endpoint
         if: inputs.updater_target_tag != ''
-        run: pnpm prepare:updater-rehearsal -- --tag "${{ inputs.updater_target_tag }}"
+        env:
+          UPDATER_TARGET_TAG: ${{ inputs.updater_target_tag }}
+        shell: bash
+        run: pnpm prepare:updater-rehearsal -- --tag "${UPDATER_TARGET_TAG}"
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -109,7 +141,8 @@ jobs:
             This candidate uses deterministic test browser-extension identities and must not be promoted as a stable store release.
 
             The OS installers are unsigned. Tauri updater artifacts are signed independently.
-          releaseDraft: ${{ inputs.release_draft }}
+          # Candidate releases are also created privately until verification.
+          releaseDraft: true
           prerelease: true
           includeUpdaterJson: true
           args: ${{ matrix.args }} --config ${{ inputs.updater_target_tag != '' && 'src-tauri/tauri.updater-rehearsal.generated.json' || 'src-tauri/tauri.bundle.conf.json' }}
@@ -155,7 +188,7 @@ jobs:
           squashfs-root/usr/bin/vibe-native-host --self-check
 
   build-extensions:
-    needs: publish
+    needs: [preflight, publish]
     permissions:
       contents: write
     runs-on: ubuntu-22.04
@@ -164,6 +197,8 @@ jobs:
       VIBE_BROWSER_PROFILE: candidate
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -172,7 +207,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: node scripts/sync-version.mjs "${{ inputs.tag }}"
+      - run: node scripts/sync-version.mjs "${RELEASE_TAG}"
+        shell: bash
       - run: pnpm verify:extensions
       - uses: actions/upload-artifact@v7
         with:
@@ -182,16 +218,18 @@ jobs:
       - name: Attach candidate extensions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ inputs.tag }}" browser/dist/packages/* --clobber
+        run: gh release upload "${RELEASE_TAG}" browser/dist/packages/* --clobber
 
   verify-release:
-    needs: [publish, build-extensions]
+    needs: [preflight, publish, build-extensions]
     permissions:
       contents: write
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -203,9 +241,44 @@ jobs:
       - name: Download candidate assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release download "${{ inputs.tag }}" --dir .release-assets
-      - run: pnpm verify:release-assets -- --dir .release-assets --version "${{ inputs.tag }}"
+        run: gh release download "${RELEASE_TAG}" --dir .release-assets
+      - name: Record and attach the verified source commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: |
+          printf '%s\n' "${SOURCE_SHA}" > .release-assets/SOURCE_COMMIT.txt
+          gh release upload "${RELEASE_TAG}" .release-assets/SOURCE_COMMIT.txt --clobber
+      - run: pnpm verify:release-assets -- --dir .release-assets --version "${RELEASE_TAG}" --source-sha "${{ needs.preflight.outputs.source_sha }}"
       - name: Attach unified checksum file
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ inputs.tag }}" .release-assets/SHA256SUMS.txt --clobber
+        run: gh release upload "${RELEASE_TAG}" .release-assets/SHA256SUMS.txt --clobber
+
+  promote:
+    needs: [preflight, quality, publish, build-extensions, verify-release]
+    if: ${{ inputs.release_draft == false }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Recheck tag and draft before publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/release-source.mjs --tag "${RELEASE_TAG}" --remote origin
+          node scripts/release-state.mjs --require-draft
+      - name: Publish the verified candidate draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${RELEASE_TAG}" --draft=false --prerelease=true --latest=false

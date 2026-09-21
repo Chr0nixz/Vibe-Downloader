@@ -34,19 +34,19 @@ Vibe Downloader 的目标是提供清晰、可靠、可诊断的大文件下载�
 - 请求诊断，包括 Range、If-Range、ETag、状态码、耗时和重试信息。
 - 下载完成后的文件发布、打开文件和打开所在目录。
 
-HTTP Basic Auth（`FUN-01`）和 HTTP 系逐任务代理（`FUN-02`）已修复并有集成测试覆盖。剩余缺口是 DASH/FTP/SFTP 的**探测**路径尚未接入逐任务代理，见 `FUN-20`。
+HTTP Basic Auth（`FUN-01`）、HTTP 系逐任务代理（`FUN-02`）与 DASH/FTP/SFTP 探测路径的逐任务代理（`FUN-20`）均已修复并有集成测试覆盖。
 
 ### 其他协议
 
 | 协议 | 当前能力 | 主要边界 |
 | --- | --- | --- |
-| FTP/FTPS | 单文件、动态并行分段、加密凭据、目录探测（支持对话框凭据与代理）、SOCKS5 | implicit FTPS over SOCKS5 不支持；无连接超时（`ARC-26`）；探测未接逐任务代理（`FUN-20`） |
-| SFTP | 单文件、密码和 OpenSSH 私钥认证、加密凭据、本地临时文件续传、SOCKS5、TOFU host key 及 list/forget UI | 同 FTP 的 `ARC-26` / `FUN-20` |
-| BitTorrent | magnet、远程和本地 `.torrent`、多文件选择、piece/peer/DHT/做种快照、SOCKS5、ratio/时间做种限制 | tracker 为配置快照而非实时健康；probe 每次新建 session（`ARC-28`）；限速不实时同步且不计入全局桶（`ARC-29`）；`.torrent` 抓取绕过 SSRF 守卫与代理策略（`SEC-03`） |
-| HLS | 主变体选择、AES-128-CBC、EXT-X-MAP、byte range、并发分片、外部音轨/字幕、live 轮询与空闲收敛、ffmpeg MP4 remux | 不支持 SAMPLE-AES/DRM；staging 目录完成后不清理；live 轮询每 100ms 查库（`PERF-15`） |
-| DASH | 静态/VOD first-pass：单 Period、`$Number$` SegmentTemplate / SegmentList / SegmentBase、分段下载、进度监控、ffmpeg MP4 remux；任务可暂停后续传 | 明确拒绝 dynamic/live、SegmentTimeline、多 Period、未实现的模板变量（如 `$Time$`）；探测未接逐任务代理（`FUN-20`） |
+| FTP/FTPS | 单文件、动态并行分段、加密凭据、目录探测（支持对话框凭据与代理）、SOCKS5 | implicit FTPS over SOCKS5 不支持（`FUN-18` 中明确记录的边界） |
+| SFTP | 单文件、密码和 OpenSSH 私钥认证、加密凭据、本地临时文件续传、SOCKS5、TOFU host key 及 list/forget UI | 不支持目录递归下载 |
+| BitTorrent | magnet、远程和本地 `.torrent`、多文件选择、piece/peer/DHT/做种快照、SOCKS5、ratio/时间做种限制 | tracker 为配置快照而非实时健康 |
+| HLS | 主变体选择、AES-128-CBC、EXT-X-MAP、byte range、并发分片、外部音轨/字幕、live 轮询与空闲收敛、ffmpeg MP4 remux | 不支持 SAMPLE-AES/DRM |
+| DASH | 静态/VOD first-pass：单 Period、`$Number$` SegmentTemplate / SegmentList / SegmentBase、分段下载、进度监控、ffmpeg MP4 remux；任务可暂停后续传 | 明确拒绝 dynamic/live、SegmentTimeline、多 Period、未实现的模板变量（如 `$Time$`）；签名 CDN 下续传可能退化为全量重下 |
 | WebDAV | WebDAV/WebDAVS 映射、Basic Auth、Depth-1 PROPFIND（支持对话框凭据与代理）、委托 HTTP 下载 | PROPFIND 无整体超时；目录探测绕过客户端缓存 |
-| Metalink4 | 本地/远程 manifest、多文件选择、HTTP/HTTPS 镜像 failover、文件级进度、strongest-hash 与跨镜像续传校验 | 并行下载任一镜像失败会删除全部 part（`ARC-24`）；读循环无空闲超时且取消不及时（`ARC-25`） |
+| Metalink4 | 本地/远程 manifest、多文件选择、HTTP/HTTPS 镜像 failover、文件级进度、strongest-hash 与跨镜像续传校验 | 无额外登记边界（原 `ARC-24`、`ARC-25` 已修复） |
 
 详细状态见 [协议可靠性矩阵](docs/protocol-reliability-matrix.md)。
 
@@ -78,7 +78,7 @@ HTTP Basic Auth（`FUN-01`）和 HTTP 系逐任务代理（`FUN-02`）已修复�
 - `dev`：只有显式设置 `VIBE_BROWSER_EXPERIMENTAL_CAPTURE=true` 才包含自动接管和 Cookie/header 转发。
 - 站点规则中的 `ask` 不会弹出确认；界面文案为「不接管/不转发（不提示）」，实际表现为被动跳过。
 - Header 过期后可从浏览器重新发送并恢复到原任务（`FUN-03`）。
-- WebSocket bridge 目前没有速率限制，引导文件在 Windows 上仅设只读属性而非 ACL，见 `SEC-04`。
+- WebSocket bridge 已加速率限制，Windows 引导文件权限也已收紧（`SEC-04`）。
 
 更多说明见 [浏览器集成](docs/browser-integration.md) 和 [Header 转发](docs/browser-header-forwarding.md)。
 
@@ -86,9 +86,9 @@ HTTP Basic Auth（`FUN-01`）和 HTTP 系逐任务代理（`FUN-02`）已修复�
 
 初版的 6 项阶段 A 阻断（`UX-01`、`FUN-01`、`FUN-02`、`ARC-01`、`ARC-02`、`ARC-03`）、2026-08-13 复审的 6 项阻断（`ARC-19`～`ARC-22`、`SEC-01`、`SEC-02`，`ARC-19` 排空残留并入 `ARC-31`）与 2026-08-26 复审的 4 项 P0（`ARC-32`、`ARC-33`、`ARC-37`、`ARC-38`，2026-09-11 关闭）均已修复并有测试覆盖。
 
-当前没有已登记的 P0 发布阻断。发布前仍需清零主审计中的 P1 项（探测代理缺口 `FUN-20`、跨卷备份 `FUN-23`、统一网络契约 `SEC-03`/`SEC-08`~`SEC-11` 等），完整清单见下节与[项目改进审计](docs/project-improvement-audit.md)。
+当前没有已登记的 P0 发布阻断，审计中的 P1 项也已全部关闭（含探测代理 `FUN-20`、跨卷备份 `FUN-23`、统一网络契约 `SEC-03` 与凭据安全 `SEC-08`~`SEC-11`）。未关闭项现在只剩 P2/P3 的可维护性与性能条目，完整清单见下节与[项目改进审计](docs/project-improvement-audit.md)。
 
-完整证据、验收条件和修复顺序见 [项目改进审计](docs/project-improvement-audit.md)。在这些问题关闭前，不应发布稳定版本。
+完整证据、验收条件和修复顺序见 [项目改进审计](docs/project-improvement-audit.md)。发布稳定版本前真正剩余的工作是外部验证：三个平台的真实安装包 smoke、GUI E2E、浏览器商店身份与 OS 代码签名。
 
 ## 尚未实现或未完成验收
 
