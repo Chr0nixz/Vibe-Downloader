@@ -63,7 +63,7 @@ export function MenuContent({
     <ContextMenu.Content
       alignOffset={alignOffset ?? 4}
       className={cn(
-        "min-w-48 overflow-hidden rounded-lg bg-surface-overlay p-1.5 shadow-md ring-1 ring-border-subtle",
+        "min-w-48 overflow-hidden rounded-lg bg-surface-popover p-1.5 shadow-md ring-1 ring-border-subtle",
         "data-[state=open]:animate-[fade-in_120ms_ease-out]",
         className,
       )}

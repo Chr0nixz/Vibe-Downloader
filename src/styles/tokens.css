@@ -9,6 +9,10 @@
      effectively invisible). Same token name as dark; value tuned per theme. */
   --progress-fill-inactive: oklch(0.45 0.014 255);
   --surface-overlay: oklch(1 0.002 255 / 0.94);
+  /* Opaque twin of surface-overlay for anything floating over the app's own
+     text (dialogs, palette, toasts, menus, tooltips). There is no blur behind
+     them, so any alpha lets the task list read through the copy. */
+  --surface-popover: oklch(1 0.002 255);
   --surface-scrim: oklch(0.975 0.004 255 / 0.72);
   --surface-hover: oklch(0.93 0.007 255);
   --border-subtle: oklch(0.84 0.01 255);
@@ -18,7 +22,10 @@
   --text-on-accent: oklch(0.98 0.004 255);
   --text-on-danger: oklch(0.98 0.004 255);
   --status-success: oklch(0.27 0.14 150);
-  --status-warning: oklch(0.3 0.14 75);
+  /* Amber, not olive: at L 0.3 hue 75 fell outside sRGB and rendered as a dark
+     olive-brown that no longer read as a warning. L 0.52 hue 65 keeps
+     5.3:1 on the root surface and 4.8:1 on the list well. */
+  --status-warning: oklch(0.52 0.13 65);
   --status-danger: oklch(0.38 0.18 25);
   --shadow-idle-ball: 0 0 8px oklch(0.12 0.01 255 / 0.15);
 
@@ -68,7 +75,7 @@
   --swatch-purple: oklch(0.4 0.18 290);
   --swatch-teal: oklch(0.4 0.15 190);
   --swatch-green: oklch(0.4 0.16 150);
-  --swatch-orange: oklch(0.4 0.16 55);
+  --swatch-orange: oklch(0.42 0.15 62);
   --swatch-rose: oklch(0.4 0.18 350);
   --swatch-indigo: oklch(0.4 0.18 265);
   --swatch-amber: oklch(0.4 0.16 80);
@@ -81,9 +88,9 @@
   --border-danger: oklch(0.38 0.18 25 / 0.3);
   --border-danger-strong: oklch(0.38 0.18 25 / 0.45);
   --border-danger-subtle: oklch(0.38 0.18 25 / 0.25);
-  --border-warning: oklch(0.3 0.14 75 / 0.3);
-  --border-warning-strong: oklch(0.3 0.14 75 / 0.45);
-  --border-warning-subtle: oklch(0.3 0.14 75 / 0.25);
+  --border-warning: oklch(0.52 0.13 65 / 0.3);
+  --border-warning-strong: oklch(0.52 0.13 65 / 0.45);
+  --border-warning-subtle: oklch(0.52 0.13 65 / 0.25);
   --border-success: oklch(0.27 0.14 150 / 0.25);
   --border-success-strong: oklch(0.27 0.14 150 / 0.35);
   --border-accent: color-mix(in oklch, var(--accent-primary) 30%, transparent);
@@ -126,9 +133,11 @@
   --accent-peak: oklch(0.55 0.16 190);
 }
 
+/* Orange sits at hue 62 rather than 55: at 55 a light-theme accent pill was a
+   brick red one step from --status-danger (hue 25). */
 :root[data-accent="orange"] {
-  --accent-primary: oklch(0.4 0.16 55);
-  --accent-energy: oklch(0.38 0.14 80);
+  --accent-primary: oklch(0.42 0.15 62);
+  --accent-energy: oklch(0.38 0.14 85);
   --accent-peak: oklch(0.55 0.16 350);
 }
 
@@ -163,8 +172,13 @@
      sits at ~2.4:1, below the 3:1 WCAG 1.4.11 floor for non-text graphics.
      oklch 0.45 clears ~3.4:1 on the dark track. */
   --progress-fill-inactive: oklch(0.45 0.012 255);
+  /* Translucent on purpose: only the floating status window and tray menu use
+     it, and they sit over the desktop, not over dense app text. */
   --surface-overlay: oklch(0.255 0.013 255 / 0.82);
-  --surface-scrim: oklch(0.145 0.006 255 / 0.72);
+  --surface-popover: oklch(0.255 0.013 255);
+  /* Darker than the root surface: a scrim in the root colour barely dimmed the
+     near-identical dark list, so the palette and dialogs did not lift off it. */
+  --surface-scrim: oklch(0.06 0.004 255 / 0.66);
   --surface-hover: oklch(0.3 0.012 255);
   --border-subtle: oklch(0.33 0.012 255);
   --text-primary: oklch(0.93 0.006 255);
@@ -224,7 +238,7 @@
   --swatch-purple: oklch(0.76 0.14 290);
   --swatch-teal: oklch(0.76 0.14 190);
   --swatch-green: oklch(0.76 0.14 150);
-  --swatch-orange: oklch(0.76 0.14 55);
+  --swatch-orange: oklch(0.76 0.14 62);
   --swatch-rose: oklch(0.76 0.14 350);
   --swatch-indigo: oklch(0.76 0.14 265);
   --swatch-amber: oklch(0.76 0.14 80);
@@ -257,8 +271,8 @@
 }
 
 .dark[data-accent="orange"] {
-  --accent-primary: oklch(0.76 0.14 55);
-  --accent-energy: oklch(0.76 0.14 80);
+  --accent-primary: oklch(0.76 0.14 62);
+  --accent-energy: oklch(0.76 0.14 85);
   --accent-peak: oklch(0.74 0.14 350);
 }
 
@@ -287,4 +301,33 @@
 /* Linux uses native window chrome, so the in-app titlebar is not rendered. */
 [data-platform="linux"] {
   --titlebar-height: 0px;
+}
+
+/* ── Status hues under warm accents ──
+   Amber and orange accents sit on the warning hue, and rose sits beside
+   danger, so in those themes a live transfer and a problem could share a
+   colour. Dark mode (the primary target) has the lightness headroom to move
+   warning to a clear yellow and danger toward pure red. Icons and labels
+   still carry every state; the hue shift keeps the glance honest too. */
+.dark[data-accent="amber"],
+.dark[data-accent="orange"] {
+  --status-warning: oklch(0.9 0.13 100);
+  --border-warning: oklch(0.8 0.13 100 / 0.3);
+  --border-warning-strong: oklch(0.8 0.13 100 / 0.45);
+  --border-warning-subtle: oklch(0.8 0.13 100 / 0.25);
+}
+
+.dark[data-accent="orange"],
+.dark[data-accent="rose"] {
+  --status-danger: oklch(0.76 0.18 20);
+  --border-danger: oklch(0.66 0.19 20 / 0.3);
+  --border-danger-strong: oklch(0.66 0.19 20 / 0.45);
+  --border-danger-subtle: oklch(0.66 0.19 20 / 0.25);
+}
+
+:root[data-accent="amber"]:not(.dark) {
+  --status-warning: oklch(0.5 0.13 48);
+  --border-warning: oklch(0.5 0.13 48 / 0.3);
+  --border-warning-strong: oklch(0.5 0.13 48 / 0.45);
+  --border-warning-subtle: oklch(0.5 0.13 48 / 0.25);
 }

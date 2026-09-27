@@ -6,7 +6,7 @@ interface ProgressBarProps {
   active?: boolean;
   /** When false, skip transform transitions during frequent progress updates. */
   smooth?: boolean;
-  tone?: "primary" | "success" | "danger" | "neutral";
+  tone?: "primary" | "success" | "warning" | "danger" | "neutral";
   /** Increase height for prominence; "default" keeps the slim row variant and
    * "compact" is a 2px hairline for the dense row preset. */
   size?: "default" | "lg" | "compact";
@@ -23,6 +23,9 @@ const sizeClass: Record<NonNullable<ProgressBarProps["size"]>, string> = {
 const toneFill: Record<NonNullable<ProgressBarProps["tone"]>, string> = {
   primary: "bg-accent-primary",
   success: "bg-status-success",
+  // A transfer that is moving but fighting errors (retrying) reads amber, not
+  // the accent a healthy download wears.
+  warning: "bg-status-warning",
   danger: "bg-status-danger",
   // Inactive fills use the dedicated ≥3:1 token, not border-subtle — the bar is
   // the row's primary graphic for paused/failed tasks (WCAG 1.4.11).
@@ -32,6 +35,7 @@ const toneFill: Record<NonNullable<ProgressBarProps["tone"]>, string> = {
 const toneGlow: Record<NonNullable<ProgressBarProps["tone"]>, string> = {
   primary: "shadow-[0_0_8px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
   success: "shadow-[0_0_6px_color-mix(in_oklch,var(--status-success)_30%,transparent)]",
+  warning: "shadow-[0_0_6px_color-mix(in_oklch,var(--status-warning)_30%,transparent)]",
   danger: "shadow-[0_0_6px_color-mix(in_oklch,var(--status-danger)_30%,transparent)]",
   neutral: "",
 };

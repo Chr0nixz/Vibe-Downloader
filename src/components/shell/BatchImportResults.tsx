@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { BatchImportResult } from "@/generated/bindings";
-import { parseAppError } from "@/lib/errors";
+import { errorCodeToI18nKey } from "@/lib/errors";
 import { isTauriRuntime } from "@/lib/runtime";
 import { writeExportFile } from "@/lib/tauri";
 import { sanitizeUrlForDisplay } from "@/lib/utils";
@@ -50,7 +50,7 @@ export function BatchImportResults({
         line: index + 1,
         url: sanitizeUrlForDisplay(urlFor(index)),
         status: item.task ? "created" : item.duplicate ? "duplicate" : isFailedBatchItem(item) ? "failed" : "ready",
-        errorCode: item.errorMessage ? (parseAppError(item.errorMessage)?.code ?? null) : null,
+        errorCode: item.errorCode ?? null,
       })),
       null,
       2,
@@ -82,14 +82,24 @@ export function BatchImportResults({
 
   function renderRow({ item, index }: { item: Item; index: number }) {
     const failedItem = isFailedBatchItem(item);
+    // UX-29: prefer the stable error code for localized copy; the raw
+    // errorMessage stays available only as expandable diagnostics detail.
+    const errorKey = item.errorCode ? errorCodeToI18nKey(item.errorCode) : null;
+    const detail = item.errorMessage ?? null;
     return (
       <div key={index} className="grid min-w-0 gap-1 border-b border-border-divider py-2" data-batch-line={index + 1}>
         <span className="truncate font-mono text-text-primary" title={sanitizeUrlForDisplay(item.inputUrl)}>
           {item.fileName ?? sanitizeUrlForDisplay(item.normalizedUrl ?? item.inputUrl)}
         </span>
         <span className={`break-words ${failedItem ? "text-status-danger" : "text-text-muted"}`}>
-          {item.errorMessage ?? t(item.task ? "newDownload.batchCreated" : "newDownload.batchReady")}
+          {errorKey ? t(errorKey) : (detail ?? t(item.task ? "newDownload.batchCreated" : "newDownload.batchReady"))}
         </span>
+        {failedItem && detail && errorKey ? (
+          <details className="text-[11px] text-text-muted">
+            <summary className="cursor-pointer">{t("newDownload.batchErrorDetail")}</summary>
+            <pre className="mt-1 whitespace-pre-wrap break-all rounded bg-surface-base/60 p-2 font-mono">{detail}</pre>
+          </details>
+        ) : null}
         {failedItem && onRetry && (
           <div className="flex min-w-0 items-center gap-2">
             <Input

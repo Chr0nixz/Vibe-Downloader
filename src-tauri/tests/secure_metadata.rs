@@ -169,10 +169,14 @@ async fn malformed_nonce_is_reported_by_headers_credentials_and_proxy() {
         .await
         .unwrap();
     let schema = db::current_schema_version(&pool).await.unwrap();
-    let error =
-        db::materialize_and_verify_backup_db(&std::fs::read(&paths.temp).unwrap(), schema, schema)
-            .await
-            .unwrap_err();
+    let error = db::materialize_and_verify_backup_db(
+        &std::fs::read(&paths.temp).unwrap(),
+        schema,
+        schema,
+        None,
+    )
+    .await
+    .unwrap_err();
     assert!(
         error.contains("task_credentials") && error.contains("nonce"),
         "{error}"

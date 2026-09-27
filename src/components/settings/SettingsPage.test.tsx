@@ -218,6 +218,23 @@ describe("SettingsPage", () => {
     expect(mocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ maxActiveTasks: 4 }));
   });
 
+  // Regression: the empty field preselected B/s, so typing "5" capped every
+  // download at 5 bytes per second.
+  it("reads a number typed into an empty global speed limit as MB/s", async () => {
+    vi.useFakeTimers();
+    renderSettings();
+    await act(async () => {});
+
+    fireEvent.change(document.getElementById("global-speed-limit") as HTMLInputElement, {
+      target: { value: "5" },
+    });
+    await act(async () => vi.advanceTimersByTime(1000));
+
+    expect(mocks.updateSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ globalSpeedLimitBps: String(5 * 1024 * 1024) }),
+    );
+  });
+
   it("associates a clamped numeric setting with a programmatic range hint (UX-18)", () => {
     renderSettings();
     const input = screen.getByLabelText("settings.maxActiveTasks");
@@ -312,6 +329,24 @@ describe("SettingsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "settings.aboutUpdates", hidden: true }));
 
     expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: expect.any(Number) }));
+    const targetToggle = screen
+      .getAllByRole("button", { hidden: true })
+      .find((button) => button.getAttribute("aria-controls") === "about-updates-settings-section-panel");
+    expect(targetToggle).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("disables section disclosures while search forces matching results open", async () => {
+    renderSettings();
+    await act(async () => {});
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "settings.searchSettings" }), {
+      target: { value: "settings.defaultSaveDir" },
+    });
+
+    const downloadsToggle = screen
+      .getAllByRole("button", { hidden: true })
+      .find((button) => button.getAttribute("aria-controls") === "downloads-settings-section-panel");
+    expect(downloadsToggle).toBeDisabled();
   });
 
   it("has no automated accessibility violations in the default settings surface", async () => {

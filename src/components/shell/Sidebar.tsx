@@ -1,9 +1,8 @@
 import {
-  AlertCircle,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  CircleAlert,
   DatabaseBackup,
   Download,
   Filter,
@@ -17,8 +16,9 @@ import {
   PanelLeftOpen,
   PauseCircle,
   Settings,
+  TriangleAlert,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { MenuItem, RegionContextMenu } from "@/components/ui/menu-item";
@@ -36,23 +36,51 @@ type NavItemDef = {
   icon: React.ComponentType<{ className?: string }>;
 };
 
-/** Primary scan path — keep ≤4 so first paint asks to act, not classify. */
+/** The three list views the "Needs you" entry covers; its cause filter
+ * switches between them inside the list. */
+const ISSUE_NAVS: readonly NavFilter[] = ["issues", "attention", "failed"];
+
+/** Count badges wear the colour of the state they count: "Needs you" is red
+ * while anything has failed and amber while only decisions wait, as on the
+ * row status badges; every other count stays neutral so a busy download list
+ * never reads as an alarm. */
+function navBadgeTone(id: NavFilter, failed: number): string {
+  if (id === "issues") {
+    return failed > 0 ? "bg-status-danger/12 text-status-danger" : "bg-status-warning/14 text-status-warning";
+  }
+  return "bg-surface-raised text-text-muted";
+}
+
+/** The four destinations a download manager is checked for: everything, what
+ * is moving, what needs the user, and what is done. Failed and Needs attention
+ * used to be two entries with two different layouts; they are one list now,
+ * with a cause filter. */
 const primaryFilterItems: NavItemDef[] = [
   { id: "all", labelKey: "nav.all", icon: LayoutGrid },
   { id: "downloading", labelKey: "nav.downloading", icon: Download },
-  { id: "attention", labelKey: "nav.attention", icon: CircleAlert },
+  { id: "issues", labelKey: "nav.issues", icon: TriangleAlert },
   { id: "completed", labelKey: "nav.completed", icon: CheckCircle2 },
 ];
 
-/** Secondary views — still reachable via More + command palette + shortcuts. */
-const secondaryFilterItems: NavItemDef[] = [
+const otherTaskFilterItems: NavItemDef[] = [
   { id: "queue", labelKey: "nav.queue", icon: ListOrdered },
   { id: "paused", labelKey: "nav.paused", icon: PauseCircle },
-  { id: "failed", labelKey: "nav.failed", icon: AlertCircle },
+];
+
+/** Maintenance views stay together in the mobile overflow. They remain
+ * explicit, labelled destinations rather than an opaque "other" bucket.
+ * Recovery Center is a repair tool over the Needs attention and Failed tasks
+ * (bulk retry, playbook, history), not a third view of them, so it sits here
+ * instead of beside those states as a peer with the same count. */
+const maintenanceItems: NavItemDef[] = [
+  { id: "recovery", labelKey: "recoveryCenter.title", icon: LifeBuoy },
   { id: "storage", labelKey: "nav.storage", icon: HardDrive },
-  { id: "recovery", labelKey: "nav.recovery", icon: LifeBuoy },
   { id: "backup", labelKey: "nav.backup", icon: DatabaseBackup },
 ];
+
+const mobilePrimaryItems: NavItemDef[] = primaryFilterItems;
+
+const mobileMoreItems: NavItemDef[] = [...otherTaskFilterItems, ...maintenanceItems];
 
 const settingsItem: NavItemDef = {
   id: "settings",
@@ -83,6 +111,9 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
       return false;
     }
   });
+  const [otherViewsExpanded, setOtherViewsExpanded] = useState(() =>
+    otherTaskFilterItems.some((item) => item.id === nav),
+  );
 
   const toggleCollapse = () => {
     const next = !collapsed;
@@ -98,18 +129,19 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
     all: taskStats.all,
     downloading: taskStats.active,
     queue: taskStats.queued,
-    attention: taskStats.attention,
+    issues: taskStats.attention + taskStats.failed,
     paused: taskStats.paused,
     completed: taskStats.completed,
-    failed: taskStats.failed,
-    // Recovery Center spans both failure classes.
-    recovery: taskStats.failed + taskStats.attention,
   };
+  // The cause filter's three views all light up the one "Needs you" entry.
+  const isActive = (id: NavFilter) => nav === id || (id === "issues" && ISSUE_NAVS.includes(nav));
+  const otherViewsActive = otherTaskFilterItems.some((item) => item.id === nav);
+  const mobileMoreActive =
+    mobileMoreItems.some((item) => item.id === nav) || nav === settingsItem.id || nav === aboutItem.id;
 
-  const secondaryActive = secondaryFilterItems.some((item) => item.id === nav);
-  // Tasks hidden behind the overflow that warrant a look. Previously signalled by
-  // a bare red dot, which said "something" but never "how much".
-  const secondaryAttentionCount = (counts.failed ?? 0) + (counts.queue ?? 0);
+  useEffect(() => {
+    if (otherViewsActive) setOtherViewsExpanded(true);
+  }, [otherViewsActive]);
 
   return (
     <RegionContextMenu
@@ -124,111 +156,197 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
         </>
       }
     >
-      <nav
-        className={cn(
-          // ── Vertical compact rail at every width; `lg` expands it when not
-          // collapsed. The former phone-style bottom bar fought the desktop
-          // window context (PRODUCT.md "native desktop feel"): a narrow window
-          // is a snapped desktop surface with pointer + keyboard, so the icon
-          // rail is the native answer at every size.
-          "flex h-auto w-[var(--shell-nav-width-compact)] shrink-0 flex-col items-stretch justify-between gap-1",
-          "border-r border-border-subtle bg-surface-base p-1.5",
-          // ── Desktop: expand only when not collapsed ──
-          !collapsed && "lg:w-[var(--shell-nav-width)] lg:p-2",
-          // No width/padding transition: animating layout properties forces a
-          // reflow every frame on a container bordering the virtualized task
-          // list. The collapse reads instantly from the content change itself.
-        )}
-        aria-label={t("app.navAria")}
-      >
-        {/* ── View group ── */}
-        <div className="flex flex-1 flex-col items-stretch justify-start gap-0.5">
-          {/* Group label — only when expanded (wide). These entries switch views;
-              the filter facets live in the CommandBar tool panel, so labelling
-              this group "Filters" sent users to the wrong control. */}
-          <span
-            className={cn(
-              "hidden px-3 py-1 text-[11px] font-medium text-text-muted lg:block",
-              collapsed && "lg:hidden",
-            )}
-          >
-            {t("nav.views")}
-          </span>
-
-          {primaryFilterItems.map((item) => (
+      <div className="order-2 flex shrink-0 flex-col md:order-1 md:w-[var(--shell-nav-width-compact)] lg:w-auto">
+        <nav
+          className={cn(
+            "hidden min-h-0 flex-1 flex-col items-stretch justify-between gap-1 border-r border-border-subtle bg-surface-base p-1.5 md:flex",
+            !collapsed && "lg:w-[var(--shell-nav-width)] lg:p-2",
+          )}
+          aria-label={t("app.navAria")}
+        >
+          <div className="flex min-h-0 flex-1 flex-col items-stretch justify-start gap-0.5 overflow-y-auto">
+            <span
+              className={cn(
+                "hidden px-3 py-1 text-[11px] font-medium text-text-muted lg:block",
+                collapsed && "lg:hidden",
+              )}
+            >
+              {t("nav.views")}
+            </span>
+            {primaryFilterItems.map((item) => (
+              <NavItem
+                key={item.id}
+                item={item}
+                active={isActive(item.id)}
+                label={t(item.labelKey)}
+                count={counts[item.id] ?? 0}
+                badgeTone={navBadgeTone(item.id, taskStats.failed)}
+                compact={collapsed}
+                onClick={() => setNav(item.id)}
+                contextMenuItems={
+                  <MenuItem
+                    icon={Filter}
+                    label={t("contextmenu.sidebar.showOnly", { name: t(item.labelKey) })}
+                    disabled={isActive(item.id)}
+                    onSelect={() => setNav(item.id)}
+                  />
+                }
+              />
+            ))}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  aria-label={t("nav.otherViews")}
+                  aria-expanded={otherViewsExpanded}
+                  aria-controls="other-task-views"
+                  onClick={() => setOtherViewsExpanded((expanded) => !expanded)}
+                  className={cn(
+                    "relative h-10 w-full flex-none flex-col items-center justify-start gap-1 px-1 text-xs",
+                    "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-2 lg:px-3",
+                    collapsed && "lg:justify-center lg:px-0",
+                    otherViewsActive && [
+                      "bg-accent-primary/15 dark:bg-accent-primary/20",
+                      "shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
+                      "font-medium text-accent-primary",
+                    ],
+                    !otherViewsActive && "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
+                  )}
+                >
+                  <MoreHorizontal className="h-[18px] w-[18px] shrink-0" aria-hidden />
+                  <span
+                    className={cn("hidden truncate lg:inline lg:text-sm lg:leading-normal", collapsed && "lg:hidden")}
+                  >
+                    {t("nav.otherViews")}
+                  </span>
+                  <ChevronDown
+                    className={cn(
+                      "ml-auto hidden h-3.5 w-3.5 shrink-0 transition-transform lg:inline",
+                      collapsed && "lg:hidden",
+                      otherViewsExpanded && "rotate-180",
+                    )}
+                    aria-hidden
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right" className="hidden md:block lg:hidden">
+                {t("nav.otherViews")}
+              </TooltipContent>
+            </Tooltip>
+            <div id="other-task-views" hidden={!otherViewsExpanded} className="flex flex-col gap-0.5">
+              {otherTaskFilterItems.map((item) => (
+                <NavItem
+                  key={item.id}
+                  item={item}
+                  active={nav === item.id}
+                  label={t(item.labelKey)}
+                  count={counts[item.id] ?? 0}
+                  compact={collapsed}
+                  onClick={() => setNav(item.id)}
+                  contextMenuItems={
+                    <MenuItem
+                      icon={Filter}
+                      label={t("contextmenu.sidebar.showOnly", { name: t(item.labelKey) })}
+                      disabled={nav === item.id}
+                      onSelect={() => setNav(item.id)}
+                    />
+                  }
+                />
+              ))}
+            </div>
+            <div className="mx-2 my-1 h-px bg-border-subtle/50 lg:mx-3" aria-hidden />
+            <span
+              className={cn(
+                "hidden px-3 py-1 text-[11px] font-medium text-text-muted lg:block",
+                collapsed && "lg:hidden",
+              )}
+            >
+              {t("nav.maintenance")}
+            </span>
+            {maintenanceItems.map((item) => (
+              <NavItem
+                key={item.id}
+                item={item}
+                active={nav === item.id}
+                label={t(item.labelKey)}
+                count={0}
+                compact={collapsed}
+                onClick={() => setNav(item.id)}
+              />
+            ))}
+          </div>
+          <div className="flex flex-none flex-col items-stretch gap-0.5">
+            <div className="mx-2 mb-1 h-px bg-border-subtle/50 lg:mx-3" aria-hidden />
             <NavItem
+              item={settingsItem}
+              active={nav === "settings"}
+              label={t(settingsItem.labelKey)}
+              count={0}
+              compact={collapsed}
+              onClick={() => setNav("settings")}
+            />
+            <NavItem
+              item={aboutItem}
+              active={nav === "about"}
+              label={t(aboutItem.labelKey)}
+              count={0}
+              compact={collapsed}
+              onClick={() => setNav("about")}
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={toggleCollapse}
+              aria-label={collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
+              className="group mt-1 flex h-10 w-full flex-none flex-row justify-center gap-2 border-t border-border-subtle/40 p-0 text-text-muted hover:bg-accent-primary/10 hover:text-accent-primary lg:h-9"
+            >
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-surface-raised/80 group-hover:bg-accent-primary/15">
+                {collapsed ? (
+                  <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+                ) : (
+                  <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+                )}
+              </span>
+              <span className="hidden text-xs font-medium lg:inline">
+                {collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
+              </span>
+            </Button>
+          </div>
+        </nav>
+
+        <nav
+          className="order-2 flex h-14 w-full items-stretch justify-around border-t border-border-subtle bg-surface-base px-1 pb-[env(safe-area-inset-bottom)] md:hidden"
+          aria-label={t("app.navAria")}
+        >
+          {mobilePrimaryItems.map((item) => (
+            <MobileBottomItem
               key={item.id}
               item={item}
-              active={nav === item.id}
               label={t(item.labelKey)}
+              active={isActive(item.id)}
               count={counts[item.id] ?? 0}
-              compact={collapsed}
+              badgeTone={navBadgeTone(item.id, taskStats.failed)}
               onClick={() => setNav(item.id)}
-              contextMenuItems={
-                <MenuItem
-                  icon={Filter}
-                  label={t("contextmenu.sidebar.showOnly", { name: t(item.labelKey) })}
-                  disabled={nav === item.id}
-                  onSelect={() => setNav(item.id)}
-                />
-              }
             />
           ))}
-
-          {/* Desktop/tablet: secondary views behind More */}
           <Popover>
             <PopoverTrigger asChild>
               <Button
                 type="button"
                 variant="ghost"
-                aria-label={
-                  secondaryAttentionCount > 0
-                    ? t("nav.moreViewsNeedsAttentionCount", { count: secondaryAttentionCount })
-                    : t("nav.moreViews")
-                }
-                aria-current={secondaryActive ? "page" : undefined}
+                aria-label={t("nav.more")}
                 className={cn(
-                  "relative h-10 w-full flex-none flex-col items-start justify-start gap-1 px-1 text-xs",
-                  "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
-                  collapsed && "lg:justify-center lg:px-0",
-                  "transition-[color,background-color,box-shadow,border-color] duration-[var(--motion-ui)] ease-out",
-                  secondaryActive
-                    ? [
-                        "bg-accent-primary/15 font-medium text-accent-primary dark:bg-accent-primary/20",
-                        "shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
-                      ]
-                    : "text-text-secondary hover:bg-surface-raised hover:text-text-primary",
+                  "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 text-[11px] leading-tight",
+                  mobileMoreActive ? "bg-accent-primary/12 font-medium text-accent-primary" : "text-text-secondary",
                 )}
               >
-                <MoreHorizontal className="h-[18px] w-[18px] shrink-0" aria-hidden />
-                <span
-                  className={cn(
-                    "max-w-none text-xs leading-tight lg:text-sm lg:leading-normal",
-                    collapsed && "lg:hidden",
-                  )}
-                >
-                  {t("nav.moreViews")}
-                </span>
-                {secondaryAttentionCount > 0 && (
-                  <span
-                    className={cn(
-                      "absolute right-0 top-0 inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-4 tabular-nums",
-                      "lg:static lg:min-w-0 lg:px-1.5 lg:py-0.5 lg:text-[11px] lg:leading-none",
-                      collapsed &&
-                        "lg:absolute lg:right-0 lg:top-0 lg:min-w-4 lg:px-1 lg:py-0 lg:text-[10px] lg:leading-4",
-                      (counts.failed ?? 0) > 0
-                        ? "bg-status-danger/12 text-status-danger"
-                        : "bg-status-warning/14 text-status-warning",
-                    )}
-                    aria-hidden
-                  >
-                    {secondaryAttentionCount > 99 ? "99+" : secondaryAttentionCount}
-                  </span>
-                )}
+                <MoreHorizontal className="h-5 w-5" aria-hidden />
+                <span className="max-w-full text-center leading-tight">{t("nav.more")}</span>
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="start" side="right" className="w-52 p-1">
-              {secondaryFilterItems.map((item) => (
+            <PopoverContent align="end" side="top" className="w-56 p-1">
+              {mobileMoreItems.map((item) => (
                 <MobileNavMenuItem
                   key={item.id}
                   item={item}
@@ -238,67 +356,23 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
                   onClick={() => setNav(item.id)}
                 />
               ))}
+              <div className="my-1 h-px bg-border-subtle" aria-hidden />
+              <MobileNavMenuItem
+                item={settingsItem}
+                label={t(settingsItem.labelKey)}
+                active={nav === "settings"}
+                onClick={() => setNav("settings")}
+              />
+              <MobileNavMenuItem
+                item={aboutItem}
+                label={t(aboutItem.labelKey)}
+                active={nav === "about"}
+                onClick={() => setNav("about")}
+              />
             </PopoverContent>
           </Popover>
-        </div>
-
-        {/* ── Separator + Settings + Collapse toggle ── */}
-        <div className="flex flex-none flex-col items-stretch gap-0.5">
-          <div className="mx-2 mb-1 lg:mx-3">
-            <div className="h-px bg-border-subtle/50" />
-          </div>
-          <NavItem
-            item={settingsItem}
-            active={nav === "settings"}
-            label={t(settingsItem.labelKey)}
-            count={0}
-            compact={collapsed}
-            onClick={() => setNav("settings")}
-          />
-          <NavItem
-            item={aboutItem}
-            active={nav === "about"}
-            label={t(aboutItem.labelKey)}
-            count={0}
-            compact={collapsed}
-            onClick={() => setNav("about")}
-          />
-
-          {/* Collapse / expand toggle */}
-          <div className="mx-1.5 mt-0.5 lg:mx-2.5">
-            <div className="h-px bg-border-subtle/40" />
-          </div>
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={toggleCollapse}
-            aria-label={collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
-            className={cn(
-              "group mt-1 flex h-10 w-full flex-none flex-row justify-center gap-2 p-0",
-              "text-text-muted",
-              "hover:bg-accent-primary/10 hover:text-accent-primary",
-              "transition-[color,background-color] duration-[var(--motion-ui)]",
-            )}
-          >
-            <span
-              className={cn(
-                "flex h-5 w-5 items-center justify-center rounded-full",
-                "bg-surface-raised/80 group-hover:bg-accent-primary/15",
-                "transition-colors duration-[var(--motion-ui)]",
-              )}
-            >
-              {collapsed ? (
-                <ChevronRight className="h-3.5 w-3.5" aria-hidden />
-              ) : (
-                <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
-              )}
-            </span>
-            <span className={cn("text-xs font-medium lg:hidden")}>
-              {collapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
-            </span>
-          </Button>
-        </div>
-      </nav>
+        </nav>
+      </div>
     </RegionContextMenu>
   );
 }
@@ -312,6 +386,7 @@ function NavItem({
   active,
   label,
   count,
+  badgeTone = "bg-surface-raised text-text-muted",
   compact,
   onClick,
   contextMenuItems,
@@ -320,6 +395,7 @@ function NavItem({
   active: boolean;
   label: string;
   count: number;
+  badgeTone?: string;
   compact: boolean;
   onClick: () => void;
   /** Optional context-menu items for this nav entry (filter items only). */
@@ -362,13 +438,8 @@ function NavItem({
           {/* Icon — left-aligned (no mx-auto) */}
           <Icon className="h-[18px] w-[18px] shrink-0" aria-hidden />
 
-          {/* Label: visible at every tier; hidden only when the desktop rail is collapsed */}
-          <span
-            className={cn(
-              "max-w-16 truncate leading-tight md:max-w-none lg:text-sm lg:leading-normal",
-              compact && "lg:hidden",
-            )}
-          >
+          {/* The tablet rail keeps only icons; expanded desktop restores labels. */}
+          <span className={cn("hidden truncate lg:inline lg:text-sm lg:leading-normal", compact && "lg:hidden")}>
             {label}
           </span>
 
@@ -380,13 +451,7 @@ function NavItem({
                 "absolute right-0 top-0 inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-4 tabular-nums",
                 "lg:static lg:min-w-0 lg:px-1.5 lg:py-0.5 lg:text-[11px] lg:leading-none",
                 compact && "lg:absolute lg:right-0 lg:top-0 lg:min-w-4 lg:px-1 lg:py-0 lg:text-[10px] lg:leading-4",
-                active
-                  ? "bg-accent-primary/20 text-accent-primary"
-                  : item.id === "failed"
-                    ? "bg-status-danger/12 text-status-danger"
-                    : item.id === "attention"
-                      ? "bg-status-warning/14 text-status-warning"
-                      : "bg-surface-raised text-text-muted",
+                active ? "bg-accent-primary/20 text-accent-primary" : badgeTone,
               )}
             >
               {count > 99 ? "99+" : count}
@@ -394,8 +459,8 @@ function NavItem({
           )}
         </Button>
       </TooltipTrigger>
-      {/* Tooltip: only needed when the label is hidden, i.e. the collapsed rail */}
-      <TooltipContent side="right" className={cn("hidden", compact && "lg:block")}>
+      {/* The tablet rail has no inline labels; collapsed desktop keeps the same hint. */}
+      <TooltipContent side="right" className="hidden md:block lg:hidden">
         {label}
         {showBadge ? ` (${count})` : null}
       </TooltipContent>
@@ -406,6 +471,51 @@ function NavItem({
   // settings/about fall through to the outer <nav> context menu.
   if (!contextMenuItems) return button;
   return <RegionContextMenu items={contextMenuItems}>{button}</RegionContextMenu>;
+}
+
+function MobileBottomItem({
+  item,
+  label,
+  active,
+  count,
+  badgeTone,
+  onClick,
+}: {
+  item: NavItemDef;
+  label: string;
+  active: boolean;
+  count: number;
+  badgeTone: string;
+  onClick: () => void;
+}) {
+  const Icon = item.icon;
+  const showBadge = item.id !== "all" && count > 0;
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      onClick={onClick}
+      aria-current={active ? "page" : undefined}
+      aria-label={showBadge ? `${label} (${count})` : label}
+      className={cn(
+        "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 text-[11px] leading-tight",
+        active ? "bg-accent-primary/12 font-medium text-accent-primary" : "text-text-secondary",
+      )}
+    >
+      <Icon className="h-5 w-5 shrink-0" aria-hidden />
+      <span className="max-w-full whitespace-normal text-center leading-tight line-clamp-2">{label}</span>
+      {showBadge ? (
+        <span
+          className={cn(
+            "absolute right-1 top-1 min-w-4 rounded-full px-1 text-center text-[10px] font-semibold leading-4",
+            badgeTone,
+          )}
+        >
+          {count > 99 ? "99+" : count}
+        </span>
+      ) : null}
+    </Button>
+  );
 }
 
 function MobileNavMenuItem({

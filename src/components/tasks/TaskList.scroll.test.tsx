@@ -1,4 +1,4 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Task } from "@/types/task";
@@ -8,6 +8,12 @@ import { TaskList } from "./TaskList";
 // Hoisted so the assertion survives the per-render mock object recreation.
 const scrollToIndex = vi.hoisted(() => vi.fn());
 const listTasksCursor = vi.hoisted(() => vi.fn());
+// Rendered rows hand their onSelectTask here so tests can drive a row click
+// or keypress without mounting the real TaskRow.
+const rowSelect = vi.hoisted(() => ({
+  current: null as null | ((id: string, source?: "pointer" | "keyboard") => void),
+}));
+const virtualItems = vi.hoisted(() => ({ current: [] as { index: number; key: string; start: number }[] }));
 
 vi.mock("react-i18next", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-i18next")>();
@@ -26,7 +32,7 @@ vi.mock("motion/react", () => ({
 
 vi.mock("@tanstack/react-virtual", () => ({
   useVirtualizer: () => ({
-    getVirtualItems: () => [],
+    getVirtualItems: () => virtualItems.current,
     getTotalSize: () => 0,
     scrollToOffset: vi.fn(),
     scrollToIndex,
@@ -40,7 +46,10 @@ vi.mock("@/lib/tauri", () => ({
 }));
 
 vi.mock("@/components/tasks/TaskRow", () => ({
-  TaskRow: () => null,
+  TaskRow: ({ onSelectTask }: { onSelectTask: (id: string, source?: "pointer" | "keyboard") => void }) => {
+    rowSelect.current = onSelectTask;
+    return null;
+  },
 }));
 
 vi.mock("@/components/tasks/TaskContextMenu", () => ({
@@ -156,6 +165,8 @@ describe("TaskList selection scroll (UX-17)", () => {
 
   afterEach(() => {
     resetListQueryEpochForTests();
+    virtualItems.current = [];
+    rowSelect.current = null;
     vi.clearAllMocks();
   });
 
@@ -228,5 +239,50 @@ describe("TaskList selection scroll (UX-17)", () => {
     });
     await waitFor(() => expect(scrollToIndex).toHaveBeenCalledTimes(afterFirst + 1));
     expect(scrollToIndex).toHaveBeenLastCalledWith(2, { align: "center" });
+  });
+
+  it("does not scroll when a row is clicked, but reveals it for keyboard moves", async () => {
+    listTasksCursor.mockResolvedValue(
+      page([sampleTask("a", "a.bin"), sampleTask("b", "b.bin"), sampleTask("c", "c.bin")], null),
+    );
+    virtualItems.current = [
+      { index: 0, key: "a", start: 0 },
+      { index: 1, key: "b", start: 56 },
+      { index: 2, key: "c", start: 112 },
+    ];
+    renderList();
+
+    await waitFor(() => expect(useTaskDataStore.getState().taskIds).toEqual(["a", "b", "c"]));
+    await waitFor(() => expect(rowSelect.current).not.toBeNull());
+    const before = scrollToIndex.mock.calls.length;
+
+    // A clicked row is already under the cursor: moving the list would put a
+    // different row there for the next click.
+    await act(async () => {
+      rowSelect.current?.("c", "pointer");
+    });
+    expect(useTaskUIStore.getState().selectedId).toBe("c");
+    expect(scrollToIndex).toHaveBeenCalledTimes(before);
+
+    // Keyboard selection scrolls only as far as needed, never re-centres.
+    await act(async () => {
+      rowSelect.current?.("b", "keyboard");
+    });
+    expect(useTaskUIStore.getState().selectedId).toBe("b");
+    expect(scrollToIndex).toHaveBeenCalledTimes(before + 1);
+    expect(scrollToIndex).toHaveBeenLastCalledWith(1, { align: "auto" });
+  });
+
+  it("offers the matching task from All when a scoped search is empty", async () => {
+    useTaskUIStore.setState({ nav: "completed", search: "game" });
+    listTasksCursor.mockImplementation(async (input: { nav?: string }) =>
+      input.nav === "all" ? page([sampleTask("all-match", "game-patch.zip")], null) : page([], null),
+    );
+
+    renderList();
+
+    await waitFor(() => expect(screen.getByText("taskList.emptySearchElsewhere")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "attentionCenter.viewAll" }));
+    expect(useTaskUIStore.getState().nav).toBe("all");
   });
 });

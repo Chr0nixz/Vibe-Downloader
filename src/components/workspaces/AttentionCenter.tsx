@@ -1,75 +1,29 @@
-import {
-  AlertTriangle,
-  ArrowLeft,
-  CheckCircle2,
-  Clock3,
-  ExternalLink,
-  FolderCog,
-  LifeBuoy,
-  Link2,
-  RotateCcw,
-  Settings2,
-} from "lucide-react";
+import { ArrowLeft, CheckCircle2, ExternalLink, LifeBuoy, RotateCcw } from "lucide-react";
 import { type KeyboardEvent, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 
-import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
+import {
+  ErrorCodeDisclosure,
+  RecoveryConcernIcon,
+  RecoveryProblem,
+  TaskRecoveryActions,
+} from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { RecoveryAction } from "@/generated/bindings";
-import { localizedErrorMessage, parseAppError, recoveryActionsForError } from "@/lib/errors";
+import { localizedErrorMessage } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
 import { sanitizeUrlForDisplay } from "@/lib/utils";
 import { useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
 import type { Task } from "@/types/task";
+import { errorCodeForTask, RECOVERY_CONCERNS, type RecoveryConcern, recoveryConcern } from "./recovery-center-logic";
 
-type AttentionCategory = "storage" | "source" | "runtime" | "retry" | "other";
-type AttentionFilter = "all" | AttentionCategory;
-
-const CATEGORY_ORDER: AttentionCategory[] = ["storage", "source", "runtime", "retry", "other"];
-
-const STORAGE_ERROR_CODES = new Set([
-  "disk_write_failed",
-  "final_path_conflict",
-  "temp_file_missing",
-  "temp_file_smaller_than_progress",
-]);
-const SOURCE_ERROR_CODES = new Set([
-  "auth_headers_expired",
-  "http_denied",
-  "http_not_found",
-  "remote_changed",
-  "resume_unavailable",
-]);
-const RETRY_ERROR_CODES = new Set(["server_rate_limited"]);
-const STORAGE_ACTIONS = new Set<RecoveryAction>(["choose_another_name", "choose_another_folder", "free_disk_space"]);
-const SOURCE_ACTIONS = new Set<RecoveryAction>(["check_url"]);
-const RUNTIME_ACTIONS = new Set<RecoveryAction>(["configure_ffmpeg", "manage_sftp_host_keys", "restart"]);
-const RETRY_ACTIONS = new Set<RecoveryAction>(["retry", "retry_later"]);
-
-function actionsForTask(task: Task): RecoveryAction[] {
-  return task.recoveryActions.length > 0 ? task.recoveryActions : recoveryActionsForError(task.errorMessage);
-}
-
-function errorCodeForTask(task: Task): string | null {
-  return task.errorCode ?? parseAppError(task.errorMessage)?.code ?? null;
-}
-
-export function attentionCategory(task: Task): AttentionCategory {
-  const errorCode = errorCodeForTask(task);
-  if (errorCode && SOURCE_ERROR_CODES.has(errorCode)) return "source";
-  if (errorCode && STORAGE_ERROR_CODES.has(errorCode)) return "storage";
-  if (errorCode && RETRY_ERROR_CODES.has(errorCode)) return "retry";
-
-  const actions = actionsForTask(task);
-  if (actions.some((action) => SOURCE_ACTIONS.has(action))) return "source";
-  if (actions.some((action) => STORAGE_ACTIONS.has(action))) return "storage";
-  if (actions.some((action) => RUNTIME_ACTIONS.has(action))) return "runtime";
-  if (actions.some((action) => RETRY_ACTIONS.has(action))) return "retry";
-  return "other";
-}
+// Grouped by the Recovery Center's concern vocabulary rather than a taxonomy
+// of its own: with two sets of names the same task was "Source" here and
+// "Remote changed" one click away, and users read that as two problems.
+type AttentionFilter = "all" | RecoveryConcern;
 
 export function AttentionCenter({
   taskIds,
@@ -114,20 +68,20 @@ export function AttentionCenter({
   }, [selectTask, selectedId, selectedTask]);
 
   const grouped = useMemo(() => {
-    const groups = new Map<AttentionCategory, Task[]>();
-    for (const category of CATEGORY_ORDER) groups.set(category, []);
-    for (const task of tasks) groups.get(attentionCategory(task))?.push(task);
+    const groups = new Map<RecoveryConcern, Task[]>();
+    for (const concern of RECOVERY_CONCERNS) groups.set(concern, []);
+    for (const task of tasks) groups.get(recoveryConcern(task))?.push(task);
     return groups;
   }, [tasks]);
-  const visibleGroups = CATEGORY_ORDER.map((category) => ({
+  const visibleGroups = RECOVERY_CONCERNS.map((category) => ({
     category,
     tasks: grouped.get(category) ?? [],
   })).filter((group) => group.tasks.length > 0 && (filter === "all" || filter === group.category));
   // Flat order for roving tabindex across category sections (mirrors QueueCenter).
   const flatTasks = useMemo(() => visibleGroups.flatMap((group) => group.tasks), [visibleGroups]);
   const categoryCounts = Object.fromEntries(
-    CATEGORY_ORDER.map((category) => [category, grouped.get(category)?.length ?? 0]),
-  ) as Record<AttentionCategory, number>;
+    RECOVERY_CONCERNS.map((category) => [category, grouped.get(category)?.length ?? 0]),
+  ) as Record<RecoveryConcern, number>;
 
   const chooseTask = (task: Task) => {
     selectTask(task.id);
@@ -190,9 +144,9 @@ export function AttentionCenter({
             <TabsTrigger value="all" className="h-7 px-2 text-xs">
               {t("attentionCenter.filterAll")}
             </TabsTrigger>
-            {CATEGORY_ORDER.filter((category) => categoryCounts[category] > 0).map((category) => (
+            {RECOVERY_CONCERNS.filter((category) => categoryCounts[category] > 0).map((category) => (
               <TabsTrigger key={category} value={category} className="h-7 gap-1 px-2 text-xs">
-                {t(`attentionCenter.category.${category}`)}
+                {t(`recoveryCenter.concern.${category}`)}
                 <span className="font-mono text-xs text-text-muted">{categoryCounts[category]}</span>
               </TabsTrigger>
             ))}
@@ -204,9 +158,9 @@ export function AttentionCenter({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">{t("attentionCenter.filterAll")}</SelectItem>
-            {CATEGORY_ORDER.filter((category) => categoryCounts[category] > 0).map((category) => (
+            {RECOVERY_CONCERNS.filter((category) => categoryCounts[category] > 0).map((category) => (
               <SelectItem key={category} value={category}>
-                {t(`attentionCenter.category.${category}`)} ({categoryCounts[category]})
+                {t(`recoveryCenter.concern.${category}`)} ({categoryCounts[category]})
               </SelectItem>
             ))}
           </SelectContent>
@@ -215,7 +169,7 @@ export function AttentionCenter({
             lives in the Recovery Center workspace. */}
         <Button variant="outline" size="sm" className="h-8" onClick={() => setNav("recovery")}>
           <LifeBuoy className="h-3.5 w-3.5" aria-hidden />
-          {t("nav.recovery")}
+          {t("recoveryCenter.title")}
         </Button>
       </header>
 
@@ -258,12 +212,12 @@ export function AttentionCenter({
                 {visibleGroups.map((group) => (
                   <section key={group.category} aria-labelledby={`attention-group-${group.category}`}>
                     <div className="sticky top-0 z-10 flex h-8 items-center gap-2 border-b border-border-divider bg-surface-base/95 px-3 backdrop-blur-sm md:px-4">
-                      <CategoryIcon category={group.category} className="h-3.5 w-3.5 text-status-warning" />
+                      <RecoveryConcernIcon concern={group.category} className="h-3.5 w-3.5 text-status-warning" />
                       <h2
                         id={`attention-group-${group.category}`}
                         className="text-xs font-semibold text-text-secondary"
                       >
-                        {t(`attentionCenter.category.${group.category}`)}
+                        {t(`recoveryCenter.concern.${group.category}`)}
                       </h2>
                       <span className="font-mono text-xs text-text-muted">{group.tasks.length}</span>
                     </div>
@@ -276,7 +230,7 @@ export function AttentionCenter({
                     {/* biome-ignore lint/a11y/useSemanticElements: keep parity with the TaskList/QueueCenter list containers — a semantic <ul> would fight the grouped layout and key handling. */}
                     <div
                       role="list"
-                      aria-label={t(`attentionCenter.category.${group.category}`)}
+                      aria-label={t(`recoveryCenter.concern.${group.category}`)}
                       onKeyDown={handleListKeyDown}
                     >
                       {group.tasks.map((task) => (
@@ -333,7 +287,7 @@ function AttentionTaskRow({
   onSelect,
 }: {
   task: Task;
-  category: AttentionCategory;
+  category: RecoveryConcern;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -360,7 +314,7 @@ function AttentionTaskRow({
       }`}
     >
       <span className="flex h-7 w-7 items-center justify-center rounded-md bg-status-warning/12 text-status-warning">
-        <CategoryIcon category={category} className="h-4 w-4" />
+        <RecoveryConcernIcon concern={category} className="h-4 w-4" />
       </span>
       <span className="min-w-0">
         <span className="block truncate text-sm font-semibold leading-5 text-text-primary">{task.fileName}</span>
@@ -388,7 +342,6 @@ function AttentionDetail({
   onShowDetails?: (task: Task) => void;
 }) {
   const { t } = useTranslation();
-  const category = attentionCategory(task);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex min-h-12 items-center gap-2 border-b border-border-divider px-3 py-2 md:px-4">
@@ -416,28 +369,18 @@ function AttentionDetail({
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6 md:py-5">
         <div className="mx-auto max-w-3xl space-y-6">
           <section aria-labelledby="attention-problem-title">
-            <div className="flex items-start gap-3">
-              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-status-warning/12 text-status-warning">
-                <CategoryIcon category={category} className="h-4 w-4" />
-              </span>
-              <div className="min-w-0">
-                <h3 id="attention-problem-title" className="text-sm font-semibold leading-5 text-text-primary">
-                  {t(`attentionCenter.category.${category}`)}
-                </h3>
-                <p className="mt-1 max-w-[65ch] text-sm leading-5 text-text-secondary">
-                  {task.errorMessage
-                    ? localizedErrorMessage(task.errorMessage, t)
-                    : t("attentionCenter.actionRequired")}
-                </p>
-              </div>
-            </div>
+            <RecoveryProblem
+              task={task}
+              headingId="attention-problem-title"
+              fallbackMessage={t("attentionCenter.actionRequired")}
+            />
           </section>
 
           <section className="border-t border-border-divider pt-5" aria-labelledby="attention-actions-title">
             <h3 id="attention-actions-title" className="mb-3 text-xs font-medium text-text-muted">
               {t("attentionCenter.recommendedActions")}
             </h3>
-            <TaskRecoveryActions task={task} onResolve={onResolve} />
+            <TaskRecoveryActions task={task} onResolve={onResolve} showMessage={false} />
           </section>
 
           <section className="border-t border-border-divider pt-5" aria-labelledby="attention-context-title">
@@ -448,12 +391,8 @@ function AttentionDetail({
               <DetailRow label={t("attentionCenter.source")} value={task.sourceKey} />
               <DetailRow label={t("attentionCenter.protocol")} value={task.protocol.toUpperCase()} mono />
               <DetailRow label={t("attentionCenter.saveDirectory")} value={task.saveDir} />
-              <DetailRow
-                label={t("attentionCenter.errorCode")}
-                value={errorCodeForTask(task) ?? t("attentionCenter.notAvailable")}
-                mono
-              />
             </dl>
+            <ErrorCodeDisclosure label={t("attentionCenter.errorCode")} code={errorCodeForTask(task)} />
           </section>
         </div>
       </div>
@@ -513,12 +452,4 @@ function AttentionEmpty({
       ) : null}
     </div>
   );
-}
-
-function CategoryIcon({ category, className }: { category: AttentionCategory; className?: string }) {
-  if (category === "storage") return <FolderCog className={className} aria-hidden />;
-  if (category === "source") return <Link2 className={className} aria-hidden />;
-  if (category === "runtime") return <Settings2 className={className} aria-hidden />;
-  if (category === "retry") return <Clock3 className={className} aria-hidden />;
-  return <AlertTriangle className={className} aria-hidden />;
 }

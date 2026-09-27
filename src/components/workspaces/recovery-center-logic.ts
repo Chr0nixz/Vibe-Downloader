@@ -56,9 +56,28 @@ const CONCERN_BY_CODE: Record<string, RecoveryConcern> = {
   task_credentials_encrypt_failed: "auth",
   task_credentials_decrypt_failed: "auth",
   task_credentials_invalid: "auth",
+  // Server-side authentication rejections belong with credential repair:
+  // rotating the stored secret is the fix, not a blind retry. These codes
+  // come from the HTTP family and the FTP/SFTP login paths.
+  http_denied: "auth",
+  ftp_auth_failed: "auth",
+  sftp_auth_failed: "auth",
   // Tooling gaps belong with protocol handling, not "internal".
   ffmpeg_missing: "protocol",
   disk_write_failed: "disk",
+  // A name clash at the save path is fixed by the same moves as a full disk
+  // (another name or folder). Its backend category is "other", which would
+  // file it under the catch-all now that the Attention Center groups by
+  // concern too.
+  final_path_conflict: "disk",
+  // The restart-class codes name their concern outright. Without these a task
+  // with no failure category fell through to "other", so the same task sat
+  // under "Source" in the Attention Center and the catch-all here.
+  remote_changed: "remoteChanged",
+  resume_unavailable: "resume",
+  resume_mismatch: "resume",
+  temp_file_missing: "resume",
+  temp_file_smaller_than_progress: "resume",
 };
 
 export function errorCodeForTask(task: Task): string | null {

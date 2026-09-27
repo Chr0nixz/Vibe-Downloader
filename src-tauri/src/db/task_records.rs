@@ -130,6 +130,7 @@ pub async fn task_stats_snapshot(pool: &SqlitePool) -> Result<TaskStatsSnapshot,
             COALESCE(SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END), 0) AS queued_count,
             COALESCE(SUM(CASE WHEN status = 'needs_attention' THEN 1 ELSE 0 END), 0) AS attention_count,
             COALESCE(SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END), 0) AS paused_count,
+            COALESCE(SUM(CASE WHEN status = 'waiting_network' THEN 1 ELSE 0 END), 0) AS waiting_network_count,
             COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
             COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
             COALESCE(SUM(CASE WHEN status IN ('downloading', 'retrying') THEN speed_bps ELSE 0 END), 0) AS total_speed,
@@ -176,6 +177,7 @@ pub async fn task_stats_snapshot(pool: &SqlitePool) -> Result<TaskStatsSnapshot,
         queued: row.get::<i64, _>("queued_count").to_string(),
         attention: row.get::<i64, _>("attention_count").to_string(),
         paused: row.get::<i64, _>("paused_count").to_string(),
+        waiting_network: row.get::<i64, _>("waiting_network_count").to_string(),
         completed: row.get::<i64, _>("completed_count").to_string(),
         failed: row.get::<i64, _>("failed_count").to_string(),
         total_speed: row.get::<i64, _>("total_speed").to_string(),
@@ -366,6 +368,13 @@ fn append_task_filters(query: &mut QueryBuilder<Sqlite>, input: &TaskListQuery) 
         "paused" => push_static_filter(query, &mut has_where, "status = 'paused'"),
         "queue" => push_static_filter(query, &mut has_where, "status = 'queued'"),
         "attention" => push_static_filter(query, &mut has_where, "status = 'needs_attention'"),
+        // "Needs you": the list view that pairs failed downloads with the
+        // ones waiting on a decision, filtered by cause on the client.
+        "issues" => push_static_filter(
+            query,
+            &mut has_where,
+            "status IN ('failed', 'needs_attention')",
+        ),
         // Recovery Center: both failure classes the page offers to recover.
         "recovery" => push_static_filter(
             query,
@@ -710,10 +719,10 @@ pub async fn list_task_ids_by_statuses(
             ORDER BY updated_at DESC, id ASC
             "#
         }
-        ["paused", "failed", "waiting_network"] => {
+        ["paused", "waiting_network"] => {
             r#"
             SELECT id FROM tasks
-            WHERE status IN ('paused', 'failed', 'waiting_network')
+            WHERE status IN ('paused', 'waiting_network')
             ORDER BY updated_at DESC, id ASC
             "#
         }

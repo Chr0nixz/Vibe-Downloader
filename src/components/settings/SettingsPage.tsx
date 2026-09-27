@@ -114,12 +114,7 @@ const SECTION_IDS = [
 
 type SettingsSectionId = (typeof SECTION_IDS)[number];
 
-const DEFAULT_EXPANDED_SETTINGS_SECTIONS = new Set<SettingsSectionId>([
-  "downloads",
-  "interface",
-  "desktop-integration",
-  "about-updates",
-]);
+const DEFAULT_EXPANDED_SETTINGS_SECTIONS = new Set<SettingsSectionId>(["downloads"]);
 
 const SettingsSearchContext = createContext<{
   query: string;
@@ -496,6 +491,9 @@ export function SettingsPage() {
   const settingsSearchHasMatch = settingsSearchHasResults(settingsSections, settingsSearch);
   const settingsSearchActive = settingsSearch.trim().length > 0;
   const [activeSection, setActiveSection] = useState<string>(SECTION_IDS[0]);
+  const [expandedSettingsSections, setExpandedSettingsSections] = useState<Set<SettingsSectionId>>(
+    () => new Set(DEFAULT_EXPANDED_SETTINGS_SECTIONS),
+  );
   const sectionNavRef = useRef<HTMLDivElement>(null);
   const isScrollingRef = useRef(false);
 
@@ -541,7 +539,15 @@ export function SettingsPage() {
       title: section.title,
       description: section.description,
       summary: section.summary,
-      defaultOpen: DEFAULT_EXPANDED_SETTINGS_SECTIONS.has(id),
+      open: expandedSettingsSections.has(id),
+      onOpenChange: (open: boolean) => {
+        setExpandedSettingsSections((current) => {
+          const next = new Set(current);
+          if (open) next.add(id);
+          else next.delete(id);
+          return next;
+        });
+      },
       matchesSearch: settingsSectionMatchesQuery(section, settingsSearch),
     };
   };
@@ -580,6 +586,15 @@ export function SettingsPage() {
 
   const scrollToSection = useCallback((id: string) => {
     setActiveSection(id);
+    const sectionId = id as SettingsSectionId;
+    if (SECTION_IDS.includes(sectionId)) {
+      setExpandedSettingsSections((current) => {
+        if (current.has(sectionId)) return current;
+        const next = new Set(current);
+        next.add(sectionId);
+        return next;
+      });
+    }
     const element = document.getElementById(id);
     const container = sectionNavRef.current;
     if (!element || !container) return;
@@ -1438,6 +1453,7 @@ export function SettingsPage() {
                       ["1073741824", "GB/s"],
                     ]}
                     allowEmpty
+                    emptyUnit={MEGABYTE_UNIT}
                   />
                 </SettingsRow>
 
@@ -1522,6 +1538,7 @@ export function SettingsPage() {
                       ["1073741824", "GB/s"],
                     ]}
                     allowEmpty
+                    emptyUnit={MEGABYTE_UNIT}
                   />
                 </SettingsRow>
 
@@ -1614,6 +1631,7 @@ export function SettingsPage() {
                       ["1073741824", "GB/s"],
                     ]}
                     allowEmpty
+                    emptyUnit={MEGABYTE_UNIT}
                   />
                 </SettingsRow>
                 <SettingsSubHeading title={t("settings.scheduleGroupCompletion")} />
@@ -2344,7 +2362,8 @@ function SettingsSection({
   title,
   description,
   summary,
-  defaultOpen = false,
+  open,
+  onOpenChange,
   matchesSearch = true,
   children,
 }: {
@@ -2352,14 +2371,14 @@ function SettingsSection({
   title: string;
   description?: string;
   summary?: string;
-  defaultOpen?: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   matchesSearch?: boolean;
   children: ReactNode;
 }) {
   const { t } = useTranslation();
   const { query, setQuery } = useSettingsSearch();
   const searchActive = query.trim().length > 0;
-  const [open, setOpen] = useState(defaultOpen);
   const contentVisible = searchActive ? matchesSearch : open;
   const panelId = id ? `${id}-settings-section-panel` : undefined;
 
@@ -2384,7 +2403,9 @@ function SettingsSection({
           className={cn(
             "mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors",
             "hover:bg-surface-base/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
+            "disabled:cursor-not-allowed disabled:opacity-60",
           )}
+          disabled={searchActive}
           aria-expanded={contentVisible}
           aria-controls={panelId}
           aria-label={
@@ -2392,7 +2413,7 @@ function SettingsSection({
           }
           onClick={() => {
             if (searchActive) return;
-            setOpen((current) => !current);
+            onOpenChange(!open);
           }}
         >
           <ChevronDown
@@ -2427,6 +2448,7 @@ function ByteUnitInput({
   placeholder,
   allowEmpty,
   unitAriaLabel,
+  emptyUnit,
 }: {
   id: string;
   valueBytes: string;
@@ -2436,8 +2458,10 @@ function ByteUnitInput({
   placeholder?: string;
   allowEmpty?: boolean;
   unitAriaLabel?: string;
+  /** Unit to offer while the field is empty; defaults to the smallest. */
+  emptyUnit?: string;
 }) {
-  const initialUnit = bestUnit(valueBytes, units);
+  const initialUnit = bestUnit(valueBytes, units, emptyUnit);
   const [unit, setUnit] = useState(initialUnit);
   const unitSize = Number(unit);
   const amount = displayAmount(valueBytes, unitSize, allowEmpty);
@@ -2491,9 +2515,18 @@ function ByteUnitInput({
   );
 }
 
-function bestUnit(valueBytes: string, units: readonly (readonly [string, string])[]): string {
+/**
+ * Speed limits start in MB/s: with B/s preselected, typing "5" into an empty
+ * field capped every download at 5 bytes per second.
+ */
+const MEGABYTE_UNIT = "1048576";
+
+function bestUnit(valueBytes: string, units: readonly (readonly [string, string])[], emptyUnit?: string): string {
   const bytes = Number(valueBytes);
-  if (!Number.isFinite(bytes) || bytes <= 0) return units[0]?.[0] ?? "1";
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    if (emptyUnit && units.some(([unit]) => unit === emptyUnit)) return emptyUnit;
+    return units[0]?.[0] ?? "1";
+  }
   const exact = [...units].reverse().find(([unit]) => bytes >= Number(unit) && bytes % Number(unit) === 0);
   return exact?.[0] ?? units[0]?.[0] ?? "1";
 }

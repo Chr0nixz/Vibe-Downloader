@@ -1,6 +1,10 @@
 /** Protocol helpers for TaskDetails diagnostics presentation. */
 
+import type { TFunction } from "i18next";
+import { resumeVerdict } from "@/components/tasks/row-recovery";
 import type { TranslationKey } from "@/i18n";
+import { formatDateTime } from "@/lib/format-date";
+import type { Task } from "@/types/task";
 
 export function isTorrentProtocol(protocol: string): boolean {
   return protocol === "bt" || protocol === "magnet";
@@ -88,4 +92,78 @@ export function parseUrlHostPort(url: string, defaultPort: number): { host: stri
   } catch {
     return null;
   }
+}
+
+/** Health summaries that only restate the status badge next to the file name. */
+const RESTATING_SUMMARIES = new Set([
+  "taskDiagnostics.idle",
+  "taskDiagnostics.downloading",
+  "taskDiagnostics.completed",
+  "taskDiagnostics.queued",
+  "taskDiagnostics.waitingNetwork",
+]);
+
+/**
+ * The details panel's one-line verdict: what the engine knows that the badge
+ * and the progress numbers do not ("Server limit detected"). Null when there is
+ * nothing to add, so the panel never prints a sentence for its own sake.
+ */
+export function detailDiagnosis(
+  task: Pick<Task, "status" | "healthSummary" | "retryAfterAt">,
+  t: TFunction,
+): string | null {
+  // The recovery block right below already states the problem and its cause.
+  if (task.status === "failed" || task.status === "needs_attention") return null;
+  if (task.status === "queued" && task.retryAfterAt) {
+    return t("task.retryAfter", { time: formatDateTime(task.retryAfterAt, "time") });
+  }
+  const summary = task.healthSummary;
+  // Only stable keys: raw engine text stays in the logs tab (UX-11), and an
+  // English sentence here would ignore the chosen language.
+  if (!summary?.startsWith("taskDiagnostics.") || RESTATING_SUMMARIES.has(summary)) return null;
+  return t(summary as TranslationKey);
+}
+
+export interface CapabilityChip {
+  labelKey: TranslationKey;
+  /** Warning marks the one capability gap that can cost the user bytes. */
+  tone: "neutral" | "warning";
+}
+
+/**
+ * The server capabilities that explain a download's behaviour: whether it can
+ * split into ranges and whether a pause or crash keeps the bytes. Only for
+ * single-file transfer protocols, where both are server-decided; stream and
+ * swarm protocols resume per segment or piece, so the same words would
+ * mislead. Shown only while the transfer can still run: the flags come from
+ * the first probe and are not cleared when a server later refuses a resume, so
+ * on a stopped task "Resumable" could contradict the recovery block below.
+ */
+export function capabilityChips(
+  task: Pick<Task, "status" | "protocol" | "supportsParallel" | "supportsResume"> &
+    Partial<Pick<Task, "errorMessage" | "recoveryActions" | "errorCode">>,
+): CapabilityChip[] {
+  if (!isHttpLikeProtocol(task.protocol) && !isFtpSftpProtocol(task.protocol)) return [];
+  if (!showsTransferRates(task.status)) return [];
+  return [
+    {
+      labelKey: task.supportsParallel
+        ? "taskDetails.capability.rangeSupported"
+        : "taskDetails.capability.singleConnection",
+      tone: "neutral",
+    },
+    (
+      task.status !== "paused" && task.status !== "waiting_network"
+        ? task.supportsResume
+        : resumeVerdict(task) === "available"
+    )
+      ? { labelKey: "taskDetails.capability.resumable", tone: "neutral" }
+      : { labelKey: "taskDetails.capability.notResumable", tone: "warning" },
+  ];
+}
+
+/** Speed and ETA describe a transfer in progress; for a stopped task they are
+ * two rows of dashes. */
+export function showsTransferRates(status: Task["status"]): boolean {
+  return status !== "completed" && status !== "failed" && status !== "needs_attention";
 }

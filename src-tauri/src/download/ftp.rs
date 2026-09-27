@@ -236,6 +236,37 @@ pub async fn probe_ftp_directory_url(
     proxy_config: ResolvedProxyConfig,
     credentials: Option<&db::TaskCredentials>,
 ) -> Result<FtpDirectoryProbe, String> {
+    probe_ftp_directory_url_cancellable(input_url, proxy_config, credentials, None).await
+}
+
+/// ARC-55: directory probe with a total deadline + optional cancel. Connect
+/// already had FTP_CONNECT_BUDGET, but CWD/PWD/MLSD/LIST ran unbounded — a
+/// server that accepts the control socket then stalls held the dialog open.
+pub async fn probe_ftp_directory_url_cancellable(
+    input_url: &str,
+    proxy_config: ResolvedProxyConfig,
+    credentials: Option<&db::TaskCredentials>,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<FtpDirectoryProbe, String> {
+    let future = probe_ftp_directory_inner(input_url, proxy_config, credentials, cancel_token);
+    match crate::download::bounded_probe(future, cancel_token).await {
+        crate::download::BoundedProbeOutcome::Done(probe) => Ok(probe),
+        crate::download::BoundedProbeOutcome::Error(error) => Err(error),
+        crate::download::BoundedProbeOutcome::Canceled => Err("Download canceled.".to_string()),
+        crate::download::BoundedProbeOutcome::Timeout => Err(engine_error(
+            "ftp_directory_probe_timeout",
+            "FTP directory probe exceeded its 90 second budget.",
+            true,
+        )),
+    }
+}
+
+async fn probe_ftp_directory_inner(
+    input_url: &str,
+    proxy_config: ResolvedProxyConfig,
+    credentials: Option<&db::TaskCredentials>,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<FtpDirectoryProbe, String> {
     let mut target = FtpTarget::parse_directory(input_url)?;
     if let Some(credentials) = credentials {
         if !credentials.username.is_empty() {
@@ -244,7 +275,7 @@ pub async fn probe_ftp_directory_url(
         target.password = credentials.password.clone();
     }
     let mut diagnostics = Vec::new();
-    let mut session = connect_session(&target, &proxy_config, None).await?;
+    let mut session = connect_session(&target, &proxy_config, cancel_token).await?;
     session.transfer_type(FileType::Binary).await?;
     session.set_mode(Mode::Passive);
     let cwd_result = session.cwd(&target.path).await;

@@ -11,6 +11,7 @@ import {
   TIMELINE_MILESTONE_KEYS,
   TIMELINE_TRIGGER_KEYS,
   timelineMilestones,
+  timelinePayloadSummary,
 } from "@/lib/integrity-passport";
 
 /**
@@ -74,6 +75,11 @@ describe("integrity passport key tables", () => {
           "taskDetails.passport.report.resume",
           "taskDetails.passport.report.validators",
           "taskDetails.passport.report.validatorsNone",
+          "taskDetails.passport.report.rangeSupported",
+          "taskDetails.passport.report.rangeNotObserved",
+          "taskDetails.passport.rangeLabel",
+          "taskDetails.passport.rangeSupported",
+          "taskDetails.passport.rangeNotObserved",
           "taskDetails.passport.report.checksumNotProvided",
           "taskDetails.passport.report.checksumVerified",
           "taskDetails.passport.report.checksumFailed",
@@ -163,6 +169,9 @@ describe("buildPassportTextReport", () => {
     expect(report).toContain("deadbeef");
     expect(report).toContain("taskDetails.passport.validator.etag");
     expect(report).toContain("taskDetails.passport.staging.complete");
+    // Range is a capability, not a validator: it gets its own line.
+    expect(report).not.toContain("taskDetails.passport.validator.range");
+    expect(report).toContain("taskDetails.passport.report.rangeSupported");
   });
 
   it("masks credentials embedded in the source URL", () => {
@@ -247,6 +256,34 @@ describe("timelineMilestones", () => {
     expect(milestones).toHaveLength(1);
     expect(milestones[0].trigger).toBeNull();
     expect(milestones[0].labelKey).toBe("taskEvent.retrying");
+  });
+});
+
+describe("timelinePayloadSummary", () => {
+  const t = ((key: string) => `t:${key}`) as unknown as TFunction;
+
+  it("localizes structured error payloads instead of printing their JSON", () => {
+    const structured = JSON.stringify({
+      code: "remote_changed",
+      message: "taskDiagnostics.resumeUnavailable",
+      recoverable: true,
+      actions: ["restart"],
+    });
+    expect(timelinePayloadSummary(structured, t)).toBe("t:taskDiagnostics.resumeUnavailable");
+
+    const coded = JSON.stringify({ code: "disk_write_failed", message: "raw", recoverable: true, actions: [] });
+    expect(timelinePayloadSummary(coded, t)).toMatch(/^t:errors\./);
+  });
+
+  it("localizes bare diagnostic keys", () => {
+    expect(timelinePayloadSummary("taskDiagnostics.resumeUnavailable", t)).toBe("t:taskDiagnostics.resumeUnavailable");
+  });
+
+  it("keeps raw engine text and unmapped codes out of the overview", () => {
+    expect(timelinePayloadSummary("seg-3: connection reset by peer", t)).toBeNull();
+    const unmapped = JSON.stringify({ code: "no_such_code", message: "raw", recoverable: false, actions: [] });
+    expect(timelinePayloadSummary(unmapped, t)).toBeNull();
+    expect(timelinePayloadSummary(null, t)).toBeNull();
   });
 });
 

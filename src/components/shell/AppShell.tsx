@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { CommandBar } from "@/components/shell/CommandBar";
@@ -7,6 +7,7 @@ import type { AttentionDialogRequest } from "@/components/shell/ResolveAttention
 import { ShutdownOverlay } from "@/components/shell/ShutdownOverlay";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { StatusBar } from "@/components/shell/StatusBar";
+import { isOverlayKey } from "@/components/shell/shell-keys";
 import { TitleBar } from "@/components/shell/TitleBar";
 import type { ReorderAction } from "@/components/tasks/TaskContextMenu";
 import { TaskList } from "@/components/tasks/TaskList";
@@ -20,6 +21,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { LiveRegion } from "@/components/ui/live-region";
 import { ToastViewport } from "@/components/ui/toast";
 import type {
   CompletionAction,
@@ -30,6 +32,7 @@ import type {
 } from "@/generated/bindings";
 import { useClipboardLinkMonitor } from "@/hooks/use-clipboard-link-monitor";
 import { useFileDropMonitor } from "@/hooks/use-file-drop-monitor";
+import { useChromeLayout } from "@/hooks/use-shell-layout";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import type { TranslationKey } from "@/i18n";
 import { localizedErrorMessage } from "@/lib/errors";
@@ -41,6 +44,12 @@ import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
 
 const log = createLogger("app-shell");
 
+import {
+  allowedTransferActions,
+  hasInlineRecovery,
+  pauseWouldDiscardProgress,
+  primaryRecoveryAction,
+} from "@/components/tasks/row-recovery";
 import { isSupportedLocalFile, resolveLocalFile } from "@/lib/local-file";
 import {
   bulkDeleteTasks,
@@ -176,8 +185,11 @@ export function AppShell() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
+  const newDownloadReturnFocusRef = useRef<HTMLElement | null>(null);
   const [newDownloadInitialState, setNewDownloadInitialState] = useState<NewDownloadInitialState | null>(null);
   const [newDownloadDraftDirty, setNewDownloadDraftDirty] = useState(false);
+  const [newDownloadCreating, setNewDownloadCreating] = useState(false);
+  const [detailAnnouncement, setDetailAnnouncement] = useState("");
   // Hard-confirm dialogs are only used for "delete files too" (irreversible).
   // Metadata-only removal goes through an undoable soft-delete flow.
   const [deleteFilesTarget, setDeleteFilesTarget] = useState<Task | null>(null);
@@ -213,10 +225,11 @@ export function AppShell() {
   const addToast = useToastStore((s) => s.addToast);
   const updateToast = useToastStore((s) => s.updateToast);
 
+  // The attention view is an ordinary list now (one of the "Needs you" cause
+  // filters), so it keeps search, sort, filters, and the details panel.
   const taskSurfaceActive =
     nav !== "settings" &&
     nav !== "about" &&
-    nav !== "attention" &&
     nav !== "queue" &&
     nav !== "storage" &&
     nav !== "recovery" &&
@@ -291,9 +304,14 @@ export function AppShell() {
 
   const toggleTransfer = useCallback(
     (task: Task) => {
-      if (task.status === "downloading" || task.status === "retrying" || task.status === "queued") {
+      const action = allowedTransferActions(task)[0];
+      if (action === "pause") {
+        if (pauseWouldDiscardProgress(task)) {
+          setAttentionRequest({ task, action: "pause" });
+          return;
+        }
         void runTaskAction(() => pauseTask(task.id), task.id);
-      } else if (task.status !== "completed" && task.status !== "needs_attention") {
+      } else if (action === "resume") {
         void runTaskAction(() => resumeTask(task.id), task.id);
       }
     },
@@ -302,7 +320,9 @@ export function AppShell() {
 
   const retry = useCallback(
     (task: Task) => {
-      void runTaskAction(() => retryTask(task.id), task.id);
+      if (allowedTransferActions(task).includes("retry")) {
+        void runTaskAction(() => retryTask(task.id), task.id);
+      }
     },
     [runTaskAction],
   );
@@ -410,11 +430,12 @@ export function AppShell() {
   const showTaskDetails = useCallback(
     (task: Task) => {
       const currentNav = useTaskUIStore.getState().nav;
-      if (currentNav === "attention" || currentNav === "queue") setNav("all");
+      if (currentNav === "queue") setNav("all");
       selectTask(task.id);
       setDetailOpen(true);
+      setDetailAnnouncement(t("taskDetails.openedAnnouncement", { name: task.fileName }));
     },
-    [selectTask, setDetailOpen, setNav],
+    [selectTask, setDetailOpen, setNav, t],
   );
 
   const updateQueueOptions = useCallback(
@@ -487,18 +508,21 @@ export function AppShell() {
 
   const bulkPause = useCallback(
     (selectedTasks: Task[]) => {
-      const ids = selectedTasks
-        .filter((task) => task.status === "downloading" || task.status === "retrying" || task.status === "queued")
-        .map((task) => task.id);
+      const pauseable = selectedTasks.filter((task) => allowedTransferActions(task).includes("pause"));
+      const skipped = pauseable.filter(pauseWouldDiscardProgress).length;
+      const ids = pauseable.filter((task) => !pauseWouldDiscardProgress(task)).map((task) => task.id);
+      if (skipped > 0) {
+        addToast({ tone: "info", title: t("toast.bulkSkippedResumeUnavailable", { skipped }) });
+      }
       void runBulkTransferAction(ids, "pause", t("taskList.bulkPause"));
     },
-    [runBulkTransferAction, t],
+    [addToast, runBulkTransferAction, t],
   );
 
   const bulkResume = useCallback(
     (selectedTasks: Task[]) => {
       const ids = selectedTasks
-        .filter((task) => task.status === "paused" || task.status === "failed" || task.status === "waiting_network")
+        .filter((task) => allowedTransferActions(task).includes("resume"))
         .map((task) => task.id);
       void runBulkTransferAction(ids, "resume", t("taskList.bulkResume"));
     },
@@ -507,7 +531,7 @@ export function AppShell() {
 
   const bulkRetry = useCallback(
     (selectedTasks: Task[]) => {
-      const ids = selectedTasks.filter((task) => task.status !== "completed").map((task) => task.id);
+      const ids = selectedTasks.filter((task) => allowedTransferActions(task).includes("retry")).map((task) => task.id);
       void runBulkTransferAction(ids, "retry", t("taskList.bulkRetry"));
     },
     [runBulkTransferAction, t],
@@ -515,7 +539,7 @@ export function AppShell() {
 
   // UX-05: pause/resume every matching task in the DB, not the loaded page.
   const pauseAll = useCallback(async () => {
-    const label = t("taskList.bulkPause");
+    const label = t("taskList.pauseAll");
     const toastKey = "bulk-pause-all";
     const toastId = addToast({
       tone: "info",
@@ -530,7 +554,8 @@ export function AppShell() {
         updateToast(toastId, {
           tone: "success",
           title: t("toast.bulkComplete", { action: label, done: result.succeeded, total }),
-          description: result.skipped > 0 ? t("toast.bulkSkippedDetail", { skipped: result.skipped }) : undefined,
+          description:
+            result.skipped > 0 ? t("toast.bulkSkippedResumeUnavailable", { skipped: result.skipped }) : undefined,
         });
       } else {
         updateToast(toastId, {
@@ -540,7 +565,10 @@ export function AppShell() {
             failed: result.failed,
             total,
           }),
-          description: t("toast.bulkSkippedDetail", { skipped: result.skipped }),
+          description:
+            result.skipped > 0
+              ? t("toast.bulkSkippedResumeUnavailable", { skipped: result.skipped })
+              : t("toast.bulkFailureDetail", { failed: result.failed, total }),
         });
       }
     } catch (err) {
@@ -553,7 +581,7 @@ export function AppShell() {
   }, [addToast, updateToast, refreshTasks, t]);
 
   const resumeAll = useCallback(async () => {
-    const label = t("taskList.bulkResume");
+    const label = t("taskList.resumeAll");
     const toastKey = "bulk-resume-all";
     const toastId = addToast({
       tone: "info",
@@ -635,6 +663,9 @@ export function AppShell() {
           try {
             await deleteTask(id, false);
             removePendingDelete(id);
+            // PERF-18: drop the entity from the cache so a confirmed delete
+            // does not linger in taskById until the next page load.
+            useTaskDataStore.getState().evictTasks([id]);
           } catch (err) {
             log.error("soft-delete commit failed", err);
             removePendingDelete(id);
@@ -684,6 +715,7 @@ export function AppShell() {
           try {
             await bulkDeleteTasks(freshIds, false);
             for (const id of freshIds) removePendingDelete(id);
+            useTaskDataStore.getState().evictTasks(freshIds);
             addToast({
               tone: "success",
               title: t("toast.bulkComplete", { action: label, done: freshIds.length, total: freshIds.length }),
@@ -746,6 +778,7 @@ export function AppShell() {
       const ids = targets.map((task) => task.id);
       try {
         const done = await bulkDeleteTasks(ids, true);
+        useTaskDataStore.getState().evictTasks(ids);
         addToast({
           tone: "success",
           title: t("toast.bulkComplete", { action: label, done, total }),
@@ -764,12 +797,24 @@ export function AppShell() {
   }, [addToast, bulkDeleteFilesTargets, clearSelectedIds, t]);
 
   const openNewDownload = useCallback((initialState?: NewDownloadInitialState) => {
+    const active = document.activeElement;
+    newDownloadReturnFocusRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
     if (initialState) {
       setNewDownloadInitialState(initialState);
     } else {
       setNewDownloadInitialState(null);
     }
     setNewDownloadOpen(true);
+  }, []);
+
+  const handleNewDownloadOpenChange = useCallback((open: boolean) => {
+    setNewDownloadOpen(open);
+    if (open) return;
+    const target = newDownloadReturnFocusRef.current;
+    newDownloadReturnFocusRef.current = null;
+    if (target?.isConnected) {
+      requestAnimationFrame(() => target.focus({ preventScroll: true }));
+    }
   }, []);
 
   // Stable shell handlers so memoized children (TaskList / TaskRow) are not
@@ -779,6 +824,19 @@ export function AppShell() {
   const openOnboarding = useCallback(() => setOnboardingOpen(true), []);
   const openAbout = useCallback(() => setNav("about"), [setNav]);
   const requestDeleteFiles = useCallback((task: Task) => setDeleteFilesTarget(task), []);
+
+  // Stable identity so the lazily loaded details panel does not re-render on
+  // every AppShell render just because a fresh object was passed.
+  const detailActions = useMemo(
+    () => ({
+      onToggleTransfer: toggleTransfer,
+      onRetry: retry,
+      onOpenFile: openFile,
+      onOpenFolder: openFolder,
+      onDelete: softDelete,
+    }),
+    [toggleTransfer, retry, openFile, openFolder, softDelete],
+  );
 
   const applyClipboardDownload = useCallback((sourceId: string, urls: string[]) => {
     if (urls.length === 0) return;
@@ -974,6 +1032,25 @@ export function AppShell() {
     [addToast, openFolder, selectTask, setDetailOpen, setNav, submitAttentionResolution, t],
   );
 
+  // Mod+R and the palette run the same fix the row's banner offers, so a
+  // restart-only failure is reachable from the keyboard. Restart keeps its
+  // cost confirmation because it goes through resolveAttention like a click.
+  const recoverTask = useCallback(
+    (task: Task) => {
+      const action = primaryRecoveryAction(task);
+      if (!action) {
+        addToast({ tone: "info", title: t("toast.nothingToRecover", { name: task.fileName }) });
+        return;
+      }
+      if (action === "retry" && !hasInlineRecovery(task)) {
+        retry(task);
+        return;
+      }
+      void resolveAttention(task, action);
+    },
+    [addToast, resolveAttention, retry, t],
+  );
+
   useEffect(() => {
     // UX-25: getPlatform already falls back internally; this catch is hygiene
     // so the one-off effect can never produce an unhandled rejection.
@@ -1064,7 +1141,10 @@ export function AppShell() {
   // unlisten and re-listen.
   useClipboardLinkMonitor((payload) => {
     if (payload.urls.length === 0) return;
-    if (newDownloadOpen && newDownloadDraftDirty) {
+    // UX-30: the dialog stays mounted, so a kept draft exists even while the
+    // dialog is closed — gate on the draft itself, not open state, or a
+    // handoff would silently overwrite the draft the guard promised to keep.
+    if (newDownloadDraftDirty) {
       addToast({
         tone: "info",
         title:
@@ -1116,6 +1196,9 @@ export function AppShell() {
   }, [settings?.accentColor]);
 
   const [dropActive, setDropActive] = useState(false);
+  // Linux keeps native window chrome (no in-app titlebar to host the bar).
+  const chromeLayout = useChromeLayout();
+  const mergedChrome = chromeLayout === "merged" && platform !== "linux";
 
   const applyDroppedFile = useCallback((initialState: NewDownloadInitialState) => {
     setNewDownloadInitialState(initialState);
@@ -1137,7 +1220,7 @@ export function AppShell() {
       const name = firstPath.split(/[/\\]/).pop() ?? firstPath;
       try {
         const resolved = await resolveLocalFile(firstPath, name);
-        if (newDownloadOpen && newDownloadDraftDirty) {
+        if (newDownloadDraftDirty) {
           addToast({
             tone: "info",
             title: t("toast.droppedFileReady"),
@@ -1177,7 +1260,9 @@ export function AppShell() {
       // pinyin), keystrokes should go to the IME, not trigger app shortcuts.
       if (event.isComposing) return;
       const target = event.target as HTMLElement;
+      const isCheckbox = target instanceof HTMLInputElement && target.type === "checkbox";
       const isInput = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+      const inOverlay = isOverlayKey(event);
 
       // Read selected task imperatively — not a subscription, so AppShell
       // stays off the per-tick re-render path.
@@ -1218,16 +1303,37 @@ export function AppShell() {
         return;
       }
 
+      if (matchesShortcut(event, "mod+shift+p", platform)) {
+        event.preventDefault();
+        void pauseAll();
+        return;
+      }
+      if (matchesShortcut(event, "mod+shift+r", platform)) {
+        event.preventDefault();
+        void resumeAll();
+        return;
+      }
+
+      // Details can be opened from a row, palette, or the command bar. Keep
+      // Escape meaningful from the list surface as well as inside the drawer.
+      if (!isInput && !inOverlay && event.key === "Escape" && detailOpen) {
+        event.preventDefault();
+        setDetailOpen(false);
+        return;
+      }
+
       // ── Non-input shortcuts ──
 
-      if (!isInput) {
+      // Checkboxes are row selection controls, not text-entry surfaces. Keep
+      // bulk and delete shortcuts available while one has focus.
+      if ((!isInput || isCheckbox) && !inOverlay) {
         if (event.key === "?") {
           event.preventDefault();
           setShortcutPanelOpen((prev) => !prev);
           return;
         }
 
-        // Navigation: Mod+1–4 follows the primary sidebar items.
+        // Navigation: Mod+1–7 follows the sidebar order in nav-shortcuts.ts.
         const navTarget = navFilterForDigit(event.key);
         if (navTarget && matchesShortcut(event, `mod+${event.key}`, platform)) {
           event.preventDefault();
@@ -1273,12 +1379,12 @@ export function AppShell() {
           return;
         }
 
-        // Retry failed task: Mod+R
+        // Recover the selected task: Mod+R. Swallowed even when there is
+        // nothing to recover — the WebView would otherwise reload the whole
+        // app, and a silent no-op read as a broken shortcut.
         if (matchesShortcut(event, "mod+r", platform) && selected) {
-          if (selected.status === "failed" || selected.status === "needs_attention") {
-            event.preventDefault();
-            retry(selected);
-          }
+          event.preventDefault();
+          recoverTask(selected);
           return;
         }
 
@@ -1288,8 +1394,10 @@ export function AppShell() {
         // Mod+R (retry-only). toggleTransfer itself no-ops on completed and
         // needs_attention states, so the shortcut is safe to fire universally.
         if (matchesShortcut(event, "mod+p", platform) && selected) {
-          event.preventDefault();
-          toggleTransfer(selected);
+          if (allowedTransferActions(selected).some((action) => action === "pause" || action === "resume")) {
+            event.preventDefault();
+            toggleTransfer(selected);
+          }
           return;
         }
 
@@ -1359,7 +1467,7 @@ export function AppShell() {
     openNewDownload,
     pendingDeleteIds,
     platform,
-    retry,
+    recoverTask,
     selectTask,
     selectedId,
     setSelectedIds,
@@ -1369,6 +1477,8 @@ export function AppShell() {
     taskIds,
     t,
     toggleTransfer,
+    pauseAll,
+    resumeAll,
   ]);
 
   // UX-02: Suppress WebView native context menus on bubble phase so Radix
@@ -1390,11 +1500,24 @@ export function AppShell() {
     return () => window.removeEventListener("contextmenu", onContextMenu);
   }, []);
 
+  const commandBar = (
+    <CommandBar
+      platform={platform}
+      onOpenPalette={openPalette}
+      onNewDownload={openNewDownload}
+      inputRef={searchInputRef}
+      taskSurfaceActive={taskSurfaceActive}
+      suppressFirstRunTip={onboardingOpen}
+      embedded={mergedChrome}
+    />
+  );
+
   return (
     <div className="flex h-full flex-col">
+      <LiveRegion>{detailAnnouncement}</LiveRegion>
       <a
         href="#main-content"
-        className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-2 focus:z-[100] focus:rounded-md focus:bg-surface-overlay focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-text-primary focus:shadow-[var(--shadow-popover)] focus:ring-2 focus:ring-accent-primary focus:outline-none"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-2 focus:z-[100] focus:rounded-md focus:bg-surface-popover focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-text-primary focus:shadow-[var(--shadow-popover)] focus:ring-2 focus:ring-accent-primary focus:outline-none"
       >
         {t("app.skipToMain")}
       </a>
@@ -1403,22 +1526,19 @@ export function AppShell() {
         onOpenPalette={openPalette}
         onNewDownload={openNewDownload}
         onOpenShortcuts={openShortcutPanel}
+        center={mergedChrome ? commandBar : undefined}
       />
-      <CommandBar
-        platform={platform}
-        onOpenPalette={openPalette}
-        onNewDownload={openNewDownload}
-        inputRef={searchInputRef}
-      />
-      {/* Sidebar sits left at every width — narrow windows are snapped desktop
-          surfaces with pointer + keyboard, so they get the compact rail instead
-          of a phone-style bottom bar. */}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-row">
+      {mergedChrome ? null : commandBar}
+      {/* The shell changes composition at the same tiers as the navigation:
+          a bottom bar on narrow windows, a compact rail on tablet widths, and
+          the expandable rail on desktop. Keeping the list as the flex child
+          lets it retain the available height in every tier. */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
         <Sidebar onNewDownload={openNewDownload} />
         <main
           id="main-content"
           tabIndex={-1}
-          className="flex min-h-0 min-w-0 flex-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary"
+          className="order-1 flex min-h-0 min-w-0 flex-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary md:order-2"
         >
           <TaskList
             onToggleTransfer={toggleTransfer}
@@ -1445,6 +1565,7 @@ export function AppShell() {
             onRefresh={refreshTaskList}
             onReorder={handleReorder}
             onUpdateQueueOptions={updateQueueOptions}
+            platform={platform}
           />
           <Suspense fallback={null}>
             <TaskDetails
@@ -1460,11 +1581,21 @@ export function AppShell() {
                 }
               }}
               onResolveAttention={resolveAttention}
+              actions={detailActions}
             />
           </Suspense>
         </main>
       </div>
-      <StatusBar className="flex" platform={platform} onOpenShortcuts={openShortcutPanel} onOpenAbout={openAbout} />
+      <StatusBar
+        className="flex"
+        platform={platform}
+        onOpenShortcuts={openShortcutPanel}
+        onOpenAbout={openAbout}
+        newDownloadState={newDownloadCreating ? "creating" : newDownloadDraftDirty ? "draft" : null}
+        onOpenNewDownload={openNewDownload}
+        onPauseAll={() => void pauseAll()}
+        onResumeAll={() => void resumeAll()}
+      />
       <ToastViewport />
       {paletteOpen ? (
         <Suspense fallback={null}>
@@ -1476,19 +1607,21 @@ export function AppShell() {
             onNewDownload={openNewDownload}
             onStart={() => {
               const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
-              if (task) void runTaskAction(() => resumeTask(task.id), task.id);
+              if (task && allowedTransferActions(task).includes("resume")) {
+                void runTaskAction(() => resumeTask(task.id), task.id);
+              }
             }}
             onPause={() => {
               const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
-              if (task) void runTaskAction(() => pauseTask(task.id), task.id);
+              if (task) toggleTransfer(task);
             }}
             onDelete={() => {
               const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
               if (task) softDelete(task);
             }}
-            onRetry={() => {
+            onRecover={() => {
               const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
-              if (task) retry(task);
+              if (task) recoverTask(task);
             }}
             onOpenFile={() => {
               const task = selectedId ? useTaskDataStore.getState().taskById[selectedId] : null;
@@ -1514,25 +1647,24 @@ export function AppShell() {
           />
         </Suspense>
       ) : null}
-      {newDownloadOpen ? (
-        <Suspense fallback={null}>
-          <NewDownloadDialog
-            open={newDownloadOpen}
-            onOpenChange={(open) => {
-              setNewDownloadOpen(open);
-              if (!open) setNewDownloadDraftDirty(false);
-            }}
-            initialSourceId={newDownloadInitialState?.sourceId}
-            initialUrl={newDownloadInitialState?.url}
-            initialBatchInput={newDownloadInitialState?.batchInput}
-            onDraftStateChange={setNewDownloadDraftDirty}
-            onCreated={(task) => {
-              useTaskDataStore.getState().upsertTask(task);
-              selectTask(task.id);
-            }}
-          />
-        </Suspense>
-      ) : null}
+      {/* UX-30: the dialog stays mounted for the session so its draft state
+          survives close/reopen — the dialog itself decides (via its close
+          guard) whether closing keeps the draft or just hides a busy create. */}
+      <Suspense fallback={null}>
+        <NewDownloadDialog
+          open={newDownloadOpen}
+          onOpenChange={handleNewDownloadOpenChange}
+          initialSourceId={newDownloadInitialState?.sourceId}
+          initialUrl={newDownloadInitialState?.url}
+          initialBatchInput={newDownloadInitialState?.batchInput}
+          onDraftStateChange={setNewDownloadDraftDirty}
+          onCreateStateChange={setNewDownloadCreating}
+          onCreated={(task) => {
+            useTaskDataStore.getState().upsertTask(task);
+            selectTask(task.id);
+          }}
+        />
+      </Suspense>
       {deleteFilesTarget ? (
         <Suspense fallback={null}>
           <DeleteTaskDialog
@@ -1545,7 +1677,11 @@ export function AppShell() {
               const target = deleteFilesTarget;
               setDeleteFilesTarget(null);
               if (target) {
-                void runTaskAction(() => deleteTask(target.id, true));
+                const id = target.id;
+                void runTaskAction(async () => {
+                  await deleteTask(id, true);
+                  useTaskDataStore.getState().evictTasks([id]);
+                });
               }
             }}
           />
@@ -1574,7 +1710,9 @@ export function AppShell() {
             onResolve={(fileName) => {
               const request = attentionRequest;
               setAttentionRequest(null);
-              if (request) {
+              if (request?.action === "pause") {
+                void runTaskAction(() => pauseTask(request.task.id), request.task.id);
+              } else if (request) {
                 submitAttentionResolution(request.task, request.action, {
                   fileName: fileName ?? null,
                 });
@@ -1606,6 +1744,7 @@ export function AppShell() {
               setOnboardingOpen(false);
             }}
             onOpenNewDownload={() => setNewDownloadOpen(true)}
+            platform={platform}
           />
         </Suspense>
       ) : null}

@@ -19,7 +19,7 @@ const PopoverContent = React.forwardRef<
       <PopoverPrimitive.Content ref={ref} align={align} sideOffset={sideOffset} asChild {...props}>
         <motion.div
           className={cn(
-            "z-50 min-w-[8rem] rounded-lg bg-surface-overlay p-1.5 shadow-md ring-1 ring-border-subtle",
+            "z-50 min-w-[8rem] rounded-lg bg-surface-popover p-1.5 shadow-md ring-1 ring-border-subtle",
             className,
           )}
           initial={reduceMotion ? false : { opacity: 0, y: -4, scale: 0.97 }}

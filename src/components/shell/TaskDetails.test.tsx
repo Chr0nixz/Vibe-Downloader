@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -198,16 +198,35 @@ describe("TaskDetails", () => {
 
     expect(screen.getByRole("complementary")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "tabs.zip" })).toBeInTheDocument();
-    expect(mocks.listSegmentsPage).not.toHaveBeenCalled();
+    // HTTPS segments are byte ranges, so the overview's chunk map loads them
+    // once; the Segments sub-tab reuses them instead of fetching again.
+    await waitFor(() => expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(1));
+    expect(mocks.listTaskRequestsPage).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("tab", { name: "taskDetails.diagnostics" }));
-    await waitFor(() => expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(1));
-    expect(screen.getByText("taskDetails.noChunks")).toBeInTheDocument();
+    expect(await screen.findByText("taskDetails.noChunks")).toBeInTheDocument();
+    expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(1);
 
     await user.click(screen.getByRole("tab", { name: "taskDetails.logs" }));
     // The Overview timeline also loads events, so this is the second fetch.
     await waitFor(() => expect(mocks.listTaskEventsPage).toHaveBeenCalledTimes(2));
     expect(screen.getByText("taskDetails.noLogs")).toBeInTheDocument();
+  });
+
+  it("keeps task state anchored while diagnostics change evidence views", async () => {
+    const user = userEvent.setup();
+    const task = makeTask("task-diagnostics-context", "context.zip", { status: "paused" });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    expect(screen.getByText("task.status.paused")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "taskDetails.diagnostics" }));
+
+    // One scroll with sections, not tabs inside the tab.
+    expect(screen.getByRole("heading", { name: "taskDetails.segments" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "taskDetails.requests" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "taskDetails.requests" })).not.toBeInTheDocument();
+    expect(screen.getByText("task.status.paused")).toBeInTheDocument();
   });
 
   it("shows the integrity passport with honest checksum copy on completed tasks", async () => {
@@ -397,6 +416,51 @@ describe("TaskDetails", () => {
     expect(screen.getByText("taskDetails.metalinkFilesHeader")).toBeInTheDocument();
   });
 
+  it("opens a failed task on Overview with its recovery action available", async () => {
+    const task = makeTask("task-failed", "failed.zip", {
+      status: "failed",
+      errorMessage: "network_error: Connection lost",
+      recoveryActions: ["retry"],
+    });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    expect(screen.getByRole("tab", { name: "taskDetails.overview" })).toHaveAttribute("data-state", "active");
+    expect(screen.getByRole("button", { name: "recovery.retry" })).toBeInTheDocument();
+  });
+
+  it("leads the overview with the diagnosis and the server capabilities", async () => {
+    const task = makeTask("task-limited", "limited.iso", {
+      status: "downloading",
+      healthSummary: "taskDiagnostics.serverLimitDetected",
+      supportsParallel: true,
+      supportsResume: false,
+      speedBps: 1024,
+    });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    expect(screen.getByText("taskDetails.speed")).toBeInTheDocument();
+    const diagnosis = screen.getByText("taskDiagnostics.serverLimitDetected");
+    const capabilities = screen.getByRole("list", { name: "taskDetails.capabilitiesAria" });
+    // The verdict sits above the progress strip, the capabilities below it.
+    const strip = screen.getByRole("progressbar");
+    expect(diagnosis.compareDocumentPosition(strip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(strip.compareDocumentPosition(capabilities) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(capabilities).getByText("taskDetails.capability.rangeSupported")).toBeInTheDocument();
+    expect(within(capabilities).getByText("taskDetails.capability.notResumable")).toBeInTheDocument();
+  });
+
+  it("drops speed, ETA and capabilities once the download is finished", async () => {
+    const task = makeTask("task-done", "done.iso", { status: "completed", downloadedBytes: 100, totalSize: 100 });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    expect(screen.queryByText("taskDetails.speed")).not.toBeInTheDocument();
+    expect(screen.queryByText("taskDetails.eta")).not.toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "taskDetails.capabilitiesAria" })).not.toBeInTheDocument();
+  });
+
   it("shows FTP/SFTP overview panel and loads segment summary", async () => {
     const task = makeTask("task-ftp", "file.bin", {
       protocol: "ftp",
@@ -449,27 +513,27 @@ describe("TaskDetails", () => {
     seedTasks([task]);
     renderDetails(task.id);
     await user.click(screen.getByRole("tab", { name: "taskDetails.diagnostics" }));
-    await user.click(screen.getByRole("tab", { name: "taskDetails.requests" }));
     await waitFor(() => expect(screen.getByText("FTP RETR")).toBeInTheDocument());
     expect(screen.queryByText("taskDetails.requestIfRange")).not.toBeInTheDocument();
     expect(screen.queryByText(/ETag/)).not.toBeInTheDocument();
   });
 
-  it("stops segment polling when switching to the Requests sub-tab", async () => {
+  it("loads segments and requests together, and stops polling them when Diagnostics closes", async () => {
     const user = userEvent.setup();
-    const task = makeTask("task-req-tab", "requests.zip", { status: "downloading" });
+    const task = makeTask("task-req-tab", "requests.zip", { status: "downloading", protocol: "ftp" });
     seedTasks([task]);
     renderDetails(task.id);
 
     await user.click(screen.getByRole("tab", { name: "taskDetails.diagnostics" }));
-    await waitFor(() => expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(1));
-
-    await user.click(screen.getByRole("tab", { name: "taskDetails.requests" }));
+    await waitFor(() => expect(mocks.listSegmentsPage).toHaveBeenCalled());
     await waitFor(() => expect(mocks.listTaskRequestsPage).toHaveBeenCalledTimes(1));
 
-    const callsAfterSwitch = mocks.listSegmentsPage.mock.calls.length;
+    await user.click(screen.getByRole("tab", { name: "taskDetails.logs" }));
+    const segmentCalls = mocks.listSegmentsPage.mock.calls.length;
+    const requestCalls = mocks.listTaskRequestsPage.mock.calls.length;
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(callsAfterSwitch);
+    expect(mocks.listSegmentsPage).toHaveBeenCalledTimes(segmentCalls);
+    expect(mocks.listTaskRequestsPage).toHaveBeenCalledTimes(requestCalls);
   });
 
   it("skips overlapping segments polls while a request is in flight", async () => {
@@ -606,5 +670,111 @@ describe("TaskDetails", () => {
         updateLimits: false,
       }),
     );
+  });
+
+  it("draws the overview progress as a chunk map when the task has byte ranges", async () => {
+    const user = userEvent.setup();
+    const task = makeTask("task-chunks", "chunks.iso", {
+      status: "downloading",
+      totalSize: 1000,
+      downloadedBytes: 600,
+    });
+    mocks.listSegmentsPage.mockResolvedValue({
+      items: [
+        {
+          id: "s1",
+          taskId: task.id,
+          fileId: null,
+          unitKind: "range",
+          rangeStart: 0,
+          rangeEnd: 499,
+          downloadedUntil: 500,
+          speedBps: 0,
+          status: "completed",
+          retryCount: 0,
+          lastError: null,
+        },
+        {
+          id: "s2",
+          taskId: task.id,
+          fileId: null,
+          unitKind: "range",
+          rangeStart: 500,
+          rangeEnd: 999,
+          downloadedUntil: 600,
+          speedBps: 1024,
+          status: "downloading",
+          retryCount: 1,
+          lastError: null,
+        },
+      ],
+      nextCursor: null,
+    });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    const map = await screen.findByRole("progressbar", { name: "taskDetails.chunkMapAria" });
+    expect(map).toHaveAttribute("aria-valuenow", "60");
+    expect(map.children).toHaveLength(2);
+
+    await user.click(screen.getByRole("button", { name: "taskDetails.chunkMapViewRanges" }));
+    expect(screen.getByRole("tab", { name: "taskDetails.diagnostics" })).toHaveAttribute("data-state", "active");
+  });
+
+  it("keeps the plain progress bar when there is only one range", async () => {
+    const task = makeTask("task-single", "single.zip", { status: "downloading" });
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    await waitFor(() => expect(mocks.listSegmentsPage).toHaveBeenCalled());
+    expect(screen.queryByRole("progressbar", { name: "taskDetails.chunkMapAria" })).not.toBeInTheDocument();
+  });
+
+  it("closes the docked panel on Escape pressed inside it", () => {
+    const task = makeTask("task-esc", "esc.zip");
+    seedTasks([task]);
+    const { onClose } = renderDetails(task.id);
+
+    fireEvent.keyDown(screen.getByRole("heading", { name: "esc.zip" }), { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    fireEvent.keyDown(screen.getByRole("heading", { name: "esc.zip" }), { key: "Enter" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers the row's transfer actions in the panel header", async () => {
+    const user = userEvent.setup();
+    const actions = { onToggleTransfer: vi.fn(), onRetry: vi.fn(), onOpenFile: vi.fn(), onOpenFolder: vi.fn() };
+    const paused = makeTask("task-actions", "actions.zip", { status: "paused" });
+    seedTasks([paused]);
+    const view = render(
+      <TooltipProvider>
+        <TaskDetails taskId={paused.id} open onClose={vi.fn()} onResolveAttention={vi.fn()} actions={actions} />
+      </TooltipProvider>,
+    );
+
+    const group = screen.getByRole("group", { name: "taskDetails.actionsAria" });
+    await user.click(within(group).getByRole("button", { name: "actions.resume" }));
+    expect(actions.onToggleTransfer).toHaveBeenCalledWith(paused);
+    await user.click(within(group).getByRole("button", { name: "actions.openFolder" }));
+    expect(actions.onOpenFolder).toHaveBeenCalledWith(paused);
+    expect(within(group).queryByRole("button", { name: "actions.openFile" })).not.toBeInTheDocument();
+
+    // A failed task with a recovery playbook gets its fixes in the overview,
+    // not a Resume that would contradict Restart.
+    const failed = makeTask("task-actions", "actions.zip", {
+      status: "failed",
+      errorMessage: "Remote file changed",
+      recoveryActions: ["restart", "open_folder"],
+    });
+    seedTasks([failed]);
+    view.rerender(
+      <TooltipProvider>
+        <TaskDetails taskId={failed.id} open onClose={vi.fn()} onResolveAttention={vi.fn()} actions={actions} />
+      </TooltipProvider>,
+    );
+    const failedGroup = screen.getByRole("group", { name: "taskDetails.actionsAria" });
+    expect(within(failedGroup).queryByRole("button", { name: "actions.resume" })).not.toBeInTheDocument();
+    expect(within(failedGroup).queryByRole("button", { name: "actions.retry" })).not.toBeInTheDocument();
   });
 });

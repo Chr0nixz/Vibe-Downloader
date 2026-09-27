@@ -66,6 +66,12 @@ pub(crate) struct FileDeleteOutcome {
     pub result: Result<(), String>,
 }
 
+/// Global pause must leave already-written bytes intact when the source cannot
+/// resume; callers report these tasks as skipped instead of changing status.
+fn pause_would_discard_progress(task: &crate::models::TaskRecord) -> bool {
+    task.downloaded_bytes > 0 && !task.supports_resume
+}
+
 pub(crate) async fn delete_paths_off_runtime(
     requests: Vec<FileDeleteRequest>,
 ) -> Vec<FileDeleteOutcome> {
@@ -319,8 +325,30 @@ pub async fn resume_task(
         )
         .command_error());
     }
-    if matches!(task.status, TaskStatus::NeedsAttention) {
-        return Err("Remote file changed. Restart download to avoid corruption.".to_string());
+    if matches!(task.status, TaskStatus::Failed | TaskStatus::NeedsAttention) {
+        // Resume is only for paused/waiting tasks. Failed tasks must go through
+        // retry or the explicit recovery playbook so bulk and keyboard paths
+        // cannot silently bypass the row's safety decision.
+        return Err(AppErrorPayload::new(
+            "task_state_changed",
+            "Task requires recovery before it can resume.",
+            false,
+            Vec::new(),
+        )
+        .command_error());
+    }
+    if !task.supports_resume
+        || task_error_code(&task)
+            .as_deref()
+            .is_some_and(restart_required_error_code)
+    {
+        return Err(AppErrorPayload::new(
+            "resume_unavailable",
+            "The server no longer supports resuming.",
+            true,
+            vec!["restart", "open_folder"],
+        )
+        .command_error());
     }
     let task = queue_task_for_retry_with_event(&app, state.inner(), &id, "resumed", None).await?;
     task_from_record_with_files(&state.pool, task).await
@@ -337,7 +365,7 @@ pub async fn retry_task(
     let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, "retrying task");
     let task = require_task(&state.pool, &id).await?;
-    if task.status == TaskStatus::NeedsAttention
+    if matches!(task.status, TaskStatus::Failed | TaskStatus::NeedsAttention)
         && task_error_code(&task)
             .as_deref()
             .is_some_and(restart_required_error_code)
@@ -759,7 +787,7 @@ pub async fn bulk_task_action_global(
     let normalized = action.trim().to_ascii_lowercase();
     let statuses: &[&str] = match normalized.as_str() {
         "pause" => &["downloading", "retrying", "queued"],
-        "resume" => &["paused", "failed", "waiting_network"],
+        "resume" => &["paused", "waiting_network"],
         other => return Err(format!("Unknown global bulk action: {other}")),
     };
     let ids = db::list_task_ids_by_statuses(&state.pool, statuses).await?;
@@ -780,6 +808,12 @@ pub async fn bulk_task_action_global(
         };
         let status = task.status.as_str();
         if !statuses.contains(&status) {
+            skipped += 1;
+            continue;
+        }
+        // Pausing would discard bytes when the source cannot resume; leave the
+        // task running and report it as skipped so the global action is safe.
+        if normalized == "pause" && pause_would_discard_progress(&task) {
             skipped += 1;
             continue;
         }
@@ -1316,6 +1350,27 @@ mod tests {
             created_at: task.created_at.clone(),
             updated_at: task.updated_at.clone(),
         }
+    }
+
+    #[test]
+    fn global_pause_marks_only_written_non_resumable_tasks_as_skipped() {
+        let root = std::env::temp_dir().join(format!("vibe-pause-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create fixture directory");
+        let path = root.join("payload.bin");
+        std::fs::write(&path, b"fixture").expect("write fixture");
+        let mut task = checksum_task("pause-check", "http", &path);
+
+        task.downloaded_bytes = 1;
+        task.supports_resume = false;
+        assert!(pause_would_discard_progress(&task));
+
+        task.supports_resume = true;
+        assert!(!pause_would_discard_progress(&task));
+        task.supports_resume = false;
+        task.downloaded_bytes = 0;
+        assert!(!pause_would_discard_progress(&task));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

@@ -254,6 +254,7 @@ pub struct TaskStatsSnapshot {
     pub queued: String,
     pub attention: String,
     pub paused: String,
+    pub waiting_network: String,
     pub completed: String,
     pub failed: String,
     pub total_speed: String,
@@ -506,6 +507,10 @@ pub struct BatchImportItem {
     pub total_size: Option<String>,
     pub content_type: Option<String>,
     pub supports_resume: bool,
+    /// UX-29: stable error code for localization; the frontend maps it through
+    /// ERROR_CODE_I18N_MAP. `error_message` keeps the raw backend detail for
+    /// expandable diagnostics — it is not the user-facing copy.
+    pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub task: Option<Task>,
 }

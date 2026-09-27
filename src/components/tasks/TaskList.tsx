@@ -1,9 +1,23 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDown, MoreHorizontal, Pause, Play, Plus, RotateCcw, Search, SlidersHorizontal, X } from "lucide-react";
+import {
+  CheckCircle2,
+  ChevronDown,
+  CircleX,
+  MoreHorizontal,
+  Pause,
+  Play,
+  Plus,
+  RotateCcw,
+  Search,
+  SlidersHorizontal,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueueReasons } from "@/hooks/use-queue-reasons";
+import { useRowSegments } from "@/hooks/use-row-segments";
 import { handleMenuKeyDown } from "@/lib/menu-keyboard";
 
 const SettingsPage = lazy(() =>
@@ -15,12 +29,6 @@ const SettingsPage = lazy(() =>
 const AboutPage = lazy(() =>
   import("@/components/about/AboutPage").then((m) => ({
     default: m.AboutPage,
-  })),
-);
-
-const AttentionCenter = lazy(() =>
-  import("@/components/workspaces/AttentionCenter").then((m) => ({
-    default: m.AttentionCenter,
   })),
 );
 
@@ -48,20 +56,24 @@ const BackupCenter = lazy(() =>
   })),
 );
 
+import { allowedTransferActions } from "@/components/tasks/row-recovery";
 import { ListContextMenu, type ReorderAction } from "@/components/tasks/TaskContextMenu";
 import { TaskRow } from "@/components/tasks/TaskRow";
 import { taskRowEstimateFor } from "@/components/tasks/task-layout";
 import { Button } from "@/components/ui/button";
+import { LiveRegion } from "@/components/ui/live-region";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { RecoveryAction, TaskPriority } from "@/generated/bindings";
 import type { TranslationKey } from "@/i18n";
 import { errorMessage } from "@/lib/errors";
 import { beginListLoad, createListLoadFlight, endListLoad, isCurrentListQueryEpoch } from "@/lib/list-query-epoch";
+import type { Platform } from "@/lib/platform";
 import { listTasksCursor } from "@/lib/tauri";
-import { cn } from "@/lib/utils";
+import { cn, formatShortcut } from "@/lib/utils";
 import {
   type FileTypeFilter,
+  type NavFilter,
   type ResumeFilter,
   taskCursorInput,
   useTaskDataStore,
@@ -78,6 +90,11 @@ const FILE_TYPE_KEYS = {
   app: "taskList.fileTypeApp",
   other: "taskList.fileTypeOther",
 } as const satisfies Record<Exclude<FileTypeFilter, "all">, TranslationKey>;
+
+/** The three list views behind the sidebar's one "Needs you" entry. The cause
+ * filter switches between them, so a failed download and one waiting on a
+ * decision share a layout, search, and sort instead of living in two places. */
+const ISSUE_NAVS = new Set<NavFilter>(["issues", "attention", "failed"]);
 
 export const TaskList = memo(function TaskList({
   onToggleTransfer,
@@ -104,6 +121,7 @@ export const TaskList = memo(function TaskList({
   onPasteAndCreate,
   onRefresh,
   onUpdateQueueOptions,
+  platform = "unknown",
 }: {
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
@@ -129,11 +147,16 @@ export const TaskList = memo(function TaskList({
   onPasteAndCreate?: () => void;
   onRefresh?: () => void;
   onUpdateQueueOptions: (task: Task, patch: { priority?: TaskPriority; obeySchedule?: boolean }) => Promise<boolean>;
+  /** Formats the Mod+N hint so macOS shows the Command glyph, not "Ctrl". */
+  platform?: Platform;
 }) {
   const { t } = useTranslation();
   const reduceMotion = !!useReducedMotion();
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
+  const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [statusAnnouncement, setStatusAnnouncement] = useState("");
+  const [allSearchMatches, setAllSearchMatches] = useState<number | null>(null);
+  const searchMatchRequestRef = useRef(0);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const loadFlightRef = useRef(createListLoadFlight());
   const initialLoadDoneRef = useRef(false);
@@ -160,6 +183,17 @@ export const TaskList = memo(function TaskList({
   const setTaskSelected = useTaskUIStore((s) => s.setTaskSelected);
   const clearSelectedIds = useTaskUIStore((s) => s.clearSelectedIds);
   const setFilters = useTaskUIStore((s) => s.setFilters);
+  const setSearch = useTaskUIStore((s) => s.setSearch);
+  const setNav = useTaskUIStore((s) => s.setNav);
+  const setSelectionAnchor = useTaskUIStore((s) => s.setSelectionAnchor);
+  // Primitive selector: progress ticks rebuild the stats object but rarely
+  // change these three numbers, so the list does not re-render per tick.
+  const issueCounts = useTaskDataStore((s) => {
+    const stats = s.globalTaskStats ?? s.taskStats;
+    return `${stats.attention}:${stats.failed}:${stats.all}`;
+  });
+  const [attentionCount, failedCount, totalTaskCount] = issueCounts.split(":").map(Number);
+  const issueView = ISSUE_NAVS.has(nav);
   const toolPanelOpen = useTaskUIStore((s) => s.toolPanelOpen);
   const setToolPanelOpen = useTaskUIStore((s) => s.setToolPanelOpen);
   const setTaskCursorPage = useTaskDataStore((s) => s.setTaskCursorPage);
@@ -176,6 +210,30 @@ export const TaskList = memo(function TaskList({
     if (filters.resume !== "all") n++;
     return n;
   }, [filters]);
+  const scopeLabel = (() => {
+    switch (nav) {
+      case "issues":
+        return t("nav.issues");
+      case "attention":
+        return t("nav.attention");
+      case "queue":
+        return t("queueCenter.title");
+      case "recovery":
+        return t("recoveryCenter.title");
+      case "downloading":
+        return t("nav.downloading");
+      case "paused":
+        return t("nav.paused");
+      case "completed":
+        return t("nav.completed");
+      case "failed":
+        return t("nav.failed");
+      default:
+        return t("nav.all");
+    }
+  })();
+  const advancedFilterCount =
+    Number(filters.source !== "all") + Number(filters.failure !== "all") + Number(filters.resume !== "all");
 
   // Hide tasks that are in the soft-delete undo window so the list reflects
   // the deletion immediately while the undo toast is reachable.
@@ -186,6 +244,28 @@ export const TaskList = memo(function TaskList({
   );
   const filteredRef = useRef(filtered);
   filteredRef.current = filtered;
+
+  // An empty scoped search should offer a route to the matching task instead
+  // of leaving the user at a dead end in the current status view.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: taskCursorInput reads filters from the UI store; filter identity is intentionally the invalidation signal.
+  useEffect(() => {
+    const requestId = ++searchMatchRequestRef.current;
+    if (!search.trim() || nav === "all" || filtered.length > 0) {
+      setAllSearchMatches(null);
+      return;
+    }
+    let active = true;
+    void listTasksCursor(taskCursorInput(null, { nav: "all" }))
+      .then((result) => {
+        if (active && requestId === searchMatchRequestRef.current) setAllSearchMatches(result.minimumTotal);
+      })
+      .catch(() => {
+        if (active && requestId === searchMatchRequestRef.current) setAllSearchMatches(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [filtered.length, filters, nav, search]);
 
   // One shared scheduler poll for the whole list; rows read their decision from
   // the returned map instead of each fetching their own.
@@ -304,6 +384,13 @@ export const TaskList = memo(function TaskList({
     virtualizer.measure();
   }, [rowDensity, virtualizer]);
 
+  // Only rows on screen ask for their byte ranges; see useRowSegments.
+  const visibleTaskIds = virtualizer
+    .getVirtualItems()
+    .map((item) => filtered[item.index])
+    .filter((id): id is string => Boolean(id));
+  const rowSegments = useRowSegments(visibleTaskIds);
+
   // Scroll to top when filter / sort / search changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: query fields intentionally trigger this imperative virtualizer reset.
   useEffect(() => {
@@ -334,46 +421,49 @@ export const TaskList = memo(function TaskList({
   //
   // Selector returns a primitive so Zustand's Object.is equality prevents re-renders
   // when progress patches (250ms) change taskById but not the status mix.
-  const primaryBulkAction = useTaskDataStore<"pause" | "resume" | "retry" | null>((s) => {
-    if (selectedIds.length === 0) return null;
-    // P2: queued is grouped with downloading/retrying (pauseable), NOT with
-    // paused/waiting_network (resumable). bulkResume filters out queued, so
-    // grouping queued with paused produced a silent no-op "Resume" button for
-    // all-queued selections. toggleTransfer and bulkPause both treat queued
-    // as pauseable, so "Pause" is the correct inferred action for all-queued.
-    let allActive = true; // downloading | retrying | queued
-    let allPaused = true; // paused | waiting_network
-    let allFailed = true; // failed | needs_attention
+  const selectedActionCounts = useTaskDataStore((s) => {
+    let pause = 0;
+    let resume = 0;
+    let retry = 0;
     for (const id of selectedIds) {
-      const status = s.taskById[id]?.status;
-      if (!status) return null;
-      if (status !== "downloading" && status !== "retrying" && status !== "queued") allActive = false;
-      if (status !== "paused" && status !== "waiting_network") allPaused = false;
-      if (status !== "failed" && status !== "needs_attention") allFailed = false;
-      if (status === "completed") return null;
+      const task = s.taskById[id];
+      if (!task) continue;
+      const actions = allowedTransferActions(task);
+      if (actions.includes("pause")) pause++;
+      if (actions.includes("resume")) resume++;
+      if (actions.includes("retry")) retry++;
     }
-    if (allActive) return "pause";
-    if (allPaused) return "resume";
-    if (allFailed) return "retry";
-    return null;
+    return `${pause}:${resume}:${retry}`;
   });
+  const [pauseableSelected, resumableSelected, retryableSelected] = selectedActionCounts.split(":").map(Number);
   const sourceOptions = filterOptions.sources;
   // E-3: failureOptions is read from the store to avoid depending on taskById (which rebuilds its reference every 250ms) and causing per-frame recompute.
   // Prefer backend-provided failureCategories when available; otherwise use the store-computed value.
   const failureOptions =
     filterOptions.failureCategories.length > 0 ? filterOptions.failureCategories : storeFailureOptions;
 
+  // Declared ahead of selectAndFocus, which records the ids it has already
+  // handled so the selection effect below does not scroll a second time.
+  const lastScrolledSelectedIdRef = useRef<string | null>(null);
+
   const selectAndFocus = useCallback(
-    (taskId: string) => {
+    (taskId: string, source: "pointer" | "keyboard" = "keyboard") => {
+      lastScrolledSelectedIdRef.current = taskId;
       selectTask(taskId);
-      const list = filteredRef.current;
-      const index = list.indexOf(taskId);
-      if (index >= 0) {
-        virtualizer.scrollToIndex(index, { align: "center" });
+      // A clicked row is already on screen. Scrolling it (the old code centred
+      // it) moved a different row under the cursor, so the second click of a
+      // double-click, a Shift-click, or a click on an inline Restart button
+      // could land on the wrong task. Keyboard moves scroll only as far as
+      // needed to reveal the row, instead of re-centring on every arrow press.
+      if (source === "keyboard") {
+        const index = filteredRef.current.indexOf(taskId);
+        if (index >= 0) {
+          virtualizer.scrollToIndex(index, { align: "auto" });
+        }
       }
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          document.getElementById(`task-row-${taskId}`)?.focus();
+          document.getElementById(`task-row-${taskId}`)?.focus({ preventScroll: source === "pointer" });
         });
       });
     },
@@ -396,7 +486,9 @@ export const TaskList = memo(function TaskList({
   // changes. `filtered` gets a fresh identity on every infinite-scroll append,
   // so keeping it in the deps re-centered the viewport onto the selection after
   // each page load; the latest list is read through filteredRef instead.
-  const lastScrolledSelectedIdRef = useRef<string | null>(null);
+  // Selections made in the list itself are marked by selectAndFocus and skip
+  // this; it only centres selections that arrive from elsewhere (palette,
+  // a newly created task, a workspace "show in list").
   useEffect(() => {
     // UX-17: clear on deselect so re-selecting the same task later still
     // scrolls it into view instead of being treated as an already-scrolled id.
@@ -410,6 +502,31 @@ export const TaskList = memo(function TaskList({
     lastScrolledSelectedIdRef.current = selectedId;
     virtualizer.scrollToIndex(index, { align: "center" });
   }, [selectedId, virtualizer]);
+
+  // Shift+Arrow: move the focus one row and select everything between the
+  // anchor and it, the keyboard twin of Shift+click.
+  const extendSelection = useCallback(
+    (direction: "next" | "prev") => {
+      const list = filteredRef.current;
+      if (list.length === 0) return;
+      const currentId = selectedIdRef.current;
+      const currentIndex = currentId ? list.indexOf(currentId) : -1;
+      const startIndex = currentIndex >= 0 ? currentIndex : 0;
+      const nextIndex = direction === "next" ? Math.min(list.length - 1, startIndex + 1) : Math.max(0, startIndex - 1);
+      const nextId = list[nextIndex];
+      if (!nextId) return;
+      const storedAnchor = useTaskUIStore.getState().selectionAnchorId;
+      const anchorId = storedAnchor && list.includes(storedAnchor) ? storedAnchor : (currentId ?? nextId);
+      selectAndFocus(nextId);
+      // selectTask moves the anchor to the focused row; a range keeps growing
+      // from where it started, so the anchor is put back.
+      setSelectionAnchor(anchorId);
+      const anchorIndex = list.indexOf(anchorId);
+      const [from, to] = anchorIndex < nextIndex ? [anchorIndex, nextIndex] : [nextIndex, anchorIndex];
+      setSelectedIds(list.slice(from, to + 1));
+    },
+    [selectAndFocus, setSelectedIds, setSelectionAnchor],
+  );
 
   const navigateRow = useCallback(
     (direction: "next" | "prev") => {
@@ -427,6 +544,9 @@ export const TaskList = memo(function TaskList({
 
   const handleListKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
+      // Rows handle their own arrows (and Shift+Arrow) and mark the event;
+      // acting on it again here would reset a range selection's anchor.
+      if (event.defaultPrevented) return;
       const list = filteredRef.current;
       if (list.length === 0) return;
 
@@ -467,23 +587,6 @@ export const TaskList = memo(function TaskList({
     return (
       <Suspense fallback={<SurfaceLoadingSkeleton label={t("about.loading")} />}>
         <AboutPage onOpenOnboarding={onOpenOnboarding} />
-      </Suspense>
-    );
-  }
-
-  if (nav === "attention") {
-    return (
-      <Suspense fallback={<SurfaceLoadingSkeleton label={t("attentionCenter.loading")} />}>
-        <AttentionCenter
-          taskIds={filtered}
-          loading={loading}
-          error={error}
-          hasMore={hasMore}
-          onLoadMore={() => void loadPage(nextCursor, true)}
-          onRetryLoad={() => void loadPage(null, false)}
-          onResolve={onResolveAttention}
-          onShowDetails={onShowDetails}
-        />
       </Suspense>
     );
   }
@@ -563,10 +666,8 @@ export const TaskList = memo(function TaskList({
         </div>
       ) : null}
 
-      {/* Screen reader status announcements */}
-      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {statusAnnouncement}
-      </div>
+      {/* Screen reader status announcements (outside #root, see LiveRegion). */}
+      <LiveRegion>{statusAnnouncement}</LiveRegion>
 
       {/* Selection bar — contextual, appears when rows are multi-selected.
           Inferred primary + More menu for selection-scoped bulk actions.
@@ -581,43 +682,39 @@ export const TaskList = memo(function TaskList({
             {t("taskList.clearSelection")}
           </Button>
           <div className="mx-1 h-4 w-px bg-border-subtle" aria-hidden />
-          {/* Inferred primary action: Pause / Resume / Retry based on selection status mix. */}
-          {primaryBulkAction === "pause" ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-11 md:h-8"
-              onClick={() => onBulkPause(selectedTasks())}
-            >
-              <Pause className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-              {t("taskList.bulkPause")}
-            </Button>
-          ) : null}
-          {primaryBulkAction === "resume" ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-11 md:h-8"
-              onClick={() => onBulkResume(selectedTasks())}
-            >
-              <Play className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-              {t("taskList.bulkResume")}
-            </Button>
-          ) : null}
-          {primaryBulkAction === "retry" ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-11 md:h-8"
-              onClick={() => onBulkRetry(selectedTasks())}
-            >
-              <RotateCcw className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-              {t("taskList.bulkRetry")}
-            </Button>
-          ) : null}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-11 md:h-8"
+            disabled={pauseableSelected === 0}
+            onClick={() => onBulkPause(selectedTasks())}
+          >
+            <Pause className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+            {t("taskList.bulkPause")}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-11 md:h-8"
+            disabled={resumableSelected === 0}
+            onClick={() => onBulkResume(selectedTasks())}
+          >
+            <Play className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+            {t("taskList.bulkResume")}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-11 md:h-8"
+            disabled={retryableSelected === 0}
+            onClick={() => onBulkRetry(selectedTasks())}
+          >
+            <RotateCcw className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+            {t("taskList.bulkRetry")}
+          </Button>
           <Popover open={bulkMenuOpen} onOpenChange={setBulkMenuOpen} modal={false}>
             <PopoverTrigger asChild>
               <Button
@@ -650,14 +747,17 @@ export const TaskList = memo(function TaskList({
               <div id="task-list-bulk-menu" className="space-y-0.5" role="menu" onKeyDown={handleMenuKeyDown}>
                 <BulkMenuItem
                   label={t("taskList.bulkPause")}
+                  disabled={pauseableSelected === 0}
                   onClick={() => runAfterBulkMenuClose(() => onBulkPause(selectedTasks()))}
                 />
                 <BulkMenuItem
                   label={t("taskList.bulkResume")}
+                  disabled={resumableSelected === 0}
                   onClick={() => runAfterBulkMenuClose(() => onBulkResume(selectedTasks()))}
                 />
                 <BulkMenuItem
                   label={t("taskList.bulkRetry")}
+                  disabled={retryableSelected === 0}
                   onClick={() => runAfterBulkMenuClose(() => onBulkRetry(selectedTasks()))}
                 />
                 <div className="my-1 h-px bg-border-subtle" aria-hidden />
@@ -709,6 +809,32 @@ export const TaskList = memo(function TaskList({
         </div>
       ) : null}
 
+      {issueView ? (
+        <IssueCauseFilter
+          nav={nav}
+          attention={attentionCount}
+          failed={failedCount}
+          onChange={(next) => {
+            clearSelectedIds();
+            setNav(next);
+          }}
+        />
+      ) : null}
+
+      {search || activeFilterCount > 0 ? (
+        <div className="flex min-w-0 items-center gap-1.5 border-b border-border-subtle/70 px-3 py-1.5 text-xs text-text-muted md:px-4">
+          <span className="shrink-0 font-medium text-text-secondary">{scopeLabel}</span>
+          {search ? (
+            <span className="min-w-0 truncate" title={search}>
+              · {t("commandBar.searchAria")}: <span className="text-text-primary">{search}</span>
+            </span>
+          ) : null}
+          {activeFilterCount > 0 ? (
+            <span className="shrink-0">· {t("taskList.toolPanelActive", { count: activeFilterCount })}</span>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* Active filter chips */}
       {activeFilterCount > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5 border-b border-border-subtle px-3 py-1.5">
@@ -748,7 +874,7 @@ export const TaskList = memo(function TaskList({
             type="button"
             variant="ghost"
             size="sm"
-            className="px-1.5 text-[11px] text-text-muted"
+            className="px-1.5 text-xs text-text-muted"
             onClick={() => setFilters({ fileType: "all", source: "all", failure: "all", resume: "all" })}
           >
             {t("taskList.clearAllFilters")}
@@ -776,37 +902,41 @@ export const TaskList = memo(function TaskList({
                 aria-hidden="true"
               />
             </Button>
-            {/* UX-12: narrow viewports hide CommandBar sort; surface current order here. */}
-            <span className="ml-auto truncate text-[11px] text-text-muted md:hidden" title={t("taskList.sort")}>
-              {t(`taskList.${sortSummaryKey(sortKey, sortDirection)}`)}
-            </span>
           </div>
           <div id="task-list-tool-panel" className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            <SelectControl
-              label={t("taskList.sort")}
-              value={`${sortKey}:${sortDirection}`}
-              onChange={(value) => {
-                const [key, direction] = value.split(":") as [typeof sortKey, typeof sortDirection];
-                setSort(key, direction);
-              }}
-              options={[
-                ["updated_at:desc", t("taskList.sortUpdatedDesc")],
-                ["created_at:desc", t("taskList.sortCreatedDesc")],
-                ["file_size:desc", t("taskList.sortSizeDesc")],
-                ["progress:desc", t("taskList.sortProgressDesc")],
-                ["speed:desc", t("taskList.sortSpeedDesc")],
-                ["status:asc", t("taskList.sortStatusAsc")],
-              ]}
-            />
-            <SelectControl
-              label={t("taskList.rowDensity")}
-              value={rowDensity}
-              onChange={(value) => setRowDensity(value === "compact" ? "compact" : "comfortable")}
-              options={[
-                ["comfortable", t("taskList.densityComfortable")],
-                ["compact", t("taskList.densityCompact")],
-              ]}
-            />
+            {/* UX-12: the command bar's View menu owns Sort and row height from
+                `md` up; below it the bar hides that menu, so these are the
+                narrow window's only copies. One of each is visible at any
+                width, and neither is a filter, so neither sits here on desktop. */}
+            <div className="md:hidden">
+              <SelectControl
+                label={t("taskList.sort")}
+                value={`${sortKey}:${sortDirection}`}
+                onChange={(value) => {
+                  const [key, direction] = value.split(":") as [typeof sortKey, typeof sortDirection];
+                  setSort(key, direction);
+                }}
+                options={[
+                  ["updated_at:desc", t("taskList.sortUpdatedDesc")],
+                  ["created_at:desc", t("taskList.sortCreatedDesc")],
+                  ["file_size:desc", t("taskList.sortSizeDesc")],
+                  ["progress:desc", t("taskList.sortProgressDesc")],
+                  ["speed:desc", t("taskList.sortSpeedDesc")],
+                  ["status:asc", t("taskList.sortStatusAsc")],
+                ]}
+              />
+            </div>
+            <div className="md:hidden">
+              <SelectControl
+                label={t("taskList.rowDensity")}
+                value={rowDensity}
+                onChange={(value) => setRowDensity(value === "compact" ? "compact" : "comfortable")}
+                options={[
+                  ["comfortable", t("taskList.densityComfortable")],
+                  ["compact", t("taskList.densityCompact")],
+                ]}
+              />
+            </div>
             <SelectControl
               label={t("taskList.fileType")}
               value={filters.fileType}
@@ -821,33 +951,64 @@ export const TaskList = memo(function TaskList({
                 ["other", t("taskList.fileTypeOther")],
               ]}
             />
-            <SelectControl
-              label={t("taskList.source")}
-              value={filters.source}
-              onChange={(value) => setFilters({ source: value })}
-              options={[["all", t("taskList.allSources")], ...sourceOptions.map((source) => [source, source] as const)]}
-            />
-            <SelectControl
-              label={t("taskList.failure")}
-              value={filters.failure}
-              onChange={(value) => setFilters({ failure: value })}
-              options={[
-                ["all", t("taskList.allFailures")],
-                ...failureOptions.map(
-                  (failure) => [failure, t(`taskList.failure_${failure}`, { defaultValue: failure })] as const,
-                ),
-              ]}
-            />
-            <SelectControl
-              label={t("taskList.resume")}
-              value={filters.resume}
-              onChange={(value) => setFilters({ resume: value as ResumeFilter })}
-              options={[
-                ["all", t("taskList.allResume")],
-                ["resumable", t("taskList.resumable")],
-                ["single_connection", t("taskList.singleConnection")],
-              ]}
-            />
+            <div className="flex items-end">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2 text-xs text-text-secondary"
+                aria-expanded={moreFiltersOpen}
+                aria-controls="task-list-more-filters"
+                onClick={() => setMoreFiltersOpen((open) => !open)}
+              >
+                <ChevronDown
+                  className={cn("mr-1.5 h-3.5 w-3.5 transition-transform", moreFiltersOpen && "rotate-180")}
+                />
+                {t("taskList.moreFilters")}
+                {advancedFilterCount > 0 ? (
+                  <span className="ml-1 rounded-full bg-accent-primary/12 px-1.5 py-0.5 text-xs leading-none text-accent-primary">
+                    {advancedFilterCount}
+                  </span>
+                ) : null}
+              </Button>
+            </div>
+            {moreFiltersOpen ? (
+              <div
+                id="task-list-more-filters"
+                className="col-span-full grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3"
+              >
+                <SelectControl
+                  label={t("taskList.source")}
+                  value={filters.source}
+                  onChange={(value) => setFilters({ source: value })}
+                  options={[
+                    ["all", t("taskList.allSources")],
+                    ...sourceOptions.map((source) => [source, source] as const),
+                  ]}
+                />
+                <SelectControl
+                  label={t("taskList.failure")}
+                  value={filters.failure}
+                  onChange={(value) => setFilters({ failure: value })}
+                  options={[
+                    ["all", t("taskList.allFailures")],
+                    ...failureOptions.map(
+                      (failure) => [failure, t(`taskList.failure_${failure}`, { defaultValue: failure })] as const,
+                    ),
+                  ]}
+                />
+                <SelectControl
+                  label={t("taskList.resume")}
+                  value={filters.resume}
+                  onChange={(value) => setFilters({ resume: value as ResumeFilter })}
+                  options={[
+                    ["all", t("taskList.allResume")],
+                    ["resumable", t("taskList.resumable")],
+                    ["single_connection", t("taskList.singleConnection")],
+                  ]}
+                />
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -865,37 +1026,26 @@ export const TaskList = memo(function TaskList({
           {loading && !initialLoadDoneRef.current ? (
             <TaskListLoadingSkeleton label={t("taskList.loading")} />
           ) : filtered.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-4 px-6 py-20 text-center">
-              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-accent-primary/8">
-                {search || activeFilterCount > 0 ? (
-                  <Search className="h-7 w-7 text-text-muted" />
-                ) : (
-                  <Plus className="h-7 w-7 text-accent-primary/70" />
-                )}
-              </div>
-              <div className="space-y-1.5">
-                <p className="text-sm font-medium text-text-primary">
-                  {search || activeFilterCount > 0 ? t("taskList.emptySearch") : t("taskList.empty")}
-                </p>
-                {!(search || activeFilterCount > 0) ? (
-                  <p className="max-w-xs text-xs leading-relaxed text-text-muted">{t("taskList.emptyHint")}</p>
-                ) : null}
-              </div>
-              {activeFilterCount > 0 ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setFilters({ fileType: "all", source: "all", failure: "all", resume: "all" })}
-                >
-                  {t("taskList.clearFilters")}
-                </Button>
-              ) : !search ? (
-                <Button type="button" size="sm" onClick={onNewDownload}>
-                  <Plus className="h-4 w-4" aria-hidden />
-                  {t("commandBar.newDownload")}
-                </Button>
-              ) : null}
-            </div>
+            <TaskListEmptyState
+              kind={
+                search || activeFilterCount > 0
+                  ? "search"
+                  : issueView
+                    ? "issues"
+                    : nav === "all" && totalTaskCount === 0
+                      ? "firstRun"
+                      : "view"
+              }
+              platform={platform}
+              hasSearch={Boolean(search)}
+              hasFilters={activeFilterCount > 0}
+              onClearSearch={() => setSearch("")}
+              onClearFilters={() => setFilters({ fileType: "all", source: "all", failure: "all", resume: "all" })}
+              onNewDownload={onNewDownload}
+              onShowAll={() => setNav("all")}
+              scopeLabel={scopeLabel}
+              allSearchMatches={allSearchMatches}
+            />
           ) : (
             <>
               {/* biome-ignore lint/a11y/useSemanticElements: Virtual rows require measured positioning wrappers, so explicit list semantics avoid invalid ul/div/li nesting. */}
@@ -917,7 +1067,7 @@ export const TaskList = memo(function TaskList({
                       style={{
                         top: 0,
                         transform: `translateY(calc(${virtualRow.start}px + var(--lp, 16px)))`,
-                        paddingBottom: virtualRow.index < filtered.length - 1 ? 8 : 0,
+                        paddingBottom: virtualRow.index < filtered.length - 1 ? 2 : 0,
                       }}
                     >
                       <TaskRow
@@ -932,6 +1082,7 @@ export const TaskList = memo(function TaskList({
                         onSelectTask={selectAndFocus}
                         onToggleSelected={setTaskSelected}
                         onNavigate={navigateRow}
+                        onExtendSelection={extendSelection}
                         onShiftSelect={handleShiftSelect}
                         onToggleTransfer={onToggleTransfer}
                         onRetry={onRetry}
@@ -946,6 +1097,7 @@ export const TaskList = memo(function TaskList({
                         onCopyLocalPath={onCopyLocalPath}
                         onShowDetails={onShowDetails}
                         queueReason={queueReasons.get(taskId)}
+                        segments={rowSegments.get(taskId)}
                         compact={compactRows}
                       />
                     </div>
@@ -965,14 +1117,11 @@ export const TaskList = memo(function TaskList({
 
 function TaskListLoadingSkeleton({ label }: { label: string }) {
   return (
-    <div className="p-2.5 sm:p-3 md:p-4" role="status" aria-live="polite" aria-label={label}>
+    <div className="px-2.5 sm:px-3 md:px-4" role="status" aria-live="polite" aria-label={label}>
       <span className="sr-only">{label}</span>
-      <div className="space-y-2.5">
+      <div>
         {Array.from({ length: 5 }).map((_, index) => (
-          <div
-            key={index}
-            className="overflow-hidden rounded-lg border border-border-subtle/60 bg-surface-base/60 px-3 py-3.5 sm:px-3.5 md:px-4"
-          >
+          <div key={index} className="overflow-hidden border-b border-border-subtle/70 px-2.5 py-3.5 sm:px-3 md:py-3">
             <div className="skeleton-shimmer">
               <div className="flex min-w-0 gap-3">
                 <div className="mt-0.5 h-8 w-8 shrink-0 rounded bg-surface-raised" />
@@ -1040,7 +1189,7 @@ function SelectControl({
 }) {
   return (
     <div className="flex h-11 items-center gap-1.5 text-text-muted md:h-8">
-      <span className="text-[11px] font-medium text-text-muted">{label}</span>
+      <span className="text-xs font-medium text-text-muted">{label}</span>
       <Select value={value} onValueChange={onChange}>
         <SelectTrigger aria-label={label} title={label} className="w-auto min-w-[6rem] px-2.5 text-xs font-medium">
           <SelectValue />
@@ -1057,36 +1206,6 @@ function SelectControl({
   );
 }
 
-function sortSummaryKey(
-  sortKey: string,
-  sortDirection: string,
-):
-  | "sortUpdatedDesc"
-  | "sortCreatedDesc"
-  | "sortSizeDesc"
-  | "sortProgressDesc"
-  | "sortSpeedDesc"
-  | "sortStatusAsc"
-  | "sort" {
-  const value = `${sortKey}:${sortDirection}`;
-  switch (value) {
-    case "updated_at:desc":
-      return "sortUpdatedDesc";
-    case "created_at:desc":
-      return "sortCreatedDesc";
-    case "file_size:desc":
-      return "sortSizeDesc";
-    case "progress:desc":
-      return "sortProgressDesc";
-    case "speed:desc":
-      return "sortSpeedDesc";
-    case "status:asc":
-      return "sortStatusAsc";
-    default:
-      return "sort";
-  }
-}
-
 function FilterChip({
   active,
   label,
@@ -1100,12 +1219,12 @@ function FilterChip({
 }) {
   if (!active) return null;
   return (
-    <span className="inline-flex items-center gap-1 rounded-full border border-border-accent-subtle bg-accent-primary/[0.04] px-2 py-0.5 text-[11px] font-medium text-text-secondary">
+    <span className="inline-flex items-center gap-1 rounded-md border border-border-accent-subtle bg-accent-primary/[0.04] px-2 py-0.5 text-xs font-medium text-text-secondary">
       <span className="text-text-muted">{label}:</span>
       {value}
       <button
         type="button"
-        className="ml-0.5 -mr-0.5 inline-flex min-h-9 min-w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:outline-none md:min-h-8 md:min-w-8"
+        className="ml-0.5 -mr-0.5 inline-flex min-h-9 min-w-9 items-center justify-center rounded-sm text-text-muted transition-colors hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent-primary focus-visible:outline-none md:min-h-8 md:min-w-8"
         aria-label={`${label}: ${value}`}
         onClick={(event) => {
           event.stopPropagation();
@@ -1148,5 +1267,151 @@ function BulkMenuItem({
     >
       {label}
     </button>
+  );
+}
+
+/**
+ * Cause filter for the "Needs you" view: everything stuck, only what waits on
+ * a decision, or only what failed. Each option is a list view of its own, so
+ * the status bar's attention and failure chips land on the matching one.
+ */
+function IssueCauseFilter({
+  nav,
+  attention,
+  failed,
+  onChange,
+}: {
+  nav: NavFilter;
+  attention: number;
+  failed: number;
+  onChange: (nav: NavFilter) => void;
+}) {
+  const { t } = useTranslation();
+  const options = [
+    { value: "issues", label: t("taskList.issueAll"), count: attention + failed, icon: null },
+    { value: "attention", label: t("taskList.issueDecision"), count: attention, icon: TriangleAlert },
+    { value: "failed", label: t("taskList.issueFailed"), count: failed, icon: CircleX },
+  ] as const;
+  return (
+    <fieldset className="m-0 flex min-w-0 flex-wrap items-center gap-1 border-0 border-b border-border-subtle/70 px-3 py-1.5 md:px-4">
+      <legend className="sr-only">{t("taskList.issueFilterAria")}</legend>
+      {options.map(({ value, label, count, icon: Icon }) => {
+        const active = nav === value;
+        return (
+          <Button
+            key={value}
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-pressed={active}
+            onClick={() => onChange(value)}
+            className={cn(
+              "h-8 gap-1.5 px-2.5 text-xs",
+              active
+                ? "bg-accent-primary/12 font-medium text-text-primary hover:bg-accent-primary/15"
+                : "text-text-secondary",
+            )}
+          >
+            {Icon ? (
+              <Icon
+                className={cn("h-3.5 w-3.5", value === "failed" ? "text-status-danger" : "text-status-warning")}
+                aria-hidden
+              />
+            ) : null}
+            {label}
+            <span className="font-mono tabular-nums text-text-muted">{count}</span>
+          </Button>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * Empty list copy by situation: a first run explains where downloads come
+ * from, a cleared "Needs you" view reassures, and a search or filter offers
+ * the way back instead of a New download button that would not help.
+ */
+function TaskListEmptyState({
+  kind,
+  platform,
+  hasSearch,
+  hasFilters,
+  onClearSearch,
+  onClearFilters,
+  onNewDownload,
+  onShowAll,
+  scopeLabel,
+  allSearchMatches,
+}: {
+  kind: "firstRun" | "issues" | "search" | "view";
+  platform: Platform;
+  hasSearch: boolean;
+  hasFilters: boolean;
+  onClearSearch: () => void;
+  onClearFilters: () => void;
+  onNewDownload: () => void;
+  onShowAll: () => void;
+  scopeLabel: string;
+  allSearchMatches: number | null;
+}) {
+  const { t } = useTranslation();
+  const shortcut = formatShortcut("mod+N", platform);
+  const copy = {
+    firstRun: { title: t("taskList.emptyFirstRun"), hint: t("taskList.emptyFirstRunHint", { shortcut }) },
+    issues: { title: t("taskList.emptyIssues"), hint: t("taskList.emptyIssuesHint") },
+    search: { title: t("taskList.emptySearch"), hint: null },
+    view: { title: t("taskList.empty"), hint: t("taskList.emptyHint", { shortcut }) },
+  }[kind];
+  const Icon = kind === "search" ? Search : kind === "issues" ? CheckCircle2 : Plus;
+
+  return (
+    <div className="flex flex-col items-center justify-center gap-4 px-6 py-20 text-center">
+      <Icon
+        className={cn(
+          "h-8 w-8",
+          kind === "issues" ? "text-status-success" : kind === "search" ? "text-text-muted" : "text-accent-primary",
+        )}
+        aria-hidden
+      />
+      <div className="space-y-1.5">
+        <p className="text-sm font-medium text-text-primary">{copy.title}</p>
+        {kind === "search" && allSearchMatches && allSearchMatches > 0 ? (
+          <p className="max-w-sm text-xs leading-relaxed text-text-muted">
+            {t("taskList.emptySearchElsewhere", { view: scopeLabel, count: allSearchMatches })}
+          </p>
+        ) : copy.hint ? (
+          <p className="max-w-sm text-xs leading-relaxed text-text-muted">{copy.hint}</p>
+        ) : null}
+      </div>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        {hasSearch ? (
+          <Button variant="outline" size="sm" onClick={onClearSearch}>
+            {t("settings.clearSearch")}
+          </Button>
+        ) : null}
+        {hasFilters ? (
+          <Button variant="outline" size="sm" onClick={onClearFilters}>
+            {t("taskList.clearFilters")}
+          </Button>
+        ) : null}
+        {kind === "firstRun" || kind === "view" ? (
+          <Button type="button" size="sm" onClick={onNewDownload}>
+            <Plus className="h-4 w-4" aria-hidden />
+            {t("commandBar.newDownload")}
+          </Button>
+        ) : null}
+        {kind === "issues" || kind === "view" ? (
+          <Button type="button" variant="outline" size="sm" onClick={onShowAll}>
+            {t("attentionCenter.viewAll")}
+          </Button>
+        ) : null}
+        {kind === "search" && allSearchMatches && allSearchMatches > 0 ? (
+          <Button type="button" variant="outline" size="sm" onClick={onShowAll}>
+            {t("attentionCenter.viewAll")}
+          </Button>
+        ) : null}
+      </div>
+    </div>
   );
 }

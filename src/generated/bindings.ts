@@ -487,6 +487,12 @@ export type BatchImportItem = {
 	totalSize: string | null,
 	contentType: string | null,
 	supportsResume: boolean,
+	/**
+	 *  UX-29: stable error code for localization; the frontend maps it through
+	 *  ERROR_CODE_I18N_MAP. `error_message` keeps the raw backend detail for
+	 *  expandable diagnostics — it is not the user-facing copy.
+	 */
+	errorCode: string | null,
 	errorMessage: string | null,
 	task: Task | null,
 };
@@ -1713,6 +1719,7 @@ export type TaskStatsSnapshot = {
 	queued: string,
 	attention: string,
 	paused: string,
+	waitingNetwork: string,
 	completed: string,
 	failed: string,
 	totalSpeed: string,

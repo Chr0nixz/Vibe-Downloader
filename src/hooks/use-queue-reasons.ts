@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { QueueTaskDecision } from "@/generated/bindings";
+import { useVisibilityGatedPoll } from "@/hooks/use-visibility-gated-poll";
 import { getSchedulerSnapshot } from "@/lib/tauri";
 import { useTaskDataStore } from "@/stores/task-store";
 
@@ -35,16 +36,14 @@ export function useQueueReasons(taskIds: string[]): Map<string, QueueTaskDecisio
 
   const [snapshot, setSnapshot] = useState<QueueReasonSnapshot | null>(null);
 
-  useEffect(() => {
-    if (!queuedIdsKey) {
-      setSnapshot((previous) => (previous === null ? previous : null));
-      return;
-    }
-    let cancelled = false;
-    const load = async () => {
+  // PERF-19 (R26-P04): reuse the shared visibility-gated poll instead of a
+  // bare interval — a hidden window must not keep issuing scheduler IPC, and
+  // one slow snapshot must not overlap the next tick.
+  useVisibilityGatedPoll(
+    async (isStale) => {
       try {
         const next = await getSchedulerSnapshot(queuedIdsKey.split("\u0000"));
-        if (cancelled) return;
+        if (isStale()) return;
         // Reason text is an enhancement, not row-critical state, so a changed
         // *set* of ids matters but an unchanged answer must not churn the Map.
         const key = next.decisions
@@ -54,13 +53,17 @@ export function useQueueReasons(taskIds: string[]): Map<string, QueueTaskDecisio
       } catch {
         // Keep the previous snapshot; the row falls back to generic queued copy.
       }
-    };
-    void load();
-    const timer = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
+    },
+    REFRESH_INTERVAL_MS,
+    { enabled: Boolean(queuedIdsKey), reloadKey: queuedIdsKey },
+  );
+
+  // Disabled polls keep the last snapshot in state; clear it so re-enabling
+  // cannot briefly surface reasons for a different queued set.
+  useEffect(() => {
+    if (!queuedIdsKey) {
+      setSnapshot((previous) => (previous === null ? previous : null));
+    }
   }, [queuedIdsKey]);
 
   return useMemo(() => new Map(snapshot?.decisions.map((decision) => [decision.taskId, decision]) ?? []), [snapshot]);

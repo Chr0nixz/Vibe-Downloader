@@ -206,6 +206,34 @@ describe("RecoveryCenter", () => {
     });
   });
 
+  it("offers credential repair for http auth failures but not for bt tasks", async () => {
+    const authHttp = makeTask({
+      id: "http-auth-1",
+      failureCategory: "http",
+      protocol: "https",
+      status: "failed",
+      errorCode: "http_denied",
+    });
+    const btFailed = makeTask({
+      id: "bt-1",
+      failureCategory: "bt",
+      protocol: "bt",
+      status: "failed",
+    });
+    useTaskDataStore.setState({
+      tasks: [authHttp, btFailed],
+      taskIds: [authHttp.id, btFailed.id],
+      taskById: { [authHttp.id]: authHttp, [btFailed.id]: btFailed },
+    });
+
+    renderList();
+
+    // The HTTP 401/403 task lands in the auth concern and exposes the
+    // credential repair entry; the bt task must not.
+    const repairButtons = screen.getAllByRole("button", { name: "recoveryCenter.credentials.open" });
+    expect(repairButtons).toHaveLength(1);
+  });
+
   it("renders the recovery history with action and source labels", async () => {
     const failed = makeTask({ id: "http-1", failureCategory: "http", status: "failed" });
     useTaskDataStore.setState({

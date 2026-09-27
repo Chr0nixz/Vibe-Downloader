@@ -30,7 +30,9 @@ import {
 import { useTheme } from "next-themes";
 import { type ComponentType, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { navShortcutDigit } from "@/components/shell/nav-shortcuts";
+import { NAV_SHORTCUT_DIGITS, NAV_SHORTCUT_KEYS } from "@/components/shell/nav-shortcuts";
+import { allowedTransferActions, primaryRecoveryAction } from "@/components/tasks/row-recovery";
+import { recoveryActionIcon, restartCost } from "@/components/tasks/TaskRecoveryActions";
 import {
   Dialog,
   DialogBody,
@@ -104,7 +106,7 @@ export function Palette({
   onStart,
   onPause,
   onDelete,
-  onRetry,
+  onRecover,
   onOpenFile,
   onOpenFolder,
   onBulkPause,
@@ -124,7 +126,7 @@ export function Palette({
   onStart: () => void;
   onPause: () => void;
   onDelete: () => void;
-  onRetry: () => void;
+  onRecover: () => void;
   onOpenFile: () => void;
   onOpenFolder: () => void;
   onBulkPause: (tasks: Task[]) => void;
@@ -223,7 +225,7 @@ export function Palette({
         onStart,
         onPause,
         onDelete,
-        onRetry,
+        onRecover,
         onOpenFile,
         onOpenFolder,
         onBulkPause,
@@ -267,7 +269,7 @@ export function Palette({
       onPause,
       onPauseAll,
       onResumeAll,
-      onRetry,
+      onRecover,
       onSetNav,
       onStart,
       platform,
@@ -299,7 +301,9 @@ export function Palette({
     const normalized = normalizeSearch(query);
     const base = normalized
       ? commands.filter((command) => commandMatches(command, normalized))
-      : commands.filter((command) => command.featured !== false);
+      : // Disabled commands (and their reasons) appear once the user searches
+        // for them; the idle list shows only what can run right now.
+        commands.filter((command) => command.featured !== false && command.enabled);
 
     return base.sort((a, b) => GROUP_ORDER.indexOf(a.group) - GROUP_ORDER.indexOf(b.group));
   }, [commands, query]);
@@ -561,7 +565,7 @@ function buildCommands({
   onStart,
   onPause,
   onDelete,
-  onRetry,
+  onRecover,
   onOpenFile,
   onOpenFolder,
   onBulkPause,
@@ -592,7 +596,7 @@ function buildCommands({
   selectedTasks: Task[];
   selectedCount: number;
   visibleTasks: Task[];
-  globalStats: { active: number; queued: number; paused: number; failed: number };
+  globalStats: { active: number; queued: number; paused: number; waitingNetwork: number; failed: number };
   nav: NavFilter;
   sortKey: TaskSortKey;
   sortDirection: TaskSortDirection;
@@ -605,7 +609,7 @@ function buildCommands({
   onStart: () => void;
   onPause: () => void;
   onDelete: () => void;
-  onRetry: () => void;
+  onRecover: () => void;
   onOpenFile: () => void;
   onOpenFolder: () => void;
   onBulkPause: (tasks: Task[]) => void;
@@ -638,25 +642,20 @@ function buildCommands({
   const currentLimit = Number(settings?.globalSpeedLimitBps ?? 0);
   const mod = platform === "macos" ? "\u2318" : "Ctrl+";
 
-  const canStart =
-    !!selectedTask &&
-    (selectedTask.status === "paused" || selectedTask.status === "failed" || selectedTask.status === "waiting_network");
-  const canPause =
-    !!selectedTask &&
-    (selectedTask.status === "downloading" || selectedTask.status === "retrying" || selectedTask.status === "queued");
-  const canRetry = !!selectedTask && selectedTask.status !== "completed" && selectedTask.status !== "needs_attention";
+  const selectedActions = selectedTask ? allowedTransferActions(selectedTask) : [];
+  const canStart = selectedActions.includes("resume");
+  const canPause = selectedActions.includes("pause");
+  // Same fix as the row banner and Mod+R: a restart-only failure offers
+  // Restart here instead of a disabled "Retry" that never named the way out.
+  const recoverAction = selectedTask ? primaryRecoveryAction(selectedTask) : null;
   const canOpenFile = selectedTask?.status === "completed";
   const hasSelectedTasks = selectedTasks.length > 0;
-  const canBulkPause = selectedTasks.some(
-    (task) => task.status === "downloading" || task.status === "retrying" || task.status === "queued",
-  );
-  const canBulkResume = selectedTasks.some(
-    (task) => task.status === "paused" || task.status === "failed" || task.status === "waiting_network",
-  );
-  const canBulkRetry = selectedTasks.some((task) => task.status !== "completed");
+  const canBulkPause = selectedTasks.some((task) => allowedTransferActions(task).includes("pause"));
+  const canBulkResume = selectedTasks.some((task) => allowedTransferActions(task).includes("resume"));
+  const canBulkRetry = selectedTasks.some((task) => allowedTransferActions(task).includes("retry"));
   // UX-05: gate on DB-wide stats, not the loaded page subset.
   const canPauseAll = globalStats.active + globalStats.queued > 0;
-  const canResumeAll = globalStats.paused + globalStats.failed > 0;
+  const canResumeAll = globalStats.paused + globalStats.waitingNetwork > 0;
   const filtersActive =
     filters.fileType !== DEFAULT_FILTERS.fileType ||
     filters.source !== DEFAULT_FILTERS.source ||
@@ -680,42 +679,6 @@ function buildCommands({
     run: onNewDownload,
   });
   push({
-    id: "app.all-tasks",
-    label: t("palette.commands.allTasks"),
-    description: t("palette.descriptions.allTasks"),
-    group: "app",
-    icon: ListChecks,
-    keywords: keyword("all", "tasks", "home", "全部", "任务", "主页"),
-    enabled: true,
-    active: nav === "all",
-    featured: true,
-    run: () => onSetNav("all"),
-  });
-  push({
-    id: "app.queue",
-    label: t("nav.queue"),
-    description: t("queueCenter.subtitle"),
-    group: "app",
-    icon: ListOrdered,
-    keywords: keyword("queue", "schedule", "order", "waiting", "队列", "调度", "顺序"),
-    enabled: true,
-    active: nav === "queue",
-    featured: true,
-    run: () => onSetNav("queue"),
-  });
-  push({
-    id: "app.attention",
-    label: t("nav.attention"),
-    description: t("attentionCenter.subtitle"),
-    group: "app",
-    icon: CircleAlert,
-    keywords: keyword("attention", "decision", "blocked", "recovery", "待处理", "恢复"),
-    enabled: true,
-    active: nav === "attention",
-    featured: true,
-    run: () => onSetNav("attention"),
-  });
-  push({
     id: "app.storage",
     label: t("nav.storage"),
     description: t("storageCenter.subtitle"),
@@ -729,7 +692,7 @@ function buildCommands({
   });
   push({
     id: "app.recovery",
-    label: t("nav.recovery"),
+    label: t("recoveryCenter.title"),
     description: t("recoveryCenter.subtitle"),
     group: "app",
     icon: LifeBuoy,
@@ -827,16 +790,26 @@ function buildCommands({
     run: onPause,
   });
   push({
-    id: "task.retry",
-    label: t("palette.retry"),
-    description: t("palette.descriptions.task", { name: selectedName }),
+    id: "task.recover",
+    label:
+      recoverAction === null || recoverAction === "retry"
+        ? t("palette.retry")
+        : recoverAction === "restart"
+          ? t("palette.restart")
+          : t("palette.recoverWith", { action: t(`recovery.${recoverAction}`) }),
+    description:
+      recoverAction === "restart" && selectedTask
+        ? (restartCost(selectedTask, t) ?? t("palette.descriptions.task", { name: selectedName }))
+        : t("palette.descriptions.task", { name: selectedName }),
     group: "task",
-    icon: RotateCcw,
-    keywords: keyword("retry", "again", "重试"),
-    enabled: canRetry,
+    icon: recoverAction ? recoveryActionIcon(recoverAction) : RotateCcw,
+    keywords: keyword("retry", "again", "restart", "recover", "fix", "重试", "重新开始", "恢复"),
+    shortcut: `${mod}R`,
+    enabled: recoverAction !== null,
     disabledReason: selectedTask ? t("palette.disabled.cannotRetry") : noTask,
     featured: true,
-    run: onRetry,
+    danger: recoverAction === "restart",
+    run: onRecover,
   });
   push({
     id: "task.open-file",
@@ -1004,21 +977,57 @@ function buildCommands({
     run: () => onResumeAll(),
   });
 
-  (
-    ["all", "downloading", "queue", "attention", "paused", "completed", "failed", "storage", "settings"] as const
-  ).forEach((nextNav) => {
-    const digit = navShortcutDigit(nextNav);
+  // One entry per view, in shortcut order (1–7). Workspaces such as Storage
+  // and Settings live in the App group only; listing them twice made the
+  // palette read as two navigation systems.
+  const viewDetails: Partial<
+    Record<NavFilter, { description: string; icon: ComponentType<{ className?: string }>; keywords: string[] }>
+  > = {
+    all: {
+      description: t("palette.descriptions.allTasks"),
+      icon: ListChecks,
+      keywords: keyword("all", "tasks", "home", "全部", "任务", "主页"),
+    },
+    queue: {
+      description: t("queueCenter.subtitle"),
+      icon: ListOrdered,
+      keywords: keyword("queue", "schedule", "order", "waiting", "队列", "调度", "顺序"),
+    },
+    issues: {
+      description: t("palette.descriptions.issues"),
+      icon: CircleAlert,
+      keywords: keyword("attention", "failed", "decision", "blocked", "error", "needs", "待处理", "失败", "需要处理"),
+    },
+    downloading: {
+      description: t("palette.descriptions.downloading"),
+      icon: ListChecks,
+      keywords: keyword("active", "running", "下载中"),
+    },
+    completed: {
+      description: t("palette.descriptions.completed"),
+      icon: ListChecks,
+      keywords: keyword("done", "finished", "已完成"),
+    },
+    paused: {
+      description: t("palette.descriptions.paused"),
+      icon: ListChecks,
+      keywords: keyword("stopped", "已暂停"),
+    },
+  };
+  NAV_SHORTCUT_DIGITS.forEach((digit) => {
+    const nextNav = NAV_SHORTCUT_KEYS[digit];
+    const details = viewDetails[nextNav];
     push({
       id: `view.${nextNav}`,
       label: t(`nav.${nextNav}`),
-      description: t("palette.descriptions.view"),
+      description: details?.description ?? t("palette.descriptions.view"),
       group: "views",
-      icon: nextNav === "settings" ? Settings : ListChecks,
-      keywords: keyword("view", "filter", nextNav, "视图", "导航"),
-      shortcut: digit ? `${mod}${digit}` : undefined,
+      icon: details?.icon ?? ListChecks,
+      keywords: [...keyword("view", "filter", nextNav, "视图", "导航"), ...(details?.keywords ?? [])],
+      shortcut: `${mod}${digit}`,
       enabled: true,
-      active: nav === nextNav,
-      featured: nextNav !== "settings",
+      active: nav === nextNav || (nextNav === "issues" && (nav === "attention" || nav === "failed")),
+      featured: true,
       run: () => onSetNav(nextNav),
     });
   });

@@ -171,6 +171,38 @@ pub async fn probe_webdav_directory_url(
     input_url: &str,
     credentials: Option<&crate::db::TaskCredentials>,
 ) -> Result<WebDavDirectoryProbe, String> {
+    probe_webdav_directory_url_cancellable(client, input_url, credentials, None).await
+}
+
+/// ARC-55: directory probe with a total deadline + optional cancel. The
+/// original `send().await` had no budget — a server that accepts the TCP
+/// connection but never returns headers held the new-download dialog open
+/// indefinitely.
+pub async fn probe_webdav_directory_url_cancellable(
+    client: &Client,
+    input_url: &str,
+    credentials: Option<&crate::db::TaskCredentials>,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<WebDavDirectoryProbe, String> {
+    let future = probe_webdav_directory_inner(client, input_url, credentials, cancel_token);
+    match crate::download::bounded_probe(future, cancel_token).await {
+        crate::download::BoundedProbeOutcome::Done(probe) => Ok(probe),
+        crate::download::BoundedProbeOutcome::Error(error) => Err(error),
+        crate::download::BoundedProbeOutcome::Canceled => Err("Download canceled.".to_string()),
+        crate::download::BoundedProbeOutcome::Timeout => Err(engine_error(
+            "webdav_propfind_timeout",
+            "WebDAV directory probe exceeded its 90 second budget.",
+            true,
+        )),
+    }
+}
+
+async fn probe_webdav_directory_inner(
+    client: &Client,
+    input_url: &str,
+    credentials: Option<&crate::db::TaskCredentials>,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<WebDavDirectoryProbe, String> {
     let mut target = WebDavTarget::parse_directory(input_url)?;
     // FUN-04: prefer URL-embedded credentials; otherwise apply draft credentials.
     if target.credentials.is_none() {
@@ -209,16 +241,37 @@ pub async fn probe_webdav_directory_url(
 </d:propfind>"#,
         );
     request = apply_forwarded_headers(request, &headers);
-    let response = request.send().await.map_err(|e| {
-        engine_error(
-            "webdav_propfind_failed",
-            format!("WebDAV PROPFIND failed: {e}"),
-            true,
-        )
-    })?;
+    let send = request.send();
+    let response = match cancel_token {
+        Some(token) => {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err("Download canceled.".to_string()),
+                outcome = send => outcome.map_err(|e| {
+                    engine_error(
+                        "webdav_propfind_failed",
+                        format!("WebDAV PROPFIND failed: {e}"),
+                        true,
+                    )
+                })?,
+            }
+        }
+        None => send.await.map_err(|e| {
+            engine_error(
+                "webdav_propfind_failed",
+                format!("WebDAV PROPFIND failed: {e}"),
+                true,
+            )
+        })?,
+    };
     let status = response.status();
-    let text = match read_body_limited(response, CONTROL_PLANE_MAX_BYTES, None, READ_IDLE_TIMEOUT)
-        .await
+    let text = match read_body_limited(
+        response,
+        CONTROL_PLANE_MAX_BYTES,
+        cancel_token,
+        READ_IDLE_TIMEOUT,
+    )
+    .await
     {
         Ok(bytes) => String::from_utf8(bytes)
             .map_err(|_| "WebDAV PROPFIND response is not valid UTF-8.".to_string())?,

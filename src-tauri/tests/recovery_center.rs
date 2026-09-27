@@ -6,6 +6,8 @@
 //! here; the ARC-41 start-failure routing it depends on is covered by the
 //! scheduler in-crate tests (`arc41_*`).
 
+mod common;
+
 use tauri_app_lib::commands::recovery::{
     bulk_resolution_gate, credentials_update_gate, normalize_recovery_source, BulkGate,
     CredentialsGateError,
@@ -118,16 +120,33 @@ fn credential_gate_blocks_unsupported_protocols_and_busy_tasks() {
     assert!(credentials_update_gate("sftp", &TaskStatus::NeedsAttention).is_ok());
     assert!(credentials_update_gate("webdavs", &TaskStatus::Failed).is_ok());
     assert!(credentials_update_gate("ftps", &TaskStatus::Paused).is_ok());
-    assert_eq!(
-        credentials_update_gate("http", &TaskStatus::NeedsAttention),
-        Err(CredentialsGateError::UnsupportedProtocol)
-    );
+    // HTTP family: Basic Auth tasks and the derived engines consume the same
+    // task_credentials store, so password rotation must be repairable in place.
+    for protocol in ["http", "https", "hls", "dash", "metalink"] {
+        assert!(
+            credentials_update_gate(protocol, &TaskStatus::NeedsAttention).is_ok(),
+            "{protocol} should accept credential updates"
+        );
+    }
+    // BT/magnet tasks have no credential channel; the gate must still refuse.
+    for protocol in ["bt", "magnet"] {
+        assert_eq!(
+            credentials_update_gate(protocol, &TaskStatus::NeedsAttention),
+            Err(CredentialsGateError::UnsupportedProtocol),
+            "{protocol} should stay unsupported"
+        );
+    }
     assert_eq!(
         credentials_update_gate("ftp", &TaskStatus::Downloading),
         Err(CredentialsGateError::TaskBusy)
     );
     assert_eq!(
         credentials_update_gate("ftp", &TaskStatus::Retrying),
+        Err(CredentialsGateError::TaskBusy)
+    );
+    // The busy gate must apply to the HTTP family too, not just FTP.
+    assert_eq!(
+        credentials_update_gate("https", &TaskStatus::Downloading),
         Err(CredentialsGateError::TaskBusy)
     );
 }
@@ -201,6 +220,63 @@ async fn recovery_history_is_bounded_by_prune_on_insert() {
     assert_eq!(history.len(), 200, "the log must stay bounded");
     assert_eq!(history[0].id, "219", "the newest insert survives");
     assert_eq!(history.last().expect("tail").id, "20", "oldest pruned");
+
+    pool.close().await;
+}
+
+/// FUN-31: an HTTP task must accept a credential update the same way an
+/// FTP/SFTP/WebDAV task does — the encrypted row lands in task_credentials
+/// and resolves back to the same Basic Auth secret.
+#[tokio::test]
+async fn http_task_credentials_round_trip_through_encrypted_store() {
+    common::install_test_secret_key();
+    let (_db, pool) = common::test_pool("http-credentials").await;
+
+    let paths = common::TestPaths::new("http-credentials");
+    let task = common::download_task(
+        "http-cred-task",
+        "https://example.com/file.bin".to_string(),
+        "https",
+        "file.bin",
+        1024,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+
+    db::upsert_task_credentials(
+        &pool,
+        &task.id,
+        &task.protocol,
+        "alice",
+        "rotated-secret",
+        None,
+        None,
+    )
+    .await
+    .expect("upsert credentials");
+
+    // The row must hold ciphertext, not the plaintext secret.
+    let raw: (String,) =
+        sqlx::query_as("SELECT credentials_ciphertext FROM task_credentials WHERE task_id = ?")
+            .bind(&task.id)
+            .fetch_one(&pool)
+            .await
+            .expect("credential row");
+    assert!(
+        !raw.0.contains("rotated-secret"),
+        "secret must be encrypted at rest"
+    );
+
+    let resolved = db::resolve_task_credentials(&pool, &task.id)
+        .await
+        .expect("resolve credentials")
+        .expect("credentials present");
+    assert_eq!(resolved.username, "alice");
+    assert_eq!(resolved.password, "rotated-secret");
+    assert_eq!(resolved.private_key_data, None);
 
     pool.close().await;
 }

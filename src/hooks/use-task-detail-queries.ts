@@ -10,6 +10,7 @@ import type {
   TorrentRuntimeSnapshot,
 } from "@/generated/bindings";
 import { useVisibilityGatedPoll } from "@/hooks/use-visibility-gated-poll";
+import { hasByteRangeSegments } from "@/lib/chunk-map";
 import { errorMessage } from "@/lib/errors";
 import { isDashProtocol, isFtpSftpProtocol, isHlsProtocol, isTorrentProtocol } from "@/lib/task-diagnostics";
 import {
@@ -28,8 +29,6 @@ import type { TaskSegment } from "@/types/task-segment";
 
 const SEGMENT_REFRESH_MS = 2_000;
 const DETAIL_REFRESH_MS = 30_000;
-
-export type TaskDetailDiagSubTab = "segments" | "requests";
 
 function mergeById<T extends { id: string }>(current: T[], incoming: T[]): T[] {
   const byId = new Map(current.map((item) => [item.id, item] as const));
@@ -53,14 +52,20 @@ function usesPlaylistSegments(protocol: string): boolean {
  * ARC-17: TaskDetails query controller — segments / requests / events / torrent / HLS / DASH
  * polling gated by the visible tab so inactive panes do not keep hitting IPC.
  */
-export function useTaskDetailQueries(options: { task: Task; activeTab: string; diagSubTab: TaskDetailDiagSubTab }) {
-  const { task, activeTab, diagSubTab } = options;
+export function useTaskDetailQueries(options: { task: Task; activeTab: string }) {
+  const { task, activeTab } = options;
   const isTorrentTask = isTorrentProtocol(task.protocol);
   const isHlsTask = isHlsProtocol(task.protocol);
   const isDashTask = isDashProtocol(task.protocol);
   const isFtpSftpTask = isFtpSftpProtocol(task.protocol);
-  const segmentsVisible = activeTab === "diagnostics" && diagSubTab === "segments" && !isTorrentTask;
   const overviewVisible = activeTab === "overview";
+  // Diagnostics is one scroll (segments, then requests), so both load while it
+  // is open. The overview's chunk map draws the same work-unit segments, so
+  // they load there too — but only for protocols whose segments are byte
+  // ranges of one file (a few rows: HTTP caps at 8 ranges, FTP at 4).
+  const diagnosticsVisible = activeTab === "diagnostics";
+  const segmentsVisible =
+    !isTorrentTask && (diagnosticsVisible || (overviewVisible && hasByteRangeSegments(task.protocol)));
 
   const [segments, setSegments] = useState<TaskSegment[]>([]);
   const [segmentsCursor, setSegmentsCursor] = useState<string | null>(null);
@@ -157,7 +162,7 @@ export function useTaskDetailQueries(options: { task: Task; activeTab: string; d
     },
   );
 
-  // HLS real playlist segments — only while Segments sub-tab is visible.
+  // HLS real playlist segments — only while Diagnostics is visible.
   const hlsSegmentsEnabled = segmentsVisible && isHlsTask;
 
   useEffect(() => {
@@ -187,7 +192,7 @@ export function useTaskDetailQueries(options: { task: Task; activeTab: string; d
     },
   );
 
-  // DASH real MPD segments — only while Segments sub-tab is visible.
+  // DASH real MPD segments — only while Diagnostics is visible.
   const dashSegmentsEnabled = segmentsVisible && isDashTask;
 
   useEffect(() => {
@@ -217,7 +222,7 @@ export function useTaskDetailQueries(options: { task: Task; activeTab: string; d
     },
   );
 
-  const requestsEnabled = activeTab === "diagnostics" && diagSubTab === "requests";
+  const requestsEnabled = diagnosticsVisible;
 
   useEffect(() => {
     if (requestsEnabled) return;

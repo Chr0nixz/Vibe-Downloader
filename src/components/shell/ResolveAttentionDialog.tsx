@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { restartCost } from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,9 +14,10 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { RecoveryAction } from "@/generated/bindings";
+import { formatBytes } from "@/lib/utils";
 import type { Task } from "@/types/task";
 
-export type AttentionDialogAction = Extract<RecoveryAction, "choose_another_name" | "restart">;
+export type AttentionDialogAction = Extract<RecoveryAction, "choose_another_name" | "restart"> | "pause";
 
 export interface AttentionDialogRequest {
   task: Task;
@@ -36,12 +38,25 @@ export function ResolveAttentionDialog({
   const { t } = useTranslation();
   const [fileName, setFileName] = useState("");
   const isSaveAs = request?.action === "choose_another_name";
+  const isPause = request?.action === "pause";
 
   useEffect(() => {
     setFileName(request?.task.fileName ?? "");
   }, [request]);
 
   if (!request) return null;
+  const cost = isSaveAs
+    ? null
+    : isPause
+      ? request.task.downloadedBytes > 0
+        ? request.task.totalSize > 0
+          ? t("recovery.pauseCost", {
+              downloaded: formatBytes(request.task.downloadedBytes),
+              total: formatBytes(request.task.totalSize),
+            })
+          : t("recovery.pauseCostUnknownTotal", { downloaded: formatBytes(request.task.downloadedBytes) })
+        : null
+      : restartCost(request.task, t);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -56,20 +71,42 @@ export function ResolveAttentionDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      {/* Restart destroys downloaded bytes, so it interrupts as an alert
+          dialog; Save as is an ordinary form. */}
+      <DialogContent role={isSaveAs ? undefined : "alertdialog"}>
         <DialogHeader>
-          <DialogTitle>{isSaveAs ? t("recoveryDialog.saveAsTitle") : t("recoveryDialog.restartTitle")}</DialogTitle>
+          <DialogTitle>
+            {isSaveAs
+              ? t("recoveryDialog.saveAsTitle")
+              : isPause
+                ? t("recoveryDialog.pauseTitle")
+                : t("recoveryDialog.restartTitle")}
+          </DialogTitle>
         </DialogHeader>
         <form className="flex min-h-0 flex-1 flex-col" onSubmit={submit}>
           <DialogBody className="space-y-4 py-4">
-            <DialogDescription>
+            {/* Restart names the object, then the consequence once: the generic
+                "will discard the current progress" line used to precede the
+                byte-exact cost that says the same thing more precisely. */}
+            {!isSaveAs ? (
+              <p className="truncate text-sm font-medium text-text-primary" title={request.task.fileName}>
+                {request.task.fileName}
+              </p>
+            ) : null}
+            <DialogDescription className={cost ? "leading-5 text-text-secondary" : undefined}>
               {isSaveAs
                 ? t("recoveryDialog.saveAsDescription", {
                     name: request.task.fileName,
                   })
-                : t("recoveryDialog.restartDescription", {
-                    name: request.task.fileName,
-                  })}
+                : isPause
+                  ? (cost ??
+                    t("recoveryDialog.pauseDescription", {
+                      name: request.task.fileName,
+                    }))
+                  : (cost ??
+                    t("recoveryDialog.restartDescription", {
+                      name: request.task.fileName,
+                    }))}
             </DialogDescription>
             {isSaveAs ? (
               <label htmlFor="recovery-file-name" className="flex flex-col gap-1 text-xs text-text-muted">
@@ -95,7 +132,11 @@ export function ResolveAttentionDialog({
               className="w-full sm:w-auto"
               disabled={isSaveAs && !fileName.trim()}
             >
-              {isSaveAs ? t("recoveryDialog.confirmSaveAs") : t("recoveryDialog.confirmRestart")}
+              {isSaveAs
+                ? t("recoveryDialog.confirmSaveAs")
+                : isPause
+                  ? t("recoveryDialog.confirmPause")
+                  : t("recoveryDialog.confirmRestart")}
             </Button>
           </DialogFooter>
         </form>

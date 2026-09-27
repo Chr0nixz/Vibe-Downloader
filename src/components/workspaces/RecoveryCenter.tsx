@@ -1,16 +1,11 @@
+import type { TFunction } from "i18next";
 import {
-  AlertTriangle,
   ArrowLeft,
   CheckCircle2,
-  CloudOff,
   ExternalLink,
-  Globe,
-  HardDrive,
   History,
   KeyRound,
-  Link2,
   Loader2,
-  PackageOpen,
   RotateCcw,
   ShieldCheck,
 } from "lucide-react";
@@ -18,6 +13,12 @@ import { type KeyboardEvent, useCallback, useEffect, useMemo, useState } from "r
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 
+import {
+  ErrorCodeDisclosure,
+  RecoveryConcernIcon,
+  RecoveryProblem,
+  recoveryTone,
+} from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -33,7 +34,7 @@ import type { RecoveryAction, RecoveryHistoryRecord } from "@/generated/bindings
 import { errorMessage, localizedErrorMessage } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
 import { bulkResolveAttention, listRecoveryHistory, updateTaskCredentials } from "@/lib/tauri";
-import { sanitizeUrlForDisplay } from "@/lib/utils";
+import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
 import { useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
@@ -44,13 +45,27 @@ import {
   HISTORY_ACTION_KEYS,
   HISTORY_SOURCE_KEYS,
   isAutoRecoverable,
+  type PlaybookEntry,
   playbookForTask,
   type RecoveryConcern,
 } from "./recovery-center-logic";
 
 /** Protocols whose stored credentials the backend can replace (SEC parity
- * with commands/recovery.rs CREDENTIAL_PROTOCOLS). */
-const CREDENTIAL_PROTOCOLS = new Set(["ftp", "ftps", "sftp", "webdav", "webdavs"]);
+ * with commands/recovery.rs CREDENTIAL_PROTOCOLS). The HTTP family covers
+ * Basic Auth on http/https plus the derived hls/dash/metalink engines;
+ * bt/magnet have no credential channel. */
+const CREDENTIAL_PROTOCOLS = new Set([
+  "ftp",
+  "ftps",
+  "sftp",
+  "webdav",
+  "webdavs",
+  "http",
+  "https",
+  "hls",
+  "dash",
+  "metalink",
+]);
 
 export function RecoveryCenter({
   taskIds,
@@ -255,7 +270,7 @@ export function RecoveryCenter({
                   {groups.map((group) => (
                     <section key={group.concern} aria-labelledby={`recovery-group-${group.concern}`}>
                       <div className="sticky top-0 z-10 flex h-9 items-center gap-2 border-b border-border-divider bg-surface-base/95 px-3 backdrop-blur-sm md:px-4">
-                        <ConcernIcon concern={group.concern} className="h-3.5 w-3.5 text-status-warning" />
+                        <RecoveryConcernIcon concern={group.concern} className="h-3.5 w-3.5 text-status-warning" />
                         <h2
                           id={`recovery-group-${group.concern}`}
                           className="text-xs font-semibold text-text-secondary"
@@ -391,8 +406,14 @@ function RecoveryTaskRow({
         selected ? "bg-accent-primary/12" : "hover:bg-surface-hover"
       }`}
     >
-      <span className="flex h-7 w-7 items-center justify-center rounded-md bg-status-warning/12 text-status-warning">
-        <ConcernIcon concern={concern} className="h-4 w-4" />
+      <span
+        className={`flex h-7 w-7 items-center justify-center rounded-md ${
+          recoveryTone(task.status) === "danger"
+            ? "bg-status-danger/12 text-status-danger"
+            : "bg-status-warning/12 text-status-warning"
+        }`}
+      >
+        <RecoveryConcernIcon concern={concern} className="h-4 w-4" />
       </span>
       <span className="min-w-0">
         <span className="block truncate text-sm font-semibold leading-5 text-text-primary">{task.fileName}</span>
@@ -454,19 +475,11 @@ function RecoveryDetail({
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6 md:py-5">
         <div className="mx-auto max-w-3xl space-y-6">
           <section aria-labelledby="recovery-problem-title">
-            <div className="flex items-start gap-3">
-              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-status-warning/12 text-status-warning">
-                <ConcernIcon concern={concern} className="h-4 w-4" />
-              </span>
-              <div className="min-w-0">
-                <h3 id="recovery-problem-title" className="text-sm font-semibold leading-5 text-text-primary">
-                  {t(`recoveryCenter.concern.${concern}`)}
-                </h3>
-                <p className="mt-1 max-w-[65ch] text-sm leading-5 text-text-secondary">
-                  {task.errorMessage ? localizedErrorMessage(task.errorMessage, t) : t("recoveryCenter.actionRequired")}
-                </p>
-              </div>
-            </div>
+            <RecoveryProblem
+              task={task}
+              headingId="recovery-problem-title"
+              fallbackMessage={t("recoveryCenter.actionRequired")}
+            />
           </section>
 
           <section className="border-t border-border-divider pt-5" aria-labelledby="recovery-playbook-title">
@@ -502,13 +515,11 @@ function RecoveryDetail({
                       </div>
                       <div className="flex gap-1.5">
                         <dt className="shrink-0">{t("recoveryCenter.playbook.deletesLabel")}</dt>
-                        <dd className="min-w-0 text-text-secondary">{t(entry.deletesKey)}</dd>
+                        <dd className="min-w-0 text-text-secondary">{playbookDeletes(entry, task, t)}</dd>
                       </div>
                       <div className="flex gap-1.5">
                         <dt className="shrink-0">{t("recoveryCenter.playbook.redownloadsLabel")}</dt>
-                        <dd className="text-text-secondary">
-                          {entry.redownloads ? t("recoveryCenter.playbook.yes") : t("recoveryCenter.playbook.no")}
-                        </dd>
+                        <dd className="text-text-secondary">{playbookRedownloads(entry, task, t)}</dd>
                       </div>
                       <div className="flex gap-1.5">
                         <dt className="shrink-0">{t("recoveryCenter.playbook.changesPathLabel")}</dt>
@@ -549,12 +560,8 @@ function RecoveryDetail({
               <DetailRow label={t("recoveryCenter.source")} value={task.sourceKey} />
               <DetailRow label={t("recoveryCenter.protocol")} value={task.protocol.toUpperCase()} mono />
               <DetailRow label={t("recoveryCenter.saveDirectory")} value={task.saveDir} />
-              <DetailRow
-                label={t("recoveryCenter.errorCode")}
-                value={errorCodeForTask(task) ?? t("recoveryCenter.notAvailable")}
-                mono
-              />
             </dl>
+            <ErrorCodeDisclosure label={t("recoveryCenter.errorCode")} code={errorCodeForTask(task)} />
           </section>
         </div>
       </div>
@@ -783,13 +790,19 @@ function RecoveryEmpty({ title, description }: { title: string; description: str
   );
 }
 
-function ConcernIcon({ concern, className }: { concern: RecoveryConcern; className?: string }) {
-  if (concern === "auth") return <KeyRound className={className} aria-hidden />;
-  if (concern === "proxy") return <Globe className={className} aria-hidden />;
-  if (concern === "disk") return <HardDrive className={className} aria-hidden />;
-  if (concern === "remoteChanged") return <Link2 className={className} aria-hidden />;
-  if (concern === "resume") return <PackageOpen className={className} aria-hidden />;
-  if (concern === "protocol") return <CloudOff className={className} aria-hidden />;
-  if (concern === "http") return <History className={className} aria-hidden />;
-  return <AlertTriangle className={className} aria-hidden />;
+// The playbook's static wording ("all downloaded bytes") becomes a number
+// once there is something on disk: "2.0 GB" is what the user is weighing.
+function playbookDeletes(entry: PlaybookEntry, task: Task, t: TFunction): string {
+  if (entry.action === "restart" && task.downloadedBytes > 0) {
+    return t("recoveryCenter.playbook.restart.deletesAmount", { downloaded: formatBytes(task.downloadedBytes) });
+  }
+  return t(entry.deletesKey);
+}
+
+function playbookRedownloads(entry: PlaybookEntry, task: Task, t: TFunction): string {
+  if (!entry.redownloads) return t("recoveryCenter.playbook.no");
+  if (task.totalSize > 0) {
+    return t("recoveryCenter.playbook.redownloadsAmount", { total: formatBytes(task.totalSize) });
+  }
+  return t("recoveryCenter.playbook.yes");
 }

@@ -15,6 +15,7 @@ import type {
   RemoteValidatorKind,
 } from "@/generated/bindings";
 import type { TranslationKey } from "@/i18n";
+import { errorCodeToI18nKey, localizedMessage, parseAppError } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
 import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
 
@@ -45,6 +46,23 @@ export const PASSPORT_VALIDATOR_KEYS = {
   last_modified: "taskDetails.passport.validator.lastModified",
   range: "taskDetails.passport.validator.range",
 } as const satisfies Record<RemoteValidatorKind, TranslationKey>;
+
+/**
+ * The backend reports Range support in the same list as ETag and
+ * Last-Modified, but Range is a capability (the server can send part of the
+ * file), not a validator (proof the file did not change between requests).
+ * Labelling it "Remote validator: Range" told users a changed-file check
+ * existed when none did, so the two are shown apart.
+ */
+export function splitRemoteValidators(kinds: readonly RemoteValidatorKind[]): {
+  validators: Exclude<RemoteValidatorKind, "range">[];
+  rangeSupported: boolean;
+} {
+  return {
+    validators: kinds.filter((kind): kind is Exclude<RemoteValidatorKind, "range"> => kind !== "range"),
+    rangeSupported: kinds.includes("range"),
+  };
+}
 
 /** Who caused a timeline milestone. Inferred from the event vocabulary —
  * ambiguous events (e.g. `retrying` can be a user requeue or a segment
@@ -120,6 +138,23 @@ export function timelineMilestones(
     }));
 }
 
+/**
+ * The one-line summary a milestone shows under its label. Event payloads are
+ * whatever the engine recorded: a structured `{code, message}` error, a
+ * `taskDiagnostics.*` key, or raw engine text. Only the first two can be
+ * localized; raw text (and codes with no i18n entry) returns null so it stays
+ * in the Logs tab instead of leaking English or JSON into the overview (UX-11).
+ */
+export function timelinePayloadSummary(payload: string | null, t: TFunction): string | null {
+  if (!payload) return null;
+  if (payload.startsWith("taskDiagnostics.")) return localizedMessage(payload, t) ?? null;
+  const structured = parseAppError(payload);
+  if (!structured) return null;
+  if (structured.message.startsWith("taskDiagnostics.")) return localizedMessage(structured.message, t) ?? null;
+  const key = errorCodeToI18nKey(structured.code);
+  return key ? t(key) : null;
+}
+
 /** Sanitized multi-line clipboard report. Paths are intentionally omitted —
  * the report is the shareable summary; the JSON export carries paths. */
 export function buildPassportTextReport(passport: IntegrityPassport, t: TFunction): string {
@@ -144,15 +179,19 @@ export function buildPassportTextReport(passport: IntegrityPassport, t: TFunctio
     }),
   );
 
-  if (passport.remoteValidators.length > 0) {
+  const { validators, rangeSupported } = splitRemoteValidators(passport.remoteValidators);
+  if (validators.length > 0) {
     lines.push(
       t("taskDetails.passport.report.validators", {
-        validators: passport.remoteValidators.map((validator) => t(PASSPORT_VALIDATOR_KEYS[validator])).join(", "),
+        validators: validators.map((validator) => t(PASSPORT_VALIDATOR_KEYS[validator])).join(", "),
       }),
     );
   } else {
     lines.push(t("taskDetails.passport.report.validatorsNone"));
   }
+  lines.push(
+    t(rangeSupported ? "taskDetails.passport.report.rangeSupported" : "taskDetails.passport.report.rangeNotObserved"),
+  );
 
   if (passport.checksumState === "not_provided") {
     lines.push(t("taskDetails.passport.report.checksumNotProvided"));

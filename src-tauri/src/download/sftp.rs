@@ -377,6 +377,40 @@ pub async fn probe_sftp_directory_url(
     proxy_config: ResolvedProxyConfig,
     credentials: Option<&db::TaskCredentials>,
 ) -> Result<SftpDirectoryProbe, String> {
+    probe_sftp_directory_url_cancellable(pool, input_url, proxy_config, credentials, None).await
+}
+
+/// ARC-55: directory probe with a total deadline + optional cancel. The SSH
+/// connect had SFTP_CONNECT_BUDGET, but REALPATH/READDIR ran unbounded — a
+/// session that stalls mid-listing held the dialog open.
+pub async fn probe_sftp_directory_url_cancellable(
+    pool: &SqlitePool,
+    input_url: &str,
+    proxy_config: ResolvedProxyConfig,
+    credentials: Option<&db::TaskCredentials>,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<SftpDirectoryProbe, String> {
+    let future =
+        probe_sftp_directory_inner(pool, input_url, proxy_config, credentials, cancel_token);
+    match crate::download::bounded_probe(future, cancel_token).await {
+        crate::download::BoundedProbeOutcome::Done(probe) => Ok(probe),
+        crate::download::BoundedProbeOutcome::Error(error) => Err(error),
+        crate::download::BoundedProbeOutcome::Canceled => Err("Download canceled.".to_string()),
+        crate::download::BoundedProbeOutcome::Timeout => Err(engine_error(
+            "sftp_directory_probe_timeout",
+            "SFTP directory probe exceeded its 90 second budget.",
+            true,
+        )),
+    }
+}
+
+async fn probe_sftp_directory_inner(
+    pool: &SqlitePool,
+    input_url: &str,
+    proxy_config: ResolvedProxyConfig,
+    credentials: Option<&db::TaskCredentials>,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<SftpDirectoryProbe, String> {
     let mut target = SftpTarget::parse_directory(input_url)?;
     if let Some(creds) = credentials {
         if !creds.username.is_empty() {
@@ -389,7 +423,7 @@ pub async fn probe_sftp_directory_url(
         }
     }
     let mut diagnostics = Vec::new();
-    let connection = connect_sftp(pool, &target, &proxy_config, None).await?;
+    let connection = connect_sftp(pool, &target, &proxy_config, cancel_token).await?;
     let canonical = connection.session.canonicalize(&target.path).await.ok();
     if let Some(canonical) = canonical.as_deref() {
         diagnostics.push(format!("REALPATH {canonical} succeeded"));

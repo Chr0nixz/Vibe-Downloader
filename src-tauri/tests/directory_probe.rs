@@ -816,3 +816,87 @@ async fn fun04_ftp_directory_probe_uses_socks5_proxy() {
     );
     proxy_task.abort();
 }
+
+// --- ARC-55: directory probe deadline + cancellation -----------------------
+
+/// A server that accepts TCP and never writes a byte must not hold the probe
+/// open forever. Cancelling the token has to converge the probe immediately;
+/// without the bounded_probe wrapper the future would wait on `send()`
+/// indefinitely.
+#[tokio::test]
+async fn arc55_webdav_probe_cancel_converges() {
+    use tauri_app_lib::download::probe_webdav_directory_url_cancellable;
+
+    let listener = TokioTcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stall server");
+    let addr = listener.local_addr().expect("addr");
+    // Accept connections and hold them open without responding.
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+
+    let factory = tauri_app_lib::download::NetworkClientFactory::new();
+    let client = factory
+        .client_for(&tauri_app_lib::proxy::ResolvedProxyConfig::default())
+        .await
+        .expect("client");
+
+    let token = tokio_util::sync::CancellationToken::new();
+    let probe_url = format!("webdav://{addr}/dir/");
+    let probe = tokio::spawn({
+        let token = token.clone();
+        async move {
+            probe_webdav_directory_url_cancellable(&client, &probe_url, None, Some(&token)).await
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    token.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+        .await
+        .expect("cancelled probe must converge quickly")
+        .expect("probe task join");
+    let error = result.expect_err("cancelled probe must fail");
+    assert!(
+        error.contains("canceled") || error.contains("cancelled"),
+        "expected a cancellation error, got: {error}"
+    );
+    server.abort();
+}
+
+/// Same stall server, no cancel token: the 90s budget is too long for a unit
+/// test, so verify the smaller invariant — a *real* error still propagates
+/// instead of being flattened into a timeout.
+#[tokio::test]
+async fn arc55_webdav_probe_error_not_masked_by_budget() {
+    use tauri_app_lib::download::probe_webdav_directory_url_cancellable;
+
+    // Port closed → connect fails fast; bounded_probe must surface the
+    // connect error, not wait the full budget or mislabel it.
+    let factory = tauri_app_lib::download::NetworkClientFactory::new();
+    let client = factory
+        .client_for(&tauri_app_lib::proxy::ResolvedProxyConfig::default())
+        .await
+        .expect("client");
+    let token = tokio_util::sync::CancellationToken::new();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        probe_webdav_directory_url_cancellable(
+            &client,
+            "webdav://127.0.0.1:1/dir/",
+            None,
+            Some(&token),
+        ),
+    )
+    .await
+    .expect("connect failure must not wait the whole budget");
+    let error = result.expect_err("closed port must fail");
+    assert!(
+        error.contains("PROPFIND failed") || error.contains("webdav"),
+        "expected a real connect error, got: {error}"
+    );
+}

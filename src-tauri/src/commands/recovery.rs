@@ -19,8 +19,13 @@ use crate::models::recovery::{
 use crate::models::{task::now_iso, Task, TaskRecord, TaskStatus};
 use crate::AppState;
 
-/// Protocols whose stored credentials the Recovery Center can replace.
-const CREDENTIAL_PROTOCOLS: [&str; 5] = ["ftp", "ftps", "sftp", "webdav", "webdavs"];
+/// Protocols whose stored credentials the Recovery Center can replace. This
+/// mirrors the set of engines that consume `task_credentials` at runtime:
+/// HTTP Basic Auth covers http/https plus the derived hls/dash/metalink
+/// engines, while bt/magnet have no credential channel at all.
+const CREDENTIAL_PROTOCOLS: [&str; 10] = [
+    "ftp", "ftps", "sftp", "webdav", "webdavs", "http", "https", "hls", "dash", "metalink",
+];
 
 /// Upper bound for the free-form recovery-history `source` field (the only
 /// caller-controlled string stored in the log), so a caller cannot plant an

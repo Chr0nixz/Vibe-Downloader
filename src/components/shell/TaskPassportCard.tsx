@@ -17,6 +17,7 @@ import {
   PASSPORT_STAGING_KEYS,
   PASSPORT_VALIDATOR_KEYS,
   type PassportFileHash,
+  splitRemoteValidators,
 } from "@/lib/integrity-passport";
 import { createLogger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
@@ -148,6 +149,7 @@ export function TaskPassportCard({
     );
   }
   if (!passport) return null;
+  const { validators, rangeSupported } = splitRemoteValidators(passport.remoteValidators);
 
   return (
     <div className="rounded-md border border-border-subtle bg-surface-raised/40 p-3 text-xs">
@@ -179,9 +181,15 @@ export function TaskPassportCard({
         <div className="flex items-center justify-between gap-2">
           <span className="text-text-muted">{t("taskDetails.passport.validatorsLabel")}</span>
           <span className="text-right text-text-secondary">
-            {passport.remoteValidators.length > 0
-              ? passport.remoteValidators.map((validator) => t(PASSPORT_VALIDATOR_KEYS[validator])).join(", ")
+            {validators.length > 0
+              ? validators.map((validator) => t(PASSPORT_VALIDATOR_KEYS[validator])).join(", ")
               : t("taskDetails.passport.validatorsNone")}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-text-muted">{t("taskDetails.passport.rangeLabel")}</span>
+          <span className="text-right text-text-secondary">
+            {t(rangeSupported ? "taskDetails.passport.rangeSupported" : "taskDetails.passport.rangeNotObserved")}
           </span>
         </div>
         <div className="flex items-center justify-between gap-2">

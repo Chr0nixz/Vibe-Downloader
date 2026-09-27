@@ -10,8 +10,14 @@ interface SpeedTrend {
 }
 
 export function describeSpeedTrend(samples: SpeedSample[], currentSpeedBps: number, t: TFunction): SpeedTrend {
-  if (currentSpeedBps <= 0 || samples.length < 3) {
+  if (currentSpeedBps <= 0) {
     return { label: t("taskDiagnostics.idle"), tone: "muted" };
+  }
+  // Bytes are moving but there is no trend yet. "Waiting for activity" beside
+  // a live speed read as stalled on every freshly resumed task — the moment a
+  // user checks whether the resume worked.
+  if (samples.length < 3) {
+    return { label: t("taskDiagnostics.measuring"), tone: "muted" };
   }
 
   const recent = samples.slice(-8).map((sample) => sample.speedBps);
@@ -41,6 +47,7 @@ export const SpeedSparkline = memo(function SpeedSparkline({
 }) {
   const points = useMemo(() => buildPoints(samples), [samples]);
   const hasData = samples.some((sample) => sample.speedBps > 0);
+  if (!hasData && currentSpeedBps <= 0) return null;
 
   return (
     <div

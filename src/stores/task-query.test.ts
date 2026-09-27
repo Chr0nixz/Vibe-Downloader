@@ -186,6 +186,7 @@ describe("task query helpers", () => {
         queued: "4",
         attention: "3",
         paused: "5",
+        waitingNetwork: "1",
         completed: "100",
         failed: "9",
         totalSpeed: "4096",

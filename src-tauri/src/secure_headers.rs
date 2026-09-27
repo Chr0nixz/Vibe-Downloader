@@ -73,14 +73,26 @@ pub fn decrypt_secret(
         .map_err(|_| format!("Stored {label} nonce has invalid length."))?;
     let nonce_ref = Nonce::from_slice(&nonce_array);
 
-    // Dispatch on version byte.
+    // SEC-14: version dispatch cannot rely on the first byte alone. A legacy
+    // ciphertext whose plaintext happens to start with 0x01 is
+    // indistinguishable from a v1 envelope by that check (~1/256 chance per
+    // credential). Try v1 first; if authentication fails AND the byte is 0x01,
+    // retry as legacy without stripping the prefix. A genuine v1 ciphertext
+    // still authenticates on the first pass; a real legacy ciphertext only
+    // passes the second. No AAD downgrade occurs — the second attempt still
+    // uses AEAD on the original bytes.
     let raw_plaintext = if raw.first() == Some(&CIPHERTEXT_VERSION) {
-        // v1: [0x01 | ciphertext+tag], decrypt with AAD.
-        let payload = Payload {
+        let v1_payload = Payload {
             msg: &raw[1..],
             aad,
         };
-        cipher.decrypt(nonce_ref, payload)
+        match cipher.decrypt(nonce_ref, v1_payload) {
+            Ok(plaintext) => Ok(plaintext),
+            Err(_) => {
+                // First-byte collision: retry as legacy before giving up.
+                cipher.decrypt(nonce_ref, raw.as_ref())
+            }
+        }
     } else {
         // Legacy: no version prefix, no AAD. Decrypt as-is for backward compat.
         cipher.decrypt(nonce_ref, raw.as_ref())
@@ -216,10 +228,20 @@ fn decode_key(value: &str) -> Result<Zeroizing<[u8; 32]>, String> {
 mod malformed_input_tests {
     use super::*;
 
+    // TEST_SECRET_KEY_OVERRIDE is a OnceLock shared by all tests in the
+    // process — whichever test installs first wins, so every test in this
+    // module must encrypt fixtures with the SAME key or decryption silently
+    // uses a different one.
+    const TEST_KEY: [u8; 32] = [7_u8; 32];
+
+    fn test_cipher() -> ChaCha20Poly1305 {
+        install_test_secret_key(&STANDARD.encode(TEST_KEY));
+        ChaCha20Poly1305::new(Key::from_slice(&TEST_KEY))
+    }
+
     #[test]
     fn malformed_nonce_lengths_return_errors_without_panicking() {
-        let key = STANDARD.encode([7_u8; 32]);
-        install_test_secret_key(&key);
+        let _cipher = test_cipher();
         let ciphertext = STANDARD.encode(vec![CIPHERTEXT_VERSION]);
         for length in [0, 1, 11, 13] {
             let nonce = STANDARD.encode(vec![0_u8; length]);
@@ -232,5 +254,63 @@ mod malformed_input_tests {
                 "nonce length {length} was accepted"
             );
         }
+    }
+
+    /// SEC-14: a legacy ciphertext whose first byte happens to equal 0x01
+    /// would be misrouted to the v1 branch and fail. Try successive nonces
+    /// until we produce such a ciphertext (~1/256 chance per try).
+    #[test]
+    fn legacy_ciphertext_with_leading_version_byte_still_decrypts() {
+        let cipher = test_cipher();
+
+        let legacy_plaintext = b"legacy-secret";
+        let mut nonce = None;
+        let mut legacy_ct = Vec::new();
+        for counter in 0u64..10_000 {
+            let mut nonce_bytes = [0_u8; 12];
+            nonce_bytes[..8].copy_from_slice(&counter.to_le_bytes());
+            let candidate_nonce = Nonce::from_slice(&nonce_bytes);
+            let ct = cipher
+                .encrypt(candidate_nonce, legacy_plaintext.as_ref())
+                .expect("encrypt legacy");
+            if ct.first() == Some(&0x01) {
+                nonce = Some(*candidate_nonce);
+                legacy_ct = ct;
+                break;
+            }
+        }
+        let nonce = nonce.expect("failed to produce a leading-0x01 ciphertext within 10k tries");
+
+        let ciphertext_b64 = STANDARD.encode(&legacy_ct);
+        let nonce_b64 = STANDARD.encode(nonce.as_slice());
+        let decrypted = decrypt_secret(&ciphertext_b64, &nonce_b64, "legacy credential", b"")
+            .expect("legacy ciphertext with 0x01 leading byte must decrypt");
+        assert_eq!(decrypted.as_str(), "legacy-secret");
+    }
+
+    /// A real v1 ciphertext must still take the AAD-bound branch and fail on
+    /// AAD mismatch.
+    #[test]
+    fn v1_ciphertext_with_wrong_aad_still_fails() {
+        let cipher = test_cipher();
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+
+        let mut versioned = vec![CIPHERTEXT_VERSION];
+        let ct = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: b"payload",
+                    aad: b"correct",
+                },
+            )
+            .expect("encrypt v1");
+        versioned.extend_from_slice(&ct);
+        let ciphertext_b64 = STANDARD.encode(&versioned);
+        let nonce_b64 = STANDARD.encode(nonce.as_slice());
+
+        let err = decrypt_secret(&ciphertext_b64, &nonce_b64, "test", b"wrong-aad")
+            .expect_err("v1 with wrong AAD must fail");
+        assert!(err.contains("Could not decrypt"));
     }
 }

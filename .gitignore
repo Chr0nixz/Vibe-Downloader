@@ -23,6 +23,9 @@ browser/dist
 .impeccable/
 .claude/
 .codebuddy/
+.pi/
+.workbuddy/
+.zcode/
 
 # Temporary working files
 .tmp_*

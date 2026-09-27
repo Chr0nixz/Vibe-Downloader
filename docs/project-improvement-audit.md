@@ -1,6 +1,6 @@
 # 项目改进审计
 
-最后更新：2026-09-21
+最后更新：2026-09-25
 
 适用版本：Vibe Downloader `0.5.0`
 
@@ -1494,6 +1494,126 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 
 - **修复合同**：先创建 draft，完整质量门禁、扩展和资产/updater/source 校验通过后由唯一 promote job 公开；candidate 保持 `latest=false`，RC 不进入 stable/latest。
 - **验收与证据**：release/candidate 工作流已将 publish 改为 draft、promote 依赖全部校验 job，并校验平台资产、`.sig` 和 `SOURCE_COMMIT.txt` 与源码 SHA 关联。远程发布演练和三平台实际构建仍需 CI/发布环境执行。
+
+## 2026-09-21 第二批修复
+
+来源：[四维现状审查](project-review-2026-09-21.md) 第一梯队余项。本批按条登记、验收通过后更新状态；历史条目保留原结论。
+
+### FUN-32（P2，Closed）：DASH SegmentList 遗漏 Initialization sourceURL 与 SegmentURL mediaRange（R26-F03）
+
+- **证据／影响**：解析层只读取 `SegmentList@initialization` 属性与 `SegmentURL@media`，不读子元素 `<Initialization sourceURL>`/`range` 与 `SegmentURL@mediaRange`——带独立 init 文件的清单静默丢失 init 段，同一文件多 mediaRange 的 SegmentURL 会全量重复下载。
+- **修复合同**：`Initialization sourceURL`/`range` 与 `mediaRange` 进入解析状态机并传到下载计划（Range 头 + 206 校验已存在）；`SegmentList initialization` 属性 + 子 `range` 组合按属性 URL 配 range 处理；无 URL 的裸 range、index-only SegmentURL、SegmentList 与 SegmentTemplate 混合以稳定码 `dash_segment_list_unsupported` 在 probe/计划阶段拒绝；空 `<SegmentList/>` 不覆盖 SegmentBase fallback。
+- **2026-09-21 修复证据**：新增 `SegmentListState` 状态机（init_attr/init_source/init_range/unsupported/segments）、`absorb_segment_url_event`/`absorb_list_initialization_event`/`absorb_base_initialization_event`/`finalize_segment_list` 辅助函数；`ListSegment.media_range`、`SegmentSource::List.initialization_range` 与 `SegmentSource::Unsupported` 变体进入计划生成。单元测试 26/26（新增 4 项：sourceURL+mediaRange 解析与计划、裸 range 拒绝、index-only 拒绝、属性+range 组合）；集成测试 21/21，新增 `segment_list_media_ranges_issue_exact_range_requests` 断言服务端收到精确 `bytes=start-end` Range 请求并验证任务完成。
+
+### UX-29（P2，Closed）：批量导入结果仍以原始英文错误展示（R26-U04）
+
+- **证据／影响**：`create.rs` 四处产生预渲染英文（`Task already exists`、`URL is invalid`、`Duplicate URL in this import`、协议不支持文案），前端 `BatchImportResults` 直接渲染 `error_message`，非英文 locale 下显示英文。
+- **修复合同**：`BatchImportItem` 携带稳定 `error_code` 与 params；前端经 `ERROR_CODE_I18N_MAP` 映射本地化，原始 `error_message` 仅进可展开诊断；全部错误来源有稳定码。
+- **2026-09-21 修复证据**：`BatchImportItem` 新增 `error_code` 字段；4 处预渲染英文改为稳定码（`duplicate_task` 复用 + 新增 `duplicate_url_in_batch`/`invalid_url`/`unsupported_url_scheme`），probe/create 失败经 `AppErrorPayload::code_from_stored` 提取结构化码；`stable-error-codes.ts` 注册 3 个新码（123 codes），`stable-error-messages.json` 补 6 locale 译文并经同步脚本写入 7 locale；`tauri-browser` mock 补 `errorCode`；`BatchImportResults` 按 `errorCode`→i18n key 本地化，原始 message 进 `<details>` 展开诊断。`pnpm typecheck`、`check:i18n`（7 locale）通过；`errors.test.ts` 的 SUPPORTED_LOCALES 遍历自动覆盖新码；`NewDownloadDialog`/`BatchImportResults` 测试 25/25 通过；`pnpm specta` 重新生成 bindings。
+
+### PERF-18（P2，Closed）：任务实体缓存只合并不淘汰（R26-P02）
+
+- **证据／影响**：`mergeEntities` 浅拷贝合并 `taskById` 且从不驱逐；更换查询只替换 `taskIds` 视图层，实体缓存随历史翻页/查询/创建删除持续增长至应用退出。评审探针复现 10×100 任务替换后缓存 1000。
+- **修复合同**：`taskById` 对可见页、选中/详情、展开项及活动任务（downloading/retrying/queued，持续收进度事件）pin，其余实体受容量上限约束；硬删除后实体显式失效。
+- **2026-09-21 修复证据**：新增 `ENTITY_CACHE_LIMIT=500`、`entityPins`（可见页 + selectedId/selectedIds + expandedTaskIds）、`evictEntities`（插入序淘汰最旧非 pin 实体）与 `removeEntities`；`evictEntities` 接入 `setTasks`/`setTaskPage`/`setTaskCursorPage`/`upsertTask`/`upsertTasksBatch` 五个写入路径；新增公开动作 `evictTasks` 并在 AppShell 软删除 commit、批量软删、批量删文件、单条硬删四处调用。新增 `task-data-store.cache.test.ts` 4/4：10×100 页面替换后缓存有界且可见页全保留、选中/展开/活动实体 pin、硬删除显式失效、追加分页下有界。既有 ARC-07/08 一致性测试（`task-data-store.membership.test.ts` 等）18/18 通过无回归；`pnpm typecheck` 通过。
+
+### PERF-19（P2，Closed）：排队原因轮询未接入可见性与 in-flight 门控（R26-P04）
+
+- **证据／影响**：`useQueueReasons` 用裸 `setInterval` 每 10s 调 `getSchedulerSnapshot`——窗口隐藏仍发 IPC；单次快照慢于间隔时请求可并发堆叠。QueueCenter/TaskDetails 已用 `useVisibilityGatedPoll`，此处是残留独立路径。
+- **修复合同**：复用 `useVisibilityGatedPoll`：`document.hidden` 期间快照调用为 0；单次请求超时无并发堆叠；恢复可见立即刷新；无 queued id 不轮询。
+- **2026-09-21 修复证据**：`useQueueReasons` 改用 `useVisibilityGatedPoll`（`enabled` 绑定 `queuedIdsKey` 非空、`reloadKey` 驱动变更重载），补 useEffect 在禁用时清空快照防止串台。新增 `use-queue-reasons.test.ts` 3/3：无 queued 任务零轮询、可见轮询+隐藏停止+恢复即刷新、慢请求无堆叠。hooks/tasks 回归 60/60 通过；typecheck 通过。
+
+### UX-30（P2，Closed）：新建草稿关闭即销毁，提交中关闭语义不明（R26-U05）
+
+- **证据／影响**：`AppShell` 按 `newDownloadOpen` 条件挂载对话框，Escape/遮罩/取消关闭即卸载约 40 个局部 state——复杂认证/代理/批量输入误关全丢；提交中关闭无法区分"隐藏""取消""放弃"，IPC 可能继续执行而用户不知结果。
+- **修复合同**：会话内内存保留非敏感草稿（不写 localStorage/日志）；脏草稿关闭明示"草稿已保留"；提交中关闭明示"仍在创建，完成后出现在列表"；机密字段不落盘。
+- **2026-09-21 修复证据**：`NewDownloadDialog` 新增 `draftDirty`/`createInFlight`/`handleOpenChange` 关闭守卫（脏草稿→`draftKept` toast；`submitting`/`batchCreating`→`closeSubmitting` toast，IPC 不中断）；`AppShell` 改常驻挂载（`open` 控制而非卸载），`onOpenChange(false)` 不再重置 `newDownloadDraftDirty`——`onDraftStateChange` 成为唯一事实来源；剪贴板/拖拽 handoff 守卫改看 `newDownloadDraftDirty` 单独状态，避免关闭后静默覆盖已保留草稿。`closeSubmittingTitle`/`closeSubmittingDescription`/`draftKeptTitle`/`draftKeptDescription` 4 键入全部 7 locale。`NewDownloadDialog.test.tsx` 新增 close semantics 2/2（脏草稿关闭→toast+重开保留；提交中 Escape→still-running toast+IPC 未中断），全套 18/18 通过；typecheck、check:i18n 通过。
+
+### ARC-53（P2，Closed）：恢复 staging 仍要求系统 TEMP 与 DB 同卷（R26-A05）
+
+- **证据／影响**：`materialize_and_verify_backup_db` 写到 `std::env::temp_dir()`，`commands/backup.rs` 用 `fs::rename` 把它移到 DB 旁的 pending——TEMP 在另一磁盘/挂载点时 rename 以 EXDEV / ERROR_NOT_SAME_DEVICE 失败，备份恢复不可用。与同文件 `snapshot_database_to_path` 已有的跨卷 copy fallback 不一致。
+- **修复合同**：verified/staging 落在 DB 同目录（或跨卷复制+同步+校验后同卷发布 pending）；TEMP 与 DB 异卷时完整恢复成功；复制中断不留下会被误应用的 pending。
+- **2026-09-21 修复证据**：`materialize_and_verify_backup_db` 新增 `staging_dir: Option<&Path>` 参数——恢复路径先算 `db_path` 再传 `db_dir = db_path.parent()`，使 verified 与 pending 天然同卷；`validate_app_backup`（preview）与子集恢复传 `None` 保持 OS temp dir（只读消费不 rename）。新增测试 2/2：`arc53_verified_backup_stages_beside_the_live_database` 断言 verified 落 DB 目录且同卷 rename 到 pending 成功；`arc53_readonly_materialize_defaults_to_temp_dir` 断言 `None` 时仍用 temp_dir。备份套件无回归：backup_center 9/9、backup_restore 12/12 通过。
+
+### ARC-54（P2，Closed）：ffmpeg 版本探测可无限等待并保留子进程（R26-A06）
+
+- **证据／影响**：`probe_ffmpeg_version_at_path` 用 `output().await` 裸等 `ffmpeg -version`，无 timeout/取消/kill_on_drop——设置验证与环境检查可被一个挂死或持续输出的二进制永久卡住；下载 remux 的取消治理不覆盖此路径。
+- **修复合同**：短总超时、输出字节上限；超时/取消 kill 后 wait 回收无残留 PID；设置验证与环境检查复用同一实现，返回稳定超时错误。
+- **2026-09-21 修复证据**：探测重构为外层 `probe_ffmpeg_version_at_path`（固定 `FFMPEG_PROBE_TIMEOUT=15s` + `FFMPEG_PROBE_MAX_OUTPUT_BYTES=256KiB`）+ 内层 `probe_ffmpeg_version_with_budget`（可传预算供测试走 kill+wait 路径）；`stdin=null` 防挂死输入；stdout/stderr 管道由独立 task 并发排空（修掉先 wait 后读在 >64KiB 输出时的管道死锁），`take(cap+1)` 截断；超时 kill+wait 回收子进程。`commands/ffmpeg.rs`（设置验证）与 `commands/environment.rs`（环境检查）共用同一实现。测试 4/4：missing path、zero-deadline 确定性走 timeout 错误、非零退出码、真 ffmpeg 版本串；Unix 另有 flood/hang 两个 cfg(unix) fixture。
+
+### FUN-31（P2，Closed）：恢复中心凭据修复不覆盖 HTTP 派生引擎（R26-F06）
+
+- **证据／影响**：`commands/recovery.rs` 的 `CREDENTIAL_PROTOCOLS` 与前端白名单仅含 FTP/SFTP/WebDAV；HTTP/HLS/DASH/Metalink 任务同样消费 `task_credentials`（嵌入 URL 凭据或草稿凭据，加密落库后经 `resolve_task_credentials` → `merge_basic_auth_headers` 注入），口令轮换后无法原地更新。且 `http_denied`/`ftp_auth_failed`/`sftp_auth_failed` 认证失败码归入 `http`/`protocol` concern，凭据修复区块（`concern === "auth"` 门控）对真实认证失败不可见。
+- **修复合同**：凭据修复按认证机制开放（所有消费 `task_credentials` 的协议），bt/magnet 保持拒绝；认证失败码归入 auth concern；活跃下载（downloading/retrying）仍禁止半途替换；凭据加密落库。
+- **2026-09-21 修复证据**：`CREDENTIAL_PROTOCOLS` 扩展为 10 项（加 http/https/hls/dash/metalink）；`CONCERN_BY_CODE` 把 `http_denied`/`ftp_auth_failed`/`sftp_auth_failed` 映射为 auth。Rust 测试：`credential_gate_blocks_unsupported_protocols_and_busy_tasks` 覆盖 HTTP 家族放行、bt/magnet 拒绝、HTTP 繁忙门控；新增 `http_task_credentials_round_trip_through_encrypted_store` 验证加密落库与解密往返（9/9 通过）。前端：`recovery-center-logic.test.ts` 断言认证码→auth 分组；`RecoveryCenter.test.tsx` 验证 http_denied 任务显示凭据修复入口而 bt 任务不显示（15/15 通过）。`pnpm typecheck` 无错误。
+
+## 2026-09-25 界面评审修复
+
+来源：2026-09-24 对主界面（`AppShell`）的双代理设计评审（设计评审 + 确定性检测器/浏览器实测），快照见 `.impeccable/critique/2026-09-24T18-17-51Z__src-components-shell-appshell-tsx.md`。本批修复其中的 P0 与全部 P1；P2/P3（文案、字号层级、大进度条渐变方向等）未纳入。
+
+### UX-31（P0，Closed）：关闭态常驻对话框永久占用模态焦点，成功/信息 toast 与撤销删除全部被搁置
+
+- **证据／影响**：[`dialog.tsx`](../src/components/ui/dialog.tsx) 在 `DialogContent` 包装组件的挂载 effect 里调用 `acquireModalFocus()`，而该包装在 `<Dialog open={false}>` 下同样挂载。`UX-30` 让 `NewDownloadDialog` 常驻挂载后，模态深度自启动起恒 ≥1，[`toast-store.ts`](../src/stores/toast-store.ts) 把全部非 error toast 放进 deferred 队列且永不 flush。软删除的提交完全依赖 toast 生命周期（`UX-19`），于是 Del / 批量删除只隐藏行：无撤销入口、`deleteTask` 永不下发、重启后任务「复活」；完成通知、复制 URL、剪贴板链接提示同样静默丢失。
+- **修复合同**：模态焦点只在对话框实际打开期间持有；关闭态常驻对话框不影响任何 toast；打开期间仍延迟非 error toast，关闭后 flush。
+- **2026-09-25 修复证据**：声明移入 `ModalFocusClaim` 子组件，渲染在 `DialogPrimitive.Content` 内部（Radix 只在打开时挂载 Content）。新增 `dialog-modal-focus.test.tsx` 2/2：关闭态挂载不持有焦点且 success toast 立即入栈；打开期间 info toast 被延迟、关闭后 flush。浏览器预览实测：Del 后出现「已移除…点击撤销以还原」，点撤销恢复行；7 秒超时后删除提交；任务完成 toast 恢复显示。
+
+### UX-32（P1，Closed）：任务详情面板在默认窗口尺寸下右侧被裁切，时间线直出原始 JSON
+
+- **证据／影响**：Radix ScrollArea 的 viewport 内层包装带 inline `display: table; min-width: 100%`，宽度随最宽后代增长；[`TaskTimeline.tsx`](../src/components/shell/TaskTimeline.tsx) 的 `truncate` payload 行因此把整个概览撑到 754px，而 viewport 只有 287px 且隐藏横向溢出——1200×800（Tauri 默认窗口）下时间戳渲染在 x=1565，卡片右缘与大进度条被截断；600px 抽屉同样复现。payload 本身是 `{"code":"remote_changed","message":"taskDiagnostics…"}` 原文，违背 `UX-11`。
+- **修复合同**：详情面板任何宽度下无横向溢出；时间线只显示可本地化的摘要，原始引擎文本留在日志页。
+- **2026-09-25 修复证据**：[`scroll-area.tsx`](../src/components/ui/scroll-area.tsx) 的 viewport 加 `[&>div]:block!`（该组件只纵向滚动，唯一使用方是 TaskDetails）；新增 `timelinePayloadSummary`（`integrity-passport.ts`）：结构化错误与 `taskDiagnostics.*` key 走本地化，原始引擎文本和无 i18n 映射的码返回 null。`integrity-passport.test.ts` 新增 3 项；浏览器实测 1200×800 下 viewport `scrollWidth = clientWidth = 287`、面板内无越界元素，时间线显示本地化句子。
+
+### UX-33（P1，Closed）：失败任务分散在三个同级入口，两个入口图标相同，两个中心的分类互相矛盾
+
+- **证据／影响**：侧栏「待处理 / 失败 / 恢复中心」三者并列，覆盖同一批任务（恢复中心计数 = 失败 + 待处理）；`CircleAlert` 与 `AlertCircle` 是 lucide 同一图标，768–1023px 的图标栏里两者无法区分；`remote_changed`、`resume_unavailable` 等续传类码不在 `CONCERN_BY_CODE`，任务缺 `failureCategory` 时同一任务在待处理中心归「来源」、在恢复中心落进兜底「内部错误」，读起来像应用自身出错；待处理详情把同一句错误连续展示三次；两个中心和任务行把原始错误码直接展示给用户。
+- **修复合同**：状态入口图标可区分；两个中心对同一任务给出一致分类；兜底分组不暗示应用故障；同一问题在一屏内不重复陈述；原始码仅在显式展开时可见。
+- **2026-09-25 修复证据**：待处理改 `TriangleAlert`、失败改 `CircleX`（行状态徽标同步）；恢复中心移入「维护」组，作为对前两个状态的修复工具而非第三个同级视图（移动端移入「更多」）；`CONCERN_BY_CODE` 补 `remote_changed`→remoteChanged 与 4 个续传/临时文件码→resume；兜底 concern 文案「内部错误」改为「其他」（7 locale）；`TaskRecoveryActions` 新增 `showMessage`，待处理详情与已有行内恢复横幅的行展开区只显示操作；原始错误码移入「技术细节」折叠（新增 `recovery.technicalDetails`，7 locale），行内横幅去掉「上下文:」前缀与错误码行。`recovery-center-logic.test.ts` 新增续传类码分类用例；浏览器实测恢复中心分组为「远端变化 / 续传与临时文件」。**未实施**：把三者合并为单一「需要处理」入口的 IA 重构——涉及导航结构与两个工作区合并，留待产品决策。
+
+### UX-34（P1，Closed）：鼠标点击任务行会把列表滚到居中，下一次点击落在别的行
+
+- **证据／影响**：[`TaskList.tsx`](../src/components/tasks/TaskList.tsx) 的 `selectAndFocus` 与选中 effect 对每次选中变化都 `scrollToIndex(…, { align: "center" })`，指针点击也不例外。实测点击 y=608 的行后它被移到 y=433：双击的第二下、Shift 点击、或行内红色「重新开始」都可能落在另一个任务上。
+- **修复合同**：指针选中不移动列表；键盘选中只滚到刚好可见；来自列表外的选中（命令面板、新建任务）仍滚入视口。
+- **2026-09-25 修复证据**：`onSelectTask(taskId, source)` 区分 pointer / keyboard；指针路径不滚动并 `focus({ preventScroll: true })`，键盘路径 `align: "auto"`；两条路径都登记 `lastScrolledSelectedIdRef`，effect 只处理外部来源的选中（保留居中）。`TaskList.scroll.test.tsx` 新增「点击不滚动、键盘 auto」用例（原有 UX-17 三例不变），`TaskRow.test.tsx` 断言带 `"pointer"` 来源；浏览器实测点击后行位置不变、方向键只滚到下一行刚好可见。
+
+### UX-35（P1，Fixed locally）：概览看不到分段引擎的分块，「详情」分散且侧栏缺少操作
+
+- **证据／影响**：DESIGN.md 要求的 chunk heatmap 在 `src` 中不存在，详情概览只有一条大进度条，产品卖点「多连接分段」从不可见；侧栏详情没有暂停/继续/打开操作，停靠面板按 Esc 不关闭；行展开区重复状态徽标文字；行展开按钮叫「显示详情」，与侧栏「详情」撞名。
+- **修复合同**：分段任务在概览按真实字节偏移展示每个范围及其进度，并有文字摘要与逐段 tooltip；侧栏提供与任务行一致的操作且 Esc 可关闭；行展开不重复信息、命名不与侧栏混淆。
+- **2026-09-25 修复证据**：新增 [`chunk-map.ts`](../src/lib/chunk-map.ts)（纯几何：按字节偏移排布、写入比例、状态色；少于 2 段、未知大小、带 `fileId` 的 Metalink 段或越界段返回 null，回退进度条）与 [`ChunkMap.tsx`](../src/components/shell/ChunkMap.tsx)（只有正在写入的连接用 energy 色，写入头用 transform 移动；`progressbar` 语义 + `aria-valuetext` 摘要 + 逐段 tooltip；「查看分块」跳到诊断页）；`useTaskDetailQueries` 对字节范围协议（HTTP 家族、FTP/FTPS）在概览也加载段数据（HTTP ≤8、FTP ≤4 行，仅下载中每 2 秒轮询）；停靠侧栏与抽屉标题下新增操作组（暂停/继续、重试、打开文件、打开文件夹，规则复用 `rowTransferMode`/`rowShowsRetry`）；停靠侧栏 Esc 关闭（只响应面板自身 DOM 内的按键，Portal 弹层自行处理 Esc）；行展开区删除重复状态行；展开按钮改名「展开/收起行」（7 locale）；浏览器 mock 为多连接任务生成按连接的范围段以便预览。新增 i18n `taskDetails.chunkMapAria`/`chunkMapViewRanges`/`actionsAria`（7 locale），复用 `chunkTooltip`（ja 标点改为「、」）。`chunk-map.test.ts` 7 项；`TaskDetails.test.tsx` 新增 4 项（分块图渲染与跳转、单段回退、Esc 关闭、操作组规则），首项更新为「概览加载一次段数据、诊断页复用」。**待验证**：真实 Tauri 分段 HTTP 下载下的分块图（已核对 `segment_planner.rs` 的范围段 `file_id` 为 None，与前端判定一致）。
+
+## 2026-09-25 界面评审修复（第二轮）
+
+来源：同日对主界面的第二次双代理评审（27/40，0 个 P0、3 个 P1），快照见 `.impeccable/critique/2026-09-25T05-15-35Z__src-components-shell-appshell-tsx.md`。本批修复其中 3 个 P1（UX-36–38）与 2 个 P2（UX-39–40）；两个中心**不合并**（产品决策：先统一内容，保留导航结构），次要项未纳入。
+
+### UX-36（P1，Closed）：常驻界面只报告活动，不报告健康
+
+- **证据／影响**：[`StatusBar.tsx`](../src/components/shell/StatusBar.tsx) 只统计活跃/排队与总速度；有任务待处理或失败时仍显示「没有活跃下载」，读起来像一切正常，违背 PRODUCT.md「一眼看懂下载健康」。
+- **修复合同**：常驻状态栏在存在待处理或失败任务时给出可见计数，且可一步进入对应视图；无问题时保持安静，不加「一切正常」徽标。
+- **2026-09-25 修复证据**：状态栏新增 `HealthChip`：琥珀「N 个待处理」→ 待处理中心，红色「N 个失败」→ 失败视图；计数为 0 时不渲染；`sm` 以下只显示图标与数字（600px 实测 footer `scrollWidth = clientWidth`）。新增 i18n `statusBar.attentionCount`/`failedCount`（含 en/ru/es `_one`）与 `showAttention`/`showFailed`（7 locale）。新增 `StatusBar.test.tsx` 2 项（无问题时安静、计数可点击并切换 nav）。**未实施**：列表按紧急度置顶/排序——牵涉后端游标排序（`task_records.rs` 的 `task_sort_sql`），留待单独评估。
+
+### UX-37（P1，Closed）：同一个失败在四处有四种说法、两种颜色
+
+- **证据／影响**：任务行横幅（信息 + 原因 + 红色「建议」重新开始）、详情侧栏（仅信息，`role="alert"`）、待处理中心（自有分类「来源/存储/运行环境/重试」）、恢复中心（`RecoveryConcern` 分类 + 后果说明）各说各话；needs_attention 在行徽标与移动端底栏为红色、桌面侧栏为琥珀色；重新开始的确认只说「丢弃临时进度」，不说丢多少；详情侧栏方向键切换失败任务时每次重发紧急播报。
+- **修复合同**：一处定义问题陈述（分类、信息、原因）并在详情侧栏与两个中心复用；needs_attention 统一琥珀、failed 统一红色；两个中心使用同一套分类用词；重新开始在按钮旁、确认框与恢复方案中给出量化代价；详情区不再使用 alert 播报。
+- **2026-09-25 修复证据**：[`TaskRecoveryActions.tsx`](../src/components/tasks/TaskRecoveryActions.tsx) 新增 `RecoveryProblem`（分类用 `recoveryCenter.concern.*` + 信息 + `localizedErrorCause`）、`recoveryTone`、`restartCost`、`RecoveryConcernIcon`；详情侧栏、待处理中心、恢复中心的问题区都渲染 `RecoveryProblem`。待处理中心删除自有 `attentionCategory` 与 `attentionCenter.category.*`（7 locale），改按 `recoveryConcern` 分组；`final_path_conflict` 归入 `disk`，该分类改名「磁盘与保存路径」（7 locale）。行状态徽标、行内横幅、行边框、侧栏与移动端徽标（`navBadgeTone`）按状态取色。重新开始：行内按钮 tooltip、详情/中心操作区下方一行、`ResolveAttentionDialog` 确认框均显示「丢弃已下载的 2 GB，并重新下载全部 7.5 GB」；恢复方案的「删除/重新下载」行给出字节数（新增 `recovery.restartCost`/`restartCostUnknownTotal`、`recoveryCenter.playbook.redownloadsAmount`、`recoveryCenter.playbook.restart.deletesAmount`，7 locale）。测试：`TaskRecoveryActions.test.tsx` 新增色调、代价行与 `restartCost` 3 项并改为断言无 alert；`TaskRow.test.tsx` 新增琥珀徽标与重新开始 tooltip；`recovery-center-logic.test.ts` 新增路径冲突分类与「每个 concern key 在 7 locale 存在」walk；删除 `workspace-logic.test.ts` 中已不存在的 `attentionCategory` 用例。浏览器实测：待处理中心分组「远端变化」（原「来源」），恢复方案显示「全部临时文件，包括已下载的 2 GB / 是，全部 7.5 GB」，详情侧栏无 `role="alert"`。
+
+### UX-38（P1，Closed）：只用鼠标很难打开详情与分块图
+
+- **证据／影响**：单击行只选中，展开箭头打开的是行内展开区，⋯ 菜单只有「打开文件夹」，「查看详情」只在右键菜单；Enter / Ctrl+D 需要记忆。`UX-35` 做出的分块图对纯鼠标用户几乎不可达。
+- **修复合同**：详情入口在行上可见；未完成任务存在一个无需记忆的鼠标手势直达详情；已完成任务双击仍打开文件。
+- **2026-09-25 修复证据**：⋯ 菜单首项为「查看详情」（复用 `contextmenu.task.showDetails`），两项都包在 `PopoverClose` 中，点击后菜单关闭；未完成任务双击行打开详情侧栏，已完成保持双击打开文件。`TaskRow.test.tsx` 新增双击与 ⋯ 菜单 2 项；浏览器实测双击 llm-weights 打开侧栏，⋯ →「查看详情」打开 rust-docs 详情且菜单关闭。
+
+### UX-39（P2，Closed）：详情概览不给诊断，停止的任务仍显示两行破折号
+
+- **证据／影响**：任务的 `healthSummary`（「检测到服务器限速」「磁盘写入慢于网络」）只在任务行渲染，详情侧栏从不显示；HTTP 任务没有「支持分段/可续传」这类能力说明（只有 FTP/SFTP 面板里有是/否两行）；已完成、失败、待处理任务仍显示速度「—」和剩余时间「—」。
+- **修复合同**：概览首行给出引擎的一句话诊断（不重复状态徽标、不直出原始引擎文本、失败类交给恢复区）；单文件传输协议显示服务器能力标签；停止的任务不显示速度与剩余时间。
+- **2026-09-25 修复证据**：[`task-diagnostics.ts`](../src/lib/task-diagnostics.ts) 新增 `detailDiagnosis`（只接受 `taskDiagnostics.*` key，过滤只复述状态的 5 个 key；排队任务给重试时间；failed/needs_attention 返回 null）、`capabilityChips`（HTTP 家族与 FTP/FTPS/SFTP：「支持分段下载/仅单连接」「支持断点续传/不支持断点续传」，后者琥珀色）与 `showsTransferRates`。能力标签也只在任务仍可运行时显示：`supportsResume` 来自首次探测，服务器后来拒绝续传时不会被清除，实测失败任务上「支持断点续传」与下方「无法续传」相互矛盾，因此停止的任务不显示。详情概览：诊断行在进度条/分块图上方，能力标签在分块摘要下方；FTP/SFTP 面板删除重复的「断点续传/并行 是/否」两行。i18n：`taskDetails.resumeSupport`/`parallelSupport`/`capabilityYes`/`capabilityNo` 替换为 `taskDetails.capabilitiesAria` 与 `taskDetails.capability.*`（7 locale）。测试：`task-diagnostics.test.ts` 新增 6 项，`TaskDetails.test.tsx` 新增 2 项（诊断在进度条上方、能力标签在其下；已完成不显示速度/剩余时间/能力）。浏览器实测：重试中任务首行「网络波动，正在重试」、标签「支持分段下载 · 支持断点续传」；失败与已完成任务无标签、无速度行。
+
+### UX-40（P2，Closed）：对话框、命令面板与提示半透明，任务列表文字透出
+
+- **证据／影响**：对话框、命令面板、toast、菜单、下拉与 tooltip 都用 `--surface-overlay`，暗色下为 `oklch(0.255 0.013 255 / 0.82)` 且背后没有模糊，列表文字从命令面板与新建对话框里透出来。
+- **修复合同**：浮在应用自身文字之上的表面不透明；浮在桌面之上的独立窗口（悬浮状态球、托盘菜单）保持原样。
+- **2026-09-25 修复证据**：[`tokens.css`](../src/styles/tokens.css) 新增不透明的 `--surface-popover`（明 `oklch(1 0.002 255)`，暗 `oklch(0.255 0.013 255)`），`globals.css` 暴露 `bg-surface-popover`；dialog、toast（3 处）、menu-item、popover、select、tooltip、ShutdownOverlay 与跳转链接改用它；`--surface-overlay` 只留给 `FloatingStatusWindow` 与 `TrayMenu`。DESIGN.md 的两套 token 同步新增 `surface.popover` 并注明两者分工。浏览器实测命令面板计算背景：暗 `oklch(0.255 0.013 255)`、明 `oklch(1 0.002 255)`，均无 alpha。
 
 ## 十一、统一修复顺序
 

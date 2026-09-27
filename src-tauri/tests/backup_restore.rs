@@ -234,7 +234,7 @@ async fn backup_faults_and_process_exit_preserve_a_readable_previous_backup() {
     write_backup_file(&destination, &replacement).unwrap();
     let parsed = read_backup_file(&destination).unwrap();
     let schema = db::current_schema_version(&pool).await.unwrap();
-    let verified = db::materialize_and_verify_backup_db(&parsed.database, schema, schema)
+    let verified = db::materialize_and_verify_backup_db(&parsed.database, schema, schema, None)
         .await
         .unwrap();
     let restored = db::connect(&verified).await.unwrap().pool;
@@ -336,6 +336,7 @@ async fn sec02_backup_with_out_of_root_paths_is_rejected() {
         &parsed.database,
         parsed.manifest.schema_version,
         current,
+        None,
     )
     .await
     .expect("structural verification still accepts a crafted backup");
@@ -394,6 +395,7 @@ async fn sec02_backup_with_in_root_paths_is_accepted() {
         &parsed.database,
         parsed.manifest.schema_version,
         current,
+        None,
     )
     .await
     .expect("verify");
@@ -551,4 +553,81 @@ async fn fun23_snapshot_copy_fallback_produces_verified_snapshot() {
     let _ = std::fs::remove_file(&live);
     let _ = std::fs::remove_file(&backup);
     let _ = std::fs::remove_file(&destination);
+}
+
+/// ARC-53 (R26-A05): the verified staging file must land beside the live
+/// database, not in the OS temp dir — a pending-restore rename is a filesystem
+/// move that fails across volumes (EXDEV / ERROR_NOT_SAME_DEVICE). Staging in
+/// the DB's own directory keeps it same-volume regardless of where TEMP lives.
+#[tokio::test]
+async fn arc53_verified_backup_stages_beside_the_live_database() {
+    let live_dir = unique_path("arc53-staging");
+    std::fs::create_dir_all(&live_dir).expect("create db dir");
+    let live = live_dir.join("live.sqlite");
+    let backup = unique_path("arc53.vibe-backup");
+    let pool = db::connect(&live).await.expect("connect").pool;
+    seed_task(&pool, "arc53-task").await;
+    make_backup_from_pool(&pool, &live, &backup).await;
+
+    let parsed = read_backup_file(&backup).expect("parse");
+    let current = db::current_schema_version(&pool).await.expect("schema");
+    let verified =
+        db::materialize_and_verify_backup_db(&parsed.database, current, current, Some(&live_dir))
+            .await
+            .expect("materialize");
+
+    // The verified file must live in the DB's directory (same volume as the
+    // pending path), never in the OS temp dir.
+    assert_eq!(
+        verified.parent().expect("verified parent"),
+        live_dir.as_path(),
+        "verified staging must sit beside the live database"
+    );
+    assert_ne!(
+        verified.parent(),
+        Some(std::env::temp_dir().as_path()),
+        "staging must not leak into the OS temp dir"
+    );
+
+    // Same-volume rename to the pending path succeeds — this is the operation
+    // that failed when staging lived in TEMP on another volume.
+    let pending = pending_restore_path(&live);
+    assert_eq!(
+        pending.parent().expect("pending parent"),
+        live_dir.as_path()
+    );
+    std::fs::rename(&verified, &pending).expect("same-volume rename to pending");
+    assert!(pending.exists(), "pending restore must be staged");
+
+    pool.close().await;
+    let _ = std::fs::remove_file(&pending);
+    let _ = std::fs::remove_file(&backup);
+    let _ = std::fs::remove_dir_all(&live_dir);
+}
+
+/// ARC-53: a read-only consumer (no staging dir) still uses the OS temp dir —
+/// preview/subset paths never rename the file, so the temp dir is safe there.
+#[tokio::test]
+async fn arc53_readonly_materialize_defaults_to_temp_dir() {
+    let live = unique_path("arc53-readonly.sqlite");
+    let backup = unique_path("arc53-readonly.vibe-backup");
+    let pool = db::connect(&live).await.expect("connect").pool;
+    seed_task(&pool, "arc53-readonly").await;
+    make_backup_from_pool(&pool, &live, &backup).await;
+
+    let parsed = read_backup_file(&backup).expect("parse");
+    let current = db::current_schema_version(&pool).await.expect("schema");
+    let verified = db::materialize_and_verify_backup_db(&parsed.database, current, current, None)
+        .await
+        .expect("materialize");
+    assert_eq!(
+        verified.parent(),
+        Some(std::env::temp_dir().as_path()),
+        "no staging dir must keep the OS temp dir default"
+    );
+
+    pool.close().await;
+    let _ = std::fs::remove_file(&verified);
+    let _ = std::fs::remove_file(&backup);
+    let _ = std::fs::remove_file(&live);
 }

@@ -941,13 +941,17 @@ export async function bulkTaskActionGlobal(
     const adapter = await loadBrowserAdapter();
     const tasks = await adapter.listTasks();
     const statuses =
-      action === "pause"
-        ? new Set(["downloading", "retrying", "queued"])
-        : new Set(["paused", "failed", "waiting_network"]);
+      action === "pause" ? new Set(["downloading", "retrying", "queued"]) : new Set(["paused", "waiting_network"]);
     const ids = tasks.filter((task) => statuses.has(task.status)).map((task) => task.id);
     let succeeded = 0;
+    let skipped = 0;
     let failed = 0;
     for (const id of ids) {
+      const task = tasks.find((entry) => entry.id === id);
+      if (action === "pause" && task && task.downloadedBytes > 0 && !task.supportsResume) {
+        skipped += 1;
+        continue;
+      }
       try {
         if (action === "pause") await adapter.pauseTask(id);
         else await adapter.resumeTask(id);
@@ -956,7 +960,7 @@ export async function bulkTaskActionGlobal(
         failed += 1;
       }
     }
-    return { succeeded, skipped: 0, failed };
+    return { succeeded, skipped, failed };
   }
   const commands = await loadNativeCommands();
   return runCommand("bulkTaskActionGlobal", () => commands.bulkTaskActionGlobal(action));

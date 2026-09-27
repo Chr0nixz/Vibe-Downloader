@@ -102,15 +102,16 @@ export type ListQueryMembership = {
 };
 
 /**
- * Effective list query as TaskList builds `listTasksCursor` input — queue/attention
- * clear facet filters so membership matches server pages.
+ * Effective list query as TaskList builds `listTasksCursor` input — the Queue
+ * workspace clears facet filters so membership matches server pages. The
+ * attention view is an ordinary filtered list now, so it keeps them.
  */
 export function effectiveListQueryMembership(
   nav: NavFilter,
   search: string,
   filters: TaskFilters,
 ): ListQueryMembership {
-  if (nav === "queue" || nav === "attention") {
+  if (nav === "queue") {
     return {
       nav,
       search,
@@ -134,6 +135,7 @@ export function taskMatchesListQuery(task: Task, snapshot: ListQueryMembership):
   if (nav === "paused" && task.status !== "paused") return false;
   if (nav === "queue" && task.status !== "queued") return false;
   if (nav === "attention" && task.status !== "needs_attention") return false;
+  if (nav === "issues" && task.status !== "needs_attention" && task.status !== "failed") return false;
   if (nav === "completed" && task.status !== "completed") return false;
   if (nav === "failed" && task.status !== "failed") return false;
   if (nav === "settings" || nav === "about") return false;

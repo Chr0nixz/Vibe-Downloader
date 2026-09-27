@@ -409,6 +409,9 @@ fn duplicate_import_item(
         total_size: Some(task.total_size.to_string()),
         content_type: task.content_type.clone(),
         supports_resume: task.supports_resume,
+        // UX-29: stable code for localized display; the raw message keeps the
+        // colliding file name for expandable diagnostics.
+        error_code: Some("duplicate_task".to_string()),
         error_message: Some(format!("Task already exists: {}", task.file_name)),
         task: None,
     }
@@ -492,6 +495,7 @@ async fn import_urls_core(
                     total_size: None,
                     content_type: None,
                     supports_resume: false,
+                    error_code: Some("unsupported_url_scheme".to_string()),
                     error_message: Some(
                         "Only HTTP, HTTPS, FTP, FTPS, SFTP, WebDAV, magnet links, .torrent URLs, Metalink manifests, and MPEG-DASH MPDs are supported."
                             .to_string(),
@@ -511,6 +515,7 @@ async fn import_urls_core(
                     total_size: None,
                     content_type: None,
                     supports_resume: false,
+                    error_code: Some("invalid_url".to_string()),
                     error_message: Some("URL is invalid.".to_string()),
                     task: None,
                 });
@@ -529,6 +534,7 @@ async fn import_urls_core(
                 total_size: None,
                 content_type: None,
                 supports_resume: false,
+                error_code: Some("duplicate_url_in_batch".to_string()),
                 error_message: Some("Duplicate URL in this import.".to_string()),
                 task: None,
             });
@@ -545,6 +551,7 @@ async fn import_urls_core(
             total_size: None,
             content_type: None,
             supports_resume: false,
+            error_code: None,
             error_message: None,
             task: None,
         };
@@ -610,6 +617,7 @@ async fn import_urls_core(
                 }
                 Err(error) => {
                     item.valid = false;
+                    item.error_code = AppErrorPayload::code_from_stored(None, Some(&error));
                     item.error_message = Some(error);
                     failed_count += 1;
                     items.push(item);
@@ -668,6 +676,7 @@ async fn import_urls_core(
                 Err(error) => {
                     failed_count += 1;
                     item.valid = false;
+                    item.error_code = AppErrorPayload::code_from_stored(None, Some(&error));
                     item.error_message = Some(error);
                 }
             }

@@ -10,11 +10,13 @@ async function workflow(name) {
 for (const name of ["release.yml", "release-candidate.yml"]) {
   test(`${name}: tagged source, full CI and private assets precede publication`, async () => {
     const { jobs, concurrency, permissions } = await workflow(name);
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions expression, not a JS template literal
     const sha = "${{ needs.preflight.outputs.source_sha }}";
     assert.equal(permissions.contents, "read");
     assert.match(concurrency.group, /^release-/);
     assert.equal(concurrency["cancel-in-progress"], false);
     assert.match(jobs.preflight.steps[0].with.ref, /^refs\/tags\//);
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions expression, not a JS template literal
     assert.equal(jobs.preflight.outputs.source_sha, "${{ steps.source.outputs.sha }}");
     assert.match(jobs.preflight.steps.find((step) => step.id === "source").run, /--remote origin/);
     assert.ok(jobs.preflight.steps.some((step) => step.run === "node scripts/release-state.mjs"));
@@ -55,6 +57,7 @@ test("reusable quality gate checks the exact source on all supported operating s
   assert.equal(ci.on.workflow_call.inputs.source_sha.required, true);
   assert.deepEqual(ci.jobs.rust.strategy.matrix.os, ["ubuntu-latest", "windows-latest", "macos-latest"]);
   for (const [id, job] of Object.entries(ci.jobs)) {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions expression, not a JS template literal
     assert.equal(job.steps[0].with.ref, "${{ inputs.source_sha || github.sha }}");
     assert.ok(job.steps.some((step) => step.run === `pnpm verify:${id}`));
   }

@@ -80,7 +80,7 @@ const SelectContent = React.forwardRef<
         <motion.div
           ref={ref}
           className={cn(
-            "relative z-50 max-h-60 min-w-[8rem] overflow-hidden rounded-lg bg-surface-overlay shadow-md ring-1 ring-border-subtle",
+            "relative z-50 max-h-60 min-w-[8rem] overflow-hidden rounded-lg bg-surface-popover shadow-md ring-1 ring-border-subtle",
             position === "popper" &&
               "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
             className,

@@ -1,6 +1,7 @@
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -39,7 +40,10 @@ export function ToastViewport() {
     if (hiddenCount === 0 && expanded) setExpanded(false);
   }, [expanded, hiddenCount]);
 
-  return (
+  // Portaled into <body> like LiveRegion: an aria-live container inside #root
+  // kept #root out of a modal's aria-hidden, so the app behind a dialog stayed
+  // reachable by a screen reader's virtual cursor.
+  return createPortal(
     <div
       className="pointer-events-none fixed bottom-28 right-3 z-[70] flex w-[calc(100vw-1.5rem)] max-w-sm flex-col gap-2 md:bottom-12 md:right-4"
       aria-live="polite"
@@ -62,7 +66,7 @@ export function ToastViewport() {
             <button
               type="button"
               onClick={() => setExpanded((value) => !value)}
-              className="rounded-full border border-border-subtle bg-surface-overlay px-3 py-1 text-xs text-text-secondary shadow-md transition-colors hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+              className="rounded-full border border-border-subtle bg-surface-popover px-3 py-1 text-xs text-text-secondary shadow-md transition-colors hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
             >
               {expanded ? t("toast.showLess") : t("toast.showMore", { count: hiddenCount })}
             </button>
@@ -71,14 +75,15 @@ export function ToastViewport() {
             <button
               type="button"
               onClick={() => clearToasts()}
-              className="rounded-full border border-border-subtle bg-surface-overlay px-3 py-1 text-xs text-text-secondary shadow-md transition-colors hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+              className="rounded-full border border-border-subtle bg-surface-popover px-3 py-1 text-xs text-text-secondary shadow-md transition-colors hover:bg-surface-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
             >
               {t("toast.clearAll")}
             </button>
           ) : null}
         </div>
       ) : null}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -176,7 +181,7 @@ function ToastItem({
       transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
       className={cn(
         // Quiet product surface: border + single raised shadow, no blur/glow stack.
-        "pointer-events-auto relative grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-lg border bg-surface-overlay px-3 py-3 shadow-[var(--shadow-raised)]",
+        "pointer-events-auto relative grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-lg border bg-surface-popover px-3 py-3 shadow-[var(--shadow-raised)]",
         toast.tone === "success" && "border-border-success-strong",
         toast.tone === "error" && "border-border-danger-strong",
         toast.tone === "info" && "border-border-subtle",

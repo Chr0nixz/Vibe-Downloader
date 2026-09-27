@@ -8,7 +8,9 @@ import {
   FileText,
   FileVideo,
   FolderOpen,
+  HardDrive,
   Pencil,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -62,13 +64,15 @@ import {
   probeSftpDirectory,
   probeTask,
   probeWebdavDirectory,
+  queryDiskSpace,
 } from "@/lib/tauri";
 
 const log = createLogger("new-download");
 
 import { getLocalFileKind, pathToFileUrl, readFileAsText } from "@/lib/local-file";
-import { formatBytes } from "@/lib/utils";
+import { cn, formatBytes } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
+import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 import { normalizeTask, parseByteCount } from "@/types/task";
 import { BatchImportResults, isFailedBatchItem } from "./BatchImportResults";
@@ -361,6 +365,7 @@ export function NewDownloadDialog({
   initialBatchInput,
   initialSourceId,
   onDraftStateChange,
+  onCreateStateChange,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -369,6 +374,7 @@ export function NewDownloadDialog({
   initialBatchInput?: string;
   initialSourceId?: string;
   onDraftStateChange?: (dirty: boolean) => void;
+  onCreateStateChange?: (creating: boolean) => void;
 }) {
   const { t } = useTranslation();
   const settings = useSettingsStore((s) => s.settings);
@@ -481,6 +487,8 @@ export function NewDownloadDialog({
   const isSftpUrl = /^sftp:\/\//i.test(url.trim());
   const isSelectableMultiFileProbe = isTorrentProbe || isMetalinkProbe;
   const isMultiFile = probe != null && probe.files.length > 1;
+  // The folder the file will actually land in: the typed path, else the default.
+  const effectiveSaveDir = saveDir.trim() || settings?.defaultSaveDir || "";
   const shouldShowManifestProtocolHint =
     isTorrentProbe ||
     isMetalinkProbe ||
@@ -865,7 +873,6 @@ export function NewDownloadDialog({
           // UX-04: enter batch mode and preview immediately, matching handoff.
           changeBatchInput(text);
           setMode("batch");
-          setAdvancedOpen(true);
           void runBatch(false, text);
         } catch (err) {
           log.warn("failed to read text file", err);
@@ -982,18 +989,77 @@ export function NewDownloadDialog({
     }
   }, [initialBatchInput, initialSourceId, initialUrl]);
 
+  // UX-30: this guard also protects the kept draft from clipboard and file-drop
+  // handoff in AppShell. Every non-default creation override must participate,
+  // because an incoming source resets the form and would otherwise erase it.
+  const draftDirty = Boolean(
+    url.trim() ||
+      saveDir.trim() ||
+      fileName.trim() ||
+      expectedHash.trim() ||
+      expectedHashAlgorithm !== "sha256" ||
+      batchInput.trim() ||
+      selectedLocalFile ||
+      useCredentials ||
+      username.trim() ||
+      password ||
+      privateKeyData ||
+      privateKeyPassphrase ||
+      priority !== "normal" ||
+      categoryKey.trim() ||
+      speedAmount.trim() ||
+      proxyMode !== "inherit" ||
+      proxyUrl.trim() ||
+      proxyUsername.trim() ||
+      proxyPassword ||
+      proxyNoProxy.trim() ||
+      selectedHlsVariantUri ||
+      selectedHlsAudioTrackUris.length > 0 ||
+      selectedHlsSubtitleTrackUris.length > 0,
+  );
+
   useEffect(() => {
-    onDraftStateChange?.(
-      Boolean(
-        url.trim() ||
-          saveDir.trim() ||
-          fileName.trim() ||
-          expectedHash.trim() ||
-          batchInput.trim() ||
-          selectedLocalFile,
-      ),
-    );
-  }, [batchInput, expectedHash, fileName, onDraftStateChange, saveDir, selectedLocalFile, url]);
+    onDraftStateChange?.(draftDirty);
+  }, [draftDirty, onDraftStateChange]);
+
+  // Closing while a create is in flight hides the dialog but must not suggest
+  // the request was canceled — the IPC keeps running and the task appears in
+  // the list when done. Closing a dirty draft keeps it in session memory
+  // (the shell keeps this component mounted) and says so explicitly.
+  const createInFlight = submitting || batchCreating;
+  const batchCreateDisabled = batchCreating || batchPreviewing || !batchInput.trim();
+
+  useEffect(() => {
+    onCreateStateChange?.(createInFlight);
+  }, [createInFlight, onCreateStateChange]);
+
+  function handleOpenChange(nextOpen: boolean) {
+    if (nextOpen) {
+      onOpenChange(true);
+      return;
+    }
+    if (createInFlight) {
+      onOpenChange(false);
+      useToastStore.getState().addToast({
+        tone: "info",
+        title: t("newDownload.closeSubmittingTitle"),
+        description: t("newDownload.closeSubmittingDescription"),
+        key: "new-download-busy-close",
+      });
+      return;
+    }
+    if (draftDirty) {
+      onOpenChange(false);
+      useToastStore.getState().addToast({
+        tone: "info",
+        title: t("newDownload.draftKeptTitle"),
+        description: t("newDownload.draftKeptDescription"),
+        key: "new-download-draft-kept",
+      });
+      return;
+    }
+    onOpenChange(false);
+  }
 
   // Toggle all files
   function toggleAllFiles() {
@@ -1026,7 +1092,7 @@ export function NewDownloadDialog({
   }, [probe, selectedFiles]);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("newDownload.title")}</DialogTitle>
@@ -1068,8 +1134,8 @@ export function NewDownloadDialog({
             {mode === "single" ? (
               <>
                 {/* URL input */}
-                <label htmlFor="new-download-url" className="flex flex-col gap-1 text-xs text-text-muted">
-                  {t("newDownload.url")}
+                <div className="flex flex-col gap-1 text-xs text-text-muted">
+                  <label htmlFor="new-download-url">{t("newDownload.url")}</label>
                   <div className="flex gap-2">
                     <Input
                       id="new-download-url"
@@ -1104,7 +1170,7 @@ export function NewDownloadDialog({
                       <span className="hidden sm:inline">{t("newDownload.chooseFile")}</span>
                     </Button>
                   </div>
-                </label>
+                </div>
 
                 {shouldShowManifestProtocolHint ? (
                   <p className="text-[11px] leading-4 text-text-muted">{t("newDownload.manifestProtocolHint")}</p>
@@ -1210,8 +1276,8 @@ export function NewDownloadDialog({
                 ) : null}
 
                 {/* Save directory */}
-                <label htmlFor="new-download-save-dir" className="flex flex-col gap-1 text-xs text-text-muted">
-                  {t("newDownload.saveDir")}
+                <div className="flex flex-col gap-1 text-xs text-text-muted">
+                  <label htmlFor="new-download-save-dir">{t("newDownload.saveDir")}</label>
                   <div className="flex gap-2">
                     <Input
                       id="new-download-save-dir"
@@ -1233,7 +1299,7 @@ export function NewDownloadDialog({
                       <FolderOpen className="h-4 w-4" />
                     </Button>
                   </div>
-                </label>
+                </div>
 
                 {/* ---- File selection card (from probe) ---- */}
                 {probe ? (
@@ -1303,9 +1369,12 @@ export function NewDownloadDialog({
                         </div>
 
                         {/* Footer summary */}
-                        <div className="flex items-center justify-between border-t border-border-subtle px-3 py-2 text-xs text-text-muted">
+                        <div className="flex items-center justify-between gap-3 border-t border-border-subtle px-3 py-2 text-xs text-text-muted">
                           <span>{t("newDownload.totalSize")}</span>
-                          <span className="font-mono text-text-primary">{formatBytes(selectedTotal)}</span>
+                          <span className="flex min-w-0 items-center gap-3">
+                            <FreeSpaceNote dir={effectiveSaveDir} neededBytes={selectedTotal} />
+                            <span className="font-mono text-text-primary">{formatBytes(selectedTotal)}</span>
+                          </span>
                         </div>
                       </>
                     ) : (
@@ -1340,16 +1409,17 @@ export function NewDownloadDialog({
                               <span className="truncate text-sm text-text-primary" title={fileName || probe.fileName}>
                                 {fileName || probe.fileName}
                               </span>
-                              <Pencil className="h-3 w-3 shrink-0 text-text-muted opacity-0 transition-opacity group-hover:opacity-100" />
+                              {/* Always visible: a hover-only pencil hid the one way to rename before starting. */}
+                              <Pencil className="h-3 w-3 shrink-0 text-text-muted transition-colors group-hover:text-text-primary" />
                             </button>
                           )}
-                          <div className="mt-0.5 flex items-center gap-3 text-xs text-text-muted">
-                            <span>{formatBytes(parseByteCount(probe.totalSize))}</span>
-                            <span>
-                              {probe.capabilities.supportsResume
-                                ? t("newDownload.resumeSupported")
-                                : t("newDownload.resumeUnavailable")}
+                          {/* Resume support is already stated in the header strip; this
+                              line answers the next question for a large file: will it fit? */}
+                          <div className="mt-0.5 flex min-w-0 items-center gap-3 text-xs text-text-muted">
+                            <span className="shrink-0 font-mono tabular-nums">
+                              {formatBytes(parseByteCount(probe.totalSize))}
                             </span>
+                            <FreeSpaceNote dir={effectiveSaveDir} neededBytes={parseByteCount(probe.totalSize)} />
                           </div>
                         </div>
                       </div>
@@ -1415,6 +1485,8 @@ export function NewDownloadDialog({
                 <button
                   type="button"
                   onClick={() => setAdvancedOpen((v) => !v)}
+                  aria-expanded={advancedOpen}
+                  aria-controls="new-download-advanced-options"
                   className="flex items-center gap-1.5 self-start text-xs text-text-secondary transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
                 >
                   <ChevronDown
@@ -1425,7 +1497,10 @@ export function NewDownloadDialog({
 
                 {/* Advanced section */}
                 {advancedOpen ? (
-                  <div className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3">
+                  <div
+                    id="new-download-advanced-options"
+                    className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3"
+                  >
                     {/* Credentials sit behind the Advanced gate like every other
                     override: most URLs are public, and probe failures that need
                     auth surface the denied hint above. The underlying state is
@@ -1629,16 +1704,6 @@ export function NewDownloadDialog({
                     >
                       {t("newDownload.previewBatch")}
                     </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-8"
-                      onClick={() => void runBatch(true)}
-                      disabled={batchPreviewing || batchCreating || !batchInput.trim()}
-                    >
-                      {t("newDownload.createBatch")}
-                    </Button>
                   </div>
                   {(batchPreviewing || batchCreating) && (
                     <p role="status" className="text-xs text-text-muted">
@@ -1657,8 +1722,8 @@ export function NewDownloadDialog({
                 </div>
 
                 {/* Save directory (batch tasks use this via runBatch) */}
-                <label htmlFor="new-download-save-dir-batch" className="flex flex-col gap-1 text-xs text-text-muted">
-                  {t("newDownload.saveDir")}
+                <div className="flex flex-col gap-1 text-xs text-text-muted">
+                  <label htmlFor="new-download-save-dir-batch">{t("newDownload.saveDir")}</label>
                   <div className="flex gap-2">
                     <Input
                       id="new-download-save-dir-batch"
@@ -1680,78 +1745,99 @@ export function NewDownloadDialog({
                       <FolderOpen className="h-4 w-4" />
                     </Button>
                   </div>
-                </label>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setAdvancedOpen((v) => !v)}
+                  aria-expanded={advancedOpen}
+                  aria-controls="new-download-batch-options"
+                  className="flex items-center gap-1.5 self-start text-xs text-text-secondary transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary"
+                >
+                  <ChevronDown
+                    className={`h-3.5 w-3.5 transition-transform duration-200 ${advancedOpen ? "" : "-rotate-90"}`}
+                  />
+                  {t("newDownload.advancedOptions")}
+                </button>
 
                 {/* FUN-17: batch shares the same create-draft overrides as single create. */}
-                <div className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3">
-                  <label htmlFor="new-download-use-credentials-batch" className="flex cursor-pointer items-start gap-2">
-                    <Checkbox
-                      id="new-download-use-credentials-batch"
-                      checked={useCredentials}
-                      onChange={(event) => setUseCredentials(event.target.checked)}
-                      aria-label={t("newDownload.useCredentials")}
+                {advancedOpen ? (
+                  <div
+                    id="new-download-batch-options"
+                    className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3"
+                  >
+                    <label
+                      htmlFor="new-download-use-credentials-batch"
+                      className="flex cursor-pointer items-start gap-2"
+                    >
+                      <Checkbox
+                        id="new-download-use-credentials-batch"
+                        checked={useCredentials}
+                        onChange={(event) => setUseCredentials(event.target.checked)}
+                        aria-label={t("newDownload.useCredentials")}
+                      />
+                      <span>
+                        <span className="block text-xs font-medium text-text-secondary">
+                          {t("newDownload.useCredentials")}
+                        </span>
+                        <span className="block text-[11px] leading-4 text-text-muted">
+                          {t("newDownload.useCredentialsHint")}
+                        </span>
+                      </span>
+                    </label>
+                    {useCredentials ? (
+                      <div className="grid grid-cols-2 gap-2">
+                        <label
+                          htmlFor="new-download-username-batch"
+                          className="flex flex-col gap-1 text-xs text-text-muted"
+                        >
+                          {t("newDownload.authUsername")}
+                          <Input
+                            id="new-download-username-batch"
+                            value={username}
+                            onChange={(event) => setUsername(event.target.value)}
+                            className="h-8"
+                            autoComplete="username"
+                          />
+                        </label>
+                        <label
+                          htmlFor="new-download-password-batch"
+                          className="flex flex-col gap-1 text-xs text-text-muted"
+                        >
+                          {t("newDownload.authPassword")}
+                          <Input
+                            id="new-download-password-batch"
+                            type="password"
+                            value={password}
+                            onChange={(event) => setPassword(event.target.value)}
+                            className="h-8"
+                            autoComplete="current-password"
+                          />
+                        </label>
+                      </div>
+                    ) : null}
+                    <SharedCreateDraftFields
+                      priority={priority}
+                      setPriority={setPriority}
+                      categoryKey={categoryKey}
+                      setCategoryKey={setCategoryKey}
+                      speedAmount={speedAmount}
+                      setSpeedAmount={setSpeedAmount}
+                      speedUnit={speedUnit}
+                      setSpeedUnit={setSpeedUnit}
+                      proxyMode={proxyMode}
+                      setProxyMode={setProxyMode}
+                      proxyUrl={proxyUrl}
+                      setProxyUrl={setProxyUrl}
+                      proxyUsername={proxyUsername}
+                      setProxyUsername={setProxyUsername}
+                      proxyPassword={proxyPassword}
+                      setProxyPassword={setProxyPassword}
+                      proxyNoProxy={proxyNoProxy}
+                      setProxyNoProxy={setProxyNoProxy}
                     />
-                    <span>
-                      <span className="block text-xs font-medium text-text-secondary">
-                        {t("newDownload.useCredentials")}
-                      </span>
-                      <span className="block text-[11px] leading-4 text-text-muted">
-                        {t("newDownload.useCredentialsHint")}
-                      </span>
-                    </span>
-                  </label>
-                  {useCredentials ? (
-                    <div className="grid grid-cols-2 gap-2">
-                      <label
-                        htmlFor="new-download-username-batch"
-                        className="flex flex-col gap-1 text-xs text-text-muted"
-                      >
-                        {t("newDownload.authUsername")}
-                        <Input
-                          id="new-download-username-batch"
-                          value={username}
-                          onChange={(event) => setUsername(event.target.value)}
-                          className="h-8"
-                          autoComplete="username"
-                        />
-                      </label>
-                      <label
-                        htmlFor="new-download-password-batch"
-                        className="flex flex-col gap-1 text-xs text-text-muted"
-                      >
-                        {t("newDownload.authPassword")}
-                        <Input
-                          id="new-download-password-batch"
-                          type="password"
-                          value={password}
-                          onChange={(event) => setPassword(event.target.value)}
-                          className="h-8"
-                          autoComplete="current-password"
-                        />
-                      </label>
-                    </div>
-                  ) : null}
-                  <SharedCreateDraftFields
-                    priority={priority}
-                    setPriority={setPriority}
-                    categoryKey={categoryKey}
-                    setCategoryKey={setCategoryKey}
-                    speedAmount={speedAmount}
-                    setSpeedAmount={setSpeedAmount}
-                    speedUnit={speedUnit}
-                    setSpeedUnit={setSpeedUnit}
-                    proxyMode={proxyMode}
-                    setProxyMode={setProxyMode}
-                    proxyUrl={proxyUrl}
-                    setProxyUrl={setProxyUrl}
-                    proxyUsername={proxyUsername}
-                    setProxyUsername={setProxyUsername}
-                    proxyPassword={proxyPassword}
-                    setProxyPassword={setProxyPassword}
-                    proxyNoProxy={proxyNoProxy}
-                    setProxyNoProxy={setProxyNoProxy}
-                  />
-                </div>
+                  </div>
+                ) : null}
               </>
             )}
 
@@ -1799,8 +1885,8 @@ export function NewDownloadDialog({
               type="button"
               variant="ghost"
               className="w-full sm:w-auto"
-              onClick={() => onOpenChange(false)}
-              disabled={submitting}
+              onClick={() => handleOpenChange(false)}
+              disabled={createInFlight}
             >
               {t("newDownload.cancel")}
             </Button>
@@ -1826,7 +1912,16 @@ export function NewDownloadDialog({
                   t("newDownload.start")
                 )}
               </Button>
-            ) : null}
+            ) : (
+              <Button
+                type="button"
+                className="w-full sm:w-auto"
+                disabled={batchCreateDisabled}
+                onClick={() => void runBatch(true)}
+              >
+                {t("newDownload.createBatch")}
+              </Button>
+            )}
           </DialogFooter>
         </form>
       </DialogContent>
@@ -1837,6 +1932,54 @@ export function NewDownloadDialog({
 /* ------------------------------------------------------------------ */
 /*  Sub-components                                                      */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Free space in the target folder, checked before Start instead of after a
+ * multi-gigabyte download fails at 90%. Unknown sizes and failed queries show
+ * nothing rather than a guess.
+ */
+function FreeSpaceNote({ dir, neededBytes }: { dir: string; neededBytes: number }) {
+  const { t } = useTranslation();
+  const [available, setAvailable] = useState<number | null>(null);
+
+  useEffect(() => {
+    setAvailable(null);
+    if (!dir) return;
+    let cancelled = false;
+    // Typing a path fires this per keystroke; wait for the input to settle.
+    const timer = window.setTimeout(() => {
+      queryDiskSpace(dir)
+        .then((info) => {
+          const bytes = Number(info.available_bytes);
+          if (!cancelled && Number.isFinite(bytes)) setAvailable(bytes);
+        })
+        .catch((error) => log.debug("free space query failed", error));
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [dir]);
+
+  if (available == null) return null;
+  const short = neededBytes > 0 && neededBytes > available;
+  return (
+    <span
+      className={cn("flex min-w-0 items-center gap-1", short ? "font-medium text-status-warning" : "text-text-muted")}
+    >
+      {short ? (
+        <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden />
+      ) : (
+        <HardDrive className="h-3 w-3 shrink-0" aria-hidden />
+      )}
+      <span className="truncate">
+        {short
+          ? t("newDownload.freeSpaceShort", { needed: formatBytes(neededBytes), available: formatBytes(available) })
+          : t("newDownload.freeSpace", { available: formatBytes(available) })}
+      </span>
+    </span>
+  );
+}
 
 function FileRow({
   file,

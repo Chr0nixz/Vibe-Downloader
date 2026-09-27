@@ -49,8 +49,11 @@ import type {
   UpdateTorrentSeedingInput,
   WebDavDirectoryProbe,
 } from "@/generated/bindings";
+import { advanceBrowserMockProgress } from "@/lib/browser-mock-progress";
 import { createLogger } from "@/lib/logger";
 import { sanitizeUrlForDisplay } from "@/lib/utils";
+import type { FileTypeFilter, NavFilter, ResumeFilter, TaskSortDirection, TaskSortKey } from "@/stores/task-data-store";
+import { filterTasks } from "@/stores/task-query";
 import type { Task, TaskStatus } from "@/types/task";
 import { normalizeTask } from "@/types/task";
 import type { TaskProgressPayload } from "@/types/task-progress";
@@ -735,22 +738,19 @@ function scheduleBrowserQueue(): void {
 function tickActiveDownloads(): void {
   let changed = false;
   tasks = tasks.map((task) => {
-    if (task.status !== "downloading" && task.status !== "retrying") return task;
-    if (task.downloadedBytes >= task.totalSize) return task;
-    const step = Math.max(64_000, Math.floor(task.speedBps / 4));
-    const downloadedBytes = Math.min(task.totalSize, task.downloadedBytes + step);
-    const completed = downloadedBytes >= task.totalSize;
+    const progress = advanceBrowserMockProgress(task, nowIso());
+    if (!progress) return task;
     changed = true;
     const next = {
       ...task,
-      downloadedBytes,
-      status: completed ? ("completed" as const) : task.status,
-      speedBps: completed ? 0 : task.speedBps,
-      connectionCount: completed ? 0 : task.connectionCount,
-      healthSummary: completed ? "taskDiagnostics.completed" : task.healthSummary,
-      updatedAt: nowIso(),
+      status: progress.status,
+      downloadedBytes: progress.downloadedBytes,
+      speedBps: progress.speedBps,
+      connectionCount: progress.connectionCount,
+      healthSummary: progress.healthSummary,
+      updatedAt: progress.updatedAt,
     };
-    if (completed) {
+    if (progress.completed) {
       logTaskEvent(task.id, "completed");
       emitTaskUpdated(next);
     }
@@ -820,6 +820,7 @@ export async function getTaskStats(): Promise<TaskStatsSnapshot> {
     queued: String(tasks.filter((task) => task.status === "queued").length),
     attention: String(tasks.filter((task) => task.status === "needs_attention").length),
     paused: String(tasks.filter((task) => task.status === "paused").length),
+    waitingNetwork: String(tasks.filter((task) => task.status === "waiting_network").length),
     completed: String(tasks.filter((task) => task.status === "completed").length),
     failed: String(tasks.filter((task) => task.status === "failed").length),
     totalSpeed: String(activeTasks.reduce((sum, task) => sum + task.speedBps, 0)),
@@ -902,6 +903,12 @@ async function mockTaskSegmentsForTask(taskId: string): Promise<TaskSegment[]> {
   if (!task) return [];
   const total = Math.max(1, task.totalSize);
   const downloaded = Math.min(task.downloadedBytes, total);
+  const ranges = Math.min(8, task.connectionCount);
+  // Real HTTP/FTP range segments carry no file id (segment_planner.rs); the
+  // mock's file records are a preview artifact, so they do not gate this.
+  if (ranges > 1 && task.totalSize > 0 && task.status !== "completed" && task.protocol !== "metalink") {
+    return mockRangeSegments(task, ranges, total, downloaded);
+  }
   return [
     normalizeTaskSegment({
       id: `${taskId}-segment-0`,
@@ -926,6 +933,37 @@ async function mockTaskSegmentsForTask(taskId: string): Promise<TaskSegment[]> {
   ];
 }
 
+/**
+ * Multi-connection preview tasks get one byte range per connection so the
+ * overview chunk map has something real to draw. Fills vary per range the way
+ * parallel connections drift apart; the sum stays near the task's progress.
+ */
+function mockRangeSegments(task: Task, ranges: number, total: number, downloaded: number): TaskSegment[] {
+  const progress = downloaded / total;
+  const size = Math.floor(total / ranges);
+  const active = task.status === "downloading" || task.status === "retrying";
+  return Array.from({ length: ranges }, (_, index) => {
+    const rangeStart = index * size;
+    const rangeEnd = index === ranges - 1 ? total - 1 : rangeStart + size - 1;
+    const length = rangeEnd - rangeStart + 1;
+    const fill = Math.min(1, Math.max(0, progress * (1 + 0.45 * Math.sin(index * 1.7 + 0.6))));
+    const done = fill >= 0.999;
+    return normalizeTaskSegment({
+      id: `${task.id}-segment-${index}`,
+      taskId: task.id,
+      fileId: null,
+      unitKind: "http_range",
+      rangeStart: String(rangeStart),
+      rangeEnd: String(rangeEnd),
+      downloadedUntil: String(rangeStart + Math.round(length * fill)),
+      speedBps: String(active && !done ? Math.round(task.speedBps / ranges) : 0),
+      status: done ? "completed" : active ? "downloading" : "pending",
+      retryCount: task.status === "retrying" && index === 1 ? 1 : 0,
+      lastError: null,
+    });
+  });
+}
+
 export async function listTasksPage(input: ListTasksInput) {
   const pageSize = Math.max(1, Math.min(500, input.pageSize ?? 100));
   const page = Math.max(0, input.page ?? 0);
@@ -943,15 +981,31 @@ export async function listTasksCursor(input: ListTasksCursorInput) {
   const pageSize = Math.max(1, Math.min(500, input.pageSize ?? 100));
   const start = Math.max(0, Number(input.cursor ?? 0) || 0);
   const all = await listTasks();
-  const items = all.slice(start, start + pageSize);
+  // Apply the same nav/search/sort/facet rules as the backend query, so the
+  // browser preview can show filtered and empty views instead of every task
+  // in every view (the frontend helper mirrors the SQL filters).
+  const matching = filterTasks(
+    all,
+    (input.nav ?? "all") as NavFilter,
+    input.search ?? "",
+    (input.sortKey ?? "updated_at") as TaskSortKey,
+    (input.sortDirection ?? "desc") as TaskSortDirection,
+    {
+      fileType: (input.fileType ?? "all") as FileTypeFilter,
+      source: input.source ?? "all",
+      failure: input.failureCategory ?? "all",
+      resume: (input.resume ?? "all") as ResumeFilter,
+    },
+  );
+  const items = matching.slice(start, start + pageSize);
   const next = start + items.length;
   const failureCategories = Array.from(
     new Set(all.map((task) => task.failureCategory ?? mockFailureCategory(task)).filter(Boolean)),
   ).sort() as string[];
   return {
     items,
-    nextCursor: next < all.length ? String(next) : null,
-    minimumTotal: all.length,
+    nextCursor: next < matching.length ? String(next) : null,
+    minimumTotal: matching.length,
     filterOptions: {
       sources: Array.from(new Set(all.map((task) => task.sourceKey).filter(Boolean))).sort(),
       failureCategories,
@@ -1790,6 +1844,7 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
         totalSize: null,
         contentType: null,
         supportsResume: false,
+        errorCode: "invalid_url",
         errorMessage: "URL is invalid.",
         task: null,
       });
@@ -1852,6 +1907,7 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
       totalSize: existingTask ? String(existingTask.totalSize) : (probe?.totalSize ?? null),
       contentType: existingTask?.contentType ?? probe?.contentType ?? null,
       supportsResume: existingTask?.supportsResume ?? probe?.capabilities.supportsResume ?? false,
+      errorCode: duplicate ? "duplicate_url_in_batch" : existingTask ? "duplicate_task" : null,
       errorMessage: duplicate
         ? "Duplicate URL in this import."
         : existingTask

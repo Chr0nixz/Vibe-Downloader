@@ -10,7 +10,12 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import type { TaskEvent } from "@/generated/bindings";
 import { formatDateTime } from "@/lib/format-date";
-import { TIMELINE_TRIGGER_KEYS, type TimelineTrigger, timelineMilestones } from "@/lib/integrity-passport";
+import {
+  TIMELINE_TRIGGER_KEYS,
+  type TimelineTrigger,
+  timelineMilestones,
+  timelinePayloadSummary,
+} from "@/lib/integrity-passport";
 import { cn } from "@/lib/utils";
 
 const RECENT_MILESTONES = 8;
@@ -54,37 +59,40 @@ export function TaskTimeline({
       ) : null}
       {milestones.length > 0 ? (
         <ol className="mt-2 space-y-1.5">
-          {milestones.map((milestone) => (
-            <li key={milestone.id} className="flex items-start gap-2">
-              <span
-                aria-hidden
-                className={cn(
-                  "mt-1.5 size-1.5 shrink-0 rounded-full",
-                  milestone.trigger ? TRIGGER_DOT_CLASS[milestone.trigger] : "bg-text-muted/40",
-                )}
-              />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                  <span className="font-medium text-text-primary">
-                    {milestone.labelKey ? t(milestone.labelKey) : milestone.eventType}
-                  </span>
-                  {milestone.trigger ? (
-                    <span className="rounded bg-surface-raised px-1.5 py-0.5 text-[10px] text-text-muted">
-                      {t(TIMELINE_TRIGGER_KEYS[milestone.trigger])}
+          {milestones.map((milestone) => {
+            const summary = timelinePayloadSummary(milestone.payload, t);
+            return (
+              <li key={milestone.id} className="flex items-start gap-2">
+                <span
+                  aria-hidden
+                  className={cn(
+                    "mt-1.5 size-1.5 shrink-0 rounded-full",
+                    milestone.trigger ? TRIGGER_DOT_CLASS[milestone.trigger] : "bg-text-muted/40",
+                  )}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                    <span className="font-medium text-text-primary">
+                      {milestone.labelKey ? t(milestone.labelKey) : milestone.eventType}
                     </span>
+                    {milestone.trigger ? (
+                      <span className="rounded bg-surface-raised px-1.5 py-0.5 text-[11px] text-text-muted">
+                        {t(TIMELINE_TRIGGER_KEYS[milestone.trigger])}
+                      </span>
+                    ) : null}
+                    <span className="ml-auto font-mono text-[11px] tabular-nums text-text-muted">
+                      {formatDateTime(milestone.createdAt, "dateTime")}
+                    </span>
+                  </div>
+                  {summary ? (
+                    <p className="truncate text-[11px] text-text-muted" title={summary}>
+                      {summary}
+                    </p>
                   ) : null}
-                  <span className="ml-auto font-mono text-[10px] text-text-muted">
-                    {formatDateTime(milestone.createdAt, "dateTime")}
-                  </span>
                 </div>
-                {milestone.payload ? (
-                  <p className="truncate font-mono text-[10px] text-text-muted" title={milestone.payload}>
-                    {milestone.payload}
-                  </p>
-                ) : null}
-              </div>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ol>
       ) : null}
     </div>

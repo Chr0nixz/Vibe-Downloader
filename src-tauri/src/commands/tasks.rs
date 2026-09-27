@@ -245,7 +245,17 @@ pub async fn probe_ftp_directory(
         input.proxy_no_proxy.as_deref(),
     )?;
     let credentials = directory_probe_credentials(&input);
-    crate::download::ftp::probe_ftp_directory_url(url, proxy_config, credentials.as_ref()).await
+    // ARC-55: the directory probe has a total budget via bounded_probe; the
+    // token is plumbed for future IPC cancellation but today's entry point
+    // always observes the deadline path.
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    crate::download::ftp::probe_ftp_directory_url_cancellable(
+        url,
+        proxy_config,
+        credentials.as_ref(),
+        Some(&cancel_token),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -269,11 +279,13 @@ pub async fn probe_sftp_directory(
         input.proxy_no_proxy.as_deref(),
     )?;
     let credentials = directory_probe_credentials(&input);
-    crate::download::sftp::probe_sftp_directory_url(
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    crate::download::sftp::probe_sftp_directory_url_cancellable(
         &state.pool,
         url,
         proxy_config,
         credentials.as_ref(),
+        Some(&cancel_token),
     )
     .await
 }
@@ -306,7 +318,13 @@ pub async fn probe_webdav_directory(
         .http_engine()
         .client_for_config(&proxy_config)
         .await?;
-    crate::download::webdav::probe_webdav_directory_url(&client, url, credentials.as_ref()).await
+    crate::download::webdav::probe_webdav_directory_url_cancellable(
+        &client,
+        url,
+        credentials.as_ref(),
+        Some(&tokio_util::sync::CancellationToken::new()),
+    )
+    .await
 }
 
 fn directory_probe_credentials(input: &DirectoryProbeInput) -> Option<db::TaskCredentials> {

@@ -847,7 +847,9 @@ async fn download_host_key_mismatch_then_forget_and_retry() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn download_pauses_mid_transfer_and_resumes_from_persisted_offset() {
     common::install_test_secret_key();
-    let payload: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let payload: Vec<u8> = (0..(2 * 1024 * 1024usize))
+        .map(|i| (i % 251) as u8)
+        .collect();
     let mut files = HashMap::new();
     files.insert("/resume.bin".to_string(), payload.clone());
     let server = start_sftp_server(SftpServerConfig {
@@ -1202,7 +1204,9 @@ struct Arc42SftpFixture {
 
 async fn pause_sftp_download_mid_transfer(task_id: &str) -> Arc42SftpFixture {
     common::install_test_secret_key();
-    let payload: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let payload: Vec<u8> = (0..(2 * 1024 * 1024usize))
+        .map(|i| (i % 251) as u8)
+        .collect();
     let mut files = HashMap::new();
     files.insert("/resume.bin".to_string(), payload.clone());
     let server = start_sftp_server(SftpServerConfig {

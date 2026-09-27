@@ -49,7 +49,8 @@ Recommended dark tokens:
 - `surface.root`: `oklch(0.145 0.006 255)`
 - `surface.base`: `oklch(0.18 0.008 255)`
 - `surface.raised`: `oklch(0.25 0.011 255)`
-- `surface.overlay`: `oklch(0.255 0.013 255 / 0.82)`
+- `surface.overlay`: `oklch(0.255 0.013 255 / 0.82)` (floating status window and tray menu only; they sit over the desktop)
+- `surface.popover`: `oklch(0.255 0.013 255)` (dialogs, palette, toasts, menus, tooltips: opaque, because nothing blurs behind them and the task list would read through the copy)
 - `border.subtle`: `oklch(0.33 0.012 255)`
 - `text.primary`: `oklch(0.93 0.006 255)`
 - `text.secondary`: `oklch(0.84 0.008 255)`
@@ -67,6 +68,7 @@ Recommended light tokens:
 - `surface.base`: `oklch(0.955 0.006 255)`
 - `surface.raised`: `oklch(1 0.002 255)`
 - `surface.overlay`: `oklch(1 0.002 255 / 0.94)`
+- `surface.popover`: `oklch(1 0.002 255)`
 - `border.subtle`: `oklch(0.84 0.01 255)`
 - `text.primary`: `oklch(0.22 0.012 255)`
 - `text.secondary`: `oklch(0.28 0.015 255)`
@@ -74,7 +76,7 @@ Recommended light tokens:
 - `accent.primary`: `oklch(0.4 0.18 235)`
 - `accent.energy`: `oklch(0.38 0.15 165)`
 - `status.success`: `oklch(0.27 0.14 150)`
-- `status.warning`: `oklch(0.3 0.14 75)`
+- `status.warning`: `oklch(0.52 0.13 65)` (reads as amber; the earlier `oklch(0.3 0.14 75)` rendered olive-brown)
 - `status.danger`: `oklch(0.38 0.18 25)`
 
 ## Typography
@@ -114,8 +116,8 @@ Primary structure:
 Responsive behavior:
 
 - Wide window: navigation, task list, and detail panel can be visible together.
-- Medium window: detail panel becomes an inline expandable drawer or overlay panel.
-- Narrow window: task rows become compact single-column cards, but the default task model remains list-based.
+- Medium window (560–1199px, including a window snapped to half a screen): detail panel becomes an overlay drawer; below 1024px, or under 600px tall, the command bar moves into the titlebar so the list keeps the height.
+- Narrow window (below 560px, the `md` breakpoint): task rows become compact single-column cards with 44px targets and bottom navigation, but the default task model remains list-based. A snapped desktop window with a mouse is not a narrow window.
 
 Do not use a default grid of large task cards for the main task manager. It reduces scan speed and weakens comparison between tasks.
 

@@ -1,9 +1,36 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { ChevronDown, Clipboard, ClipboardCopy, Hash, RefreshCw, X } from "lucide-react";
-import { Component, type ErrorInfo, memo, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import {
+  ChevronDown,
+  Clipboard,
+  ClipboardCopy,
+  File,
+  FolderOpen,
+  Hash,
+  Pause,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  Trash2,
+  X,
+} from "lucide-react";
+import {
+  Component,
+  type ErrorInfo,
+  type KeyboardEvent,
+  memo,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
+import { ChunkMap, ChunkMapSummary } from "@/components/shell/ChunkMap";
 import { TaskPassportCard } from "@/components/shell/TaskPassportCard";
 import { TaskTimeline } from "@/components/shell/TaskTimeline";
+import { rowShowsRetry, rowTransferMode } from "@/components/tasks/row-recovery";
+import { SpeedSparkline } from "@/components/tasks/SpeedSparkline";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -33,10 +60,12 @@ import type {
   TorrentRuntimeSnapshot,
 } from "@/generated/bindings";
 import { useIsCompactShell } from "@/hooks/use-shell-layout";
-import { type TaskDetailDiagSubTab, useTaskDetailQueries } from "@/hooks/use-task-detail-queries";
+import { useTaskDetailQueries } from "@/hooks/use-task-detail-queries";
 import type { TranslationKey } from "@/i18n";
-import { errorMessage } from "@/lib/errors";
+import { chunkMapCells, hasByteRangeSegments } from "@/lib/chunk-map";
+import { errorMessage, localizedErrorMessage, parseAppError } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
+import { timelinePayloadSummary } from "@/lib/integrity-passport";
 import { createLogger } from "@/lib/logger";
 import {
   SPEED_LIMIT_UNITS,
@@ -45,17 +74,17 @@ import {
   speedLimitUnitLabel,
 } from "@/lib/speed-limit";
 import {
-  defaultDiagSubTab,
-  diagnosticsConnectionsEmptyKey,
+  capabilityChips,
+  detailDiagnosis,
   diagnosticsRequestsEmptyKey,
   diagnosticsSegmentsEmptyKey,
   ftpTlsModeLabel,
   isDashProtocol,
   isHlsProtocol,
-  isHttpLikeProtocol,
   isTorrentProtocol,
   parseUrlHostPort,
   showsHttpRequestFields,
+  showsTransferRates,
 } from "@/lib/task-diagnostics";
 import {
   computeFileHash,
@@ -71,6 +100,7 @@ import {
   verifyTaskHash,
 } from "@/lib/tauri";
 import { cn, formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
+import { type SpeedSample, useSpeedHistoryStore } from "@/stores/speed-history-store";
 import { useTaskDataStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
@@ -86,15 +116,27 @@ const FTP_TLS_MODE_KEYS = {
 } as const satisfies Record<NonNullable<ReturnType<typeof ftpTlsModeLabel>>, TranslationKey>;
 
 const EMPTY_TASK_FILES: Task["files"] = [];
+const EMPTY_SPEED_HISTORY: SpeedSample[] = [];
+
+/** The same transfer actions the task row offers. The panel repeats them so a
+ * user reading the details never has to go back to the row to act on them. */
+export interface TaskDetailsActionHandlers {
+  onToggleTransfer: (task: Task) => void;
+  onRetry: (task: Task) => void;
+  onOpenFile: (task: Task) => void;
+  onOpenFolder: (task: Task) => void;
+  onDelete?: (task: Task) => void;
+}
 
 interface TaskDetailsProps {
   taskId: string | null;
   open: boolean;
   onClose?: () => void;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
+  actions?: TaskDetailsActionHandlers;
 }
 
-export function TaskDetails({ taskId, open, onClose, onResolveAttention }: TaskDetailsProps) {
+export function TaskDetails({ taskId, open, onClose, onResolveAttention, actions }: TaskDetailsProps) {
   // Subscribe to the task object directly from the store. This keeps the
   // per-tick re-render scoped to TaskDetails only, removing AppShell from
   // the progress-tick render path.
@@ -127,6 +169,7 @@ export function TaskDetails({ taskId, open, onClose, onResolveAttention }: TaskD
         onClose={onClose}
         onResolveAttention={onResolveAttention}
         onRefresh={onRefresh}
+        actions={actions}
       />
     );
   }
@@ -169,8 +212,9 @@ export function TaskDetails({ taskId, open, onClose, onResolveAttention }: TaskD
           "motion-safe:animate-[detail-enter_220ms_cubic-bezier(0.16,1,0.3,1)_both]",
         )}
         aria-labelledby="task-details-heading"
+        onKeyDown={(event) => closeOnEscape(event, onClose)}
       >
-        <TaskDetailsHeader task={task} onClose={onClose} />
+        <TaskDetailsHeader task={task} onClose={onClose} actions={actions} />
         <TaskDetailsErrorBoundary taskId={task.id} onClose={onClose}>
           <TaskDetailsPanel task={task} onResolveAttention={onResolveAttention} onRefresh={onRefresh} />
         </TaskDetailsErrorBoundary>
@@ -237,18 +281,110 @@ function TaskDetailsErrorFallback({ onClose, onRetry }: { onClose?: () => void; 
   );
 }
 
+/**
+ * Esc closes the docked panel the way it closes the drawer and every dialog.
+ * Only keys pressed inside the panel's own DOM count: selects and menus portal
+ * their popups out of it (React still bubbles their events here), and they use
+ * Esc to close themselves first.
+ */
+function closeOnEscape(event: KeyboardEvent<HTMLElement>, onClose?: () => void) {
+  if (event.key !== "Escape" || event.defaultPrevented || !onClose) return;
+  if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
+  event.preventDefault();
+  onClose();
+}
+
+function TaskDetailsActions({ task, actions }: { task: Task; actions?: TaskDetailsActionHandlers }) {
+  const { t } = useTranslation();
+  if (!actions) return null;
+  // Same rules as the row: a failed task with a recovery playbook offers its
+  // fixes in the overview instead of a Resume/Retry that would contradict them.
+  const transferMode = rowTransferMode(task);
+  const showRetry = rowShowsRetry(task);
+  const buttonClass = "h-8 gap-1.5 px-2.5 text-xs";
+
+  return (
+    <fieldset className="m-0 mt-2 flex min-w-0 flex-wrap gap-1.5 border-0 p-0">
+      <legend className="sr-only">{t("taskDetails.actionsAria")}</legend>
+      {transferMode !== "hidden" ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className={buttonClass}
+          onClick={() => actions.onToggleTransfer(task)}
+        >
+          {transferMode === "resume" ? (
+            <Play className="h-3.5 w-3.5" aria-hidden />
+          ) : (
+            <Pause className="h-3.5 w-3.5" aria-hidden />
+          )}
+          {transferMode === "resume" ? t("actions.resume") : t("actions.pause")}
+        </Button>
+      ) : null}
+      {showRetry ? (
+        <Button type="button" variant="outline" size="sm" className={buttonClass} onClick={() => actions.onRetry(task)}>
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+          {t("actions.retry")}
+        </Button>
+      ) : null}
+      {task.status === "completed" ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className={buttonClass}
+          onClick={() => actions.onOpenFile(task)}
+        >
+          <File className="h-3.5 w-3.5" aria-hidden />
+          {t("actions.openFile")}
+        </Button>
+      ) : null}
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className={buttonClass}
+        onClick={() => actions.onOpenFolder(task)}
+      >
+        <FolderOpen className="h-3.5 w-3.5" aria-hidden />
+        {t("actions.openFolder")}
+      </Button>
+      {actions.onDelete ? (
+        // Delete here is the undoable soft delete, so it sits apart at the end
+        // and turns red only on hover or focus instead of outweighing Pause.
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className={cn(
+            buttonClass,
+            "ml-auto text-text-muted hover:bg-status-danger/10 hover:text-status-danger focus-visible:text-status-danger",
+          )}
+          onClick={() => actions.onDelete?.(task)}
+        >
+          <Trash2 className="h-3.5 w-3.5" aria-hidden />
+          {t("deleteDialog.confirm")}
+        </Button>
+      ) : null}
+    </fieldset>
+  );
+}
+
 function TaskDetailsDrawer({
   task,
   open,
   onClose,
   onResolveAttention,
   onRefresh,
+  actions,
 }: {
   task: Task;
   open: boolean;
   onClose?: () => void;
   onResolveAttention: (task: Task, action: RecoveryAction) => void;
   onRefresh: () => void;
+  actions?: TaskDetailsActionHandlers;
 }) {
   const { t } = useTranslation();
 
@@ -283,6 +419,8 @@ function TaskDetailsDrawer({
               <p className="truncate text-xs text-text-muted" title={task.saveDir}>
                 {task.saveDir}
               </p>
+              <TaskDetailsStatus task={task} />
+              <TaskDetailsActions task={task} actions={actions} />
             </div>
             <Dialog.Close asChild>
               <Button
@@ -308,7 +446,15 @@ function TaskDetailsDrawer({
   );
 }
 
-function TaskDetailsHeader({ task, onClose }: { task: Task; onClose?: () => void }) {
+function TaskDetailsHeader({
+  task,
+  onClose,
+  actions,
+}: {
+  task: Task;
+  onClose?: () => void;
+  actions?: TaskDetailsActionHandlers;
+}) {
   const { t } = useTranslation();
 
   return (
@@ -320,6 +466,8 @@ function TaskDetailsHeader({ task, onClose }: { task: Task; onClose?: () => void
         <p className="truncate text-xs text-text-muted" title={task.saveDir}>
           {task.saveDir}
         </p>
+        <TaskDetailsStatus task={task} />
+        <TaskDetailsActions task={task} actions={actions} />
       </div>
       {onClose ? (
         <Tooltip>
@@ -336,10 +484,33 @@ function TaskDetailsHeader({ task, onClose }: { task: Task; onClose?: () => void
               <X className="h-4 w-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>{t("taskDetails.close")}</TooltipContent>
+          <TooltipContent>
+            {t("taskDetails.close")}
+            <kbd className="ml-2 font-mono text-[11px] opacity-70">Esc</kbd>
+          </TooltipContent>
         </Tooltip>
       ) : null}
     </header>
+  );
+}
+
+function TaskDetailsStatus({ task }: { task: Task }) {
+  const { t } = useTranslation();
+  const tone =
+    task.status === "failed"
+      ? "text-status-danger"
+      : task.status === "needs_attention"
+        ? "text-status-warning"
+        : "text-text-secondary";
+  return (
+    <span
+      className={cn(
+        "mt-1 inline-flex rounded-full border border-border-subtle px-1.5 py-0.5 text-xs font-medium",
+        tone,
+      )}
+    >
+      {t(`task.status.${task.status}`)}
+    </span>
   );
 }
 
@@ -354,8 +525,7 @@ function TaskDetailsPanel({
 }) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("overview");
-  const [diagSubTab, setDiagSubTab] = useState<TaskDetailDiagSubTab>("segments");
-  const [segmentViewMode, setSegmentViewMode] = useState<"ranges" | "connections">("ranges");
+  const speedHistory = useSpeedHistoryStore((s) => s.history[task.id] ?? EMPTY_SPEED_HISTORY);
   const [hashState, setHashState] = useState<HashVerificationState | null>(null);
   const [verifyingHash, setVerifyingHash] = useState(false);
   const [checksumResults, setChecksumResults] = useState<Record<string, { actual: string; match: boolean }>>({});
@@ -397,13 +567,14 @@ function TaskDetailsPanel({
     loadMoreDashSegments,
     loadMoreEvents,
     loadMoreRequests,
-  } = useTaskDetailQueries({ task, activeTab, diagSubTab });
+  } = useTaskDetailQueries({ task, activeTab });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: task identity resets the panel; later status updates must preserve the selected tab.
   useEffect(() => {
-    setActiveTab(task.status === "failed" || task.status === "needs_attention" ? "diagnostics" : "overview");
-    setDiagSubTab(defaultDiagSubTab(task.protocol));
-    setSegmentViewMode("ranges");
+    // Recovery is the time-sensitive next step for failed tasks, and it lives
+    // in Overview. Starting there makes the corrective action available before
+    // the user has to discover and leave a diagnostics-only tab.
+    setActiveTab("overview");
     setHashState(null);
     setChecksumResults({});
     setVerifyingChecksums(new Set());
@@ -515,6 +686,12 @@ function TaskDetailsPanel({
 
   const isFailedOrAttention = task.status === "failed" || task.status === "needs_attention";
   const isCompleted = task.status === "completed";
+  const chunkCells = useMemo(
+    () => (hasByteRangeSegments(task.protocol) ? chunkMapCells(segments, task.totalSize, task.status) : null),
+    [segments, task.protocol, task.totalSize, task.status],
+  );
+  const overallPercent =
+    task.totalSize > 0 ? Math.min(100, Math.max(0, Math.round((task.downloadedBytes / task.totalSize) * 100))) : 0;
 
   const hashPanel = (
     <HashPanel
@@ -538,130 +715,108 @@ function TaskDetailsPanel({
         <TabsTrigger value="logs">{t("taskDetails.logs")}</TabsTrigger>
       </TabsList>
 
-      <TabsContent value="diagnostics" className="flex min-h-0 flex-1 flex-col">
-        <Tabs value={diagSubTab} onValueChange={(v) => setDiagSubTab(v as TaskDetailDiagSubTab)}>
-          <TabsList aria-label={t("taskDetails.diagnostics")} className="mb-2 flex h-auto gap-1 bg-transparent p-0">
-            {(isTorrentTask ? (["requests"] as const) : (["segments", "requests"] as const)).map((key) => (
-              <TabsTrigger
-                key={key}
-                value={key}
-                className={cn(
-                  "rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
-                  "data-[state=active]:bg-accent-primary/12 data-[state=active]:text-accent-primary data-[state=active]:shadow-none",
-                  "data-[state=inactive]:text-text-muted data-[state=inactive]:hover:bg-surface-raised/60 data-[state=inactive]:hover:text-text-secondary",
-                )}
-              >
-                {t(`taskDetails.${key}`)}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-
-          <ScrollArea className="min-h-0 flex-1">
-            {!isTorrentTask ? (
-              <TabsContent value="segments" id="panel-segments">
-                {isHlsTask ? (
-                  <HlsSegmentList
-                    segments={hlsSegments}
-                    error={hlsSegmentError}
-                    emptyLabel={t(diagnosticsSegmentsEmptyKey(task.protocol))}
-                    sequenceLabel={t("taskDetails.hlsSequence")}
-                    statusLabel={t("taskDetails.hlsStatus")}
-                    durationLabel={t("taskDetails.hlsDuration")}
-                    retriesLabel={t("taskDetails.chunkRetries")}
-                    hasMore={Boolean(hlsSegmentsCursor)}
-                    loadMoreLabel={t("taskDetails.loadMore")}
-                    onLoadMore={loadMoreHlsSegments}
-                  />
-                ) : isDashTask ? (
-                  <DashSegmentList
-                    segments={dashSegments}
-                    error={dashSegmentError}
-                    emptyLabel={t(diagnosticsSegmentsEmptyKey(task.protocol))}
-                    trackLabel={t("taskDetails.dashTrack")}
-                    indexLabel={t("taskDetails.dashIndex")}
-                    statusLabel={t("taskDetails.dashStatus")}
-                    retriesLabel={t("taskDetails.chunkRetries")}
-                    hasMore={Boolean(dashSegmentsCursor)}
-                    loadMoreLabel={t("taskDetails.loadMore")}
-                    onLoadMore={loadMoreDashSegments}
-                  />
-                ) : (
-                  <>
-                    {isHttpLikeProtocol(task.protocol) ? (
-                      <SegmentViewToggle
-                        value={segmentViewMode}
-                        onChange={(mode) => setSegmentViewMode(mode)}
-                        rangesLabel={t("taskDetails.segmentViewRanges")}
-                        connectionsLabel={t("taskDetails.segmentViewConnections")}
-                        ariaLabel={t("taskDetails.segmentViewAria")}
-                      />
-                    ) : null}
-                    {segmentViewMode === "connections" && isHttpLikeProtocol(task.protocol) ? (
-                      <ConnectionList
-                        segments={segments}
-                        taskSpeedBps={task.speedBps}
-                        error={segmentError}
-                        emptyLabel={t(diagnosticsConnectionsEmptyKey(task.protocol))}
-                        connectionLabel={t("taskDetails.connection")}
-                        rangeLabel={t("taskDetails.connectionRange")}
-                        progressLabel={t("taskDetails.connectionProgress")}
-                        speedLabel={t("taskDetails.connectionSpeed")}
-                        hasMore={Boolean(segmentsCursor)}
-                        loadMoreLabel={t("taskDetails.loadMore")}
-                        onLoadMore={loadMoreSegments}
-                      />
-                    ) : (
-                      <ChunkList
-                        segments={segments}
-                        error={segmentError}
-                        emptyLabel={t(diagnosticsSegmentsEmptyKey(task.protocol))}
-                        rangeLabel={t("taskDetails.chunkRange")}
-                        progressLabel={t("taskDetails.chunkProgress")}
-                        retryLabel={t("taskDetails.chunkRetries")}
-                        hasMore={Boolean(segmentsCursor)}
-                        loadMoreLabel={t("taskDetails.loadMore")}
-                        onLoadMore={loadMoreSegments}
-                      />
-                    )}
-                  </>
-                )}
-              </TabsContent>
-            ) : null}
-            <TabsContent value="requests" id="panel-requests">
-              <RequestList
-                requests={requests}
-                error={requestsError}
-                emptyLabel={t(diagnosticsRequestsEmptyKey(task.protocol))}
-                hasMore={Boolean(requestsCursor)}
-                loadMoreLabel={t("taskDetails.loadMore")}
-                onLoadMore={loadMoreRequests}
-              />
-            </TabsContent>
-          </ScrollArea>
-        </Tabs>
-      </TabsContent>
-
       <ScrollArea className="min-h-0 flex-1">
+        {/* One scroll with sections instead of tabs inside a tab with a mode
+            toggle inside that: the chunk ranges were three clicks deep. */}
+        <TabsContent value="diagnostics" className="space-y-5">
+          {!isTorrentTask ? (
+            <DiagnosticsSection id="panel-segments" title={t("taskDetails.segments")}>
+              {isHlsTask ? (
+                <HlsSegmentList
+                  segments={hlsSegments}
+                  error={hlsSegmentError}
+                  emptyLabel={t(diagnosticsSegmentsEmptyKey(task.protocol))}
+                  sequenceLabel={t("taskDetails.hlsSequence")}
+                  statusLabel={t("taskDetails.hlsStatus")}
+                  durationLabel={t("taskDetails.hlsDuration")}
+                  retriesLabel={t("taskDetails.chunkRetries")}
+                  hasMore={Boolean(hlsSegmentsCursor)}
+                  loadMoreLabel={t("taskDetails.loadMore")}
+                  onLoadMore={loadMoreHlsSegments}
+                />
+              ) : isDashTask ? (
+                <DashSegmentList
+                  segments={dashSegments}
+                  error={dashSegmentError}
+                  emptyLabel={t(diagnosticsSegmentsEmptyKey(task.protocol))}
+                  trackLabel={t("taskDetails.dashTrack")}
+                  indexLabel={t("taskDetails.dashIndex")}
+                  statusLabel={t("taskDetails.dashStatus")}
+                  retriesLabel={t("taskDetails.chunkRetries")}
+                  hasMore={Boolean(dashSegmentsCursor)}
+                  loadMoreLabel={t("taskDetails.loadMore")}
+                  onLoadMore={loadMoreDashSegments}
+                />
+              ) : (
+                <SegmentList
+                  segments={segments}
+                  taskSpeedBps={task.speedBps}
+                  error={segmentError}
+                  emptyLabel={t(diagnosticsSegmentsEmptyKey(task.protocol))}
+                  hasMore={Boolean(segmentsCursor)}
+                  loadMoreLabel={t("taskDetails.loadMore")}
+                  onLoadMore={loadMoreSegments}
+                />
+              )}
+            </DiagnosticsSection>
+          ) : null}
+          <DiagnosticsSection id="panel-requests" title={t("taskDetails.requests")}>
+            <RequestList
+              requests={requests}
+              error={requestsError}
+              emptyLabel={t(diagnosticsRequestsEmptyKey(task.protocol))}
+              hasMore={Boolean(requestsCursor)}
+              loadMoreLabel={t("taskDetails.loadMore")}
+              onLoadMore={loadMoreRequests}
+            />
+          </DiagnosticsSection>
+        </TabsContent>
         <TabsContent value="overview" className="space-y-3 text-sm">
           <div className="space-y-2">
-            <ProgressBar
-              value={task.totalSize > 0 ? task.downloadedBytes / task.totalSize : 0}
-              label={formatPercent(task.downloadedBytes, task.totalSize)}
-              active={task.status === "downloading" || task.status === "retrying"}
-              size="lg"
-              tone={task.status === "completed" ? "success" : task.status === "failed" ? "danger" : "primary"}
-            />
+            <OverviewDiagnosis task={task} />
+            {chunkCells ? (
+              <ChunkMap cells={chunkCells} segments={segments} percent={overallPercent} taskStatus={task.status} />
+            ) : (
+              <ProgressBar
+                value={task.totalSize > 0 ? task.downloadedBytes / task.totalSize : 0}
+                label={formatPercent(task.downloadedBytes, task.totalSize)}
+                active={task.status === "downloading" || task.status === "retrying"}
+                size="lg"
+                tone={task.status === "completed" ? "success" : task.status === "failed" ? "danger" : "primary"}
+              />
+            )}
             <div className="flex items-center justify-between px-1">
               <span className="text-xs text-text-muted">{formatPercent(task.downloadedBytes, task.totalSize)}</span>
               <span className="font-mono text-xs text-text-muted">
                 {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalSize)}
               </span>
             </div>
+            {chunkCells ? (
+              <ChunkMapSummary
+                segments={segments}
+                taskStatus={task.status}
+                onViewRanges={() => setActiveTab("diagnostics")}
+              />
+            ) : null}
+            <CapabilityChips task={task} />
           </div>
-          <div className="space-y-0.5">
-            <Row label={t("taskDetails.speed")} value={formatSpeed(task.speedBps)} />
-            <Row label={t("taskDetails.eta")} value={formatEta(task.downloadedBytes, task.totalSize, task.speedBps)} />
-          </div>
+          {showsTransferRates(task.status) ? (
+            <div className="space-y-0.5">
+              <Row label={t("taskDetails.speed")} value={formatSpeed(task.speedBps, { fixed: true })} />
+              <Row
+                label={t("taskDetails.eta")}
+                value={formatEta(task.downloadedBytes, task.totalSize, task.speedBps)}
+              />
+              {/* Speed history moved here from the row's in-place expansion,
+                  which was the only other place it could be seen. */}
+              <SpeedSparkline
+                samples={speedHistory}
+                currentSpeedBps={task.speedBps}
+                label={t("task.expanded.speedHistoryAria", { name: task.fileName })}
+                className="mt-1.5"
+              />
+            </div>
+          ) : null}
           {canFinishLiveRecording ? (
             <div className="flex justify-end">
               <Button
@@ -713,6 +868,38 @@ function TaskDetailsPanel({
         </TabsContent>
       </ScrollArea>
     </Tabs>
+  );
+}
+
+/** The engine's verdict above the progress strip, so the first line of the
+ * overview says why the numbers below look the way they do. */
+function OverviewDiagnosis({ task }: { task: Task }) {
+  const { t } = useTranslation();
+  const diagnosis = detailDiagnosis(task, t);
+  if (!diagnosis) return null;
+  return <p className="px-1 text-sm font-medium leading-5 text-text-primary">{diagnosis}</p>;
+}
+
+function CapabilityChips({ task }: { task: Task }) {
+  const { t } = useTranslation();
+  const chips = capabilityChips(task);
+  if (chips.length === 0) return null;
+  return (
+    <ul aria-label={t("taskDetails.capabilitiesAria")} className="flex flex-wrap gap-1.5 px-1">
+      {chips.map((chip) => (
+        <li
+          key={chip.labelKey}
+          className={cn(
+            "rounded-full border px-2 py-0.5 text-[11px] font-medium leading-4",
+            chip.tone === "warning"
+              ? "border-border-warning-subtle bg-status-warning/10 text-status-warning"
+              : "border-border-subtle text-text-secondary",
+          )}
+        >
+          {t(chip.labelKey)}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -1080,14 +1267,6 @@ function FtpSftpOverviewPanel({
         <Row label={t("taskDetails.protocol")} value={task.protocol.toUpperCase()} />
         {tlsMode ? <Row label={t("taskDetails.ftpTlsMode")} value={t(FTP_TLS_MODE_KEYS[tlsMode])} /> : null}
         <Row label={t("taskDetails.connections")} value={String(task.connectionCount)} />
-        <Row
-          label={t("taskDetails.resumeSupport")}
-          value={task.supportsResume ? t("taskDetails.capabilityYes") : t("taskDetails.capabilityNo")}
-        />
-        <Row
-          label={t("taskDetails.parallelSupport")}
-          value={task.supportsParallel ? t("taskDetails.capabilityYes") : t("taskDetails.capabilityNo")}
-        />
         {summaryError ? (
           <p
             role="alert"
@@ -1738,162 +1917,27 @@ function TaskProxyPanel({ task }: { task: Task }) {
   );
 }
 
-/**
- * Mode toggle for the single Segments view. Switches the same segment data
- * between two presentations: by byte range ("ranges") and by connection
- * ("connections"). Replaces the former chunks/connections parallel sub-tabs.
- */
-function SegmentViewToggle({
-  value,
-  onChange,
-  rangesLabel,
-  connectionsLabel,
-  ariaLabel,
-}: {
-  value: "ranges" | "connections";
-  onChange: (mode: "ranges" | "connections") => void;
-  rangesLabel: string;
-  connectionsLabel: string;
-  ariaLabel: string;
-}) {
+function DiagnosticsSection({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
-    <fieldset className="mb-2 inline-flex min-w-0 items-center gap-0.5 rounded-md border border-border-subtle bg-surface-root/50 p-0.5">
-      <legend className="sr-only">{ariaLabel}</legend>
-      {(
-        [
-          { mode: "ranges", label: rangesLabel },
-          { mode: "connections", label: connectionsLabel },
-        ] as const
-      ).map((option) => (
-        <button
-          key={option.mode}
-          type="button"
-          aria-pressed={value === option.mode}
-          onClick={() => onChange(option.mode)}
-          className={cn(
-            "rounded px-2 py-0.5 text-[11px] font-medium transition-[background-color,color] duration-[var(--motion-ui)] ease-out",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary",
-            value === option.mode
-              ? "bg-accent-primary/12 text-accent-primary"
-              : "text-text-muted hover:bg-surface-raised/60 hover:text-text-secondary",
-          )}
-        >
-          {option.label}
-        </button>
-      ))}
-    </fieldset>
+    <section id={id} aria-labelledby={`${id}-heading`}>
+      <h3 id={`${id}-heading`} className="mb-2 text-xs font-semibold text-text-secondary">
+        {title}
+      </h3>
+      {children}
+    </section>
   );
 }
 
-const ChunkList = memo(function ChunkList({
-  segments,
-  error,
-  emptyLabel,
-  rangeLabel,
-  progressLabel,
-  retryLabel,
-  hasMore,
-  loadMoreLabel,
-  onLoadMore,
-}: {
-  segments: TaskSegment[];
-  error: string | null;
-  emptyLabel: string;
-  rangeLabel: string;
-  progressLabel: string;
-  retryLabel: string;
-  hasMore: boolean;
-  loadMoreLabel: string;
-  onLoadMore: () => void;
-}) {
-  const { t } = useTranslation();
-
-  if (error) {
-    return (
-      <p
-        role="alert"
-        className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
-      >
-        {error}
-      </p>
-    );
-  }
-
-  if (segments.length === 0) {
-    return <p className="text-xs text-text-secondary">{emptyLabel}</p>;
-  }
-
-  return (
-    <div className="space-y-3 text-xs">
-      <p className="rounded-md border border-border-divider bg-surface-root/50 px-3 py-2 text-text-secondary">
-        {t("taskDetails.chunksSummary", {
-          total: segments.length,
-          completed: segments.filter((segment) => segment.status === "completed").length,
-          active: segments.filter((segment) => segment.status === "downloading").length,
-          failed: segments.filter((segment) => segment.status === "failed").length,
-        })}
-      </p>
-      {segments.map((segment) => {
-        const total = Math.max(1, segment.rangeEnd - segment.rangeStart + 1);
-        const completed = Math.max(0, segment.downloadedUntil - segment.rangeStart);
-        const progress = Math.min(1, completed / total);
-        const isLive = segment.status === "downloading" || segment.status === "pending";
-        const rangeText = `${formatBytes(segment.rangeStart)} - ${formatBytes(segment.rangeEnd)}`;
-        const percentText = `${Math.round(progress * 100)}%`;
-
-        return (
-          <div key={segment.id} className="rounded-md border border-border-subtle bg-surface-raised/50 p-3">
-            <div className="flex items-center justify-between gap-3">
-              <span className="font-medium text-text-primary">
-                {rangeLabel} {rangeText}
-              </span>
-              <span className={cn("capitalize", segmentTone(segment.status))}>
-                {t(`segment.status.${segment.status}`)}
-              </span>
-            </div>
-            <div className="mt-2">
-              <ProgressBar
-                value={progress}
-                label={t("taskDetails.chunkProgressAria", {
-                  range: rangeText,
-                  percent: percentText,
-                })}
-                active={segment.status !== "completed" && segment.status !== "failed"}
-                smooth={!isLive}
-                tone={segment.status === "failed" ? "danger" : segment.status === "completed" ? "success" : "primary"}
-                className="h-1.5"
-              />
-            </div>
-            <div className="mt-2 flex justify-between gap-3 text-text-muted">
-              <span>
-                {progressLabel} {formatBytes(completed)} / {formatBytes(total)}
-              </span>
-              <span>
-                {retryLabel} {segment.retryCount}
-              </span>
-            </div>
-            {segment.lastError ? (
-              <p role="alert" className="mt-2 text-status-danger">
-                {segment.lastError}
-              </p>
-            ) : null}
-          </div>
-        );
-      })}
-      <LoadMoreButton visible={hasMore} label={loadMoreLabel} onClick={onLoadMore} />
-    </div>
-  );
-});
-
-const ConnectionList = memo(function ConnectionList({
+/**
+ * One list for the engine's work units: each row is a connection's byte range
+ * with its progress, live speed, and retries. The same data used to sit behind
+ * a "By range / By connection" toggle that split it into two half-lists.
+ */
+const SegmentList = memo(function SegmentList({
   segments,
   taskSpeedBps,
   error,
   emptyLabel,
-  connectionLabel,
-  rangeLabel,
-  progressLabel,
-  speedLabel,
   hasMore,
   loadMoreLabel,
   onLoadMore,
@@ -1902,10 +1946,6 @@ const ConnectionList = memo(function ConnectionList({
   taskSpeedBps: number;
   error: string | null;
   emptyLabel: string;
-  connectionLabel: string;
-  rangeLabel: string;
-  progressLabel: string;
-  speedLabel: string;
   hasMore: boolean;
   loadMoreLabel: string;
   onLoadMore: () => void;
@@ -1927,49 +1967,63 @@ const ConnectionList = memo(function ConnectionList({
     return <p className="text-xs text-text-secondary">{emptyLabel}</p>;
   }
 
-  const activeSegments = segments.filter((segment) => segment.status === "downloading");
+  const counts = {
+    total: segments.length,
+    completed: segments.filter((segment) => segment.status === "completed").length,
+    active: segments.filter((segment) => segment.status === "downloading").length,
+    failed: segments.filter((segment) => segment.status === "failed").length,
+  };
+
   return (
     <div className="space-y-2 text-xs">
-      <p className="rounded-md border border-border-divider bg-surface-root/50 px-3 py-2 text-text-secondary">
-        {t("taskDetails.connectionsSummary", {
-          total: segments.length,
-          active: activeSegments.length,
-          speed: formatSpeed(taskSpeedBps),
-        })}
+      <p className="text-text-secondary">
+        {t("taskDetails.chunksSummary", counts)}
+        {counts.active > 0 ? ` · ${formatSpeed(taskSpeedBps, { fixed: true })}` : null}
       </p>
-      {segments.map((segment, index) => {
-        const total = Math.max(1, segment.rangeEnd - segment.rangeStart + 1);
-        const completed = Math.max(0, segment.downloadedUntil - segment.rangeStart);
-        const speed = segment.status === "downloading" ? segment.speedBps : 0;
-        const rangeText = `${formatBytes(segment.rangeStart)} - ${formatBytes(segment.rangeEnd)}`;
-        const percentText = formatPercent(completed, total);
+      <ol className="divide-y divide-border-divider rounded-md border border-border-subtle">
+        {segments.map((segment, index) => {
+          const total = Math.max(1, segment.rangeEnd - segment.rangeStart + 1);
+          const completed = Math.max(0, Math.min(total, segment.downloadedUntil - segment.rangeStart));
+          const progress = segment.status === "completed" ? 1 : Math.min(1, completed / total);
+          const isLive = segment.status === "downloading" || segment.status === "pending";
+          const rangeText = `${formatBytes(segment.rangeStart)} – ${formatBytes(segment.rangeEnd + 1)}`;
+          const percentText = `${Math.round(progress * 100)}%`;
+          const speed = segment.status === "downloading" ? segment.speedBps : 0;
 
-        return (
-          <div key={segment.id} className="rounded-md border border-border-subtle bg-surface-raised/50 p-3">
-            <div className="flex items-center justify-between gap-3">
-              <span className="font-medium text-text-primary">
-                {connectionLabel} {index + 1}
-              </span>
-              <span className={cn("capitalize", segmentTone(segment.status))}>
-                {t(`segment.status.${segment.status}`)}
-              </span>
-            </div>
-            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 text-text-muted">
-              <span>{rangeLabel}</span>
-              <span className="text-right font-mono text-text-secondary">{rangeText}</span>
-              <span>{progressLabel}</span>
-              <span className="text-right font-mono text-text-secondary">{percentText}</span>
-              <span>{speedLabel}</span>
-              <span className="text-right font-mono text-text-secondary">{formatSpeed(speed)}</span>
-            </div>
-            {segment.lastError ? (
-              <p role="alert" className="mt-2 text-status-danger">
-                {errorMessage(segment.lastError)}
-              </p>
-            ) : null}
-          </div>
-        );
-      })}
+          return (
+            <li key={segment.id} className="space-y-1.5 px-3 py-2">
+              <div className="flex items-center justify-between gap-3">
+                <span className="min-w-0 truncate">
+                  <span className="font-medium text-text-primary">
+                    {t("taskDetails.connection")} {index + 1}
+                  </span>
+                  <span className="ml-2 font-mono text-text-muted">{rangeText}</span>
+                </span>
+                <span className={cn("shrink-0", segmentTone(segment.status))}>
+                  {t(`segment.status.${segment.status}`)}
+                </span>
+              </div>
+              <ProgressBar
+                value={progress}
+                label={t("taskDetails.chunkProgressAria", { range: rangeText, percent: percentText })}
+                active={segment.status !== "completed" && segment.status !== "failed"}
+                smooth={!isLive}
+                tone={segment.status === "failed" ? "danger" : segment.status === "completed" ? "success" : "primary"}
+              />
+              <div className="flex justify-between gap-3 font-mono text-text-muted">
+                <span>
+                  {formatBytes(completed, { fixed: true })} / {formatBytes(total)}
+                </span>
+                <span>{speed > 0 ? formatSpeed(speed, { fixed: true }) : null}</span>
+                <span>
+                  {t("taskDetails.chunkRetries")} {segment.retryCount}
+                </span>
+              </div>
+              {segment.lastError ? <p className="text-status-danger">{errorMessage(segment.lastError)}</p> : null}
+            </li>
+          );
+        })}
+      </ol>
       <LoadMoreButton visible={hasMore} label={loadMoreLabel} onClick={onLoadMore} />
     </div>
   );
@@ -2020,7 +2074,7 @@ const EventList = memo(function EventList({
               </span>
               <time className="shrink-0 font-mono text-[11px] text-text-muted">{formatEventTime(event.createdAt)}</time>
             </div>
-            {event.payload ? <p className="mt-1 break-words text-text-secondary">{event.payload}</p> : null}
+            {event.payload ? <EventPayload payload={event.payload} /> : null}
           </li>
         ))}
       </ol>
@@ -2028,6 +2082,25 @@ const EventList = memo(function EventList({
     </div>
   );
 });
+
+function EventPayload({ payload }: { payload: string }) {
+  const { t } = useTranslation();
+  const summary = timelinePayloadSummary(payload, t);
+  const localized = summary ?? (parseAppError(payload) ? localizedErrorMessage(payload, t) : t("errors.unknownError"));
+  return (
+    <div className="mt-1 min-w-0">
+      <p className="break-words text-text-secondary">{localized}</p>
+      <details className="mt-1 text-[11px] text-text-muted">
+        <summary className="cursor-default select-none hover:text-text-secondary">
+          {t("recovery.technicalDetails")}
+        </summary>
+        <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-surface-root/60 p-2 font-mono text-text-muted">
+          {payload}
+        </pre>
+      </details>
+    </div>
+  );
+}
 
 const RequestList = memo(function RequestList({
   requests,

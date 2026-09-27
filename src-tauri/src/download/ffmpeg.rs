@@ -94,32 +94,118 @@ pub(crate) async fn ensure_ffmpeg_available(
     }
 }
 
+/// Total deadline for a `ffmpeg -version` probe. A version string is a few
+/// hundred bytes printed immediately by any working binary — a probe that
+/// does not answer inside this window is treated as a hung binary, not a slow
+/// one (ARC-54).
+const FFMPEG_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Bound on combined stdout+stderr the probe retains. A malformed binary
+/// could otherwise spew unbounded output that `output()` buffers in memory
+/// for the whole deadline.
+const FFMPEG_PROBE_MAX_OUTPUT_BYTES: usize = 256 * 1024;
+
 /// Probe the ffmpeg version string for a given binary path.
 ///
 /// Used by the Settings UI to verify that a user-configured path points to a
 /// working ffmpeg binary. Returns the first line of `ffmpeg -version` output
 /// (e.g. `ffmpeg version 6.1.1 Copyright (c) 2000-2023 the FFmpeg developers`).
+///
+/// The probe has a total deadline and an output cap so a binary that hangs or
+/// floods the pipes cannot stall settings verification or the environment
+/// health check forever (ARC-54). On timeout the child is killed *and* waited
+/// so no process is left behind.
 pub(crate) async fn probe_ffmpeg_version_at_path(path: &Path) -> Result<String, String> {
+    probe_ffmpeg_version_with_budget(path, FFMPEG_PROBE_TIMEOUT, FFMPEG_PROBE_MAX_OUTPUT_BYTES)
+        .await
+}
+
+/// Budget-parameterized probe body so tests can exercise the deadline and
+/// output-cap paths without waiting the full production timeout.
+async fn probe_ffmpeg_version_with_budget(
+    path: &Path,
+    deadline: std::time::Duration,
+    max_output_bytes: usize,
+) -> Result<String, String> {
     if !tokio::fs::try_exists(path).await.unwrap_or(false) {
         return Err(format!(
             "ffmpeg binary not found at the configured path: {}",
             path.display()
         ));
     }
-    let output = tokio::process::Command::new(path)
+    let mut command = tokio::process::Command::new(path);
+    command
         .arg("-version")
-        .output()
-        .await
+        // Null stdin so a non-ffmpeg binary cannot hang waiting for input.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
         .map_err(|e| format!("Failed to spawn ffmpeg: {e}"))?;
-    if !output.status.success() {
+
+    // Drain the pipes concurrently with the wait. Reading only after exit
+    // would deadlock on a child that blocks on a full pipe (>~64 KiB).
+    use tokio::io::AsyncReadExt;
+    let stdout_pipe = child.stdout.take().expect("stdout is piped");
+    let stderr_pipe = child.stderr.take().expect("stderr is piped");
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe
+            .take(max_output_bytes as u64 + 1)
+            .read_to_end(&mut buf)
+            .await;
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe
+            .take(max_output_bytes as u64 + 1)
+            .read_to_end(&mut buf)
+            .await;
+        buf
+    });
+
+    let result = tokio::time::timeout(deadline, child.wait()).await;
+
+    let (status, stdout, stderr) = match result {
+        Ok(Ok(status)) => {
+            let stdout = stdout_task
+                .await
+                .map_err(|e| format!("ffmpeg stdout reader failed: {e}"))?;
+            let stderr = stderr_task
+                .await
+                .map_err(|e| format!("ffmpeg stderr reader failed: {e}"))?;
+            (status, stdout, stderr)
+        }
+        Ok(Err(e)) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(format!("Failed to wait for ffmpeg: {e}"));
+        }
+        Err(_elapsed) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            // Kill *and* wait: a detached child is a leaked PID, and a zombie
+            // process can hold the binary path on Windows.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!(
+                "ffmpeg did not return a version within {deadline:?}."
+            ));
+        }
+    };
+
+    if !status.success() {
         return Err(format!(
             "ffmpeg exited with status {}. stderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            status,
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first_line = stdout.lines().next().unwrap_or("").trim();
+    let stdout_text = String::from_utf8_lossy(&stdout);
+    let first_line = stdout_text.lines().next().unwrap_or("").trim();
     if first_line.is_empty() {
         return Err("ffmpeg returned an empty version string.".to_string());
     }
@@ -419,5 +505,182 @@ mod tests {
             resolved, fixture,
             "ffmpeg_path must honor the persisted settings value when env var is unset"
         );
+    }
+
+    /// An existing executable any platform can spawn: the probe only passes
+    /// `-version`, so `cmd.exe`/`sh` exits fast on its own — a zero deadline
+    /// still deterministically walks the kill+wait timeout path instead.
+    fn existing_binary() -> std::path::PathBuf {
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("WINDIR")
+                .map(|dir| std::path::Path::new(&dir).join("System32").join("cmd.exe"))
+                .expect("WINDIR must be set on Windows")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::path::PathBuf::from("/bin/sh")
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_version_deadline_kills_and_reaps_a_hung_binary() {
+        let binary = existing_binary();
+        assert!(binary.exists(), "fixture binary must exist");
+        // Duration::ZERO forces the timeout branch on any spawnable binary —
+        // the hang path is deterministic without a deliberately-slow fixture.
+        let start = std::time::Instant::now();
+        let err = probe_ffmpeg_version_with_budget(
+            &binary,
+            std::time::Duration::ZERO,
+            FFMPEG_PROBE_MAX_OUTPUT_BYTES,
+        )
+        .await
+        .expect_err("a zero deadline must time out");
+        assert!(
+            err.contains("did not return a version"),
+            "expected the stable timeout error, got: {err}"
+        );
+        // The kill+wait path itself must be bounded: if the child leaked, the
+        // process would still exist — this call returning quickly is the
+        // observable part of "no residual PID".
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "timeout path took too long: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_version_surfaces_nonzero_exit_status() {
+        // `whoami -version` / `sh -version` both exit non-zero immediately on
+        // receiving the probe's single argument.
+        #[cfg(target_os = "windows")]
+        let binary = std::env::var("WINDIR")
+            .map(|dir| {
+                std::path::Path::new(&dir)
+                    .join("System32")
+                    .join("whoami.exe")
+            })
+            .expect("WINDIR must be set on Windows");
+        #[cfg(not(target_os = "windows"))]
+        let binary = std::path::PathBuf::from("/bin/sh");
+        let err = probe_ffmpeg_version_at_path(&binary)
+            .await
+            .expect_err("a non-ffmpeg binary exits non-zero");
+        assert!(
+            err.contains("exited with status") || err.contains("empty version"),
+            "expected a status error, got: {err}"
+        );
+    }
+
+    /// Flood fixture: a script that prints far more than the pipe buffer and
+    /// the probe cap, then exits. `sh` on Unix, `cmd` batch on Windows — Rust's
+    /// Command runs `.cmd` scripts through cmd.exe automatically, so the probe
+    /// spawns either as a normal child.
+    fn flood_script(lines: usize, exit_code: i32, suffix: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vibe-ffmpeg-probe-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        #[cfg(unix)]
+        let (path, body) = {
+            let path = dir.join(format!("fake-ffmpeg-{suffix}.sh"));
+            let body = format!(
+                "#!/bin/sh\ni=0\nwhile [ $i -lt {lines} ]; do\n  printf 'flood-line-%08d-padding-padding-padding-padding\\n' $i\n  i=$((i+1))\ndone\necho 'ffmpeg version 6.0-test'\nexit {exit_code}\n"
+            );
+            (path, body)
+        };
+        #[cfg(target_os = "windows")]
+        let (path, body) = {
+            let path = dir.join(format!("fake-ffmpeg-{suffix}.cmd"));
+            let body = format!(
+                "@echo off\r\nfor /l %%i in (1,1,{lines}) do echo flood-line-%%i-padding-padding-padding-padding\r\necho ffmpeg version 6.0-test\r\nexit /b {exit_code}\r\n"
+            );
+            (path, body)
+        };
+        std::fs::write(&path, body).expect("write flood script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat script").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod script");
+        }
+        path
+    }
+
+    /// Endless-writer fixture: prints `x` forever; the probe's deadline must
+    /// bound it even while output keeps arriving.
+    fn endless_flood_script() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vibe-ffmpeg-probe-loop-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        #[cfg(unix)]
+        let (path, body) = (
+            dir.join("fake-ffmpeg-loop.sh"),
+            "#!/bin/sh\nwhile true; do echo x; done\n".to_string(),
+        );
+        #[cfg(target_os = "windows")]
+        let (path, body) = (
+            dir.join("fake-ffmpeg-loop.cmd"),
+            "@echo off\r\n:loop\r\necho x\r\ngoto loop\r\n".to_string(),
+        );
+        std::fs::write(&path, body).expect("write loop script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+        path
+    }
+
+    #[tokio::test]
+    async fn probe_version_drains_large_output_without_deadlocking() {
+        // >64 KiB of stdout then a clean exit: if the probe read output only
+        // after wait(), the child would block on a full pipe forever and the
+        // deadline would fire instead of a clean Ok.
+        let script = flood_script(6_000, 0, "flood-ok");
+        let version = probe_ffmpeg_version_with_budget(
+            &script,
+            std::time::Duration::from_secs(30),
+            FFMPEG_PROBE_MAX_OUTPUT_BYTES,
+        )
+        .await
+        .expect("flood output must not deadlock the probe");
+        assert!(!version.is_empty(), "a first line must come back");
+        let _ = std::fs::remove_dir_all(script.parent().expect("fixture dir"));
+    }
+
+    #[tokio::test]
+    async fn probe_version_kills_a_flooding_binary_within_deadline() {
+        // An effectively infinite writer: the deadline must bound the probe
+        // even while output keeps arriving.
+        let script = endless_flood_script();
+        let start = std::time::Instant::now();
+        let err = probe_ffmpeg_version_with_budget(
+            &script,
+            std::time::Duration::from_millis(500),
+            FFMPEG_PROBE_MAX_OUTPUT_BYTES,
+        )
+        .await
+        .expect_err("an infinite flood must hit the deadline");
+        assert!(err.contains("did not return a version"), "got: {err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "kill+wait took too long"
+        );
+        let _ = std::fs::remove_dir_all(script.parent().expect("fixture dir"));
     }
 }

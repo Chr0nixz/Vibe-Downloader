@@ -448,10 +448,18 @@ fn sync_parent_directory(parent: &Path) {
 fn sync_parent_directory(_parent: &Path) {}
 
 /// Materialize backup database bytes to a temp path and verify integrity + migrations.
+///
+/// `staging_dir` picks where the verified file lands. Pass the live database's
+/// parent directory on the restore path (ARC-53): the pending-restore rename
+/// is a filesystem move, which fails across volumes — staging beside the DB
+/// keeps it same-volume regardless of where the OS temp dir lives. `None`
+/// falls back to the OS temp dir for read-only consumers (preview / subset
+/// restore) that never rename the file.
 pub async fn materialize_and_verify_backup_db(
     database: &[u8],
     schema_version: i64,
     current_schema: i64,
+    staging_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     if schema_version > current_schema {
         return Err(engine_backup_error(
@@ -465,7 +473,11 @@ pub async fn materialize_and_verify_backup_db(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("vibe-backup-verify-{id}.sqlite"));
+    let dir = staging_dir
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let path = dir.join(format!("vibe-backup-verify-{id}.sqlite"));
     std::fs::write(&path, database).map_err(|e| {
         engine_backup_error(
             "backup_write_failed",

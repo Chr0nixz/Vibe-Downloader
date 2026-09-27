@@ -20,6 +20,8 @@ export type NavFilter =
   | "all"
   | "downloading"
   | "queue"
+  /** "Needs you": failed and needs-attention together (the sidebar entry). */
+  | "issues"
   | "attention"
   | "paused"
   | "completed"
@@ -53,6 +55,7 @@ export interface TaskStats {
   queued: number;
   attention: number;
   paused: number;
+  waitingNetwork: number;
   completed: number;
   failed: number;
   totalSpeed: number;
@@ -76,6 +79,7 @@ export const EMPTY_TASK_STATS: TaskStats = {
   queued: 0,
   attention: 0,
   paused: 0,
+  waitingNetwork: 0,
   completed: 0,
   failed: 0,
   totalSpeed: 0,
@@ -98,6 +102,7 @@ export function calculateTaskStats(tasks: Task[]): TaskStats {
   let queued = 0;
   let attention = 0;
   let paused = 0;
+  let waitingNetwork = 0;
   let completed = 0;
   let failed = 0;
   let totalSpeed = 0;
@@ -121,6 +126,9 @@ export function calculateTaskStats(tasks: Task[]): TaskStats {
     }
     if (task.status === "paused") {
       paused += 1;
+    }
+    if (task.status === "waiting_network") {
+      waitingNetwork += 1;
     }
     if (task.status === "completed") {
       completed += 1;
@@ -150,6 +158,7 @@ export function calculateTaskStats(tasks: Task[]): TaskStats {
     queued,
     attention,
     paused,
+    waitingNetwork,
     completed,
     failed,
     totalSpeed,
@@ -166,6 +175,7 @@ export function normalizeTaskStatsSnapshot(stats: TaskStats | TaskStatsSnapshot)
     queued: Number(stats.queued) || 0,
     attention: Number(stats.attention) || 0,
     paused: Number(stats.paused) || 0,
+    waitingNetwork: Number(stats.waitingNetwork) || 0,
     completed: Number(stats.completed) || 0,
     failed: Number(stats.failed) || 0,
     totalSpeed: parseByteCount(stats.totalSpeed),
@@ -173,6 +183,29 @@ export function normalizeTaskStatsSnapshot(stats: TaskStats | TaskStatsSnapshot)
     totalBytes: parseByteCount(stats.totalBytes),
     featuredTaskId: stats.featuredTaskId ?? null,
   };
+}
+
+/**
+ * PERF-18 (R26-P02): entity cache is bounded. Visible page + pinned IDs are
+ * always kept; the rest are evicted oldest-first once the cache grows past
+ * ENTITY_CACHE_LIMIT. Active/downloading tasks are pinned because progress
+ * patches keep arriving for them; evicting them would just force a re-add on
+ * the next tick.
+ */
+const ENTITY_CACHE_LIMIT = 500;
+const ACTIVE_ENTITY_STATUSES = new Set(["downloading", "retrying", "queued"]);
+
+function entityPins(view: { taskIds: string[]; expandedTaskIds: string[] }): Set<string> {
+  const pins = new Set(view.taskIds);
+  const ui = useTaskUIStore.getState();
+  if (ui.selectedId) pins.add(ui.selectedId);
+  for (const id of ui.selectedIds) pins.add(id);
+  for (const id of view.expandedTaskIds) pins.add(id);
+  return pins;
+}
+
+function isEntityPinned(task: Task, pins: Set<string>): boolean {
+  return pins.has(task.id) || ACTIVE_ENTITY_STATUSES.has(task.status);
 }
 
 /** Merge page rows into the entity cache while keeping view order separate. */
@@ -183,6 +216,39 @@ function mergeEntities(existing: Record<string, Task>, incoming: Task[]): Record
     const mergedFiles = (task.files?.length ?? 0) > 0 ? task.files : (prior?.files ?? task.files);
     next[task.id] = prior ? { ...prior, ...task, files: mergedFiles } : task;
   }
+  return next;
+}
+
+/**
+ * Evict non-pinned entities beyond the capacity cap. Iteration order of a
+ * Record<string, Task> matches insertion order for string keys, so the first
+ * entries are the oldest merged entities — evicting them approximates LRU
+ * without a separate bookkeeping structure.
+ */
+function evictEntities(
+  taskById: Record<string, Task>,
+  view: { taskIds: string[]; expandedTaskIds: string[] },
+): Record<string, Task> {
+  const ids = Object.keys(taskById);
+  if (ids.length <= ENTITY_CACHE_LIMIT) return taskById;
+  const pins = entityPins(view);
+  const next = { ...taskById };
+  let remaining = ids.length;
+  for (const id of ids) {
+    if (remaining <= ENTITY_CACHE_LIMIT) break;
+    const task = next[id];
+    if (!task || isEntityPinned(task, pins)) continue;
+    delete next[id];
+    remaining -= 1;
+  }
+  return next;
+}
+
+/** Drop entities outright (hard delete confirmed by the caller). */
+function removeEntities(taskById: Record<string, Task>, ids: readonly string[]): Record<string, Task> {
+  if (ids.length === 0) return taskById;
+  const next = { ...taskById };
+  for (const id of ids) delete next[id];
   return next;
 }
 
@@ -256,12 +322,13 @@ function applyProgressToTask(task: Task, payload: TaskProgressPayload): Task {
 /** Map a task status to the stat counter fields it contributes to. */
 function statusCounterKeys(
   status: Task["status"],
-): Array<"active" | "queued" | "attention" | "paused" | "completed" | "failed"> {
-  const keys: Array<"active" | "queued" | "attention" | "paused" | "completed" | "failed"> = [];
+): Array<"active" | "queued" | "attention" | "paused" | "waitingNetwork" | "completed" | "failed"> {
+  const keys: Array<"active" | "queued" | "attention" | "paused" | "waitingNetwork" | "completed" | "failed"> = [];
   if (status === "downloading" || status === "retrying") keys.push("active");
   if (status === "queued") keys.push("queued");
   if (status === "needs_attention") keys.push("attention");
   if (status === "paused") keys.push("paused");
+  if (status === "waiting_network") keys.push("waitingNetwork");
   if (status === "completed") keys.push("completed");
   if (status === "failed") keys.push("failed");
   return keys;
@@ -317,6 +384,9 @@ interface TaskDataStore {
   setError: (error: string | null) => void;
   recalculateTaskStats: () => void;
   requestViewReload: () => void;
+  /** Drop cached entities after a confirmed hard delete so deleted tasks do
+   * not linger in `taskById` until the next page load. */
+  evictTasks: (ids: readonly string[]) => void;
 }
 
 /* ── Store ── */
@@ -348,11 +418,22 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
 
   requestViewReload: () => set((state) => ({ viewReloadToken: state.viewReloadToken + 1 })),
 
+  evictTasks: (ids) =>
+    set((state) => {
+      const taskById = removeEntities(state.taskById, ids);
+      if (taskById === state.taskById) return {};
+      return { taskById };
+    }),
+
   setTasks: (tasks) =>
     set((state) => {
-      const taskById = mergeEntities(state.taskById, tasks);
       const taskIds = tasks.map((task) => task.id);
       const ids = new Set(taskIds);
+      // PERF-18: evict before merging so the pin set reflects the new view.
+      const taskById = evictEntities(mergeEntities(state.taskById, tasks), {
+        taskIds,
+        expandedTaskIds: state.expandedTaskIds,
+      });
 
       useSpeedHistoryStore.getState().pruneToIds(ids);
       pruneUISelectedIds(ids);
@@ -370,11 +451,14 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
 
   setTaskPage: (tasks, total, page, pageSize, append = false) =>
     set((state) => {
-      const taskById = mergeEntities(state.taskById, tasks);
       const taskIds = append
         ? [...state.taskIds, ...tasks.map((task) => task.id).filter((id) => !state.taskIndexById[id])]
         : tasks.map((task) => task.id);
       const ids = new Set(taskIds);
+      const taskById = evictEntities(mergeEntities(state.taskById, tasks), {
+        taskIds,
+        expandedTaskIds: state.expandedTaskIds,
+      });
 
       useSpeedHistoryStore.getState().pruneToIds(ids);
       pruneUISelectedIds(ids);
@@ -392,12 +476,15 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
 
   setTaskCursorPage: (tasks, minimumTotal, nextCursor, filterOptions, append = false) =>
     set((state) => {
-      const taskById = mergeEntities(state.taskById, tasks);
       const incomingIds = tasks.map((task) => task.id);
       const taskIds = append
         ? [...state.taskIds, ...incomingIds.filter((id) => state.taskIndexById[id] === undefined)]
         : incomingIds;
       const ids = new Set(taskIds);
+      const taskById = evictEntities(mergeEntities(state.taskById, tasks), {
+        taskIds,
+        expandedTaskIds: state.expandedTaskIds,
+      });
 
       useSpeedHistoryStore.getState().pruneToIds(ids);
 
@@ -426,7 +513,10 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       const inView = state.taskIndexById[task.id] !== undefined;
       const mergedFiles = (task.files?.length ?? 0) > 0 ? task.files : (existing?.files ?? task.files);
       const merged = existing ? { ...existing, ...task, files: mergedFiles } : task;
-      const taskById = { ...state.taskById, [task.id]: merged };
+      const taskById = evictEntities(
+        { ...state.taskById, [task.id]: merged },
+        { taskIds: state.taskIds, expandedTaskIds: state.expandedTaskIds },
+      );
 
       if (
         existing &&
@@ -530,8 +620,13 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
         viewReloadToken = state.viewReloadToken + 1;
       }
 
+      const boundedTaskById = evictEntities(taskById, {
+        taskIds,
+        expandedTaskIds: state.expandedTaskIds,
+      });
+
       return {
-        ...rebuildViewCollections(taskById, taskIds, {
+        ...rebuildViewCollections(boundedTaskById, taskIds, {
           total: Math.max(0, state.total + totalDelta, taskIds.length),
           failureOptions: statusChangedAny ? undefined : state.failureOptions,
           viewReloadToken,
@@ -600,6 +695,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
       let dQueued = 0;
       let dAttention = 0;
       let dPaused = 0;
+      let dWaitingNetwork = 0;
       let dCompleted = 0;
       let dFailed = 0;
       let dTotalSpeed = 0;
@@ -639,6 +735,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
             else if (key === "queued") dQueued -= 1;
             else if (key === "attention") dAttention -= 1;
             else if (key === "paused") dPaused -= 1;
+            else if (key === "waitingNetwork") dWaitingNetwork -= 1;
             else if (key === "completed") dCompleted -= 1;
             else if (key === "failed") dFailed -= 1;
           }
@@ -647,6 +744,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
             else if (key === "queued") dQueued += 1;
             else if (key === "attention") dAttention += 1;
             else if (key === "paused") dPaused += 1;
+            else if (key === "waitingNetwork") dWaitingNetwork += 1;
             else if (key === "completed") dCompleted += 1;
             else if (key === "failed") dFailed += 1;
           }
@@ -668,6 +766,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
         dQueued === 0 &&
         dAttention === 0 &&
         dPaused === 0 &&
+        dWaitingNetwork === 0 &&
         dCompleted === 0 &&
         dFailed === 0 &&
         dTotalSpeed === 0 &&
@@ -681,6 +780,7 @@ export const useTaskDataStore = create<TaskDataStore>((set, get) => ({
             queued: prevStats.queued + dQueued,
             attention: prevStats.attention + dAttention,
             paused: prevStats.paused + dPaused,
+            waitingNetwork: prevStats.waitingNetwork + dWaitingNetwork,
             completed: prevStats.completed + dCompleted,
             failed: prevStats.failed + dFailed,
             totalSpeed: Math.max(0, prevStats.totalSpeed + dTotalSpeed),
@@ -825,18 +925,18 @@ export function taskPageInput(page = useTaskDataStore.getState().page): ListTask
   );
 }
 
-export function taskCursorInput(cursor: string | null = null, overrides?: { search?: string }): ListTasksCursorInput {
+export function taskCursorInput(
+  cursor: string | null = null,
+  overrides?: { nav?: NavFilter; search?: string },
+): ListTasksCursorInput {
   const data = useTaskDataStore.getState();
   const ui = useTaskUIStore.getState();
-  const membership = effectiveListQueryMembership(ui.nav, overrides?.search ?? ui.search, ui.filters);
+  const membership = effectiveListQueryMembership(overrides?.nav ?? ui.nav, overrides?.search ?? ui.search, ui.filters);
   let sortKey = ui.sortKey;
   let sortDirection = ui.sortDirection;
-  if (ui.nav === "queue") {
+  if (membership.nav === "queue") {
     sortKey = "queue_order";
     sortDirection = "asc";
-  } else if (ui.nav === "attention") {
-    sortKey = "updated_at";
-    sortDirection = "desc";
   }
   return buildTaskCursorInput(
     {

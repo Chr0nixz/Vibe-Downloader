@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { BatchImportResult, ProbePhasePayload, ProbeTaskPayload } from "@/generated/bindings";
 import { useSettingsStore } from "@/stores/settings-store";
+import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 import { NewDownloadDialog } from "./NewDownloadDialog";
 
@@ -450,6 +451,51 @@ describe("NewDownloadDialog probe flow", () => {
     expect(screen.getByRole("button", { name: "newDownload.createBatch" })).toBeInTheDocument();
   });
 
+  it("keeps batch-only overrides collapsed until more options is opened", () => {
+    renderDialog();
+
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.modeBatch" }));
+
+    const toggle = screen.getByRole("button", { name: "newDownload.advancedOptions" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("newDownload.useCredentials")).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByLabelText("newDownload.useCredentials")).toBeInTheDocument();
+    expect(screen.getByLabelText("newDownload.priority")).toBeInTheDocument();
+  });
+
+  it("marks a draft dirty when it only contains an advanced batch override", () => {
+    const onDraftStateChange = vi.fn();
+    render(
+      <TooltipProvider>
+        <NewDownloadDialog open onOpenChange={vi.fn()} onCreated={vi.fn()} onDraftStateChange={onDraftStateChange} />
+      </TooltipProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.modeBatch" }));
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.advancedOptions" }));
+    fireEvent.click(screen.getByLabelText("newDownload.useCredentials"));
+
+    expect(onDraftStateChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("disables Cancel while a batch creation is in flight", () => {
+    const pending = deferred<BatchImportResult>();
+    mocks.importUrls.mockReturnValue(pending.promise);
+    renderDialog();
+
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.modeBatch" }));
+    fireEvent.change(screen.getByLabelText("newDownload.batchUrls"), {
+      target: { value: "https://example.com/creating.zip" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.createBatch" }));
+
+    expect(screen.getByRole("button", { name: "newDownload.cancel" })).toBeDisabled();
+  });
+
   it("keeps every batch result and retries only the remaining failures", async () => {
     const task = { id: "created-1", url: "https://example.com/1.zip", fileName: "1.zip" } as Task;
     const result = {
@@ -662,6 +708,87 @@ describe("NewDownloadDialog HLS track picker", () => {
     expect(boxes).toHaveLength(7);
     expect(boxes.some((box) => box.getAttribute("aria-label") === "Track 8")).toBe(true);
     expect(screen.getByRole("button", { name: "newDownload.hlsShowMoreTracks" })).toBeInTheDocument();
+  });
+});
+
+// UX-30: closing a dirty draft must not silently destroy work — the dialog
+// stays mounted in the shell, so the same state is still there on reopen;
+// closing while a create is in flight hides the dialog with an explicit
+// "still running" notice instead of suggesting cancellation.
+describe("NewDownloadDialog close semantics", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    mocks.phaseHandler = undefined;
+    mocks.onProbePhase.mockImplementation(async (handler: (payload: ProbePhasePayload) => void) => {
+      mocks.phaseHandler = handler;
+      return mocks.unlisten;
+    });
+    useSettingsStore.setState({ settings: null, loading: false, error: null });
+    useToastStore.setState({ toasts: [] });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  it("keeps the draft after close and announces it once", async () => {
+    // Spying on the store method: the toast is deferred while the modal owns
+    // focus, so asserting the call (not the rendered stack) is the stable
+    // contract — the deferral mechanism itself has its own coverage.
+    const addToast = vi.spyOn(useToastStore.getState(), "addToast");
+    const view = renderDialog();
+    fireEvent.change(screen.getByLabelText("newDownload.url"), {
+      target: { value: "https://example.com/draft.zip" },
+    });
+
+    // The Cancel button goes through the same close guard as Escape/overlay.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "newDownload.cancel" }));
+    });
+    expect(view.onOpenChange).toHaveBeenCalledWith(false);
+    expect(addToast).toHaveBeenCalledWith(expect.objectContaining({ title: "newDownload.draftKeptTitle" }));
+
+    // Close then reopen on the same mounted instance: the draft is still there.
+    view.rerender(
+      <TooltipProvider>
+        <NewDownloadDialog open={false} onOpenChange={view.onOpenChange} onCreated={view.onCreated} />
+      </TooltipProvider>,
+    );
+    view.rerender(
+      <TooltipProvider>
+        <NewDownloadDialog open onOpenChange={view.onOpenChange} onCreated={view.onCreated} />
+      </TooltipProvider>,
+    );
+    expect(screen.getByLabelText("newDownload.url")).toHaveValue("https://example.com/draft.zip");
+  });
+
+  it("announces a still-running create instead of pretending it was canceled", async () => {
+    const addToast = vi.spyOn(useToastStore.getState(), "addToast");
+    const pending = deferred<Task>();
+    mocks.createTask.mockReturnValueOnce(pending.promise);
+    mocks.probeTask.mockResolvedValue(makeProbe("https://example.com/busy.zip", "busy.zip"));
+    const view = renderDialog();
+    await startAutomaticProbe("https://example.com/busy.zip");
+
+    // Submit the form so `submitting` is true while the IPC is in flight.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "newDownload.start" }));
+    });
+
+    // Escape while submitting hides the dialog and surfaces the explicit
+    // still-running notice (not an implied cancel).
+    await act(async () => {
+      fireEvent.keyDown(document, { key: "Escape" });
+    });
+    expect(view.onOpenChange).toHaveBeenCalledWith(false);
+    expect(addToast).toHaveBeenCalledWith(expect.objectContaining({ title: "newDownload.closeSubmittingTitle" }));
+    // The in-flight IPC was never interrupted by the close.
+    expect(mocks.createTask).toHaveBeenCalledTimes(1);
+
+    await act(async () => pending.resolve({ id: "done" } as Task));
   });
 });
 

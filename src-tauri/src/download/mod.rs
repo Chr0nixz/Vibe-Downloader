@@ -28,16 +28,18 @@ pub use error::DownloadError;
 #[cfg(debug_assertions)]
 #[doc(hidden)]
 pub use file_ops::testing as publication_testing;
-pub use ftp::{probe_ftp_directory_url, FtpEngine};
+pub use ftp::{probe_ftp_directory_url, probe_ftp_directory_url_cancellable, FtpEngine};
 pub use hls::HlsEngine;
 pub use http::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine, ProbeResult};
 #[doc(hidden)]
 pub use metalink::testing;
 pub use metalink::MetalinkEngine;
 pub use net_factory::NetworkClientFactory;
-pub use sftp::{probe_sftp_directory_url, SftpEngine};
+pub use sftp::{probe_sftp_directory_url, probe_sftp_directory_url_cancellable, SftpEngine};
 pub use speed::GlobalSpeedLimiter;
-pub use webdav::{probe_webdav_directory_url, WebDavEngine};
+pub use webdav::{
+    probe_webdav_directory_url, probe_webdav_directory_url_cancellable, WebDavEngine,
+};
 
 // ---------------------------------------------------------------------------
 // Shared idle-read timeout helper (E-1)
@@ -54,6 +56,52 @@ pub(crate) const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// PROPFIND, HLS playlists/keys/init maps). Aligns with the existing HLS
 /// `HLS_INIT_MAX_BYTES` budget.
 pub(crate) const CONTROL_PLANE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// ARC-55: Total wall-clock budget for a directory probe across all engines.
+/// A probe that stalls on connect, auth, command, or listing must converge —
+/// the dialog's Cancel button cannot terminate a spawned task if this is
+/// absent. 90s covers a slow FTP/SFTP handshake + LIST without blocking the UI
+/// for minutes.
+pub(crate) const DIRECTORY_PROBE_BUDGET: Duration = Duration::from_secs(90);
+
+/// ARC-55: Race a probe future against a hard deadline and optional cancel.
+/// Distinguishes "canceled" from "timeout" so callers can return the right
+/// error code; internal future is dropped (aborted) on either non-Data path.
+pub(crate) async fn bounded_probe<F, T>(
+    future: F,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> BoundedProbeOutcome<T>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let deadline = tokio::time::timeout(DIRECTORY_PROBE_BUDGET, future);
+    match cancel_token {
+        Some(token) => {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => BoundedProbeOutcome::Canceled,
+                outcome = deadline => match outcome {
+                    Ok(Ok(value)) => BoundedProbeOutcome::Done(value),
+                    Ok(Err(error)) => BoundedProbeOutcome::Error(error),
+                    Err(_) => BoundedProbeOutcome::Timeout,
+                },
+            }
+        }
+        None => match deadline.await {
+            Ok(Ok(value)) => BoundedProbeOutcome::Done(value),
+            Ok(Err(error)) => BoundedProbeOutcome::Error(error),
+            Err(_) => BoundedProbeOutcome::Timeout,
+        },
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum BoundedProbeOutcome<T> {
+    Done(T),
+    Error(String),
+    Canceled,
+    Timeout,
+}
 
 /// Outcome of a read operation wrapped with an idle timeout.
 ///

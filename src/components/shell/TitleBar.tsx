@@ -1,11 +1,12 @@
 import { Command, Download, Keyboard, Minus, Square, X } from "lucide-react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { MenuItem, MenuSeparator, RegionContextMenu } from "@/components/ui/menu-item";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { type Platform, usesCustomTitleBar } from "@/lib/platform";
-import { cn } from "@/lib/utils";
+import { cn, formatShortcut } from "@/lib/utils";
 import { closeWindow, minimizeWindow, startWindowDrag, toggleMaximizeWindow } from "@/lib/window-controls";
 import { useSettingsStore } from "@/stores/settings-store";
 
@@ -14,9 +15,13 @@ interface TitleBarProps {
   onOpenPalette?: () => void;
   onNewDownload?: () => void;
   onOpenShortcuts?: () => void;
+  /** The command bar, when the shell merges it into this bar (snapped or
+   * short windows). The app name gives way to it; the logo and the gaps
+   * around the controls stay a drag handle. */
+  center?: ReactNode;
 }
 
-export function TitleBar({ platform, onOpenPalette, onNewDownload, onOpenShortcuts }: TitleBarProps) {
+export function TitleBar({ platform, onOpenPalette, onNewDownload, onOpenShortcuts, center }: TitleBarProps) {
   const { t } = useTranslation();
   const titlebarGradient = useSettingsStore((s) => s.settings?.titlebarGradientEnabled ?? false);
 
@@ -35,7 +40,12 @@ export function TitleBar({ platform, onOpenPalette, onNewDownload, onOpenShortcu
   const menuItems = (
     <>
       {onOpenPalette && (
-        <MenuItem icon={Command} label={t("palette.title")} shortcut="Mod+K" onSelect={onOpenPalette} />
+        <MenuItem
+          icon={Command}
+          label={t("palette.title")}
+          shortcut={formatShortcut("mod+K", platform)}
+          onSelect={onOpenPalette}
+        />
       )}
       {onNewDownload && <MenuItem icon={Download} label={t("palette.newDownload")} onSelect={onNewDownload} />}
       {onOpenShortcuts && <MenuItem icon={Keyboard} label={t("statusBar.shortcuts")} onSelect={onOpenShortcuts} />}
@@ -64,17 +74,27 @@ export function TitleBar({ platform, onOpenPalette, onNewDownload, onOpenShortcu
           void startWindowDrag();
         }}
       >
-        <div className="flex min-w-0 flex-1 items-center gap-2.5 px-3" data-tauri-drag-region>
+        <div
+          className={cn("flex min-w-0 items-center gap-2.5 px-3", center ? "shrink-0" : "flex-1")}
+          data-tauri-drag-region
+        >
           <img
             src="/logo-48.png"
-            alt=""
+            alt={center ? t("app.name") : ""}
             width={20}
             height={20}
             className="shrink-0 select-none titlebar-logo"
             draggable={false}
           />
-          <span className="truncate text-[13px] font-semibold tracking-wide text-text-primary">{t("app.name")}</span>
+          {center ? null : (
+            <span className="truncate text-[13px] font-semibold tracking-wide text-text-primary">{t("app.name")}</span>
+          )}
         </div>
+        {center ? (
+          <div className="flex h-full min-w-0 flex-1 items-center pr-3" data-tauri-drag-region>
+            {center}
+          </div>
+        ) : null}
 
         {showWindowsControls ? (
           <div className="flex items-center" data-no-drag>

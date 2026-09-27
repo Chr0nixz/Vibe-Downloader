@@ -6,6 +6,14 @@
     "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", "Source Han Sans CN", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic", "MS PGothic", sans-serif;
 }
 
+/* `md` is the phone/desktop split (NARROW_MAX_WIDTH in use-shell-layout.ts):
+   a snapped desktop window at 600–760px has a mouse and keeps the dense
+   desktop list. `sm` moves down with it so the scale stays sm < md < lg. */
+@theme {
+  --breakpoint-sm: 30rem;
+  --breakpoint-md: 35rem;
+}
+
 @theme inline {
   --color-surface-root: var(--surface-root);
   --color-surface-base: var(--surface-base);
@@ -13,6 +21,7 @@
   --color-surface-track: var(--surface-track);
   --color-progress-fill-inactive: var(--progress-fill-inactive);
   --color-surface-overlay: var(--surface-overlay);
+  --color-surface-popover: var(--surface-popover);
   --color-surface-scrim: var(--surface-scrim);
   --color-surface-hover: var(--surface-hover);
   --color-surface-list-well: var(--surface-list-well);
@@ -280,15 +289,10 @@
   left: 0;
   right: 0;
   height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--accent-primary) 25%,
-    var(--accent-energy) 50%,
-    var(--accent-peak) 75%,
-    transparent 100%
-  );
-  opacity: 0.18;
+  /* Accent only: energy and peak hues are reserved for live speed and
+     completion moments (DESIGN.md), not for idle chrome. */
+  background: linear-gradient(90deg, transparent 0%, var(--accent-primary) 50%, transparent 100%);
+  opacity: 0.22;
 }
 
 .titlebar-logo {

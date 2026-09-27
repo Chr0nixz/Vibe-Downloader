@@ -1,9 +1,11 @@
+import type { TFunction } from "i18next";
 import {
-  Activity,
   AlertTriangle,
+  ArrowDown,
   Check,
-  ChevronDown,
+  CircleX,
   Clock,
+  Copy,
   File,
   FileArchive,
   FileAudio,
@@ -15,31 +17,38 @@ import {
   FileText,
   FileVideo,
   FolderOpen,
-  Loader2,
+  MoreHorizontal,
+  PanelRight,
   Pause,
   Play,
   RotateCcw,
+  ShieldAlert,
+  ShieldCheck,
   Square,
+  Trash2,
 } from "lucide-react";
-import { AnimatePresence, motion } from "motion/react";
+import { motion } from "motion/react";
 import { type MouseEventHandler, memo, type ReactNode, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import {
   hasInlineRecovery,
-  recoveryActionsForTask,
+  inlineRecoveryActionsForTask,
+  resumeVerdict,
   rowShowsRetry,
   rowTransferMode,
 } from "@/components/tasks/row-recovery";
-import { describeSpeedTrend, SpeedSparkline } from "@/components/tasks/SpeedSparkline";
+import { describeSpeedTrend } from "@/components/tasks/SpeedSparkline";
 import { type ReorderAction, TaskContextMenu } from "@/components/tasks/TaskContextMenu";
-import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
+import { recoveryActionIcon, recoveryTone, restartCost } from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Popover, PopoverClose, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { QueueTaskDecision, RecoveryAction, TaskStatus } from "@/generated/bindings";
 import { useSystemFileIcon } from "@/hooks/use-system-file-icon";
 import type { TranslationKey } from "@/i18n";
+import { type ChunkCell, type ChunkTone, chunkCounts, chunkMapCells, interpolateChunkCells } from "@/lib/chunk-map";
 import { localizedErrorCause, localizedErrorMessage, localizedMessage } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
 import { cn, formatBytes, formatEta, formatPercent, formatSpeed, formatStalledSpeed } from "@/lib/utils";
@@ -47,6 +56,7 @@ import type { SpeedSample } from "@/stores/speed-history-store";
 import { useSpeedHistoryStore } from "@/stores/speed-history-store";
 import { useTaskDataStore, useTaskUIStore } from "@/stores/task-store";
 import type { Task } from "@/types/task";
+import type { TaskSegment } from "@/types/task-segment";
 
 interface TaskRowProps {
   taskId: string;
@@ -57,9 +67,14 @@ interface TaskRowProps {
   reduceMotion: boolean;
   position: number;
   setSize: number;
-  onSelectTask: (taskId: string) => void;
+  /** `source` tells the list whether to scroll: a pointer selection is
+   * already on screen, so moving the list would put a different row under
+   * the cursor for the next click. */
+  onSelectTask: (taskId: string, source?: "pointer" | "keyboard") => void;
   onToggleSelected: (taskId: string, selected: boolean) => void;
   onNavigate: (direction: "next" | "prev") => void;
+  /** Shift+Arrow: move the focus and grow the multi-selection from the anchor. */
+  onExtendSelection?: (direction: "next" | "prev") => void;
   onShiftSelect?: (anchorId: string, currentId: string) => void;
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
@@ -76,6 +91,10 @@ interface TaskRowProps {
   /** Scheduler wait decision, when this task is queued. Supplied by the list from
    * a single shared poll (`useQueueReasons`) rather than fetched per row. */
   queueReason?: QueueTaskDecision;
+  /** Byte ranges from the list's shared segment poll (`useRowSegments`). When
+   * present and truthful the bar is drawn as those ranges; otherwise it falls
+   * back to one fill. */
+  segments?: readonly TaskSegment[];
   /** Compact density preset: drops the host/diagnostic lines to sr-only, uses a
    * 2px bar and a single-line rail, and reveals checkbox/actions on hover or
    * focus. Distinct from `shellCompact`, which is a viewport-width tier. */
@@ -84,16 +103,43 @@ interface TaskRowProps {
 
 const EMPTY_SPEED_HISTORY: SpeedSample[] = [];
 
+/** Live numbers keep one decimal so the rail does not change width each tick. */
+const FIXED = { fixed: true } as const;
+
+/** Backend health keys can lag a status transition by one progress tick. */
+const HEALTH_STATUS_HINTS: Record<string, Task["status"][]> = {
+  "taskDiagnostics.idle": ["paused", "queued", "waiting_network"],
+  "taskDiagnostics.downloading": ["downloading"],
+  "taskDiagnostics.downloadingSteadily": ["downloading"],
+  "taskDiagnostics.serverLimitDetected": ["downloading"],
+  "taskDiagnostics.networkRetrying": ["retrying"],
+  "taskDiagnostics.completed": ["completed"],
+  "taskDiagnostics.queued": ["queued"],
+  "taskDiagnostics.waitingNetwork": ["waiting_network"],
+  "taskDiagnostics.finishingHls": ["downloading", "retrying"],
+};
+
+function healthSummaryMatchesStatus(summary: string | null | undefined, status: Task["status"]): boolean {
+  const hints = summary ? HEALTH_STATUS_HINTS[summary] : undefined;
+  return !hints || hints.includes(status);
+}
+
 function statusBadge(status: Task["status"]): string {
   switch (status) {
+    // A healthy transfer stays neutral: its bar and its speed already wear the
+    // accent, and a third accent pill made every busy row read as an alert.
     case "downloading":
+      return "bg-surface-hover text-text-primary";
+    // Moving but fighting errors is the state a glance has to catch, so it
+    // takes the warning tint instead of looking like a healthy download.
     case "retrying":
-      return "bg-accent-primary/15 dark:bg-accent-primary/10 text-accent-primary";
+      return "bg-status-warning/15 dark:bg-status-warning/10 text-status-warning";
     case "completed":
       return "bg-status-success/15 dark:bg-status-success/10 text-status-success";
     case "failed":
-    case "needs_attention":
       return "bg-status-danger/15 dark:bg-status-danger/10 text-status-danger";
+    case "needs_attention":
+      return "bg-status-warning/15 dark:bg-status-warning/10 text-status-warning";
     case "paused":
       return "text-text-muted";
     case "queued":
@@ -104,26 +150,55 @@ function statusBadge(status: Task["status"]): string {
   }
 }
 
-// Per-status icon: shape differentiation on top of color, so badges read at a glance
-// even when the hue is similar (paused vs. queued were previously identical pills).
-// `spin` is only true for active transfer states.
+// Per-status icon: shape differentiation on top of color, so badges read at a
+// glance even when hues are close (paused vs. queued, or a warm accent theme
+// next to warning). Nothing spins: the bar already shows that bytes move.
 function statusBadgeIcon(
   status: Task["status"],
-): { Icon: React.ComponentType<{ className?: string }>; spin: boolean } | null {
+): { Icon: React.ComponentType<{ className?: string }>; className?: string } | null {
   switch (status) {
     case "downloading":
+      return { Icon: ArrowDown, className: "text-accent-primary" };
     case "retrying":
-      return { Icon: Loader2, spin: true };
+      return { Icon: RotateCcw };
     case "completed":
-      return { Icon: Check, spin: false };
+      return { Icon: Check };
+    // Same glyphs as the sidebar's Needs you entry, so a row and the view that
+    // lists it read as the same state.
     case "failed":
+      return { Icon: CircleX };
     case "needs_attention":
-      return { Icon: AlertTriangle, spin: false };
+      return { Icon: AlertTriangle };
     case "paused":
-      return { Icon: Pause, spin: false };
+      return { Icon: Pause };
     case "queued":
     case "waiting_network":
-      return { Icon: Clock, spin: false };
+      return { Icon: Clock };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Whether the bytes already on disk survive a pause, stated on the row once
+ * there is progress to protect. A server without Range support turns a pause
+ * into a restart, which is the one fact a user checking a multi-GB download
+ * needs before pressing Pause, so that case wears the warning tone.
+ */
+function resumeMark(task: Task): { key: TranslationKey; warning: boolean } | null {
+  if (task.downloadedBytes <= 0) return null;
+  switch (task.status) {
+    case "downloading":
+    case "retrying":
+    case "queued":
+      return task.supportsResume
+        ? { key: "task.trust.resumable", warning: false }
+        : { key: "task.trust.pauseRestarts", warning: true };
+    case "paused":
+    case "waiting_network":
+      return resumeVerdict(task) === "available"
+        ? { key: "task.trust.resumable", warning: false }
+        : { key: "task.trust.restartRequired", warning: true };
     default:
       return null;
   }
@@ -328,6 +403,7 @@ export const TaskRow = memo(function TaskRow({
   onSelectTask,
   onToggleSelected,
   onNavigate,
+  onExtendSelection,
   onShiftSelect,
   onToggleTransfer,
   onRetry,
@@ -342,31 +418,41 @@ export const TaskRow = memo(function TaskRow({
   onCopyLocalPath,
   onShowDetails,
   queueReason,
+  segments,
   compact,
 }: TaskRowProps) {
   const { t } = useTranslation();
   const task = useTaskDataStore((s) => s.taskById[taskId]);
-  const expanded = useTaskDataStore((s) => s.expandedTaskIds.includes(taskId));
   const completionFlash = useTaskDataStore((s) => s.completionFlashIds.includes(taskId));
   const speedHistory = useSpeedHistoryStore((s) => s.history[taskId] ?? EMPTY_SPEED_HISTORY);
-  const toggleTaskExpanded = useTaskDataStore((s) => s.toggleTaskExpanded);
   // System file icon — resolved from the OS file association via IPC.
   // Called before the `if (!task)` guard would violate the Rules of Hooks,
   // so we pass the file name defensively (empty string yields null safely).
   const systemIcon = useSystemFileIcon(task?.fileName ?? "");
-  const onSelect = useCallback(() => {
-    onSelectTask(taskId);
-  }, [onSelectTask, taskId]);
-  const onToggleExpanded = useCallback(() => {
-    toggleTaskExpanded(taskId);
-  }, [toggleTaskExpanded, taskId]);
+  const onSelect = useCallback(
+    (source: "pointer" | "keyboard") => {
+      onSelectTask(taskId, source);
+    },
+    [onSelectTask, taskId],
+  );
   const speedTrend = useMemo(
     () => describeSpeedTrend(speedHistory, task?.speedBps ?? 0, t),
     [speedHistory, task?.speedBps, t],
   );
   if (!task) return null;
-  const progress = task.totalSize > 0 ? task.downloadedBytes / task.totalSize : 0;
   const isActive = task.status === "downloading" || task.status === "retrying";
+  const bytesComplete = task.totalSize > 0 && task.downloadedBytes >= task.totalSize;
+  const isFinalizing = isActive && bytesComplete;
+  const incompleteBytes = task.totalSize > 0 && task.downloadedBytes < task.totalSize;
+  // A one-decimal label and an integer progressbar can round 99.5% up to 100%.
+  // Keep unfinished transfers visibly below completion until all bytes arrive.
+  const progress =
+    task.totalSize > 0 ? Math.min(task.downloadedBytes / task.totalSize, incompleteBytes ? 0.994 : 1) : 0;
+  const progressPercent = formatPercent(task.downloadedBytes, task.totalSize, incompleteBytes ? 99.4 : 100, FIXED);
+  // Roving tab stop: only the focused row's own controls sit in the Tab order.
+  // Every control stayed tabbable before, so crossing ten rows took ~50 Tab
+  // presses; arrows move between rows, Tab now moves within the current one.
+  const controlTabIndex = selected || isFirstFocusable ? undefined : -1;
   const retryLaterLabel =
     task.retryAfterAt && task.status === "queued"
       ? t("task.retryAfter", { time: formatClockTime(task.retryAfterAt) })
@@ -382,13 +468,13 @@ export const TaskRow = memo(function TaskRow({
   // text slot — has to carry the *next* useful fact. Echoing the badge here
   // wasted the one place a row could explain itself.
   const statusFact = (() => {
-    const percent = formatPercent(task.downloadedBytes, task.totalSize);
     switch (task.status) {
       case "downloading":
+        return isFinalizing ? t("task.diagnostic.finishing") : speedTrend.label;
       case "retrying":
-        return speedTrend.label;
+        return isFinalizing ? t("task.diagnostic.finishing") : t("task.diagnostic.retrying");
       case "paused":
-        return t("task.diagnostic.pausedAt", { percent });
+        return t("task.diagnostic.pausedAt", { percent: progressPercent });
       case "queued":
         // `retryAfterAt` is the task's own record; the scheduler decision is the
         // authoritative reason and covers slot/host/window waits too.
@@ -406,30 +492,40 @@ export const TaskRow = memo(function TaskRow({
       case "needs_attention":
         // Reached only when there is no errorMessage to show; still more useful
         // than repeating "Failed".
-        return t("task.diagnostic.stoppedAt", { percent });
+        return t("task.diagnostic.stoppedAt", { percent: progressPercent });
       default:
         // Exhaustive over TaskStatus today; the cast keeps this compiling if a
         // new status ships before its diagnostic copy does.
         return t(`task.status.${task.status as TaskStatus}`);
     }
   })();
-  const diagnosticLabel = task.errorMessage
-    ? localizedErrorMessage(task.errorMessage, t)
-    : retryLaterLabel || healthSummary || statusFact;
   // The badge already names the state, and the recovery banner already carries
   // message + cause for recoverable failures — a diagnostic line that only
   // repeats one of them wastes the row's single free-text slot.
-  const badgeLabel = t(`task.status.${task.status}`);
+  const badgeLabel = isFinalizing ? t("task.status.finishing") : t(`task.status.${task.status}`);
+  // A health summary that only restates the badge ("Waiting for network")
+  // yields to the status fact, which says what happens next.
+  const usefulHealth =
+    healthSummary && healthSummary !== badgeLabel && healthSummaryMatchesStatus(task.healthSummary, task.status)
+      ? healthSummary
+      : null;
+  const diagnosticLabel = task.errorMessage
+    ? localizedErrorMessage(task.errorMessage, t)
+    : isFinalizing
+      ? statusFact
+      : retryLaterLabel || usefulHealth || statusFact;
   const showDiagnostic = diagnosticLabel !== badgeLabel && !hasInlineRecovery(task);
+  const diagnosticWarning =
+    !isFinalizing && (task.status === "retrying" || (speedTrend.tone === "warning" && !task.healthSummary));
+  const mark = resumeMark(task);
   const baseId = `task-${task.id}`;
   const nameId = `${baseId}-name`;
   const statusId = `${baseId}-status`;
   const hostId = `${baseId}-host`;
   const diagnosticId = `${baseId}-diagnostic`;
-  const expandedId = `${baseId}-expanded`;
   const progressLabel = t("task.progressAria", {
     name: task.fileName,
-    percent: formatPercent(task.downloadedBytes, task.totalSize),
+    percent: progressPercent,
   });
 
   return (
@@ -447,6 +543,7 @@ export const TaskRow = memo(function TaskRow({
       onCopyUrl={onCopyUrl}
       onCopyLocalPath={onCopyLocalPath}
       onShowDetails={onShowDetails}
+      onContextMenu={() => onSelect("pointer")}
     >
       {/* biome-ignore lint/a11y/useSemanticElements: The virtualizer inserts a measured div between the list and each row, so an explicit listitem role preserves the accessibility tree. */}
       <div
@@ -467,25 +564,32 @@ export const TaskRow = memo(function TaskRow({
               return;
             }
           }
-          onSelect();
+          onSelect("pointer");
         }}
         onDoubleClick={(event) => {
           if ((event.target as HTMLElement).closest("[data-row-action]")) return;
           if (task.status === "completed") {
             onOpenFile(task);
+            return;
           }
+          // Unfinished work has nothing to open yet; the double-click lands on
+          // the evidence instead (chunk map, timeline, recovery), which was
+          // otherwise reachable only through Enter or the context menu.
+          onShowDetails?.(task);
         }}
         onKeyDown={(event) => {
           if ((event.target as HTMLElement).closest("[data-row-action]")) return;
 
-          if (event.key === "ArrowDown") {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
-            onNavigate("next");
-            return;
-          }
-          if (event.key === "ArrowUp") {
-            event.preventDefault();
-            onNavigate("prev");
+            const direction = event.key === "ArrowDown" ? "next" : "prev";
+            // Shift+Arrow grows the selection the way Shift+click does, so a
+            // subset can be picked without leaving the keyboard.
+            if (event.shiftKey && onExtendSelection) {
+              onExtendSelection(direction);
+              return;
+            }
+            onNavigate(direction);
             return;
           }
           if (event.key === "Enter") {
@@ -495,15 +599,19 @@ export const TaskRow = memo(function TaskRow({
           }
           if (event.key === " ") {
             event.preventDefault();
-            onSelect();
+            // Ctrl/⌘+Space toggles this row in the multi-selection (the
+            // Windows list convention); plain Space only moves the focus.
+            if (event.ctrlKey || event.metaKey) {
+              onToggleSelected(task.id, !multiSelected);
+              return;
+            }
+            onSelect("keyboard");
           }
         }}
         className={cn(
-          // Row surface: a raised card on the recessed list well, with a 1px border
-          // so light mode gets a real figure/ground split. Hover lifts through the
-          // border + shadow rather than a bg shift — a white row has nowhere lighter
-          // to go, and the shadow reads as elevation instead of a stripe.
-          "group relative overflow-hidden rounded-md border border-row-border bg-surface-row transition-[background-color,border-color,box-shadow] duration-ui ease-out hover:border-row-border-hover hover:shadow-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary sm:px-3",
+          // Normal rows stay quiet and aligned; stateful rows add only a tint and
+          // inset focus ring so the list scans as one surface instead of a stack of cards.
+          "group relative overflow-hidden border-b border-border-subtle/70 bg-transparent transition-[background-color,border-color] duration-ui ease-out hover:bg-surface-hover/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary sm:px-3",
           compact ? "px-2.5 py-1" : "px-2.5 py-2 md:py-1.5",
           "grid gap-x-3 md:grid-cols-[minmax(0,1fr)_minmax(12rem,14rem)]",
           // Compact parks the actions beside the content from `sm` up, the same
@@ -512,13 +620,14 @@ export const TaskRow = memo(function TaskRow({
           compact && "sm:grid-cols-[minmax(0,1fr)_auto]",
           compact ? "gap-y-1" : "gap-y-2",
           completionFlash && "completion-flash",
-          // Selected: stronger accent fill (was 4%) + inset accent ring so the row anchors.
+          // Selected: stronger accent fill + inset accent ring so the row anchors.
           selected &&
-            "border-border-accent bg-accent-primary/10 shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_20%,transparent)]",
+            "border-border-accent bg-accent-primary/10 shadow-[inset_0_1px_0_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
           multiSelected && !selected && "border-border-accent-subtle bg-accent-primary/[0.06]",
           // Shift-select anchor: bump the tint so users can see the range origin.
           isShiftAnchor && (selected || multiSelected) && "bg-accent-primary/[0.14]",
-          (task.status === "failed" || task.status === "needs_attention") && !selected && "border-border-danger-subtle",
+          task.status === "failed" && !selected && "border-border-danger-subtle",
+          task.status === "needs_attention" && !selected && "border-border-warning-subtle",
         )}
       >
         <div className="flex min-w-0 gap-2.5">
@@ -540,6 +649,7 @@ export const TaskRow = memo(function TaskRow({
             <Checkbox
               id={`task-select-${task.id}`}
               checked={multiSelected}
+              tabIndex={controlTabIndex}
               onChange={(event) => onToggleSelected(task.id, event.target.checked)}
             />
           </label>
@@ -595,30 +705,40 @@ export const TaskRow = memo(function TaskRow({
                         animate={{ opacity: 1, scale: 1 }}
                         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
                         className={cn(
-                          "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-semibold leading-none",
+                          "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-xs font-semibold leading-none",
                           statusBadge(task.status),
                         )}
                       >
                         {badgeIcon ? (
-                          <badgeIcon.Icon
-                            className={cn("h-3 w-3 shrink-0", badgeIcon.spin && !reduceMotion && "animate-spin")}
-                            aria-hidden
-                          />
+                          <badgeIcon.Icon className={cn("h-3 w-3 shrink-0", badgeIcon.className)} aria-hidden />
                         ) : null}
-                        {t(`task.status.${task.status}`)}
+                        {badgeLabel}
                       </motion.span>
                     );
                   })()}
                 </div>
-                {/* Compact demotes these to sr-only rather than unmounting them:
-                    aria-describedby on the row points at both ids, and the text is
-                    the row's only explanation of itself. */}
-                <p
-                  id={hostId}
-                  className={compact ? "sr-only" : "truncate text-xs text-text-muted"}
-                  title={compact ? undefined : task.sourceKey}
-                >
-                  {task.sourceKey}
+                {/* Source, then whether the bytes on disk survive a pause: the
+                    trust fact a user checks before pausing a long download. */}
+                <p id={hostId} className="flex min-w-0 items-center gap-1.5 text-xs text-text-muted">
+                  <span className="min-w-0 truncate" title={task.sourceKey}>
+                    {task.sourceKey}
+                  </span>
+                  {mark ? (
+                    <span
+                      className={cn(
+                        "inline-flex shrink-0 items-center gap-1",
+                        mark.warning ? "font-medium text-status-warning" : "text-text-muted",
+                      )}
+                    >
+                      <span aria-hidden>·</span>
+                      {mark.warning ? (
+                        <ShieldAlert className="h-3 w-3" aria-hidden />
+                      ) : (
+                        <ShieldCheck className="h-3 w-3" aria-hidden />
+                      )}
+                      {t(mark.key)}
+                    </span>
+                  ) : null}
                 </p>
               </div>
             </div>
@@ -626,16 +746,10 @@ export const TaskRow = memo(function TaskRow({
             {showDiagnostic ? (
               <p
                 id={diagnosticId}
-                title={compact ? undefined : diagnosticLabel}
+                title={diagnosticLabel}
                 className={cn(
-                  compact
-                    ? "sr-only"
-                    : cn(
-                        "truncate text-xs",
-                        speedTrend.tone === "warning" && !task.healthSummary
-                          ? "font-medium text-status-warning"
-                          : "text-text-secondary",
-                      ),
+                  "truncate text-xs",
+                  diagnosticWarning ? "font-medium text-status-warning" : "text-text-secondary",
                 )}
               >
                 {diagnosticLabel}
@@ -646,17 +760,24 @@ export const TaskRow = memo(function TaskRow({
                 redundancy next to the size line, so terminal rows skip it and
                 spend the vertical budget on one more visible row instead. */}
             {task.status !== "completed" ? (
-              <ProgressBar
-                value={progress}
+              <RowProgress
+                task={task}
+                segments={segments}
+                progress={progress}
                 label={progressLabel}
-                active={isActive}
-                smooth={!isActive}
-                size={compact ? "compact" : "default"}
-                className={completionFlash ? "completion-flash-progress" : undefined}
+                isActive={isActive}
+                compact={compact}
+                flash={completionFlash}
               />
             ) : null}
 
-            <TaskMeta task={task} isActive={isActive} layout="inline" compact={compact} />
+            <TaskMeta
+              task={task}
+              isActive={isActive}
+              percentLabel={progressPercent}
+              layout="inline"
+              compact={compact}
+            />
           </div>
         </div>
 
@@ -665,18 +786,19 @@ export const TaskRow = memo(function TaskRow({
             one branch based on the JS resize tier, so any missed resize event
             left the row with no actions at all. */}
         <div className="hidden min-w-52 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-right font-mono text-xs md:grid">
-          <TaskMeta task={task} isActive={isActive} layout="rail" compact={compact} />
+          <TaskMeta task={task} isActive={isActive} percentLabel={progressPercent} layout="rail" compact={compact} />
           <RowActions
             task={task}
-            expanded={expanded}
-            expandedId={expandedId}
-            onToggleExpanded={onToggleExpanded}
             onToggleTransfer={onToggleTransfer}
             onRetry={onRetry}
             onFinishLiveRecording={onFinishLiveRecording}
             onOpenFile={onOpenFile}
             onOpenFolder={onOpenFolder}
+            onShowDetails={onShowDetails}
+            onDelete={onDelete}
+            onCopyUrl={onCopyUrl}
             compact={compact}
+            tabIndex={controlTabIndex}
             // Compact parks the actions beside the two meta lines (spanning both
             // rows) instead of giving them a row of their own — that single saved
             // row is most of the height difference between the two densities.
@@ -684,11 +806,9 @@ export const TaskRow = memo(function TaskRow({
               compact
                 ? cn(
                     "col-start-2 row-start-1 row-span-2 self-center justify-self-end",
-                    // Fading rather than unmounting: the buttons stay in the a11y
-                    // tree and tabbable, and group-focus-within reveals them for
-                    // keyboard users. Hovering a button always hovers the row, so
-                    // an invisible target can never be clicked by surprise.
-                    "md:opacity-0 md:transition-opacity md:duration-ui md:group-hover:opacity-100 md:group-focus-within:opacity-100",
+                    // Keep the primary action path visible in compact density;
+                    // hover-only controls hid pause, retry, and open-folder actions.
+                    "md:transition-opacity md:duration-ui",
                   )
                 : "col-span-2 justify-self-end"
             }
@@ -696,69 +816,22 @@ export const TaskRow = memo(function TaskRow({
         </div>
         <RowActions
           task={task}
-          expanded={expanded}
-          expandedId={expandedId}
-          onToggleExpanded={onToggleExpanded}
           onToggleTransfer={onToggleTransfer}
           onRetry={onRetry}
           onFinishLiveRecording={onFinishLiveRecording}
           onOpenFile={onOpenFile}
           onOpenFolder={onOpenFolder}
+          onShowDetails={onShowDetails}
+          onDelete={onDelete}
+          onCopyUrl={onCopyUrl}
           compact={compact}
+          tabIndex={controlTabIndex}
           className={cn("flex md:hidden", compact && "sm:col-start-2 sm:row-start-1 sm:self-center")}
         />
 
         {task.status === "failed" || task.status === "needs_attention" ? (
-          <InlineRecovery
-            task={task}
-            expanded={expanded}
-            expandedId={expandedId}
-            compact={compact}
-            onToggleExpanded={onToggleExpanded}
-            onResolve={onResolveAttention}
-          />
+          <InlineRecovery task={task} compact={compact} tabIndex={controlTabIndex} onResolve={onResolveAttention} />
         ) : null}
-
-        <AnimatePresence initial={false}>
-          {expanded ? (
-            <motion.div
-              id={expandedId}
-              className="col-span-full overflow-hidden"
-              initial={reduceMotion ? false : { opacity: 0, y: -4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -4 }}
-              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            >
-              <div className="grid gap-2 border-t border-border-divider pt-2 md:grid-cols-[minmax(0,1fr)_minmax(10rem,15rem)] md:items-center">
-                <div className="min-w-0 space-y-1.5 text-xs text-text-secondary">
-                  <DetailLine label={t("task.expanded.saveDir")} value={task.saveDir} />
-                  <DetailLine
-                    label={t("task.expanded.resume")}
-                    value={
-                      task.supportsParallel ? t("task.expanded.resumeSupported") : t("task.expanded.resumeUnavailable")
-                    }
-                  />
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Activity className="h-3.5 w-3.5 shrink-0 text-accent-primary" aria-hidden />
-                    <span className="min-w-0 truncate" title={diagnosticLabel}>
-                      {diagnosticLabel}
-                    </span>
-                  </div>
-                </div>
-                <SpeedSparkline
-                  samples={speedHistory}
-                  currentSpeedBps={task.speedBps}
-                  label={t("task.expanded.speedHistoryAria", {
-                    name: task.fileName,
-                  })}
-                />
-                <div className="md:col-span-2">
-                  <TaskRecoveryActions task={task} onResolve={onResolveAttention} />
-                </div>
-              </div>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
       </div>
     </TaskContextMenu>
   );
@@ -769,6 +842,140 @@ export const TaskRow = memo(function TaskRow({
 /// printing "Invalid Date".
 function formatClockTime(value: string): string {
   return formatDateTime(value, "time");
+}
+
+/** Healthy ranges share the accent; only a failed range or a finished file
+ * changes hue, and a paused task's ranges go gray like its bar would. */
+const CHUNK_FILL: Record<ChunkTone, string> = {
+  live: "bg-accent-primary",
+  done: "bg-accent-primary",
+  idle: "bg-progress-fill-inactive",
+  failed: "bg-status-danger",
+  complete: "bg-status-success",
+};
+
+/**
+ * The row's progress: the byte ranges the engine is filling when the list's
+ * segment poll has them, one fill otherwise. The ranges are the product's
+ * signature evidence (parallel connections, where each is writing), so they
+ * live in the scan path instead of three tabs deep in the details panel.
+ */
+const RowProgress = memo(function RowProgress({
+  task,
+  segments,
+  progress,
+  label,
+  isActive,
+  compact,
+  flash,
+}: {
+  task: Task;
+  segments?: readonly TaskSegment[];
+  progress: number;
+  label: string;
+  isActive: boolean;
+  compact: boolean;
+  flash: boolean;
+}) {
+  const { t } = useTranslation();
+  const cells = useMemo(() => {
+    if (!segments) return null;
+    const base = chunkMapCells(segments, task.totalSize, task.status);
+    return base ? interpolateChunkCells(base, task.downloadedBytes) : null;
+  }, [segments, task.totalSize, task.status, task.downloadedBytes]);
+  const retrying = task.status === "retrying";
+
+  if (!cells || !segments) {
+    return (
+      <ProgressBar
+        value={progress}
+        label={label}
+        active={isActive}
+        smooth={!isActive}
+        tone={retrying ? "warning" : "primary"}
+        size={compact ? "compact" : "default"}
+        className={flash ? "completion-flash-progress" : undefined}
+      />
+    );
+  }
+  const percent = Math.round(progress * 100);
+  return (
+    <RowChunkBar
+      cells={cells}
+      label={label}
+      percent={percent}
+      summary={chunkSummaryForStatus(segments, task.status, t)}
+      retrying={retrying}
+      compact={compact}
+    />
+  );
+});
+
+function RowChunkBar({
+  cells,
+  label,
+  percent,
+  summary,
+  retrying,
+  compact,
+}: {
+  cells: readonly ChunkCell[];
+  label: string;
+  percent: number;
+  summary: string;
+  retrying: boolean;
+  compact: boolean;
+}) {
+  return (
+    <div
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={percent}
+      aria-valuetext={`${percent}% · ${summary}`}
+      data-chunk-bar
+      className={cn("relative overflow-hidden rounded-full bg-surface-track", compact ? "h-0.5" : "h-1.5")}
+    >
+      {cells.map((cell) => (
+        <div
+          key={cell.id}
+          // The 1px seam in the track colour is what makes adjacent ranges
+          // read as separate connections instead of one fill.
+          className="absolute inset-y-0 overflow-hidden shadow-[inset_-1px_0_0_var(--surface-track)]"
+          style={{ left: `${cell.leftPct}%`, width: `${cell.widthPct}%` }}
+        >
+          <div
+            aria-hidden
+            className={cn(
+              "h-full w-full origin-left transition-transform duration-ui ease-out motion-reduce:transition-none",
+              retrying && (cell.tone === "live" || cell.tone === "done") ? "bg-status-warning" : CHUNK_FILL[cell.tone],
+            )}
+            style={{ transform: `scaleX(${cell.fill})` }}
+          />
+          {cell.tone === "live" && cell.fill > 0 && cell.fill < 1 ? (
+            // Write head: where this connection is writing right now. Moved by
+            // transform so progress ticks never relayout the row.
+            <div
+              aria-hidden
+              className="absolute inset-0 border-r border-text-primary/80 transition-transform duration-ui ease-out motion-reduce:transition-none"
+              style={{ transform: `translateX(${(cell.fill - 1) * 100}%)` }}
+            />
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function chunkSummaryForStatus(segments: readonly TaskSegment[], status: Task["status"], t: TFunction): string {
+  const counts = chunkCounts(segments);
+  // A segment poll can arrive just before the task status transition. Avoid
+  // announcing "all complete" while the task itself is still transferring.
+  if ((status === "downloading" || status === "retrying") && counts.total > 0 && counts.completed === counts.total) {
+    return t(`task.status.${status}`);
+  }
+  return t("taskDetails.chunksSummary", counts);
 }
 
 // Shared meta row for speed / bytes / progress+ETA / connections.
@@ -782,11 +989,13 @@ const META_MUTED =
 const TaskMeta = memo(function TaskMeta({
   task,
   isActive,
+  percentLabel,
   layout,
   compact,
 }: {
   task: Task;
   isActive: boolean;
+  percentLabel: string;
   layout: "inline" | "rail";
   compact: boolean;
 }) {
@@ -796,9 +1005,8 @@ const TaskMeta = memo(function TaskMeta({
   // slot is dropped entirely instead of spending the rail's most prominent
   // position on an em-dash placeholder.
   const stalled = isActive && task.speedBps <= 0;
-  const speed = stalled ? formatStalledSpeed() : formatSpeed(task.speedBps);
-  const bytes = `${formatBytes(task.downloadedBytes)} / ${formatBytes(task.totalSize)}`;
-  const percent = formatPercent(task.downloadedBytes, task.totalSize);
+  const speed = stalled ? formatStalledSpeed() : formatSpeed(task.speedBps, FIXED);
+  const bytes = `${formatBytes(task.downloadedBytes, FIXED)} / ${formatBytes(task.totalSize, FIXED)}`;
   const eta = formatEta(task.downloadedBytes, task.totalSize, task.speedBps);
   const connections = task.connectionCount > 0 ? t("task.connections", { count: task.connectionCount }) : null;
   // A completed row states its size once — "3.9 GB / 3.9 GB" under a bar pinned
@@ -809,18 +1017,23 @@ const TaskMeta = memo(function TaskMeta({
   // Connections ride along on the progress line rather than taking a rail row of
   // their own — a rail row costs ~20px, a third of a compact row's whole budget.
   const progress = [
-    task.status === "completed" || eta === "—" ? percent : `${percent} · ${t("task.eta")} ${eta}`,
+    task.status === "completed" || eta === "—" ? percentLabel : `${percentLabel} · ${t("task.eta")} ${eta}`,
     connections,
   ]
     .filter(Boolean)
     .join(" · ");
-  const speedClass = stalled ? "font-semibold text-status-warning" : "font-semibold text-accent-primary";
+  // A retrying transfer's speed is real but unhealthy, so it drops the accent.
+  const speedClass = stalled
+    ? "font-semibold text-status-warning"
+    : task.status === "retrying"
+      ? "font-semibold text-text-primary"
+      : "font-semibold text-accent-primary";
 
   if (layout === "inline") {
     return (
       <div
         className={cn(
-          "flex flex-wrap items-center gap-x-2 font-mono text-[11px] text-text-muted md:hidden",
+          "flex flex-wrap items-center gap-x-2 font-mono text-xs text-text-muted md:hidden",
           compact ? "gap-y-0.5" : "gap-y-1",
         )}
       >
@@ -901,7 +1114,9 @@ const TaskMeta = memo(function TaskMeta({
       <span data-slot="speed" className={cn("col-start-1 min-w-0 truncate text-sm", speedClass)}>
         {speed}
       </span>
-      <span data-slot="bytes" className={cn("col-start-2 min-w-0 truncate", META_MUTED)}>
+      {/* A reserved width keeps the speed's right edge still: the byte column
+          used to grow and shrink with each tick and drag the speed with it. */}
+      <span data-slot="bytes" className={cn("col-start-2 min-w-[17ch] truncate", META_MUTED)}>
         {bytes}
       </span>
       <span data-slot="progress" className={cn("col-span-2 min-w-0 truncate", META_MUTED)}>
@@ -911,40 +1126,31 @@ const TaskMeta = memo(function TaskMeta({
   );
 });
 
-const DetailLine = memo(function DetailLine({ label, value }: { label: string; value: string }) {
-  return (
-    <p className="flex min-w-0 gap-2">
-      <span className="shrink-0 text-text-muted">{label}</span>
-      <span className="min-w-0 truncate text-text-secondary" title={value}>
-        {value}
-      </span>
-    </p>
-  );
-});
-
 function RowActions({
   task,
-  expanded,
-  expandedId,
-  onToggleExpanded,
   onToggleTransfer,
   onRetry,
   onFinishLiveRecording,
   onOpenFile,
   onOpenFolder,
+  onShowDetails,
+  onDelete,
+  onCopyUrl,
   compact,
+  tabIndex,
   className,
 }: {
   task: Task;
-  expanded: boolean;
-  expandedId: string;
-  onToggleExpanded: () => void;
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
   onFinishLiveRecording: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
+  onShowDetails?: (task: Task) => void;
+  onDelete: (task: Task) => void;
+  onCopyUrl?: (task: Task) => void;
   compact: boolean;
+  tabIndex?: number;
   className?: string;
 }) {
   const { t } = useTranslation();
@@ -966,26 +1172,28 @@ function RowActions({
       data-row-action
       data-no-drag
     >
-      <ActionButton
-        label={expanded ? t("actions.collapse") : t("actions.expand")}
-        ariaLabel={t(expanded ? "actions.collapseFor" : "actions.expandFor", {
-          name: task.fileName,
-        })}
-        expanded={expanded}
-        controls={expandedId}
-        onClick={(event) => {
-          event.stopPropagation();
-          onToggleExpanded();
-        }}
-      >
-        <ChevronDown className={cn("h-4 w-4 transition-transform duration-ui", expanded && "rotate-180")} />
-      </ActionButton>
+      {onShowDetails ? (
+        <ActionButton
+          label={t("contextmenu.task.showDetails")}
+          ariaLabel={t("actions.showDetailsFor", { name: task.fileName })}
+          tabIndex={tabIndex}
+          onClick={(event) => {
+            event.stopPropagation();
+            onShowDetails(task);
+          }}
+        >
+          {/* The one way into the evidence (chunk map, speed history, logs):
+              the old in-place expand showed a thin slice of the same panel. */}
+          <PanelRight className="h-4 w-4" />
+        </ActionButton>
+      ) : null}
       {transferMode !== "hidden" ? (
         <ActionButton
           label={transferMode === "resume" ? t("actions.resume") : t("actions.pause")}
           ariaLabel={t(transferMode === "resume" ? "actions.resumeFor" : "actions.pauseFor", {
             name: task.fileName,
           })}
+          tabIndex={tabIndex}
           onClick={(event) => {
             event.stopPropagation();
             onToggleTransfer(task);
@@ -998,6 +1206,7 @@ function RowActions({
         <ActionButton
           label={t("actions.retry")}
           ariaLabel={t("actions.retryFor", { name: task.fileName })}
+          tabIndex={tabIndex}
           onClick={(event) => {
             event.stopPropagation();
             onRetry(task);
@@ -1010,6 +1219,7 @@ function RowActions({
         <ActionButton
           label={t("actions.finishRecording")}
           ariaLabel={t("actions.finishRecordingFor", { name: task.fileName })}
+          tabIndex={tabIndex}
           onClick={(event) => {
             event.stopPropagation();
             onFinishLiveRecording(task);
@@ -1022,6 +1232,7 @@ function RowActions({
         <ActionButton
           label={t("actions.openFile")}
           ariaLabel={t("actions.openFileFor", { name: task.fileName })}
+          tabIndex={tabIndex}
           onClick={(event) => {
             event.stopPropagation();
             onOpenFile(task);
@@ -1030,16 +1241,76 @@ function RowActions({
           <File className="h-4 w-4" />
         </ActionButton>
       ) : null}
-      <ActionButton
-        label={t("actions.openFolder")}
-        ariaLabel={t("actions.openFolderFor", { name: task.fileName })}
-        onClick={(event) => {
-          event.stopPropagation();
-          onOpenFolder(task);
-        }}
-      >
-        <FolderOpen className="h-4 w-4" />
-      </ActionButton>
+      <Popover modal={false}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={t("actions.moreFor", { name: task.fileName })}
+                title={t("taskList.more")}
+                tabIndex={tabIndex}
+                data-row-icon-button
+                onClick={(event) => event.stopPropagation()}
+              >
+                <MoreHorizontal className="h-4 w-4" aria-hidden />
+              </Button>
+            </PopoverTrigger>
+          </TooltipTrigger>
+          <TooltipContent>{t("taskList.more")}</TooltipContent>
+        </Tooltip>
+        <PopoverContent align="end" className="w-44 p-1" onClick={(event) => event.stopPropagation()}>
+          <PopoverClose asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-9 w-full justify-start gap-2 px-2 text-sm"
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenFolder(task);
+              }}
+            >
+              <FolderOpen className="h-4 w-4" aria-hidden />
+              {t("actions.openFolder")}
+            </Button>
+          </PopoverClose>
+          {onCopyUrl ? (
+            <PopoverClose asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-9 w-full justify-start gap-2 px-2 text-sm"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCopyUrl(task);
+                }}
+              >
+                <Copy className="h-4 w-4" aria-hidden />
+                {t("contextmenu.task.copyUrl")}
+              </Button>
+            </PopoverClose>
+          ) : null}
+          <PopoverClose asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-9 w-full justify-start gap-2 px-2 text-sm text-status-danger hover:bg-status-danger/10 hover:text-status-danger"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete(task);
+              }}
+            >
+              <Trash2 className="h-4 w-4" aria-hidden />
+              {t("deleteDialog.confirm")}
+            </Button>
+          </PopoverClose>
+        </PopoverContent>
+      </Popover>
     </div>
   );
 }
@@ -1048,16 +1319,14 @@ const ActionButton = memo(function ActionButton({
   label,
   ariaLabel,
   disabled,
-  expanded,
-  controls,
+  tabIndex,
   onClick,
   children,
 }: {
   label: string;
   ariaLabel?: string;
   disabled?: boolean;
-  expanded?: boolean;
-  controls?: string;
+  tabIndex?: number;
   onClick: MouseEventHandler<HTMLButtonElement>;
   children: ReactNode;
 }) {
@@ -1068,9 +1337,8 @@ const ActionButton = memo(function ActionButton({
           variant="ghost"
           size="icon"
           aria-label={ariaLabel ?? label}
-          aria-expanded={expanded}
-          aria-controls={controls}
           disabled={disabled}
+          tabIndex={tabIndex}
           onClick={onClick}
           data-row-icon-button
         >
@@ -1084,24 +1352,20 @@ const ActionButton = memo(function ActionButton({
 
 const InlineRecovery = memo(function InlineRecovery({
   task,
-  expanded,
-  expandedId,
   compact,
-  onToggleExpanded,
+  tabIndex,
   onResolve,
 }: {
   task: Task;
-  expanded: boolean;
-  expandedId: string;
   compact: boolean;
-  onToggleExpanded: () => void;
+  tabIndex?: number;
   onResolve: (task: Task, action: RecoveryAction) => void;
 }) {
   const { t } = useTranslation();
 
   if (!task.errorMessage) return null;
 
-  const recoveryActions = recoveryActionsForTask(task);
+  const recoveryActions = inlineRecoveryActionsForTask(task);
 
   if (recoveryActions.length === 0) return null;
 
@@ -1112,51 +1376,75 @@ const InlineRecovery = memo(function InlineRecovery({
   // mechanism the backend already knows ("server dropped Range support") so the
   // user can judge whether the recovery action is safe before pressing it.
   const cause = localizedErrorCause(task.errorMessage, t);
+  const tone = recoveryTone(task.status);
+  const restartConsequence =
+    primaryAction === "restart" || moreFixes.includes("restart")
+      ? (restartCost(task, t) ?? t("recoveryDialog.restartDescription", { name: task.fileName }))
+      : null;
+  const restartTitle = restartConsequence ?? undefined;
   const moreFixesTitle =
     moreFixes.length > 1
       ? t("actions.moreFixesTitle", { fixes: moreFixes.map((action) => t(`recovery.${action}`)).join(", ") })
       : undefined;
-  // Compact clamps the message to one line; the buttons keep the 32px height at
-  // every width (DESIGN.md minimum for dense desktop UI).
+  // Every button keeps the 32px height at every width (DESIGN.md minimum for
+  // dense desktop UI).
   const buttonClass = "px-2 text-xs";
 
   return (
-    // Alert container: a real callout box instead of loose inline elements.
-    // Tinted bg + danger border + padding give the error its own visual unit,
-    // so a failed row's recovery path reads as an alert, not as row text.
+    // Keep the recovery context attached to the row while using a flat divider;
+    // the error tint distinguishes it without creating another nested card.
+    // Capped at one line (verdict · cause) plus the price of a restart, so a
+    // failed row is at most one text line taller than a healthy one; the full
+    // wording stays in the title and in the details panel.
     <div
       className={cn(
-        "col-span-full flex flex-wrap items-center rounded-md border border-border-danger-subtle bg-status-danger/[0.06] px-2.5",
-        compact ? "mt-0.5 gap-1.5 py-1" : "mt-1 gap-2 py-2",
+        "col-span-full flex flex-wrap items-center gap-x-2 gap-y-1 border-t px-2.5",
+        tone === "danger"
+          ? "border-border-danger-subtle bg-status-danger/[0.06]"
+          : "border-border-warning-subtle bg-status-warning/[0.06]",
+        compact ? "mt-0.5 py-1" : "mt-1 py-1.5",
       )}
       data-row-action
       data-no-drag
     >
-      <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-danger" aria-hidden />
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span
-          className={cn("min-w-0 text-xs leading-snug text-status-danger", compact ? "line-clamp-1" : "line-clamp-2")}
-          title={message}
-        >
-          {message}
-        </span>
-        {cause ? (
-          <span
-            className={cn("text-[11px] leading-4 text-text-secondary", compact ? "line-clamp-1" : "line-clamp-2")}
-            title={cause}
-          >
-            {cause}
+      {tone === "danger" ? (
+        <CircleX className="h-3.5 w-3.5 shrink-0 text-status-danger" aria-hidden />
+      ) : (
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-status-warning" aria-hidden />
+      )}
+      <div className="flex min-w-[12rem] flex-1 flex-col">
+        <p className="truncate text-xs leading-5" title={cause ? `${message} · ${cause}` : message}>
+          <span className={cn("font-medium", tone === "danger" ? "text-status-danger" : "text-status-warning")}>
+            {message}
           </span>
+          {cause ? (
+            <>
+              <span aria-hidden className="text-text-muted">
+                {" · "}
+              </span>
+              <span className="text-text-secondary">{cause}</span>
+            </>
+          ) : null}
+        </p>
+        {restartConsequence && !compact ? (
+          <p className="truncate text-xs leading-5 text-text-primary" title={restartConsequence}>
+            {restartConsequence}
+          </p>
         ) : null}
+        {/* The raw error code stays out of the row: it is in the details
+            panel's copied report and behind "Technical details" in the
+            Recovery Center. */}
       </div>
-      <div className="ml-auto flex shrink-0 items-center gap-1">
+      <div className="ml-auto flex shrink-0 flex-wrap items-center gap-1">
         {/* Restart discards downloaded bytes, so it wears the same danger tint
-            here as in the expanded TaskRecoveryActions — never the accent that
-            marks the recommended action. */}
+            here as in the details panel — never the accent that marks the
+            recommended action. */}
         <Button
           size="sm"
           variant={primaryAction === "restart" ? "danger" : "default"}
           className={buttonClass}
+          title={primaryAction === "restart" ? restartTitle : undefined}
+          tabIndex={tabIndex}
           onClick={(event) => {
             event.stopPropagation();
             onResolve(task, primaryAction);
@@ -1172,6 +1460,8 @@ const InlineRecovery = memo(function InlineRecovery({
             variant="outline"
             size="sm"
             className={buttonClass}
+            title={moreFixes[0] === "restart" ? restartTitle : undefined}
+            tabIndex={tabIndex}
             onClick={(event) => {
               event.stopPropagation();
               onResolve(task, moreFixes[0]);
@@ -1180,21 +1470,49 @@ const InlineRecovery = memo(function InlineRecovery({
             {t(`recovery.${moreFixes[0]}`)}
           </Button>
         ) : moreFixes.length > 1 ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            className={buttonClass}
-            aria-expanded={expanded}
-            aria-controls={expandedId}
-            aria-label={moreFixesTitle}
-            title={moreFixesTitle}
-            onClick={(event) => {
-              event.stopPropagation();
-              if (!expanded) onToggleExpanded();
-            }}
-          >
-            {t("actions.moreFixesCount", { count: moreFixes.length })}
-          </Button>
+          // Two or more alternatives open as a menu in place; they used to
+          // expand the row, which showed the save folder instead of the fixes.
+          <Popover modal={false}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className={buttonClass}
+                aria-label={moreFixesTitle}
+                title={moreFixesTitle}
+                tabIndex={tabIndex}
+                onClick={(event) => event.stopPropagation()}
+              >
+                {t("actions.moreFixesCount", { count: moreFixes.length })}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-52 p-1" onClick={(event) => event.stopPropagation()}>
+              {moreFixes.map((action) => {
+                const Icon = recoveryActionIcon(action);
+                return (
+                  <PopoverClose asChild key={action}>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className={cn(
+                        "h-9 w-full justify-start gap-2 px-2 text-sm",
+                        action === "restart" && "text-status-danger hover:bg-status-danger/10 hover:text-status-danger",
+                      )}
+                      title={action === "restart" ? restartTitle : undefined}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onResolve(task, action);
+                      }}
+                    >
+                      <Icon className="h-4 w-4" aria-hidden />
+                      {t(`recovery.${action}`)}
+                    </Button>
+                  </PopoverClose>
+                );
+              })}
+            </PopoverContent>
+          </Popover>
         ) : null}
       </div>
     </div>

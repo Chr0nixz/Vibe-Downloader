@@ -173,7 +173,7 @@ async fn make_backup_file(pool: &sqlx::SqlitePool, db_file: &Path, dest: &Path) 
 async fn materialize_backup(backup: &Path) -> PathBuf {
     let parsed = read_backup_file(backup).expect("parse backup");
     let current = parsed.manifest.schema_version;
-    materialize_and_verify_backup_db(&parsed.database, current, current)
+    materialize_and_verify_backup_db(&parsed.database, current, current, None)
         .await
         .expect("materialize")
 }
@@ -227,7 +227,7 @@ async fn contents_inventory_matches_between_live_and_backup() {
     make_backup_file(&pool, &live, &backup).await;
     let parsed = read_backup_file(&backup).expect("parse");
     let current = parsed.manifest.schema_version;
-    let verified = materialize_and_verify_backup_db(&parsed.database, current, current)
+    let verified = materialize_and_verify_backup_db(&parsed.database, current, current, None)
         .await
         .expect("materialize");
 

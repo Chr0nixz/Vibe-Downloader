@@ -91,9 +91,11 @@ export function SpeedLimitControl({ open, onOpenChange }: { open: boolean; onOpe
           {saving ? (
             <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
           ) : (
-            <Gauge className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            <Gauge className={cn("h-3.5 w-3.5 shrink-0", currentLimit > 0 && "text-accent-primary")} aria-hidden />
           )}
-          <span className="truncate">{label}</span>
+          {/* An active cap is state the user must see at any width; "No speed
+              limit" is the default and folds into the icon on a narrow bar. */}
+          <span className={cn("truncate", currentLimit > 0 ? undefined : "hidden sm:inline")}>{label}</span>
         </Button>
       </PopoverTrigger>
       {/* The status bar is flush with the window's bottom edge, so the panel has

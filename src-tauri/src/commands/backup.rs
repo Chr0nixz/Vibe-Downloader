@@ -124,6 +124,7 @@ pub async fn validate_app_backup(
         &parsed.database,
         parsed.manifest.schema_version,
         current,
+        None,
     )
     .await?;
 
@@ -249,16 +250,20 @@ pub async fn restore_app_backup(
     let path = PathBuf::from(&backup_path);
     let parsed = read_backup_file(&path)?;
     let current = db::current_schema_version(&state.pool).await?;
+    // ARC-53: stage the verified copy beside the live database so the pending
+    // rename stays same-volume even when the OS temp dir is on another disk.
+    let db_path = platform::db_path(&app)?;
+    let db_dir = db_path.parent().map(Path::to_path_buf);
     let verified = db::materialize_and_verify_backup_db(
         &parsed.database,
         parsed.manifest.schema_version,
         current,
+        db_dir.as_deref(),
     )
     .await?;
 
     // Disk headroom is checked before anything is staged: restore writes the
     // pending file AND the pre-restore snapshot next to the live database.
-    let db_path = platform::db_path(&app)?;
     if let Some(free) = platform::free_disk_bytes(&db_path) {
         if free < restore_required_bytes(parsed.manifest.database_bytes) {
             let _ = fs::remove_file(&verified).await;
@@ -421,6 +426,7 @@ pub async fn restore_backup_subset(
         &parsed.database,
         parsed.manifest.schema_version,
         current,
+        None,
     )
     .await?;
 

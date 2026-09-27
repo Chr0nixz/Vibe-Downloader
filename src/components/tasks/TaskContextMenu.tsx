@@ -6,11 +6,11 @@ import {
   ChevronsUp,
   Clipboard,
   ClipboardCopy,
-  ExternalLink,
   File,
   FileDown,
   FileText,
   FolderOpen,
+  PanelRight,
   Pause,
   Play,
   RotateCcw,
@@ -20,9 +20,11 @@ import {
 import { memo } from "react";
 import { useTranslation } from "react-i18next";
 
-import { rowShowsRetry, rowTransferMode } from "@/components/tasks/row-recovery";
+import { inlineRecoveryActionsForTask, rowShowsRetry, rowTransferMode } from "@/components/tasks/row-recovery";
+import { recoveryActionIcon } from "@/components/tasks/TaskRecoveryActions";
 import { MenuContent, MenuItem, MenuLabel, MenuSeparator } from "@/components/ui/menu-item";
 import type { RecoveryAction } from "@/generated/bindings";
+import { formatBytes, formatShortcutForDocument } from "@/lib/utils";
 import type { Task } from "@/types/task";
 
 interface TaskContextMenuProps {
@@ -39,6 +41,8 @@ interface TaskContextMenuProps {
   onCopyUrl?: (task: Task) => void;
   onCopyLocalPath?: (task: Task) => void;
   onShowDetails?: (task: Task) => void;
+  /** Select and focus the row before the menu's keyboard actions can run. */
+  onContextMenu?: () => void;
   children: React.ReactNode;
 }
 
@@ -53,10 +57,12 @@ export const TaskContextMenu = memo(function TaskContextMenu({
   onOpenFolder,
   onDelete,
   onDeleteFiles,
+  onResolveAttention,
   onReorder,
   onCopyUrl,
   onCopyLocalPath,
   onShowDetails,
+  onContextMenu,
   children,
 }: TaskContextMenuProps) {
   const { t } = useTranslation();
@@ -64,12 +70,41 @@ export const TaskContextMenu = memo(function TaskContextMenu({
   const transferMode = rowTransferMode(task);
   const canFinishRecording = protocol === "hls" && (status === "downloading" || status === "retrying");
   const canReorder = status === "queued" && onReorder;
+  // The row banner's fixes, offered here too: a restart-only failure used to
+  // leave this menu with nothing but Open folder and Delete, so the one way to
+  // recover it was a pointer click on the banner.
+  const recoveryActions =
+    onResolveAttention && (status === "failed" || status === "needs_attention")
+      ? inlineRecoveryActionsForTask(task)
+      : [];
 
   return (
     <ContextMenu.Root>
-      <ContextMenu.Trigger asChild>{children}</ContextMenu.Trigger>
+      <ContextMenu.Trigger asChild onContextMenu={onContextMenu}>
+        {children}
+      </ContextMenu.Trigger>
       <ContextMenu.Portal>
         <MenuContent>
+          <MenuLabel>{task.fileName}</MenuLabel>
+          <MenuSeparator />
+          {recoveryActions.map((action) => (
+            <MenuItem
+              key={action}
+              icon={recoveryActionIcon(action)}
+              label={
+                // The price of a restart is stated where it is chosen, as on the
+                // banner and in the details panel.
+                action === "restart" && task.downloadedBytes > 0
+                  ? t("actions.restartDiscards", { size: formatBytes(task.downloadedBytes) })
+                  : t(`recovery.${action}`)
+              }
+              destructive={action === "restart"}
+              shortcut={action === recoveryActions[0] ? formatShortcutForDocument("mod+R") : undefined}
+              onSelect={() => onResolveAttention?.(task, action)}
+            />
+          ))}
+          {recoveryActions.length > 0 && <MenuSeparator />}
+
           {transferMode !== "hidden" && (
             <MenuItem
               icon={transferMode === "resume" ? Play : Pause}
@@ -79,7 +114,12 @@ export const TaskContextMenu = memo(function TaskContextMenu({
           )}
 
           {rowShowsRetry(task) && (
-            <MenuItem icon={RotateCcw} label={t("actions.retry")} onSelect={() => onRetry(task)} />
+            <MenuItem
+              icon={RotateCcw}
+              label={t("actions.retry")}
+              shortcut={formatShortcutForDocument("mod+R")}
+              onSelect={() => onRetry(task)}
+            />
           )}
 
           {canFinishRecording && (
@@ -92,7 +132,15 @@ export const TaskContextMenu = memo(function TaskContextMenu({
 
           <MenuItem icon={FolderOpen} label={t("actions.openFolder")} onSelect={() => onOpenFolder(task)} />
 
-          {(onCopyUrl || onCopyLocalPath || onShowDetails) && (
+          {onShowDetails && (
+            <MenuItem
+              icon={PanelRight}
+              label={t("contextmenu.task.showDetails")}
+              onSelect={() => onShowDetails(task)}
+            />
+          )}
+
+          {(onCopyUrl || onCopyLocalPath) && (
             <>
               <MenuSeparator />
               <MenuLabel>{t("contextmenu.task.section.copy")}</MenuLabel>
@@ -109,14 +157,6 @@ export const TaskContextMenu = memo(function TaskContextMenu({
               onSelect={() => onCopyLocalPath(task)}
             />
           )}
-          {onShowDetails && (
-            <MenuItem
-              icon={ExternalLink}
-              label={t("contextmenu.task.showDetails")}
-              onSelect={() => onShowDetails(task)}
-            />
-          )}
-
           {canReorder && (
             <>
               <MenuSeparator />

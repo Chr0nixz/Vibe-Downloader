@@ -267,9 +267,17 @@ enum SegmentSource {
     },
     /// SegmentList with explicit segment URLs.
     List {
+        /// URL-valued init reference: the SegmentList `initialization`
+        /// attribute or a child `<Initialization sourceURL="…">` element.
         initialization: Option<String>,
+        /// Byte range applied to the init URL when the init bytes live inside
+        /// the addressed resource (`<Initialization sourceURL="file" range="…">`).
+        initialization_range: Option<ByteRange>,
         segments: Vec<ListSegment>,
     },
+    /// The Representation used a shape this engine cannot schedule — recorded
+    /// so the probe rejects it with a stable code instead of mis-downloading.
+    Unsupported { reason: &'static str },
     /// SegmentBase with a single BaseURL + byte ranges.
     Base {
         base_url: String,
@@ -281,6 +289,125 @@ enum SegmentSource {
 #[derive(Debug, Clone)]
 struct ListSegment {
     uri: String,
+    /// `SegmentURL@mediaRange`: byte slice of `uri` that carries the segment.
+    /// Several SegmentURLs may reference the same file at different ranges.
+    media_range: Option<ByteRange>,
+}
+
+/// Accumulated state while inside a `<SegmentList>` element.
+#[derive(Default)]
+struct SegmentListState {
+    /// `SegmentList@initialization` attribute (attribute form of the init URL).
+    init_attr: Option<String>,
+    /// Child `<Initialization sourceURL>` element.
+    init_source: Option<String>,
+    /// Byte range on the init resource (`<Initialization range>`).
+    init_range: Option<ByteRange>,
+    /// First unsupported-shape reason; the probe surfaces it at finalize time.
+    unsupported: Option<&'static str>,
+    segments: Vec<ListSegment>,
+}
+
+fn byte_range_from_event(event: &quick_xml::events::BytesStart<'_>) -> Option<ByteRange> {
+    attr_value(event, "range").and_then(|range| parse_byte_range(&range))
+}
+
+/// Read one `<SegmentURL>` element into the open SegmentList. `media` names
+/// the resource; `mediaRange` selects the byte slice of that resource that
+/// carries the segment. `attr_value` compares case-insensitively against the
+/// lowercased local name, so `mediaRange`/`sourceURL`/`xlink:href` all land.
+fn absorb_segment_url_event(
+    state: &mut SegmentListState,
+    event: &quick_xml::events::BytesStart<'_>,
+) {
+    let media = attr_value(event, "media");
+    let media_range = attr_value(event, "mediaRange").and_then(|r| parse_byte_range(&r));
+    // An index-only SegmentURL (`index`/`indexRange`, no `media`) addresses the
+    // sidx index rather than media bytes — a fetch contract this engine does
+    // not implement, so it must be rejected rather than silently skipped.
+    if media.is_none()
+        && (attr_value(event, "index").is_some() || attr_value(event, "indexRange").is_some())
+    {
+        state.unsupported.get_or_insert(
+            "SegmentURL with index/indexRange is not supported; this engine downloads media segments only.",
+        );
+        return;
+    }
+    if let Some(uri) = media {
+        state.segments.push(ListSegment { uri, media_range });
+    }
+}
+
+/// `<Initialization>` inside a SegmentList: `sourceURL` names the init
+/// resource and `range` selects bytes within it. A bare `range` only makes
+/// sense paired with the SegmentList `initialization` attribute URL.
+fn absorb_list_initialization_event(
+    state: &mut SegmentListState,
+    event: &quick_xml::events::BytesStart<'_>,
+) {
+    let source = attr_value(event, "sourceURL").or_else(|| attr_value(event, "href"));
+    let range = byte_range_from_event(event);
+    if source.is_some() {
+        state.init_source = source;
+        state.init_range = range;
+    } else if let Some(range) = range {
+        if state.init_attr.is_some() {
+            // `<SegmentList initialization="init.mp4"><Initialization range="0-99"/>`:
+            // the range applies to the attribute's resource.
+            state.init_range = Some(range);
+        } else {
+            // A bare range with no URL names bytes of an enclosing resource
+            // that does not exist in a SegmentList — reject instead of guessing.
+            state.unsupported.get_or_insert(
+                "SegmentList Initialization declares a byte range without a sourceURL; this engine only supports a whole-file init URL or a sourceURL+range pair.",
+            );
+        }
+    }
+}
+
+/// `<Initialization>` outside a SegmentList: the SegmentBase contract, where
+/// the init bytes are a `range` of the media file. A `sourceURL` here is a
+/// different fetch contract and is rejected via `SegmentSource::Unsupported`.
+fn absorb_base_initialization_event(
+    rep: &mut Option<ParsedRepresentation>,
+    event: &quick_xml::events::BytesStart<'_>,
+) {
+    let Some(rep) = rep.as_mut() else {
+        return;
+    };
+    if attr_value(event, "sourceURL").is_some() || attr_value(event, "href").is_some() {
+        rep.segment_source = SegmentSource::Unsupported {
+            reason: "Initialization with sourceURL outside a SegmentList is not supported; use a SegmentList or a SegmentBase range.",
+        };
+        return;
+    }
+    if let SegmentSource::Base {
+        initialization_range,
+        ..
+    } = &mut rep.segment_source
+    {
+        *initialization_range = byte_range_from_event(event);
+    }
+}
+
+/// Fold the collected SegmentList state into the Representation's segment
+/// source. An entirely empty `<SegmentList/>` keeps the fallback addressing
+/// mode (the historical BaseURL/SegmentBase path) so a stray empty element
+/// cannot clobber a valid SegmentBase declaration.
+fn finalize_segment_list(state: SegmentListState, fallback: SegmentSource) -> SegmentSource {
+    if let Some(reason) = state.unsupported {
+        return SegmentSource::Unsupported { reason };
+    }
+    if state.segments.is_empty() && state.init_attr.is_none() && state.init_source.is_none() {
+        return fallback;
+    }
+    SegmentSource::List {
+        // The child element is the canonical form; the attribute is kept as a
+        // fallback for manifests that only use the attribute spelling.
+        initialization: state.init_source.or(state.init_attr),
+        initialization_range: state.init_range,
+        segments: state.segments,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -337,8 +464,7 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
     let mut element_stack: Vec<String> = Vec::new();
     let mut current_adaptation: Option<ParsedAdaptationSet> = None;
     let mut current_representation: Option<ParsedRepresentation> = None;
-    let mut current_segment_list: Vec<ListSegment> = Vec::new();
-    let mut current_init_for_list: Option<String> = None;
+    let mut segment_list_state: Option<SegmentListState> = None;
     let mut current_base_url: Option<String> = None;
 
     loop {
@@ -397,8 +523,7 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                                 media_range: None,
                             },
                         });
-                        current_segment_list.clear();
-                        current_init_for_list = None;
+                        segment_list_state = None;
                         current_base_url = None;
                     }
                     "segmenttemplate" => {
@@ -432,13 +557,22 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                         }
                     }
                     "segmentlist" => {
-                        let initialization = attr_value(&event, "initialization");
-                        current_init_for_list = initialization;
-                        current_segment_list.clear();
+                        let mut state = SegmentListState {
+                            init_attr: attr_value(&event, "initialization"),
+                            ..SegmentListState::default()
+                        };
+                        if let Some(rep) = current_representation.as_ref() {
+                            if !matches!(rep.segment_source, SegmentSource::Base { .. }) {
+                                state.unsupported = Some(
+                                    "SegmentList cannot be combined with SegmentTemplate in this engine.",
+                                );
+                            }
+                        }
+                        segment_list_state = Some(state);
                     }
                     "segmenturl" => {
-                        if let Some(uri) = attr_value(&event, "media") {
-                            current_segment_list.push(ListSegment { uri });
+                        if let Some(state) = segment_list_state.as_mut() {
+                            absorb_segment_url_event(state, &event);
                         }
                     }
                     "segmentbase" => {
@@ -446,17 +580,10 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                         // child element carries the byte range.
                     }
                     "initialization" => {
-                        if let Some(range) = attr_value(&event, "range") {
-                            let br = parse_byte_range(&range);
-                            if let Some(rep) = current_representation.as_mut() {
-                                if let SegmentSource::Base {
-                                    initialization_range,
-                                    ..
-                                } = &mut rep.segment_source
-                                {
-                                    *initialization_range = br;
-                                }
-                            }
+                        if let Some(state) = segment_list_state.as_mut() {
+                            absorb_list_initialization_event(state, &event);
+                        } else {
+                            absorb_base_initialization_event(&mut current_representation, &event);
                         }
                     }
                     "baseurl" => {
@@ -470,22 +597,17 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                 let name = local_name(event.name().as_ref());
                 match name.as_str() {
                     "segmenturl" => {
-                        if let Some(uri) = attr_value(&event, "media") {
-                            current_segment_list.push(ListSegment { uri });
+                        if let Some(state) = segment_list_state.as_mut() {
+                            absorb_segment_url_event(state, &event);
                         }
                     }
                     "initialization" => {
-                        if let Some(range) = attr_value(&event, "range") {
-                            let br = parse_byte_range(&range);
-                            if let Some(rep) = current_representation.as_mut() {
-                                if let SegmentSource::Base {
-                                    initialization_range,
-                                    ..
-                                } = &mut rep.segment_source
-                                {
-                                    *initialization_range = br;
-                                }
+                        if segment_list_state.is_some() {
+                            if let Some(state) = segment_list_state.as_mut() {
+                                absorb_list_initialization_event(state, &event);
                             }
+                        } else {
+                            absorb_base_initialization_event(&mut current_representation, &event);
                         }
                     }
                     "segmenttemplate" => {
@@ -537,12 +659,11 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                     }
                     "representation" => {
                         if let Some(mut rep) = current_representation.take() {
-                            // If we accumulated a SegmentList, finalize it.
-                            if !current_segment_list.is_empty() {
-                                rep.segment_source = SegmentSource::List {
-                                    initialization: current_init_for_list.take(),
-                                    segments: std::mem::take(&mut current_segment_list),
-                                };
+                            // If a SegmentList was open, fold its collected
+                            // state into the representation's segment source.
+                            if let Some(state) = segment_list_state.take() {
+                                rep.segment_source =
+                                    finalize_segment_list(state, rep.segment_source);
                             } else if let Some(base) = current_base_url.take() {
                                 // SegmentBase with BaseURL.
                                 if let SegmentSource::Base {
@@ -758,10 +879,19 @@ fn build_segment_plans(
     // already rejected at parse time; SegmentList length is only bounded by
     // CONTROL_PLANE_MAX_BYTES, which still permits on the order of a million
     // entries in a 64 MiB manifest. SegmentBase yields at most two plans.
+    // A recorded rejection reason wins over plan building so the caller sees
+    // the stable code, not a partial plan.
+    if let SegmentSource::Unsupported { reason } = &rep.segment_source {
+        return Err(engine_error(
+            "dash_segment_list_unsupported",
+            *reason,
+            false,
+        ));
+    }
     let declared_segments = match &rep.segment_source {
         SegmentSource::Template { segment_count, .. } => *segment_count,
         SegmentSource::List { segments, .. } => i64::try_from(segments.len()).unwrap_or(i64::MAX),
-        SegmentSource::Base { .. } => 0,
+        SegmentSource::Base { .. } | SegmentSource::Unsupported { .. } => 0,
     };
     if declared_segments > DASH_MAX_SEGMENTS_PER_REPRESENTATION {
         return Err(engine_error(
@@ -843,6 +973,7 @@ fn build_segment_plans(
         }
         SegmentSource::List {
             initialization,
+            initialization_range,
             segments,
         } => {
             let mut plans = Vec::new();
@@ -856,7 +987,7 @@ fn build_segment_plans(
                     segment_index: -1,
                     uri: init_uri,
                     local_path: init_local.to_string_lossy().to_string(),
-                    byte_range: None,
+                    byte_range: initialization_range.clone(),
                     init_segment_uri: None,
                     init_segment_local_path: None,
                 });
@@ -871,13 +1002,18 @@ fn build_segment_plans(
                     segment_index: i as i64,
                     uri: resolved,
                     local_path: local_path.to_string_lossy().to_string(),
-                    byte_range: None,
+                    byte_range: seg.media_range.clone(),
                     init_segment_uri: None,
                     init_segment_local_path: None,
                 });
             }
             Ok(plans)
         }
+        SegmentSource::Unsupported { reason } => Err(engine_error(
+            "dash_segment_list_unsupported",
+            *reason,
+            false,
+        )),
         SegmentSource::Base {
             base_url,
             initialization_range,
@@ -2076,9 +2212,11 @@ mod tests {
             codecs: None,
             segment_source: SegmentSource::List {
                 initialization: None,
+                initialization_range: None,
                 segments: vec![
                     ListSegment {
-                        uri: "seg.m4s".to_string()
+                        uri: "seg.m4s".to_string(),
+                        media_range: None,
                     };
                     oversized
                 ],
@@ -2253,6 +2391,198 @@ mod tests {
                 assert_eq!(segments.len(), 3);
                 assert_eq!(segments[0].uri, "seg1.m4s");
                 assert_eq!(segments[2].uri, "seg3.m4s");
+            }
+            _ => panic!("expected SegmentSource::List"),
+        }
+    }
+
+    #[test]
+    fn parses_segment_list_initialization_source_url_and_media_ranges() {
+        // FUN-32: a SegmentList whose init bytes live in a separate resource
+        // (Initialization@sourceURL) and whose SegmentURLs address byte ranges
+        // of a shared file must surface in the plan as exact Range requests.
+        let mpd = r#"
+            <MPD type="static" mediaPresentationDuration="PT10S">
+              <Period>
+                <AdaptationSet mimeType="video/mp4" contentType="video">
+                  <Representation id="v0" bandwidth="500000">
+                    <SegmentList>
+                      <Initialization sourceURL="video.mp4" range="0-1023" />
+                      <SegmentURL media="video.mp4" mediaRange="1024-2047" />
+                      <SegmentURL media="video.mp4" mediaRange="2048-3071" />
+                    </SegmentList>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+        let parsed = parse_dash_manifest("https://example.com/path/video.mpd", mpd)
+            .expect("manifest parses");
+        let (video, _) = select_tracks(&parsed).expect("tracks selected");
+        let video = video.expect("video track");
+        match &video.segment_source {
+            SegmentSource::List {
+                initialization,
+                initialization_range,
+                segments,
+            } => {
+                assert_eq!(initialization.as_deref(), Some("video.mp4"));
+                let init_range = initialization_range.as_ref().expect("init range");
+                assert_eq!((init_range.start, init_range.length), (0, 1024));
+                assert_eq!(segments.len(), 2);
+                assert_eq!(
+                    segments[0]
+                        .media_range
+                        .as_ref()
+                        .map(|r| (r.start, r.length)),
+                    Some((1024, 1024))
+                );
+                assert_eq!(
+                    segments[1]
+                        .media_range
+                        .as_ref()
+                        .map(|r| (r.start, r.length)),
+                    Some((2048, 1024))
+                );
+            }
+            _ => panic!("expected SegmentSource::List"),
+        }
+
+        let plans = build_segment_plans(
+            "https://example.com/path/video.mpd",
+            Path::new("staging"),
+            "task-1",
+            TRACK_KIND_VIDEO,
+            &video,
+        )
+        .expect("plans built");
+        assert_eq!(plans.len(), 3);
+        // init plan carries the sourceURL target with its byte range.
+        assert_eq!(plans[0].segment_index, -1);
+        assert_eq!(plans[0].uri, "https://example.com/path/video.mp4");
+        assert_eq!(
+            plans[0].byte_range.as_ref().map(|r| (r.start, r.length)),
+            Some((0, 1024))
+        );
+        // media plans reuse the same file URI at distinct ranges.
+        assert_eq!(plans[1].uri, "https://example.com/path/video.mp4");
+        assert_eq!(
+            plans[1].byte_range.as_ref().map(|r| (r.start, r.length)),
+            Some((1024, 1024))
+        );
+        assert_eq!(
+            plans[2].byte_range.as_ref().map(|r| (r.start, r.length)),
+            Some((2048, 1024))
+        );
+    }
+
+    #[test]
+    fn rejects_segment_list_bare_initialization_range() {
+        // `<Initialization range="…">` with no sourceURL inside a SegmentList
+        // names bytes of an enclosing resource that does not exist — reject it
+        // at plan build instead of silently dropping the init segment.
+        let mpd = r#"
+            <MPD type="static" mediaPresentationDuration="PT10S">
+              <Period>
+                <AdaptationSet mimeType="video/mp4" contentType="video">
+                  <Representation id="v0" bandwidth="500000">
+                    <SegmentList>
+                      <Initialization range="0-1023" />
+                      <SegmentURL media="seg1.m4s" />
+                    </SegmentList>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+        let parsed =
+            parse_dash_manifest("https://example.com/video.mpd", mpd).expect("manifest parses");
+        let (video, _) = select_tracks(&parsed).expect("tracks selected");
+        let video = video.expect("video track");
+        let error = build_segment_plans(
+            "https://example.com/video.mpd",
+            Path::new("staging"),
+            "task-1",
+            TRACK_KIND_VIDEO,
+            &video,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("dash_segment_list_unsupported"),
+            "expected stable unsupported code, got: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_segment_url_index_only_entries() {
+        // A SegmentURL that only declares index/indexRange addresses the sidx
+        // index, not media bytes — a fetch contract this engine does not
+        // implement. It must be rejected rather than silently skipped.
+        let mpd = r#"
+            <MPD type="static" mediaPresentationDuration="PT10S">
+              <Period>
+                <AdaptationSet mimeType="video/mp4" contentType="video">
+                  <Representation id="v0" bandwidth="500000">
+                    <SegmentList>
+                      <SegmentURL indexRange="0-500" />
+                      <SegmentURL media="seg1.m4s" />
+                    </SegmentList>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+        let parsed =
+            parse_dash_manifest("https://example.com/video.mpd", mpd).expect("manifest parses");
+        let (video, _) = select_tracks(&parsed).expect("tracks selected");
+        let video = video.expect("video track");
+        let error = build_segment_plans(
+            "https://example.com/video.mpd",
+            Path::new("staging"),
+            "task-1",
+            TRACK_KIND_VIDEO,
+            &video,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("dash_segment_list_unsupported"),
+            "expected stable unsupported code, got: {error}"
+        );
+    }
+
+    #[test]
+    fn segment_list_attribute_init_range_pairs_with_attr_url() {
+        // `<SegmentList initialization="init.mp4"><Initialization range="0-99"/>`
+        // applies the range to the attribute's resource.
+        let mpd = r#"
+            <MPD type="static" mediaPresentationDuration="PT10S">
+              <Period>
+                <AdaptationSet mimeType="video/mp4" contentType="video">
+                  <Representation id="v0" bandwidth="500000">
+                    <SegmentList initialization="init.mp4">
+                      <Initialization range="0-99" />
+                      <SegmentURL media="seg1.m4s" />
+                    </SegmentList>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+        let parsed =
+            parse_dash_manifest("https://example.com/video.mpd", mpd).expect("manifest parses");
+        let (video, _) = select_tracks(&parsed).expect("tracks selected");
+        let video = video.expect("video track");
+        match &video.segment_source {
+            SegmentSource::List {
+                initialization,
+                initialization_range,
+                ..
+            } => {
+                assert_eq!(initialization.as_deref(), Some("init.mp4"));
+                assert_eq!(
+                    initialization_range.as_ref().map(|r| (r.start, r.length)),
+                    Some((0, 100))
+                );
             }
             _ => panic!("expected SegmentSource::List"),
         }

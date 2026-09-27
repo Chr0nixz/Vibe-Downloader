@@ -812,6 +812,68 @@ async fn cursor_task_query_pages_and_maps_failure_categories() {
 }
 
 #[tokio::test]
+async fn issues_nav_lists_failed_and_needs_attention_together() {
+    let (_db, pool) = test_pool("issues-nav").await;
+    let statuses = [
+        ("task-issue-failed", TaskStatus::Failed),
+        ("task-issue-attention", TaskStatus::NeedsAttention),
+        ("task-issue-paused", TaskStatus::Paused),
+        ("task-issue-completed", TaskStatus::Completed),
+    ];
+    for (index, (id, status)) in statuses.into_iter().enumerate() {
+        let mut task = sample_task(id, 100);
+        task.status = status;
+        task.updated_at = format!("2024-01-01T00:0{index}:00Z");
+        task.created_at = task.updated_at.clone();
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert issue task");
+    }
+
+    let query = |nav: &str| db::TaskListQuery {
+        nav: nav.to_string(),
+        search: String::new(),
+        sort_key: "updated_at".to_string(),
+        sort_direction: "desc".to_string(),
+        file_type: "all".to_string(),
+        source: "all".to_string(),
+        failure: "all".to_string(),
+        resume: "all".to_string(),
+        page: 0,
+        page_size: 10,
+        cursor_value: None,
+        cursor_id: None,
+    };
+    let ids = |page: &db::TaskListPage| {
+        let mut ids = page
+            .items
+            .iter()
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    };
+
+    // The "Needs you" view pairs both stuck states; its cause filters narrow
+    // back to the single-status views without losing either class.
+    let issues = db::list_task_records_cursor(&pool, &query("issues"))
+        .await
+        .expect("issues page");
+    assert_eq!(
+        ids(&issues),
+        vec!["task-issue-attention", "task-issue-failed"]
+    );
+    let attention = db::list_task_records_cursor(&pool, &query("attention"))
+        .await
+        .expect("attention page");
+    assert_eq!(ids(&attention), vec!["task-issue-attention"]);
+    let failed = db::list_task_records_cursor(&pool, &query("failed"))
+        .await
+        .expect("failed page");
+    assert_eq!(ids(&failed), vec!["task-issue-failed"]);
+}
+
+#[tokio::test]
 async fn task_query_indexes_are_created() {
     let (_db, pool) = test_pool("task-query-indexes").await;
     let indexes: Vec<String> = sqlx::query_scalar(

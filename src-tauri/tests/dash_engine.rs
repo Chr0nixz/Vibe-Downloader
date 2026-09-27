@@ -1520,3 +1520,196 @@ async fn sec11_cross_origin_segment_requests_strip_credentials() {
     }
     pool.close().await;
 }
+
+// FUN-32 (R26-F03): a SegmentList whose init bytes and media segments address
+// byte ranges of the same file must produce exact Range requests on the wire,
+// not full-file downloads. The server asserts each request's Range header and
+// answers 206 Partial Content; the engine fails the download if it sees a 200
+// where a range was requested.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segment_list_media_ranges_issue_exact_range_requests() {
+    if !ffmpeg_available() {
+        eprintln!("skipping DASH mediaRange test: ffmpeg not in PATH");
+        return;
+    }
+    common::install_test_secret_key();
+
+    let mp4 = generate_test_mp4();
+    // Split the fixture into three windows: init + two media ranges.
+    let init_len = mp4.len() / 3;
+    let seg_len = mp4.len() / 3;
+    let windows: Vec<(usize, usize)> = vec![
+        (0, init_len),
+        (init_len, init_len + seg_len),
+        (init_len + seg_len, mp4.len()),
+    ];
+    type RangeLog = Arc<std::sync::Mutex<Vec<String>>>;
+    let range_log: RangeLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mp4 = Arc::new(mp4);
+
+    let windows_for_server = windows.clone();
+    let server = TestServer::start({
+        let range_log = range_log.clone();
+        let mp4 = mp4.clone();
+        move |mut stream| {
+            let windows = &windows_for_server;
+            let mut buffer = [0_u8; 8192];
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/")
+                .to_string();
+            let range_header = request.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.trim().eq_ignore_ascii_case("range") {
+                    Some(value.trim().to_string())
+                } else {
+                    None
+                }
+            });
+            if path == "/ranges.mpd" {
+                let mpd = format!(
+                    r#"
+<MPD type="static" mediaPresentationDuration="PT10S" xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4" contentType="video">
+      <Representation id="v0" bandwidth="500000" codecs="avc1.42c01e">
+        <SegmentList>
+          <Initialization sourceURL="video.mp4" range="{init_start}-{init_end}" />
+          <SegmentURL media="video.mp4" mediaRange="{seg0_start}-{seg0_end}" />
+          <SegmentURL media="video.mp4" mediaRange="{seg1_start}-{seg1_end}" />
+        </SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>
+"#,
+                    init_start = windows[0].0,
+                    init_end = windows[0].1 - 1,
+                    seg0_start = windows[1].0,
+                    seg0_end = windows[1].1 - 1,
+                    seg1_start = windows[2].0,
+                    seg1_end = windows[2].1 - 1,
+                );
+                let body = mpd.as_bytes();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/dash+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body);
+                return;
+            }
+            if path == "/video.mp4" {
+                range_log
+                    .lock()
+                    .expect("range log lock")
+                    .push(range_header.clone().unwrap_or_default());
+                let Some(header) = range_header else {
+                    // A mediaRange request that arrives without a Range header
+                    // is the bug under test; refuse with a visible failure.
+                    let body = b"range required";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(body);
+                    return;
+                };
+                let Some((start, end)) = header
+                    .strip_prefix("bytes=")
+                    .and_then(|v| v.split_once('-'))
+                    .and_then(|(s, e)| Some((s.parse::<usize>().ok()?, e.parse::<usize>().ok()?)))
+                else {
+                    let body = b"bad range";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(body);
+                    return;
+                };
+                let slice = &mp4[start..=end.min(mp4.len() - 1)];
+                let response = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    mp4.len(),
+                    slice.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(slice);
+                return;
+            }
+            let body = b"not found";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(body);
+        }
+    });
+
+    let (_db, pool) = common::test_pool("dash-media-range").await;
+    let mut paths = common::TestPaths::new("dash-media-range");
+    let root = paths.final_path.parent().expect("root").to_path_buf();
+    paths.temp = root.join("temp.mp4");
+    paths.final_path = root.join("ranges.mp4");
+    let task = common::download_task(
+        "dash-media-range",
+        format!("{}/ranges.mpd", server.base_url),
+        "dash",
+        "ranges.mp4",
+        0,
+        &paths,
+        true,
+    );
+    db::insert_task_record(&pool, &task).await.expect("insert");
+    db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments");
+
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("mediaRange DASH download completes");
+
+    let logged = range_log.lock().expect("range log lock").clone();
+    assert_eq!(
+        logged.len(),
+        3,
+        "init + two media ranges must each issue one ranged request; got {logged:?}"
+    );
+    assert_eq!(
+        logged[0],
+        format!("bytes={}-{}", windows[0].0, windows[0].1 - 1)
+    );
+    assert_eq!(
+        logged[1],
+        format!("bytes={}-{}", windows[1].0, windows[1].1 - 1)
+    );
+    assert_eq!(
+        logged[2],
+        format!("bytes={}-{}", windows[2].0, windows[2].1 - 1)
+    );
+
+    let completed = db::get_task_record(&pool, "dash-media-range")
+        .await
+        .expect("read task")
+        .expect("task exists");
+    assert_eq!(completed.status, TaskStatus::Completed);
+    pool.close().await;
+}

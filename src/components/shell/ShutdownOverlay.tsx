@@ -43,7 +43,7 @@ export function ShutdownOverlay() {
       role="alert"
       aria-live="assertive"
     >
-      <div className="flex flex-col items-center gap-4 rounded-xl bg-surface-overlay px-8 py-6 shadow-md ring-1 ring-border-subtle">
+      <div className="flex flex-col items-center gap-4 rounded-xl bg-surface-popover px-8 py-6 shadow-md ring-1 ring-border-subtle">
         <div
           className="h-8 w-8 rounded-full border-2 border-border-subtle border-t-accent-primary motion-safe:animate-spin"
           aria-hidden="true"

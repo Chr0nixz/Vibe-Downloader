@@ -20,7 +20,7 @@ describe("recovery center key tables", () => {
   it("maps every history, source, and playbook key in every locale", async () => {
     const i18n = (await import("@/i18n")).default;
     const { SUPPORTED_LOCALES } = await import("@/i18n");
-    const { PLAYBOOK } = await import("@/components/workspaces/recovery-center-logic");
+    const { PLAYBOOK, RECOVERY_CONCERNS } = await import("@/components/workspaces/recovery-center-logic");
     const previous = i18n.language;
     try {
       for (const locale of SUPPORTED_LOCALES) {
@@ -34,6 +34,12 @@ describe("recovery center key tables", () => {
         for (const [action, entry] of Object.entries(PLAYBOOK)) {
           expect(i18n.exists(entry.keepsKey), `${locale} missing ${entry.keepsKey} (${action})`).toBe(true);
           expect(i18n.exists(entry.deletesKey), `${locale} missing ${entry.deletesKey} (${action})`).toBe(true);
+        }
+        // Both centers and the details panel build the concern label from
+        // the union, so the literal-key scan never sees these.
+        for (const concern of RECOVERY_CONCERNS) {
+          const key = `recoveryCenter.concern.${concern}`;
+          expect(i18n.exists(key), `${locale} missing ${key}`).toBe(true);
         }
       }
     } finally {
@@ -112,6 +118,44 @@ describe("recoveryConcern", () => {
     expect(recoveryConcern(makeTask({ id: "c", failureCategory: "other", errorCode: "disk_write_failed" }))).toBe(
       "disk",
     );
+  });
+
+  it("groups server-side credential rejections under the auth concern", () => {
+    // FUN-31: credential repair must be reachable for every protocol that
+    // consumes task_credentials — an http_denied (401/403) or an FTP/SFTP
+    // login failure is exactly the "rotate the stored secret" scenario.
+    for (const errorCode of ["http_denied", "ftp_auth_failed", "sftp_auth_failed"]) {
+      expect(recoveryConcern(makeTask({ id: errorCode, failureCategory: "http", errorCode }))).toBe("auth");
+    }
+  });
+
+  it("classifies restart-class codes by concern even without a failure category", () => {
+    // These used to fall through to the catch-all ("Internal errors") while the
+    // Attention Center filed the same task under "Source".
+    expect(recoveryConcern(makeTask({ id: "a", errorCode: "remote_changed", recoveryActions: ["restart"] }))).toBe(
+      "remoteChanged",
+    );
+    for (const errorCode of [
+      "resume_unavailable",
+      "resume_mismatch",
+      "temp_file_missing",
+      "temp_file_smaller_than_progress",
+    ]) {
+      expect(recoveryConcern(makeTask({ id: errorCode, errorCode, recoveryActions: ["restart"] }))).toBe("resume");
+    }
+  });
+
+  it("files a save-path conflict with disk and save path, not the catch-all", () => {
+    // The backend categorises the conflict as "other"; the Attention Center
+    // used to call it "Storage" and now shares this taxonomy.
+    const task = makeTask({
+      id: "a",
+      status: "needs_attention",
+      failureCategory: "other",
+      errorCode: "final_path_conflict",
+      recoveryActions: ["choose_another_name", "choose_another_folder", "retry"],
+    });
+    expect(recoveryConcern(task)).toBe("disk");
   });
 
   it("falls back to the recovery actions when no category is present", () => {

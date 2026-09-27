@@ -11,8 +11,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { TranslationKey } from "@/i18n";
+import type { Platform } from "@/lib/platform";
 import { getBrowserIntegrationStatus } from "@/lib/tauri";
-import { cn } from "@/lib/utils";
+import { cn, formatShortcut } from "@/lib/utils";
 
 const ONBOARDING_STORAGE_KEY = "vibe-onboarding-completed";
 const TOTAL_STEPS = 3;
@@ -51,12 +52,14 @@ export function OnboardingDialog({
   onOpenChange,
   onOpenSettings,
   onOpenNewDownload,
+  platform = "unknown",
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onOpenSettings?: () => void;
   /** Opens New Download and ends onboarding — the aha path. */
   onOpenNewDownload?: () => void;
+  platform?: Platform;
 }) {
   const { t } = useTranslation();
   const [step, setStep] = useState(0);
@@ -123,7 +126,8 @@ export function OnboardingDialog({
     >
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>{t("onboarding.title")}</DialogTitle>
+          {/* The welcome title outranks the per-step heading below it. */}
+          <DialogTitle className="text-base font-semibold">{t("onboarding.title")}</DialogTitle>
           <DialogDescription className="sr-only">
             {t("onboarding.stepIndicator", { current: step + 1, total: TOTAL_STEPS })}
           </DialogDescription>
@@ -139,7 +143,8 @@ export function OnboardingDialog({
                 aria-hidden={i !== step ? "true" : undefined}
                 aria-current={i === step ? "step" : undefined}
                 className={cn(
-                  "h-1.5 rounded-full transition-all duration-[var(--motion-ui)]",
+                  // Only the color fades; the width snaps so step changes never animate layout.
+                  "h-1.5 rounded-full transition-colors duration-[var(--motion-ui)]",
                   i === step ? "w-6 bg-accent-primary" : "w-1.5 bg-border-subtle",
                 )}
               />
@@ -147,8 +152,13 @@ export function OnboardingDialog({
           </ol>
 
           <div className="space-y-2">
-            <h3 className="text-base font-semibold text-text-primary">{t(stepTitleKey)}</h3>
-            <p className="text-sm leading-relaxed text-text-secondary">{t(stepBodyKey)}</p>
+            <h3 className="text-sm font-semibold text-text-primary">{t(stepTitleKey)}</h3>
+            <p className="text-sm leading-relaxed text-text-secondary">
+              {t(stepBodyKey, {
+                newDownload: formatShortcut("mod+N", platform),
+                palette: formatShortcut("mod+K", platform),
+              })}
+            </p>
           </div>
 
           {step === 0 ? (

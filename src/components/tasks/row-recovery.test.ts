@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import type { Task } from "@/types/task";
-import { hasInlineRecovery, recoveryActionsForTask, rowShowsRetry, rowTransferMode } from "./row-recovery";
+import {
+  hasInlineRecovery,
+  inlineRecoveryActionsForTask,
+  pauseWouldDiscardProgress,
+  recoveryActionsForTask,
+  rowShowsRetry,
+  rowTransferMode,
+} from "./row-recovery";
 
 function task(overrides: Partial<Task> = {}): Task {
   const now = "2026-01-01T00:00:00.000Z";
@@ -52,6 +59,17 @@ function task(overrides: Partial<Task> = {}): Task {
 }
 
 describe("row recovery visibility", () => {
+  it("marks an active non-resumable task with bytes on disk as destructive to pause", () => {
+    expect(pauseWouldDiscardProgress(task({ supportsResume: false }))).toBe(true);
+    expect(pauseWouldDiscardProgress(task({ supportsResume: true }))).toBe(false);
+    expect(pauseWouldDiscardProgress(task({ supportsResume: false, downloadedBytes: 0 }))).toBe(false);
+  });
+
+  it("does not warn for paused or completed tasks even when resume is unavailable", () => {
+    expect(pauseWouldDiscardProgress(task({ status: "paused", supportsResume: false }))).toBe(false);
+    expect(pauseWouldDiscardProgress(task({ status: "completed", supportsResume: false }))).toBe(false);
+  });
+
   it("hides resume and standalone retry when restart is the inline primary", () => {
     const failed = task({
       status: "failed",
@@ -77,7 +95,7 @@ describe("row recovery visibility", () => {
     expect(rowShowsRetry(failed)).toBe(false);
   });
 
-  it("keeps a fallback retry when a failed row has no recovery actions", () => {
+  it("keeps a safe retry when a failed row has no recovery actions", () => {
     const failed = task({
       status: "failed",
       errorMessage: "Mystery failure",
@@ -85,7 +103,19 @@ describe("row recovery visibility", () => {
     });
 
     expect(hasInlineRecovery(failed)).toBe(false);
-    expect(rowTransferMode(failed)).toBe("resume");
+    expect(rowTransferMode(failed)).toBe("hidden");
+    expect(rowShowsRetry(failed)).toBe(true);
+  });
+
+  it("keeps an open-folder utility action out of the inline recovery set", () => {
+    const failed = task({
+      status: "failed",
+      errorMessage: "Network error",
+      recoveryActions: ["open_folder"],
+    });
+
+    expect(inlineRecoveryActionsForTask(failed)).toEqual([]);
+    expect(hasInlineRecovery(failed)).toBe(false);
     expect(rowShowsRetry(failed)).toBe(true);
   });
 
