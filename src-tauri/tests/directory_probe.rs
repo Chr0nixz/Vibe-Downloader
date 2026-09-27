@@ -355,6 +355,10 @@ struct FtpDirServer {
 
 impl FtpDirServer {
     fn start(config: FtpDirConfig) -> Self {
+        // Every loopback fake server must install the SSRF bypass, mirroring
+        // `common::TestServer::start` — the OnceLock is process-wide, so
+        // relying on another test to install it first is a race.
+        common::install_intranet_test_bypass();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let stop = Arc::new(AtomicBool::new(false));
@@ -827,6 +831,9 @@ async fn fun04_ftp_directory_probe_uses_socks5_proxy() {
 async fn arc55_webdav_probe_cancel_converges() {
     use tauri_app_lib::download::probe_webdav_directory_url_cancellable;
 
+    // Dials loopback directly (no fake server): install the SSRF bypass
+    // explicitly instead of relying on another test's OnceLock write.
+    common::install_intranet_test_bypass();
     let listener = TokioTcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind stall server");
@@ -875,6 +882,9 @@ async fn arc55_webdav_probe_cancel_converges() {
 async fn arc55_webdav_probe_error_not_masked_by_budget() {
     use tauri_app_lib::download::probe_webdav_directory_url_cancellable;
 
+    // Dials loopback directly (no fake server): install the SSRF bypass
+    // explicitly instead of relying on another test's OnceLock write.
+    common::install_intranet_test_bypass();
     // Port closed → connect fails fast; bounded_probe must surface the
     // connect error, not wait the full budget or mislabel it.
     let factory = tauri_app_lib::download::NetworkClientFactory::new();

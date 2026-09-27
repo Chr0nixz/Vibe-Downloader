@@ -145,8 +145,6 @@ async fn probe_ffmpeg_version_with_budget(
         .spawn()
         .map_err(|e| format!("Failed to spawn ffmpeg: {e}"))?;
 
-    // Drain the pipes concurrently with the wait. Reading only after exit
-    // would deadlock on a child that blocks on a full pipe (>~64 KiB).
     let stdout_pipe = child.stdout.take().expect("stdout is piped");
     let stderr_pipe = child.stderr.take().expect("stderr is piped");
     let stdout_task = tokio::spawn(drain_capped_output(stdout_pipe, max_output_bytes));
@@ -515,28 +513,48 @@ mod tests {
         );
     }
 
-    /// An existing executable any platform can spawn: the probe only passes
-    /// `-version`, so `cmd.exe`/`sh` exits fast on its own — a zero deadline
-    /// still deterministically walks the kill+wait timeout path instead.
-    fn existing_binary() -> std::path::PathBuf {
+    /// Hang fixture: never exits on its own, so the probe's deadline path is
+    /// exercised deterministically. A fast-exiting binary (e.g. `sh -version`,
+    /// which errors out immediately on the unknown flag) can win the race
+    /// against even a zero deadline and skip the timeout branch entirely.
+    /// A busy loop keeps the hang inside the spawned process itself, so
+    /// `kill` reaps it directly with no orphaned grandchildren.
+    fn hang_script() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vibe-ffmpeg-probe-hang-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        #[cfg(unix)]
+        let (path, body) = (
+            dir.join("fake-ffmpeg-hang.sh"),
+            "#!/bin/sh\nwhile true; do :; done\n".to_string(),
+        );
         #[cfg(target_os = "windows")]
+        let (path, body) = (
+            dir.join("fake-ffmpeg-hang.cmd"),
+            "@echo off\r\n:loop\r\ngoto loop\r\n".to_string(),
+        );
+        std::fs::write(&path, body).expect("write hang script");
+        #[cfg(unix)]
         {
-            std::env::var("WINDIR")
-                .map(|dir| std::path::Path::new(&dir).join("System32").join("cmd.exe"))
-                .expect("WINDIR must be set on Windows")
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            std::path::PathBuf::from("/bin/sh")
-        }
+        path
     }
 
     #[tokio::test]
     async fn probe_version_deadline_kills_and_reaps_a_hung_binary() {
-        let binary = existing_binary();
+        let binary = hang_script();
         assert!(binary.exists(), "fixture binary must exist");
-        // Duration::ZERO forces the timeout branch on any spawnable binary —
-        // the hang path is deterministic without a deliberately-slow fixture.
+        // Duration::ZERO forces the timeout branch; the fixture never exits
+        // on its own, so the kill+wait path is taken deterministically.
         let start = std::time::Instant::now();
         let err = probe_ffmpeg_version_with_budget(
             &binary,
@@ -557,6 +575,7 @@ mod tests {
             "timeout path took too long: {:?}",
             start.elapsed()
         );
+        let _ = std::fs::remove_dir_all(binary.parent().expect("fixture dir"));
     }
 
     #[tokio::test]

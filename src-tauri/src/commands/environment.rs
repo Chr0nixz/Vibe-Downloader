@@ -786,9 +786,12 @@ pub fn find_latest_db_backup(db_path: &Path) -> Option<PathBuf> {
             .ok()
             .and_then(|meta| meta.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
+            // Millisecond precision: `as_secs()` collapses backups written
+            // within the same second into a tie that `read_dir` order then
+            // breaks arbitrarily, making "newest" nondeterministic.
+            .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        if best.as_ref().is_none_or(|(secs, _)| modified >= *secs) {
+        if best.as_ref().is_none_or(|(ms, _)| modified >= *ms) {
             best = Some((modified, path));
         }
     }
