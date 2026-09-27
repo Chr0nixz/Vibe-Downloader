@@ -41,7 +41,7 @@ jobs:
         run: pnpm test:coverage
       - name: Upload frontend coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-coverage
           path: coverage/
@@ -102,7 +102,7 @@ jobs:
         run: cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --lcov --output-path lcov.info
       - name: Upload rust coverage
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-coverage
           path: lcov.info
