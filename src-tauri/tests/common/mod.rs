@@ -165,6 +165,7 @@ impl TestDbGuard {
 }
 
 impl TestDbGuard {
+    #[allow(dead_code)]
     fn remove_files(path: &Path) -> bool {
         // Main db first; sqlite deletes its own -wal/-shm on a clean close,
         // so a missing sidecar is not an error.
