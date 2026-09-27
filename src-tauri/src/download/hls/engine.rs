@@ -1529,10 +1529,8 @@ impl StreamingAes128CbcDecryptor {
             return Err("AES-128 HLS ciphertext is not block-aligned.".to_string());
         }
         let mut plaintext = Vec::with_capacity(ciphertext.len());
-        for block_bytes in ciphertext.chunks_exact(16) {
-            let ciphertext_block: [u8; 16] = block_bytes
-                .try_into()
-                .map_err(|_| "AES-128 HLS ciphertext block is invalid.".to_string())?;
+        for block_bytes in ciphertext.as_chunks::<16>().0 {
+            let ciphertext_block = *block_bytes;
             let mut block = Array::from(ciphertext_block);
             self.cipher.decrypt_block(&mut block);
             plaintext.extend(

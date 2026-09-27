@@ -3,7 +3,7 @@
 
 use std::{sync::atomic::Ordering, time::Duration};
 
-use tauri_app_lib::download::GlobalSpeedLimiter;
+use tauri_app_lib::download::{GlobalSpeedLimiter, ThrottleError};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -62,7 +62,10 @@ async fn completed_paused_and_failed_runs_release_every_ticker() {
                         async move { limiter.throttle(1_000_000, &cancel).await }
                     });
                     cancel.cancel();
-                    assert!(waiter.await.expect("waiter exits").is_err());
+                    assert_eq!(
+                        waiter.await.expect("waiter exits"),
+                        Err(ThrottleError::Cancelled)
+                    );
                 }
                 "failed" => {
                     let owner = limiter.clone();

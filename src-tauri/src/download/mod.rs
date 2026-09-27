@@ -36,7 +36,7 @@ pub use metalink::testing;
 pub use metalink::MetalinkEngine;
 pub use net_factory::NetworkClientFactory;
 pub use sftp::{probe_sftp_directory_url, probe_sftp_directory_url_cancellable, SftpEngine};
-pub use speed::GlobalSpeedLimiter;
+pub use speed::{GlobalSpeedLimiter, ThrottleError};
 pub use webdav::{
     probe_webdav_directory_url, probe_webdav_directory_url_cancellable, WebDavEngine,
 };

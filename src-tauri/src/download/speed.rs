@@ -9,6 +9,12 @@ use std::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ThrottleError {
+    #[error("throttling cancelled")]
+    Cancelled,
+}
+
 /// Process-monotonic millisecond clock (PERF-08).
 /// Anchored once so wall-clock jumps cannot stall token refill.
 fn mono_anchor() -> Instant {
@@ -207,7 +213,7 @@ impl GlobalSpeedLimiter {
         self: &Arc<Self>,
         bytes: usize,
         cancel: &CancellationToken,
-    ) -> Result<(), ()> {
+    ) -> Result<(), ThrottleError> {
         if let Some(parent) = &self.parent {
             self.throttle_self(bytes, cancel).await?;
             parent.throttle_self(bytes, cancel).await?;
@@ -221,13 +227,13 @@ impl GlobalSpeedLimiter {
         self: &Arc<Self>,
         bytes: usize,
         cancel: &CancellationToken,
-    ) -> Result<(), ()> {
+    ) -> Result<(), ThrottleError> {
         let mut remaining = bytes as i64;
         let mut spin_count = 0u32;
 
         while remaining > 0 {
             if cancel.is_cancelled() {
-                return Err(());
+                return Err(ThrottleError::Cancelled);
             }
 
             let limit = self.limit_bps.load(Ordering::Relaxed);
@@ -281,7 +287,7 @@ impl GlobalSpeedLimiter {
                     continue;
                 }
                 tokio::select! {
-                    _ = cancel.cancelled() => return Err(()),
+                    _ = cancel.cancelled() => return Err(ThrottleError::Cancelled),
                     _ = notified => {}
                 }
                 spin_count = 0;
@@ -291,7 +297,7 @@ impl GlobalSpeedLimiter {
             spin_count += 1;
             if spin_count >= 4 {
                 tokio::select! {
-                    _ = cancel.cancelled() => return Err(()),
+                    _ = cancel.cancelled() => return Err(ThrottleError::Cancelled),
                     _ = tokio::task::yield_now() => {}
                 }
                 spin_count = 0;
@@ -382,7 +388,7 @@ mod tests {
             .await
             .expect("throttle cancel must converge quickly")
             .expect("join");
-        assert!(result.is_err(), "throttle should report cancellation");
+        assert_eq!(result, Err(ThrottleError::Cancelled));
     }
 
     #[tokio::test]
