@@ -1539,7 +1539,8 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 
 - **证据／影响**：`probe_ffmpeg_version_at_path` 用 `output().await` 裸等 `ffmpeg -version`，无 timeout/取消/kill_on_drop——设置验证与环境检查可被一个挂死或持续输出的二进制永久卡住；下载 remux 的取消治理不覆盖此路径。
 - **修复合同**：短总超时、输出字节上限；超时/取消 kill 后 wait 回收无残留 PID；设置验证与环境检查复用同一实现，返回稳定超时错误。
-- **2026-09-21 修复证据**：探测重构为外层 `probe_ffmpeg_version_at_path`（固定 `FFMPEG_PROBE_TIMEOUT=15s` + `FFMPEG_PROBE_MAX_OUTPUT_BYTES=256KiB`）+ 内层 `probe_ffmpeg_version_with_budget`（可传预算供测试走 kill+wait 路径）；`stdin=null` 防挂死输入；stdout/stderr 管道由独立 task 并发排空（修掉先 wait 后读在 >64KiB 输出时的管道死锁），`take(cap+1)` 截断；超时 kill+wait 回收子进程。`commands/ffmpeg.rs`（设置验证）与 `commands/environment.rs`（环境检查）共用同一实现。测试 4/4：missing path、zero-deadline 确定性走 timeout 错误、非零退出码、真 ffmpeg 版本串；Unix 另有 flood/hang 两个 cfg(unix) fixture。
+- **2026-09-21 修复证据**：探测重构为外层 `probe_ffmpeg_version_at_path`（固定 `FFMPEG_PROBE_TIMEOUT=15s` + `FFMPEG_PROBE_MAX_OUTPUT_BYTES=256KiB`）+ 内层 `probe_ffmpeg_version_with_budget`（可传预算供测试走 kill+wait 路径）；`stdin=null` 防挂死输入；stdout/stderr 管道由独立 task 并发排空（修掉先 wait 后读在 >64KiB 输出时的管道死锁），每条管道最多保留 `cap` 字节、超过后继续读并丢弃，避免子进程写入时遇到已关闭的管道；超时 kill+wait 回收子进程。`commands/ffmpeg.rs`（设置验证）与 `commands/environment.rs`（环境检查）共用同一实现。测试 4/4：missing path、zero-deadline 确定性走 timeout 错误、非零退出码、真 ffmpeg 版本串；Unix 另有 flood/hang 两个 cfg(unix) fixture。
+- **2026-09-27 回归修复**：CI 的 flood fixtures 写入超过保留上限后，原 `take(cap+1)` 会关闭读取端，使有限输出的脚本因 SIGPIPE 失败，并让无限输出 fixture 报出子进程错误而非稳定超时。新增 capped drain loop：只保留前缀、持续排空管道直到 EOF；无限输出仍由 deadline 分支 kill+wait。有限与无限 flood 回归测试均通过。
 
 ### FUN-31（P2，Closed）：恢复中心凭据修复不覆盖 HTTP 派生引擎（R26-F06）
 

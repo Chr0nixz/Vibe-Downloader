@@ -100,9 +100,9 @@ pub(crate) async fn ensure_ffmpeg_available(
 /// one (ARC-54).
 const FFMPEG_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Bound on combined stdout+stderr the probe retains. A malformed binary
-/// could otherwise spew unbounded output that `output()` buffers in memory
-/// for the whole deadline.
+/// Bound on each output stream the probe retains. A malformed binary could
+/// otherwise spew unbounded output that `output()` buffers in memory for the
+/// whole deadline.
 const FFMPEG_PROBE_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
 /// Probe the ffmpeg version string for a given binary path.
@@ -147,25 +147,10 @@ async fn probe_ffmpeg_version_with_budget(
 
     // Drain the pipes concurrently with the wait. Reading only after exit
     // would deadlock on a child that blocks on a full pipe (>~64 KiB).
-    use tokio::io::AsyncReadExt;
     let stdout_pipe = child.stdout.take().expect("stdout is piped");
     let stderr_pipe = child.stderr.take().expect("stderr is piped");
-    let stdout_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stdout_pipe
-            .take(max_output_bytes as u64 + 1)
-            .read_to_end(&mut buf)
-            .await;
-        buf
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stderr_pipe
-            .take(max_output_bytes as u64 + 1)
-            .read_to_end(&mut buf)
-            .await;
-        buf
-    });
+    let stdout_task = tokio::spawn(drain_capped_output(stdout_pipe, max_output_bytes));
+    let stderr_task = tokio::spawn(drain_capped_output(stderr_pipe, max_output_bytes));
 
     let result = tokio::time::timeout(deadline, child.wait()).await;
 
@@ -210,6 +195,29 @@ async fn probe_ffmpeg_version_with_budget(
         return Err("ffmpeg returned an empty version string.".to_string());
     }
     Ok(first_line.to_string())
+}
+
+/// Retain a bounded prefix while continuing to drain, so a verbose child does
+/// not receive a broken pipe before it exits or the probe deadline kills it.
+async fn drain_capped_output<R>(mut pipe: R, max_output_bytes: usize) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut output = Vec::with_capacity(max_output_bytes.min(8 * 1024));
+    let mut buffer = [0; 8 * 1024];
+    loop {
+        let bytes_read = match pipe.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(bytes_read) => bytes_read,
+        };
+        let retained = max_output_bytes
+            .saturating_sub(output.len())
+            .min(bytes_read);
+        output.extend_from_slice(&buffer[..retained]);
+    }
+    output
 }
 
 /// Locate an executable by name on `PATH`. Cross-platform: on Windows this
