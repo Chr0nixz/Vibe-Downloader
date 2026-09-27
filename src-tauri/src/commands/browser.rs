@@ -1951,6 +1951,7 @@ fn windows_version_vendor(browser: BrowserKind) -> &'static str {
 /// Extracts the data value from `reg query` output. A successful query emits
 /// lines like `    version    REG_SZ    141.0.7390.122`; the data is
 /// everything after the `REG_SZ` marker on the matching line.
+#[cfg(any(target_os = "windows", test))]
 fn parse_reg_version_value(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let (_, value) = line.split_once("REG_SZ")?;
@@ -1966,6 +1967,7 @@ fn parse_reg_version_value(output: &str) -> Option<String> {
 /// Firefox reports `141.0.3 (x64 zh-CN)`; keep the leading version token and
 /// require digit-prefixed dot-separated digits so locale tails or garbage
 /// never reach the UI as a "version".
+#[cfg(any(target_os = "windows", test))]
 fn normalize_browser_version(raw: &str) -> Option<String> {
     let token = raw.split_whitespace().next()?;
     let digits_and_dots = !token.is_empty()
