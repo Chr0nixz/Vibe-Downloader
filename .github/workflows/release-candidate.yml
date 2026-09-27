@@ -42,8 +42,6 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.tag }}
       - uses: pnpm/action-setup@v6
-        with:
-          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -103,8 +101,6 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.source_sha }}
       - uses: pnpm/action-setup@v6
-        with:
-          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -200,8 +196,6 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.source_sha }}
       - uses: pnpm/action-setup@v6
-        with:
-          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -231,8 +225,6 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.source_sha }}
       - uses: pnpm/action-setup@v6
-        with:
-          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version: 22
