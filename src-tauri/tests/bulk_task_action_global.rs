@@ -100,7 +100,7 @@ async fn list_task_ids_by_statuses_covers_full_db_beyond_page_size() {
         "global pause must include every matching row, not a 100-item page"
     );
 
-    let resume_ids = db::list_task_ids_by_statuses(&pool, &["paused", "failed", "waiting_network"])
+    let resume_ids = db::list_task_ids_by_statuses(&pool, &["paused", "waiting_network"])
         .await
         .expect("list resume targets");
     assert!(resume_ids.is_empty());
@@ -115,8 +115,11 @@ async fn list_task_ids_by_statuses_covers_full_db_beyond_page_size() {
         .await
         .expect("insert waiting");
 
-    let resume_ids = db::list_task_ids_by_statuses(&pool, &["paused", "failed", "waiting_network"])
+    let resume_ids = db::list_task_ids_by_statuses(&pool, &["paused", "waiting_network"])
         .await
         .expect("list resume targets after insert");
-    assert_eq!(resume_ids.len(), 3);
+    assert_eq!(resume_ids.len(), 2);
+    assert!(resume_ids.contains(&"p-1".to_string()));
+    assert!(resume_ids.contains(&"w-1".to_string()));
+    assert!(!resume_ids.contains(&"f-1".to_string()));
 }
