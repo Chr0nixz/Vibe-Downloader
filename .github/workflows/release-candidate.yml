@@ -129,7 +129,7 @@ jobs:
           UPDATER_TARGET_TAG: ${{ inputs.updater_target_tag }}
         shell: bash
         run: pnpm prepare:updater-rehearsal -- --tag "${UPDATER_TARGET_TAG}"
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
