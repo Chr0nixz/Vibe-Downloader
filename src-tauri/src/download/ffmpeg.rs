@@ -549,6 +549,40 @@ mod tests {
         path
     }
 
+    /// Fixture that exits immediately with a non-zero status, so the probe's
+    /// failure path is exercised deterministically. Relying on a system
+    /// shell's reaction to `-version` is platform-specific: dash exits 2,
+    /// but macOS bash prints its own version banner and exits 0.
+    fn nonzero_exit_script() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vibe-ffmpeg-probe-nonzero-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        #[cfg(unix)]
+        let (path, body) = (
+            dir.join("fake-ffmpeg-nonzero.sh"),
+            "#!/bin/sh\nexit 3\n".to_string(),
+        );
+        #[cfg(target_os = "windows")]
+        let (path, body) = (
+            dir.join("fake-ffmpeg-nonzero.cmd"),
+            "@echo off\r\nexit /b 3\r\n".to_string(),
+        );
+        std::fs::write(&path, body).expect("write nonzero-exit script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod");
+        }
+        path
+    }
+
     #[tokio::test]
     async fn probe_version_deadline_kills_and_reaps_a_hung_binary() {
         let binary = hang_script();
@@ -580,18 +614,11 @@ mod tests {
 
     #[tokio::test]
     async fn probe_version_surfaces_nonzero_exit_status() {
-        // `whoami -version` / `sh -version` both exit non-zero immediately on
-        // receiving the probe's single argument.
-        #[cfg(target_os = "windows")]
-        let binary = std::env::var("WINDIR")
-            .map(|dir| {
-                std::path::Path::new(&dir)
-                    .join("System32")
-                    .join("whoami.exe")
-            })
-            .expect("WINDIR must be set on Windows");
-        #[cfg(not(target_os = "windows"))]
-        let binary = std::path::PathBuf::from("/bin/sh");
+        // Deterministic fixture: a script that exits 3 immediately. A system
+        // shell cannot serve this role — its reaction to the probe's
+        // `-version` argument is platform-specific (dash exits 2, macOS bash
+        // prints its version banner and exits 0).
+        let binary = nonzero_exit_script();
         let err = probe_ffmpeg_version_at_path(&binary)
             .await
             .expect_err("a non-ffmpeg binary exits non-zero");
@@ -599,6 +626,7 @@ mod tests {
             err.contains("exited with status") || err.contains("empty version"),
             "expected a status error, got: {err}"
         );
+        let _ = std::fs::remove_dir_all(binary.parent().expect("fixture dir"));
     }
 
     /// Flood fixture: a script that prints far more than the pipe buffer and

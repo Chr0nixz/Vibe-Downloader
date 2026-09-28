@@ -30,7 +30,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls", 
 hls_m3u8 = "0.7.0"
 aes = "0.9.1"
 cbc = { version = "0.2.1", features = ["alloc"] }
-suppaftp = { version = "9.0.0", default-features = false, features = ["tokio-rustls-ring", "deprecated"] }
+suppaftp = { version = "10.0.2", default-features = false, features = ["tokio-rustls-ring", "deprecated"] }
 webpki-roots = "1.0.8"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "migrate"] }
 tokio = { version = "1.52.3", features = ["fs", "io-util", "net", "process", "sync", "time", "macros", "rt-multi-thread"] }

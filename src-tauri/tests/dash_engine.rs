@@ -5,7 +5,7 @@ use std::{
     net::TcpStream,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -140,11 +140,20 @@ fn new_probe_request(uri: String) -> ProbeRequest {
 }
 
 fn generate_test_mp4() -> Vec<u8> {
-    let id = SystemTime::now()
+    // The filename must be unique per call, not just per timestamp:
+    // `SystemTime::now()` has ~15ms granularity on Windows, so parallel
+    // tests can generate the same name and one test's cleanup then deletes
+    // another test's fixture before it is read.
+    static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = FIXTURE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-dash-recovery-{id}.mp4"));
+    let path = std::env::temp_dir().join(format!(
+        "vibe-dash-recovery-{}-{nanos}-{unique}.mp4",
+        std::process::id()
+    ));
     let status = std::process::Command::new("ffmpeg")
         .args([
             "-y",

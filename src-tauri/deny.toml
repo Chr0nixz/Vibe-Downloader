@@ -23,6 +23,15 @@ ignore = [
     # connections to their own servers; the attack requires observing many
     # timings over the network. Accept until russh ships a patched rsa.
     "RUSTSEC-2023-0071",
+    # ringbuf double-free on panicking Drop in Consumer::skip/clear
+    # (RUSTSEC-2026-0293).
+    # No safe upgrade available — librqbit-utp 0.7.0 pins ringbuf ^0.4.7;
+    # the fix (0.5.2) requires a librqbit 9.0.0-rc.0 -> 9.x BT engine
+    # upgrade, which is out of scope for a dependency bump. The bug needs
+    # an element's Drop impl to panic mid-skip; librqbit-utp only stores
+    # plain network buffers there. Accept until librqbit releases a
+    # version that allows ringbuf 0.5.
+    "RUSTSEC-2026-0293",
 ]
 
 [licenses]
