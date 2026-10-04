@@ -4,16 +4,14 @@
 //! Originally in `download/http/file.rs`; moved to a protocol-neutral location
 //! because it is reused by FTP/SFTP/DASH/HLS/Metalink and other HTTP-derived engines.
 
+use crate::download::owned_fs as fs;
 use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
 };
 
 use sqlx::SqlitePool;
-use tokio::{
-    fs,
-    io::{AsyncReadExt, AsyncWriteExt},
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::{db, models::AppErrorPayload};
@@ -107,7 +105,7 @@ fn publication_error(error: std::io::Error, destination: &Path) -> String {
 async fn publish_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
     let source = source.to_path_buf();
     let destination = destination.to_path_buf();
-    tokio::task::spawn_blocking(move || rename_noreplace(&source, &destination))
+    crate::download::lifecycle::blocking(move || rename_noreplace(&source, &destination))
         .await
         .map_err(std::io::Error::other)?
 }

@@ -14,6 +14,16 @@ const mocks = vi.hoisted(() => ({
   getIntegrityPassport: vi.fn(),
   getSegmentSummary: vi.fn(),
   getTaskProxySettings: vi.fn(),
+  getTaskRequestProfile: vi.fn().mockResolvedValue({
+    taskId: "task",
+    userAgent: null,
+    referer: null,
+    customHeaders: [],
+    sensitiveHeaderNames: [],
+    sensitiveExpiresAt: null,
+    sensitiveExpired: false,
+  }),
+  updateTaskRequestProfile: vi.fn(),
   getTorrentRuntimeSnapshot: vi.fn(),
   listDashSegmentsPage: vi.fn(),
   listHlsSegmentsPage: vi.fn(),
@@ -52,6 +62,8 @@ vi.mock("@/lib/tauri", () => ({
   getIntegrityPassport: mocks.getIntegrityPassport,
   getSegmentSummary: mocks.getSegmentSummary,
   getTaskProxySettings: mocks.getTaskProxySettings,
+  getTaskRequestProfile: mocks.getTaskRequestProfile,
+  updateTaskRequestProfile: mocks.updateTaskRequestProfile,
   getTorrentRuntimeSnapshot: mocks.getTorrentRuntimeSnapshot,
   listDashSegmentsPage: mocks.listDashSegmentsPage,
   listHlsSegmentsPage: mocks.listHlsSegmentsPage,
@@ -179,6 +191,14 @@ describe("TaskDetails", () => {
       speedBps: "0",
     });
     mocks.listSftpKnownHosts.mockResolvedValue([]);
+    mocks.getTaskProxySettings.mockResolvedValue({
+      taskId: "task-details",
+      mode: "inherit",
+      proxyUrl: "",
+      proxyUsername: "",
+      proxyPasswordSaved: false,
+      noProxy: "",
+    });
     mocks.finishLiveRecording.mockResolvedValue({});
     mocks.getIntegrityPassport.mockResolvedValue(makePassport("task-details"));
     mocks.onTaskUpdated.mockResolvedValue(mocks.unlisten);
@@ -211,6 +231,25 @@ describe("TaskDetails", () => {
     // The Overview timeline also loads events, so this is the second fetch.
     await waitFor(() => expect(mocks.listTaskEventsPage).toHaveBeenCalledTimes(2));
     expect(screen.getByText("taskDetails.noLogs")).toBeInTheDocument();
+  });
+
+  it("allows changing a running task's speed limit and priority", async () => {
+    const user = userEvent.setup();
+    const task = makeTask("task-live-speed", "live-speed.zip", { status: "downloading" });
+    seedTasks([task]);
+    mocks.updateTaskTransferOptions.mockResolvedValue({ ...task, taskSpeedLimitBps: "2097152" });
+    renderDetails(task.id);
+
+    await user.click(screen.getByRole("button", { name: "taskDetails.advancedSettings" }));
+
+    const speedLimit = document.getElementById("task-speed-limit") as HTMLInputElement;
+    expect(speedLimit).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "taskDetails.priority" })).toBeEnabled();
+    expect(screen.getByText("taskDetails.transferSettingsRunningHint")).toBeInTheDocument();
+
+    await user.type(speedLimit, "2");
+    await user.click(screen.getByRole("button", { name: "taskDetails.saveTransfer" }));
+    await waitFor(() => expect(mocks.updateTaskTransferOptions).toHaveBeenCalled());
   });
 
   it("keeps task state anchored while diagnostics change evidence views", async () => {
@@ -318,6 +357,70 @@ describe("TaskDetails", () => {
     const callsAfterLeave = mocks.getTorrentRuntimeSnapshot.mock.calls.length;
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(mocks.getTorrentRuntimeSnapshot).toHaveBeenCalledTimes(callsAfterLeave);
+  });
+
+  it("keeps BT file selection reachable when metadata has no runtime session", async () => {
+    const task = makeTask("task-bt-selection", "magnet-selection", {
+      protocol: "magnet",
+      url: "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      status: "needs_attention",
+      errorCode: "bt_file_selection_required",
+      errorMessage: JSON.stringify({
+        code: "bt_file_selection_required",
+        message: "Choose at least one torrent file before downloading.",
+        recoverable: true,
+        actions: ["check_url"],
+      }),
+      recoveryActions: ["check_url"],
+      files: [
+        {
+          id: "bt-file-1",
+          taskId: "task-bt-selection",
+          relativePath: "docs/readme.txt",
+          fileName: "readme.txt",
+          saveDir: "D:\\Downloads",
+          tempPath: null,
+          finalPath: null,
+          totalSize: 120,
+          downloadedBytes: 0,
+          selected: false,
+          status: "queued",
+          contentType: "text/plain",
+        },
+        {
+          id: "bt-file-2",
+          taskId: "task-bt-selection",
+          relativePath: "bin/app.exe",
+          fileName: "app.exe",
+          saveDir: "D:\\Downloads",
+          tempPath: null,
+          finalPath: null,
+          totalSize: 240,
+          downloadedBytes: 0,
+          selected: false,
+          status: "queued",
+          contentType: "application/octet-stream",
+        },
+      ],
+    });
+    mocks.getTorrentRuntimeSnapshot.mockRejectedValue(new Error("runtime session is not present"));
+    seedTasks([task]);
+    renderDetails(task.id);
+
+    expect(screen.getByText("docs/readme.txt")).toBeInTheDocument();
+    expect(screen.getAllByText("errors.btFileSelectionRequired")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "newDownload.chooseFile" })).toBeInTheDocument();
+    expect(screen.getByText("taskDetails.btNoRuntime")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /docs\/readme\.txt/ }));
+    fireEvent.click(screen.getByRole("button", { name: "taskDetails.btSaveFiles" }));
+
+    await waitFor(() =>
+      expect(mocks.updateTorrentFileSelection).toHaveBeenCalledWith({
+        taskId: task.id,
+        selectedFilePaths: ["docs/readme.txt"],
+      }),
+    );
   });
 
   it("loads HLS segments instead of placeholder task_segments", async () => {

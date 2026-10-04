@@ -1,6 +1,125 @@
 use crate::platform;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use specta::Type;
 use std::path::Path;
+use tauri::{AppHandle, Manager, State};
+
+use crate::{db, events::emit_settings_changed, AppState};
+
+#[derive(Debug, Clone, Copy, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseRequestAction {
+    Tray,
+    PauseExit,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopStatusUpdate {
+    /// Already-localized tooltip text assembled by the frontend.
+    pub tooltip: String,
+    pub progress: Option<u32>,
+    pub has_error: bool,
+}
+
+fn close_request_state_reset(state: &State<'_, AppState>) {
+    state
+        .close_request_pending
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+async fn persist_close_to_tray(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    close_to_tray: bool,
+) -> Result<(), String> {
+    let default_dir = super::settings::default_download_dir(app)?;
+    let mut settings = db::get_settings(&state.pool, default_dir).await?;
+    settings.close_to_tray = close_to_tray;
+    db::upsert_settings(&state.pool, &settings).await?;
+    emit_settings_changed(app);
+    Ok(())
+}
+
+/// Resolve a close request emitted by the native window event handler.
+/// The pause-and-exit branch uses the same global action as the command
+/// palette, so it covers tasks outside the currently loaded page and leaves
+/// manually paused tasks untouched on the next startup.
+#[tauri::command]
+#[specta::specta]
+pub async fn resolve_close_request(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    action: CloseRequestAction,
+    remember: bool,
+) -> Result<(), String> {
+    match action {
+        CloseRequestAction::Cancel => {
+            close_request_state_reset(&state);
+        }
+        CloseRequestAction::Tray => {
+            if remember {
+                persist_close_to_tray(&app, &state, true).await?;
+            }
+            close_request_state_reset(&state);
+            if let Some(window) = app.get_webview_window("main") {
+                window.hide().map_err(|error| error.to_string())?;
+            }
+        }
+        CloseRequestAction::PauseExit => {
+            if remember {
+                persist_close_to_tray(&app, &state, false).await?;
+            }
+            // Keep the close request claimed while pausing. A second native
+            // close event must not start a competing drain before this one.
+            super::tasks::bulk_task_action_global(app.clone(), state.clone(), "pause".to_string())
+                .await?;
+            close_request_state_reset(&state);
+            crate::request_graceful_exit(app);
+        }
+    }
+    Ok(())
+}
+
+/// Update the native shell affordances from a localized frontend snapshot.
+/// The taskbar API is desktop-only; the command remains callable on mobile so
+/// the generated IPC contract stays stable across targets.
+#[tauri::command]
+#[specta::specta]
+pub async fn update_desktop_status(
+    app: AppHandle,
+    input: DesktopStatusUpdate,
+) -> Result<(), String> {
+    let tooltip = input.tooltip.trim();
+    if tooltip.is_empty() || tooltip.len() > 256 {
+        return Err("Desktop status tooltip must contain 1-256 characters.".to_string());
+    }
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_tooltip(Some(tooltip))
+            .map_err(|error| error.to_string())?;
+    }
+
+    #[cfg(desktop)]
+    if let Some(window) = app.get_webview_window("main") {
+        use tauri::window::{ProgressBarState, ProgressBarStatus};
+        let status = if input.has_error {
+            ProgressBarStatus::Error
+        } else if input.progress.is_some() {
+            ProgressBarStatus::Normal
+        } else {
+            ProgressBarStatus::None
+        };
+        window
+            .set_progress_bar(ProgressBarState {
+                status: Some(status),
+                progress: input.progress.map(u64::from),
+            })
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Serialize, specta::Type)]
 pub struct DiskSpaceInfo {
@@ -71,6 +190,18 @@ pub async fn request_system_hibernate() -> Result<(), String> {
 #[specta::specta]
 pub async fn request_lock_screen() -> Result<(), String> {
     platform::lock_screen_now()
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn prepare_app_relaunch(app: AppHandle) -> Result<(), String> {
+    crate::prepare_app_relaunch(&app).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_prepared_app_relaunch(app: AppHandle) -> Result<(), String> {
+    crate::cancel_prepared_app_relaunch(&app).await
 }
 
 /// Extract the OS-associated file-type icon for a file name.

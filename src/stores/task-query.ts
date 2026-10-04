@@ -1,4 +1,4 @@
-import type { ListTasksCursorInput, ListTasksInput } from "@/generated/bindings";
+import type { ListTasksCursorInput, ListTasksInput, TaskFailureCategory } from "@/generated/bindings";
 import { sanitizeUrlForDisplay } from "@/lib/utils";
 import type { Task } from "@/types/task";
 
@@ -186,27 +186,30 @@ export function taskFileType(task: Task): FileTypeFilter {
   return "other";
 }
 
-export function failureKind(task: Task): string {
+export function failureKind(task: Task): TaskFailureCategory | "none" {
   if (task.status !== "failed" && task.status !== "needs_attention") return "none";
   if (task.failureCategory) return task.failureCategory;
-  if (task.errorCode) {
-    if (task.errorCode === "remote_changed") return "remote_changed";
-    if (task.errorCode === "resume_unavailable") return "resume_unavailable";
-    if (task.errorCode.startsWith("temp_file")) return "temp_file";
-    if (task.errorCode === "disk_write_failed") return "disk_write";
-    if (task.errorCode.startsWith("http_") || task.errorCode === "server_rate_limited") {
-      return "http";
-    }
-    return task.errorCode;
-  }
-  const message = (task.errorMessage ?? task.healthSummary ?? "").toLowerCase();
-  if (message.includes("remote file changed")) return "remote_changed";
-  if (message.includes("resume")) return "resume_unavailable";
-  if (message.includes("temporary file")) return "temp_file";
-  if (message.includes("disk") || message.includes("write")) return "disk_write";
-  if (message.includes("http") || /\b(403|404|429|500|502|503)\b/.test(message)) {
-    return "http";
-  }
+  return failureCategoryFromCode(task.errorCode);
+}
+
+/** Keep legacy rows and browser fixtures on the same code-based taxonomy as Rust. */
+export function failureCategoryFromCode(code: string | null | undefined): TaskFailureCategory {
+  if (!code) return "other";
+  if (code === "remote_changed") return "remote_changed";
+  if (code === "resume_unavailable") return "resume_unavailable";
+  if (code === "temp_file_missing" || code === "temp_file_smaller_than_progress") return "temp_file";
+  if (code === "disk_write_failed") return "disk_write";
+  if (code === "auth_headers_expired" || code === "auth_headers_unavailable") return "auth";
+  if (code.startsWith("hls_")) return "hls";
+  if (code.startsWith("dash_")) return "dash";
+  if (code.startsWith("metalink_")) return "metalink";
+  if (code.startsWith("bt_")) return "bt";
+  if (code.startsWith("ftp_")) return "ftp";
+  if (code.startsWith("sftp_")) return "sftp";
+  if (code.startsWith("webdav_")) return "webdav";
+  if (code.startsWith("proxy_")) return "proxy";
+  if (code.startsWith("schedule_")) return "schedule";
+  if (code.startsWith("http_") || code === "server_rate_limited") return "http";
   return "other";
 }
 

@@ -23,13 +23,13 @@ async fn full_migration_on_fresh_database() {
 
     // Baseline consolidation: the original 14 incremental migrations were
     // merged into a single `001_init.sql`, followed by metalink health, HLS track
-    // selection, ARC-01 source_key unique drop, ARC-02 final_path unique, and
-    // FUN-09 metalink resource validators.
+    // selection, ARC-01 source_key unique drop, ARC-02 final_path unique,
+    // FUN-09 metalink resource validators, B4 retry state, and B5 task request profiles.
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await
         .expect("count migrations");
-    assert_eq!(count, 9, "expected exactly 9 migrations, got {count}");
+    assert_eq!(count, 13, "expected exactly 13 migrations, got {count}");
 
     pool.close().await;
 }
@@ -57,6 +57,7 @@ async fn key_tables_exist_after_migration() {
         "classification_rules",
         "storage_sweeps",
         "recovery_history",
+        "task_auto_retry_state",
     ];
     for table in &tables {
         let exists: bool = sqlx::query_scalar(
@@ -614,8 +615,8 @@ async fn migration_idempotent_on_reconnect() {
         .await
         .expect("count");
     assert_eq!(
-        count, 9,
-        "expected exactly 9 migrations on reconnect, got {count}"
+        count, 13,
+        "expected exactly 13 migrations on reconnect, got {count}"
     );
     pool2.close().await;
 

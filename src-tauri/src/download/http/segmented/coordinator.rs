@@ -1,3 +1,4 @@
+use crate::download::owned_fs as fs;
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -8,10 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::download::lifecycle::JoinSet;
 use reqwest::Client;
 use sqlx::SqlitePool;
 use tauri::AppHandle;
-use tokio::{fs, sync::mpsc, task::JoinSet};
+use tokio::sync::mpsc;
 
 use super::acceleration::{speed_is_stable, AccelerationCheck, AccelerationRuntime};
 use super::checkpoint::checkpoint_runtime_progress;
@@ -26,6 +28,7 @@ use super::{
     AUTO_ACCELERATION_MAX_SEGMENTS, AUTO_ACCELERATION_MIN_REMAINING_BYTES,
     AUTO_ACCELERATION_STABILITY_WINDOW, AUTO_ACCELERATION_WARMUP,
 };
+use crate::download::network_policy::NetworkPolicy;
 use crate::{
     db,
     download::{
@@ -66,6 +69,7 @@ pub(super) struct SegmentCoordinator<'a> {
     cancel_token: tokio_util::sync::CancellationToken,
     speed_limiter: Arc<GlobalSpeedLimiter>,
     request_headers: Vec<(String, String)>,
+    network_policy: NetworkPolicy,
 
     // Derived constants computed once in `new`.
     url: String,
@@ -91,6 +95,7 @@ impl<'a> SegmentCoordinator<'a> {
             speed_limiter,
             connection_limit,
             request_headers,
+            network_policy,
         } = context;
 
         let url = task.final_url.clone().unwrap_or_else(|| task.url.clone());
@@ -113,6 +118,7 @@ impl<'a> SegmentCoordinator<'a> {
             cancel_token,
             speed_limiter,
             request_headers,
+            network_policy,
             url,
             if_range,
             total_size,
@@ -599,6 +605,7 @@ impl<'a> SegmentCoordinator<'a> {
                     speed_limiter: self.speed_limiter.clone(),
                     request_headers: self.request_headers.clone(),
                     if_range: self.if_range.clone(),
+                    network_policy: self.network_policy.clone(),
                 }));
         }
 
@@ -731,6 +738,7 @@ impl<'a> SegmentCoordinator<'a> {
                 speed_limiter: self.speed_limiter.clone(),
                 request_headers: self.request_headers.clone(),
                 if_range: self.if_range.clone(),
+                network_policy: self.network_policy.clone(),
             }));
 
         acceleration.runtime.split_count += 1;

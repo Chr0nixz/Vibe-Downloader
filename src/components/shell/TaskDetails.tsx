@@ -29,7 +29,7 @@ import { useTranslation } from "react-i18next";
 import { ChunkMap, ChunkMapSummary } from "@/components/shell/ChunkMap";
 import { TaskPassportCard } from "@/components/shell/TaskPassportCard";
 import { TaskTimeline } from "@/components/shell/TaskTimeline";
-import { rowShowsRetry, rowTransferMode } from "@/components/tasks/row-recovery";
+import { rowShowsRetry, rowTransferMode, torrentFileSelectionRequired } from "@/components/tasks/row-recovery";
 import { SpeedSparkline } from "@/components/tasks/SpeedSparkline";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
@@ -54,6 +54,7 @@ import type {
   SftpKnownHost,
   TaskChecksum,
   TaskEvent,
+  TaskNetworkPolicyView,
   TaskPriority,
   TaskProxyMode,
   TaskProxySettings,
@@ -63,6 +64,7 @@ import { useIsCompactShell } from "@/hooks/use-shell-layout";
 import { useTaskDetailQueries } from "@/hooks/use-task-detail-queries";
 import type { TranslationKey } from "@/i18n";
 import { chunkMapCells, hasByteRangeSegments } from "@/lib/chunk-map";
+import { writeClipboardText } from "@/lib/clipboard-write";
 import { errorMessage, localizedErrorMessage, parseAppError } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format-date";
 import { timelinePayloadSummary } from "@/lib/integrity-passport";
@@ -89,10 +91,12 @@ import {
 import {
   computeFileHash,
   finishLiveRecording,
+  getTaskNetworkPolicy,
   getTaskProxySettings,
   listMetalinkMirrors,
   onTaskUpdated,
   retryTaskWithMirror,
+  revokeTaskNetworkAuthorization,
   updateTaskProxySettings,
   updateTaskTransferOptions,
   updateTorrentFileSelection,
@@ -105,6 +109,7 @@ import { useTaskDataStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
 import type { TaskSegment } from "@/types/task-segment";
+import { TaskRequestProfilePanel } from "./TaskRequestProfilePanel";
 
 const log = createLogger("task-details");
 
@@ -123,6 +128,8 @@ const EMPTY_SPEED_HISTORY: SpeedSample[] = [];
 export interface TaskDetailsActionHandlers {
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
+  onRedownload?: (task: Task) => void;
+  onRecheck?: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
   onDelete?: (task: Task) => void;
@@ -150,7 +157,7 @@ export function TaskDetails({ taskId, open, onClose, onResolveAttention, actions
   const copyToClipboard = useCallback(
     async (text: string, successKey: TranslationKey) => {
       try {
-        await navigator.clipboard?.writeText(text);
+        await writeClipboardText(text);
         addToast({ tone: "success", title: t(successKey) });
       } catch {
         addToast({ tone: "error", title: t("contextmenu.task.copyFailed") });
@@ -329,16 +336,42 @@ function TaskDetailsActions({ task, actions }: { task: Task; actions?: TaskDetai
         </Button>
       ) : null}
       {task.status === "completed" ? (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className={buttonClass}
-          onClick={() => actions.onOpenFile(task)}
-        >
-          <File className="h-3.5 w-3.5" aria-hidden />
-          {t("actions.openFile")}
-        </Button>
+        <>
+          {actions.onRedownload ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={buttonClass}
+              onClick={() => actions.onRedownload?.(task)}
+            >
+              <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+              {t("actions.redownload")}
+            </Button>
+          ) : null}
+          {actions.onRecheck ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={buttonClass}
+              onClick={() => actions.onRecheck?.(task)}
+            >
+              <Hash className="h-3.5 w-3.5" aria-hidden />
+              {t("actions.recheck")}
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className={buttonClass}
+            onClick={() => actions.onOpenFile(task)}
+          >
+            <File className="h-3.5 w-3.5" aria-hidden />
+            {t("actions.openFile")}
+          </Button>
+        </>
       ) : null}
       <Button
         type="button"
@@ -1334,6 +1367,7 @@ function TorrentRuntimePanel({
   if (task.protocol !== "bt" && task.protocol !== "magnet") return null;
 
   const canEditFiles = taskFiles.length > 1 && task.status !== "downloading" && task.status !== "retrying";
+  const requiresFileSelection = torrentFileSelectionRequired(task);
   const completedPieces = snapshot ? parseSnapshotNumber(snapshot.completedPieces) : 0;
   const pieceCount = snapshot ? Math.max(0, parseSnapshotNumber(snapshot.pieceCount)) : 0;
   const pieceCells =
@@ -1388,14 +1422,72 @@ function TorrentRuntimePanel({
     }
   }
 
+  const fileSelectionPanel =
+    taskFiles.length > 1 ? (
+      <div
+        className={cn(
+          "rounded-md bg-surface-root/50 px-3 py-2",
+          requiresFileSelection && "border border-border-warning-subtle bg-status-warning/[0.06]",
+        )}
+        data-bt-file-selection
+      >
+        <div className="mb-2 flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-text-muted">{t("taskDetails.btFiles")}</div>
+            {requiresFileSelection ? (
+              <p className="mt-1 text-[11px] leading-4 text-status-warning">{t("errors.btFileSelectionRequired")}</p>
+            ) : null}
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={!canEditFiles || saving || selectedFiles.size === 0}
+            onClick={() => void saveFileSelection()}
+          >
+            {t("taskDetails.btSaveFiles")}
+          </Button>
+        </div>
+        <div className="max-h-40 space-y-1 overflow-auto pr-1">
+          {taskFiles.map((file) => (
+            <div key={file.id} className="flex items-center gap-2 text-xs text-text-secondary">
+              <Checkbox
+                id={`task-file-${file.id}`}
+                aria-labelledby={`task-file-label-${file.id}`}
+                checked={selectedFiles.has(file.relativePath)}
+                disabled={!canEditFiles || saving}
+                onChange={(event) => {
+                  const next = new Set(selectedFiles);
+                  if (event.target.checked) next.add(file.relativePath);
+                  else next.delete(file.relativePath);
+                  setSelectedFiles(next);
+                }}
+              />
+              <label
+                id={`task-file-label-${file.id}`}
+                htmlFor={`task-file-${file.id}`}
+                className="min-w-0 flex-1 cursor-pointer truncate"
+              >
+                {file.relativePath}
+              </label>
+              <span className="ml-auto shrink-0 font-mono text-text-muted">{formatBytes(file.totalSize)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    ) : null;
+
   if (error) {
     return (
-      <p
-        role="alert"
-        className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
-      >
-        {error}
-      </p>
+      <div className="space-y-2">
+        {fileSelectionPanel}
+        <p
+          role="alert"
+          className="rounded-md border border-border-danger bg-status-danger/10 px-3 py-2 text-xs text-status-danger"
+        >
+          {error}
+        </p>
+      </div>
     );
   }
 
@@ -1409,6 +1501,7 @@ function TorrentRuntimePanel({
         <p className="rounded-md border border-border-divider bg-surface-root/50 px-3 py-2 text-xs text-text-secondary">
           {t("taskDetails.btNoRuntime")}
         </p>
+        {fileSelectionPanel}
       </div>
     );
   }
@@ -1553,45 +1646,7 @@ function TorrentRuntimePanel({
             {t("taskDetails.btSaveSeedingLimits")}
           </Button>
         </div>
-        {taskFiles.length > 1 ? (
-          <div className="rounded-md bg-surface-root/50 px-3 py-2">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <span className="text-xs font-medium text-text-muted">{t("taskDetails.btFiles")}</span>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={!canEditFiles || saving || selectedFiles.size === 0}
-                onClick={() => void saveFileSelection()}
-              >
-                {t("taskDetails.btSaveFiles")}
-              </Button>
-            </div>
-            <div className="max-h-40 space-y-1 overflow-auto pr-1">
-              {taskFiles.map((file) => (
-                <label
-                  key={file.id}
-                  htmlFor={`task-file-${file.id}`}
-                  className="flex items-center gap-2 text-xs text-text-secondary"
-                >
-                  <Checkbox
-                    id={`task-file-${file.id}`}
-                    checked={selectedFiles.has(file.relativePath)}
-                    disabled={!canEditFiles || saving}
-                    onChange={(event) => {
-                      const next = new Set(selectedFiles);
-                      if (event.target.checked) next.add(file.relativePath);
-                      else next.delete(file.relativePath);
-                      setSelectedFiles(next);
-                    }}
-                  />
-                  <span className="truncate">{file.relativePath}</span>
-                  <span className="ml-auto shrink-0 font-mono text-text-muted">{formatBytes(file.totalSize)}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-        ) : null}
+        {fileSelectionPanel}
       </div>
     </div>
   );
@@ -1617,8 +1672,75 @@ function AdvancedSettingsDisclosure({ task }: { task: Task }) {
         <div className="space-y-3 pt-1">
           <TaskTransferPanel task={task} />
           <TaskProxyPanel task={task} />
+          {/^https?:\/\//i.test(task.url) && !isTorrentProtocol(task.protocol) ? (
+            <TaskRequestProfilePanel task={task} />
+          ) : null}
+          <TaskNetworkAuthorizationPanel task={task} />
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function TaskNetworkAuthorizationPanel({ task }: { task: Task }) {
+  const { t } = useTranslation();
+  const addToast = useToastStore((s) => s.addToast);
+  const [view, setView] = useState<TaskNetworkPolicyView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const editable = task.status !== "downloading" && task.status !== "retrying";
+
+  useEffect(() => {
+    let cancelled = false;
+    // Older frontend test doubles and embedded adapters may not expose the
+    // optional B3 command yet; keep the rest of the details panel usable.
+    let load: Promise<TaskNetworkPolicyView>;
+    try {
+      if (typeof getTaskNetworkPolicy !== "function") return;
+      load = getTaskNetworkPolicy(task.id);
+    } catch {
+      return;
+    }
+    void load
+      .then((value) => {
+        if (!cancelled) setView(value);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(errorMessage(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task.id]);
+
+  const grants = view?.policy.grants ?? [];
+  if (grants.length === 0) return null;
+
+  async function revoke() {
+    setSaving(true);
+    setError(null);
+    try {
+      setView(await revokeTaskNetworkAuthorization(task.id));
+      addToast({ tone: "success", title: t("taskDetails.networkAuthorizationRevoked") });
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-border-subtle bg-surface-raised/40 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs font-medium text-text-secondary">{t("taskDetails.networkAuthorization")}</span>
+        <Button type="button" size="sm" variant="outline" disabled={!editable || saving} onClick={() => void revoke()}>
+          {t("taskDetails.revokeNetworkAuthorization")}
+        </Button>
+      </div>
+      <p className="text-[11px] text-text-muted">
+        {grants.map((grant) => `${grant.authority} (${grant.addresses.join(", ")})`).join(" · ")}
+      </p>
+      {error ? <p className="text-xs text-status-danger">{error}</p> : null}
     </div>
   );
 }
@@ -1634,8 +1756,6 @@ function TaskTransferPanel({ task }: { task: Task }) {
   const [category, setCategory] = useState(task.categoryKey ?? "none");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const editable = task.status !== "downloading" && task.status !== "retrying";
-
   useEffect(() => {
     const nextSpeed = speedLimitInputFromBytes(task.taskSpeedLimitBps);
     setSpeedAmount(nextSpeed.amount);
@@ -1686,14 +1806,16 @@ function TaskTransferPanel({ task }: { task: Task }) {
         <div>
           <div className="text-xs font-medium text-text-secondary">{t("taskDetails.transferSettings")}</div>
           <div className="mt-0.5 text-[11px] text-text-muted">
-            {editable ? t("taskDetails.transferSettingsHint") : t("taskDetails.transferSettingsRunningHint")}
+            {task.status === "downloading" || task.status === "retrying"
+              ? t("taskDetails.transferSettingsRunningHint")
+              : t("taskDetails.transferSettingsHint")}
           </div>
         </div>
         <Button
           type="button"
           size="sm"
           variant="outline"
-          disabled={!editable || saving || !dirty}
+          disabled={saving || !dirty}
           onClick={() => void saveTransferOptions()}
         >
           {saving ? t("taskDetails.savingTransfer") : t("taskDetails.saveTransfer")}
@@ -1709,10 +1831,10 @@ function TaskTransferPanel({ task }: { task: Task }) {
               onChange={(event) => setSpeedAmount(event.target.value)}
               inputMode="decimal"
               placeholder={t("taskDetails.unlimited")}
-              disabled={!editable || saving}
+              disabled={saving}
               className="h-8 bg-surface-root text-xs"
             />
-            <Select value={speedUnit} onValueChange={setSpeedUnit} disabled={!editable || saving}>
+            <Select value={speedUnit} onValueChange={setSpeedUnit} disabled={saving}>
               <SelectTrigger aria-label={t("taskDetails.taskSpeedLimit")} className="h-8 bg-surface-root text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -1729,11 +1851,7 @@ function TaskTransferPanel({ task }: { task: Task }) {
         <div className="grid grid-cols-2 gap-2">
           <div className="grid gap-1 text-xs text-text-muted">
             <span id="task-priority-label">{t("taskDetails.priority")}</span>
-            <Select
-              value={priority}
-              onValueChange={(value) => setPriority(value as TaskPriority)}
-              disabled={!editable || saving}
-            >
+            <Select value={priority} onValueChange={(value) => setPriority(value as TaskPriority)} disabled={saving}>
               <SelectTrigger aria-labelledby="task-priority-label" className="h-8 bg-surface-root text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -1746,7 +1864,7 @@ function TaskTransferPanel({ task }: { task: Task }) {
           </div>
           <div className="grid gap-1 text-xs text-text-muted">
             <span id="task-category-label">{t("taskDetails.categoryLabel")}</span>
-            <Select value={category} onValueChange={setCategory} disabled={!editable || saving}>
+            <Select value={category} onValueChange={setCategory} disabled={saving}>
               <SelectTrigger aria-labelledby="task-category-label" className="h-8 bg-surface-root text-xs">
                 <SelectValue />
               </SelectTrigger>

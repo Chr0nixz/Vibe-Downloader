@@ -41,6 +41,30 @@ fn accepts_supported_download_protocols() {
 }
 
 #[test]
+fn filters_network_urls_without_a_known_file_extension() {
+    let urls = extract_download_urls(
+        "https://example.com/article https://example.com/download?id=file.zip ftp://mirror.example.org/no-name",
+    );
+
+    assert!(urls.is_empty());
+}
+
+#[test]
+fn matches_extensions_from_path_only_and_keeps_magnets() {
+    let urls = extract_download_urls(
+        "https://example.com/video.MP4?token=page#download https://example.com/page?name=video.mp4 magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10",
+    );
+
+    assert_eq!(
+        urls,
+        vec![
+            "https://example.com/video.MP4?token=page#download".to_string(),
+            "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn rejects_unsupported_or_sensitive_urls() {
     let urls = extract_download_urls(
         "ssh://example.com/file https://user:pass@example.com/secret.zip sftp://user:pass@example.com/secret.bin file:///C:/Downloads/readme.txt",

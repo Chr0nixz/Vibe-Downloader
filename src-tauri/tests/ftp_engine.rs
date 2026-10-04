@@ -41,7 +41,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -75,6 +75,9 @@ struct FtpServerConfig {
     reject_retr: bool,
     /// Delays data chunks so cancellation can interrupt a live transfer.
     data_chunk_delay: Option<Duration>,
+    /// ARC-56: how many RETR commands (across all sessions) answer with a
+    /// transient 425 before the file is served normally.
+    transient_retr_failures: Option<Arc<AtomicUsize>>,
 }
 
 /// ARC-42 hook state: per-path content/mtime overrides consulted before the
@@ -227,6 +230,18 @@ fn handle_ftp_session(
                 let _ = writeln!(stream, "550 Permission denied");
                 continue;
             }
+            if let Some(remaining) = &config.transient_retr_failures {
+                if remaining
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        left.checked_sub(1)
+                    })
+                    .is_ok()
+                {
+                    data_listener = None;
+                    let _ = writeln!(stream, "425 Can't open data connection");
+                    continue;
+                }
+            }
             let _ = writeln!(stream, "150 Opening data connection");
 
             // Pop the data listener set by the preceding PASV, accept one
@@ -288,6 +303,7 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         app: None,
         request_id: None,
         cancel_token: None,
+        network_policy: tauri_app_lib::download::network_policy::NetworkPolicy::default(),
     }
 }
 
@@ -304,6 +320,7 @@ fn config_with_file(path: &str, size: usize) -> FtpServerConfig {
         reject_size: false,
         reject_retr: false,
         data_chunk_delay: None,
+        transient_retr_failures: None,
     }
 }
 
@@ -666,6 +683,69 @@ async fn download_uses_persisted_ftp_credentials() {
     assert_eq!(
         std::fs::read(&paths.final_path).expect("read final"),
         payload
+    );
+    pool.close().await;
+}
+
+/// ARC-56: a download resumed after a failed run carries the cumulative
+/// `retry_count` of that run (here 5, beyond FTP_WORKER_RETRIES = 2). The
+/// per-run budget must still start from zero; before the fix the first
+/// transient error after the user's "Retry" failed the task again at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc56_retry_budget_resets_despite_persisted_retry_count() {
+    let mut config = config_with_file("/budget.bin", 64 * 1024);
+    let payload = config.files["/budget.bin"].clone();
+    config.transient_retr_failures = Some(Arc::new(AtomicUsize::new(1)));
+    let server = FtpTestServer::start(config);
+    let (_db, pool) = common::test_pool("ftp-arc56-budget").await;
+    let paths = common::TestPaths::new("ftp-arc56-budget");
+    let task = common::download_task(
+        "ftp-arc56-budget",
+        server.url("budget.bin"),
+        "ftp",
+        "budget.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert FTP task");
+    for segment in db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments")
+    {
+        db::update_segment_retry(
+            &pool,
+            &segment.id,
+            segment.downloaded_until,
+            5,
+            "previous run exhausted its retries",
+        )
+        .await
+        .expect("seed exhausted retry_count");
+    }
+
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("a new run must retry the transient RETR failure");
+
+    assert_eq!(
+        std::fs::read(&paths.final_path).expect("read final"),
+        payload
+    );
+    let segment = db::get_first_segment_record(&pool, "ftp-arc56-budget")
+        .await
+        .expect("segment query")
+        .expect("segment");
+    assert_eq!(
+        segment.retry_count, 6,
+        "the cumulative diagnostic counter keeps counting across runs"
     );
     pool.close().await;
 }

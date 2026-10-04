@@ -15,7 +15,10 @@ pub(crate) use super::tasks::actions::{delete_paths_off_runtime, FileDeleteReque
 use crate::{
     db,
     download::{EngineRegistry, ProbeRequest},
-    events::{emit_queue_changed_with_ids, emit_task_progress, emit_task_updated_record},
+    events::{
+        emit_desktop_status, emit_queue_changed_with_ids, emit_task_progress,
+        emit_task_updated_record,
+    },
     models::{
         AppErrorPayload, FtpDirectoryProbe, RecoveryAction, SftpDirectoryProbe, Task,
         TaskChecksumRecord, TaskFileRecord, TaskProxySettings, TaskProxySettingsInput, TaskRecord,
@@ -24,6 +27,109 @@ use crate::{
     state_machine::TransitionError,
     AppState, TaskRequestHeaders,
 };
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_task_request_profile(
+    state: tauri::State<'_, AppState>,
+    task_id: String,
+) -> Result<crate::models::TaskRequestProfileView, String> {
+    require_task(&state.pool, &task_id).await?;
+    db::get_task_request_profile(&state.pool, &task_id).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_task_request_profile(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    task_id: String,
+    input: crate::models::TaskRequestProfileInput,
+    replace_sensitive: bool,
+) -> Result<crate::models::TaskRequestProfileView, String> {
+    let _runtime_guard = state.task_runtime_locks.lock(&task_id).await;
+    let task = require_task(&state.pool, &task_id).await?;
+    if state.downloads.lock().await.contains_key(&task_id)
+        || matches!(
+            task.status,
+            TaskStatus::Downloading | TaskStatus::Retrying | TaskStatus::Completed
+        )
+    {
+        return Err(AppErrorPayload::new(
+            "request_profile_active",
+            "Pause the task before editing request headers.",
+            false,
+            vec![],
+        )
+        .command_error());
+    }
+    db::update_task_request_profile(&state.pool, &task_id, &task.url, &input, replace_sensitive)
+        .await?;
+    state.request_headers.lock().await.remove(&task_id);
+    db::insert_task_event(&state.pool, &task_id, "request_profile_updated", None).await?;
+    if replace_sensitive
+        && matches!(task.status, TaskStatus::NeedsAttention | TaskStatus::Failed)
+        && matches!(
+            task.error_code.as_deref(),
+            Some("auth_headers_expired" | "auth_headers_unavailable")
+        )
+    {
+        queue_task_for_retry_with_event(&app, &state, &task_id, "auth_headers_refreshed", None)
+            .await?;
+    }
+    db::get_task_request_profile(&state.pool, &task_id).await
+}
+
+#[derive(Debug, Clone, serde::Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskNetworkPolicyView {
+    pub task_id: String,
+    pub policy: crate::download::network_policy::NetworkPolicy,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn create_network_authorization(
+    state: tauri::State<'_, AppState>,
+    url: String,
+    source: crate::download::network_policy::TaskSource,
+) -> Result<crate::download::network_policy::NetworkAuthorizationDraft, String> {
+    db::create_network_authorization(&state.pool, source, url.trim()).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_task_network_policy(
+    state: tauri::State<'_, AppState>,
+    task_id: String,
+) -> Result<TaskNetworkPolicyView, String> {
+    Ok(TaskNetworkPolicyView {
+        policy: db::task_network_policy(&state.pool, &task_id).await?,
+        task_id,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn revoke_task_network_authorization(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    task_id: String,
+) -> Result<TaskNetworkPolicyView, String> {
+    let task = require_task(&state.pool, &task_id).await?;
+    if matches!(task.status, TaskStatus::Downloading | TaskStatus::Retrying) {
+        return Err("Pause the task before revoking its network authorization.".to_string());
+    }
+    db::revoke_task_network_policy(&state.pool, &task_id).await?;
+    db::insert_task_event(&state.pool, &task_id, "network_authorization_revoked", None).await?;
+    if let Some(updated) = db::get_task_record(&state.pool, &task_id).await? {
+        emit_task_updated_record(&app, &state.pool, &updated).await;
+    }
+    Ok(TaskNetworkPolicyView {
+        task_id,
+        policy: db::task_network_policy(&state.pool, &task.id).await?,
+    })
+}
 
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +178,8 @@ mod query;
 pub use query::*;
 
 mod actions;
+mod deletion;
+pub use deletion::TaskDeletion;
 
 pub use actions::*;
 
@@ -111,6 +219,7 @@ pub async fn update_torrent_file_selection(
             message: "Choose at least one torrent file before downloading.".to_string(),
             recoverable: true,
             actions: vec!["check_url".to_string()],
+            retry_after_at: None,
         }
         .command_error());
     }
@@ -245,14 +354,25 @@ pub async fn probe_ftp_directory(
         input.proxy_no_proxy.as_deref(),
     )?;
     let credentials = directory_probe_credentials(&input);
+    let source = input
+        .source_kind
+        .unwrap_or(crate::download::network_policy::TaskSource::Manual);
+    let network_policy = db::draft_network_policy(
+        &state.pool,
+        source,
+        url,
+        input.network_authorization_id.as_deref(),
+    )
+    .await?;
     // ARC-55: the directory probe has a total budget via bounded_probe; the
     // token is plumbed for future IPC cancellation but today's entry point
     // always observes the deadline path.
     let cancel_token = tokio_util::sync::CancellationToken::new();
-    crate::download::ftp::probe_ftp_directory_url_cancellable(
+    crate::download::ftp::probe_ftp_directory_url_cancellable_with_policy(
         url,
         proxy_config,
         credentials.as_ref(),
+        &network_policy,
         Some(&cancel_token),
     )
     .await
@@ -279,12 +399,23 @@ pub async fn probe_sftp_directory(
         input.proxy_no_proxy.as_deref(),
     )?;
     let credentials = directory_probe_credentials(&input);
+    let source = input
+        .source_kind
+        .unwrap_or(crate::download::network_policy::TaskSource::Manual);
+    let network_policy = db::draft_network_policy(
+        &state.pool,
+        source,
+        url,
+        input.network_authorization_id.as_deref(),
+    )
+    .await?;
     let cancel_token = tokio_util::sync::CancellationToken::new();
-    crate::download::sftp::probe_sftp_directory_url_cancellable(
+    crate::download::sftp::probe_sftp_directory_url_cancellable_with_policy(
         &state.pool,
         url,
         proxy_config,
         credentials.as_ref(),
+        &network_policy,
         Some(&cancel_token),
     )
     .await
@@ -311,17 +442,28 @@ pub async fn probe_webdav_directory(
         input.proxy_no_proxy.as_deref(),
     )?;
     let credentials = directory_probe_credentials(&input);
+    let source = input
+        .source_kind
+        .unwrap_or(crate::download::network_policy::TaskSource::Manual);
+    let network_policy = db::draft_network_policy(
+        &state.pool,
+        source,
+        url,
+        input.network_authorization_id.as_deref(),
+    )
+    .await?;
     // SEC-03: obtain the client from the shared network factory so the
     // directory probe shares pooling and the proxy policy stack.
     let client = state
         .engine_registry
         .http_engine()
-        .client_for_config(&proxy_config)
+        .client_for_network_policy(&proxy_config, &network_policy)
         .await?;
-    crate::download::webdav::probe_webdav_directory_url_cancellable(
+    crate::download::webdav::probe_webdav_directory_url_cancellable_with_policy(
         &client,
         url,
         credentials.as_ref(),
+        &network_policy,
         Some(&tokio_util::sync::CancellationToken::new()),
     )
     .await
@@ -480,52 +622,101 @@ pub(crate) async fn check_schedule_preemption(
     Ok(())
 }
 
-/// Spawns a background task that checks the schedule window at boundary
-/// crossings and preempts running tasks or resumes paused tasks as needed.
-///
-/// E-5: Instead of polling every 60s, the monitor sleeps until the next
-/// window boundary (start or end, whichever comes first). This eliminates
-/// up to 60s latency at boundary crossings. When the schedule is disabled,
-/// it re-checks every 5 minutes for settings changes.
+/// Recomputes scheduled download and transfer policies at wall-clock
+/// boundaries, settings changes, and bounded fallback intervals.
 pub(crate) fn spawn_schedule_window_monitor(app: AppHandle, _state: &AppState) {
     tauri::async_runtime::spawn(async move {
-        // The initial check runs synchronously in `lib.rs` setup() before
-        // this spawns, so we start with a sleep.
         loop {
-            // Calculate sleep duration based on current schedule settings.
-            let sleep = {
-                let state_ref = app.state::<AppState>();
-                if state_ref.quit_requested.load(Ordering::SeqCst) {
-                    tracing::debug!("schedule window monitor exiting (shutdown requested)");
-                    return;
+            let state_ref = app.state::<AppState>();
+            if state_ref.quit_requested.load(Ordering::SeqCst) {
+                tracing::debug!("schedule window monitor exiting (shutdown requested)");
+                return;
+            }
+
+            let sleep = match db::get_settings(
+                &state_ref.pool,
+                super::settings::default_download_dir(&app).unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(settings) => {
+                    let schedule_active = settings.schedule_download_window_enabled
+                        || settings.schedule_speed_limit_window_enabled;
+                    let fallback =
+                        std::time::Duration::from_secs(if schedule_active { 60 } else { 300 });
+                    [
+                        settings.schedule_download_window_enabled.then(|| {
+                            db::duration_until_next_window_boundary(
+                                &settings.schedule_download_window_start,
+                                &settings.schedule_download_window_end,
+                            )
+                        }),
+                        settings.schedule_speed_limit_window_enabled.then(|| {
+                            db::duration_until_next_window_boundary(
+                                &settings.schedule_speed_limit_window_start,
+                                &settings.schedule_speed_limit_window_end,
+                            )
+                        }),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .fold(fallback, std::time::Duration::min)
+                    .min(fallback)
                 }
-                let default_dir = super::settings::default_download_dir(&app).unwrap_or_default();
-                match db::get_settings(&state_ref.pool, default_dir).await {
-                    Ok(settings) if settings.schedule_download_window_enabled => {
-                        db::duration_until_next_window_boundary(
-                            &settings.schedule_download_window_start,
-                            &settings.schedule_download_window_end,
-                        )
-                    }
-                    Ok(_) => {
-                        // Schedule disabled — re-check periodically for changes.
-                        std::time::Duration::from_secs(300)
-                    }
-                    Err(_) => {
-                        // Settings read failed — retry in 1 minute.
-                        std::time::Duration::from_secs(60)
-                    }
+                Err(error) => {
+                    tracing::warn!(error = %error, "schedule monitor settings read failed");
+                    std::time::Duration::from_secs(60)
                 }
             };
-            tokio::time::sleep(sleep).await;
+
+            let scheduler = state_ref.scheduler.clone();
+            tokio::select! {
+                _ = tokio::time::sleep(sleep) => {}
+                _ = scheduler.wait_for_speed_policy_change() => {}
+            }
 
             let state_ref = app.state::<AppState>();
             if state_ref.quit_requested.load(Ordering::SeqCst) {
                 tracing::debug!("schedule window monitor exiting (shutdown requested)");
-                break;
+                return;
             }
             if let Err(error) = check_schedule_preemption(app.clone(), state_ref).await {
                 tracing::warn!(error = %error, "schedule preemption check failed");
+            }
+            let state_ref = app.state::<AppState>();
+            let default_dir = super::settings::default_download_dir(&app).unwrap_or_default();
+            if let Err(error) = state_ref
+                .scheduler
+                .refresh_speed_limit_policies(&state_ref.pool, default_dir)
+                .await
+            {
+                tracing::warn!(error = %error, "scheduled speed policy refresh failed");
+            }
+        }
+    });
+}
+
+/// Publishes a low-frequency aggregate snapshot for native shell indicators.
+/// The frontend owns the localized tooltip text; Rust only supplies numeric
+/// state and keeps the polling cadence independent of window visibility.
+pub(crate) fn spawn_desktop_status_monitor(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            if state
+                .quit_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            match db::task_stats_snapshot(&state.pool).await {
+                Ok(snapshot) => emit_desktop_status(&app, &snapshot),
+                Err(error) => tracing::debug!(error = %error, "desktop status snapshot failed"),
             }
         }
     });
@@ -631,17 +822,46 @@ pub(crate) async fn resolve_task_request_headers(
     request_headers: TaskRequestHeaders,
     task_id: &str,
 ) -> Result<Vec<(String, String)>, String> {
-    if let Some(headers) = request_headers.lock().await.get(task_id).cloned() {
-        return Ok(headers);
+    // Persistence checks run before cache reads so queued/retried tasks cannot
+    // bypass expiry while the application remains open.
+    let profile = match db::resolve_task_request_profile_headers(pool, task_id).await {
+        Ok(headers) => headers,
+        Err(error) => {
+            request_headers.lock().await.remove(task_id);
+            return Err(error);
+        }
+    };
+    let persisted = match db::resolve_task_request_headers(pool, task_id).await {
+        Ok(headers) => headers,
+        Err(error) => {
+            request_headers.lock().await.remove(task_id);
+            return Err(error);
+        }
+    };
+    // A browser handoff can remain in memory when encrypted persistence fails
+    // during task creation. It is usable only after both database checks have
+    // succeeded; an expiry/decryption error above must fail closed.
+    let cached = request_headers.lock().await.get(task_id).cloned();
+    Ok(merge_request_header_sources(persisted, cached, profile))
+}
+
+fn merge_request_header_sources(
+    persisted: Vec<(String, String)>,
+    cached: Option<Vec<(String, String)>>,
+    profile: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut headers = persisted;
+    if let Some(cached) = cached {
+        for (name, value) in cached {
+            headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&name));
+            headers.push((name, value));
+        }
     }
-    let persisted = db::resolve_task_request_headers(pool, task_id).await?;
-    if !persisted.is_empty() {
-        request_headers
-            .lock()
-            .await
-            .insert(task_id.to_string(), persisted.clone());
+    for (name, value) in profile {
+        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&name));
+        headers.push((name, value));
     }
-    Ok(persisted)
+    headers
 }
 
 pub(crate) async fn queue_task_for_retry_with_event(
@@ -684,9 +904,15 @@ pub(crate) async fn queue_task_for_retry_at(
         }
         Err(error) => return Err(error.into()),
     }
+    // A user-directed retry starts a fresh automatic budget. Keeping the old
+    // attempt count would make a transient failure exhaust immediately after
+    // recovery, while clearing it here cannot race an active worker because
+    // the caller holds the task runtime lock.
+    db::clear_auto_retry_state(&state.pool, id).await?;
     let task = require_task(&state.pool, id).await?;
     emit_task_progress_snapshot(app, &task);
     emit_queue_changed_with_ids(app, Some(vec![id.to_string()]));
+    state.scheduler.notify_retry_schedule_changed();
     if retry_after_at.is_none() {
         // ARC-32: same constraint as restart — the caller (retry_task/
         // resume_task/resolve_task_attention) holds the per-task runtime lock,
@@ -750,13 +976,17 @@ async fn restart_task_from_beginning(
     // R-2.3: Caller (resolve_task_attention) must already hold the per-task
     // runtime lock. tokio::sync::Mutex is not re-entrant, so we do not
     // re-acquire here.
-    if let Some(control) = state.downloads.lock().await.remove(&task.id) {
-        // ARC-45: cancel + drain, not bare abort — abort takes effect at the
-        // next await, so a worker mid-write keeps the temp handle open and on
-        // Windows the removal below becomes delete-pending while the new
-        // worker's create() hits ACCESS_DENIED.
-        crate::cancel_and_drain_control(control, std::time::Duration::from_secs(5)).await;
-    }
+    // ARC-45: cancel + drain, not bare abort — abort takes effect at the
+    // next await, so a worker mid-write keeps the temp handle open and on
+    // Windows the removal below becomes delete-pending while the new
+    // worker's create() hits ACCESS_DENIED.
+    crate::remove_and_drain_control(
+        &state.downloads,
+        &state.request_headers,
+        &task.id,
+        crate::USER_ACTION_DRAIN_GRACE,
+    )
+    .await?;
     // ARC-45: removal failures no longer abort the restart — a stale artifact
     // must not leave the task half-reset; the new worker creates/truncates
     // its temp files anyway.
@@ -799,6 +1029,7 @@ async fn restart_task_from_beginning(
             app: None,
             request_id: None,
             cancel_token: None,
+            network_policy: db::task_network_policy(&state.pool, &task.id).await?,
         })
         .await?;
     db::update_task_remote_metadata(
@@ -901,7 +1132,11 @@ pub(crate) async fn prepare_task_for_download(
         temp_exists,
         temp_size,
         task.total_size,
-        task.supports_resume,
+        // Unknown-size tasks must reach the fresh probe before rejecting a
+        // partial file: an older row may have been created before the server
+        // exposed a verifiable 206 + validator pair. The probe below is the
+        // authority for whether that partial file can be resumed safely.
+        task.supports_resume || (task.total_size == 0 && temp_size > 0),
     ) {
         fail_task_and_segments(app, pool, &task.id, &message).await?;
         db::insert_task_event(pool, &task.id, "resume_blocked", Some(&message)).await?;
@@ -909,7 +1144,11 @@ pub(crate) async fn prepare_task_for_download(
     }
 
     if temp_size > 0 {
-        let uri = task.final_url.as_deref().unwrap_or(&task.url).to_string();
+        let uri = if matches!(task.protocol.as_str(), "http" | "https") {
+            task.url.clone()
+        } else {
+            task.final_url.as_deref().unwrap_or(&task.url).to_string()
+        };
         let engine = engine_registry.engine_for_uri(&uri)?;
         let credentials = db::resolve_task_credentials(pool, &task.id).await?;
         let global_proxy = engine_registry.proxy_config().await;
@@ -927,6 +1166,7 @@ pub(crate) async fn prepare_task_for_download(
                 app: None,
                 request_id: None,
                 cancel_token: None,
+                network_policy: db::task_network_policy(pool, &task.id).await?,
             })
             .await?;
         if let Some(message) = resume_mismatch_message(&task, &probe) {
@@ -950,6 +1190,27 @@ pub(crate) async fn prepare_task_for_download(
             )
             .await?;
             return Err(message);
+        }
+        if task.total_size == 0 && probe.total_size == 0 {
+            // Persist the validator/capability pair established by the fresh
+            // unknown-size range probe so the download worker applies the same
+            // safety contract when it opens the resumed stream.
+            db::update_task_remote_metadata(
+                pool,
+                &task.id,
+                db::TaskRemoteMetadataUpdate {
+                    final_url: &probe.resolved_uri,
+                    total_size: probe.total_size,
+                    etag: probe.etag.as_deref(),
+                    last_modified: probe.last_modified.as_deref(),
+                    content_type: probe.content_type.as_deref(),
+                    supports_resume: probe.capabilities.supports_resume,
+                    supports_parallel: probe.capabilities.supports_parallel,
+                    supports_multi_file: probe.capabilities.supports_multi_file,
+                    source_key: &probe.source_key,
+                },
+            )
+            .await?;
         }
         if let Some(message) = resume_decision_message(&task, &probe) {
             db::insert_task_event(pool, &task.id, "resume_checked", Some(&message)).await?;
@@ -1045,12 +1306,14 @@ async fn tasks_from_records_with_files(
     let mut files_by_task_id = db::list_task_file_records_for_tasks(pool, &task_ids).await?;
     let mut checksums_by_task_id =
         db::list_task_checksum_records_for_tasks(pool, &task_ids).await?;
+    let completed_at_by_task_id = db::completed_at_for_tasks(pool, &task_ids).await?;
     Ok(records
         .into_iter()
         .map(|record| {
             let files = files_by_task_id.remove(&record.id).unwrap_or_default();
             let checksums = checksums_by_task_id.remove(&record.id).unwrap_or_default();
-            task_from_record_and_files(record, files, checksums)
+            let completed_at = completed_at_by_task_id.get(&record.id).cloned().flatten();
+            task_from_record_and_files(record, files, checksums, completed_at)
         })
         .collect())
 }
@@ -1061,15 +1324,23 @@ pub(crate) async fn task_from_record_with_files(
 ) -> Result<Task, String> {
     let files = db::list_task_file_records(pool, &record.id).await?;
     let checksums = db::list_task_checksum_records(pool, &record.id).await?;
-    Ok(task_from_record_and_files(record, files, checksums))
+    let completed_at = db::completed_at_for_task(pool, &record.id).await?;
+    Ok(task_from_record_and_files(
+        record,
+        files,
+        checksums,
+        completed_at,
+    ))
 }
 
 fn task_from_record_and_files(
     record: TaskRecord,
     files: Vec<TaskFileRecord>,
     checksums: Vec<TaskChecksumRecord>,
+    completed_at: Option<String>,
 ) -> Task {
     let mut task = Task::from(record);
+    task.completed_at = completed_at;
     task.files = files.into_iter().map(Into::into).collect();
     task.checksums = checksums.into_iter().map(Into::into).collect();
     task
@@ -1132,4 +1403,74 @@ pub(super) fn delete_path(path: &str, use_trash: bool) -> Result<(), String> {
 /// should not clutter the recycle bin).
 fn remove_task_path(path: &str) -> Result<(), String> {
     delete_path(path, false)
+}
+
+#[cfg(test)]
+mod request_header_tests {
+    use super::merge_request_header_sources;
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::sync::Mutex;
+
+    #[test]
+    fn browser_cache_fills_persistence_gap_and_profile_wins_by_name() {
+        let merged = merge_request_header_sources(
+            vec![("User-Agent".to_string(), "stored-agent".to_string())],
+            Some(vec![
+                ("Cookie".to_string(), "session=memory".to_string()),
+                ("User-Agent".to_string(), "browser-agent".to_string()),
+            ]),
+            vec![("user-agent".to_string(), "profile-agent".to_string())],
+        );
+
+        assert_eq!(
+            merged,
+            vec![
+                ("Cookie".to_string(), "session=memory".to_string()),
+                ("user-agent".to_string(), "profile-agent".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_uses_cached_browser_headers_when_persistence_row_is_missing() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        sqlx::query(
+            "CREATE TABLE task_request_profiles (
+                task_id TEXT PRIMARY KEY, origin TEXT NOT NULL,
+                public_ciphertext TEXT NOT NULL, public_nonce TEXT NOT NULL,
+                sensitive_ciphertext TEXT, sensitive_nonce TEXT,
+                sensitive_names_json TEXT NOT NULL, sensitive_expires_at TEXT,
+                sensitive_expired INTEGER NOT NULL, updated_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("profile table");
+        sqlx::query(
+            "CREATE TABLE task_request_headers (
+                task_id TEXT PRIMARY KEY, headers_json TEXT NOT NULL,
+                headers_ciphertext TEXT, nonce TEXT, expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL, last_used_at TEXT, source_browser TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("headers table");
+
+        let cached = Arc::new(Mutex::new(HashMap::from([(
+            "task-1".to_string(),
+            vec![("Cookie".to_string(), "session=memory".to_string())],
+        )])));
+        let resolved = super::resolve_task_request_headers(&pool, cached, "task-1")
+            .await
+            .expect("memory fallback");
+        assert_eq!(
+            resolved,
+            vec![("Cookie".to_string(), "session=memory".to_string())]
+        );
+    }
 }

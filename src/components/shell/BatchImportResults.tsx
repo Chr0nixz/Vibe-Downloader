@@ -1,9 +1,10 @@
-import { Clipboard, Download, RotateCcw } from "lucide-react";
+import { Clipboard, CopyPlus, Download, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { BatchImportResult } from "@/generated/bindings";
+import { writeClipboardText } from "@/lib/clipboard-write";
 import { errorCodeToI18nKey } from "@/lib/errors";
 import { isTauriRuntime } from "@/lib/runtime";
 import { writeExportFile } from "@/lib/tauri";
@@ -18,24 +19,28 @@ export function BatchImportResults({
   result,
   busy,
   onRetry,
+  onCreateDuplicates,
 }: {
   result: BatchImportResult;
   busy: boolean;
   onRetry?: (indices: number[], urls: string[]) => void;
+  onCreateDuplicates?: (indices: number[], urls: string[]) => void;
 }) {
   const { t } = useTranslation();
   const [edits, setEdits] = useState<Record<number, string>>({});
   const [feedback, setFeedback] = useState<{ error: boolean; text: string } | null>(null);
   const rows = result.items.map((item, index) => ({ item, index }));
   const failed = rows.filter(({ item }) => isFailedBatchItem(item));
+  const duplicates = rows.filter(({ item }) => item.duplicate);
   const others = rows.filter(({ item }) => !isFailedBatchItem(item));
   const urlFor = (index: number) => edits[index] ?? result.items[index].inputUrl;
   const retry = (indices: number[]) => onRetry?.(indices, indices.map(urlFor));
+  const createDuplicates = (indices: number[]) => onCreateDuplicates?.(indices, indices.map(urlFor));
 
   async function copyFailed() {
     try {
       if (!navigator.clipboard) throw new Error("Clipboard unavailable");
-      await navigator.clipboard.writeText(failed.map(({ index }) => urlFor(index)).join("\n"));
+      await writeClipboardText(failed.map(({ index }) => urlFor(index)).join("\n"));
       setFeedback({ error: false, text: t("newDownload.batchCopied") });
     } catch {
       setFeedback({ error: true, text: t("newDownload.batchCopyFailed") });
@@ -157,6 +162,18 @@ export function BatchImportResults({
             </Button>
           </>
         )}
+        {duplicates.length > 0 && onCreateDuplicates ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={() => createDuplicates(duplicates.map(({ index }) => index))}
+          >
+            <CopyPlus className="h-3.5 w-3.5" />
+            {t("newDownload.createDuplicate")}
+          </Button>
+        ) : null}
         <Button type="button" variant="ghost" size="sm" onClick={() => void exportResult()}>
           <Download className="h-3.5 w-3.5" />
           {t("taskList.exportJson")}

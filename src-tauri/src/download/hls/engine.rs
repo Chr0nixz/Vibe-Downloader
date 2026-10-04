@@ -1,3 +1,5 @@
+use crate::download::lifecycle::JoinSet;
+use crate::download::owned_fs as fs;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -10,16 +12,14 @@ use aes::{
     Aes128,
 };
 use reqwest::{
-    header::{HeaderName, HeaderValue, ACCEPT_ENCODING, RANGE},
+    header::{ACCEPT_ENCODING, RANGE},
     Client, RequestBuilder, StatusCode,
 };
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 use tokio::{
-    fs,
     io::{AsyncWriteExt, BufWriter},
     process::Command,
-    task::JoinSet,
 };
 use uuid::Uuid;
 
@@ -259,17 +259,7 @@ impl HlsEngine {
         Self { http }
     }
 
-    async fn client(&self) -> Result<Client, String> {
-        self.http.client().await
-    }
-
-    async fn client_for_config(
-        &self,
-        config: &crate::proxy::ResolvedProxyConfig,
-    ) -> Result<Client, String> {
-        self.http.client_for_config(config).await
-    }
-
+    #[allow(clippy::too_many_arguments)]
     async fn probe_hls(
         &self,
         url: &str,
@@ -278,6 +268,7 @@ impl HlsEngine {
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
         proxy_config: Option<&crate::proxy::ResolvedProxyConfig>,
+        network_policy: &crate::download::network_policy::NetworkPolicy,
     ) -> Result<ProbePlan, String> {
         crate::download::engine::emit_probe_phase(app, request_id, "checking_ffmpeg", Some("hls"));
         crate::download::ffmpeg::ensure_ffmpeg_available(
@@ -287,9 +278,14 @@ impl HlsEngine {
         )
         .await?;
         let client = if let Some(config) = proxy_config {
-            self.client_for_config(config).await?
+            self.http
+                .client_for_network_policy(config, network_policy)
+                .await?
         } else {
-            self.client().await?
+            let config = self.http.proxy_config().await;
+            self.http
+                .client_for_network_policy(&config, network_policy)
+                .await?
         };
         crate::download::engine::emit_probe_phase(
             app,
@@ -297,7 +293,14 @@ impl HlsEngine {
             "fetching_manifest",
             Some("hls"),
         );
-        let body = fetch_text(&client, url, request_headers).await?;
+        let body = fetch_text(
+            &client,
+            url,
+            request_headers,
+            &crate::download::http::url_origin(url).unwrap_or_default(),
+            network_policy,
+        )
+        .await?;
         validate_playlist_syntax(&body)?;
         crate::download::engine::emit_probe_phase(app, request_id, "parsing_manifest", Some("hls"));
         let media_tracks = parse_ext_x_media(&body, url);
@@ -307,7 +310,14 @@ impl HlsEngine {
                 let selected_uri = variant.uri.clone();
                 let variants = hls_variants_from_master(&body, &selected_uri);
                 let media_url = resolve_url(url, &variant.uri)?;
-                let media_body = fetch_text(&client, &media_url, request_headers).await?;
+                let media_body = fetch_text(
+                    &client,
+                    &media_url,
+                    request_headers,
+                    &crate::download::http::url_origin(url).unwrap_or_default(),
+                    network_policy,
+                )
+                .await?;
                 validate_playlist_syntax(&media_body)?;
                 (
                     media_url,
@@ -394,6 +404,7 @@ impl DownloadEngine for HlsEngine {
                     &request.app,
                     &request.request_id,
                     request.proxy_config.as_ref(),
+                    &request.network_policy,
                 )
                 .await
                 .map_err(DownloadError::Other)?;
@@ -433,11 +444,11 @@ impl DownloadEngine for HlsEngine {
         &'a self,
         context: DownloadContext,
     ) -> EngineFuture<'a, Result<(), DownloadError>> {
-        Box::pin(async move {
+        Box::pin(crate::download::lifecycle::run_owned(async move {
             run_hls_download(self.clone(), context)
                 .await
                 .map_err(DownloadError::Other)
-        })
+        }))
     }
 }
 
@@ -453,6 +464,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         connection_limit,
         request_headers,
         proxy_config,
+        network_policy,
     } = context;
     // Resolve once so a settings change cannot switch binaries midway through a task.
     let ffmpeg = crate::download::ffmpeg::ensure_ffmpeg_available(
@@ -462,7 +474,10 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     )
     .await?;
     // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
-    let client = engine.client_for_config(&proxy_config).await?;
+    let client = engine
+        .http
+        .client_for_network_policy(&proxy_config, &network_policy)
+        .await?;
     // PERF-04: one coalescer per download session for shared AES keys / init maps.
     let fetch_cache = HlsTaskFetchCache::new();
     // FUN-01 / C5: inject Basic Auth from encrypted task credentials at runtime.
@@ -487,6 +502,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
             &None,
             &None,
             Some(&proxy_config),
+            &network_policy,
         )
         .await?;
     // FUN-27: read the persisted hls_tasks row BEFORE this session's upsert —
@@ -539,18 +555,24 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                 pause_hls_task(&app, &pool, &task, 0).await?;
                 return Ok(());
             }
-            let body = fetch_text(&client, &track.url, &request_headers)
-                .await
-                .map_err(|e| {
-                    engine_error(
-                        "hls_track_failed",
-                        format!(
-                            "Could not fetch selected {} track playlist: {e}",
-                            track.kind
-                        ),
-                        true,
-                    )
-                })?;
+            let body = fetch_text(
+                &client,
+                &track.url,
+                &request_headers,
+                &crate::download::http::url_origin(&task.url).unwrap_or_default(),
+                &network_policy,
+            )
+            .await
+            .map_err(|e| {
+                engine_error(
+                    "hls_track_failed",
+                    format!(
+                        "Could not fetch selected {} track playlist: {e}",
+                        track.kind
+                    ),
+                    true,
+                )
+            })?;
             validate_playlist_syntax(&body).map_err(|e| {
                 engine_error(
                     "hls_track_failed",
@@ -582,6 +604,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                     &track_dir,
                     media.segments,
                     fetch_cache.clone(),
+                    &network_policy,
                 )
                 .await
                 {
@@ -623,7 +646,14 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
             break;
         }
 
-        let media_body = fetch_text(&client, &plan.media_url, &request_headers).await?;
+        let media_body = fetch_text(
+            &client,
+            &plan.media_url,
+            &request_headers,
+            &crate::download::http::url_origin(&task.url).unwrap_or_default(),
+            &network_policy,
+        )
+        .await?;
         validate_playlist_syntax(&media_body)?;
         reject_unsupported_media_playlist(&media_body)?;
         let media = parse_media_playlist(&media_body)?;
@@ -661,6 +691,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                 first_segment_id.as_deref(),
                 &mut db_write_gate,
                 fetch_cache.clone(),
+                &network_policy,
             )
             .await?;
             downloaded_total = downloaded;
@@ -682,6 +713,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                 &task.id,
                 track,
                 fetch_cache.clone(),
+                &network_policy,
             )
             .await?;
         }
@@ -885,6 +917,7 @@ async fn download_hls_segments(
     first_segment_id: Option<&str>,
     db_write_gate: &mut DbWriteGate,
     fetch_cache: Arc<HlsTaskFetchCache>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<i64, String> {
     // SEC-11: credential headers may only travel to the task URL origin
     // (scheme + host + port — a different port is a different origin).
@@ -907,6 +940,7 @@ async fn download_hls_segments(
             let cancel_token = cancel_token.clone();
             let fetch_cache = fetch_cache.clone();
             let origin = origin.clone();
+            let network_policy = network_policy.clone();
             workers.spawn(async move {
                 download_hls_segment(
                     &pool,
@@ -917,6 +951,7 @@ async fn download_hls_segments(
                     plan,
                     fetch_cache,
                     origin,
+                    network_policy,
                 )
                 .await
             });
@@ -988,6 +1023,7 @@ async fn download_hls_segment(
     plan: SegmentDownloadPlan,
     fetch_cache: Arc<HlsTaskFetchCache>,
     origin: String,
+    network_policy: crate::download::network_policy::NetworkPolicy,
 ) -> SegmentDownloadResult {
     let retry_policy = RetryPolicy::hls_segment();
     let mut retry_count = 0;
@@ -1003,6 +1039,7 @@ async fn download_hls_segment(
             &cancel_token,
             &plan,
             &fetch_cache,
+            &network_policy,
         )
         .await;
         crate::download::diagnostics::persist_engine_diagnostic(
@@ -1101,6 +1138,7 @@ async fn download_hls_segment_once(
     cancel_token: &tokio_util::sync::CancellationToken,
     plan: &SegmentDownloadPlan,
     fetch_cache: &Arc<HlsTaskFetchCache>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<i64, String> {
     db::update_hls_segment_status(pool, &plan.id, 0, SegmentStatus::Downloading, 0, None).await?;
     if let Some(parent) = plan.local_path.parent() {
@@ -1118,14 +1156,13 @@ async fn download_hls_segment_once(
             cancel_token,
             init_map,
             fetch_cache,
+            network_policy,
         )
         .await?;
     }
-    // SEC-10: literal-authority pre-flight (resolver covers hostnames).
-    crate::download::ssrf::assert_public_authority(
-        &reqwest::Url::parse(&plan.uri)
-            .map_err(|e| format!("Could not request HLS segment: {e}"))?,
-    )?;
+    let parsed_uri = reqwest::Url::parse(&plan.uri)
+        .map_err(|e| format!("Could not request HLS segment: {e}"))?;
+    network_policy.resolve(&parsed_uri).await?;
     // SEC-11: strip Authorization/Cookie when the segment lives on another host.
     let bound_headers =
         crate::download::http::headers_for_origin(request_headers, origin, &plan.uri);
@@ -1134,14 +1171,9 @@ async fn download_hls_segment_once(
     if let Some(range) = &plan.byte_range {
         response = response.header(RANGE, byte_range_header(range));
     }
-    let mut response = response
-        .send()
-        .await
-        .map_err(|e| format!("Could not request HLS segment: {e}"))?;
+    let mut response = crate::download::http::send_request(response, network_policy).await?;
     if !response.status().is_success() {
-        return Err(crate::download::http::format_http_status_error(
-            response.status(),
-        ));
+        return Err(crate::download::http::format_http_response_error(&response));
     }
     if plan.byte_range.is_some() && response.status() != StatusCode::PARTIAL_CONTENT {
         return Err("server did not honor HLS byte range request".to_string());
@@ -1159,6 +1191,7 @@ async fn download_hls_segment_once(
             key,
             plan,
             fetch_cache,
+            network_policy,
         )
         .await
     } else {
@@ -1235,6 +1268,7 @@ async fn ensure_hls_init_map(
     cancel_token: &tokio_util::sync::CancellationToken,
     init_map: &ResolvedHlsInitMap,
     fetch_cache: &Arc<HlsTaskFetchCache>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<(), String> {
     if fs::try_exists(&init_map.local_path).await.unwrap_or(false) {
         return Ok(());
@@ -1253,6 +1287,7 @@ async fn ensure_hls_init_map(
     let request_headers = request_headers.to_vec();
     let speed_limiter = speed_limiter.clone();
     let cancel_token = cancel_token.clone();
+    let network_policy = network_policy.clone();
     fetch_cache
         .get_or_fetch_init_map(&cache_key, || async move {
             if fs::try_exists(&init_map.local_path).await.unwrap_or(false) {
@@ -1264,6 +1299,7 @@ async fn ensure_hls_init_map(
                 &request_headers,
                 init_map.byte_range.as_ref().map(byte_range_header),
                 origin,
+                &network_policy,
             )
             .await?;
             if cancel_token.is_cancelled() {
@@ -1327,6 +1363,7 @@ async fn hls_decryptor(
     key: &HlsKey,
     media_sequence: i64,
     fetch_cache: &Arc<HlsTaskFetchCache>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<StreamingAes128CbcDecryptor, String> {
     if !key.method.eq_ignore_ascii_case("AES-128") {
         return Err(engine_error(
@@ -1347,16 +1384,23 @@ async fn hls_decryptor(
     let uri_owned = uri.to_string();
     let key_bytes = fetch_cache
         .get_or_fetch_key(uri, || async move {
-            fetch_bytes(&client, &uri_owned, &request_headers, None, origin)
-                .await?
-                .try_into()
-                .map_err(|_| {
-                    engine_error(
-                        "hls_unsupported_encryption",
-                        "AES-128 HLS key must be 16 bytes.",
-                        false,
-                    )
-                })
+            fetch_bytes(
+                &client,
+                &uri_owned,
+                &request_headers,
+                None,
+                origin,
+                network_policy,
+            )
+            .await?
+            .try_into()
+            .map_err(|_| {
+                engine_error(
+                    "hls_unsupported_encryption",
+                    "AES-128 HLS key must be 16 bytes.",
+                    false,
+                )
+            })
         })
         .await?;
     let iv = key
@@ -1379,6 +1423,7 @@ async fn stream_encrypted_hls_segment(
     key: &HlsKey,
     plan: &SegmentDownloadPlan,
     fetch_cache: &Arc<HlsTaskFetchCache>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<i64, String> {
     let mut decryptor = hls_decryptor(
         client,
@@ -1387,6 +1432,7 @@ async fn stream_encrypted_hls_segment(
         key,
         plan.media_sequence,
         fetch_cache,
+        network_policy,
     )
     .await?;
     let file_name = plan
@@ -1618,7 +1664,12 @@ async fn download_hls_rendition(
     staging_dir: &Path,
     segments: Vec<HlsSegment>,
     fetch_cache: Arc<HlsTaskFetchCache>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<PathBuf, String> {
+    let origin = db::get_task_record(pool, task_id)
+        .await?
+        .and_then(|task| crate::download::http::url_origin(&task.url))
+        .unwrap_or_default();
     fs::create_dir_all(staging_dir).await.map_err(|e| {
         AppErrorPayload::disk_write_failed(format!("Could not create HLS track folder: {e}"))
             .command_error()
@@ -1635,12 +1686,13 @@ async fn download_hls_rendition(
         pool,
         client,
         request_headers,
-        crate::download::http::url_origin(media_url).unwrap_or_default(),
+        origin,
         speed_limiter,
         cancel_token,
         connection_limit,
         plans,
         fetch_cache,
+        network_policy,
     )
     .await?;
     if cancel_token.is_cancelled() {
@@ -1660,8 +1712,13 @@ async fn poll_live_external_track(
     task_id: &str,
     track: &mut LiveExternalTrack,
     fetch_cache: Arc<HlsTaskFetchCache>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<(), String> {
-    let body = fetch_text(client, &track.url, request_headers)
+    let origin = db::get_task_record(pool, task_id)
+        .await?
+        .and_then(|task| crate::download::http::url_origin(&task.url))
+        .unwrap_or_default();
+    let body = fetch_text(client, &track.url, request_headers, &origin, network_policy)
         .await
         .map_err(|e| {
             engine_error(
@@ -1701,12 +1758,13 @@ async fn poll_live_external_track(
         pool,
         client,
         request_headers,
-        crate::download::http::url_origin(&track.url).unwrap_or_default(),
+        origin,
         speed_limiter,
         cancel_token,
         connection_limit,
         plans,
         fetch_cache,
+        network_policy,
     )
     .await?;
     track.completed.extend(completed);
@@ -1724,6 +1782,7 @@ async fn download_hls_rendition_segments(
     connection_limit: usize,
     plans: Vec<SegmentDownloadPlan>,
     fetch_cache: Arc<HlsTaskFetchCache>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<Vec<(String, i64, i64, i64)>, String> {
     let mut pending = plans.into_iter();
     let mut workers = JoinSet::new();
@@ -1755,6 +1814,7 @@ async fn download_hls_rendition_segments(
                 .unwrap_or("segment.ts")
                 .to_string();
             let origin = origin.clone();
+            let network_policy = network_policy.clone();
             workers.spawn(async move {
                 let result = download_hls_segment(
                     &pool,
@@ -1765,6 +1825,7 @@ async fn download_hls_rendition_segments(
                     plan,
                     fetch_cache,
                     origin,
+                    network_policy,
                 )
                 .await;
                 (
@@ -2230,11 +2291,10 @@ async fn fetch_text(
     client: &Client,
     url: &str,
     headers: &[(String, String)],
+    origin: &str,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<String, String> {
-    // Self-origin binding: a playlist fetch always targets its own URL, so
-    // the comparison is trivially same-origin; the helper still fail-closes.
-    let own_origin = crate::download::http::url_origin(url).unwrap_or_default();
-    let bytes = fetch_bytes(client, url, headers, None, &own_origin).await?;
+    let bytes = fetch_bytes(client, url, headers, None, origin, network_policy).await?;
     String::from_utf8(bytes).map_err(|_| {
         engine_error(
             "hls_invalid_playlist",
@@ -2250,11 +2310,11 @@ async fn fetch_bytes(
     headers: &[(String, String)],
     range: Option<String>,
     origin: &str,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<Vec<u8>, String> {
-    // SEC-10: literal-authority pre-flight.
-    crate::download::ssrf::assert_public_authority(
-        &reqwest::Url::parse(url).map_err(|e| format!("Could not request HLS resource: {e}"))?,
-    )?;
+    let parsed =
+        reqwest::Url::parse(url).map_err(|e| format!("Could not request HLS resource: {e}"))?;
+    network_policy.resolve(&parsed).await?;
     // SEC-11: keys and init sections are as origin-bound as the segments.
     let bound_headers = crate::download::http::headers_for_origin(headers, origin, url);
     let headers = bound_headers.as_slice();
@@ -2262,14 +2322,9 @@ async fn fetch_bytes(
     if let Some(range) = range {
         request = request.header(RANGE, range);
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("Could not request HLS resource: {e}"))?;
+    let response = crate::download::http::send_request(request, network_policy).await?;
     if !response.status().is_success() {
-        return Err(crate::download::http::format_http_status_error(
-            response.status(),
-        ));
+        return Err(crate::download::http::format_http_response_error(&response));
     }
     // ARC-10: stream with a hard cap so chunked bodies cannot OOM the worker.
     match read_body_limited(response, HLS_INIT_MAX_BYTES, None, READ_IDLE_TIMEOUT).await {
@@ -2290,19 +2345,10 @@ async fn fetch_bytes(
 }
 
 fn apply_forwarded_headers(
-    mut request: RequestBuilder,
+    request: RequestBuilder,
     headers: &[(String, String)],
 ) -> RequestBuilder {
-    for (name, value) in headers {
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let Ok(value) = HeaderValue::from_str(value) else {
-            continue;
-        };
-        request = request.header(name, value);
-    }
-    request
+    crate::download::http::apply_forwarded_headers(request, headers)
 }
 
 fn hls_output_name(url: &str) -> String {

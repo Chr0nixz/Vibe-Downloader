@@ -10,6 +10,8 @@ const retryStartupInit = vi.fn<() => Promise<void>>();
 const openStartupLogFolder = vi.fn<() => Promise<void>>();
 const openStartupDataFolder = vi.fn<() => Promise<void>>();
 const relaunch = vi.fn<() => Promise<void>>();
+const prepareAppRelaunch = vi.fn<() => Promise<void>>();
+const cancelPreparedAppRelaunch = vi.fn<() => Promise<void>>();
 
 vi.mock("react-i18next", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-i18next")>();
@@ -32,10 +34,12 @@ vi.mock("@tauri-apps/plugin-process", () => ({
 }));
 
 vi.mock("@/lib/tauri", () => ({
+  cancelPreparedAppRelaunch: () => cancelPreparedAppRelaunch(),
   getStartupStatus: () => getStartupStatus(),
   retryStartupInit: () => retryStartupInit(),
   openStartupLogFolder: () => openStartupLogFolder(),
   openStartupDataFolder: () => openStartupDataFolder(),
+  prepareAppRelaunch: () => prepareAppRelaunch(),
   openDatabaseRecoveryFolder: vi.fn(),
   resetDatabaseForRecovery: vi.fn(),
 }));
@@ -63,6 +67,8 @@ describe("StartupGate", () => {
     openStartupLogFolder.mockReset();
     openStartupDataFolder.mockReset();
     relaunch.mockReset();
+    prepareAppRelaunch.mockReset();
+    cancelPreparedAppRelaunch.mockReset();
   });
 
   it("mounts children when startup becomes ready", async () => {
@@ -114,6 +120,32 @@ describe("StartupGate", () => {
     expect(screen.getByText("could not open db")).toBeInTheDocument();
     expect(screen.getByText("database")).toBeInTheDocument();
     expect(screen.queryByText("App ready")).not.toBeInTheDocument();
+  });
+
+  it("prepares owner drain before relaunch and releases it if relaunch fails", async () => {
+    const calls: string[] = [];
+    getStartupStatus.mockResolvedValue(failedStatus());
+    prepareAppRelaunch.mockImplementation(async () => {
+      calls.push("prepare");
+    });
+    relaunch.mockImplementation(async () => {
+      calls.push("relaunch");
+      throw new Error("restart unavailable");
+    });
+    cancelPreparedAppRelaunch.mockImplementation(async () => {
+      calls.push("cancel");
+    });
+
+    render(
+      <StartupGate>
+        <p>App ready</p>
+      </StartupGate>,
+    );
+    const button = await screen.findByRole("button", { name: /startupFailed.relaunch/ });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(calls).toEqual(["prepare", "relaunch", "cancel"]));
+    expect(await screen.findByRole("alert")).toHaveTextContent("restart unavailable");
   });
 
   it("retries init and resumes polling until ready", async () => {

@@ -7,9 +7,9 @@ import { onShuttingDown } from "@/lib/tauri";
  * Full-screen overlay shown while the app gracefully shuts down.
  *
  * The Rust backend emits `app://shutting-down` when the user closes the
- * window or clicks tray Quit. The backend then cancels active downloads,
- * waits up to 3 seconds for checkpoint flush, and exits. This overlay
- * keeps the user informed during that brief window.
+ * window or clicks tray Quit. The backend cancels active downloads and waits
+ * for their owned resources and supervisor work to finish before exiting.
+ * This overlay keeps the user informed while the drain is in progress.
  */
 export function ShutdownOverlay() {
   const { t } = useTranslation();

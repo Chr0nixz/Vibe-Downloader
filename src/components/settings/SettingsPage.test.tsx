@@ -11,6 +11,7 @@ import { SettingsPage } from "./SettingsPage";
 
 const mocks = vi.hoisted(() => ({
   updateSettings: vi.fn(),
+  resetSettings: vi.fn(),
   getBrowserIntegrationStatus: vi.fn(),
   onBrowserIntegrationChanged: vi.fn(),
 }));
@@ -67,6 +68,7 @@ vi.mock("@/lib/tauri", () => ({
   openDirectoryPicker: vi.fn(),
   openFilePicker: vi.fn(),
   probeFfmpegVersion: vi.fn(),
+  resetSettings: mocks.resetSettings,
   uninstallBrowserIntegration: vi.fn(),
   updateBrowserCaptureSettings: vi.fn(),
   updateSettings: mocks.updateSettings,
@@ -82,7 +84,7 @@ const SETTINGS: AppSettings = {
   systemNotifications: true,
   closeToTray: false,
   startOnBoot: false,
-  autoResumeOnStartup: false,
+  autoResumeOnStartup: true,
   floatingWindowEnabled: false,
   clipboardMonitorEnabled: true,
   accentColor: "blue",
@@ -102,6 +104,7 @@ const SETTINGS: AppSettings = {
   completionAction: "none",
   completionCountdownSeconds: 30,
   completionRunCommand: "",
+  completionIncludeFailures: false,
   deleteToTrash: true,
   autoUpdateCheckEnabled: true,
   ffmpegPath: null,
@@ -176,6 +179,7 @@ describe("SettingsPage", () => {
   beforeEach(() => {
     vi.stubGlobal("IntersectionObserver", MockIntersectionObserver);
     mocks.updateSettings.mockReset();
+    mocks.resetSettings.mockReset();
     mocks.getBrowserIntegrationStatus.mockReset();
     mocks.onBrowserIntegrationChanged.mockReset();
     mocks.updateSettings.mockImplementation(async (input: Partial<AppSettings>) => ({ ...SETTINGS, ...input }));
@@ -216,6 +220,7 @@ describe("SettingsPage", () => {
 
     expect(mocks.updateSettings).toHaveBeenCalledTimes(1);
     expect(mocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ maxActiveTasks: 4 }));
+    expect(mocks.updateSettings).toHaveBeenCalledWith({ maxActiveTasks: 4 });
   });
 
   // Regression: the empty field preselected B/s, so typing "5" capped every
@@ -307,6 +312,31 @@ describe("SettingsPage", () => {
     expect(useSettingsStore.getState().settings?.maxActiveTasks).toBe(4);
     expect(maxActiveTasks).toHaveValue(4);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // UX-41: reset must consume the backend-derived defaults via resetSettings,
+  // not a hardcoded frontend copy (which had drifted to a 1 MiB threshold).
+  it("restores defaults through the backend resetSettings command", async () => {
+    const backendDefaults: AppSettings = {
+      ...SETTINGS,
+      maxActiveTasks: 2,
+      multiConnectionThresholdBytes: String(16 * 1024 * 1024),
+    };
+    mocks.resetSettings.mockResolvedValue(backendDefaults);
+    renderSettings();
+    await act(async () => {});
+
+    // Open the confirmation dialog, then confirm inside it.
+    const triggers = screen.getAllByText("settings.resetDefaults");
+    fireEvent.click(triggers[0]);
+    await act(async () => {});
+    const confirmButtons = screen.getAllByText("settings.resetDefaults");
+    fireEvent.click(confirmButtons[confirmButtons.length - 1]);
+    await act(async () => {});
+
+    expect(mocks.resetSettings).toHaveBeenCalledTimes(1);
+    // The hardcoded default list must not be replayed through updateSettings.
+    expect(mocks.updateSettings).not.toHaveBeenCalled();
   });
 
   it("exposes the compact section navigator and labeled save state", async () => {

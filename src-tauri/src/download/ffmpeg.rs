@@ -20,15 +20,59 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db;
 
+struct OwnedChild {
+    child: Option<tokio::process::Child>,
+    lease: Option<super::lifecycle::Lease>,
+}
+
+impl OwnedChild {
+    fn new(child: tokio::process::Child) -> Self {
+        Self {
+            child: Some(child),
+            lease: super::lifecycle::Resources::current().map(|owner| owner.lease()),
+        }
+    }
+}
+
+impl std::ops::Deref for OwnedChild {
+    type Target = tokio::process::Child;
+    fn deref(&self) -> &Self::Target {
+        self.child.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for OwnedChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.child.as_mut().unwrap()
+    }
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let mut child = self.child.take().unwrap();
+        let lease = self.lease.take();
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        // ARC-62: kill-on-drop sends a signal but does not await process exit.
+        let _ = child.start_kill();
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+            drop(lease);
+        });
+    }
+}
+
 /// Spawn an ffmpeg command with kill-on-drop and cancel ownership (ARC-03).
 pub(crate) async fn run_cancellable(
     mut command: tokio::process::Command,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
     command.kill_on_drop(true);
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|e| format!("Could not start ffmpeg: {e}"))?;
+    let mut child = OwnedChild::new(child);
     tokio::select! {
         _ = cancel.cancelled() => {
             let _ = child.kill().await;
@@ -141,9 +185,10 @@ async fn probe_ffmpeg_version_with_budget(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|e| format!("Failed to spawn ffmpeg: {e}"))?;
+    let mut child = OwnedChild::new(child);
 
     let stdout_pipe = child.stdout.take().expect("stdout is piped");
     let stderr_pipe = child.stderr.take().expect("stderr is piped");

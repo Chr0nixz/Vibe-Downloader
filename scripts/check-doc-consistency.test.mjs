@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   bulletHeadlinedIds,
   checkDocConsistency,
+  checkSourceAuditReferences,
   currentVersionClaim,
   narrativeOpenClaims,
   parseAuditStatuses,
+  readAuditSources,
   referencedAuditIds,
+  sourceCommentReferences,
 } from "./check-doc-consistency.mjs";
 
 const SAMPLE_AUDIT = `# Audit
@@ -142,4 +146,66 @@ test("referencedAuditIds deduplicates and ignores non-audit tokens", () => {
 test("currentVersionClaim extracts the version", () => {
   assert.equal(currentVersionClaim("text The project is currently at `1.2.3`. end"), "1.2.3");
   assert.equal(currentVersionClaim("no claim here"), null);
+});
+
+test("source audit scan includes inline and nested comments but ignores literals and legacy tags", () => {
+  const source = [
+    'const url = "https://example.com/ARC-999"; // ARC-31: inline reference',
+    "// R-1, E-12, S-1.1 and UX-1 are preserved legacy tags.",
+    'const label = "// SEC-999";',
+    "const template = `/* ENG-999 */`;",
+    'let raw = r##"quotes " // FUN-999"##;',
+    'let byte_raw = br#"/* UX-999 */"#;',
+    "/* SEC-11: outer",
+    " * /* ARC-19: nested */",
+    " * ARC-31: after nested comment */",
+    "/// ARC-19: Rust item documentation",
+    "fn example<'a>(value: &'a str) {} // SEC-11: lifetimes are not strings",
+    "fn lifetimes<'a, /* ARC-31: borrowed parameters */ 'b>() {}",
+  ].join("\n");
+  assert.deepEqual(sourceCommentReferences(source), [
+    { id: "ARC-31", line: 1 },
+    { id: "SEC-11", line: 7 },
+    { id: "ARC-19", line: 8 },
+    { id: "ARC-31", line: 9 },
+    { id: "ARC-19", line: 10 },
+    { id: "SEC-11", line: 11 },
+    { id: "ARC-31", line: 12 },
+  ]);
+});
+
+test("unregistered source-comment IDs fail with a file and line diagnostic", () => {
+  assert.deepEqual(
+    checkSourceAuditReferences(SAMPLE_AUDIT, [
+      { path: "src/example.ts", text: "// ARC-31: registered\n// ENG-999: typo\n" },
+    ]),
+    ["src/example.ts:2: comment references ENG-999, which does not exist in the audit document"],
+  );
+});
+
+test("script parsing checks template expressions and JSX comments without treating text as comments", () => {
+  const text = [
+    "const ignored = `// ENG-999`;",
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: This is source text for the comment parser.
+    "const interpolated = `${value /* ENG-998: actual expression comment */}`;",
+    "const jsx = <div>{/* SEC-998: actual JSX comment */}<span>ARC-999</span></div>;",
+    "const regex = /[/*]ARC-999/;",
+  ].join("\n");
+  assert.deepEqual(checkSourceAuditReferences(SAMPLE_AUDIT, [{ path: "src/example.tsx", text }]), [
+    "src/example.tsx:2: comment references ENG-998, which does not exist in the audit document",
+    "src/example.tsx:3: comment references SEC-998, which does not exist in the audit document",
+  ]);
+});
+
+test("the production source inventory detects an injected unregistered comment", async () => {
+  const audit = await readFile(new URL("../docs/project-improvement-audit.md", import.meta.url), "utf8");
+  const sources = readAuditSources(fileURLToPath(new URL("../", import.meta.url)));
+  assert.ok(sources.some(({ path }) => path === "src-tauri/src/scheduler/mod.rs"));
+  assert.ok(sources.some(({ path }) => path === "src/components/shell/AppShell.tsx"));
+  assert.deepEqual(checkSourceAuditReferences(audit, sources), []);
+  const modified = sources.map((source) => ({ ...source }));
+  modified[0].text = `// ENG-999: injected registration failure\n${modified[0].text}`;
+  assert.deepEqual(checkSourceAuditReferences(audit, modified), [
+    `${modified[0].path}:1: comment references ENG-999, which does not exist in the audit document`,
+  ]);
 });

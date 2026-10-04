@@ -546,6 +546,16 @@ pub async fn validate_backup_secrets(pool: &SqlitePool) -> Result<(), String> {
             "SELECT rowid, headers_ciphertext, nonce FROM task_request_headers",
         ),
         (
+            "task_request_profiles",
+            "public_ciphertext",
+            "SELECT rowid, public_ciphertext, public_nonce AS nonce FROM task_request_profiles",
+        ),
+        (
+            "task_request_profiles",
+            "sensitive_ciphertext",
+            "SELECT rowid, sensitive_ciphertext, sensitive_nonce AS nonce FROM task_request_profiles",
+        ),
+        (
             "task_credentials",
             "credentials_ciphertext",
             "SELECT rowid, credentials_ciphertext, nonce FROM task_credentials",
@@ -1200,6 +1210,28 @@ pub(crate) async fn run_restore_scrub_core(
         .await
         .map_err(|e| e.to_string())?;
     }
+    // B3: network authorizations are machine-local trust decisions. A backup
+    // must never carry private-network grants onto another machine, and a
+    // task restored without its grant must fall back to public-only access.
+    sqlx::query("DELETE FROM network_authorizations")
+        .execute(&mut *connection)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "UPDATE task_network_policies
+         SET policy_json = ?, updated_at = ?",
+    )
+    .bind(
+        serde_json::to_string(&crate::download::network_policy::NetworkPolicy::public(
+            crate::download::network_policy::TaskSource::Unknown,
+            "",
+        ))
+        .map_err(|e| e.to_string())?,
+    )
+    .bind(crate::models::task::now_iso())
+    .execute(&mut *connection)
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(observation)
 }
 

@@ -33,6 +33,7 @@ import { useTranslation } from "react-i18next";
 import {
   hasInlineRecovery,
   inlineRecoveryActionsForTask,
+  recoveryActionLabel,
   resumeVerdict,
   rowShowsRetry,
   rowTransferMode,
@@ -78,6 +79,8 @@ interface TaskRowProps {
   onShiftSelect?: (anchorId: string, currentId: string) => void;
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
+  onRedownload?: (task: Task) => void;
+  onRecheck?: (task: Task) => void;
   onFinishLiveRecording: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
@@ -407,6 +410,8 @@ export const TaskRow = memo(function TaskRow({
   onShiftSelect,
   onToggleTransfer,
   onRetry,
+  onRedownload,
+  onRecheck,
   onFinishLiveRecording,
   onOpenFile,
   onOpenFolder,
@@ -482,11 +487,14 @@ export const TaskRow = memo(function TaskRow({
       case "waiting_network":
         return t("task.diagnostic.waitingNetwork");
       case "completed": {
-        const time = formatClockTime(task.updatedAt);
-        if (task.hashStatus === "verified") return t("task.diagnostic.checksumVerified", { time });
-        if (task.hashStatus === "failed") return t("task.diagnostic.checksumFailed", { time });
-        if (task.hashStatus === "pending") return t("task.diagnostic.checksumPending", { time });
-        return t("task.diagnostic.completedAt", { time });
+        const completedTime = task.completedAt
+          ? formatClockTime(task.completedAt)
+          : t("task.diagnostic.timeUnavailable");
+        const hashTime = task.hashVerifiedAt ? formatClockTime(task.hashVerifiedAt) : completedTime;
+        if (task.hashStatus === "verified") return t("task.diagnostic.checksumVerified", { time: hashTime });
+        if (task.hashStatus === "failed") return t("task.diagnostic.checksumFailed", { time: hashTime });
+        if (task.hashStatus === "pending") return t("task.diagnostic.checksumPending", { time: hashTime });
+        return t("task.diagnostic.completedAt", { time: completedTime });
       }
       case "failed":
       case "needs_attention":
@@ -503,7 +511,7 @@ export const TaskRow = memo(function TaskRow({
   // message + cause for recoverable failures — a diagnostic line that only
   // repeats one of them wastes the row's single free-text slot.
   const badgeLabel = isFinalizing ? t("task.status.finishing") : t(`task.status.${task.status}`);
-  // A health summary that only restates the badge ("Waiting for network")
+  // A health summary that only restates the badge ("Stream idle")
   // yields to the status fact, which says what happens next.
   const usefulHealth =
     healthSummary && healthSummary !== badgeLabel && healthSummaryMatchesStatus(task.healthSummary, task.status)
@@ -533,6 +541,8 @@ export const TaskRow = memo(function TaskRow({
       task={task}
       onToggleTransfer={onToggleTransfer}
       onRetry={onRetry}
+      onRedownload={onRedownload}
+      onRecheck={onRecheck}
       onFinishLiveRecording={onFinishLiveRecording}
       onOpenFile={onOpenFile}
       onOpenFolder={onOpenFolder}
@@ -1384,7 +1394,9 @@ const InlineRecovery = memo(function InlineRecovery({
   const restartTitle = restartConsequence ?? undefined;
   const moreFixesTitle =
     moreFixes.length > 1
-      ? t("actions.moreFixesTitle", { fixes: moreFixes.map((action) => t(`recovery.${action}`)).join(", ") })
+      ? t("actions.moreFixesTitle", {
+          fixes: moreFixes.map((action) => recoveryActionLabel(task, action, t)).join(", "),
+        })
       : undefined;
   // Every button keeps the 32px height at every width (DESIGN.md minimum for
   // dense desktop UI).
@@ -1450,7 +1462,7 @@ const InlineRecovery = memo(function InlineRecovery({
             onResolve(task, primaryAction);
           }}
         >
-          {t(`recovery.${primaryAction}`)}
+          {recoveryActionLabel(task, primaryAction, t)}
         </Button>
         {moreFixes.length === 1 ? (
           // A single alternative is named on its face: a count + hover tooltip
@@ -1467,7 +1479,7 @@ const InlineRecovery = memo(function InlineRecovery({
               onResolve(task, moreFixes[0]);
             }}
           >
-            {t(`recovery.${moreFixes[0]}`)}
+            {recoveryActionLabel(task, moreFixes[0], t)}
           </Button>
         ) : moreFixes.length > 1 ? (
           // Two or more alternatives open as a menu in place; they used to
@@ -1506,7 +1518,7 @@ const InlineRecovery = memo(function InlineRecovery({
                       }}
                     >
                       <Icon className="h-4 w-4" aria-hidden />
-                      {t(`recovery.${action}`)}
+                      {recoveryActionLabel(task, action, t)}
                     </Button>
                   </PopoverClose>
                 );

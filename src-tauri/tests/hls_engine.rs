@@ -185,6 +185,7 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         app: None,
         request_id: None,
         cancel_token: None,
+        network_policy: tauri_app_lib::download::network_policy::NetworkPolicy::default(),
     }
 }
 
@@ -1517,9 +1518,11 @@ async fn sec11_cross_origin_segment_fetch_strips_credentials() {
                     "Basic dXNlcjpwYXNz".to_string(),
                 ),
                 ("Cookie".to_string(), "session=abc".to_string()),
-                ("X-Vibe-Neutral".to_string(), "keep-me".to_string()),
+                ("Accept-Language".to_string(), "zh-CN".to_string()),
+                ("X-Site-Token".to_string(), "fixture-token".to_string()),
             ],
             proxy_config: ResolvedProxyConfig::default(),
+            network_policy: tauri_app_lib::download::network_policy::NetworkPolicy::default(),
         };
         async move { engine.download(context).await }
     });
@@ -1538,6 +1541,8 @@ async fn sec11_cross_origin_segment_fetch_strips_credentials() {
                 "same-origin playlist fetch must keep Authorization"
             );
             assert_eq!(playlist.header("cookie"), Some("session=abc"));
+            assert_eq!(playlist.header("x-site-token"), Some("fixture-token"));
+            assert_eq!(segment.header("x-site-token"), None);
             assert_eq!(
                 segment.header("authorization"),
                 None,
@@ -1549,8 +1554,8 @@ async fn sec11_cross_origin_segment_fetch_strips_credentials() {
                 "cross-origin segment fetch must not receive Cookie"
             );
             assert_eq!(
-                segment.header("x-vibe-neutral"),
-                Some("keep-me"),
+                segment.header("accept-language"),
+                Some("zh-CN"),
                 "non-sensitive headers still flow to cross-origin targets"
             );
             break;
@@ -1808,6 +1813,7 @@ fn headless_context_with_connections(
         connection_limit,
         request_headers: Vec::new(),
         proxy_config: ResolvedProxyConfig::default(),
+        network_policy: tauri_app_lib::download::network_policy::NetworkPolicy::default(),
     }
 }
 
@@ -2154,7 +2160,8 @@ async fn sec11_cross_origin_segment_requests_strip_credentials() {
                 "Basic dXNlcjpwYXNz".to_string(),
             ),
             ("Cookie".to_string(), "session=sec11".to_string()),
-            ("X-App-Client".to_string(), "vibe-test".to_string()),
+            ("User-Agent".to_string(), "vibe-test".to_string()),
+            ("X-Site-Token".to_string(), "fixture-token".to_string()),
         ],
         ..common::headless_download_context(
             pool.clone(),
@@ -2192,13 +2199,57 @@ async fn sec11_cross_origin_segment_requests_strip_credentials() {
     );
     for raw in &cross_requests {
         assert!(
-            !has_header(raw, "authorization") && !has_header(raw, "cookie"),
+            !has_header(raw, "authorization")
+                && !has_header(raw, "cookie")
+                && !has_header(raw, "x-site-token"),
             "cross-origin segment request leaked credentials: {raw}"
         );
         assert!(
-            has_header(raw, "x-app-client"),
+            has_header(raw, "user-agent"),
             "non-sensitive forwarded headers must still flow cross-origin: {raw}"
         );
     }
     pool.close().await;
+}
+
+#[tokio::test]
+async fn request_profile_secrets_do_not_follow_cross_origin_variant_playlists() {
+    if !ffmpeg_available() {
+        eprintln!("skipping HLS variant request profile test: ffmpeg not in PATH");
+        return;
+    }
+    let variant_log = Arc::new(Mutex::new(Vec::new()));
+    let captured = variant_log.clone();
+    let variant = TestServer::start(move |mut stream| {
+        let mut buf = [0; 16384];
+        let read = stream.read(&mut buf).unwrap_or(0);
+        captured
+            .lock()
+            .expect("variant capture")
+            .push(String::from_utf8_lossy(&buf[..read]).into_owned());
+        let body = VOD_MEDIA_PLAYLIST.as_bytes();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\n\r\n", body.len()).expect("response");
+        let _ = stream.write_all(body);
+    });
+    let media_url = format!("{}/video.m3u8", variant.base_url);
+    let master = TestServer::start(move |mut stream| {
+        let mut buf = [0; 16384];
+        let _ = stream.read(&mut buf);
+        let body = format!("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\n{media_url}\n");
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\n\r\n{body}", body.len()).expect("master response");
+    });
+    let mut request = new_probe_request(format!("{}/master.m3u8", master.base_url));
+    request.request_headers = vec![
+        ("Cookie".into(), "session=fixture".into()),
+        ("X-Token".into(), "fixture-token".into()),
+        ("User-Agent".into(), "ProfileRegression/1".into()),
+    ];
+    new_engine().probe(request).await.expect("master probe");
+    let requests = variant_log.lock().expect("capture");
+    assert!(!requests.is_empty());
+    for raw in requests.iter() {
+        let lower = raw.to_ascii_lowercase();
+        assert!(!lower.contains("cookie:") && !lower.contains("x-token:"));
+        assert!(lower.contains("user-agent: profileregression/1"));
+    }
 }

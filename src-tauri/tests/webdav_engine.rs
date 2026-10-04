@@ -244,6 +244,7 @@ fn new_probe_request(uri: String) -> ProbeRequest {
         app: None,
         request_id: None,
         cancel_token: None,
+        network_policy: tauri_app_lib::download::network_policy::NetworkPolicy::default(),
     }
 }
 

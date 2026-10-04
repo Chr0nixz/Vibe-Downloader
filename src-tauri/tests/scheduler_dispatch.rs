@@ -20,6 +20,7 @@ use tauri_app_lib::{
     db,
     models::task::now_iso,
     models::{HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus},
+    scheduler::DispatchQueue,
     DownloadControl,
 };
 use tokio::sync::Mutex;
@@ -69,6 +70,136 @@ fn sample_task_record(id: &str, source_key: &str) -> TaskRecord {
     }
 }
 
+#[tokio::test]
+async fn arc61_dispatch_reaches_another_host_beyond_a_full_page() {
+    let (_db, pool) = common::test_pool("arc61-blocked-host").await;
+    for position in 0..40 {
+        let mut task = sample_task_record(&format!("blocked-{position:03}"), "busy.example");
+        task.queue_position = position;
+        db::insert_task_record(&pool, &task).await.unwrap();
+    }
+    let mut ready = sample_task_record("ready", "ready.example");
+    ready.queue_position = 41;
+    db::insert_task_record(&pool, &ready).await.unwrap();
+    let host_slots = HashMap::from([("busy.example".to_string(), 8)]);
+    let mut candidates = DispatchQueue::new(8);
+    let selected = candidates
+        .next(&pool, false, 8, &host_slots)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.id, ready.id);
+    assert!(candidates
+        .next(&pool, false, 8, &host_slots)
+        .await
+        .unwrap()
+        .is_none());
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn arc61_schedule_filter_reaches_unrestricted_tasks_and_honors_retry_time() {
+    let (_db, pool) = common::test_pool("arc61-schedule").await;
+    for position in 0..12 {
+        let mut task = sample_task_record(&format!("scheduled-{position:03}"), "example.com");
+        task.priority = TaskPriority::High;
+        task.queue_position = position;
+        db::insert_task_record(&pool, &task).await.unwrap();
+    }
+    let mut delayed = sample_task_record("delayed", "example.com");
+    delayed.obey_schedule = false;
+    delayed.retry_after_at = Some("9999-01-01T00:00:00.000Z".to_string());
+    db::insert_task_record(&pool, &delayed).await.unwrap();
+    let mut ready = sample_task_record("ready", "example.com");
+    ready.obey_schedule = false;
+    ready.priority = TaskPriority::Low;
+    db::insert_task_record(&pool, &ready).await.unwrap();
+    let mut candidates = DispatchQueue::new(3);
+    assert_eq!(
+        candidates
+            .next(&pool, true, 8, &HashMap::new())
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        ready.id
+    );
+    assert!(candidates
+        .next(&pool, true, 8, &HashMap::new())
+        .await
+        .unwrap()
+        .is_none());
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn arc61_cursor_preserves_priority_and_ties_when_dispatched_rows_disappear() {
+    let (_db, pool) = common::test_pool("arc61-cursor").await;
+    for (id, priority) in [
+        ("low", TaskPriority::Low),
+        ("normal", TaskPriority::Normal),
+        ("high-b", TaskPriority::High),
+        ("high-a", TaskPriority::High),
+    ] {
+        let mut task = sample_task_record(id, "example.com");
+        task.priority = priority;
+        task.created_at = "2026-09-29T00:00:00.000Z".to_string();
+        db::insert_task_record(&pool, &task).await.unwrap();
+    }
+    let mut candidates = DispatchQueue::new(1);
+    let mut seen = Vec::new();
+    while let Some(task) = candidates
+        .next(&pool, false, 8, &HashMap::new())
+        .await
+        .unwrap()
+    {
+        seen.push(task.id.clone());
+        db::delete_task_record(&pool, &task.id).await.unwrap();
+    }
+    assert_eq!(seen, ["high-a", "high-b", "normal", "low"]);
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn arc61_host_usage_is_rechecked_between_candidates_in_the_same_page() {
+    let (_db, pool) = common::test_pool("arc61-host-changes").await;
+    for (position, host) in ["first.example", "first.example", "other.example"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut task = sample_task_record(&format!("task-{position}"), host);
+        task.queue_position = position as i64;
+        db::insert_task_record(&pool, &task).await.unwrap();
+    }
+    let mut candidates = DispatchQueue::new(2);
+    let mut slots = HashMap::new();
+    assert_eq!(
+        candidates
+            .next(&pool, false, 4, &slots)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "task-0"
+    );
+    slots.insert("first.example".to_string(), 4);
+    assert_eq!(
+        candidates
+            .next(&pool, false, 4, &slots)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "task-2"
+    );
+    assert!(candidates
+        .next(&pool, false, 4, &slots)
+        .await
+        .unwrap()
+        .is_none());
+    pool.close().await;
+}
+
 async fn test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
     // ENG-03: delegate to the shared helper so the database files are removed
     // on drop instead of accumulating in the temp directory.
@@ -99,6 +230,7 @@ async fn reserve_task_under_lock(
                 cancel_token,
                 finish: finish.clone(),
                 finish_notify: Arc::new(tokio::sync::Notify::new()),
+                speed_limiter: tauri_app_lib::download::GlobalSpeedLimiter::disabled(),
                 handle: None,
                 source_key: task.source_key.clone(),
                 connection_slots,

@@ -1,6 +1,6 @@
 # 项目改进审计
 
-最后更新：2026-09-25
+最后更新：2026-10-02
 
 适用版本：Vibe Downloader `0.5.0`
 
@@ -52,6 +52,7 @@ ID 前缀含义：
 4. 新增 i18n key 时更新全部 7 个 locale，并运行 `pnpm check:i18n`。
 5. Rust IPC 模型或命令签名变化后运行 `pnpm specta` 和 `pnpm check:bindings`。
 6. 修复完成后在本文将状态更新为 Closed，并记录关键测试；不要删除问题及其历史原因。
+7. 验收存在未完成部分时保留 In progress / Fixed locally；若独立拆分后关闭原条目，必须先为残项登记新 ID、验收条件及依赖，不得只在修复说明中口头延期。
 
 自 2026-08-26（第 4 轮复审）起，本文新增「已验证的非问题与负结果」清单（第十二章）：经对抗性复核判定为不可达或已有可靠上游防线的候选发现也一并登记。后续修复对话不得将其作为新问题重复报告；引用其结论时应注明「已验证的非问题」。若相关代码发生实质变更，对应条目应重新评估。
 
@@ -1615,6 +1616,245 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **证据／影响**：对话框、命令面板、toast、菜单、下拉与 tooltip 都用 `--surface-overlay`，暗色下为 `oklch(0.255 0.013 255 / 0.82)` 且背后没有模糊，列表文字从命令面板与新建对话框里透出来。
 - **修复合同**：浮在应用自身文字之上的表面不透明；浮在桌面之上的独立窗口（悬浮状态球、托盘菜单）保持原样。
 - **2026-09-25 修复证据**：[`tokens.css`](../src/styles/tokens.css) 新增不透明的 `--surface-popover`（明 `oklch(1 0.002 255)`，暗 `oklch(0.255 0.013 255)`），`globals.css` 暴露 `bg-surface-popover`；dialog、toast（3 处）、menu-item、popover、select、tooltip、ShutdownOverlay 与跳转链接改用它；`--surface-overlay` 只留给 `FloatingStatusWindow` 与 `TrayMenu`。DESIGN.md 的两套 token 同步新增 `surface.popover` 并注明两者分工。浏览器实测命令面板计算背景：暗 `oklch(0.255 0.013 255)`、明 `oklch(1 0.002 255)`，均无 alpha。
+
+## 2026-09-27 审查登记（第一批：止血）
+
+来源：[四维现状审查 2026-09-27](project-review-2026-09-27.md)（`R27-*` 本地编号）。本节先补登记两个已在代码落地但未入册的历史修复（`ARC-55`、`SEC-14`，消除「唯一风险登记册不完整」），再登记第一批止血条目；后续批次按审查文档第 8 节顺序登记。状态仅在对应验收有实际证据后更新。
+
+### ARC-55（P2，Closed）：目录探测无总预算，取消无法终止已 spawn 的探测任务（R26-F04）
+
+- **证据／影响**：目录探测的 connect 有 `FTP_CONNECT_BUDGET`，但 CWD/PWD/MLSD/LIST 无界执行；接受控制连接后停滞的服务器会让新建对话框一直挂起，且对话框的 Cancel 无法终止已 spawn 的探测任务。
+- **修复合同**：探测有跨引擎的总墙钟预算与可选取消；区分「已取消」与「超时」并返回对应稳定错误码。
+- **2026-09-27 登记说明**：代码与测试已在早前批次落地（`download/mod.rs` 的 `DIRECTORY_PROBE_BUDGET = 90s` 与 `bounded_probe`；`ftp.rs`/`sftp.rs`/`webdav.rs` 的 `*_cancellable` 探测入口），但当时未登记 ID，代码注释先行引用了 `ARC-55`。本条为补登记。残留：关闭对话框仍不取消后端请求（见 `R27-F09`/审查文档 4.1，留待后续批次）。
+
+### SEC-14（P2，Closed）：凭据密文版本分派只看首字节，legacy 密文可能被误路由（R26-A03）
+
+- **证据／影响**：v1 信封以 `0x01` 前缀标记；plaintext 恰好以 `0x01` 开头的 legacy 密文（每条约 1/256 概率）会被误判为 v1 并解密失败，凭据不可用。
+- **修复合同**：先按 v1 尝试，认证失败且首字节为 `0x01` 时按 legacy 重试（不剥离前缀、不降级 AAD）；有针对该碰撞的回归测试。
+- **2026-09-27 登记说明**：代码与测试已在早前批次落地（`secure_headers.rs` 的双路分派与 `legacy_ciphertext_with_leading_version_byte_still_decrypts`），但当时未登记 ID，代码注释先行引用了 `SEC-14`。本条为补登记。
+
+### ARC-56（P1，Fixed locally）：HTTP 分段 `retry_count` 永不重置，失败后「重试」的实际重试预算为 0（R27-A01）
+
+- **证据／影响**：worker 以数据库中的 `segment.retry_count` 作为本次运行的重试起点（`worker.rs:71`），与 `MAX_SEGMENT_RETRIES = 5` 比较；每次重试把递增后的计数写回（`runtime_progress.rs:192`、`segments.rs:341`）。暂停、恢复、重试、启动恢复所用的 `update_segments_status_for_task(_in_tx)` 只改状态不重置计数（`segments.rs:544`），`reset_interrupted_tasks` 同样不重置（`task_state.rs:1109`）。某段在一次网络中断中用尽 5 次重试→任务失败→用户点「重试」→该段下一次瞬时错误不再重试，整个任务立即失败；跨天、跨重启的大文件下载逐步累积计数，越到后期越脆弱。
+- **修复合同**：运行时预算与历史统计分开——`retry_count` 继续作为诊断累计值，worker 使用每次运行从 0 开始的本地计数；或在进入 `Queued` 的转移中重置未完成分段的计数。行为在暂停→继续、用户重试、调度器派发、应用重启四条路径一致。
+- **验收**：fake server 让某段连续失败 6 次使任务失败；点「重试」后再注入 1 次瞬时错误，任务应重试并完成；跨应用重启后同样成立。
+- **2026-09-28 修复证据**：按「运行时预算与历史统计分开」方案实施。HTTP：`worker.rs` 的预算改用每次运行从 0 开始的 `run_retries`，退避也按运行内计数（恢复的分段不再从 15s 天花板起步）；`segment.retry_count` 在运行内递增并经 `update_segment_retry` 持久化，保持累计诊断语义（请求诊断记录同样读取递增后的值）。跨引擎契约一并修复（AGENTS.md 根因 1）：FTP/SFTP 协调器的 `SegmentProgress` 新增 `run_retry_count`（`progress_from_segments` 从 0 起），失败判定与退避改用运行内计数，`retry_count` 仍持久化累计值；DASH/HLS 本就使用运行内局部计数，无需修改。测试：`http_engine.rs` 新增 `segmented_direct_retry_budget_resets_despite_persisted_retry_count`（所有分段携带 `retry_count = 5` 的「已耗尽」DB 状态 + 每段一次 500 注入，下载仍须重试并完成、SHA256 一致），29/29 通过；`ftp_engine` 18/18、`sftp_engine` 22/22 无回归。真实安装包中「失败→手动重试→跨重启」的端到端走查待实机验证（故为 Fixed locally）。
+- **2026-09-29 复核补测**：[评测报告](agent-evaluation-2026-09-29-r27-batch1.md)的变异测试发现，把 FTP 的本轮预算改回从持久化值起算，原有测试仍全部通过，即 FTP/SFTP 这一半修复没有测试锁住。现补两条同构测试：`ftp_engine.rs::arc56_retry_budget_resets_despite_persisted_retry_count`（fake FTP 新增 `transient_retr_failures`，让第一个 RETR 返回 425；分段预置 `retry_count = 5`，超过 `FTP_WORKER_RETRIES = 2`；下载必须重试并完成，累计计数继续递增到 6）；`sftp_engine.rs::arc56_retry_budget_resets_despite_persisted_retry_count`（`fail_on_read: Some(0)` 注入一次读失败）。变异复测：把 `run_retry_count` 的初值改回 `segment.retry_count` 后，两条测试都会失败。「失败→点重试」仍用预置数据库状态近似：重试路径不重置计数，预算只看本轮计数，两者等价；重启同理，重启就是新一轮运行。
+
+### FUN-33（P1，Fixed locally）：BT 任务在启动 1 秒后不再受全局限速与定时限速约束（R27-F10）
+
+- **证据／影响**：BT 主循环每秒执行 `db::parse_speed_limit_bps(task.task_speed_limit_bps).min(speed_limiter.current_limit_bps().or(Some(i64::MAX)))`（`bt.rs:1029-1036`）。Rust 中 `None < Some(_)`，任务无单独限速（最常见）时 `None.min(Some(全局))` 结果为 `None`，`sync_session_download_limit(None)` 把会话限速清除为「不限速」。会话创建时正确应用了全局限速（`bt.rs:519-527`），但第一次循环同步后即被覆盖。现有测试 `sync_session_download_limit_updates_live_session` 只直接调用同步函数，未覆盖该组合表达式。与 AGENTS.md/README「逐任务与全局限速对 BT 生效、取最小值」的描述不符。
+- **修复合同**：改用显式的 `min_optional_limit` 语义（调度器已有同名函数，`scheduler/mod.rs:882`），每次循环重新读取任务当前限速；「无单独限速 + 有全局限速」时应用全局限速。
+- **验收**：新增循环级测试覆盖「无单独限速 + 有全局限速」组合；`task=None, global=Some(L)` 时会话限速为 `L` 而非不限速；既有限速测试无回归。
+- **2026-09-28 修复证据**：循环同步改为 `effective_bt_download_limit(&speed_limiter)`（= 子限速器 `current_limit_bps()`，该值在派发时已折叠 min(task, scheduled) 为 own、global 为 parent，None 处理正确且每次重读跟踪全局限速实时变化），删除了错误的 `Option::min` 组合表达式；helper 上的 doc 注释明确禁止再以 `Option::min` 方式组合。新增循环级测试 `bt_loop_limit_sync_keeps_global_limit_without_task_limit`，用调度器同款 `with_parent` 形态覆盖五种组合。BT lib 测试 24/24 通过。长期项「BT 流量计入全局令牌桶预算」随后拆为 `FUN-35`。
+- **2026-10-01 策略边界调整**：`FUN-35` 接入后，BT session 的 librqbit cap 只保留任务/计划限速；全局 cap 由任务根 limiter 在 `OwnedStorage` 的 piece 写入边界统一收取，避免 session cap 与跨协议根桶重复扣除。`FUN-33` 的动态任务/计划更新语义保持不变，跨 BT/HTTP 的总预算由 `FUN-35` 记录。
+- **2026-09-29 复核修正**：新增测试原先不符合 rustfmt 格式，`cargo fmt --check`（`pnpm verify:rust` 的第一步）因此失败。已运行 `cargo fmt`，门禁恢复通过，逻辑没有改动。
+
+### UX-41（P2，Fixed locally）：「恢复默认设置」写入的多连接阈值与真实默认值不一致（R27-U07）
+
+- **证据／影响**：`SettingsPage.tsx:937-941` 重置时写入 `multiConnectionThresholdBytes: "1048576"`（1 MiB），后端默认值是 16 MiB（`db/mod.rs:175`）。整组默认值在前端另写一份，任何后端默认调整都会再次漂移。用户「恢复默认」后 1–16 MiB 的小文件也被切成多段，行为与首次安装不一致。
+- **修复合同**：新增后端 `get_default_settings`（或 `reset_settings`）命令，默认值由后端常量生成；前端重置改为消费该命令；Specta bindings 同步再生成。
+- **验收**：前端测试断言「重置后的设置 == 全新数据库读出的设置」；`pnpm specta` 与 `pnpm check:bindings` 通过。
+- **2026-09-28 修复证据**：后端 `db::settings` 抽出 `settings_from_kv`（空 kv 即全新安装默认值，与 `get_settings` 共用同一派生逻辑），新增 `reset_settings`——删除本模块拥有的 33 个键后重新派生，返回与全新数据库逐字段相等的 `AppSettings`；同表的无关键（如 `browser_capture_settings`）不在删除清单内故保留。新增命令 `commands::settings::reset_settings`（清除 keyring 代理密码 + 复用 update 的副作用：引擎代理、全局限速器、悬浮窗、事件、调度派发），登记进 `vibe_commands_base!`（`generate_handler` 与 `collect_commands` 共用）。前端 `SettingsPage.handleResetDefaults` 改为调用 `resetSettings()`，删除漂移的硬编码默认值副本；`tauri.ts`/`tauri-browser.ts` 补 `resetSettings`（mock 用 `defaultBrowserSettings()` 工厂，初值与重置共用一份）。`pnpm specta` 再生成 bindings（`resetSettings` 已入 `bindings.ts`）。测试：`db::settings` 新增 `reset_settings_matches_fresh_database`（污染全部键 + 无关键，断言 `serde_json` 序列化后与全新库逐字段相等、阈值 = 16 MiB、无关键存活），11/11 通过；`SettingsPage.test.tsx` 新增 `restores defaults through the backend resetSettings command`（确认走 `resetSettings` 而非 `updateSettings`），13/13 通过；`pnpm typecheck` 通过。`pnpm check:bindings` 待门禁阶段统一执行。
+- **2026-09-29 复核修正**：(1) 删除清单原是手写的 `[&str; 34]` 数组，没有测试保证它和全部 `SETTING_*` 常量一致；评测变异「清单漏掉 `start_on_boot`」没有被任何测试发现。现改为 `app_setting_keys!` 宏，常量和 `APP_SETTING_KEYS` 从同一处声明生成，新增键不可能漏进重置范围；另加 `app_setting_keys_are_unique` 防止两个常量指向同一行。(2) `reset_settings` 命令原先把 `update_settings` 的运行时副作用逐行复制了一份，现抽成共用的 `apply_settings_side_effects`，新增副作用不会只接入一条路径。(3) 补记一处行为变化：旧前端重置时发送的 `defaultSaveDir: null` 和 `ffmpegPath: null`，后端语义都是「保持不变」，所以下载目录和 ffmpeg 路径过去实际上从未被重置；现在它们会和其他键一起恢复默认值。
+
+### UX-42（P2，Fixed locally）：「等待网络」文案承诺了不存在的自动恢复，且原因描述错误（R27-U02）
+
+- **证据／影响**：`TaskRow.tsx:482-483` 对 `waiting_network` 固定显示「网络不可用，恢复后将自动继续」（7 locale 同义）。后端唯一产生该状态的路径是 HLS 直播播放列表空闲（`hls/engine.rs:699-701`），调度器只派发 `queued`，没有任何代码会自动恢复 `waiting_network`。直播录制在主播暂停推流后停在「网络不可用」，用户以为会自己恢复而不去操作，实际永远不会继续。浏览器 mock 还预置了真实后端不可能出现的「等待网络」HTTP 任务场景，误导预览评审。
+- **修复合同**：按真实原因显示「直播暂无新片段，点继续重新轮询」，提供「继续/完成录制」入口；mock 数据只构造后端可达的状态；长期在 `R27-F02`（任务级自动重试与网络感知，待登记）落地后再恢复「等待网络」语义。
+- **验收**：7 locale 文案更新且 `pnpm check:i18n` 通过；`waiting_network` 任务行显示真实原因与可操作入口；mock 中不再有 HTTP 协议的 `waiting_network` 任务。
+- **2026-09-28 修复证据**：`task.diagnostic.waitingNetwork` 7 locale 全部改为真实原因（en「Live stream idle — resume to keep recording」等），不再承诺自动恢复；`row-recovery.ts` 本就对 `waiting_network` 提供 Resume（行内按钮/右键/详情/批量「全部继续」均可达），无需新增入口。「完成录制」入口需要 HLS 循环在运行中消费 finish 标志，而 idle 任务循环已退出，属媒体工作包（R27-F07）范围，不在本条实施。mock 数据改为后端可达状态：浏览器 mock 的 `waiting_network` 任务改为 HLS 直播录制（`protocolOverride` 参数 + `live.example.com/…m3u8` + HLS 引擎真实写入的 health summary「Live playlist idle - waiting for new segments」，并登记进 `LEGACY_HEALTH_SUMMARY_KEYS` 映射）；Rust debug `mock_seed.rs` 同步改造（`MockTaskInput` 新增 `protocol` 字段，`waiting_network` 种子改为 HLS）。测试：`TaskRow.test.tsx` 相关用例更名为诚实语义并断言诊断行；TaskRow/SettingsPage/errors 59/59 通过；`pnpm check:i18n` 7 locale 通过；`pnpm typecheck` 通过；`cargo check --all-targets` 通过。长期项（`waiting_network` 表达真正的网络恢复语义）依赖任务级自动重试条目，留待第二批。
+- **2026-09-29 复核修正**：诊断行已改成真实原因，但状态徽标 `task.status.waiting_network` 和 `taskDiagnostics.waitingNetwork` 仍显示「等待网络」，与诊断行矛盾。现在 7 个 locale 都改为「直播空闲 / Stream idle」等说法；状态栏汇总里的图标也从断网的 `WifiOff` 换成 `RadioTower`。等 `R27-F02` 让这个状态真正表示「等待网络恢复」时，这两处文案和图标需要一起改回。另外，浏览器 mock 的直播任务只带了健康摘要，没有带 HLS 引擎同时写入的 `hls_live_idle` 结构化错误，所以全新预览里这一行显示的是原始英文「Live playlist idle - waiting for new segments」，而真实后端从不会这样显示。现已给 mock 补上同一个错误；预览实测显示「直播空闲」徽标，加上本地化的 `errors.hlsLiveIdle` 文案。
+
+### ARC-57（P2，Fixed locally）：暂停/取消/重试排空超时后 worker 被分离，迟到的检查点无条件写回 `downloading`（R27-A02）
+
+- **证据／影响**：`pause_task`、`retry_task`、`retry_task_with_mirror`、`cancel_task` 在移除 `DownloadControl` 后执行 `timeout(5s, handle)`（`actions.rs:255/378/424/516`），超时后 `JoinHandle` 被丢弃，任务被分离而非中止；`ARC-45` 为「重新开始」引入的 `cancel_and_drain_control`（等待+abort+join，`lib.rs:201-218`）没有推广到这些路径。协调器取消后的最后一次强制检查点状态参数固定为 `Downloading`（`coordinator.rs:469-477`），`checkpoint_task_progress` 的 UPDATE 无状态条件（`task_state.rs:915-929`）。排空超过 5 秒（NAS/SMB、休眠 USB 盘、杀毒锁文件、DB 繁忙）时出现无 worker 的「下载中」僵尸；用户在迟到检查点之前点「继续」会出现新旧两个 worker 同时写同一临时文件与同一批工作单元。
+- **修复合同**：所有用户控制路径统一使用 `cancel_and_drain_control`（限时等待 + abort + join）；检查点写入改为条件更新 `WHERE id = ? AND status IN ('downloading','retrying')`，取消路径只写字节进度不写状态；FTP/SFTP/HLS/DASH/Metalink 的收尾写入同样检查。
+- **验收**：worker 刷盘处注入 8 秒延迟，暂停后任务稳定停在 `Paused`，无残留 worker；暂停后立即继续不会出现两个写者。
+- **2026-09-28 修复证据**：两层修复。**(A) 统一排空**：`pause_task`、`retry_task`、`retry_task_with_mirror`、`cancel_task` 的非 BT 分支全部改为 `crate::cancel_and_drain_control(control, 5s)`（限时等待 + 超时 abort + join，与 ARC-45 重新开始路径同一函数），不再存在「timeout 后丢弃 JoinHandle」的分离路径——worker 在状态转移前必然已退出，「暂停后立即继续」不可能出现双写者；`restart_quiesce` 既有的顽固 worker 有界排空测试覆盖同一函数。BT 分支保持 abort（会话由 `delete_runtime_task` 接管，无检查点回写路径）。**(B) 条件检查点（防御纵深）**：`checkpoint_task_progress`（HTTP 分段）、`update_task_progress`（FTP/SFTP/HLS/DASH/BT 共享）、`update_task_runtime_progress`（Metalink）、`update_task_and_segment_progress`（HTTP direct）对 `downloading` 目标的写入统一加「live-owner 门」：任务已离开 `downloading`/`retrying` 时降级为只写 `downloaded_bytes`（工作单元只写 `downloaded_until`），不再翻状态、速度、健康摘要；引擎自身的终态写入（Paused/WaitingNetwork/Failed/Completed）保持无条件。四个函数改为 `begin_immediate` 事务——新增的读后写形态会触发 ARC-06/ARC-21 的 BUSY_SNAPSHOT 升级竞态，`state_machine_busy` 压力测试实测复现后修复。测试：新增 `late_checkpoint_guard.rs` 5/5（live 检查点行为不变、暂停后迟到检查点保字节不翻状态且 Paused→Queued 仍可转移、取消后共享写入门控、Metalink 运行时写入门控、direct 任务+单元联动门控）；`state_machine_busy` 2/2、`segments` 34/34（一处既有测试补上生产时序的 Downloading 前置转移）、`restart_quiesce` 4/4、`shutdown_drain`、`scheduler_*`、http/ftp/sftp/metalink/hls 引擎套件全部通过；clippy `--all-targets -D warnings` 干净。真实 NAS/慢盘上的端到端「8 秒刷盘延迟 + 暂停」走查待实机（故为 Fixed locally）。
+- **2026-09-29 复核补测与取舍说明**：(1) 5 处「移除控制 + 排空」合并为 `lib.rs` 的 `remove_and_drain_control`（常量 `USER_ACTION_DRAIN_GRACE = 5s`），覆盖暂停、取消、重试、按镜像重试和重新开始（ARC-45）。(2) 原本没有任何测试走暂停这条路径。现新增组合级故障注入测试 `late_checkpoint_guard.rs::pause_drain_aborts_stalled_flush_before_its_late_checkpoint`：worker 卡在不理会取消的 1.5 秒「刷盘」中（审查里的 8 秒按比例缩短），测试调用 `pause_task` 使用的同一个 helper 和状态机转移，断言：排空受宽限期约束，状态转移前 worker 已被丢弃，迟到检查点始终没有执行，任务稳定停在 `Paused`，并且可以合法转为 `Queued`。命令本身需要真实的 AppHandle，所以测试从 helper 这一层切入。(3) 取舍：宽限期到期后 supervisor 被 abort，它收尾时的 `converge_download_outcome` 不会执行。其中，downloads 映射由 helper 事先移除；派发由命令自己在状态转移后触发；runtime-lock 条目在调用方持锁期间本来就无法驱逐，会由下一次运行的收尾清理；但**请求头缓存条目**原先会残留，而下一次启动先读缓存、后读数据库，残留条目会绕过持久化请求头的过期检查。现在由 helper 在排空后清除，测试也断言了这一点。(4) 残留风险：abort 丢弃的是引擎的 future，引擎内部用 JoinSet 派生的 worker 只会被 abort、不会被 join，已提交到阻塞线程池的文件 I/O（`tokio::fs`）可能在 helper 返回后才结束；数据库一侧由 B 层门控兜底。每次进度写入多一次 SELECT 并改用 IMMEDIATE 事务，大约每个任务每秒一次，尚未做基准测量。
+- **2026-09-29 ARC-62 后续修正**：上段记录的是 ARC-62 实施前的行为与剩余风险，不再描述当前代码。下载 owner 现在覆盖 supervisor、派生 worker、文件句柄、已提交的阻塞文件 I/O、BT 存储写入和 ffmpeg 子进程。宽限期到期只返回本地化 `task_stop_pending`，保留下载槽及任务所有权；暂停、重启和删除不得启动新写者或清理文件，待原 owner 排空后可重试。迟到检查点门控继续作为数据库防御层。验证见 ARC-62。
+
+### ARC-58（P3，Fixed locally）：完成动作可能重复触发，最后一个任务失败时又不触发（R27-A07）
+
+- **证据／影响**：每个 supervisor 成功后独立调用 `maybe_emit_completion_action`（`scheduler/mod.rs:529-554`），判定只看 `downloads` 为空、队列为空、无哈希进行中（`scheduler/mod.rs:815-830`），没有「本轮已触发」的去重；两个任务几乎同时完成时「运行命令」可能执行两次，关机/睡眠弹两次。另一方面只有成功路径调用它，队列最后一个任务失败时完成动作不会发生。
+- **修复合同**：用原子标志或「完成动作世代号」去重，队列重新有任务时复位；提供「全部结束（含失败）时执行」或「全部成功时执行」的用户选择。
+- **验收**：两任务并发完成只触发一次完成动作；去重标志在队列重新有任务后复位可再次触发；回归覆盖「最后任务失败」路径的所选语义。
+- **2026-09-28 修复证据**：`Scheduler` 新增 `completion_action_fired` 原子标志；`maybe_emit_completion_action` 在通过存活门与设置门之后、执行动作之前用 `claim_completion_action`（`swap(true)` 单胜者原语，自由函数以便直接测试）选举唯一触发者。`start_task` 的状态转移成功分支复位标志（队列重新有工作 → 下一轮排空可再次触发）。失败路径：supervisor 的 `failed` 分支现在也调用 `maybe_emit_completion_action(…, triggered_by_failure = true)`，由新设置 `completion_include_failures`（默认 false = 历史「全部成功才触发」语义〔2026-09-29 更正：此实现只看最后结束的那个任务是否成功，更早的失败会被忽略，并不是「全部成功」；已重写，见下条〕）决定是否放行，设置检查在 claim 之前，被拒绝的失败触发不会消耗单胜者额度。设置贯通：`AppSettings`/`UpdateSettingsInput` 新字段、`db/settings.rs` 键+派生+upsert+`APP_SETTING_KEYS`（34 键）、设置页开关（完成动作区、随 `completionAction = none` 禁用）、7 locale 新键 `settings.completionIncludeFailures(Tip)`、specta bindings 再生成、浏览器 mock 同步。测试：`arc58_completion_action_claim_is_single_winner_until_rearmed`（首个 claim 胜出、第二个被去重、复位后可再次单次触发）；`segments` 34/34（4 处 `AppSettings` 字面量补新字段）、`completion_action`、`scheduler_logic` 17/17、`scheduler_dispatch` 通过；`pnpm typecheck`、`check:i18n`（7 locale）、`SettingsPage.test.tsx` 13/13 通过；clippy `--all-targets -D warnings` 干净。真实双任务并发完成的端到端观察待实机（故为 Fixed locally）。
+- **2026-09-29 复核修正**：评测发现三个问题。一是默认关闭时的语义并非「全部成功」；二是设置说明在 7 个 locale 里都称「最后一个任务被取消也会执行」，而取消路径从不调用完成动作；三是测试只验证了 `AtomicBool::swap` 本身，删掉复位语句或删掉失败判断，测试依然通过。现把原子标志换成 `CompletionRound`（`scheduler/mod.rs`）：一「轮」指上一次决策之后启动的全部任务。每个任务启动都记入当前轮，没有打开的轮时新开一轮。真实失败（非用户取消）和校验和不匹配会在 supervisor 释放 downloads 槽**之前**记下，所以任何看到队列排空的 supervisor 都一定能看到这些失败。第一个看到排空的 supervisor 关闭本轮（单胜者去重）；关闭前如果又有任务启动，代次号就会变化，这次决策作废。决策时会重新读取失败任务的当前状态：用户后来重试成功的不再算失败，被删除的也不算；数据库读取出错时按失败处理，不让关机类动作放行。`completion_include_failures` 关闭时，只要本轮还有未解决的失败就不执行；开启时，队列一清空就执行。用户暂停或取消导致的排空从不参与决策，这一轮的失败会带进下一批，这是对关机、睡眠这类动作更保守的选择。7 个 locale 的说明文案都按这个语义重写。原来的同义反复测试已删除，新增 5 条：单轮只决策一次、下次启动重新开轮；与启动竞态的旧快照不能关轮；失败在本轮内保留、下一轮清空；`completion_action_permitted` 真值表；基于真实数据库的决策测试（更早的失败即使最后一个任务成功也计入、重试成功后视为已解决、校验和不匹配计为失败）。supervisor 里「先记失败、再收尾、失败分支也参与决策」的接线需要真实 AppHandle，只经过代码审阅，没有自动化测试。
+
+### UX-43（P1，Fixed locally）：剪贴板监控默认开启，任何复制的链接都会弹出新建窗口并自动探测（R27-U01）
+
+- **证据／影响**：`clipboard_monitor_enabled` 默认 `true`（`db/settings.rs:95`），每秒轮询且不做文件类型过滤（`clipboard.rs:11`）；无未保存草稿时直接 `setNewDownloadOpen(true)`（`AppShell.tsx:1142-1167`），窗口隐藏在托盘时同样执行；对话框打开且有 URL 时 650ms 后自动 `detect`，后端发 HEAD/Range GET（`NewDownloadDialog.tsx:697-701`）。应用自身的「复制下载 URL」「复制失败 URL」也写入剪贴板且无自身写入抑制，下一秒把刚复制的已有任务 URL 弹回新建窗口并再次探测。用户复制普通网页链接即弹模态窗口并对**每一个**复制的链接（含带令牌的签名链接、一次性登录链接）发起网络请求，与 PRODUCT.md「安静默认」冲突，也是 `SEC-10`/`SEC-12` 所述 SSRF 威胁的主要触发入口。
+- **修复合同**：(1) 应用自身写剪贴板时登记最近写入文本，监控命中相同文本时静默；(2) 从剪贴板进入的草稿不自动探测，由用户点击「检测」或提交时再探测〔2026-09-29 调整：对话框并没有「检测」按钮。现改为：用户点击提示上的「使用此链接」，即视为对这个链接的明确同意，此后对话框和手动粘贴一样照常探测。复制本身仍然不产生任何请求〕；(3) 剪贴板命中改为非模态提示（toast/悬浮气泡「检测到 N 个链接，点击添加」），用户确认后才打开新建窗口；(4) 窗口不可见时只累积提示，不打开隐藏对话框。文件类型/扩展名白名单作为后续增强（`R27-F09` 族）不在本条范围。
+- **验收**：复制普通网页 URL 不弹模态窗口、不产生任何网络请求；应用内「复制下载 URL」后 5 秒内无检测事件；窗口隐藏时不产生探测与非模态弹窗；剪贴板草稿在用户点击「检测」前无 HEAD/GET 请求〔调整为：用户点击「使用此链接」前没有任何请求〕（前端测试 + 手动走查）。
+- **2026-09-28 修复证据**：三项落地。(1) 自身写入抑制：新增 `src/lib/clipboard-write.ts`——所有应用侧写剪贴板（复制任务 URL/本地路径、详情页复制、批量结果复制失败 URL、恢复诊断复制、护照报告复制）改走 `writeClipboardText`，登记 5 秒 TTL 的内存注册表（上限 16 条、不持久化）；AppShell 的监控回调先经 `isOwnClipboardWrite`（含后端 `Url::parse` 规范化产生的尾斜杠折叠）丢弃自身写入的检测事件。(2) 非模态提示：监控回调删除「无脏草稿即直接 `setNewDownloadOpen(true)`」路径，任何检测只产生带「使用此链接」动作的 info toast，用户点击后才进入新建窗口。(3) 不自动探测：`NewDownloadInitialState` 新增 `suppressAutoProbe`，剪贴板 handoff 置真；`NewDownloadDialog` 的 650ms auto-detect 与批量 auto-preview 在抑制期间不触发，用户编辑 URL/批量输入即解除（手输 URL 行为不变），提交仍走后端探测〔2026-09-29 更正：注释和本条提到的「检测」按钮并不存在，这项抑制让用户主动接受的剪贴板草稿看不到协议、大小、磁盘空间等探测摘要，已撤销〕。窗口隐藏时：不再打开对话框、无任何探测，toast 按既有 deferred 机制排队〔更正：deferred 队列只在模态框占用焦点时生效，与窗口是否可见无关；info toast 4.8 秒后自动消失，隐藏期间的检测等于直接丢失。已改为暂存，见下条〕。文件类型白名单为后续增强，不在本条范围。测试：新增 `clipboard-write.test.ts` 8/8（自身写入命中、外部 URL 不误杀、混合保守判外、多行批量文本、TTL 过期、规范化尾斜杠）；`NewDownloadDialog.test.tsx` 新增「剪贴板 handoff 不自动探测、编辑后恢复」用例，22/22；全量 `pnpm test:frontend` 407/407、`pnpm typecheck`、`pnpm lint` 通过。真实 Tauri 窗口隐藏态的托盘走查待实机（故为 Fixed locally）。
+- **2026-09-29 复核修正**：剪贴板处理从 AppShell 抽到 `src/hooks/use-clipboard-link-prompt.ts`，AppShell 只负责传入「接受后打开对话框」的回调。(1) 撤销 `suppressAutoProbe` / `initialSuppressAutoProbe` 整条链路（`NewDownloadDialog.tsx` 回到基准提交），并删除所有提到「检测」按钮的注释。(2) 窗口隐藏（`document.visibilityState === "hidden"`，与 PERF-14 的轮询门控是同一信号）时只保留最新一次检测，窗口重新可见时再弹出 toast，而且只弹一次。只保留最新一次，是因为剪贴板本身只存一个值。托盘或悬浮窗气泡仍未实现。(3) 评测中存活的三个变异（不再丢弃自身写入、检测后直接打开对话框、toast 动作不再抑制探测）里，第三个随设计调整已不适用；新增 `use-clipboard-link-prompt.test.ts` 4 条测试锁住其余行为：检测只产生 toast，点击动作之前 `onAccept` 不会被调用；应用自身写入被丢弃；批量文案；隐藏期间暂存最新一次、可见时只显示一次。WebView2 在 Tauri 窗口隐藏到托盘时是否上报 `hidden`，需要实机确认（PERF-14 依赖同一假设）。
+
+### ENG-12（P3，Closed）：代码注释引用的审计 ID 不存在于登记册，且文档能力表述漂移（R27-A10）
+
+- **证据／影响**：代码注释引用 `ARC-55`（`download/mod.rs:60`、`ftp.rs:242`）与 `SEC-14`（`secure_headers.rs:76`）而主审计无对应条目（本轮已补登记，见上）；`check:docs` 只扫描 README/AGENTS，覆盖不到代码注释，登记册完整性无门禁。另有 README 阻断表述前后矛盾（`README.md:5` vs `:89`）、README 仍列已修复项（DASH 签名 CDN 续传、WebDAV 目录探测）、ROADMAP 验证基线仍写 `cargo check` 与不带 `--all-targets` 的 Clippy、`browser-extension-privacy.md:41` 称启用内网交接即可访问内网（实际引擎层仍拦截）。
+- **修复合同**：扩展 `check:docs`（或新增脚本）扫描 `src`、`src-tauri/src` 注释中的审计 ID 必须存在于本文；修正上述文档漂移；为 Closed 条目的验收条件补充「未完成项需拆出新 ID」规则。
+- **验收**：故意在代码注释写入不存在的审计 ID 时门禁失败；README/ROADMAP/privacy 文档与代码一致；`pnpm check:docs` 通过。
+- **2026-09-29 修复与验收**：`check-doc-consistency.mjs` 扫描 `src`、`src-tauri/src` 中 Rust 与 TS/JS/TSX 注释，忽略字符串、正则、JSX 文本和既有单数字历史标签；Rust 嵌套块注释、原始字符串、生命周期及 TS 模板表达式/JSX 注释有回归覆盖。14 条脚本测试通过；实际向临时源码注释注入 `ENG-999` 时 CLI 以退出码 1 和准确文件/行号拒绝，移除探针后 `pnpm check:docs` 通过。README/ROADMAP/浏览器隐私文档已修正内网、做种、DASH/WebDAV、门禁命令等漂移；本文关闭规则新增未完成验收拆分要求。源码扫描保证引用存在；能力描述仍需结合实现人工复核，不能把它当成功能验收。
+
+## 2026-09-29 优化计划 B1 登记
+
+来源：[优化计划](optimization-plan-2026-09-29.md)。以下条目经当前源码重验后登记；原有 Closed 条目保持其历史修复范围。
+
+### ARC-59（P2，Fixed locally）：删除未等待 worker 退出，批量删除提前释放任务锁（R27-A06）
+
+- **证据／影响**：`commands/tasks/actions.rs` 的单删和批删移除控制后 abort、不 join，随后清理文件；批删还在清理文件与删除数据库记录之前释放逐任务锁，任务可能被并发重新启动。文件删除失败只写日志，用户无法从返回结果判断是否有残留。
+- **修复合同**：单删和批删使用同一删除服务，在逐任务锁内完成停止、运行时清理、文件清理和数据库删除；停止失败不得删除任务和文件；文件清理失败保留可重试记录并返回结构化错误。内部写者收敛依赖 ARC-62。
+- **验收**：对慢退出 worker 执行单删/批删，确认清文件发生在退出之后；删除与重新启动竞争时不存在写入已删除路径；清理失败保留任务供重试，成功任务不会被批量失败结果误报为仍存在。
+- **2026-09-29 实现与本地验收**：单删/批删复用 `TaskDeletion`，逐任务锁覆盖控制排空、运行时释放、文件清理及数据库删除；去重批量 ID，每项失败不阻止后续项。文件清理失败返回 `storage_cleanup_failed` 并记录诊断，保留可重试任务；部分失败仍触发队列刷新。排空后重新读取成品路径，避免完成时自动改名导致清理旧路径。ARC-62 的 owner 排空后，删除才继续清文件和删库；超时则保留记录、文件和活动槽，供排空后重试。`task_deletion` 6 项通过，覆盖单删/批删锁、路径改名、清理失败重试、仅删记录和阻塞写入未收敛时拒绝删除。完整 locked Rust 测试、格式和 Clippy 门禁通过；真实 Tauri 操作仍待安装包验收。
+
+### ARC-60（P2，Fixed locally）：BT 运行时错误仅写入快照，任务与下载槽永久存活（R27-A04）
+
+- **证据／影响**：`download/bt.rs` 主循环把 `stats.error` 写入快照后继续写 Downloading，不向 supervisor 返回错误。磁盘满或权限错误因此无法进入恢复中心，也不释放下载槽。
+- **修复合同**：运行时错误通过稳定错误码和诊断路径退出；可确认的磁盘错误映射到磁盘恢复动作，未知错误不通过英文猜测分类；释放 torrent/session 资源，不把错误退出当作用户取消。
+- **验收**：真实 BT 引擎运行中注入 torrent 错误，断言有界退出、稳定错误码与诊断、supervisor 失败收敛和槽位释放；正常下载与用户取消不回归。
+- **2026-09-29 本地证据**：主循环识别 torrent 错误状态并记录 `BT RUNTIME` 诊断，forget torrent 后等待 session 引用释放，再返回错误进入既有 supervisor 收敛。类型化磁盘错误使用 `disk_write_failed`；未知错误使用七语言稳定码 `bt_runtime_failed`，不按英文内容猜测。`tests/bt_runtime/mod.rs` 从 `bt.rs` 的测试模块接入：通过真实 librqbit StorageFactory 异步失败注入运行错误，执行实际 `engine.download` 循环与 supervisor 使用的收敛函数；磁盘错误、带误导磁盘字样的未知错误、用户取消共 3 条通过，断言终态、槽位、诊断、torrent/session 释放和非取消语义。仍待 CI 及真实 Tauri/BT 对端操作验证。
+
+### ARC-61（P2，Fixed locally）：调度器只看一页候选，受阻队首饿死可运行任务（R27-A03）
+
+- **证据／影响**：`scheduler/mod.rs` 仅调用一次 `list_queued_task_records`，最多读取活动数×单主机连接数个候选；跳过计划窗口或满主机后不再向后读取。
+- **修复合同**：候选查询排除受限任务或稳定分页至队尾，保持优先级/队列顺序、重试时间和主机连接限制；不全量物化队列，不持全局锁等待网络。
+- **验收**：队首超过一页同主机受阻任务时，后方其他主机任务被派发；窗口外不服从计划的任务仍可启动；混合优先级、相同排序值与派发中状态变化不跳过合法候选。
+- **2026-09-29 本地证据**：调度器使用有界 `DispatchQueue` 和数据库 keyset 查询，按优先级、queue_position、created_at、id 稳定前进；查询先排除已满主机与窗口外受计划限制的任务，逐候选重新检查槽位，固定本轮重试截止时间。一直读到填满活动槽或队尾，不全量加载队列。`scheduler_dispatch` 新增 4 条真实数据库测试，覆盖 40 条受阻队首后的其他主机、计划窗口/未来重试、混合优先级/排序值并列/前页任务退出，以及同页读取后主机槽位填满。仍待 CI 与真实应用派发链验证。
+
+### ARC-62（P1，Fixed locally）：中止 supervisor 不能证明派生 worker 与阻塞文件 I/O 已退出（ARC-57 残项）
+
+- **证据／影响**：`cancel_and_drain_control` 在宽限期后 abort supervisor 并 join；引擎的 JoinSet 随 future 丢弃，仅发出 abort，已提交到阻塞线程池的文件 I/O 可能继续。数据库检查点门控不阻止旧文件写者与下一次运行竞争。
+- **修复合同**：停止结果必须反映真实写者收敛；未退出时保留任务所有权并拒绝删除/重启，不能以数据库状态保护替代文件所有权。覆盖所有引擎的派生任务和文件 I/O 生命周期，保留有界可反馈的用户控制路径。
+- **验收**：实际派生 worker 与不可立即取消的阻塞写入分别跨过宽限期；停止返回前已退出，或明确返回未收敛且禁止新写者与文件删除；最终完成后可重试操作且没有槽位泄漏。
+- **2026-09-29 实现与本地验收**：新增共享生命周期 owner、受跟踪的子任务集合、写入句柄和 BT 存储包装；HTTP、FTP、SFTP、HLS、DASH、WebDAV、Metalink、BT 的下载入口都在 owner 生命周期内运行。阻塞文件写入完成前 owner 不释放；ffmpeg 子进程也由 owner 等待退出。停止宽限期超时不再 abort 丢弃 supervisor，而是返回 `task_stop_pending`，保留下载控制项与槽位，并阻止重启、删除和文件清理；原写者最终退出后，暂停状态收敛且用户可重试操作。测试覆盖派生 worker 与阻塞 flush 跨越超时、重启超时保留 owner、删除期间阻塞写入拒绝清理、排空后删除/重启恢复；`lifecycle_drain` 2 项、`restart_quiesce` 2 项、`task_deletion` 6 项通过。完整 `pnpm test:rust` 通过（2 个性能基准按设计忽略），Clippy `--all-targets -D warnings` 与 `cargo fmt --check` 通过。尚缺真实慢盘和打包 Tauri 操作证据，故为 Fixed locally。
+
+### ARC-63（P3，Fixed locally）：更新安装与系统退出未贯通停机排空（R27-A08）
+
+- **证据／影响**：前端 updater 直接 `downloadAndInstall` 后 relaunch；后端排空仅在窗口关闭/托盘退出执行。活动文件 I/O 和 ffmpeg 可能被突然终止或遗留。
+- **修复合同**：更新安装和 relaunch 复用后端排空入口；窗口关闭、托盘退出和 Tauri `ExitRequested` 共用单胜者生命周期状态，避免重入；排空超时保留 owner 并拒绝安装/重启；已验签更新包才可进入停止阶段。
+- **验收**：更新包下载/验签完成后活动 HTTP/媒体任务先停止，排空失败不安装/重启；下载失败或取消不触碰现有任务，手动暂停任务不被自动恢复；真实安装包退出后无遗留 ffmpeg；记录外部强制终止的恢复边界。
+- **2026-09-29 实现与本地验收**：新增 `AppLifecycle` 状态机，统一普通退出、窗口关闭、托盘退出和 Tauri `ExitRequested`。生命周期闸门与调度器的任务预留同步，退出开始后不再启动新 worker；单一 exit claimant 执行排空，重复请求只等待/拦截，不会第二次调用退出。排空同时等待下载槽和 supervisor 全生命周期（含校验及收尾）归零，不再 abort 或从控制表移走 handle；普通退出在 owner 排空前保持进程存活，updater/relaunch 用 30 秒预算，超时返回 `task_stop_pending` 并取消准备态，安装和重启都不执行。updater 已拆为下载/验签 → 后端排空 → `install()` → relaunch；下载失败不会调用排空，安装或 relaunch 失败会恢复调度，但只派发 Queued，不会恢复手动 Paused。启动恢复页的 retry/reset/relaunch 同样先调用后端准备命令。`shutdown_drain` 4 项通过（含超时 owner 保留、supervisor 收尾等待和并发退出单胜者）；updater-store 3 项及 StartupGate 排空/relaunch 测试通过；完整 `pnpm test:rust`、前端 414 项、TypeScript、Biome、i18n、`pnpm build`、`pnpm check:bundle`、Clippy 全目标和 Rust 格式检查通过。真实安装包退出后无遗留 ffmpeg 尚未在候选包中验证，故为 Fixed locally。操作系统强制结束进程或断电无法被应用拦截；重启后由现有 interrupted-task 恢复逻辑处理，不能保证强制终止瞬间的文件操作安全。
+
+### FUN-34（P1，Fixed locally）：运行中单任务限速与定时限速没有统一实时策略（R27-F03、R27-U06）
+
+- **证据／影响**：运行时子限速器只在 worker 启动时创建；详情页把下载中的限速与优先级控件禁用。限速窗口跨边界或运行中修改任务限速都不会立即更新 HTTP、FTP、SFTP、BT、HLS、DASH、Metalink 与 WebDAV 的策略。
+- **修复合同**：每个运行任务持有可更新的子限速器；有效限速统一为任务限速与活动限速窗口的较小值，再由共享父限速器施加全局约束。任务限速运行中可编辑，优先级可保存并只影响之后的派发。
+- **验收**：覆盖所有适用引擎；任务限速和定时窗口开始/结束边界后 2 秒内切换；清除限制会立即生效；BT 会话同步与其他引擎使用同一有效策略。混合 BT 会话的全局总预算另由 `FUN-35` 验收。
+- **2026-09-29 实现与本地验收**：调度器给每个活动任务保存独立、可更新的限速器句柄；HTTP、FTP、SFTP、HLS、DASH、Metalink、WebDAV 的流读取继续向该任务限速器及共享全局父桶申请额度，BT 在本地策略同步中应用任务/计划限值，跨协议全局预算由 `FUN-35` 的共享根限速器在 piece 写入边界收取。设置页与状态栏只提交限速字段补丁，任务详情页允许运行中改限速，并允许保存只影响后续派发的优先级。相同上限的策略刷新不重置已消耗的 token burst，BT 会话重复同步也不重置 librqbit bucket；覆盖该行为的 limiter 与真实 session 回归均通过。完整 `pnpm test:rust`、417 项前端测试、`pnpm typecheck`、`pnpm lint`、`pnpm check:i18n`、`pnpm build`、`pnpm check:bundle`、Rust 格式和全目标 Clippy 通过。不同协议的真实高速对端和系统级混跑测量仍待 B7。
+
+### ARC-64（P2，Fixed locally）：计划监视器睡眠未被配置变更与墙钟变化打断（R27-A05）
+
+- **证据／影响**：计划下载窗口监视器按旧配置睡到原边界；改时段不会重排这次睡眠，系统睡眠、墙钟调整和 DST 变化也可能延迟检查。
+- **修复合同**：下载窗口与限速窗口共享可唤醒的策略监视器；设置变化立即唤醒，精确计算下一个边界，并以不超过 60 秒的墙钟重算作为兜底。系统恢复后必须重新读取墙钟和设置，再校验运行任务策略。
+- **验收**：修改计划后无需等待旧边界；跨过开始/结束边界和午夜回绕都重算；时钟变化或系统恢复不会持续沿用过期策略。实际平台唤醒事件仍需单独实机验证。
+- **2026-09-29 实现与本地验收**：计划下载窗口和限速窗口由同一个监视循环重算；更新设置发出唤醒信号，等待时间取最近的窗口边界并受 60 秒兜底约束；没有启用计划时使用 5 分钟低频兜底。墙钟边界与午夜回绕的调度 helper 测试、策略变化路径及完整 Rust/前端门禁通过。Tauri 恢复事件会唤醒监视器，但 Windows 实际睡眠/恢复、墙钟跳变及 DST 仍需实机验收，因此状态为 Fixed locally。
+
+### ARC-65（P2，Fixed locally）：限速设置的缺省、清除与更新快照语义不一致（R27-A09）
+
+- **证据／影响**：`update_settings` 中全局和计划限速的 `None` 表示清除，其余字段的 `None` 表示保持；状态栏快捷更新和设置页自动保存发送完整旧快照，可能覆盖刚写入的新限速。
+- **修复合同**：限速字段明确区分保持、清除和设值；独立快捷入口只更新目标字段；并发设置补丁串行合并，不让旧快照覆盖未修改字段。
+- **验收**：省略字段保持，显式 `null` 清除，数字文本设值；状态栏更新与设置页其他字段保存并发时两项都保留；重置设置仍应用完整默认值。
+- **2026-09-29 实现与本地验收**：全局/计划限速、ffmpeg 路径及 BT 上传限速字段使用保持/清除/设值三态反序列化；设置更新与重置由共享互斥锁串行读取、合并、保存；设置自动保存仅发送变化字段，状态栏快捷入口仅提交全局限速补丁。三态 Rust 测试通过，完整设置页前端测试和门禁通过；Specta 已按最新 Rust 类型重新生成。候选应用中的快速并发操作仍建议作为 B7 手工走查。
+
+### ARC-66（P3，Open）：任务状态转换把健康消息、错误消息与速度参数混为一体（R27-A09）
+
+- **证据／影响**：`transition_task` 将 `message` 同时写入 `health_summary` 和 `error_message`，且名为 `downloaded_bytes` 的参数实际写入 `speed_bps`，调用处容易传错语义。
+- **修复合同**：状态转换输入独立表达健康摘要、错误信息、已下载字节和速度；现有调用逐一迁移，历史诊断语义保持可解释。
+- **验收**：对暂停、开始、失败和完成分别断言状态、健康摘要、错误信息、字节与速度列；错误码与恢复动作保持原有语义。
+
+### ARC-67（P3，Open）：窗口和托盘回调在 UI 线程同步等待数据库（R27-A09）
+
+- **证据／影响**：主窗口关闭与托盘“打开下载目录”路径在主线程 `block_on` 读取数据库；SQLite 忙时会阻塞界面线程直到 busy timeout。
+- **修复合同**：事件回调读取已缓存的设置/路径快照，或把数据库操作转入异步任务；退出排空和托盘行为保持确定。
+- **验收**：注入慢数据库查询时窗口仍可绘制和响应；关闭、托盘退出及打开目录流程不丢失、不重复执行。
+
+### FUN-35（P1，Fixed locally）：多个 BT 会话各自套用全局上限，混合协议总流量可能超限（FUN-33 残项）
+
+- **证据／影响**：修复前 BT 只将限速配置到每个 librqbit session，而 HTTP 等引擎从共享全局 token bucket 取额度；多个 BT 会话或 HTTP+BT 并行时，每个 BT 会话可能分别消费一份全局上限，BT 流量也不进入共享桶。
+- **修复合同**：BT 收包必须参与跨协议共享预算，或由单一预算分配器对所有 BT 会话按实际其他流量分配剩余额度；逐任务限制、代理隔离和会话生命周期合同继续成立。
+- **验收**：至少两个 BT 会话单跑及 HTTP+BT 混跑；稳定测量窗口内总下载速率符合全局预算和预先约定的容差，动态修改上限后收敛，并验证取消/删除不遗留预算份额。
+- **2026-10-01 实现与本地验收**：新增根限速器解析；BT 每个任务只把任务/计划有效值同步到独立的 librqbit session 限值，避免和全局桶重复计费；`OwnedStorage` 在每次 piece 写入（包括 vectored write）前向任务所属的共享根 token bucket 申请实际字节额度。这样多个 BT session 与 HTTP/FTP 等引擎共同消费同一个跨协议预算，代理隔离、逐任务限速和 session 引用计数不变；阻塞存储等待每 25ms 检查取消，停止/删除不会留下预算租约。新增回归覆盖两个独立 BT storage 实例共用初始 burst、BT 写入与 HTTP 风格异步 acquire 共用 bucket；既有 BT session 动态限速和 limiter 同值刷新测试继续通过。`cargo fmt --check`、全目标 Clippy 和定向测试通过。真实高速 BT 对端、HTTP+BT 混跑窗口、动态设置后的端到端收敛以及 Tauri 取消/删除仍需在 B7 实机/协议验收中确认，因此保留为 Fixed locally；本地测试验证的是同步成品写入边界的共享预算合同。
+
+### FUN-36（P1，Fixed locally）：内网授权没有贯通来源、目标与任务生命周期（R27-F01）
+
+- **证据／影响**：此前所有协议在引擎层拒绝私有、环回和 ULA 地址；浏览器的 `allow_intranet_handoff` 只能放宽交接预检，不能把用户主动确认的 NAS、Tailscale 或 localhost 任务送入探测和下载。
+- **修复合同**：授权绑定任务来源、目标 authority 和确认时解析出的地址集合；创建、目录探测、重试、续传、派生清单/种子请求、浏览器交接、任务详情撤销以及备份恢复使用同一策略。授权不升级为全局白名单，旧任务保持保守拒绝，临时授权草稿过期后不可复用。
+- **验收**：明确授权的私网 IPv4、IPv6 ULA、CGNAT 和 localhost 目标可在任务内访问；无授权、跨 authority、DNS rebinding、公网跳私网、链路本地、组播和 metadata 地址均被结构化拒绝；HTTP、WebDAV、FTP、SFTP、HLS、DASH、Metalink 和 BT 控制面行为一致。
+- **2026-10-02 实现与本地验收**：新增 `NetworkPolicy` 与 `network_authorizations`/`task_network_policies` 持久化；所有下载引擎和目录探测接入任务策略，客户端缓存指纹包含策略；浏览器 `authorization_required` 打开桌面授权窗口，扩展明确提示用户，自动接管在授权前恢复浏览器原下载。Rust 网络策略单测、BT/目录探测/HTTP/SSRF 集成测试及备份相关测试通过；完整 Rust 门禁修正并覆盖第 10 个迁移。真实 NAS、Tailscale、企业内网 DNS 和候选/发布安装包仍待外部验收，因此保持 Fixed locally。
+
+### SEC-15（P1，Fixed locally）：跨协议内网策略和浏览器边界不一致（R27-F01）
+
+- **证据／影响**：跨协议各自实现 SSRF 校验会造成探测、重定向、清单子资源或 BT `.torrent` 控制面出现策略旁路；浏览器若把“允许内网交接”误当作网络许可，还会扩大恶意页面触达内网的范围。
+- **修复合同**：以统一 `NetworkPolicy` 执行 literal、DNS、连接地址和 redirect 检查；策略按 authority + resolved IP 绑定，禁止 metadata/link-local/multicast，拒绝 DNS rebinding 和跨 authority 扩权；客户端缓存键必须区分任务策略。浏览器只负责把候选送到桌面授权流程，不直接授予网络访问。
+- **验收**：所有网络引擎和派生请求均经过同一策略；未授权地址在建立连接前被拒；显式授权的 localhost 可用但无授权仍拒绝；浏览器事件、弹窗状态、浏览器自动接管和备份恢复均保持上述边界。
+- **2026-10-02 实现与本地验收**：`NetworkPolicy` 覆盖 HTTP、HLS、DASH、Metalink、WebDAV、FTP、SFTP、BT 及目录探测；策略指纹进入网络客户端缓存；私网 IPv4/IPv6 ULA/CGNAT/localhost 授权和 metadata/link-local/组播拒绝均有测试。扩展新增 `authorization_required` 状态文案与自动接管恢复行为。真实网络矩阵、企业证书和发布 profile 仍待 B7/发布验收，因此保持 Fixed locally。
+
+### FUN-37（P1，Fixed locally）：短暂网络故障不能跨任务重试预算自动恢复（R27-F02、R27-F09）
+
+- **证据／影响**：HTTP 分段的短重试耗尽后，协调器会先把任务标成 `failed`；supervisor 收敛原先只允许 `downloading`/`retrying` 进入延迟队列，因此任务级重试无法接管该终态。通用 `network_error` 也被标记为不可恢复。`Retry-After` 秒数已能被局部 worker 使用，但 HTTP-date 未进入持久化任务截止时间。
+- **修复合同**：仅对传输/超时、429 和 5xx 等瞬时错误进行任务级重试；预算、原因及截止时间持久化，退避使用指数增长和抖动，最多 10 次、单次等待不超过 30 分钟。接受 delta-seconds 与 RFC 1123 HTTP-date。失败收敛可从 coordinator 的 `failed` 状态原子入队；用户暂停、取消和手动状态转换胜出时不复活任务；成功清预算，耗尽时持久化最终次数与原因。
+- **验收**：覆盖失败态收敛、预算持久化/耗尽、暂停竞态、认证与磁盘错误不自动重试、429 秒数和 HTTP-date；延迟队列在修改或启动时重新安排最近唤醒。
+- **2026-10-02 实现与本地验收**：迁移 `011_task_retry_state` 保存 attempt/reason，`tasks.retry_after_at` 保存下一截止时间；调度器常驻 watcher 使用可保留的单 waiter 通知并按截止时间派发。仅对带 `recoverable` 标记且能归类为具体瞬时传输/超时、429 或 5xx 的错误自动重试；通用 `network_error`、解码错误和畸形响应体不再凭字符串猜测重试，明确的连接中断统一使用 `transport_interrupted`。无 `Retry-After` 时省略可选 JSON 字段，保持旧错误文本形状；HTTP 429/5xx payload 带绝对截止时间。scheduler failed-state 收敛、预算持久化、暂停竞态与耗尽测试通过；秒数/RFC 1123 端到端 payload 测试通过。全 Rust 套件 `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2` 通过（368 个库测试及所有集成/文档测试，2 个性能基准按设计忽略），全目标 Clippy 与 fmt 通过。真实 2 分钟 Wi-Fi/VPN 中断、系统网络变化唤醒和候选安装包仍待 B7 实机验收；重试目前由持久化截止时间驱动，不声称接入了 OS 网络变化事件，因此保持 Fixed locally。`R27-U03` 的速度/剩余时间 UI 诊断未纳入本批，按已确认范围保留。加固复核还新增 `transport_interrupted` 的结构化传输错误、畸形响应体不自动重试，以及弱 ETag 不能单独授权未知大小续传的回归测试；2026-10-02 全 Rust 371 个库测试及全量集成/文档测试、全目标 Clippy 和 Rust fmt 通过。
+
+### FUN-38（P2，Fixed locally）：未知大小 HTTP 任务重试会丢弃安全续传能力或卡在不可恢复状态（R27-F04）
+
+- **证据／影响**：未知大小流原先每次启动都从头创建临时文件；下载过程中断没有跨任务重试。盲目追加又可能把不同远端表示拼接成损坏文件。
+- **修复合同**：Range 探测只有在 `206` 且精确返回 `Content-Range: bytes 0-0/*`，并提供强 ETag 或有效 HTTP-date `Last-Modified` 时才声明可续传；弱 ETag 单独出现不能授权续传。续传必须得到 `206`、起点与本地长度一致，并对所有已保存 validator 逐一匹配；缺失、变化或区间错误时拒绝追加并保留旧临时文件。若没有可靠 Range/validator 身份，则自动重试从字节零开始，清理临时内容并归零检查点。
+- **验收**：fake server 覆盖未知大小探测、匹配 validator 续传完成、validator 缺失/变化及错误区间拒绝拼接，以及无 Range 服务中断后安全从头重试；成品字节与预期一致。
+- **2026-10-02 实现与本地验收**：未知大小主引擎读取实际临时文件长度恢复；无安全续传能力时先删除旧 part、原子更新任务/segment 检查点为 0，再从头请求。共用 validator 校验要求至少一个强 ETag 或有效 HTTP-date `Last-Modified` 作为身份依据，在响应中出现且匹配，并逐项校验其他已保存 validator；弱 ETag 单独出现时即使回显也不续传。fake-server 测试覆盖合法 `206 bytes 0-0/*` 探测后续传、弱/变更/缺失 validator、错误 Range 保留原 part、畸形 chunked 响应不自动重试，以及 chunked 中断后续传或重启完成。初始 B4 验收的 HTTP 引擎 34/34；加固复核后的 HTTP 引擎 36/36；全目标 Clippy 和格式检查通过。真实 CDN/代理组合仍随协议对端验收，不在本地结果中宣称完成；因此保持 Fixed locally。
+
+### FUN-39（P1，Fixed locally）：HTTP 单任务请求头配置缺失且敏感头缺少独立生命周期（R27-F05）
+
+- **证据／影响**：HTTP/HTTPS 新建任务没有 User-Agent、Referer 或受限自定义请求头入口；现有 `task_request_headers` 专供浏览器转交头，整行统一 24 小时过期，不能直接承载长期普通配置。HTTP 以外协议必须拒绝这些配置，避免静默忽略。
+- **修复合同**：创建与探测共用同一份规范化配置，修改配置后旧 probe 快照失效；允许 UA、Referer 和数量/大小受限的自定义头，拒绝 framing、hop-by-hop、凭据/代理认证和重复字段。全部头加密持久化；普通头不随认证 TTL 丢失，敏感头独立 24 小时过期。敏感头只发往规范化任务源；跨源 playlist/resource 与 HTTP 重定向不得泄露敏感头。不得扩大内网授权或 SSRF 放行范围。
+- **验收**：fake server 证实探测、实际分段下载、暂停/重启后恢复收到相同配置；非法头、非 HTTP(S) 配置、超限输入被拒；数据库明文无头值；敏感头过期后任务进入可恢复认证状态，普通头保留；跨源请求与重定向服务端均观测不到敏感头；7 个 locale、Specta bindings、前端测试与 Rust 定向测试通过。
+- **2026-10-02 实现与本地验收**：新增单任务 HTTP/HTTPS 的 User-Agent、Referer 和受限自定义头入口；创建与探测共用规范化配置，profile 与 tasks/files 在同一事务持久化。普通头和敏感头分开加密，敏感头按 24 小时 TTL 在任务启动、恢复、重试和定期清理时重新检查；运行中的一次下载会话继续使用其已解析的 headers，不宣称在 24 小时边界即时中止。HTTP 客户端禁用自动重定向，所有请求经统一 helper 和 `NetworkPolicy`；跨源会剥离 Cookie、Authorization 与全部 `X-*`，HTTPS 降级会剥离 Referer，HLS/DASH/Metalink/WebDAV/BT 控制面复用同一边界。浏览器 handoff 仍是 HTTP/HTTPS 手动交接，未扩大 candidate/release 权限；Metalink 既有任务 Basic Auth 镜像授权边界保持不变。
+
+本地证据（Windows 工作区）：`request_profiles` 7/7、`directory_probe` 8/8、`hls_engine` 23/23、`source_hygiene` 2/2；前端 427/427、TypeScript 类型检查和 Biome lint 通过；7 个 locale、文档门禁、定向 Clippy/fmt 通过。完整 Rust 门禁采用 `-j 2` 避免本机并行编译触发页面文件不足，最终通过：库测试 371/371，全部集成测试与文档测试通过；全目标 Clippy 和 Rust fmt 通过。真实站点、真实内网服务器、候选/发布包安装和跨平台浏览器仍未验收，因此保持 Fixed locally。
+### UX-44（P3，Fixed locally）：缺少全局粘贴新建入口，连续剪贴板请求会复用已处理标识（R27-U11 子项）
+
+- **证据／影响**：`AppShell` 已有 `pasteAndCreate` 菜单入口，但全局键盘监听未绑定 `Ctrl/⌘+V`；该入口固定使用 `"clipboard"`，而常驻新建窗口按 `initialSourceId` 去重，第二次粘贴可能不能填入新链接。直接添加快捷键还需要保护输入焦点和弹层，避免粘贴动作覆盖草稿。
+- **修复合同**：非文本输入且不在弹层时，`Ctrl+V`（Windows/Linux）或 `⌘V`（macOS）打开单链接/批量草稿；输入控件、嵌套可编辑区、弹窗与菜单保留原生粘贴；已消费、IME 组合和重复按键不触发。每次主动粘贴使用独立请求标识，探测和创建保留剪贴板来源，并复用现有焦点恢复路径。快捷键帮助登记此入口，复用现有英文/简体中文文案。
+- **验收**：实际键盘事件覆盖触发与保护分支；同一常驻新建窗口连续接收不同请求、重复同一请求不重置编辑内容，探测/创建的来源为 `clipboard`；前端全量测试、类型检查、生产构建和文档门禁通过。候选包的剪贴板权限与 WebView 原生焦点行为另随 B7 验收。
+- **范围**：只覆盖 `R27-U11` 的全局粘贴入口；批量重复策略、筛选全集操作和全量快捷键同源定义继续保留在 B5 后续项。
+- **2026-10-04 实现与本地验收**：`shell-keys.ts` 共用判定覆盖平台修饰键、输入焦点、嵌套编辑区、弹层、IME、已消费及重复事件；AppShell 复用粘贴菜单入口并为每次请求生成 UUID。新建窗口识别 `clipboard-` 请求来源，连续请求可应用，同一请求不重放；关闭时通过 Radix `onCloseAutoFocus` 恢复入口焦点，避免在焦点限制仍生效时提前恢复。快捷键面板复用现有文案，无 locale 修改。Windows dirty 工作区运行 `pnpm exec vitest run src/components/shell/shell-keys.test.tsx src/components/shell/ShortcutPanel.test.tsx src/components/shell/NewDownloadDialog.test.tsx`（55/55）、`pnpm test:frontend`（78 个文件、456/456）、`pnpm typecheck`、`pnpm build`、本轮 7 个 TS/TSX 文件的 `pnpm exec biome check`、`pnpm check:i18n`、`pnpm check:docs` 通过；Tabbit/Playwright 在浏览器 mock 预览中验证了搜索框/弹层保护、连续粘贴、批量草稿和焦点恢复，并检查桌面与窄窗口。剪贴板读取使用页面临时 fixture，不读取或写入系统剪贴板；不能作为 Tauri 原生剪贴板权限或 macOS/Linux 实机证据。`pnpm lint --max-diagnostics=5` 仍有本轮范围外既有 CRLF/格式错误，未宣称全库 lint 或聚合门禁通过。候选包验证继续由 B7 承担。
+
+### UX-45（P3，Fixed locally）：BT 多文件磁力任务缺少可达的待选择文件流程（R27-U10）
+
+- **证据／影响**：BT 多文件磁力任务在元数据已落库但运行时 session 尚未建立或已退出时，任务会以 `bt_file_selection_required` 进入 `needs_attention`；恢复动作若只复用“检查 URL”文案，用户无法判断应选择文件，详情也可能因为 runtime snapshot 失败而隐藏文件清单。
+- **修复合同**：仅在稳定错误码 `bt_file_selection_required` 下把既有 `check_url` 恢复动作解释为“选择文件”，入口直接打开任务详情；详情无 runtime snapshot 时仍渲染任务文件清单，允许选择至少一个文件并复用 `update_torrent_file_selection` 保存。不得增加新的恢复动作枚举、绕过任务授权或在未选择文件时启动下载。
+- **验收**：任务行、恢复中心、上下文菜单、命令面板和详情中的动作均显示选择文件；运行时快照缺失/失败时仍可见多文件清单；空选择被前后端共同拒绝；选择后保存参数只包含用户勾选的相对路径。
+- **2026-10-05 实现与本地验收**：`row-recovery.ts` 仅按 `bt_file_selection_required` 判定专用文案；`AppShell` 的 `check_url` 分支直接打开详情并显示稳定错误提示；任务行、恢复中心、上下文菜单和命令面板复用 `newDownload.chooseFile`。`TaskDetails` 在 snapshot 为空或加载失败时保留文件选择面板，去除文件行复选框与 `label` 的重复关联，避免一次点击被切换两次；浏览器 mock 与 Rust 合同一致地拒绝空选择。Windows dirty 工作区定向测试 `pnpm exec vitest run src/components/shell/TaskDetails.test.tsx src/components/tasks/TaskRecoveryActions.test.tsx` 通过 2 个文件、36/36；`pnpm test:frontend` 通过 78 个文件、458/458，`pnpm typecheck`、`pnpm build`、`pnpm check:i18n`、`pnpm check:docs` 和 `git -c core.safecrlf=false diff --check` 通过。目标文件的 Biome 检查仍受既有 CRLF/格式差异影响，未进行整文件格式化。真实 BT 对端、多文件磁力元数据获取、候选包 WebView 行为仍属 B7，不能据此标记 Closed。
+
+### UX-46（P3，Fixed locally）：批量导入重复任务缺少明确的继续策略（R27-U11）
+
+- **证据／影响**：批量导入默认跳过已有任务并将其标记为重复，但结果区没有可达的继续入口；用户只能重新编辑输入并承担重复提交或误删其他行的风险。
+- **修复合同**：批量导入继续默认跳过重复项；结果区提供显式的“创建副本”动作，且只把重复 URL 重新提交给现有 `import_urls`，通过 `allowDuplicate: true` 复用后端重复策略。成功创建的重复项合并回原批次、从输入框移除，失败或仍重复的项保留；不得改变普通批量创建的默认行为或最终文件冲突的 no-clobber 规则。
+- **验收**：批量结果至少覆盖重复项存在、重复项创建成功、批次结果合并和输入行移除；默认请求携带 `allowDuplicate: false`，显式继续请求携带 `allowDuplicate: true`；未新增 Rust 命令、数据库迁移或 IPC 绑定。
+- **2026-10-05 实现与本地验收**：`BatchImportResults` 为重复结果提供复用 `newDownload.createDuplicate` 的显式按钮；`NewDownloadDialog` 仅提交重复行，成功结果通过既有批次合并逻辑更新统计并按出现次数移除已处理 URL。回归测试覆盖默认跳过、显式继续、结果合并和输入清理；本批未改 Rust、IPC 或 bindings。Windows dirty 工作区的最终命令与结果记录在优化计划对应批次；候选包、真实文件冲突和跨平台 WebView 行为仍归 B7，状态保持 `Fixed locally`。
+
+### UX-47（P3，Fixed locally）：错误筛选与内网交接设置的文案仍有漂移（R27-U12）
+
+- **证据／影响**：`failureKind` 在任务缺少 `failureCategory` 时会按英文错误消息猜测类别，或直接返回未登记的错误码，导致本地化消息、历史任务和浏览器 mock 的筛选选项不稳定；i18n 稳定语言注释仍写着约 670 个键；浏览器设置中的“允许内网交接”没有说明它不等于下载授权，容易让用户误以为打开开关即可访问内网。
+- **修复合同**：前端兜底分类必须只按稳定错误码，并与 Rust `failure_category_for_code` 的映射一致；未知码和缺失码归入 `other`，不得读取错误文案。稳定 locale 的内网交接文案必须说明“只控制交接，按任务授权才允许探测/下载”；不扩大授权范围，不改变 beta locale 的维护边界。
+- **验收**：错误消息改写或本地化不会改变筛选类别；HTTP、BT、认证、临时文件和未知码映射稳定；稳定 locale 文案明确交接/下载边界；过时的 locale 数量注释被移除；前端测试、类型检查、i18n 和文档门禁通过。
+- **2026-10-05 实现与本地验收**：新增 `failureCategoryFromCode`，覆盖 Rust 当前的特殊码和协议前缀；删除 `failureKind` 的英文子串回退，并新增历史任务/本地化错误文案回归测试。`STABLE_LOCALES` 注释改为不承诺过时键数；`en` 与 `zh-CN` 的内网交接标题、说明和警告改为明确按任务授权语义。未修改 Rust、IPC、数据库或网络策略。候选包、真实内网服务器和 beta locale 母语复核仍归 B7，状态保持 `Fixed locally`。
+
+### UX-48（P3，Fixed locally）：剪贴板监控缺少文件类型过滤（R27-U01 后续）
+
+- **证据／影响**：UX-43 已将剪贴板检测改为用户确认的非模态提示，但后端仍会把所有支持协议的 URL（包括无扩展名的普通网页和只在查询参数中携带文件名的 URL）送入事件，导致常驻监控继续产生低价值提示。
+- **修复合同**：常驻剪贴板监控对网络 URL 只接受固定的常见下载扩展名；扩展名从 URL path 的最后一个非空段读取，忽略 query/fragment；磁力链接和本地下载清单继续可用。多链接只保留命中的 URL；全局主动粘贴和手动输入不受过滤影响。不复用浏览器捕获设置，避免两个来源的策略意外耦合。
+- **验收**：普通网页、无扩展名下载 URL、查询参数文件名和未知扩展名不产生剪贴板事件；大小写扩展名、路径扩展名、混合多链接、磁力链接、网络 `.torrent` 及本地清单保持正确；Rust 定向测试通过。真实系统剪贴板、托盘隐藏可见性和候选包仍按 B7 验收。
+- **2026-10-05 实现与本地验收**：`src-tauri/src/clipboard.rs` 在 URL 规范化阶段加入固定白名单，事件生成前即过滤；新增 `src-tauri/tests/clipboard.rs` 回归覆盖路径判断、query/fragment 隔离、大小写和既有协议兼容性。Windows dirty 工作区执行 `cargo test --locked --manifest-path src-tauri/Cargo.toml --test clipboard`，11/11 通过；未修改 IPC、数据库、bindings 或 locale。状态保持 `Fixed locally`。
+
+### UX-49（P3，Fixed locally）：分页列表的全选入口只覆盖已加载页面，隐藏窗口剪贴板反馈不可见（B5 收尾）
+
+- **证据／影响**：任务列表使用游标分页和虚拟化；原有 `Ctrl/⌘+A`、右键菜单和命令面板分别只操作内存中的当前页，用户无法从筛选结果中可靠执行批量操作。剪贴板提示在窗口隐藏时不可见，系统通知若直接带 URL 又会把令牌或一次性链接暴露到桌面通知区域。
+- **修复合同**：全选必须固定当前查询快照并继续加载游标到队尾，所有实体先进入既有缓存再发布选择；查询变化、卸载、重复游标和待删除任务必须 fail-closed。快捷键、右键菜单和命令面板必须调用同一实现，当前页全选但仍有后续页时不能误禁用。隐藏窗口只保留最新剪贴板 payload，系统通知通用且限频，不包含 URL；恢复可见后仍需用户点击确认才进入探测/创建。
+- **验收**：跨页、空页、重复游标、查询过时和卸载回归；已加载页全选/仍有后续页的菜单状态；三种入口行为一致；隐藏态最新 payload、通知合并、可见恢复和权限失败分支；前端类型、定向测试、i18n 和构建通过。真实 WebView 托盘可见性、通知权限、系统剪贴板和候选包仍属于 B7。
+- **2026-10-05 实现与本地验收**：新增 `src/lib/select-all-matching.ts` 及 hook，复用 `taskById`、列表查询 epoch 和稳定 cursor 输入；`TaskList`、`AppShell`、`Palette` 三处入口统一到分页选择器，并增加重复 cursor、过时响应以及每页推进 epoch 的并发保护。新增 `src/lib/system-notification.ts`，隐藏剪贴板检测以 5 秒窗口发送不含 URL 的通用通知。Windows dirty 工作区执行 `pnpm typecheck`、定向 Vitest（4 文件 20/20）、`pnpm test:frontend`（79 文件 464/464）、`pnpm build`、`pnpm check:i18n`、`pnpm check:docs` 和 `git -c core.safecrlf=false diff --check` 均通过；全局 `pnpm lint` 仍受既有 CRLF/格式差异影响，未整文件格式化。候选包和实机证据未完成，状态保持 `Fixed locally`。
 
 ## 十一、统一修复顺序
 

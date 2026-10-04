@@ -19,8 +19,12 @@ import {
 } from "lucide-react";
 import { memo } from "react";
 import { useTranslation } from "react-i18next";
-
-import { inlineRecoveryActionsForTask, rowShowsRetry, rowTransferMode } from "@/components/tasks/row-recovery";
+import {
+  inlineRecoveryActionsForTask,
+  recoveryActionLabel,
+  rowShowsRetry,
+  rowTransferMode,
+} from "@/components/tasks/row-recovery";
 import { recoveryActionIcon } from "@/components/tasks/TaskRecoveryActions";
 import { MenuContent, MenuItem, MenuLabel, MenuSeparator } from "@/components/ui/menu-item";
 import type { RecoveryAction } from "@/generated/bindings";
@@ -31,6 +35,8 @@ interface TaskContextMenuProps {
   task: Task;
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
+  onRedownload?: (task: Task) => void;
+  onRecheck?: (task: Task) => void;
   onFinishLiveRecording: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
@@ -52,6 +58,8 @@ export const TaskContextMenu = memo(function TaskContextMenu({
   task,
   onToggleTransfer,
   onRetry,
+  onRedownload,
+  onRecheck,
   onFinishLiveRecording,
   onOpenFile,
   onOpenFolder,
@@ -96,7 +104,7 @@ export const TaskContextMenu = memo(function TaskContextMenu({
                 // banner and in the details panel.
                 action === "restart" && task.downloadedBytes > 0
                   ? t("actions.restartDiscards", { size: formatBytes(task.downloadedBytes) })
-                  : t(`recovery.${action}`)
+                  : recoveryActionLabel(task, action, t)
               }
               destructive={action === "restart"}
               shortcut={action === recoveryActions[0] ? formatShortcutForDocument("mod+R") : undefined}
@@ -127,7 +135,15 @@ export const TaskContextMenu = memo(function TaskContextMenu({
           )}
 
           {status === "completed" && (
-            <MenuItem icon={File} label={t("actions.openFile")} onSelect={() => onOpenFile(task)} />
+            <>
+              {onRedownload ? (
+                <MenuItem icon={RotateCcw} label={t("actions.redownload")} onSelect={() => onRedownload(task)} />
+              ) : null}
+              {onRecheck ? (
+                <MenuItem icon={FileText} label={t("actions.recheck")} onSelect={() => onRecheck(task)} />
+              ) : null}
+              <MenuItem icon={File} label={t("actions.openFile")} onSelect={() => onOpenFile(task)} />
+            </>
           )}
 
           <MenuItem icon={FolderOpen} label={t("actions.openFolder")} onSelect={() => onOpenFolder(task)} />

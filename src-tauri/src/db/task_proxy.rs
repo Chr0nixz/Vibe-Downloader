@@ -240,6 +240,7 @@ fn proxy_protocol_error(protocol: &str, message: &str) -> String {
         message: format!("{message} Protocol: {protocol}."),
         recoverable: true,
         actions: vec!["check_url".to_string()],
+        retry_after_at: None,
     }
     .command_error()
 }

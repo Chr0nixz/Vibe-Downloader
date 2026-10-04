@@ -1,4 +1,44 @@
+import type { Platform } from "@/lib/platform";
+
 const OVERLAY_SELECTOR = '[role="dialog"], [role="alertdialog"], [role="menu"]';
+
+/**
+ * Whether the focused element owns text editing. Global paste should leave
+ * these surfaces to the browser so a URL can still be pasted into a form.
+ */
+export function isTextInputTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  if (target.closest('textarea, select, [role="textbox"]')) return true;
+  const editable = target.closest("[contenteditable]");
+  if (
+    (target instanceof HTMLElement && target.isContentEditable) ||
+    (editable !== null &&
+      ["", "true", "plaintext-only"].includes(editable.getAttribute("contenteditable")?.toLowerCase() ?? ""))
+  ) {
+    return true;
+  }
+  if (!(target instanceof HTMLInputElement)) return false;
+  return !["button", "checkbox", "file", "image", "radio", "range", "reset", "submit"].includes(
+    target.type.toLowerCase(),
+  );
+}
+
+/** Global paste is available from the task surface, but never from a text
+ * editor or a Radix overlay that owns the key event. */
+export function isGlobalPasteShortcut(event: KeyboardEvent, platform: Platform): boolean {
+  const modifier = platform === "macos" ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+  return (
+    modifier &&
+    !event.shiftKey &&
+    !event.altKey &&
+    !event.isComposing &&
+    !event.repeat &&
+    !event.defaultPrevented &&
+    event.key.toLowerCase() === "v" &&
+    !isTextInputTarget(event.target) &&
+    !isOverlayKey(event)
+  );
+}
 
 /**
  * Whether a window-level keydown already belongs to a dialog, menu, or popover

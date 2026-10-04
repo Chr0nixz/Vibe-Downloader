@@ -52,6 +52,14 @@ describe("ShortcutPanel navigation group", () => {
 });
 
 describe("ShortcutPanel reference", () => {
+  it.each(["windows", "macos"] as const)("lists the paste action on %s", (platform) => {
+    render(<ShortcutPanel open onOpenChange={() => {}} platform={platform} />);
+    const row = screen.getByText("contextmenu.list.pasteAndCreate").parentElement as HTMLElement;
+    expect(Array.from(row.querySelectorAll("kbd")).map((kbd) => kbd.textContent)).toEqual(
+      platform === "macos" ? ["\u2318V"] : ["Ctrl", "V"],
+    );
+  });
+
   it("lists each action once with every chord that runs it", () => {
     render(<ShortcutPanel open onOpenChange={() => {}} platform="windows" />);
 

@@ -1,10 +1,9 @@
 //! C5 cross-engine integration coverage: BitTorrent engine probe path.
 //!
-//! The full download path (`run_torrent_download`) requires a `tauri::AppHandle`
-//! and a live librqbit session with DHT; following the convention of
-//! `ftp_engine.rs`, `sftp_engine.rs`, and `webdav_engine.rs`, these tests cover
-//! the probe layer (`BtEngine::probe`) end-to-end plus create-path checksum
-//! contracts documented in `commands/tasks/create.rs`.
+//! These tests cover `BtEngine::probe` and create-path checksum contracts.
+//! Runtime-error coverage lives in `tests/bt_runtime/mod.rs`, compiled inside
+//! the engine module so it can install a failing librqbit storage backend
+//! without exposing a production test hook or requiring a GUI handle.
 //!
 //! librqbit probe sessions bind a DHT UDP socket and conflict when run in
 //! parallel on Windows (os error 10048), so session-creating tests acquire
@@ -50,6 +49,7 @@ fn probe_request(uri: String, proxy_config: Option<ResolvedProxyConfig>) -> Prob
         app: None,
         request_id: None,
         cancel_token: None,
+        network_policy: tauri_app_lib::download::network_policy::NetworkPolicy::default(),
     }
 }
 

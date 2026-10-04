@@ -26,6 +26,8 @@ browser/dist
 .pi/
 .workbuddy/
 .zcode/
+.qoder-credits/
+.session-export/
 
 # Temporary working files
 .tmp_*
@@ -64,3 +66,6 @@ src-tauri/tauri.updater-rehearsal.generated.json
 # Tauri updater signing keys (public key lives in tauri.conf.json)
 *.key
 !*.key.pub
+
+# Local request profile validation evidence.
+artifacts/b5-request-profiles/

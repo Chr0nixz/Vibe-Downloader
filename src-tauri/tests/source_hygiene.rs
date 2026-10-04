@@ -75,3 +75,32 @@ fn reqwest_clients_are_only_built_in_the_network_factory() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn http_requests_cannot_bypass_origin_safe_redirects() {
+    let root = crate_root();
+    let mut files = Vec::new();
+    for dir in ["src/download", "src/commands"] {
+        collect_rs_files(&root.join(dir), &mut files);
+    }
+    let mut violations = Vec::new();
+    for path in files {
+        if path.ends_with("http/request.rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("source");
+        let compact: String = source.split_whitespace().collect();
+        if compact.contains(".send()") || compact.contains("client.execute(") {
+            violations.push(
+                path.strip_prefix(&root)
+                    .expect("relative path")
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "FUN-39: HTTP sends must use the shared origin-safe redirect path: {violations:?}"
+    );
+}

@@ -70,6 +70,7 @@ fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
             connection_count: 8,
             speed_bps: 48_500_000,
             health_summary: Some("Downloading steadily".into()),
+            protocol: "https",
         },
         MockTaskInput {
             file_name: "node-v22.pkg",
@@ -81,6 +82,7 @@ fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
             connection_count: 4,
             speed_bps: 12_400_000,
             health_summary: Some("Server limit detected".into()),
+            protocol: "https",
         },
         MockTaskInput {
             file_name: "rust-docs.pdf",
@@ -92,6 +94,7 @@ fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
             connection_count: 0,
             speed_bps: 0,
             health_summary: None,
+            protocol: "https",
         },
         MockTaskInput {
             file_name: "game-patch.zip",
@@ -103,6 +106,7 @@ fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
             connection_count: 0,
             speed_bps: 0,
             health_summary: None,
+            protocol: "https",
         },
         MockTaskInput {
             file_name: "dataset.tar.gz",
@@ -114,6 +118,7 @@ fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
             connection_count: 2,
             speed_bps: 3_200_000,
             health_summary: Some("Network fluctuation, retrying".into()),
+            protocol: "https",
         },
         MockTaskInput {
             file_name: "driver-setup.exe",
@@ -125,6 +130,7 @@ fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
             connection_count: 0,
             speed_bps: 0,
             health_summary: Some("Resume unavailable".into()),
+            protocol: "https",
         },
         MockTaskInput {
             file_name: "llm-weights.safetensors",
@@ -138,6 +144,7 @@ fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
             health_summary: Some(
                 "Remote file changed. Restart download to avoid corruption.".into(),
             ),
+            protocol: "https",
         },
         MockTaskInput {
             file_name: "archlinux.iso",
@@ -149,17 +156,22 @@ fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
             connection_count: 0,
             speed_bps: 0,
             health_summary: Some("Completed".into()),
+            protocol: "https",
         },
+        // UX-42: `waiting_network` is only reachable from an HLS live recording
+        // whose playlist stopped publishing segments — seed an honest HLS task
+        // instead of an HTTPS zip the backend could never put in this state.
         MockTaskInput {
-            file_name: "fonts-bundle.zip",
-            url: "https://github.com/google/fonts/archive/refs/heads/main.zip",
-            host: "github.com",
+            file_name: "conference-live.mp4",
+            url: "https://live.example.com/hls/conference/master.m3u8",
+            host: "live.example.com",
             status: TaskStatus::WaitingNetwork,
             total_size: 220_000_000,
             downloaded_bytes: 45_000_000,
             connection_count: 0,
             speed_bps: 0,
-            health_summary: Some("Waiting for network".into()),
+            health_summary: Some("Live playlist idle - waiting for new segments".into()),
+            protocol: "hls",
         },
         MockTaskInput {
             file_name: "vscode.deb",
@@ -171,6 +183,7 @@ fn build_mock_tasks(now: &str) -> Vec<TaskRecord> {
             connection_count: 2,
             speed_bps: 8_900_000,
             health_summary: Some("Disk write slower than network".into()),
+            protocol: "https",
         },
     ]
     .into_iter()
@@ -189,6 +202,9 @@ struct MockTaskInput {
     connection_count: i32,
     speed_bps: i64,
     health_summary: Option<String>,
+    /// UX-42: mock tasks must only exercise status/protocol combinations the
+    /// real backend can produce — `waiting_network` belongs to HLS live idle.
+    protocol: &'static str,
 }
 
 #[cfg(debug_assertions)]
@@ -203,6 +219,7 @@ fn mock_task(input: MockTaskInput, now: &str) -> TaskRecord {
         connection_count,
         speed_bps,
         health_summary,
+        protocol,
     } = input;
     let error_message = if matches!(status, TaskStatus::Failed | TaskStatus::NeedsAttention) {
         health_summary.clone()
@@ -214,7 +231,7 @@ fn mock_task(input: MockTaskInput, now: &str) -> TaskRecord {
         id: Uuid::new_v4().to_string(),
         url: url.to_string(),
         final_url: Some(url.to_string()),
-        protocol: "https".to_string(),
+        protocol: protocol.to_string(),
         task_kind: crate::models::TaskKind::SingleFile,
         file_name: file_name.to_string(),
         save_dir: "~/Downloads".to_string(),

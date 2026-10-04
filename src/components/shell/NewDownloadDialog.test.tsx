@@ -2,7 +2,12 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { BatchImportResult, ProbePhasePayload, ProbeTaskPayload } from "@/generated/bindings";
+import type {
+  BatchImportResult,
+  Task as GeneratedTask,
+  ProbePhasePayload,
+  ProbeTaskPayload,
+} from "@/generated/bindings";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
@@ -124,6 +129,42 @@ describe("NewDownloadDialog probe flow", () => {
     vi.useRealTimers();
   });
 
+  it("accepts successive clipboard handoffs without replaying the same source", async () => {
+    const firstUrl = "https://example.com/first.zip";
+    const secondUrl = "https://example.com/second.zip";
+    mocks.probeTask.mockImplementation(async ({ url }) => makeProbe(url, url.split("/").pop() ?? "file.zip"));
+    mocks.createTask.mockResolvedValue({ id: "created-task" } as Task);
+    const onCreated = vi.fn();
+    const onOpenChange = vi.fn();
+    const handoff = (sourceId: string, url: string) => (
+      <TooltipProvider>
+        <NewDownloadDialog
+          open
+          initialSourceId={sourceId}
+          initialUrl={url}
+          onCreated={onCreated}
+          onOpenChange={onOpenChange}
+        />
+      </TooltipProvider>
+    );
+    const view = render(handoff("clipboard-first", firstUrl));
+    await act(async () => vi.advanceTimersByTime(650));
+    expect(mocks.probeTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({ url: firstUrl, sourceKind: "clipboard" }),
+    );
+    view.rerender(handoff("clipboard-second", secondUrl));
+    expect(screen.getByLabelText("newDownload.url")).toHaveValue(secondUrl);
+    await act(async () => vi.advanceTimersByTime(650));
+    expect(mocks.probeTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({ url: secondUrl, sourceKind: "clipboard" }),
+    );
+    fireEvent.change(screen.getByLabelText("newDownload.url"), { target: { value: "https://example.com/edited.zip" } });
+    view.rerender(handoff("clipboard-second", secondUrl));
+    expect(screen.getByLabelText("newDownload.url")).toHaveValue("https://example.com/edited.zip");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "newDownload.start" })));
+    expect(mocks.createTask).toHaveBeenCalledWith(expect.objectContaining({ sourceKind: "clipboard" }));
+  });
+
   it("probes after the debounce and submits the matching snapshot", async () => {
     const url = "https://example.com/release.zip";
     const probe = makeProbe(url, "release.zip");
@@ -141,9 +182,114 @@ describe("NewDownloadDialog probe flow", () => {
       fireEvent.click(screen.getByRole("button", { name: "newDownload.start" }));
     });
 
-    expect(mocks.createTask).toHaveBeenCalledWith(expect.objectContaining({ url, probeSnapshot: probe }));
+    expect(mocks.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ url, probeSnapshot: probe, startPaused: false, obeySchedule: true }),
+    );
     expect(onCreated).toHaveBeenCalledWith(created);
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("can add a task without starting it", async () => {
+    const url = "https://example.com/paused.zip";
+    const probe = makeProbe(url, "paused.zip");
+    mocks.probeTask.mockResolvedValue(probe);
+    mocks.createTask.mockResolvedValue({ id: "paused-task" } as Task);
+    renderDialog();
+
+    await startAutomaticProbe(url);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "newDownload.addPaused" }));
+    });
+
+    expect(mocks.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ url, startPaused: true, obeySchedule: true }),
+    );
+  });
+
+  it("passes the download-window preference when creating a task", async () => {
+    const url = "https://example.com/windowed.zip";
+    const probe = makeProbe(url, "windowed.zip");
+    mocks.probeTask.mockResolvedValue(probe);
+    mocks.createTask.mockResolvedValue({ id: "windowed-task" } as Task);
+    renderDialog();
+
+    await startAutomaticProbe(url);
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.advancedOptions" }));
+    fireEvent.click(screen.getByLabelText("newDownload.obeySchedule"));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "newDownload.start" }));
+    });
+
+    expect(mocks.createTask).toHaveBeenCalledWith(expect.objectContaining({ startPaused: false, obeySchedule: false }));
+  });
+
+  it("invalidates pending and completed probes when request headers change", async () => {
+    const url = "https://example.com/profile.zip";
+    const pending = deferred<ProbeTaskPayload>();
+    mocks.probeTask.mockReturnValueOnce(pending.promise);
+    mocks.createTask.mockResolvedValue({ id: "profile-task" } as Task);
+    renderDialog();
+    await startAutomaticProbe(url);
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.advancedOptions" }));
+    fireEvent.change(screen.getByLabelText("User-Agent"), { target: { value: "Agent/1" } });
+    fireEvent.change(screen.getByLabelText("requestProfile.customHeaders"), {
+      target: { value: "Cookie: session=test" },
+    });
+    await act(async () => pending.resolve(makeProbe(url, "stale-profile.zip")));
+    expect(screen.queryByText("stale-profile.zip")).not.toBeInTheDocument();
+    mocks.probeTask.mockResolvedValue(makeProbe(url, "new-profile.zip"));
+    await act(async () => vi.advanceTimersByTime(650));
+    expect(mocks.probeTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        requestProfile: {
+          userAgent: "Agent/1",
+          referer: null,
+          customHeaders: [{ name: "cookie", value: "session=test" }],
+        },
+      }),
+    );
+    fireEvent.change(screen.getByLabelText("Referer"), { target: { value: "https://example.com/page" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "newDownload.start" }));
+    });
+    expect(mocks.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        probeSnapshot: null,
+        requestProfile: {
+          userAgent: "Agent/1",
+          referer: "https://example.com/page",
+          customHeaders: [{ name: "cookie", value: "session=test" }],
+        },
+      }),
+    );
+  });
+
+  it("keeps configured headers accessible for clearing after a protocol change", () => {
+    renderDialog();
+    fireEvent.change(screen.getByLabelText("newDownload.url"), { target: { value: "https://example.com/file.zip" } });
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.advancedOptions" }));
+    fireEvent.change(screen.getByLabelText("User-Agent"), { target: { value: "Agent/1" } });
+    fireEvent.change(screen.getByLabelText("newDownload.url"), { target: { value: "ftp://example.com/file.zip" } });
+    expect(screen.getByLabelText("User-Agent")).toHaveValue("Agent/1");
+    fireEvent.change(screen.getByLabelText("User-Agent"), { target: { value: "" } });
+    expect(screen.queryByLabelText("User-Agent")).not.toBeInTheDocument();
+  });
+
+  it("rejects invalid headers before a probe or create request", async () => {
+    const url = "https://example.com/profile-invalid.zip";
+    mocks.probeTask.mockResolvedValue(makeProbe(url, "profile-invalid.zip"));
+    renderDialog();
+    await startAutomaticProbe(url);
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.advancedOptions" }));
+    fireEvent.change(screen.getByLabelText("requestProfile.customHeaders"), { target: { value: "Host: secret" } });
+    const calls = mocks.probeTask.mock.calls.length;
+    await act(async () => vi.advanceTimersByTime(650));
+    expect(mocks.probeTask).toHaveBeenCalledTimes(calls);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "newDownload.start" }));
+    });
+    expect(mocks.createTask).not.toHaveBeenCalled();
+    expect(screen.getByText("errors.requestProfileInvalid")).toBeInTheDocument();
   });
 
   it("shows a structured timeout error and leaves the URL editable", async () => {
@@ -606,6 +752,65 @@ describe("NewDownloadDialog probe flow", () => {
     expect(lastInput).not.toContain("https://example.com/1.zip");
   });
 
+  it("keeps duplicates skipped by default and can create all duplicate rows", async () => {
+    const duplicateUrl = "https://example.com/already-added.zip";
+    const duplicateResult = {
+      items: [
+        {
+          inputUrl: duplicateUrl,
+          normalizedUrl: duplicateUrl,
+          duplicate: true,
+          valid: true,
+          fileName: "already-added.zip",
+          totalSize: "1",
+          contentType: null,
+          supportsResume: true,
+          errorCode: "duplicate_task",
+          errorMessage: "Task already exists: already-added.zip",
+          task: null,
+        },
+      ],
+      createdCount: 0,
+      failedCount: 0,
+      duplicateCount: 1,
+    } satisfies BatchImportResult;
+    const createdTask = { id: "duplicate-copy", url: duplicateUrl, fileName: "already-added (1).zip" } as GeneratedTask;
+    const duplicateCreatedResult = {
+      items: [
+        {
+          ...duplicateResult.items[0],
+          duplicate: false,
+          errorCode: null,
+          errorMessage: null,
+          task: createdTask,
+        },
+      ],
+      createdCount: 1,
+      failedCount: 0,
+      duplicateCount: 0,
+    } satisfies BatchImportResult;
+    mocks.importUrls.mockResolvedValueOnce(duplicateResult).mockResolvedValueOnce(duplicateCreatedResult);
+    const { onCreated } = renderDialog();
+
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.modeBatch" }));
+    fireEvent.change(screen.getByLabelText("newDownload.batchUrls"), { target: { value: duplicateUrl } });
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.createBatch" }));
+    await act(async () => {});
+
+    expect(mocks.importUrls).toHaveBeenLastCalledWith(expect.objectContaining({ allowDuplicate: false }));
+    expect(screen.getByRole("button", { name: "newDownload.createDuplicate" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.createDuplicate" }));
+    await act(async () => {});
+
+    expect(mocks.importUrls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ create: true, allowDuplicate: true, input: duplicateUrl }),
+    );
+    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining(createdTask));
+    expect(screen.queryByRole("button", { name: "newDownload.createDuplicate" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("newDownload.batchUrls")).toHaveValue("");
+  });
+
   it("blocks batch create during preview and drops a preview made stale by editing", async () => {
     const pending = deferred<BatchImportResult>();
     mocks.importUrls.mockReturnValue(pending.promise);
@@ -763,6 +968,27 @@ describe("NewDownloadDialog close semantics", () => {
       </TooltipProvider>,
     );
     expect(screen.getByLabelText("newDownload.url")).toHaveValue("https://example.com/draft.zip");
+  });
+
+  it("restores focus through the close callback after the focus trap releases", async () => {
+    const onCloseAutoFocus = vi.fn((event: Event) => {
+      event.preventDefault();
+      screen.getByRole("button", { name: "paste entry" }).focus();
+    });
+    const content = (open: boolean) => (
+      <TooltipProvider>
+        <button type="button">paste entry</button>
+        <NewDownloadDialog open={open} onOpenChange={vi.fn()} onCreated={vi.fn()} onCloseAutoFocus={onCloseAutoFocus} />
+      </TooltipProvider>
+    );
+    const view = render(content(false));
+    screen.getByRole("button", { name: "paste entry" }).focus();
+    view.rerender(content(true));
+    expect(screen.getByLabelText("newDownload.url")).toHaveFocus();
+    view.rerender(content(false));
+    await act(async () => vi.advanceTimersByTime(0));
+    expect(onCloseAutoFocus).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "paste entry" })).toHaveFocus();
   });
 
   it("announces a still-running create instead of pretending it was canceled", async () => {

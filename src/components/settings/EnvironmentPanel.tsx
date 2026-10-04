@@ -13,6 +13,7 @@ import type {
 } from "@/generated/bindings";
 import { useAppUpdater } from "@/hooks/use-app-updater";
 import { exportAppBackup } from "@/lib/backup";
+import { writeClipboardText } from "@/lib/clipboard-write";
 import { formatEnvironmentReport } from "@/lib/environment-report";
 import { formatEnvironmentDetail, formatEnvironmentText } from "@/lib/environment-text";
 import { createLogger } from "@/lib/logger";
@@ -74,7 +75,7 @@ export function EnvironmentPanel({ onFocusSection }: EnvironmentPanelProps) {
       t,
     );
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboardText(text);
       addToast({
         title: t("settings.environmentReportCopied"),
         tone: "success",

@@ -20,11 +20,15 @@ pub const EVENT_QUEUE_CHANGED: &str = "queue-changed";
 pub const EVENT_SETTINGS_CHANGED: &str = "settings-changed";
 pub const EVENT_BROWSER_HANDOFF_RECEIVED: &str = "browser-handoff-received";
 pub const EVENT_BROWSER_HANDOFF_FAILED: &str = "browser-handoff-failed";
+pub const EVENT_BROWSER_HANDOFF_AUTHORIZATION_REQUIRED: &str =
+    "browser-handoff-authorization-required";
 pub const EVENT_BROWSER_INTEGRATION_CHANGED: &str = "browser-integration-changed";
 pub const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED: &str = "tray-new-download-requested";
 pub const EVENT_TRAY_SETTINGS_REQUESTED: &str = "tray-settings-requested";
 pub const EVENT_CLIPBOARD_LINK_DETECTED: &str = "clipboard-link-detected";
 pub const EVENT_COMPLETION_ACTION_REQUESTED: &str = "completion-action-requested";
+pub const EVENT_CLOSE_REQUESTED: &str = "app://close-requested";
+pub const EVENT_DESKTOP_STATUS: &str = "desktop-status";
 pub const EVENT_PROBE_PHASE: &str = "probe-phase";
 pub const EVENT_STORAGE_CLEANUP_PROGRESS: &str = "storage-cleanup-progress";
 
@@ -308,6 +312,13 @@ pub async fn emit_task_updated_record<T: DownloadEventTarget + ?Sized>(
         loaded
     };
     let mut task = Task::from(task.clone());
+    task.completed_at = match db::completed_at_for_task(pool, &task.id).await {
+        Ok(completed_at) => completed_at,
+        Err(error) => {
+            tracing::warn!(task_id = %task.id, error = %error, "failed to load task completion time");
+            None
+        }
+    };
     task.files = files;
     emit_task_updated(app, &task);
 }
@@ -374,6 +385,20 @@ pub fn emit_browser_handoff_failed(app: &AppHandle) {
     emit_empty(app, EVENT_BROWSER_HANDOFF_FAILED);
 }
 
+#[derive(Clone, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserHandoffAuthorizationRequiredPayload {
+    pub request_id: String,
+    pub url: String,
+}
+
+pub fn emit_browser_handoff_authorization_required(
+    app: &AppHandle,
+    payload: &BrowserHandoffAuthorizationRequiredPayload,
+) {
+    emit_payload(app, EVENT_BROWSER_HANDOFF_AUTHORIZATION_REQUIRED, payload);
+}
+
 pub fn emit_browser_integration_changed(app: &AppHandle) {
     emit_empty(app, EVENT_BROWSER_INTEGRATION_CHANGED);
 }
@@ -395,6 +420,29 @@ pub fn emit_completion_action_requested(
     payload: &CompletionActionRequestedPayload,
 ) {
     emit_payload(app, EVENT_COMPLETION_ACTION_REQUESTED, payload);
+}
+
+/// Sent when the main window close button needs a user decision because
+/// active downloads still own network and file resources.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseRequestPayload {
+    pub active: u32,
+    pub queued: u32,
+    /// True when the close guard could not read the task snapshot. The UI
+    /// must keep the decision dialog open instead of treating the failure as
+    /// an idle queue and exiting with unknown download ownership.
+    pub stats_unavailable: bool,
+}
+
+pub fn emit_close_requested(app: &AppHandle, payload: &CloseRequestPayload) {
+    emit_payload(app, EVENT_CLOSE_REQUESTED, payload);
+}
+
+/// Snapshot consumed by the frontend to keep the native tray tooltip and
+/// taskbar progress in sync without putting locale-specific copy in Rust.
+pub fn emit_desktop_status(app: &AppHandle, payload: &crate::models::TaskStatsSnapshot) {
+    emit_payload(app, EVENT_DESKTOP_STATUS, payload);
 }
 
 /// UX-6: Emit a probe-phase event. Not broadcast to browser_realtime.

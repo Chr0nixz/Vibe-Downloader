@@ -10,12 +10,26 @@ pub async fn upsert_task_request_headers(
     headers: &[(String, String)],
     source_browser: Option<BrowserKind>,
 ) -> Result<(), String> {
+    upsert_task_request_headers_with_expiry(pool, task_id, headers, source_browser, None).await
+}
+
+pub async fn upsert_task_request_headers_with_expiry(
+    pool: &SqlitePool,
+    task_id: &str,
+    headers: &[(String, String)],
+    source_browser: Option<BrowserKind>,
+    expires_at: Option<&str>,
+) -> Result<(), String> {
     if headers.is_empty() {
         return Ok(());
     }
     let now = crate::models::task::now_iso();
-    let expires_at =
-        (chrono::Utc::now() + chrono::Duration::hours(TASK_REQUEST_HEADERS_TTL_HOURS)).to_rfc3339();
+    let expires_at = expires_at.map(str::to_string).unwrap_or_else(|| {
+        (chrono::Utc::now() + chrono::Duration::hours(TASK_REQUEST_HEADERS_TTL_HOURS)).to_rfc3339()
+    });
+    if expires_at <= now {
+        return Err(AppErrorPayload::auth_headers_expired().command_error());
+    }
     let headers_json = serde_json::to_string(headers).map_err(|e| e.to_string())?;
     let (headers_ciphertext, nonce) = crate::secure_headers::encrypt_headers(&headers_json)?;
     sqlx::query(
@@ -48,10 +62,23 @@ pub async fn resolve_task_request_headers(
     pool: &SqlitePool,
     task_id: &str,
 ) -> Result<Vec<(String, String)>, String> {
+    resolve_task_request_headers_with_source(pool, task_id)
+        .await
+        .map(|(headers, _, _)| headers)
+}
+
+/// Resolve browser handoff headers together with their originating browser.
+/// The source is metadata for the new task's diagnostics only; expiry and
+/// decryption checks remain identical to the legacy resolver.
+pub async fn resolve_task_request_headers_with_source(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<(Vec<(String, String)>, Option<BrowserKind>, Option<String>), String> {
     let now = crate::models::task::now_iso();
     let row = sqlx::query(
         r#"
-        SELECT headers_json, headers_ciphertext, nonce, expires_at FROM task_request_headers
+        SELECT headers_json, headers_ciphertext, nonce, expires_at, source_browser
+        FROM task_request_headers
         WHERE task_id = ?
         "#,
     )
@@ -61,8 +88,11 @@ pub async fn resolve_task_request_headers(
     .map_err(|e| e.to_string())?;
 
     let Some(row) = row else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None, None));
     };
+    let source_browser = row
+        .get::<Option<String>, _>("source_browser")
+        .and_then(|value| BrowserKind::from_db_str(&value));
     let expires_at: String = row.get("expires_at");
     if expires_at <= now {
         delete_task_request_headers(pool, task_id).await?;
@@ -92,10 +122,17 @@ pub async fn resolve_task_request_headers(
         (None, None) => {
             let raw: String = row.get("headers_json");
             if raw.is_empty() {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), source_browser, Some(expires_at)));
             }
             if let Ok(headers) = serde_json::from_str::<Vec<(String, String)>>(&raw) {
-                let _ = upsert_task_request_headers(pool, task_id, &headers, None).await;
+                let _ = upsert_task_request_headers_with_expiry(
+                    pool,
+                    task_id,
+                    &headers,
+                    source_browser,
+                    Some(&expires_at),
+                )
+                .await;
             }
             zeroize::Zeroizing::new(raw)
         }
@@ -107,7 +144,9 @@ pub async fn resolve_task_request_headers(
         }
     };
 
-    serde_json::from_str(&headers_json).map_err(|e| e.to_string())
+    serde_json::from_str(&headers_json)
+        .map(|headers| (headers, source_browser, Some(expires_at)))
+        .map_err(|e| e.to_string())
 }
 
 pub async fn delete_task_request_headers(pool: &SqlitePool, task_id: &str) -> Result<(), String> {
@@ -128,6 +167,7 @@ pub async fn clear_all_task_request_headers(pool: &SqlitePool) -> Result<(), Str
 }
 
 pub async fn clear_expired_task_request_headers(pool: &SqlitePool) -> Result<(), String> {
+    super::expire_task_request_profile_secrets(pool).await?;
     let now = crate::models::task::now_iso();
     sqlx::query("DELETE FROM task_request_headers WHERE expires_at <= ?")
         .bind(now)

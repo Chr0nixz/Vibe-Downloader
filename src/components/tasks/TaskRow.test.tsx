@@ -542,9 +542,11 @@ describe("TaskRow terminal-row density", () => {
     expect(document.getElementById("task-task-1-diagnostic")).toHaveTextContent("task.diagnostic.completedAt");
   });
 
-  // Regression: "Waiting for network" rows showed no reason line because the
-  // backend summary equalled the badge and suppressed the fallback.
-  it("tells a waiting-for-network row that it will resume on its own", () => {
+  // Regression: a `waiting_network` row (HLS live idle) showed no reason line
+  // because the backend summary equalled the badge and suppressed the fallback.
+  // UX-42: the line must state the real cause (live stream idle, resume to
+  // continue) rather than promising an automatic resume that never happens.
+  it("tells a waiting-for-network row that the live stream is idle and to resume", () => {
     renderRow({
       task: { ...makeTask(), status: "waiting_network", speedBps: 0, healthSummary: "task.status.waiting_network" },
     });

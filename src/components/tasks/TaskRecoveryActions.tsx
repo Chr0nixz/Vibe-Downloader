@@ -24,6 +24,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { type RecoveryConcern, recoveryConcern } from "@/components/workspaces/recovery-center-logic";
 import type { RecoveryAction } from "@/generated/bindings";
+import { writeClipboardText } from "@/lib/clipboard-write";
 import {
   formatErrorForReport,
   localizedErrorCause,
@@ -34,6 +35,7 @@ import { createLogger } from "@/lib/logger";
 import { cn, formatBytes } from "@/lib/utils";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
+import { recoveryActionLabel } from "./row-recovery";
 
 const log = createLogger("recovery");
 
@@ -83,7 +85,7 @@ export function TaskRecoveryActions({
     // unconditionally — a swallowed rejection told the user "copied" while
     // the report never left the app.
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboardText(text);
       addToast({
         tone: "info",
         title: t("recovery.errorCopied"),
@@ -125,7 +127,7 @@ export function TaskRecoveryActions({
       }}
     >
       <RecoveryIcon action={action} />
-      {t(`recovery.${action}`)}
+      {recoveryActionLabel(task, action, t)}
     </Button>
   ));
 

@@ -10,9 +10,11 @@ mod hash;
 mod hls;
 mod integrity;
 mod metalink;
+mod network_policies;
 mod recovery;
 mod request_diagnostics;
 mod request_headers;
+mod request_profiles;
 mod restore_report;
 mod segment_planner;
 mod segments;
@@ -24,6 +26,7 @@ mod task_credentials;
 mod task_files;
 mod task_proxy;
 mod task_records;
+mod task_retry;
 mod task_state;
 mod torrent;
 #[cfg(debug_assertions)]
@@ -85,6 +88,10 @@ pub use self::metalink::{
     upsert_metalink_file_plan, upsert_metalink_task, MetalinkFilePlan, MetalinkResourceInsert,
     MetalinkResourceRecord, MetalinkTaskUpsert,
 };
+pub use self::network_policies::{
+    create_network_authorization, create_network_authorization_for_policy, draft_network_policy,
+    revoke_task_network_policy, save_task_network_policy, task_network_policy,
+};
 pub use self::recovery::{insert_recovery_record, list_recovery_history};
 pub use self::request_diagnostics::{
     insert_request_diagnostic, list_request_diagnostics_page, prune_request_diagnostics,
@@ -92,8 +99,9 @@ pub use self::request_diagnostics::{
 };
 pub use self::request_headers::{
     clear_all_task_request_headers, clear_expired_task_request_headers,
-    delete_task_request_headers, resolve_task_request_headers, upsert_task_request_headers,
-    TASK_REQUEST_HEADERS_TTL_HOURS,
+    delete_task_request_headers, resolve_task_request_headers,
+    resolve_task_request_headers_with_source, upsert_task_request_headers,
+    upsert_task_request_headers_with_expiry, TASK_REQUEST_HEADERS_TTL_HOURS,
 };
 pub use self::restore_report::{
     dismiss_restore_report, read_restore_report, write_staging_meta, RestoreStagingMeta,
@@ -117,7 +125,7 @@ pub use self::settings::{
     local_time_window_active, normalize_accent_color, normalize_ffmpeg_path, normalize_local_time,
     normalize_multi_connection_threshold_bytes, normalize_proxy_mode, normalize_proxy_no_proxy,
     normalize_proxy_optional, normalize_proxy_url, normalize_speed_limit_bps,
-    parse_multi_connection_threshold_bytes, parse_speed_limit_bps, upsert_settings,
+    parse_multi_connection_threshold_bytes, parse_speed_limit_bps, reset_settings, upsert_settings,
 };
 pub use self::sftp::{
     forget_sftp_known_host, list_sftp_known_hosts, verify_or_record_sftp_host_key, SftpKnownHost,
@@ -144,15 +152,19 @@ pub use self::task_proxy::{
     upsert_task_proxy_settings, validate_task_proxy_protocol,
 };
 pub use self::task_records::{
-    find_duplicate_task_record, get_task_record, get_task_record_in_tx, insert_task_record,
-    insert_task_record_in_tx, insert_task_with_files, insert_task_with_files_in_tx,
-    list_artifact_task_refs, list_browser_realtime_task_records, list_expired_auth_header_tasks,
-    list_paused_schedulable_tasks, list_queued_task_records, list_reserved_final_paths,
-    list_staging_task_refs, list_task_ids_by_statuses, list_task_records, list_task_records_by_ids,
+    completed_at_for_task, completed_at_for_tasks, find_duplicate_task_record, get_task_record,
+    get_task_record_in_tx, insert_task_record, insert_task_record_in_tx, insert_task_with_files,
+    insert_task_with_files_in_tx, list_artifact_task_refs, list_browser_realtime_task_records,
+    list_expired_auth_header_tasks, list_paused_schedulable_tasks, list_queued_task_records,
+    list_queued_task_records_page, list_reserved_final_paths, list_staging_task_refs,
+    list_task_ids_by_statuses, list_task_records, list_task_records_by_ids,
     list_task_records_cursor, list_task_records_page, next_queue_position, next_retry_after_at,
     reorder_queued_tasks, task_filter_options, task_stats_snapshot, update_task_transfer_options,
-    ArtifactTaskRef, StagingTaskRef, TaskFilterOptions, TaskListPage, TaskListQuery,
-    TaskTransferOptionsUpdate,
+    ArtifactTaskRef, QueuedTaskCursor, StagingTaskRef, TaskFilterOptions, TaskListPage,
+    TaskListQuery, TaskTransferOptionsUpdate,
+};
+pub use self::task_retry::{
+    auto_retry_attempt, clear_auto_retry_state, schedule_auto_retry, AutoRetryOutcome,
 };
 pub use self::task_state::{
     checkpoint_task_progress, clear_tasks, complete_segment, complete_task, complete_task_segment,
@@ -187,3 +199,9 @@ pub const MIN_MAX_ACTIVE_TASKS: i32 = 1;
 pub const MAX_MAX_ACTIVE_TASKS: i32 = 8;
 pub const DEFAULT_TASK_PAGE_SIZE: i64 = 100;
 pub const MAX_TASK_PAGE_SIZE: i64 = 500;
+
+pub use self::request_profiles::{
+    expire_task_request_profile_secrets, get_task_request_profile, prepare_task_request_profile,
+    prepare_task_request_profile_with_expiry, resolve_task_request_profile_headers,
+    save_task_request_profile, update_task_request_profile,
+};

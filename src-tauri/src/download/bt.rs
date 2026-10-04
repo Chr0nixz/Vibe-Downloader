@@ -19,11 +19,12 @@ use super::engine::{DownloadContext, DownloadEngine, EngineFuture, ProbeOutput, 
 use super::url_classify::is_torrent_url;
 use super::DownloadError;
 use crate::download::error::engine_error;
+use crate::download::GlobalSpeedLimiter;
 use crate::{
     db,
     events::{emit_task_updated_record, TaskProgressEmitGate},
     models::{
-        EngineCapabilities, ProbedFile, SegmentStatus, TaskFileRecord, TaskKind,
+        AppErrorPayload, EngineCapabilities, ProbedFile, SegmentStatus, TaskFileRecord, TaskKind,
         TaskProgressPayload, TaskStatus, TorrentTrackerStatus,
     },
     proxy::{ResolvedProxyConfig, SharedProxyConfig},
@@ -59,6 +60,11 @@ struct BtSessionEntry {
     active_task_count: usize,
 }
 
+struct BtStoragePolicy {
+    shared_limiter: Arc<GlobalSpeedLimiter>,
+    cancel_token: tokio_util::sync::CancellationToken,
+}
+
 /// RAII guard that releases a BT session reference when dropped.
 ///
 /// `release_session_ref` is async (uses `tokio::sync::Mutex`), so `Drop` cannot
@@ -78,7 +84,6 @@ impl SessionRefGuard {
     }
 
     /// Release the session reference synchronously (normal completion path).
-    #[allow(dead_code)]
     async fn release(mut self) {
         if let Some(key) = self.session_key.take() {
             self.engine.release_session_ref(&key).await;
@@ -90,7 +95,9 @@ impl Drop for SessionRefGuard {
     fn drop(&mut self) {
         if let Some(key) = self.session_key.take() {
             let engine = self.engine.clone();
+            let lease = super::lifecycle::Resources::current().map(|owner| owner.lease());
             tauri::async_runtime::spawn(async move {
+                let _lease = lease;
                 engine.release_session_ref(&key).await;
             });
         }
@@ -160,12 +167,32 @@ impl BtEngine {
 
     async fn release_session_ref(&self, session_key: &str) {
         let mut sessions = self.sessions.lock().await;
-        if let Some(entry) = sessions.get_mut(session_key) {
+        let removed = if let Some(entry) = sessions.get_mut(session_key) {
             entry.active_task_count = entry.active_task_count.saturating_sub(1);
             if entry.active_task_count == 0 {
-                sessions.remove(session_key);
-                tracing::info!(session_key, "bt session evicted (no active tasks)");
+                sessions.remove(session_key)
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        drop(sessions);
+        if let Some(entry) = removed {
+            let ids = entry
+                .api
+                .session()
+                .with_torrents(|items| items.map(|(id, _)| id).collect::<Vec<_>>());
+            for id in ids {
+                let _ = entry
+                    .api
+                    .api_torrent_action_forget(TorrentIdOrHash::Id(id))
+                    .await;
+            }
+            entry.api.session().stop().await;
+            // stop() only signals librqbit; the storage leases separately keep
+            // the owning download alive until the last library writer exits.
+            tracing::info!(session_key, "bt session evicted (no active tasks)");
         }
     }
 
@@ -181,7 +208,7 @@ impl BtEngine {
     ) -> String {
         let proxy_fingerprint = task_proxy_config.fingerprint();
         let folder = output_folder.to_string();
-        let canonical = tokio::task::spawn_blocking(move || {
+        let canonical = crate::download::lifecycle::blocking(move || {
             PathBuf::from(&folder)
                 .canonicalize()
                 .unwrap_or_else(|_| PathBuf::from(folder))
@@ -193,6 +220,7 @@ impl BtEngine {
         format!("{canonical}|proxy:{proxy_fingerprint}|task:{task_id}")
     }
 
+    #[cfg(test)]
     async fn api_for_output_folder(
         &self,
         output_folder: &str,
@@ -200,6 +228,29 @@ impl BtEngine {
         download_limit_bps: Option<i64>,
         upload_limit_bps: Option<i64>,
         task_proxy_config: &ResolvedProxyConfig,
+    ) -> Result<(Arc<Api>, String), String> {
+        self.api_for_output_folder_with_limiter(
+            output_folder,
+            task_id,
+            download_limit_bps,
+            upload_limit_bps,
+            task_proxy_config,
+            BtStoragePolicy {
+                shared_limiter: GlobalSpeedLimiter::disabled(),
+                cancel_token: tokio_util::sync::CancellationToken::new(),
+            },
+        )
+        .await
+    }
+
+    async fn api_for_output_folder_with_limiter(
+        &self,
+        output_folder: &str,
+        task_id: &str,
+        download_limit_bps: Option<i64>,
+        upload_limit_bps: Option<i64>,
+        task_proxy_config: &ResolvedProxyConfig,
+        storage_policy: BtStoragePolicy,
     ) -> Result<(Arc<Api>, String), String> {
         let key = Self::compute_session_key(output_folder, task_proxy_config, task_id).await;
 
@@ -223,6 +274,14 @@ impl BtEngine {
             .map_err(|e| format!("Could not create the torrent download directory: {e}"))?;
         let output_path = output_folder.to_string();
         let mut options = SessionOptions::default();
+        use librqbit::storage::StorageFactoryExt;
+        options.default_storage_factory = Some(
+            super::bt_storage::OwnedFilesystemFactory::new(
+                storage_policy.shared_limiter,
+                storage_policy.cancel_token,
+            )
+            .boxed(),
+        );
         if let Some(proxy_url) = task_proxy_config.custom_socks5_url_with_auth() {
             options.connect = Some(ConnectionOptions {
                 proxy_url: Some(proxy_url),
@@ -302,6 +361,7 @@ impl DownloadEngine for BtEngine {
                 &request.request_id,
                 &proxy_config,
                 &self.factory,
+                &request.network_policy,
             )
             .await
             .map_err(DownloadError::Other)
@@ -312,11 +372,11 @@ impl DownloadEngine for BtEngine {
         &'a self,
         context: DownloadContext,
     ) -> EngineFuture<'a, Result<(), DownloadError>> {
-        Box::pin(async move {
+        Box::pin(crate::download::lifecycle::run_owned(async move {
             run_torrent_download(self.clone(), context)
                 .await
                 .map_err(DownloadError::Other)
-        })
+        }))
     }
 }
 
@@ -326,6 +386,7 @@ async fn probe_torrent(
     request_id: &Option<String>,
     proxy_config: &ResolvedProxyConfig,
     factory: &crate::download::net_factory::NetworkClientFactory,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<ProbeOutput, String> {
     if uri.trim_start().starts_with("magnet:") {
         crate::download::engine::emit_probe_phase(app, request_id, "parsing_magnet", Some("bt"));
@@ -337,7 +398,7 @@ async fn probe_torrent(
     // no DHT socket, no temp dir. The fixed shared probe directory previously
     // made concurrent probes fight over librqbit's persistent DHT port
     // (os error 10048); now only downloads touch sessions.
-    let bytes = fetch_torrent_source_bytes(uri, proxy_config, factory).await?;
+    let bytes = fetch_torrent_source_bytes(uri, proxy_config, factory, network_policy).await?;
     crate::download::engine::emit_probe_phase(app, request_id, "inspecting_metadata", Some("bt"));
     probe_from_torrent_bytes(uri, &bytes)
 }
@@ -347,13 +408,16 @@ async fn fetch_torrent_source_bytes(
     uri: &str,
     proxy_config: &ResolvedProxyConfig,
     factory: &crate::download::net_factory::NetworkClientFactory,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<Vec<u8>, String> {
     let trimmed = uri.trim();
     let parsed = Url::parse(trimmed).map_err(|_| "Torrent URL is invalid.".to_string())?;
     match parsed.scheme() {
         "http" | "https" => {
-            let client = factory.client_for(proxy_config).await?;
-            download_torrent_bytes(&client, trimmed, proxy_config).await
+            let client = factory
+                .client_for_policy(proxy_config, network_policy)
+                .await?;
+            download_torrent_bytes(&client, trimmed, proxy_config, network_policy).await
         }
         "file" => {
             let path = parsed
@@ -505,6 +569,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         cancel_token,
         speed_limiter,
         proxy_config,
+        network_policy,
         ..
     } = context;
 
@@ -512,30 +577,35 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
 
     // F-7: Read the global BT upload limit from settings. Fetched per-task at
     // session acquisition so settings changes apply to the next task without
-    // a restart. The download limit still comes from the task speed limiter
-    // (per-task + global min).
+    // a restart. The session cap covers task and scheduled-window policy;
+    // the global cap is charged separately at the storage boundary.
     let bt_upload_limit_bps = db::get_bt_upload_limit_bps_setting(&pool).await;
 
     let (api, session_key) = engine
-        .api_for_output_folder(
+        .api_for_output_folder_with_limiter(
             &task.save_dir,
             &task.id,
-            speed_limiter.current_limit_bps(),
+            speed_limiter.own_limit_bps(),
             bt_upload_limit_bps,
             &proxy_config,
+            BtStoragePolicy {
+                shared_limiter: speed_limiter.root_limiter(),
+                cancel_token: cancel_token.clone(),
+            },
         )
         .await?;
-    let _session_guard = SessionRefGuard::new(engine.clone(), session_key);
+    let session_guard = SessionRefGuard::new(engine.clone(), session_key);
     let source_started = Instant::now();
-    let source_result = add_torrent_source(&task.url, &proxy_config, &engine.factory)
-        .await
-        .map_err(|error| {
-            engine_error(
-                "bt_source_failed",
-                format!("Could not load the torrent source: {error}"),
-                true,
-            )
-        });
+    let source_result =
+        add_torrent_source_with_policy(&task.url, &proxy_config, &engine.factory, &network_policy)
+            .await
+            .map_err(|error| {
+                engine_error(
+                    "bt_source_failed",
+                    format!("Could not load the torrent source: {error}"),
+                    true,
+                )
+            });
     crate::download::diagnostics::persist_engine_diagnostic(
         crate::download::diagnostics::EngineDiagnosticContext {
             pool: &pool,
@@ -674,6 +744,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                             .to_string(),
                     recoverable: true,
                     actions: vec!["check_url".to_string()],
+                    retry_after_at: None,
                 }
                 .command_error(),
             ),
@@ -744,6 +815,29 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 return Err(error);
             }
         };
+        // ARC-60: an errored torrent cannot produce more bytes. Returning the
+        // error lets the supervisor release its slot and populate recovery UI.
+        if let Some(error) = torrent_runtime_error(&api, torrent_id, &stats) {
+            crate::download::diagnostics::persist_engine_diagnostic(
+                crate::download::diagnostics::EngineDiagnosticContext {
+                    pool: &pool,
+                    task_id: &task.id,
+                    method: "BT RUNTIME",
+                    url: &task.url,
+                    range_header: None,
+                    status_code: None,
+                    content_length: None,
+                    error: Some(&error),
+                    retry_count: 0,
+                    duration: stats_started.elapsed(),
+                },
+            )
+            .await;
+            let _ = api.api_torrent_action_forget(torrent_id).await;
+            progress_gate.flush(&app);
+            session_guard.release().await;
+            return Err(error);
+        }
         let downloaded = i64::try_from(stats.progress_bytes).unwrap_or(i64::MAX);
         let total = i64::try_from(stats.total_bytes).unwrap_or(i64::MAX);
         let speed = stats
@@ -1019,38 +1113,84 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
 
         last_progress = downloaded;
         last_tick = Instant::now();
-        // ARC-29: sync the session rate limits every tick so mid-transfer
-        // changes to the task limit (update_task_transfer_options) and the
-        // scheduled-window speed take effect without restarting the session.
-        // The global token bucket is enforced by the per-task child limiter
-        // that feeds `download_limit_bps` here; BT's own traffic bypasses the
-        // shared bucket, but the effective limit is the minimum of the two,
-        // which this sync preserves.
+        // ARC-29 / FUN-33: sync task and scheduled-window policy every tick.
+        // The global cap is charged by the shared storage bucket, so BT and
+        // HTTP-family traffic consume one process-wide budget.
         if last_tick.duration_since(last_limit_sync) >= Duration::from_secs(1) {
-            sync_session_download_limit(
-                &api,
-                db::parse_speed_limit_bps(task.task_speed_limit_bps.as_deref())
-                    .min(speed_limiter.current_limit_bps().or(Some(i64::MAX))),
-            );
+            sync_session_download_limit(&api, effective_bt_session_limit(&speed_limiter));
             last_limit_sync = Instant::now();
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
+fn torrent_runtime_error(
+    api: &Api,
+    torrent_id: TorrentIdOrHash,
+    stats: &librqbit::TorrentStats,
+) -> Option<String> {
+    if stats.error.is_none() && !matches!(stats.state, librqbit::TorrentStatsState::Error) {
+        return None;
+    }
+    let detail = stats
+        .error
+        .as_deref()
+        .unwrap_or("Torrent entered the error state");
+    // ARC-60: use typed I/O causes, never translated librqbit error wording.
+    let disk_failure = api.mgr_handle(torrent_id).ok().is_some_and(|torrent| {
+        torrent.with_state(|state| {
+            let librqbit::ManagedTorrentState::Error(error) = state else {
+                return false;
+            };
+            error.chain().any(|cause| {
+                cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::StorageFull
+                            | std::io::ErrorKind::ReadOnlyFilesystem
+                            | std::io::ErrorKind::QuotaExceeded
+                            | std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::WriteZero
+                    )
+                })
+            })
+        })
+    });
+    let payload = if disk_failure {
+        AppErrorPayload::disk_write_failed(detail)
+    } else {
+        AppErrorPayload::new("bt_runtime_failed", detail, true, vec!["retry"])
+    };
+    Some(payload.command_error())
+}
+
 fn sync_session_download_limit(api: &Api, limit_bps: Option<i64>) {
-    api.session()
-        .ratelimits
-        .set_download_bps(non_zero_u32(limit_bps));
+    let limits = &api.session().ratelimits;
+    let limit = non_zero_u32(limit_bps);
+    // librqbit recreates a full governor bucket on every set. The loop's
+    // periodic sync must preserve consumed permits when the cap is unchanged.
+    if limits.get_download_bps() != limit {
+        limits.set_download_bps(limit);
+    }
+}
+
+/// without an individual one.
+/// FUN-35: the per-session BT cap excludes the root global cap, which is
+/// charged by `OwnedStorage` and shared across all protocols.
+fn effective_bt_session_limit(speed_limiter: &GlobalSpeedLimiter) -> Option<i64> {
+    speed_limiter.own_limit_bps()
 }
 
 /// F-7: Apply the global BT upload limit to an existing session. `None` clears
 /// the limit (unlimited). Called on session reuse so settings changes take
 /// effect without restarting the session.
 fn sync_session_upload_limit(api: &Api, limit_bps: Option<i64>) {
-    api.session()
-        .ratelimits
-        .set_upload_bps(non_zero_u32(limit_bps));
+    let limits = &api.session().ratelimits;
+    let limit = non_zero_u32(limit_bps);
+    if limits.get_upload_bps() != limit {
+        limits.set_upload_bps(limit);
+    }
 }
 
 fn non_zero_u32(limit_bps: Option<i64>) -> Option<NonZeroU32> {
@@ -1691,10 +1831,26 @@ fn selected_torrent_total_size(
         .sum()
 }
 
+#[cfg(test)]
 async fn add_torrent_source(
     uri: &str,
     proxy_config: &ResolvedProxyConfig,
     factory: &crate::download::net_factory::NetworkClientFactory,
+) -> Result<(AddTorrent<'static>, Option<bool>, Vec<TorrentTrackerStatus>), String> {
+    add_torrent_source_with_policy(
+        uri,
+        proxy_config,
+        factory,
+        &crate::download::network_policy::NetworkPolicy::default(),
+    )
+    .await
+}
+
+async fn add_torrent_source_with_policy(
+    uri: &str,
+    proxy_config: &ResolvedProxyConfig,
+    factory: &crate::download::net_factory::NetworkClientFactory,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<(AddTorrent<'static>, Option<bool>, Vec<TorrentTrackerStatus>), String> {
     let trimmed = uri.trim();
     if trimmed.starts_with("magnet:") {
@@ -1716,8 +1872,10 @@ async fn add_torrent_source(
             // SEC-03: no fallback to AddTorrent::from_url — librqbit's internal
             // client bypasses our proxy policy and SSRF guards, so a fetch
             // failure surfaces as a structured error instead.
-            let client = factory.client_for(proxy_config).await?;
-            match download_torrent_bytes(&client, trimmed, proxy_config).await {
+            let client = factory
+                .client_for_policy(proxy_config, network_policy)
+                .await?;
+            match download_torrent_bytes(&client, trimmed, proxy_config, network_policy).await {
                 Ok(bytes) => {
                     let private = parse_torrent_private_flag(&bytes);
                     let trackers = tracker_statuses_from_torrent_bytes(&bytes);
@@ -1788,32 +1946,34 @@ async fn download_torrent_bytes(
     client: &Client,
     url: &str,
     proxy_config: &ResolvedProxyConfig,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<Vec<u8>, String> {
     // The factory client has no overall timeout (streaming downloads); this is
     // a bounded control-plane fetch, so keep the previous 60 s budget here.
-    // SEC-03: proxy policy and SSRF guards come from the shared factory client.
-    // SEC-10: literal-authority pre-flight (resolver covers hostnames).
-    crate::download::ssrf::assert_public_authority(
-        &reqwest::Url::parse(url).map_err(|e| e.to_string())?,
-    )?;
+    // B3: bind the control-plane fetch to the task grant. This covers IP
+    // literals before reqwest can bypass its resolver, while the shared
+    // resolver and redirect policy re-check every hostname and hop.
+    let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
+    network_policy.resolve(&parsed).await?;
     let response = tokio::time::timeout(Duration::from_secs(60), async {
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|error| classify_torrent_download_error(&error, proxy_config))?
-            .error_for_status()
-            .map_err(|error| {
-                if error.is_status() {
-                    engine_error(
-                        "bt_torrent_fetch_failed",
-                        format!("HTTP error fetching torrent: {error}"),
-                        true,
-                    )
-                } else {
-                    classify_torrent_download_error(&error, proxy_config)
-                }
-            })?;
+        let response = crate::download::http::send_request_with_error_mapper(
+            client.get(url),
+            network_policy,
+            |error| classify_torrent_download_error(error, proxy_config),
+        )
+        .await?
+        .error_for_status()
+        .map_err(|error| {
+            if error.is_status() {
+                engine_error(
+                    "bt_torrent_fetch_failed",
+                    format!("HTTP error fetching torrent: {error}"),
+                    true,
+                )
+            } else {
+                classify_torrent_download_error(&error, proxy_config)
+            }
+        })?;
         Ok::<_, String>(response)
     })
     .await
@@ -1935,6 +2095,10 @@ fn content_type_for_path(path: &str) -> Option<String> {
     };
     Some(value.to_string())
 }
+
+#[cfg(test)]
+#[path = "../../tests/bt_runtime/mod.rs"]
+mod runtime_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2418,6 +2582,89 @@ mod tests {
             api.session().ratelimits.get_upload_bps().map(|v| v.get()),
             Some(55_000)
         );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// FUN-33: the download loop syncs the session limit from the task's child
+    /// speed limiter every second. Before the fix the loop combined the task
+    /// limit with the limiter via `Option::min`, and because Rust orders
+    /// `None < Some(_)`, a task WITHOUT an individual limit (the common case)
+    /// resolved to `None` — clearing the global/scheduled limit to unlimited
+    /// about 1s after start. This test replays the exact loop expression
+    /// against the scheduler's limiter shape: global parent + child created by
+    /// `GlobalSpeedLimiter::with_parent`.
+    #[tokio::test]
+    async fn bt_loop_limit_sync_keeps_global_limit_without_task_limit() {
+        let _guard = BT_TEST_LOCK.lock().await;
+        let engine = bt_test_engine();
+        let temp_dir = std::env::temp_dir().join(format!("vibe-bt-fun33-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let folder = temp_dir.to_str().unwrap().to_string();
+        let proxy = crate::proxy::ResolvedProxyConfig::default();
+
+        let (api, _key) = engine
+            .api_for_output_folder(&folder, "task-fun33-loop", None, None, &proxy)
+            .await
+            .expect("session");
+        let download_bps = |api: &Api| api.session().ratelimits.get_download_bps().map(|v| v.get());
+
+        sync_session_download_limit(&api, Some(1_000));
+        api.session()
+            .ratelimits
+            .prepare_for_download(NonZeroU32::new(1_000).unwrap())
+            .await
+            .expect("consume the session burst");
+        sync_session_download_limit(&api, Some(1_000));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                api.session()
+                    .ratelimits
+                    .prepare_for_download(NonZeroU32::new(1_000).unwrap())
+            )
+            .await
+            .is_err(),
+            "syncing an unchanged cap must not replenish its consumed burst"
+        );
+
+        // Scheduler shape: every task has an independent child handle, even
+        // when its initial task-specific cap is absent.
+        let global = std::sync::Arc::new(crate::download::GlobalSpeedLimiter::new(Some(500_000)));
+        let task_limiter = crate::download::GlobalSpeedLimiter::with_parent(global.clone(), None);
+
+        // The session receives only the task-owned cap; the parent is charged
+        // by OwnedStorage so it can be shared with other protocols.
+        sync_session_download_limit(&api, effective_bt_session_limit(&task_limiter));
+        assert_eq!(download_bps(&api), None);
+
+        // Live global changes remain on the shared root bucket.
+        global.set_limit(Some(250_000)).await;
+        sync_session_download_limit(&api, effective_bt_session_limit(&task_limiter));
+        assert_eq!(download_bps(&api), None);
+
+        task_limiter.set_limit(Some(100_000)).await;
+        sync_session_download_limit(&api, effective_bt_session_limit(&task_limiter));
+        assert_eq!(download_bps(&api), Some(100_000));
+        task_limiter.set_limit(None).await;
+        sync_session_download_limit(&api, effective_bt_session_limit(&task_limiter));
+        assert_eq!(download_bps(&api), None);
+
+        // With an individual task limit, the stricter value wins (minimum).
+        let limited_task =
+            crate::download::GlobalSpeedLimiter::with_parent(global.clone(), Some(100_000));
+        sync_session_download_limit(&api, effective_bt_session_limit(&limited_task));
+        assert_eq!(download_bps(&api), Some(100_000));
+
+        // Clearing the global limit leaves the task limit intact.
+        global.set_limit(None).await;
+        sync_session_download_limit(&api, effective_bt_session_limit(&limited_task));
+        assert_eq!(download_bps(&api), Some(100_000));
+
+        // No limits anywhere: unlimited is correct.
+        let unrestricted = crate::download::GlobalSpeedLimiter::with_parent(global.clone(), None);
+        sync_session_download_limit(&api, effective_bt_session_limit(&unrestricted));
+        assert_eq!(download_bps(&api), None);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

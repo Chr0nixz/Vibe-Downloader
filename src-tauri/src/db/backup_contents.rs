@@ -39,7 +39,7 @@ pub async fn count_contents(pool: &SqlitePool) -> Result<BackupContents, String>
     contents.tasks_with_credentials =
         count("SELECT COUNT(DISTINCT task_id) FROM task_credentials").await? as u32;
     contents.tasks_with_request_headers =
-        count("SELECT COUNT(DISTINCT task_id) FROM task_request_headers").await? as u32;
+        count("SELECT COUNT(*) FROM (SELECT task_id FROM task_request_headers UNION SELECT task_id FROM task_request_profiles)").await? as u32;
     contents.settings_keys = count("SELECT COUNT(*) FROM settings").await? as u32;
     contents.task_events = count("SELECT COUNT(*) FROM task_events").await? as u32;
 

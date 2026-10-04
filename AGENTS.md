@@ -1,231 +1,152 @@
 # AGENTS.md
 
-This file gives coding agents the local project context and working rules for Vibe Downloader.
+This file is the operating guide for coding agents working on Vibe Downloader. It describes durable project rules and the current architecture. It is intentionally shorter than the audit and roadmap; detailed risk history and acceptance evidence belong in the linked documents.
 
-## Project Snapshot
+## User Custom Rules and Notes
 
-Vibe Downloader is a desktop download manager built with Tauri 2, React 19, TypeScript, Rust, SQLite, and WebExtension Native Messaging.
+This section is maintained by the project owner. Agents must read it before making changes and must preserve its contents. Do not rewrite, remove, reorder, or normalize this section unless the user explicitly asks for that change.
 
-The project is currently at `0.5.0`. It is not a finished IDM replacement or a stable public release. Treat HTTP/HTTPS as the most mature path, with FTP/FTPS, SFTP, BitTorrent, HLS, DASH, WebDAV, and Metalink entry points present at varying maturity levels.
+<!-- USER_CUSTOM_RULES_START -->
+<!-- Add project-specific rules, priorities, or cautions below. Keep each rule concrete and actionable. -->
+<!-- Example: All new user-facing copy must be reviewed in Simplified Chinese before merge. -->
+Maintain only English and Simplified Chinese unless specifically instructed to optimize i18n or update project translations. Ignore all other languages.
+<!-- USER_CUSTOM_RULES_END -->
 
-Before fixing or describing current gaps, read [docs/project-improvement-audit.md](docs/project-improvement-audit.md). It is the canonical active-risk register and provides stable IDs, acceptance criteria, and repair order. Historical audit documents are point-in-time snapshots and must not override current code or the main audit.
+## Project Context
 
-Implemented today:
+Vibe Downloader is a desktop download manager built with Tauri 2, React 19, TypeScript, Rust, SQLite, and WebExtension Native Messaging. The project is currently at `0.5.0` and is still under active development; it is not a stable public release or a complete IDM replacement.
 
-- HTTP/HTTPS task creation and resource probing through HEAD with Range GET fallback.
-- SQLite persistence for tasks, segments, settings, browser handoff messages, credentials, proxy settings, checksums, and SFTP known hosts.
-- Single-stream downloads, unknown-size downloads, segmented Range downloads, auto-acceleration (dynamic segment splitting), resume validation, segment retry, checkpoint-based progress persistence, and final file auto-renaming.
-- Queue scheduling with max active task count, per-host connection slot limits, scheduled download windows, timed speed throttling, and completion actions (cancellable app exit, confirmed shutdown).
-- Global speed limiting through a Rust token bucket.
-- Per-task speed limits enforced across HTTP/FTP/SFTP/BT, combined with global limit (minimum wins).
-- Task priorities (high/normal/low) used by the queue scheduler to dispatch tasks in priority order.
-- Per-task proxy override models, encrypted settings, protocol-aware validation, and task detail controls. HTTP and its derived engines honor the resolved task proxy at runtime (`FUN-02`), and the DASH/FTP/SFTP probe paths now resolve the task proxy too (`FUN-20` Closed).
-- FTP/FTPS task creation and downloads with dynamic parallel segments, SOCKS5 proxy support, encrypted credential storage, and directory probing.
-- SFTP task creation and single-file downloads with password or OpenSSH private-key credentials, encrypted credential storage, local-temp pause/resume, directory probing, SOCKS5 proxy support, and TOFU host-key fingerprint verification.
-- BitTorrent task creation from magnet links, HTTP/HTTPS `.torrent` URLs, and local `file://*.torrent` files, with multi-file selection, runtime snapshots (piece map, peers, configured trackers, DHT, seeding), SOCKS5 proxy support, and persisted seeding policy. Seeding limits and session ref-counting are Closed (`FUN-11`, `ARC-12`); probe session lifecycle (`ARC-28`) and speed-limit ownership (`ARC-29`) are Closed as well.
-- HLS/m3u8 streaming engine with master playlist variant selection, AES-128-CBC decryption, init map (EXT-X-MAP) support, byte range segments, concurrent segment downloads, live polling, and ffmpeg-based MP4 remuxing.
-- DASH (MPEG-DASH / MPD) first-pass engine for a limited static/VOD subset, with ffmpeg-based download, MP4 remuxing, and progress monitoring. Dynamic/live, SegmentTimeline, and several inheritance/template cases are unsupported.
-- WebDAV/WebDAVS engine mapping to HTTP/HTTPS with Basic Auth credentials, PROPFIND directory probing, and delegation to the HTTP engine.
-- Metalink4 engine with manifest parsing, multi-file selection, HTTP/HTTPS mirror failover by priority, per-file progress, and checksum persistence/verification. Multi-hash priority and cross-mirror resume validation are Closed (`FUN-08`, `FUN-09`); part-file retention on partial failure (`ARC-24`) and the read idle timeout (`ARC-25`) are Closed as well.
-- Encrypted task credential storage (ChaCha20-Poly1305) for FTP/FTPS, SFTP, and WebDAV, with legacy plaintext migration on startup.
-- React task list with store decomposition (task-data, task-ui, speed-history stores), virtualized infinite scroll, cursor pagination, status filters, search, sorting, multi-select, batch actions, command palette, settings page with 11 collapsible sections and search, task details, Chunks/Connections/Requests/Logs views, toast, delete confirmation, recovery actions, 8 accent color themes, floating status window (ball and bar modes), and 7 locales.
-- Clipboard link monitoring for all supported protocols (HTTP/HTTPS, FTP/FTPS, SFTP, WebDAV/WebDAVS, magnet, local manifests) while the desktop app is running.
-- Browser Native Messaging host, local WebSocket bridge, manifest install/uninstall diagnostics, duplicate request handling, Tauri single-instance forwarding, and manual HTTP/HTTPS handoff. Automatic takeover and Cookie/header forwarding are experimental dev-profile capabilities and are removed from candidate/release packages.
-- CI, Tauri build matrix, Release workflow, Specta bindings, and Tauri updater configuration.
-- Vitest coverage for pure frontend logic plus Rust unit/integration tests.
+Treat HTTP/HTTPS as the most mature path. FTP/FTPS, SFTP, BitTorrent, HLS, DASH, WebDAV, and Metalink are implemented to different depths. Before describing a gap or fixing an audit item, read [docs/project-improvement-audit.md](docs/project-improvement-audit.md) and then revalidate the current code. The audit is the canonical risk register, but its historical test results are snapshots and may not describe the current dirty worktree.
 
-Not implemented yet:
+### Development-Test Caveat
 
-- Cloud drive parsing, video sniffing, cloud accounts/sync, and plugin protocols.
-- Safari wrapper, browser store submission IDs, production extension signing, and final browser permission review copy.
-- Human acceptance of non-HTTP protocols against real external servers. The reliability matrix is fully `automated` against local fake servers and fixtures (`FUN-18`), which is not the same as field-verified. TaskDetails Phase 1–2 diagnostics parity is in place (protocol-aware Requests/Logs, BT hides placeholder Segments, HLS/DASH real segment lists, Metalink per-file Overview, FTP/SFTP mini panels); Phase 3 items such as BT live tracker status remain deferred.
-- Site-rule runtime hit telemetry (settings already cover conflict analysis, import/export, and URL try-run). Classification create-dialog live preview and dynamic subdir templates (settings try-run is available).
-- OS code-signed production distribution.
+The repository is frequently changed while development is in progress. A passing or failing local test run is evidence for one workspace snapshot, not a release claim. Whenever reporting verification, include the exact command, whether the worktree was dirty, and any environment limits such as Windows linker memory, missing ffmpeg, unavailable real servers, or absent GUI automation. Do not copy old test counts or old audit wording into a new status report.
 
-Active release blockers:
+The main audit distinguishes `Open`, `In progress`, `Fixed locally`, `Closed`, and `Boundary`. `Fixed locally` means implementation and local automation are complete while CI, a candidate package, a real external service, or another environment is still required. Do not change an item to `Closed` only because compilation passes.
 
-The original stage-A blockers (`UX-01`, `FUN-01`, `FUN-02`, `ARC-01`, `ARC-02`, `ARC-03`) are all Closed and verified in code. Do not re-open or re-fix them.
+## Current Capabilities
 
-The 2026-08-13 review raised six new blockers. All six are now Closed for their P0 correctness/security issues (`ARC-19`, `ARC-20`, `ARC-21`, `ARC-22`, `SEC-01`, `SEC-02`).
+- HTTP/HTTPS supports HEAD probing with Range GET fallback, single-stream and segmented downloads, unknown-size handling, dynamic acceleration, validator-aware resume, per-segment retries, checkpoint persistence, no-clobber final publication, task-level automatic retries, and Retry-After deadlines.
+- SQLite persists tasks, files, segments/work units, settings, events, diagnostics, credentials, proxies, request profiles, checksums, network policies, backups, and SFTP known hosts. Startup recovery and explicit backup restore paths are present.
+- The scheduler supports active-task and per-host limits, priority ordering, queue windows, timed speed policies, persisted retry wakeups, and completion actions. Global and per-task limits are combined with the stricter limit winning.
+- FTP/FTPS supports authenticated directory probes, SOCKS5, dynamic parallel workers, encrypted credentials, resume checks, and retries. SFTP supports password/private-key authentication, TOFU host keys, SOCKS5, directory probes, local temporary files, and resume checks.
+- BitTorrent supports magnets, local or HTTP/HTTPS torrent files, file selection, piece/peer/DHT/seeding snapshots, SOCKS5, seeding policies, session cleanup, and shared global download accounting.
+- HLS supports master-variant selection, AES-128-CBC, init maps, byte ranges, concurrent segments, external audio/subtitles, live polling, bounded reads, and ffmpeg remuxing. DASH supports a limited static/VOD subset, downloads media segments in Rust, and uses ffmpeg for final remuxing; dynamic/live, SegmentTimeline, multi-Period, and unsupported template cases remain boundaries.
+- WebDAV/WebDAVS maps onto HTTP semantics with Basic Auth and PROPFIND directory probing. Metalink4 supports local/remote manifests, multi-file selection, mirror priority/failover, per-file progress, and checksum verification.
+- The React desktop shell has decomposed Zustand stores, virtualized cursor-paginated task lists, search/sort/filter, batch actions, command palette, detail diagnostics, recovery and backup workspaces, settings search, floating status windows, seven locales, and responsive desktop/tablet/mobile navigation.
+- Browser integration provides Native Messaging, a local WebSocket bridge, single-instance forwarding, handoff authorization, diagnostics, and manual HTTP/HTTPS handoff. Automatic capture and Cookie/header forwarding are experimental dev-profile features and are excluded from candidate/release packages.
 
-The 2026-08-26 round-4 review added another P0 set; those are Closed too (`ARC-32`, `ARC-33`, `ARC-37`, `ARC-38`). The FTP/SFTP coordinator now drains its `JoinSet` before checkpointing; the ~1200-line shared-coordinator refactor stays deferred under `ARC-31`.
+## Explicit Boundaries
 
-Do not weaken, hide, or document around remaining audit items. Fix them with the acceptance tests specified in the main audit, and update the audit status only after those tests pass.
+Cloud-drive parsing, full video sniffing, cloud sync/accounts, plugin protocols, Safari packaging, browser-store identities/signing, final permission-review copy, OS code signing/notarization, GUI E2E, and real external-server acceptance are not complete release capabilities. Do not present local fake-server coverage, a protocol matrix marked `automated`, or a successful development build as field verification.
 
-Two cross-cutting root causes explain most of the above, and matter more than any single entry:
+The task-level intranet policy is explicit authorization bound to the source, authority, and resolved addresses for that task. Browser handoff permission is not download permission. Unapproved private targets, public-to-private redirects, DNS rebinding, link-local, multicast, metadata, and other forbidden addresses must remain blocked.
 
-1. **Per-engine contract drift.** Proxy resolution, cancellation convergence, timeouts, and SSRF guards are re-implemented per engine instead of being enforced by one shared path. That is why `FUN-02` and `ARC-03` were legitimately Closed for HTTP yet still broken on DASH/FTP/SFTP probe and BT. When you fix any of these, fix the contract for all engines, not just the reported one.
-2. **Gates narrower than they appear.** `cargo clippy` historically ran without `--all-targets`, `cargo deny` skipped `bans`/`sources`, and the log file kept only the last 40 KB. `check:i18n` now compares keys, placeholders, and values (`FUN-21` Closed). Clippy runs with `--all-targets`, `cargo deny` covers `bans`/`sources`, and log retention is bounded (`ENG-01` Closed); the automated doc gate keeps the check list from drifting again (`ENG-06`, `ARC-18` Closed). Anything unfinished is tracked as an open audit entry, not restated here.
-
-## Key Directories
+## Repository Map
 
 ```text
-src/                         React frontend, app shell, stores, i18n, Tauri adapters
-src-tauri/src/               Rust backend commands, download engine, DB, events, logging, platform code
+src/                         React UI, stores, i18n, Tauri adapters
+src-tauri/src/               Rust commands, engines, database, scheduler, events, platform code
 src-tauri/src/db/migrations/ SQLite migrations
-src-tauri/src/bin/           vibe-native-host and export-bindings binaries
+src-tauri/src/bin/           Native host and Specta binding exporter
 browser/extension-core/      Shared WebExtension source and manifest template
-scripts/                     Extension build and version sync scripts
-docs/                        Browser integration, logging, release, roadmap, audit docs
-.github/workflows/           CI, Tauri build, and Release workflows
+scripts/                     Build, version, documentation, release, and verification scripts
+docs/                        Audit, roadmap, protocol, browser, performance, and release documents
+.github/workflows/           CI, Tauri build, security, and release workflows
 ```
 
 ## Development Commands
 
-Install and run:
+Requirements: Node.js 20+ (CI uses 22), pnpm 10+, Rust stable, and platform Tauri prerequisites. HLS/DASH output also needs ffmpeg on `PATH`, `VIBE_FFMPEG_PATH`, or the Settings path.
 
 ```bash
 pnpm install
-pnpm tauri dev
+pnpm tauri dev                 # desktop development
+pnpm dev                       # browser preview with mock Tauri adapters
 ```
 
-Useful checks:
+Focused checks:
 
 ```bash
-# Full CI-equivalent gate (ENG-06): frontend + rust in one entry point.
-pnpm verify
-
-# Granular commands (verify:frontend / verify:rust run the CI set):
-pnpm typecheck      # TypeScript type checking (tsc --noEmit)
-pnpm lint           # Biome static analysis (NOT type checking)
-pnpm check          # typecheck + lint + i18n completeness (alias: check:static)
-pnpm check:docs     # ARC-18 gate: version + blocker IDs must match the audit
-pnpm check:i18n
-pnpm test:frontend
-pnpm build
-pnpm check:bundle    # PERF-10 bundle budget; runs in CI right after `pnpm build`
-pnpm check:bindings
-pnpm test:rust       # cargo test --locked
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-pnpm build:extensions
-pnpm verify:extensions
+pnpm typecheck                 # TypeScript only
+pnpm lint                      # Biome lint/format check, not TypeScript
+pnpm check                     # typecheck + lint + i18n
+pnpm test:frontend             # Vitest
+pnpm build                     # TypeScript + Vite production build
+pnpm test:rust                 # cargo test --locked
 pnpm verify:protocol-matrix
 pnpm test:release-tools
+pnpm build:extensions
+pnpm verify:extensions
+pnpm perf:baseline
 ```
 
-Note: `pnpm lint` runs Biome (linting/formatting), not TypeScript type checking. Use `pnpm typecheck` or `pnpm check` for type errors; `pnpm check` also verifies i18n completeness.
+Aggregate checks:
 
-Run `pnpm build:extensions` when touching `browser/extension-core`, Native Messaging behavior, or related documentation.
+```bash
+pnpm verify                    # verify:frontend followed by verify:rust
+pnpm verify:frontend           # frontend, release tools, i18n, build, bundle, extensions
+pnpm verify:rust               # fmt, locked all-target clippy, locked Rust tests
+pnpm check:docs                # version, audit IDs, blocker wording, source-comment IDs
+```
 
-Run `pnpm specta` and `pnpm check:bindings` after Rust command or model changes that affect frontend IPC types.
+`pnpm verify` is the local aggregate gate, not a literal copy of every CI step. CI additionally collects frontend/Rust coverage, runs `cargo deny check licenses advisories bans sources`, and runs `pnpm check:bindings` on Ubuntu. After Rust command/model changes, run `pnpm specta`; then inspect `src/generated/bindings.ts` and run `pnpm check:bindings`. A pre-existing dirty diff can make the latter fail even when generation is correct, so separate generated drift from unrelated workspace changes before reporting the result.
 
-## Architecture Notes
+On Windows, if Rust linking exhausts page-file or PDB resources, lower Cargo build parallelism, for example `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2`. `-j` controls compilation parallelism; it does not serialize test threads. Use `-- --test-threads=1` only when the test itself requires serialized execution.
 
-- Frontend state is decomposed into three Zustand stores under `src/stores`: `task-data-store.ts` (task data, indexes, stats, progress patching), `task-ui-store.ts` (selection, nav, search, sort, filter facets), and `speed-history-store.ts` (per-task speed samples). `task-store.ts` is the facade that re-exports from all three plus `task-query.ts`.
-- Native command wrappers live in `src/lib/tauri.ts`; browser preview mocks live in `src/lib/tauri-browser.ts`.
-- Rust command registration and Specta export live in `src-tauri/src/lib.rs`.
-- Download behavior is organized under `src-tauri/src/download/` with a trait-based `EngineRegistry` that routes URLs to the correct engine. Each protocol has its own module: `http/` (segmented coordinator, worker, direct, file), `hls/` (`mod`/`engine`/`playlist`), `ftp.rs`, `sftp.rs`, `bt.rs`, `dash.rs`, `webdav.rs`, `metalink.rs`.
-- SQLite access lives under `src-tauri/src/db/`; `db/mod.rs` is the re-export and shared-constant entry point. Protocol-specific DB modules include `db/metalink.rs`, `db/sftp.rs`, `db/task_credentials.rs`, `db/task_proxy.rs`, `db/task_checksums.rs`, `db/task_files.rs`, and `db/task_state.rs`.
-- Task commands are split under `src-tauri/src/commands/tasks/` for create/import, query/detail paging, actions/hash, and debug mock seed helpers.
-- Tauri events are defined in `src-tauri/src/events/mod.rs`; `TaskProgressEmitGate` throttles high-frequency progress updates to 250ms minimum intervals.
-- Browser handoff commands live in `src-tauri/src/commands/browser.rs`.
-- The Native Messaging host binary lives in `src-tauri/src/bin/vibe-native-host.rs`.
-- Credential encryption uses ChaCha20-Poly1305 via `secure_headers` helpers; passwords are stored as ciphertext + nonce in SQLite.
-- The segment planner (`db/segment_planner.rs`) determines segment count and type based on protocol characteristics and user settings.
-- Settings span 33 keys covering downloads, scheduling, proxy, UI (accent colors, titlebar gradient), completion actions, external tools, and desktop integration.
+Run `pnpm build:extensions` and `pnpm verify:extensions` when changing extension code, Native Messaging, browser permissions, or related documentation. Candidate/release builds must keep experimental capture disabled.
 
-Important current constants:
+## Architecture Contracts
 
-- Multi-connection threshold defaults to 16 MB.
-- Initial segment count defaults to 4 and is clamped to 1-8.
-- Max active tasks defaults to 2 and is clamped to 1-8.
-- Max connections per host defaults to 8 and is clamped to 1-16.
-- HTTP auto-acceleration: max 8 segments, 10s warmup, 5s evaluation, 8 MB minimum remaining.
-- FTP dynamic parallel: max 4 segments, 8s warmup, 5s interval, 16 MB minimum split remaining.
-- HLS segment retries: 2; live idle threshold 6 polls; target duration clamped to 60s (`ARC-11`, both Closed and verified).
-- BT metadata timeout: 90s; progress interval: 10s.
-- SFTP read buffer: 64 KB; progress interval: 300ms.
-- Checksum hash read buffer (shared by all protocols, in `download/checksum.rs`): 1 MB.
-- Clipboard max text length: 64 KB; poll interval: 1s.
-- WebSocket bridge port: 48365.
-- Event throttle (`TaskProgressEmitGate`): 250ms minimum interval.
-- Speed history limit: 60 samples per task.
+- Frontend state is split between `src/stores/task-data-store.ts`, `task-ui-store.ts`, and `speed-history-store.ts`; `task-store.ts` is the facade. Native wrappers live in `src/lib/tauri.ts`; browser mocks live in `src/lib/tauri-browser.ts`.
+- Rust commands and Specta registration are centralized in `src-tauri/src/lib.rs`. Task creation/import and detail/action commands are split under `src-tauri/src/commands/tasks/`.
+- `EngineRegistry` in `src-tauri/src/download/engine.rs` routes protocol engines. Shared download contracts live in `download/network_policy.rs`, `net_factory.rs`, `lifecycle.rs`, `owned_fs.rs`, `file_ops.rs`, `retry.rs`, and `http/request.rs`.
+- All HTTP clients must come from `NetworkClientFactory`; all HTTP requests and redirects must use the origin-safe request path. Do not create an ad-hoc reqwest client or call `.send()` around the shared policy stack.
+- `NetworkPolicy` is resolved from the task source, target authorization, authority, and allowed addresses. Every probe, manifest/segment fetch, redirect, retry, and derived resource must use the task policy.
+- `lifecycle::run_owned`, its `JoinSet`, `owned_fs`, and `blocking` helpers keep spawned workers and submitted file I/O alive until they drain. Do not replace them with detached tasks or early cleanup after a timeout.
+- `file_ops` owns durable sync, atomic no-replace publication, cross-volume staging, and final-path conflict behavior. Never check-then-overwrite a destination.
+- The scheduler owns queue dispatch, task runtime controls, speed-policy refresh, retry wakeups, and completion rounds. User actions must not await dispatch while holding a per-task runtime lock.
+- SQLite access is under `src-tauri/src/db/`; migrations are append-only. State transitions use the shared state machine and conditional updates. Preserve transaction boundaries for task, file/work-unit, retry, and event state.
+- `TaskProgressEmitGate` limits high-frequency UI events to 250 ms. Do not add per-tick full-list queries or unbounded event/data retention.
+
+Useful implementation defaults include a 16 MiB multi-connection threshold, 4 initial segments clamped to 1-8, 2 active tasks clamped to 1-8, 8 host connections clamped to 1-16, HTTP acceleration at most 8 segments, 10 s warmup and 5 s evaluation, a 10-retry task budget with a 30-minute wait cap, a 64 KiB SFTP buffer, a 1 MiB checksum buffer, a 64 KiB clipboard limit, and a 48365 WebSocket bridge port. Verify constants in source before relying on this summary.
+
+## Security and Data Rules
+
+- Browser handoff is HTTP/HTTPS only, rejects embedded credentials, never accepts a browser-controlled local save path, and keeps Cookie/header forwarding explicit, allowlisted, encrypted when persisted, origin-bound, and time-limited.
+- Direct UI/clipboard task creation may extract HTTP credentials from a URL, encrypt them, sanitize the stored URL, and consume them at runtime. Do not confuse this with the stricter browser-handoff boundary.
+- Task credentials and request-profile secrets use the existing ChaCha20-Poly1305/keyring helpers and zeroization paths. Do not log passwords, private keys, cookies, authorization headers, proxy secrets, or unsanitized URLs.
+- User request profiles separate public headers from sensitive headers. Sensitive values expire and must be refreshed explicitly; cross-origin requests must strip them. Preserve header injection, framing-header, size, duplicate, and origin validation.
+- Backup restore must validate format, checksum, credentials policy, database migrations, path policy, and machine-local network authorization. Restored private-target grants must not silently become valid.
+- Keep SSRF checks at literal-URL, DNS/connection, redirect, and protocol-specific connector boundaries. Do not weaken a guard to make a local fixture pass; authorize the fixture through the test policy instead.
+- Cancellation, pause, retry, delete, restart, application exit, and updater installation must converge through the shared lifecycle. A timeout means “stop is still pending”; it does not prove that workers or file I/O have exited.
+
+## Coding Rules
+
+- Read the local implementation before changing behavior. Keep edits scoped and work with unrelated user changes; never reset or revert them.
+- Prefer established helpers and module boundaries. Do not duplicate proxy, SSRF, timeout, retry, credential, file-publication, or cancellation logic in a new engine.
+- When an audit ID is named, revalidate its acceptance criteria, add the required regression/integration tests, and update the audit only after the criteria and evidence are complete. Preserve historical rationale.
+- Rust download/resume/lifecycle changes require Rust tests under `src-tauri/tests` or the relevant module tests. Frontend changes require at least `pnpm typecheck` and `pnpm test:frontend`; UI or bundling changes also require `pnpm build`.
+- Rust IPC changes require Specta regeneration and a binding review. Never hand-edit `src/generated/bindings.ts`.
+- Backend user-facing errors must be stable codes plus parameters; translate them in the frontend. Raw paths, versions, and probe details may use the diagnostic `raw` escape hatch.
+- Supported locales are `en` and `zh-CN` (stable), plus `zh-TW`, `ja`, `ko`, `ru`, and `es` (beta). Add new keys to all seven locale files, run `pnpm check:i18n`, use `TranslationKey` for keys held as data, and format dates/numbers through the application locale helpers.
+- Comments are English, concise, and explain why. Use `//!`/`///` for Rust module/item documentation, preserve existing audit tags, and write TODOs as actionable `// TODO:` or `// FIXME:` comments. Keep security, concurrency, algorithm, and sentinel-value rationale at the decision point.
+- Do not describe planned work as implemented. When reporting tests, distinguish local automation, CI, candidate-package checks, and real-environment acceptance.
 
 ## Documentation Rules
 
-- Keep [README.md](README.md) as the concise current-state entry point.
-- Keep [docs/ROADMAP.md](docs/ROADMAP.md) as the forward plan, not a changelog.
-- Keep [docs/project-improvement-audit.md](docs/project-improvement-audit.md) as the canonical active-risk, priority, acceptance, and repair-order document. Use its IDs in fixes and update status only after its acceptance criteria pass.
-- Keep [PRODUCT.md](PRODUCT.md) and [DESIGN.md](DESIGN.md) as product and design constraints.
-- Treat `docs/architecture-audit.md`, `docs/cross-platform-audit.md`, `docs/dependency-modernization-audit.md`, `docs/engineering-quality-audit.md`, and `docs/rust-backend-audit.md` as historical snapshots. Preserve their dated findings, but do not use them as current status when they conflict with code or the main audit.
+- Keep `README.md` as the concise current-state entry point.
+- Keep `docs/ROADMAP.md` as forward planning, not a changelog or implementation inventory.
+- Keep `docs/project-improvement-audit.md` as the canonical risk, priority, acceptance, and repair-order document.
+- Use [docs/protocol-reliability-matrix.md](docs/protocol-reliability-matrix.md) for automated protocol evidence and [docs/b7-acceptance-matrix-2026-10-02.md](docs/b7-acceptance-matrix-2026-10-02.md) for real-environment and candidate-package evidence.
+- Keep `PRODUCT.md` and `DESIGN.md` as product and UI constraints. Treat dated architecture, cross-platform, dependency, engineering, and Rust audits as historical snapshots.
 - Do not reintroduce deleted duplicate docs: `docs/functional-design.md` and `docs/ui-design-style.md`.
-- Do not describe planned features as implemented. Current gaps are documented explicitly in README and roadmap.
-
-## Coding Rules For Agents
-
-- Read the local implementation before changing behavior. Some older documentation may describe the repository incorrectly.
-- When a request names an audit ID, revalidate the cited code, implement the complete acceptance criteria for that ID, add the required tests, and update the audit entry without deleting its historical rationale.
-- Do not overwrite or revert unrelated working-tree changes. The workspace may be dirty.
-- Keep changes scoped to the requested area.
-- Prefer existing patterns over new abstractions.
-- Use generated Specta bindings rather than hand-writing IPC types when Rust models or commands change.
-- Supported locales: `en`/`zh-CN` (stable) and `zh-TW`/`ja`/`ko`/`ru`/`es` (beta, marked with a Beta badge in the language selector). Auto-detection only picks stable locales; beta locales require explicit user selection. When adding new i18n keys, update all 7 locale files and run `pnpm check:i18n` to verify completeness. The check compares key paths, interpolation placeholders, and values: copy-pasted English in `errors.*` fails, and other namespaces fail when a value still matches English and contains 3+ visible English words (allowlisted product/protocol tokens excepted). It also verifies that every literal `t("...")` key in `src/**` exists in `en.ts`, and resolves plural variants against each locale's CLDR categories: a locale whose plural rules have `one` must supply `_one` for every pluralised base key, `_few`/`_many` are optional where i18next falls back to the base, and a form the locale can never select (e.g. `_one` in `zh`/`ja`/`ko`) fails the check. Dates and numbers must go through `src/lib/format-date.ts` and `src/lib/utils.ts` so they follow the language chosen in Settings rather than the OS locale. `t()` keys are type-checked against the English bundle via the augmentation in `src/i18n/i18next.d.ts`, so a typo fails `pnpm typecheck`. When a key is held as *data* — a `labelKey` field, an array of step keys, a code-to-key map — type it as `TranslationKey` (exported from `src/i18n`) rather than `string`, and prefer an exhaustive `Record<Union, TranslationKey>` with `satisfies` over building the key by capitalising or concatenating: that is what turns a wrong-but-plausible key into a compile error, and it is how the previous `\`settings.ruleMode${capitalize(x)}\``-style construction was retired. Beta still refers to translation maturity: none of the non-English copy has had a native-speaker review, so do not describe any locale as "fully translated".
-- User-facing copy that originates in Rust must be a stable code plus interpolation params, never a pre-rendered English sentence — the backend cannot know the active language. Two precedents to copy: `STABLE_ERROR_CODES` → `ERROR_CODE_I18N_MAP` → `errors.*`, and `EnvironmentTextCode` → `ENVIRONMENT_TEXT_KEYS` → `environment.*`. Opaque values (paths, versions, raw probe errors) use the `raw` escape hatch and stay untranslated, matching `UX-11` ("raw backend messages stay in diagnostics"). Frontend tables that map a code to an i18n key are invisible to `check:i18n`'s literal scan, so each one needs a test that walks `SUPPORTED_LOCALES` and asserts the key exists.
-- Preserve the current browser handoff security boundary: browser handoff is HTTP/HTTPS only, browser handoff URLs must not contain embedded credentials (rejected at the handoff boundary), browsers do not control local save paths, and Cookie/header forwarding must stay explicit, allowlisted, and encrypted when persisted. Candidate/release extensions are minimal-permission manual-handoff builds; automatic capture and header forwarding are dev-only experimental capabilities. Note: direct task creation (UI and clipboard) does extract embedded credentials from HTTP/HTTPS URLs via `legacy_credentials_from_url`, encrypts them, and sanitizes the task URL. That storage behavior is intentional, and `FUN-01` (runtime consumption of those credentials) is Closed and verified.
-- Keep debug-only mock behavior out of production builds. `seed_mock_tasks` is intentionally debug-only.
-- When changing download or resume logic, add or update Rust tests under `src-tauri/tests`.
-- When changing frontend behavior, run at least `pnpm typecheck` and `pnpm test:frontend`; run `pnpm build` for UI or bundling changes.
-
-### Comment Rules
-
-All code comments (Rust, TypeScript/React, scripts) must follow these conventions:
-
-**Language**
-
-- All comments must be in English. Do not write Chinese (or other non-English) comments in code files. Locale string literals in `src/i18n/locales/` are content, not comments, and are exempt.
-
-**Style**
-
-- Explain WHY, not WHAT. A comment that restates the code adds noise; a comment that explains the intent, invariant, or trade-off adds value.
-- Keep comments concise (2-4 lines for inline, 4-8 lines for doc comments). If more is needed, link to a doc or issue.
-- Single space after `//`, `///`, `//!`, and `/**` (e.g., `// comment`, not `//comment` or `/**  comment */`).
-- Use `//!` for module-level docs (file purpose, architecture context) and `///` for item-level docs (functions, structs, enums, constants). Not every file needs `//!`, but complex modules (download engines, scheduler, DB layer, security) should have one.
-- Prefer comments at the decision point (above the branch/loop/calculation), not at the top of a long function describing everything.
-
-**Audit tags**
-
-- Existing audit tags (`R-1` through `R-4`, `E-1` through `E-12`, `S-1.1`/`S-2.1`/`S-2.2`, `UX-1`) reference review items and must be preserved when editing tagged comments. New comments do not require a tag unless tied to an audit item.
-- Tags go at the start: `// R-3: ...`, `/// E-4: ...`, `//! S-1.1: ...`.
-
-**When to add comments**
-
-- Security invariants: why a check exists, what attack it prevents, and what must NOT be "fixed" (e.g., TOFU policy, embedded-credential rejection, header blocklist).
-- Concurrency invariants: why a silent `Ok(())` is load-bearing, why a conditional UPDATE uses double-bind, why a CAS single-winner pattern matters.
-- Algorithm rationale: magic numbers and thresholds (e.g., `0.8` yield factor, `15%` stability band, `2×` minimum guard) must explain why the value was chosen.
-- Edge cases: sentinel values (e.g., `downloaded_until = range_end + 1` means completed), off-by-one conventions, soft vs hard limits.
-- Business rules: error code → status mappings, limit combination policies (minimum wins), retry/backoff priorities.
-
-**TODO/FIXME**
-
-- Use `// TODO:` or `// FIXME:` with a brief description. No author tags or timestamps — git blame provides history.
-- TODO/FIXME comments should describe what needs to be done, not just that something is incomplete.
-
-**Auto-generated files**
-
-- `src/generated/bindings.ts` is generated by Specta from Rust doc comments. Never hand-edit it. Run `pnpm specta` to regenerate after changing Rust models or command signatures.
-- Doc comments on Rust structs/enums/functions that participate in Specta bindings will appear in `bindings.ts` as JSDoc — keep them accurate and in English.
+- If this file gains a durable rule, prefer a short rule plus a link to the owning document. Keep the user custom section intact.
 
 ## UX Direction
 
-The UI should stay a dense, calm desktop utility, not a marketing page or card-heavy dashboard.
+The UI is a dense, calm desktop utility, not a marketing page or card-heavy dashboard. Preserve the collapsible navigation, virtualized task list, optional detail drawer, floating status window, bottom status bar, keyboard access, accessible icon buttons/tooltips, reduced-motion support, and the eight OKLCH accent themes. Advanced protocol details belong in expanded rows or detail views. Error state must remain visible, actionable, and not dependent on color alone.
 
-Preserve:
+## Release Notes
 
-- Collapsible left navigation (three responsive tiers: mobile bottom bar, tablet compact, desktop expandable), central virtualized task list with infinite scroll, optional right detail panel/drawer, floating status window (ball or bar mode), and bottom status bar.
-- Icon buttons with accessible labels and tooltips.
-- OKLCH-based color system with 8 accent color themes (blue, purple, teal, green, orange, rose, indigo, amber), each with light/dark variants.
-- Clear state colors without turning the app into a noisy neon theme.
-- Advanced engine details inside expanded rows or details tabs.
-- Keyboard access without hiding primary mouse paths.
-- `prefers-reduced-motion` respected across all animations.
-
-## Release Notes For Agents
-
-Release configuration exists but should still be treated as needing end-to-end verification before public release:
-
-- Tauri updater endpoint points at GitHub Release `latest.json`.
-- Updater public key is configured.
-- Release workflow builds macOS arm64/x64, Linux x64, and Windows x64.
-- OS code signing secrets are still reserved for later.
-
-Do not claim OS-signed production distribution unless signing is actually configured and verified.
+The repository has Tauri updater configuration, a multi-platform build matrix, release automation, extension packages, and a configured updater public key. Treat all of them as needing end-to-end verification while the project is under development. The release workflow does not provide OS code signing/notarization. Do not claim signed production distribution, completed upgrade validation, or field-verified protocol reliability without the required evidence.

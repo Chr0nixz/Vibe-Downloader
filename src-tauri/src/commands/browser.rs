@@ -19,8 +19,9 @@ use crate::{
     db,
     download::EngineRegistry,
     events::{
-        emit_browser_handoff_failed, emit_browser_handoff_received,
-        emit_browser_integration_changed,
+        emit_browser_handoff_authorization_required, emit_browser_handoff_failed,
+        emit_browser_handoff_received, emit_browser_integration_changed,
+        BrowserHandoffAuthorizationRequiredPayload,
     },
     logging::sanitize_url,
     models::{
@@ -406,6 +407,24 @@ pub async fn create_browser_handoff_task_with_state(
     }
 
     let capture_settings = browser_capture_settings(&state.pool).await?;
+    // B3: the settings toggle only permits presenting a private URL to the
+    // desktop app. It never grants a task permission by itself. Route the
+    // handoff into the main window so the user can authorize this exact target.
+    if capture_settings.allow_intranet_handoff && is_private_handoff_target(&input.url).await {
+        emit_browser_handoff_authorization_required(
+            &app,
+            &BrowserHandoffAuthorizationRequiredPayload {
+                request_id: request_id.clone(),
+                url: input.url.trim().to_string(),
+            },
+        );
+        return Ok(BrowserHandoffResult {
+            request_id,
+            status: "authorization_required".to_string(),
+            task: None,
+            error_message: None,
+        });
+    }
     let sanitized_headers = sanitize_forwarded_headers(input.forwarded_headers.as_deref());
     let forwarded_headers = if capture_settings.experimental_capture_enabled {
         sanitized_headers.clone()
@@ -429,9 +448,14 @@ pub async fn create_browser_handoff_task_with_state(
     )
     .await
     .map(|url| CreateTaskInput {
+        request_profile: None,
         url,
+        network_authorization_id: None,
+        source_kind: Some(crate::download::network_policy::TaskSource::Browser),
         save_dir: None,
         file_name: sanitize_suggested_file_name(input.suggested_file_name.as_deref()),
+        start_paused: Some(false),
+        obey_schedule: Some(true),
         expected_hash_sha256: None,
         expected_hash: None,
         expected_hash_algorithm: None,
@@ -1277,6 +1301,21 @@ async fn validate_handoff(
         return Err("Browser handoff URLs must not contain embedded credentials.".to_string());
     }
     Ok(parsed.to_string())
+}
+
+async fn is_private_handoff_target(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    if is_private_or_reserved_url(&parsed) {
+        return true;
+    }
+    if let Some(host) = parsed.host_str() {
+        if host.parse::<std::net::IpAddr>().is_err() {
+            return crate::download::ssrf::is_hostname_private_via_dns(host).await;
+        }
+    }
+    false
 }
 
 pub fn is_private_or_reserved_url(url: &Url) -> bool {

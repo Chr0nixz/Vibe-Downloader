@@ -2,7 +2,7 @@
 
 Vibe Downloader 是一个使用 Tauri 2、React 19、TypeScript、Rust 和 SQLite 构建的桌面下载管理器。项目当前版本为 `0.5.0`，HTTP/HTTPS 是最成熟的路径；FTP/FTPS、SFTP、BitTorrent、HLS、DASH、WebDAV 和 Metalink 已有可运行入口，但成熟度和诊断覆盖不一致。
 
-项目仍处于积极开发阶段，不是已经完整替代 IDM 的稳定成品。当前代码存在若干发布阻断问题，开发和试用前请先阅读 [项目改进审计](docs/project-improvement-audit.md)。
+项目仍处于积极开发阶段，不是已经完整替代 IDM 的稳定成品。历史 P0 阻断已关闭，但当前仍有主工作流修复和发布验收待完成，开发和试用前请先阅读 [项目改进审计](docs/project-improvement-audit.md)。
 
 > 本项目主要通过 AI 辅助开发。产品方向、取舍和验收由人工把关，代码和文档中的能力声明以当前实现、自动化证据和审计结论为准。
 
@@ -29,9 +29,11 @@ Vibe Downloader 的目标是提供清晰、可靠、可诊断的大文件下载�
 - HEAD 探测，并在需要时回退到 Range GET。
 - 已知大小、未知大小、单流和 Range 分段下载。
 - 默认 16 MB 以上启用多连接，初始 4 段，可按稳定性和剩余大小动态拆分到最多 8 段。
-- 暂停、继续、重试、checkpoint、远端 validator 校验和断点续传。
+- 暂停、继续、最多 10 次任务级瞬时故障自动重试、checkpoint 和远端 validator 校验；未知大小任务仅在 Range/validator 可验证时续传，否则从头重试。
+- 429/5xx 自动重试支持 `Retry-After` 秒数和 HTTP-date，等待截止时间与重试预算持久化。
 - 全局限速、逐任务限速、每主机连接槽和任务优先级。
 - 请求诊断，包括 Range、If-Range、ETag、状态码、耗时和重试信息。
+- 单任务 User-Agent、Referer 和受限自定义请求头；普通配置长期保留，Cookie 与 X-* 等敏感头加密并在任务启动、恢复或重试时按 24 小时 TTL 重新校验。
 - 下载完成后的文件发布、打开文件和打开所在目录。
 
 HTTP Basic Auth（`FUN-01`）、HTTP 系逐任务代理（`FUN-02`）与 DASH/FTP/SFTP 探测路径的逐任务代理（`FUN-20`）均已修复并有集成测试覆盖。
@@ -42,13 +44,15 @@ HTTP Basic Auth（`FUN-01`）、HTTP 系逐任务代理（`FUN-02`）与 DASH/FT
 | --- | --- | --- |
 | FTP/FTPS | 单文件、动态并行分段、加密凭据、目录探测（支持对话框凭据与代理）、SOCKS5 | implicit FTPS over SOCKS5 不支持（`FUN-18` 中明确记录的边界） |
 | SFTP | 单文件、密码和 OpenSSH 私钥认证、加密凭据、本地临时文件续传、SOCKS5、TOFU host key 及 list/forget UI | 不支持目录递归下载 |
-| BitTorrent | magnet、远程和本地 `.torrent`、多文件选择、piece/peer/DHT/做种快照、SOCKS5、ratio/时间做种限制 | tracker 为配置快照而非实时健康 |
+| BitTorrent | magnet、远程和本地 `.torrent`、多文件选择、piece/peer/DHT/做种快照、SOCKS5、ratio/时间做种限制 | tracker 为配置快照而非实时健康；做种仍占下载槽，已完成任务尚不支持重新开启或重启恢复做种 |
 | HLS | 主变体选择、AES-128-CBC、EXT-X-MAP、byte range、并发分片、外部音轨/字幕、live 轮询与空闲收敛、ffmpeg MP4 remux | 不支持 SAMPLE-AES/DRM |
-| DASH | 静态/VOD first-pass：单 Period、`$Number$` SegmentTemplate / SegmentList / SegmentBase、分段下载、进度监控、ffmpeg MP4 remux；任务可暂停后续传 | 明确拒绝 dynamic/live、SegmentTimeline、多 Period、未实现的模板变量（如 `$Time$`）；签名 CDN 下续传可能退化为全量重下 |
-| WebDAV | WebDAV/WebDAVS 映射、Basic Auth、Depth-1 PROPFIND（支持对话框凭据与代理）、委托 HTTP 下载 | PROPFIND 无整体超时；目录探测绕过客户端缓存 |
+| DASH | 静态/VOD first-pass：单 Period、`$Number$` SegmentTemplate / SegmentList / SegmentBase、分段下载、进度监控、ffmpeg MP4 remux；任务可暂停后续传 | 明确拒绝 dynamic/live、SegmentTimeline、多 Period、未实现的模板变量（如 `$Time$`）；尚无显式语言/画质选择 |
+| WebDAV | WebDAV/WebDAVS 映射、Basic Auth、Depth-1 PROPFIND（支持对话框凭据与代理）、委托 HTTP 下载 | 尚无目录递归下载，企业服务器兼容性待真实对端验收 |
 | Metalink4 | 本地/远程 manifest、多文件选择、HTTP/HTTPS 镜像 failover、文件级进度、strongest-hash 与跨镜像续传校验 | 无额外登记边界（原 `ARC-24`、`ARC-25` 已修复） |
 
 详细状态见 [协议可靠性矩阵](docs/protocol-reliability-matrix.md)。
+
+内网目标采用按任务授权：用户明确确认后，NAS、localhost、Tailscale 等目标可以在该任务的已授权 authority 和解析地址范围内访问；未授权目标、公网跳转私网、DNS rebinding、链路本地和元数据地址仍会被拒绝。浏览器的“允许内网交接”只允许把候选交给桌面应用，不能代替任务授权。策略边界和验收状态见 [优化计划](docs/optimization-plan-2026-09-29.md) 与 [项目改进审计](docs/project-improvement-audit.md)。
 
 ### 队列、桌面与界面
 
@@ -86,9 +90,9 @@ HTTP Basic Auth（`FUN-01`）、HTTP 系逐任务代理（`FUN-02`）与 DASH/FT
 
 初版的 6 项阶段 A 阻断（`UX-01`、`FUN-01`、`FUN-02`、`ARC-01`、`ARC-02`、`ARC-03`）、2026-08-13 复审的 6 项阻断（`ARC-19`～`ARC-22`、`SEC-01`、`SEC-02`，`ARC-19` 排空残留并入 `ARC-31`）与 2026-08-26 复审的 4 项 P0（`ARC-32`、`ARC-33`、`ARC-37`、`ARC-38`，2026-09-11 关闭）均已修复并有测试覆盖。
 
-当前没有已登记的 P0 发布阻断，审计中的 P1 项也已全部关闭（含探测代理 `FUN-20`、跨卷备份 `FUN-23`、统一网络契约 `SEC-03` 与凭据安全 `SEC-08`~`SEC-11`）。未关闭项现在只剩 P2/P3 的可维护性与性能条目，完整清单见下节与[项目改进审计](docs/project-improvement-audit.md)。
+当前没有已登记的 Open P0。9 月评审的重试预算、BT 限速、生命周期、调度和内网信任实现均已完成本地自动化验收并保留为 Fixed locally；真实协议对端、候选安装包和跨平台操作仍需外部验收。当前状态与证据以 [项目改进审计](docs/project-improvement-audit.md) 为准。
 
-完整证据、验收条件和修复顺序见 [项目改进审计](docs/project-improvement-audit.md)。发布稳定版本前真正剩余的工作是外部验证：三个平台的真实安装包 smoke、GUI E2E、浏览器商店身份与 OS 代码签名。
+发布稳定版本需要完成当前风险修复，并补齐三个平台的真实安装包 smoke、GUI E2E、浏览器商店身份与 OS 代码签名。
 
 ## 尚未实现或未完成验收
 
@@ -98,7 +102,7 @@ HTTP Basic Auth（`FUN-01`）、HTTP 系逐任务代理（`FUN-02`）与 DASH/FT
 - 正式操作系统代码签名和 notarization。
 - GUI 端到端测试、浏览器扩展行为测试和真实安装包自动化。
 - 生产规模的 10k、50k 和更大任务库性能基线（本机 harness 已覆盖到 50k）。
-- 测试覆盖率度量、macOS 的 Rust CI 与依赖更新自动化，见 `ENG-01` 和 `ENG-04`。
+- 真实服务器上的非 HTTP 协议验收，以及持续下载、休眠唤醒和后台恢复的实机证据。测试覆盖率产物、macOS Rust CI 与 Dependabot 已存在。
 
 ## 未签名安装包
 

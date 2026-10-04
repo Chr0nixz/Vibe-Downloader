@@ -130,7 +130,7 @@ pub fn install_test_intranet_bypass() {
 /// integration suites listens on loopback, which the guards correctly reject.
 /// Mirrors the `VIBE_DOWNLOADER_TEST_SECRET_KEY` pattern — compile-gated to
 /// debug/test builds so release binaries ignore the variable entirely.
-fn intranet_guard_bypassed() -> bool {
+pub(crate) fn intranet_guard_bypassed() -> bool {
     #[cfg(any(test, debug_assertions))]
     {
         TEST_INTRANET_BYPASS.get().is_some()

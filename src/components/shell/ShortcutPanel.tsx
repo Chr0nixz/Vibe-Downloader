@@ -42,6 +42,7 @@ function buildGroups(t: TFunction, platform: Platform): ShortcutGroup[] {
       shortcuts: [
         { keys: [`${mod}K`], label: t("shortcuts.commandPalette") },
         { keys: [`${mod}N`], label: t("shortcuts.newDownload") },
+        { keys: [`${mod}V`], label: t("contextmenu.list.pasteAndCreate") },
         { keys: [`${mod}F`], label: t("shortcuts.search") },
         { keys: [`${mod},`], label: t("shortcuts.settings") },
         { keys: [`${mod}/`, "?"], label: t("shortcuts.showShortcuts") },

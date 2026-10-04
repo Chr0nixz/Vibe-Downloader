@@ -1,3 +1,5 @@
+use crate::download::lifecycle::JoinSet;
+use crate::download::owned_fs as fs;
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
@@ -19,16 +21,14 @@ use suppaftp::{
         AsyncFtpStream, AsyncRustlsConnector, AsyncRustlsFtpStream, ImplAsyncFtpStream,
         TokioTlsStream,
     },
-    tokio_rustls::rustls::{ClientConfig, RootCertStore},
+    tokio_rustls::rustls::ClientConfig,
     types::{FileType, FtpError, FtpResult},
     Mode,
 };
 use tauri::AppHandle;
 use tokio::{
-    fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter},
     sync::mpsc,
-    task::JoinSet,
 };
 use uuid::Uuid;
 
@@ -103,7 +103,12 @@ struct SegmentProgress {
     downloaded_until: i64,
     speed_bps: i64,
     status: SegmentStatus,
+    /// ARC-56: cumulative diagnostic counter persisted to task_work_units.
     retry_count: i32,
+    /// ARC-56: retry budget for the current coordinator run only. Starts at 0
+    /// even when `retry_count` carries history, so a user retry after an
+    /// exhausted budget gets the full FTP_WORKER_RETRIES allowance again.
+    run_retry_count: i32,
     dirty: bool,
 }
 
@@ -120,6 +125,7 @@ struct WorkerRequest {
     speed_limiter: Arc<GlobalSpeedLimiter>,
     progress_tx: mpsc::UnboundedSender<WorkerProgress>,
     proxy_config: ResolvedProxyConfig,
+    network_policy: crate::download::network_policy::NetworkPolicy,
 }
 
 #[derive(Debug)]
@@ -146,6 +152,7 @@ impl FtpEngine {
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
         request_proxy: Option<&ResolvedProxyConfig>,
+        network_policy: &crate::download::network_policy::NetworkPolicy,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ProbeOutput, String> {
         // FUN-20: the task-resolved proxy must drive the probe too. Fall back
@@ -154,7 +161,8 @@ impl FtpEngine {
             Some(config) => config.clone(),
             None => self.proxy_config.read().await.clone(),
         };
-        let mut session = connect_session(&target, &proxy_config, cancel_token).await?;
+        let mut session =
+            connect_session(&target, &proxy_config, network_policy, cancel_token).await?;
         session.transfer_type(FileType::Binary).await?;
         session.set_mode(Mode::Passive);
         crate::download::engine::emit_probe_phase(
@@ -248,7 +256,33 @@ pub async fn probe_ftp_directory_url_cancellable(
     credentials: Option<&db::TaskCredentials>,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<FtpDirectoryProbe, String> {
-    let future = probe_ftp_directory_inner(input_url, proxy_config, credentials, cancel_token);
+    let network_policy = crate::download::network_policy::NetworkPolicy::default();
+    probe_ftp_directory_url_cancellable_with_policy(
+        input_url,
+        proxy_config,
+        credentials,
+        &network_policy,
+        cancel_token,
+    )
+    .await
+}
+
+/// Directory probe entry point used by task creation. The policy is the same
+/// task-bound grant used by the subsequent file probe and download.
+pub async fn probe_ftp_directory_url_cancellable_with_policy(
+    input_url: &str,
+    proxy_config: ResolvedProxyConfig,
+    credentials: Option<&db::TaskCredentials>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<FtpDirectoryProbe, String> {
+    let future = probe_ftp_directory_inner(
+        input_url,
+        proxy_config,
+        credentials,
+        network_policy,
+        cancel_token,
+    );
     match crate::download::bounded_probe(future, cancel_token).await {
         crate::download::BoundedProbeOutcome::Done(probe) => Ok(probe),
         crate::download::BoundedProbeOutcome::Error(error) => Err(error),
@@ -265,6 +299,7 @@ async fn probe_ftp_directory_inner(
     input_url: &str,
     proxy_config: ResolvedProxyConfig,
     credentials: Option<&db::TaskCredentials>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<FtpDirectoryProbe, String> {
     let mut target = FtpTarget::parse_directory(input_url)?;
@@ -275,7 +310,7 @@ async fn probe_ftp_directory_inner(
         target.password = credentials.password.clone();
     }
     let mut diagnostics = Vec::new();
-    let mut session = connect_session(&target, &proxy_config, cancel_token).await?;
+    let mut session = connect_session(&target, &proxy_config, network_policy, cancel_token).await?;
     session.transfer_type(FileType::Binary).await?;
     session.set_mode(Mode::Passive);
     let cwd_result = session.cwd(&target.path).await;
@@ -347,6 +382,7 @@ impl DownloadEngine for FtpEngine {
                 &request.app,
                 &request.request_id,
                 request.proxy_config.as_ref(),
+                &request.network_policy,
                 request.cancel_token.as_ref(),
             )
             .await
@@ -358,11 +394,11 @@ impl DownloadEngine for FtpEngine {
         &'a self,
         context: DownloadContext,
     ) -> EngineFuture<'a, Result<(), DownloadError>> {
-        Box::pin(async move {
+        Box::pin(crate::download::lifecycle::run_owned(async move {
             self.run_download(context)
                 .await
                 .map_err(DownloadError::Other)
-        })
+        }))
     }
 }
 
@@ -376,12 +412,14 @@ async fn revalidate_ftp_remote(
     proxy_config: &ResolvedProxyConfig,
     cancel_token: &tokio_util::sync::CancellationToken,
     task: &TaskRecord,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<(), String> {
     if task.downloaded_bytes <= 0 {
         // Fresh start: there are no local bytes to stitch with.
         return Ok(());
     }
-    let mut session = connect_session(target, proxy_config, Some(cancel_token)).await?;
+    let mut session =
+        connect_session(target, proxy_config, network_policy, Some(cancel_token)).await?;
     let remote_size = session
         .size(&target.path)
         .await
@@ -410,8 +448,10 @@ async fn run_ftp_download(
         finish_notify: _,
         speed_limiter,
         connection_limit,
+        network_policy,
         request_headers: _,
         proxy_config: _,
+        ..
     } = context;
 
     let temp_path = task
@@ -461,7 +501,14 @@ async fn run_ftp_download(
     // replaced with the same size would stitch old and new bytes undetected.
     // Revalidate SIZE/MDTM on a short-lived control connection before any
     // worker starts; metadata errors degrade to the legacy behavior.
-    revalidate_ftp_remote(&target, &proxy_config, &cancel_token, &task).await?;
+    revalidate_ftp_remote(
+        &target,
+        &proxy_config,
+        &cancel_token,
+        &task,
+        &network_policy,
+    )
+    .await?;
 
     let mut running: HashMap<String, SegmentRuntime> = HashMap::new();
     let mut workers = JoinSet::new();
@@ -486,6 +533,7 @@ async fn run_ftp_download(
         &mut running,
         &mut workers,
         &proxy_config,
+        &network_policy,
     );
     emit_ftp_progress(
         &mut progress,
@@ -553,7 +601,10 @@ async fn run_ftp_download(
                             return Err(error);
                         };
                         segment.status = SegmentStatus::Pending;
+                        // ARC-56: cumulative counter feeds diagnostics only;
+                        // the per-run budget decides failure and backoff.
                         segment.retry_count += 1;
+                        segment.run_retry_count += 1;
                         segment.speed_bps = 0;
                         segment.dirty = false;
                         db::update_segment_retry(
@@ -586,13 +637,13 @@ async fn run_ftp_download(
                             ).await?;
                             db::insert_task_event(&pool, &task.id, "ftp_acceleration_disabled", Some(&error)).await?;
                         }
-                        if segment.retry_count > FTP_WORKER_RETRIES {
+                        if segment.run_retry_count > FTP_WORKER_RETRIES {
                             return Err(error);
                         }
                         // Backoff before re-queueing the failed segment.
                         // The delay is based on the retry count (1-indexed for delay calculation).
                         let delay = retry_policy.delay_for_attempt(
-                            u32::try_from(segment.retry_count).unwrap_or(1),
+                            u32::try_from(segment.run_retry_count).unwrap_or(1),
                         );
                         if !delay.is_zero() {
                             tokio::select! {
@@ -650,6 +701,7 @@ async fn run_ftp_download(
                 &mut running,
                 &mut workers,
                 &proxy_config,
+                &network_policy,
             );
         }
 
@@ -676,6 +728,7 @@ async fn run_ftp_download(
                         speed_bps: 0,
                         status: SegmentStatus::Pending,
                         retry_count: 0,
+                        run_retry_count: 0,
                         dirty: true,
                     },
                 );
@@ -789,6 +842,7 @@ fn start_next_ftp_worker(
     running: &mut HashMap<String, SegmentRuntime>,
     workers: &mut JoinSet<WorkerFinished>,
     proxy_config: &ResolvedProxyConfig,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) {
     let Some(segment) = pending.pop_front() else {
         return;
@@ -812,6 +866,7 @@ fn start_next_ftp_worker(
         speed_limiter: speed_limiter.clone(),
         progress_tx: progress_tx.clone(),
         proxy_config: proxy_config.clone(),
+        network_policy: network_policy.clone(),
     };
     workers.spawn(async move {
         let segment_id = request.segment.id.clone();
@@ -870,6 +925,7 @@ async fn download_ftp_segment_inner(request: &WorkerRequest) -> Result<i64, Stri
     let mut session = connect_session(
         &request.target,
         &request.proxy_config,
+        &request.network_policy,
         Some(&request.cancel_token),
     )
     .await?;
@@ -1149,7 +1205,13 @@ fn progress_from_segments(segments: &[TaskSegmentRecord]) -> HashMap<String, Seg
                     downloaded_until: segment.downloaded_until,
                     speed_bps: segment.speed_bps,
                     status: segment.status,
+                    // ARC-56: carry the cumulative counter forward for
+                    // diagnostics, but the per-run budget starts fresh so a
+                    // segment that exhausted FTP_WORKER_RETRIES in a previous
+                    // run still gets its full retry allowance after the user
+                    // hits "Retry".
                     retry_count: segment.retry_count,
+                    run_retry_count: 0,
                     dirty: false,
                 },
             )
@@ -1195,6 +1257,7 @@ mod tests {
                 speed_bps: 0,
                 status: SegmentStatus::Completed,
                 retry_count: 0,
+                run_retry_count: 0,
                 dirty: false,
             },
         );
@@ -1214,6 +1277,7 @@ mod tests {
                 speed_bps: 0,
                 status: SegmentStatus::Completed,
                 retry_count: 0,
+                run_retry_count: 0,
                 dirty: false,
             },
         );
@@ -1262,7 +1326,14 @@ mod tests {
             username: None,
             password: None,
         };
-        let error = match connect_session(&target, &proxy, None).await {
+        let error = match connect_session(
+            &target,
+            &proxy,
+            &crate::download::network_policy::NetworkPolicy::default(),
+            None,
+        )
+        .await
+        {
             Ok(_) => panic!("implicit FTPS + SOCKS5 must be rejected"),
             Err(error) => error,
         };
@@ -1364,32 +1435,37 @@ const FTP_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(3
 async fn connect_session(
     target: &FtpTarget,
     proxy_config: &ResolvedProxyConfig,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<FtpSession, String> {
     // SEC-12: FTP control connections bypass reqwest, so the client-level SSRF
     // layers never see them. Run the full authority pre-flight (literal check
     // + DNS resolution) before any socket is opened.
-    let authority_url = format!(
-        "{}://{}:{}",
+    let authority_url = crate::download::network_policy::format_authority_url(
         if target.mode == FtpSecurityMode::Plain {
             "ftp"
         } else {
             "ftps"
         },
-        target.host,
-        target.port
+        &target.host,
+        target.port,
     );
     let authority = reqwest::Url::parse(&authority_url)
         .map_err(|e| format!("Could not resolve FTP target: {e}"))?;
-    crate::download::ssrf::assert_connectable_authority(&authority)
+    let addr = network_policy
+        .resolve(&authority)
         .await
-        .map_err(|e| engine_error("intranet_target_blocked", e, false))?;
-    let addr = format!("{}:{}", target.host, target.port);
+        .map_err(|e| engine_error("intranet_target_blocked", e, false))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            crate::download::network_policy::blocked("DNS returned no usable addresses")
+        })?;
     let dial = async {
         let result = match target.mode {
             FtpSecurityMode::Plain => {
                 let mut session = if proxy_config.is_custom_socks5() {
-                    let stream = socks5_control_stream(target, proxy_config).await?;
+                    let stream = socks5_control_stream(proxy_config, addr).await?;
                     AsyncFtpStream::connect_with_stream(stream)
                         .await
                         .map_err(|error| ftp_connect_error(target.mode, error))?
@@ -1398,7 +1474,12 @@ async fn connect_session(
                         .await
                         .map_err(|error| ftp_connect_error(target.mode, error))?
                 };
-                session = apply_passive_proxy(session, proxy_config);
+                session = apply_passive_proxy(
+                    session,
+                    proxy_config,
+                    authority.clone(),
+                    network_policy.clone(),
+                );
                 session
                     .login(&target.username, &target.password)
                     .await
@@ -1408,7 +1489,7 @@ async fn connect_session(
             FtpSecurityMode::ExplicitTls => {
                 let connector = rustls_connector();
                 let session = if proxy_config.is_custom_socks5() {
-                    let stream = socks5_control_stream(target, proxy_config).await?;
+                    let stream = socks5_control_stream(proxy_config, addr).await?;
                     AsyncRustlsFtpStream::connect_with_stream(stream)
                         .await
                         .map_err(|error| ftp_connect_error(target.mode, error))?
@@ -1421,7 +1502,12 @@ async fn connect_session(
                     .into_secure(connector, &target.host)
                     .await
                     .map_err(|error| ftp_connect_error(target.mode, error))?;
-                session = apply_passive_proxy(session, proxy_config);
+                session = apply_passive_proxy(
+                    session,
+                    proxy_config,
+                    authority.clone(),
+                    network_policy.clone(),
+                );
                 session
                     .login(&target.username, &target.password)
                     .await
@@ -1480,8 +1566,8 @@ fn ftp_connect_timeout_error(mode: FtpSecurityMode) -> String {
 }
 
 async fn socks5_control_stream(
-    target: &FtpTarget,
     proxy_config: &ResolvedProxyConfig,
+    address: SocketAddr,
 ) -> Result<tokio::net::TcpStream, String> {
     let proxy_url = proxy_config
         .url
@@ -1491,8 +1577,8 @@ async fn socks5_control_stream(
         proxy_url,
         proxy_config.username.as_deref(),
         proxy_config.password.as_deref(),
-        &target.host,
-        target.port,
+        &address.ip().to_string(),
+        address.port(),
     )
     .await
     .map_err(|error| proxy_connect_error("FTP", &error))
@@ -1501,25 +1587,42 @@ async fn socks5_control_stream(
 fn apply_passive_proxy<T>(
     session: ImplAsyncFtpStream<T>,
     proxy_config: &ResolvedProxyConfig,
+    authority: reqwest::Url,
+    network_policy: crate::download::network_policy::NetworkPolicy,
 ) -> ImplAsyncFtpStream<T>
 where
     T: TokioTlsStream + Send + 'static,
 {
-    let Some(proxy_url) = proxy_config
+    let proxy_url = proxy_config
         .url
         .clone()
-        .filter(|_| proxy_config.is_custom_socks5())
-    else {
-        return session;
-    };
+        .filter(|_| proxy_config.is_custom_socks5());
     let username = proxy_config.username.clone();
     let password = proxy_config.password.clone();
     session.passive_stream_builder(move |address| {
         let proxy_url = proxy_url.clone();
         let username = username.clone();
         let password = password.clone();
-        Box::pin(async move { socks5_passive_stream(proxy_url, username, password, address).await })
-            as Pin<Box<dyn Future<Output = FtpResult<tokio::net::TcpStream>> + Send + Sync>>
+        let authority = authority.clone();
+        let network_policy = network_policy.clone();
+        Box::pin(async move {
+            network_policy
+                .assert_address(&authority, address.ip())
+                .map_err(|error| {
+                    FtpError::ConnectionError(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        error,
+                    ))
+                })?;
+            match proxy_url {
+                Some(proxy_url) => {
+                    socks5_passive_stream(proxy_url, username, password, address).await
+                }
+                None => tokio::net::TcpStream::connect(address)
+                    .await
+                    .map_err(FtpError::ConnectionError),
+            }
+        }) as Pin<Box<dyn Future<Output = FtpResult<tokio::net::TcpStream>> + Send + Sync>>
     })
 }
 
@@ -1570,10 +1673,9 @@ fn ftp_auth_error(mode: FtpSecurityMode, error: suppaftp::FtpError) -> String {
 }
 
 fn rustls_connector() -> AsyncRustlsConnector {
-    let root_store = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    use rustls_platform_verifier::ConfigVerifierExt;
+    let config = ClientConfig::with_platform_verifier()
+        .expect("platform certificate verifier must initialize");
     AsyncRustlsConnector::from(suppaftp::tokio_rustls::TlsConnector::from(Arc::new(config)))
 }
 
@@ -1771,7 +1873,8 @@ impl FtpTarget {
             .password()
             .map(percent_decode_path)
             .unwrap_or_default();
-        let source_key = format!("{protocol}://{host}:{port}");
+        let source_key =
+            crate::download::network_policy::format_authority_url(&protocol, &host, port);
 
         Ok(Self {
             sanitized_uri: sanitize_url(parsed.as_str()),
@@ -1825,7 +1928,8 @@ impl FtpTarget {
             .password()
             .map(percent_decode_path)
             .unwrap_or_default();
-        let source_key = format!("{protocol}://{host}:{port}");
+        let source_key =
+            crate::download::network_policy::format_authority_url(&protocol, &host, port);
 
         Ok(Self {
             sanitized_uri: sanitize_url(parsed.as_str()),

@@ -3,6 +3,7 @@ import { ErrorBoundary, type FallbackProps } from "react-error-boundary";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { writeClipboardTextQuietly } from "@/lib/clipboard-write";
 
 // Defensive fallbacks: the error boundary fires when the app is broken,
 // so the i18n bundle may not be initialized. Always have English strings ready.
@@ -29,7 +30,7 @@ function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
 
   const handleCopy = useCallback(() => {
     const text = error instanceof Error ? `${error.message}\n\n${error.stack ?? ""}` : String(error);
-    navigator.clipboard.writeText(text).catch(() => {});
+    writeClipboardTextQuietly(text);
   }, [error]);
 
   return (

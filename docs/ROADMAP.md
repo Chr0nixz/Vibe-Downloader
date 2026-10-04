@@ -1,6 +1,6 @@
 # Vibe Downloader Roadmap
 
-Last updated: 2026-09-19
+Last updated: 2026-09-29
 
 Current baseline: `0.5.0`
 
@@ -35,7 +35,7 @@ The repository contains:
 - Native Messaging and WebSocket browser integration with manual HTTP/HTTPS hand-off in minimal-permission builds.
 - CI, multi-platform Tauri build workflows, release tooling, updater configuration, and a substantial Rust and frontend test suite.
 
-This baseline is not yet a stable release. The 2026-08-13 review raised six new P0 blockers; all six are now Closed for their P0 correctness and security issues, and the 2026-08-26 round-4 batch (F1–F5) is Closed as well. What keeps a public stable release out of reach is no longer open P0 defects but external verification — real installer smoke on three platforms, browser store identities, OS code signing, GUI E2E — plus a small set of P2/P3 items. Active risks and acceptance criteria live in [project-improvement-audit.md](project-improvement-audit.md); this document keeps the phase structure as the forward plan.
+This baseline is not yet a stable release. The historical P0 batches are Closed, but the September reviews identified further workflow and lifecycle gaps. The first seven September 27 fixes are Fixed locally, with remaining runtime-policy, intranet-trust, recovery and protocol work ordered in the [September 29 optimization plan](optimization-plan-2026-09-29.md). Real installer smoke on three platforms, browser store identities, OS code signing and GUI E2E also remain. Active risks and acceptance criteria live in [project-improvement-audit.md](project-improvement-audit.md); the earlier phases below retain their original repair scope.
 
 ## Phase A: Release Blockers
 
@@ -170,7 +170,7 @@ Audit IDs: `FUN-10`, `FUN-12`, `ARC-10`, `ARC-11` — **Closed**
 
 Audit IDs: `FUN-11`, `FUN-15`, `ARC-12`, `ARC-13` — **Closed**
 
-- Enforce both seeding ratio and time limits without consuming ordinary download slots after completion.
+- Enforce both seeding ratio and time limits (implemented). Separating seeding from ordinary download slots, enabling seeding after completion and restoring it after restart remain planned under the September 29 BT work package.
 - Make session ownership, reference counting, and speed policy explicit.
 - Publish real per-file progress and clearly label configured-only tracker data.
 
@@ -305,29 +305,26 @@ The following are intentional unless a future product decision changes them:
 
 ## Verification Baseline
 
-For frontend and ordinary changes:
+The canonical CI-equivalent gate is:
 
 ```bash
-pnpm check
-pnpm test:frontend
-pnpm build
+pnpm verify
 ```
 
-For Rust command, model, database, scheduler, or engine changes:
+Granular frontend and Rust gates use the same checks as CI:
+
+```bash
+pnpm verify:frontend
+pnpm verify:rust
+```
+
+`verify:rust` includes formatting, Clippy with `--locked --all-targets -- -D warnings`, and locked Rust tests. On memory-constrained Windows builders, set `CARGO_BUILD_JOBS` to limit compiler concurrency without dropping tests.
+
+For IPC changes, regenerate and verify bindings; for browser and release changes, run the relevant checks:
 
 ```bash
 pnpm specta
 pnpm check:bindings
-# -j 2 只与链接阶段内存有关：Windows 上默认并行度可能在链接 lib 时
-# 耗尽页面文件（error 1455），与测试间干扰无关，不要用 -j 1 掩盖。
-cargo test --manifest-path src-tauri/Cargo.toml -j 2
-cargo check --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-```
-
-For browser and release changes:
-
-```bash
 pnpm verify:extensions
 pnpm test:release-tools
 pnpm verify:protocol-matrix

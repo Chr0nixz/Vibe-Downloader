@@ -7,6 +7,7 @@ use std::{
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 
+use super::network_policy::NetworkPolicy;
 use super::{
     BtEngine, DashEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine, MetalinkEngine,
     SftpEngine, WebDavEngine,
@@ -41,6 +42,7 @@ pub struct ProbeRequest {
     /// occupy the scheduler past its budget. `None` for callers that have no
     /// cancellation source yet.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    pub network_policy: NetworkPolicy,
 }
 
 /// UX-6: Emit a probe-phase event if `app` and `request_id` are both `Some`.
@@ -155,6 +157,7 @@ pub struct DownloadContext {
     pub connection_limit: usize,
     pub request_headers: Vec<(String, String)>,
     pub proxy_config: ResolvedProxyConfig,
+    pub network_policy: NetworkPolicy,
 }
 
 pub trait DownloadEngine: Send + Sync {

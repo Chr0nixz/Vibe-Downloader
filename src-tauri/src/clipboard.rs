@@ -22,6 +22,18 @@ const URL_PREFIXES: [&str; 9] = [
     "file://",
 ];
 
+/// UX-48: clipboard monitoring is intentionally narrower than manual paste.
+/// A fixed, conservative list keeps ordinary page URLs out of the prompt
+/// path while retaining the file types the downloader can commonly receive.
+/// Metadata magnets remain eligible even though they have no path extension.
+const CLIPBOARD_FILE_EXTENSIONS: &[&str] = &[
+    "7z", "aac", "apk", "avi", "bin", "bz2", "csv", "deb", "dmg", "doc", "docx", "epub", "exe",
+    "flac", "gz", "img", "ipa", "iso", "jar", "m4a", "m4v", "meta4", "metalink", "mkv", "mobi",
+    "mov", "mp3", "mp4", "mpd", "m3u8", "msi", "ogg", "opus", "pdf", "pkg", "ppt", "pptx", "rar",
+    "rpm", "srt", "tar", "torrent", "ts", "vtt", "wav", "webm", "whl", "wmv", "xls", "xlsx", "xz",
+    "zip", "zst",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardLinkDetectedPayload {
@@ -172,12 +184,27 @@ fn normalize_download_url(raw: &str) -> Option<String> {
     }
 
     match parsed.scheme() {
-        "http" | "https" | "ftp" | "ftps" | "sftp" | "webdav" | "webdavs" | "magnet" => {
+        "magnet" => Some(parsed.to_string()),
+        "http" | "https" | "ftp" | "ftps" | "sftp" | "webdav" | "webdavs"
+            if has_clipboard_file_extension(parsed.path()) =>
+        {
             Some(parsed.to_string())
         }
         "file" if is_local_manifest_path(parsed.path()) => Some(parsed.to_string()),
         _ => None,
     }
+}
+
+fn has_clipboard_file_extension(path: &str) -> bool {
+    let filename = path
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or_default();
+    let Some((_, extension)) = filename.rsplit_once('.') else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    CLIPBOARD_FILE_EXTENSIONS.contains(&extension.as_str())
 }
 
 fn is_local_manifest_path(path: &str) -> bool {

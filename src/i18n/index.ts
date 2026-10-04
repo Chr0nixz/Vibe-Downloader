@@ -39,7 +39,7 @@ export type Locale = (typeof LOCALE_REGISTRY)[number]["code"];
 
 export const SUPPORTED_LOCALES: readonly Locale[] = LOCALE_REGISTRY.map((e) => e.code);
 
-/** Locales with complete translation coverage (~670 keys). Exposed in the language selector. */
+/** Locales with complete translation coverage. Exposed in the language selector. */
 export const STABLE_LOCALES: readonly Locale[] = LOCALE_REGISTRY.filter((e) => e.stable).map((e) => e.code);
 
 /** Maps locale code → i18n key for the locale's display name. */

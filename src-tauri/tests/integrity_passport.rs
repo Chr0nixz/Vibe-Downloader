@@ -205,6 +205,12 @@ async fn completed_passport_reports_verified_checksum_and_staging_complete() {
     seed_checksum(&pool, "c1", "t1", "verified", Some("verifieddigest")).await;
     seed_work_unit(&pool, "w1", "t1", 2).await;
     seed_work_unit(&pool, "w2", "t1", 1).await;
+    sqlx::query("UPDATE tasks SET completed_at = ? WHERE id = ?")
+        .bind("2026-09-14T00:00:00Z")
+        .bind("t1")
+        .execute(&pool)
+        .await
+        .expect("persist completion time");
 
     let passport = build_integrity_passport(&pool, "t1")
         .await
@@ -380,9 +386,33 @@ async fn pruned_events_leave_milestones_unknown() {
         .await
         .expect("passport");
     assert!(passport.started_at.is_none());
+    // The task row is seeded as a completed legacy record, but its durable
+    // completion field is intentionally absent; the passport must preserve
+    // that unknown instead of reconstructing it from events or updated_at.
     assert!(passport.completed_at.is_none());
     assert_eq!(passport.resume_count, 0);
     assert_eq!(passport.segment_retries, 0);
+}
+
+#[tokio::test]
+async fn persisted_completion_survives_event_retention() {
+    let (_guard, pool) = common::test_pool("passport-completion-persisted").await;
+    seed_task(&pool, "t1", &SeedTask::new(".")).await;
+    sqlx::query("UPDATE tasks SET completed_at = ? WHERE id = ?")
+        .bind("2026-09-16T00:00:00Z")
+        .bind("t1")
+        .execute(&pool)
+        .await
+        .expect("persist completion time");
+
+    let passport = build_integrity_passport(&pool, "t1")
+        .await
+        .expect("passport");
+    assert_eq!(
+        passport.completed_at.as_deref(),
+        Some("2026-09-16T00:00:00Z")
+    );
+    assert!(passport.started_at.is_none());
 }
 
 #[tokio::test]

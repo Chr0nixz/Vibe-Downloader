@@ -4,7 +4,7 @@ import { create } from "zustand";
 
 import { createLogger } from "@/lib/logger";
 import { isTauriRuntime } from "@/lib/runtime";
-import { getAppVersion } from "@/lib/tauri";
+import { cancelPreparedAppRelaunch, getAppVersion, prepareAppRelaunch } from "@/lib/tauri";
 
 const log = createLogger("updater");
 
@@ -121,29 +121,42 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
         return;
       }
 
-      await update.downloadAndInstall((event: DownloadEvent) => {
-        if (event.event === "Started") {
-          set({
-            progress: {
-              totalBytes: event.data.contentLength,
-              downloadedBytes: 0,
-            },
-          });
-        } else if (event.event === "Progress") {
-          const prev = get().progress;
-          set({
-            progress: {
-              totalBytes: prev?.totalBytes,
-              downloadedBytes: (prev?.downloadedBytes ?? 0) + event.data.chunkLength,
-            },
-          });
-        } else if (event.event === "Finished") {
-          set({ status: "installing" });
-        }
-      });
+      let relaunchPrepared = false;
+      try {
+        await update.download((event: DownloadEvent) => {
+          if (event.event === "Started") {
+            set({
+              progress: {
+                totalBytes: event.data.contentLength,
+                downloadedBytes: 0,
+              },
+            });
+          } else if (event.event === "Progress") {
+            const prev = get().progress;
+            set({
+              progress: {
+                totalBytes: prev?.totalBytes,
+                downloadedBytes: (prev?.downloadedBytes ?? 0) + event.data.chunkLength,
+              },
+            });
+          }
+        });
 
-      set({ status: "installing" });
-      await relaunch();
+        set({ status: "installing" });
+        await prepareAppRelaunch();
+        relaunchPrepared = true;
+        await update.install();
+        await relaunch();
+      } catch (err) {
+        if (relaunchPrepared) {
+          await cancelPreparedAppRelaunch().catch((cancelError) =>
+            log.warn("failed to release the prepared relaunch state", cancelError),
+          );
+        }
+        throw err;
+      } finally {
+        await update.close().catch((closeError) => log.warn("failed to close update resource", closeError));
+      }
     } catch (err) {
       log.error("update install failed", err);
       set({

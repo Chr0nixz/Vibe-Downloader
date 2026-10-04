@@ -243,6 +243,9 @@ pub struct Task {
     pub checksums: Vec<TaskChecksum>,
     pub files: Vec<TaskFile>,
     pub created_at: String,
+    /// Exact completion time when this task finished in a schema-aware build.
+    /// Legacy rows stay `None`; `updated_at` must not be used as a substitute.
+    pub completed_at: Option<String>,
     pub updated_at: String,
 }
 
@@ -638,6 +641,7 @@ impl From<TaskRecord> for Task {
             checksums: Vec::new(),
             files: Vec::new(),
             created_at: record.created_at,
+            completed_at: None,
             updated_at: record.updated_at,
         }
     }
@@ -1104,6 +1108,11 @@ pub struct AppSettings {
     pub completion_action: CompletionAction,
     pub completion_countdown_seconds: i32,
     pub completion_run_command: String,
+    /// ARC-58: when true, the completion action also fires when the queue
+    /// drains with the last task failed/canceled ("all finished"); when false
+    /// it only fires after all-success ("all succeeded", the historical
+    /// behavior).
+    pub completion_include_failures: bool,
     pub delete_to_trash: bool,
     pub auto_update_check_enabled: bool,
     /// Optional user-configured ffmpeg binary path. Resolution chain at use:
@@ -1121,6 +1130,10 @@ pub struct AppErrorPayload {
     pub message: String,
     pub recoverable: bool,
     pub actions: Vec<String>,
+    /// Absolute retry deadline supplied by a transient HTTP response.
+    /// Optional so historical payloads remain valid across upgrades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1233,7 +1246,13 @@ impl AppErrorPayload {
             message: message.into(),
             recoverable,
             actions: actions.into_iter().map(str::to_string).collect(),
+            retry_after_at: None,
         }
+    }
+
+    pub fn with_retry_after_at(mut self, retry_after_at: Option<String>) -> Self {
+        self.retry_after_at = retry_after_at;
+        self
     }
 
     pub fn command_error(&self) -> String {

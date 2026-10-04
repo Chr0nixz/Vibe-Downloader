@@ -91,6 +91,350 @@ async fn probe_allows_unknown_size_single_streams() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_size_range_probe_captures_validator_and_resumes_safely() {
+    let server = start_test_server();
+    let engine = HttpEngine::new().expect("engine");
+    let url = format!("{}/unknown-range-stable", server.base_url);
+    let probe = engine.probe(&url).await.expect("unknown-size probe");
+
+    assert_eq!(probe.total_size, 0);
+    assert!(probe.supports_resume);
+    assert_eq!(probe.etag.as_deref(), Some("\"stable\""));
+
+    let paths = TestPaths::new("unknown-range-resume");
+    let prefix = &SAMPLE[..7];
+    fs::write(&paths.temp, prefix).expect("write partial file");
+    engine
+        .download_direct(
+            DirectDownloadRequest {
+                url,
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: probe.total_size,
+                supports_resume: probe.supports_resume,
+                supports_parallel: probe.supports_parallel,
+                etag: probe.etag,
+                last_modified: probe.last_modified,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("resume unknown-size resource");
+
+    assert_eq!(fs::read(&paths.final_path).expect("read final"), SAMPLE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_size_probe_and_resume_reject_unverifiable_ranges() {
+    let server = start_test_server();
+    let engine = HttpEngine::new().expect("engine");
+    let invalid_probe = engine
+        .probe(&format!("{}/unknown-range-invalid-probe", server.base_url))
+        .await
+        .expect("probe invalid range response");
+    assert!(!invalid_probe.supports_resume);
+    let weak_probe = engine
+        .probe(&format!("{}/unknown-range-weak-validator", server.base_url))
+        .await
+        .expect("probe weak ETag response");
+    assert!(!weak_probe.supports_resume);
+
+    for (label, path, expected_error) in [
+        (
+            "unknown-range-changed-validator",
+            "/unknown-range-changed-validator",
+            "Resume unavailable. The remote resource validator changed during resume.",
+        ),
+        (
+            "unknown-range-missing-validator",
+            "/unknown-range-missing-validator",
+            "Resume unavailable. The remote resource validator changed during resume.",
+        ),
+        (
+            "unknown-range-invalid-resume",
+            "/unknown-range-invalid-resume",
+            "Resume unavailable. The server returned a mismatched Content-Range.",
+        ),
+    ] {
+        let paths = TestPaths::new(label);
+        let prefix = &SAMPLE[..7];
+        fs::write(&paths.temp, prefix).expect("write partial file");
+        let error = engine
+            .download_direct(
+                DirectDownloadRequest {
+                    url: format!("{}{}", server.base_url, path),
+                    temp_path: paths.temp.clone(),
+                    final_path: paths.final_path.clone(),
+                    total_size: 0,
+                    supports_resume: true,
+                    supports_parallel: false,
+                    etag: Some("\"stable\"".to_string()),
+                    last_modified: None,
+                },
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("unsafe unknown-size resume must fail");
+
+        assert_eq!(error, expected_error, "route {path}");
+        assert_eq!(fs::read(&paths.temp).expect("preserved partial"), prefix);
+        assert!(!paths.final_path.exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_unknown_size_body_fails_without_retryable_transport_code() {
+    let server = start_test_server();
+    let engine = HttpEngine::new().expect("engine");
+    let url = format!("{}/unknown-malformed-chunk", server.base_url);
+    let probe = engine
+        .probe(&url)
+        .await
+        .expect("probe malformed-body fixture");
+    assert_eq!(probe.total_size, 0);
+    assert!(probe.supports_resume);
+
+    let (_db, pool) = common::test_pool("unknown-size-malformed-body").await;
+    let paths = TestPaths::new("unknown-size-malformed-body");
+    let mut task = common::download_task(
+        "unknown-size-malformed-body",
+        url,
+        "http",
+        "unknown.bin",
+        probe.total_size,
+        &paths,
+        false,
+    );
+    task.supports_resume = probe.supports_resume;
+    task.etag = probe.etag;
+    task.last_modified = probe.last_modified;
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+
+    let error = engine
+        .download(common::headless_download_context(
+            pool,
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("malformed chunk framing must fail");
+    let payload: tauri_app_lib::models::AppErrorPayload =
+        serde_json::from_str(&error).expect("structured malformed-body error");
+    assert!(matches!(
+        payload.code.as_str(),
+        "decode_error" | "body_error"
+    ));
+    assert!(!payload.recoverable);
+    assert!(!paths.final_path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_size_legacy_weak_etag_restarts_from_byte_zero() {
+    let server = start_test_server();
+    let engine = HttpEngine::new().expect("engine");
+    let url = format!("{}/unknown-range-weak-validator", server.base_url);
+    let (_db, pool) = common::test_pool("unknown-size-weak-etag-restart").await;
+    let paths = TestPaths::new("unknown-size-weak-etag-restart");
+    fs::write(&paths.temp, b"stale").expect("write stale prefix");
+    let mut task = common::download_task(
+        "unknown-size-weak-etag-restart",
+        url,
+        "http",
+        "unknown.bin",
+        0,
+        &paths,
+        false,
+    );
+    // Older task rows can claim resume support even though a weak ETag is not
+    // a byte-identity validator; runtime validation must still fail closed.
+    task.supports_resume = true;
+    task.etag = Some("W/\"weak\"".to_string());
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert legacy task");
+
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            task.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("restart weak-validator task from zero");
+
+    assert_eq!(fs::read(&paths.final_path).expect("read final"), SAMPLE);
+    let completed = db::get_task_record(&pool, &task.id)
+        .await
+        .expect("load completed task")
+        .expect("task exists");
+    assert_eq!(completed.downloaded_bytes, SAMPLE.len() as i64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_size_task_retry_resumes_after_a_midstream_disconnect() {
+    let server = start_test_server();
+    let engine = HttpEngine::new().expect("engine");
+    let url = format!("{}/unknown-resume-after-reset", server.base_url);
+    let probe = engine.probe(&url).await.expect("unknown-size probe");
+    assert!(probe.supports_resume);
+    assert_eq!(probe.etag.as_deref(), Some("\"stable\""));
+
+    let (_db, pool) = common::test_pool("unknown-size-auto-retry").await;
+    let paths = TestPaths::new("unknown-size-auto-retry");
+    let payload = slow_resume_payload();
+    let mut task = common::download_task(
+        "unknown-size-auto-retry",
+        url,
+        "http",
+        "unknown.bin",
+        probe.total_size,
+        &paths,
+        false,
+    );
+    task.supports_resume = probe.supports_resume;
+    task.etag = probe.etag;
+    task.last_modified = probe.last_modified;
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+
+    let first_error = engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            task.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("first body should disconnect");
+    let first_payload: tauri_app_lib::models::AppErrorPayload =
+        serde_json::from_str(&first_error).expect("structured transport failure");
+    assert_eq!(first_payload.code, "transport_interrupted");
+    assert!(first_payload.recoverable);
+    let partial_size = fs::metadata(&paths.temp)
+        .expect("temp file after disconnect")
+        .len();
+    assert!(partial_size > 0, "some body bytes must be durable");
+    assert!(partial_size < payload.len() as u64);
+
+    let retry = db::schedule_auto_retry(
+        &pool,
+        &task.id,
+        1,
+        "2000-01-01T00:00:00Z",
+        "transport_interrupted",
+        &first_error,
+    )
+    .await
+    .expect("persist automatic retry");
+    assert_eq!(retry, db::AutoRetryOutcome::Scheduled { attempt: 1 });
+    let queued = db::get_task_record(&pool, &task.id)
+        .await
+        .expect("load queued task")
+        .expect("task exists");
+
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            queued,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("resume after automatic retry");
+
+    assert_eq!(fs::read(&paths.final_path).expect("read final"), payload);
+    let completed = db::get_task_record(&pool, &task.id)
+        .await
+        .expect("load completed task")
+        .expect("task exists");
+    assert_eq!(
+        completed.status,
+        tauri_app_lib::models::TaskStatus::Completed
+    );
+    assert_eq!(completed.downloaded_bytes, payload.len() as i64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_size_task_retry_restarts_when_range_resume_is_unavailable() {
+    let server = start_test_server();
+    let engine = HttpEngine::new().expect("engine");
+    let url = format!("{}/unknown-restart-after-reset", server.base_url);
+    let probe = engine.probe(&url).await.expect("unknown-size probe");
+    assert_eq!(probe.total_size, 0);
+    assert!(!probe.supports_resume);
+    assert!(probe.etag.is_none());
+
+    let (_db, pool) = common::test_pool("unknown-size-restart-retry").await;
+    let paths = TestPaths::new("unknown-size-restart-retry");
+    let payload = slow_resume_payload();
+    let mut task = common::download_task(
+        "unknown-size-restart-retry",
+        url,
+        "http",
+        "unknown.bin",
+        probe.total_size,
+        &paths,
+        false,
+    );
+    task.supports_resume = probe.supports_resume;
+    task.etag = probe.etag;
+    task.last_modified = probe.last_modified;
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert task");
+
+    let first_error = engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            task.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect_err("first body should disconnect");
+    let first_payload: tauri_app_lib::models::AppErrorPayload =
+        serde_json::from_str(&first_error).expect("structured transport failure");
+    assert_eq!(first_payload.code, "transport_interrupted");
+    assert!(first_payload.recoverable);
+    assert!(fs::metadata(&paths.temp).expect("partial temp file").len() > 0);
+
+    db::schedule_auto_retry(
+        &pool,
+        &task.id,
+        1,
+        "2000-01-01T00:00:00Z",
+        "transport_interrupted",
+        &first_error,
+    )
+    .await
+    .expect("persist automatic retry");
+    let queued = db::get_task_record(&pool, &task.id)
+        .await
+        .expect("load queued task")
+        .expect("task exists");
+
+    engine
+        .download(common::headless_download_context(
+            pool.clone(),
+            queued,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("restart unsupported resume from byte zero");
+
+    assert_eq!(fs::read(&paths.final_path).expect("read final"), payload);
+    let completed = db::get_task_record(&pool, &task.id)
+        .await
+        .expect("load completed task")
+        .expect("task exists");
+    assert_eq!(
+        completed.status,
+        tauri_app_lib::models::TaskStatus::Completed
+    );
+    assert_eq!(completed.downloaded_bytes, payload.len() as i64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_uses_extended_file_name_sources() {
     let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
@@ -151,6 +495,35 @@ async fn probe_maps_common_http_failures() {
         "The server is limiting requests. Try again later."
     );
     assert_eq!(limited["recoverable"], true);
+    assert!(limited.get("retryAfterAt").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_preserves_retry_after_delta_and_http_date_deadlines() {
+    let server = start_test_server();
+    let engine = HttpEngine::new().expect("engine");
+
+    let delta_error = engine
+        .probe(&format!("{}/status/429-retry-seconds", server.base_url))
+        .await
+        .expect_err("429 should fail");
+    let delta: serde_json::Value = serde_json::from_str(&delta_error).expect("delta payload");
+    let delta_at = chrono::DateTime::parse_from_rfc3339(
+        delta["retryAfterAt"].as_str().expect("delta deadline"),
+    )
+    .expect("parse delta deadline");
+    let delta_remaining = delta_at.with_timezone(&chrono::Utc) - chrono::Utc::now();
+    assert!(delta_remaining >= chrono::Duration::seconds(44));
+    assert!(delta_remaining <= chrono::Duration::seconds(45));
+
+    let date_error = engine
+        .probe(&format!("{}/status/429-retry-date", server.base_url))
+        .await
+        .expect_err("429 HTTP-date should fail");
+    let date: serde_json::Value = serde_json::from_str(&date_error).expect("date payload");
+    let retry_after_at = date["retryAfterAt"].as_str().expect("HTTP-date deadline");
+    let parsed = chrono::DateTime::parse_from_rfc3339(retry_after_at).expect("parse date");
+    assert_eq!(parsed.to_rfc3339(), "2030-01-02T03:04:05+00:00");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -540,6 +913,56 @@ async fn segmented_direct_retries_transient_segment_failures() {
     std::env::remove_var("VIBE_FAST_RETRY_DELAYS");
 }
 
+/// ARC-56: `retry_count` persisted on a segment is a cumulative diagnostic
+/// counter, not the retry budget. A segment that exhausted its budget during
+/// an earlier outage (retry_count == MAX_SEGMENT_RETRIES) must still get a
+/// full per-run allowance after the user hits "Retry" — before the fix the
+/// worker started from the persisted counter and failed the task on the very
+/// first transient error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segmented_direct_retry_budget_resets_despite_persisted_retry_count() {
+    std::env::set_var("VIBE_FAST_RETRY_DELAYS", "1");
+    let server = start_test_server();
+    let engine = HttpEngine::new().expect("engine");
+    let paths = TestPaths::new("segmented-retry-budget-reset");
+    let payload = large_payload();
+    // Simulate the DB state after a failed run: every segment carries an
+    // exhausted cumulative counter (the coordinator would have persisted 5).
+    let segments = direct_segments("segmented-retry-budget-reset", payload.len() as i64)
+        .into_iter()
+        .map(|mut segment| {
+            segment.retry_count = 5;
+            segment
+        })
+        .collect();
+
+    // `/transient-segment` injects exactly one 500 per range start, so success
+    // requires the worker to retry despite the persisted counter being at the
+    // ceiling.
+    let downloaded = engine
+        .download_segmented_direct(
+            DirectSegmentedDownloadRequest {
+                url: format!("{}/transient-segment", server.base_url),
+                temp_path: paths.temp.clone(),
+                final_path: paths.final_path.clone(),
+                total_size: payload.len() as i64,
+                supports_resume: true,
+                supports_parallel: true,
+                segments,
+                etag: None,
+                last_modified: None,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("retry budget must reset per run even when the persisted counter is exhausted");
+
+    assert_eq!(downloaded, payload.len() as i64);
+    let final_bytes = fs::read(&paths.final_path).expect("read final");
+    assert_eq!(sha256_hex(&final_bytes), LARGE_PAYLOAD_SHA256);
+    std::env::remove_var("VIBE_FAST_RETRY_DELAYS");
+}
+
 /// ARC-33: a connection abort mid-body must not let the checkpoint run ahead
 /// of durable bytes. The abort leaves buffered-but-unflushed bytes in the
 /// worker's 256 KiB BufWriter; if the retryable failure's offset were reported
@@ -640,7 +1063,10 @@ async fn segmented_direct_failure_does_not_rename_temp_file() {
         .await
         .expect_err("segment should fail");
 
-    assert_eq!(error, "The server returned HTTP 500.");
+    let payload: serde_json::Value = serde_json::from_str(&error).expect("500 error payload");
+    assert_eq!(payload["code"], "server_error");
+    assert_eq!(payload["message"], "The server returned HTTP 500.");
+    assert!(payload.get("retryAfterAt").is_none());
     assert!(!paths.final_path.exists());
     std::env::remove_var("VIBE_FAST_RETRY_DELAYS");
 }
@@ -715,13 +1141,26 @@ async fn segmented_direct_fails_when_range_is_not_honored() {
 async fn probe_refuses_redirect_to_private_target() {
     let server = start_test_server();
     let engine = HttpEngine::new().expect("engine");
+    let url = format!("{}/redirect-to-file", server.base_url);
+    // The fake server itself is a task-authorized loopback target. The
+    // redirect points at a different private authority, which must remain
+    // outside that task grant even though the test harness permits loopback
+    // connections for ordinary fixture traffic.
+    let policy = tauri_app_lib::download::network_policy::NetworkPolicy::confirm_target(
+        tauri_app_lib::download::network_policy::TaskSource::Manual,
+        &url,
+    )
+    .await
+    .expect("authorize fake server target");
 
     let error = engine
-        .probe(&format!("{}/redirect-to-file", server.base_url))
+        .probe_with_headers_and_proxy_and_policy(&url, &[], None, &policy)
         .await
         .expect_err("redirects to loopback must not be followed");
 
-    assert_eq!(error, "The server returned HTTP 302.");
+    let payload: tauri_app_lib::models::AppErrorPayload =
+        serde_json::from_str(&error).expect("redirect policy error must be structured");
+    assert_eq!(payload.code, "intranet_target_blocked");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -976,6 +1415,83 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HashMap<String, usi
             SAMPLE,
             &[("Content-Type", "application/octet-stream")],
         ),
+        "/unknown-malformed-chunk" => {
+            let etag = ("ETag", "\"malformed\"");
+            if method == "HEAD" {
+                write_unknown_size_response(
+                    &mut stream,
+                    method,
+                    SAMPLE,
+                    &[("Content-Type", "application/octet-stream"), etag],
+                );
+            } else if byte_range.is_some() {
+                write_response(
+                    &mut stream,
+                    206,
+                    &[
+                        ("Content-Type", "application/octet-stream"),
+                        etag,
+                        ("Content-Range", "bytes 0-0/*"),
+                        ("Content-Length", "1"),
+                    ],
+                    &SAMPLE[..1],
+                    false,
+                );
+            } else {
+                let response = "HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\nETag: \"malformed\"\r\n\r\nZ\r\n";
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        }
+        "/unknown-range-stable" => respond_unknown_size_range(
+            &mut stream,
+            method,
+            byte_range,
+            Some("\"stable\""),
+            false,
+            false,
+        ),
+        "/unknown-range-invalid-probe" => respond_unknown_size_range(
+            &mut stream,
+            method,
+            byte_range,
+            Some("\"stable\""),
+            true,
+            false,
+        ),
+        "/unknown-range-weak-validator" => respond_unknown_size_range(
+            &mut stream,
+            method,
+            byte_range,
+            Some("W/\"weak\""),
+            false,
+            false,
+        ),
+        "/unknown-range-changed-validator" => respond_unknown_size_range(
+            &mut stream,
+            method,
+            byte_range,
+            Some("\"changed\""),
+            false,
+            false,
+        ),
+        "/unknown-range-missing-validator" => {
+            respond_unknown_size_range(&mut stream, method, byte_range, None, false, false)
+        }
+        "/unknown-range-invalid-resume" => respond_unknown_size_range(
+            &mut stream,
+            method,
+            byte_range,
+            Some("\"stable\""),
+            false,
+            true,
+        ),
+        "/unknown-resume-after-reset" => {
+            handle_unknown_resume_connection(stream, method, byte_range, if_range, state)
+        }
+        "/unknown-restart-after-reset" => {
+            handle_unknown_restart_connection(stream, method, byte_range, state)
+        }
         "/content-location-name" => write_unknown_size_response(
             &mut stream,
             method,
@@ -1148,7 +1664,18 @@ Connection: close
             false,
         ),
         "/redirect-to-file" => {
-            let response = "HTTP/1.1 302 Found\r\nConnection: close\r\nLocation: /file\r\nContent-Length: 0\r\n\r\n";
+            let host = request
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("host").then_some(value.trim())
+                })
+                .unwrap_or_default();
+            let port = host.split(':').nth(1).unwrap_or("80");
+            let location = format!("http://127.0.0.2:{port}/file");
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nConnection: close\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n"
+            );
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
         }
@@ -1174,6 +1701,20 @@ Connection: close
         "/status/403" => write_response(&mut stream, 403, &[], b"denied", false),
         "/status/404" => write_response(&mut stream, 404, &[], b"missing", false),
         "/status/429" => write_response(&mut stream, 429, &[], b"limited", false),
+        "/status/429-retry-seconds" => write_response(
+            &mut stream,
+            429,
+            &[("Retry-After", "45")],
+            b"limited",
+            false,
+        ),
+        "/status/429-retry-date" => write_response(
+            &mut stream,
+            429,
+            &[("Retry-After", "Wed, 02 Jan 2030 03:04:05 GMT")],
+            b"limited",
+            false,
+        ),
         _ => write_response(&mut stream, 404, &[], b"missing", false),
     }
 }
@@ -1368,6 +1909,161 @@ fn write_unknown_size_response(
         let _ = stream.write_all(body);
     }
     let _ = stream.flush();
+}
+
+fn respond_unknown_size_range(
+    stream: &mut TcpStream,
+    method: &str,
+    byte_range: Option<ByteRange>,
+    etag: Option<&str>,
+    invalid_probe: bool,
+    invalid_resume: bool,
+) {
+    let mut headers = vec![("Content-Type", "application/octet-stream")];
+    if let Some(etag) = etag {
+        headers.push(("ETag", etag));
+    }
+    if method == "HEAD" {
+        write_unknown_size_response(stream, method, SAMPLE, &headers);
+        return;
+    }
+
+    let Some(range) = byte_range else {
+        write_unknown_size_response(stream, method, SAMPLE, &headers);
+        return;
+    };
+    let mut start = range.start.min(SAMPLE.len().saturating_sub(1));
+    let mut end = range
+        .end
+        .unwrap_or_else(|| SAMPLE.len().saturating_sub(1))
+        .min(SAMPLE.len().saturating_sub(1));
+    if invalid_probe && start == 0 {
+        end = end.saturating_add(1).min(SAMPLE.len().saturating_sub(1));
+    }
+    if invalid_resume && start > 0 {
+        start = start.saturating_add(1);
+    }
+    if start > end {
+        write_response(stream, 416, &[], b"range not satisfiable", false);
+        return;
+    }
+
+    let content_range = format!("bytes {start}-{end}/*");
+    let content_length = (end - start + 1).to_string();
+    headers.push(("Content-Range", content_range.as_str()));
+    headers.push(("Content-Length", content_length.as_str()));
+    write_response(stream, 206, &headers, &SAMPLE[start..=end], false);
+}
+
+fn handle_unknown_resume_connection(
+    mut stream: TcpStream,
+    method: &str,
+    byte_range: Option<ByteRange>,
+    if_range: Option<String>,
+    state: Arc<Mutex<HashMap<String, usize>>>,
+) {
+    const ETAG: &str = "\"stable\"";
+    let payload = slow_resume_payload();
+    let headers = [("Content-Type", "application/octet-stream"), ("ETag", ETAG)];
+
+    if method == "HEAD" {
+        write_unknown_size_response(&mut stream, method, &payload, &headers);
+        return;
+    }
+
+    if let Some(range) = byte_range {
+        if range.start > 0 && if_range.as_deref() != Some(ETAG) {
+            write_unknown_size_response(&mut stream, method, &payload, &headers);
+            return;
+        }
+        let start = range.start.min(payload.len().saturating_sub(1));
+        let end = range
+            .end
+            .unwrap_or_else(|| payload.len().saturating_sub(1))
+            .min(payload.len().saturating_sub(1));
+        if start > end {
+            write_response(&mut stream, 416, &[], b"range not satisfiable", false);
+            return;
+        }
+        let content_range = format!("bytes {start}-{end}/*");
+        let content_length = (end - start + 1).to_string();
+        let mut range_headers = headers.to_vec();
+        range_headers.push(("Content-Range", content_range.as_str()));
+        range_headers.push(("Content-Length", content_length.as_str()));
+        write_response(
+            &mut stream,
+            206,
+            &range_headers,
+            &payload[start..=end],
+            false,
+        );
+        return;
+    }
+
+    let first_transfer = {
+        let mut state = state.lock().expect("state lock");
+        let count = state
+            .entry("unknown-resume-after-reset".to_string())
+            .or_insert(0);
+        let first = *count == 0;
+        *count += 1;
+        first
+    };
+    if !first_transfer {
+        write_unknown_size_response(&mut stream, method, &payload, &headers);
+        return;
+    }
+
+    let response_head = format!(
+        "HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nETag: {ETAG}\r\n\r\n"
+    );
+    let chunk_head = format!("{:X}\r\n", 300_000);
+    let _ = stream.write_all(response_head.as_bytes());
+    let _ = stream.write_all(chunk_head.as_bytes());
+    let _ = stream.write_all(&payload[..300_000]);
+    let _ = stream.write_all(b"\r\n");
+    let _ = stream.flush();
+    let socket: socket2::Socket = stream.into();
+    let _ = socket.set_linger(Some(Duration::ZERO));
+    let _ = socket.shutdown(std::net::Shutdown::Both);
+}
+
+fn handle_unknown_restart_connection(
+    mut stream: TcpStream,
+    method: &str,
+    byte_range: Option<ByteRange>,
+    state: Arc<Mutex<HashMap<String, usize>>>,
+) {
+    let payload = slow_resume_payload();
+    if method == "HEAD" || byte_range.is_some() {
+        write_unknown_size_response(&mut stream, method, &payload, &[]);
+        return;
+    }
+
+    let first_transfer = {
+        let mut state = state.lock().expect("state lock");
+        let count = state
+            .entry("unknown-restart-after-reset".to_string())
+            .or_insert(0);
+        let first = *count == 0;
+        *count += 1;
+        first
+    };
+    if !first_transfer {
+        write_unknown_size_response(&mut stream, method, &payload, &[]);
+        return;
+    }
+
+    let response_head = "HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\n\r\n";
+    let chunk_head = format!("{:X}\r\n", 300_000);
+    let _ = stream.write_all(response_head.as_bytes());
+    let _ = stream.write_all(chunk_head.as_bytes());
+    let _ = stream.write_all(&payload[..300_000]);
+    let _ = stream.write_all(b"\r\n");
+    let _ = stream.flush();
+    let socket: socket2::Socket = stream.into();
+    let _ = socket.set_linger(Some(Duration::ZERO));
+    let _ = socket.shutdown(std::net::Shutdown::Both);
 }
 
 fn slow_payload() -> Vec<u8> {

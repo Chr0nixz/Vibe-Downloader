@@ -14,12 +14,10 @@
 //! reporting sites read the offset back from the writer — so an unflushed
 //! offset cannot leave this module by construction.
 
+use crate::download::owned_fs as fs;
 use std::{io::SeekFrom, path::Path};
 
-use tokio::{
-    fs,
-    io::{AsyncSeekExt, AsyncWriteExt, BufWriter},
-};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 
 pub(in crate::download::http) struct SegmentFileWriter {
     inner: BufWriter<fs::File>,
@@ -92,7 +90,7 @@ mod tests {
                 .expect("time")
                 .as_nanos()
         ));
-        tokio::fs::File::create(&path)
+        crate::download::owned_fs::File::create(&path)
             .await
             .expect("create temp file");
         path
@@ -122,7 +120,7 @@ mod tests {
         writer.sync().await.expect("sync");
         assert_eq!(writer.durable_offset(), 96);
 
-        let _ = tokio::fs::remove_file(&path).await;
+        let _ = crate::download::owned_fs::remove_file(&path).await;
     }
 
     /// A failed write must not advance the durable watermark: the failure path
@@ -144,7 +142,7 @@ mod tests {
         writer.sync().await.expect("sync after failure");
         assert_eq!(writer.durable_offset(), 16);
 
-        let _ = tokio::fs::remove_file(&path).await;
+        let _ = crate::download::owned_fs::remove_file(&path).await;
     }
 
     /// Bytes below the durable watermark must be physically on disk: reopen
@@ -161,9 +159,11 @@ mod tests {
         writer.sync().await.expect("sync");
         drop(writer);
 
-        let on_disk = tokio::fs::read(&path).await.expect("read back");
+        let on_disk = crate::download::owned_fs::read(&path)
+            .await
+            .expect("read back");
         assert_eq!(on_disk, payload);
 
-        let _ = tokio::fs::remove_file(&path).await;
+        let _ = crate::download::owned_fs::remove_file(&path).await;
     }
 }

@@ -9,6 +9,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use reqwest::{Client, StatusCode};
 
 use super::net_factory::NetworkClientFactory;
+use super::network_policy::NetworkPolicy;
 use super::GlobalSpeedLimiter;
 use crate::{
     db,
@@ -20,14 +21,23 @@ use crate::{
 use self::{
     direct::run_direct_download,
     direct::run_direct_segmented_download,
-    error::format_http_status,
+    error::format_http_status_with_retry_after,
     probe::probe_from_response,
-    request::{send_get_with_retry, send_head_with_retry},
+    request::{retry_after_at, send_get_with_retry, send_head_with_retry},
     segmented::run_segmented_download,
 };
 
-pub(crate) use error::format_http_status as format_http_status_error;
-pub(crate) use request::{headers_for_origin, merge_basic_auth_headers, url_origin};
+pub(crate) use request::{
+    apply_forwarded_headers, headers_for_origin, merge_basic_auth_headers, send_request,
+    send_request_with_error_mapper, url_origin,
+};
+
+/// Preserve Retry-After metadata for every HTTP-derived engine, including
+/// HLS, DASH, and Metalink paths that receive the response outside the core
+/// segmented worker.
+pub(crate) fn format_http_response_error(response: &reqwest::Response) -> String {
+    error::format_http_status_with_retry_after(response.status(), request::retry_after_at(response))
+}
 
 use super::engine::EngineFuture;
 use super::{DownloadContext, DownloadEngine, DownloadError, ProbeOutput, ProbeRequest};
@@ -123,6 +133,18 @@ impl HttpEngine {
         self.factory.client_for(config).await
     }
 
+    pub async fn proxy_config(&self) -> ResolvedProxyConfig {
+        self.proxy_config.read().await.clone()
+    }
+
+    pub async fn client_for_network_policy(
+        &self,
+        config: &ResolvedProxyConfig,
+        network_policy: &NetworkPolicy,
+    ) -> Result<Client, String> {
+        self.factory.client_for_policy(config, network_policy).await
+    }
+
     /// E-4: Returns the current client cache entry count. Used by integration tests to verify
     /// that the shared cache is correctly cleared after `set_proxy_config` (four HTTP-derived engines share the same `Arc<HttpEngine>`).
     pub async fn client_cache_len(&self) -> usize {
@@ -154,13 +176,32 @@ impl HttpEngine {
         request_headers: &[(String, String)],
         proxy_config: Option<&ResolvedProxyConfig>,
     ) -> Result<ProbeResult, String> {
+        self.probe_with_headers_and_proxy_and_policy(
+            url,
+            request_headers,
+            proxy_config,
+            &NetworkPolicy::default(),
+        )
+        .await
+    }
+
+    pub async fn probe_with_headers_and_proxy_and_policy(
+        &self,
+        url: &str,
+        request_headers: &[(String, String)],
+        proxy_config: Option<&ResolvedProxyConfig>,
+        network_policy: &NetworkPolicy,
+    ) -> Result<ProbeResult, String> {
         let client = if let Some(config) = proxy_config {
-            self.client_for_config(config).await?
+            self.client_for_network_policy(config, network_policy)
+                .await?
         } else {
-            self.client().await?
+            let config = self.proxy_config.read().await.clone();
+            self.client_for_network_policy(&config, network_policy)
+                .await?
         };
         let sanitized = sanitize_url(url);
-        let head = send_head_with_retry(&client, url, request_headers).await;
+        let head = send_head_with_retry(&client, url, request_headers, network_policy).await;
         if let Ok(response) = head {
             if response.status().is_success() {
                 let probe = probe_from_response(url, &response, false)?;
@@ -189,11 +230,15 @@ impl HttpEngine {
             Some("bytes=0-0".to_string()),
             None,
             request_headers,
+            network_policy,
         )
         .await?;
 
         if !response.status().is_success() {
-            return Err(format_http_status(response.status()));
+            return Err(format_http_status_with_retry_after(
+                response.status(),
+                retry_after_at(&response),
+            ));
         }
 
         let probe = probe_from_response(
@@ -214,12 +259,23 @@ impl HttpEngine {
 
     pub async fn download(&self, context: DownloadContext) -> Result<(), String> {
         // FUN-02: use the task-resolved proxy from DownloadContext, not only global.
-        let client = self.client_for_config(&context.proxy_config).await?;
+        let client = self
+            .client_for_network_policy(&context.proxy_config, &context.network_policy)
+            .await?;
         // FUN-01: inject Basic Auth from encrypted task credentials at runtime.
         // Authorization is never persisted in task_request_headers.
         let credentials = db::resolve_task_credentials(&context.pool, &context.task.id).await?;
         let request_headers =
             request::merge_basic_auth_headers(&context.request_headers, credentials.as_ref());
+        let request_headers = headers_for_origin(
+            &request_headers,
+            &url_origin(&context.task.url).unwrap_or_default(),
+            context
+                .task
+                .final_url
+                .as_deref()
+                .unwrap_or(&context.task.url),
+        );
         run_segmented_download(segmented::SegmentedDownloadContext {
             client: &client,
             app: context.app,
@@ -229,6 +285,7 @@ impl HttpEngine {
             speed_limiter: context.speed_limiter,
             connection_limit: context.connection_limit,
             request_headers,
+            network_policy: context.network_policy,
         })
         .await
     }
@@ -239,11 +296,13 @@ impl HttpEngine {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<i64, String> {
         let client = self.client().await?;
+        let network_policy = NetworkPolicy::default();
         run_direct_download(
             &client,
             request,
             cancel_token,
             GlobalSpeedLimiter::disabled(),
+            &network_policy,
         )
         .await
     }
@@ -255,7 +314,15 @@ impl HttpEngine {
         speed_limiter: Arc<GlobalSpeedLimiter>,
     ) -> Result<i64, String> {
         let client = self.client().await?;
-        run_direct_download(&client, request, cancel_token, speed_limiter).await
+        let network_policy = NetworkPolicy::default();
+        run_direct_download(
+            &client,
+            request,
+            cancel_token,
+            speed_limiter,
+            &network_policy,
+        )
+        .await
     }
 
     pub async fn download_segmented_direct(
@@ -264,11 +331,13 @@ impl HttpEngine {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<i64, String> {
         let client = self.client().await?;
+        let network_policy = NetworkPolicy::default();
         run_direct_segmented_download(
             &client,
             request,
             cancel_token,
             GlobalSpeedLimiter::disabled(),
+            &network_policy,
         )
         .await
     }
@@ -307,11 +376,12 @@ impl DownloadEngine for HttpEngine {
             };
             let headers =
                 request::merge_basic_auth_headers(&request.request_headers, credentials.as_ref());
-            let probe = HttpEngine::probe_with_headers_and_proxy(
+            let probe = HttpEngine::probe_with_headers_and_proxy_and_policy(
                 self,
                 &request.uri,
                 &headers,
                 request.proxy_config.as_ref(),
+                &request.network_policy,
             )
             .await
             .map_err(DownloadError::Other)?;
@@ -349,10 +419,10 @@ impl DownloadEngine for HttpEngine {
         &'a self,
         context: DownloadContext,
     ) -> EngineFuture<'a, Result<(), DownloadError>> {
-        Box::pin(async move {
+        Box::pin(crate::download::lifecycle::run_owned(async move {
             HttpEngine::download(self, context)
                 .await
                 .map_err(DownloadError::Other)
-        })
+        }))
     }
 }

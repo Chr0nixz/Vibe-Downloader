@@ -5,6 +5,9 @@
   "statusReady": { "message": "Ready" },
   "statusSending": { "message": "Sending..." },
   "statusSent": { "message": "Sent" },
+  "statusAuthorizationRequired": { "message": "Authorize in Vibe Downloader" },
+  "statusFailed": { "message": "Failed" },
+  "statusDuplicate": { "message": "Already received" },
   "statusDisconnected": { "message": "Disconnected" },
   "statusUnknown": { "message": "unknown" },
 

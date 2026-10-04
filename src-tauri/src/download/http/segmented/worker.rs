@@ -14,8 +14,8 @@ use reqwest::{
 use tokio::sync::mpsc;
 
 use super::super::{
-    error::format_http_status,
-    request::{apply_forwarded_headers, is_retryable_status, retry_after_duration},
+    error::format_http_status_with_retry_after,
+    request::{apply_forwarded_headers, is_retryable_status, retry_after_at, retry_after_duration},
     HTTP_CHUNK_READ_TIMEOUT,
 };
 use super::{
@@ -24,6 +24,7 @@ use super::{
     SegmentFailure, SegmentMessage, MAX_SEGMENT_RETRIES,
 };
 use crate::{
+    download::network_policy::NetworkPolicy,
     download::GlobalSpeedLimiter,
     models::{AppErrorPayload, RequestDiagnosticRecord, TaskSegmentRecord},
 };
@@ -43,6 +44,7 @@ pub(in crate::download::http) struct SegmentWorkerRequest {
     pub(in crate::download::http) speed_limiter: Arc<GlobalSpeedLimiter>,
     pub(in crate::download::http) request_headers: Vec<(String, String)>,
     pub(in crate::download::http) if_range: Option<String>,
+    pub(in crate::download::http) network_policy: NetworkPolicy,
 }
 
 pub(in crate::download::http) async fn download_segment_worker(
@@ -63,12 +65,21 @@ pub(in crate::download::http) async fn download_segment_worker(
         speed_limiter,
         request_headers,
         if_range,
+        network_policy,
     } = request;
 
     let mut offset = segment
         .downloaded_until
         .clamp(segment.range_start, segment.range_end.saturating_add(1));
-    let mut retry_count = segment.retry_count.max(0);
+    // ARC-56: `segment.retry_count` is the cumulative diagnostic counter across
+    // runs (persisted by update_segment_retry, surfaced in request diagnostics).
+    // The retry budget must reset per run: a segment that exhausted its 5
+    // attempts during one outage used to start the next run at 5, so a user
+    // "Retry" had zero attempts left and the task failed on the first transient
+    // error. Track this run's attempts separately; keep incrementing the record
+    // so persisted diagnostics stay cumulative.
+    let mut segment = segment;
+    let mut run_retries = 0_i32;
 
     loop {
         if cancel_token.is_cancelled() {
@@ -91,19 +102,21 @@ pub(in crate::download::http) async fn download_segment_worker(
             speed_limiter: &speed_limiter,
             request_headers: &request_headers,
             if_range: if_range.as_deref(),
+            network_policy: &network_policy,
             offset,
         })
         .await
         {
             Ok(_) => return Ok(()),
-            Err(error) if error.retryable && retry_count < MAX_SEGMENT_RETRIES => {
+            Err(error) if error.retryable && run_retries < MAX_SEGMENT_RETRIES => {
                 offset = error.failure.downloaded_until;
-                retry_count += 1;
+                run_retries += 1;
+                segment.retry_count = segment.retry_count.max(0) + 1;
                 send_segment_retry(
                     &progress_tx,
                     &segment.id,
                     offset,
-                    retry_count,
+                    segment.retry_count,
                     &error.failure.error,
                 )
                 .await?;
@@ -115,9 +128,12 @@ pub(in crate::download::http) async fn download_segment_worker(
                 // 60s must not delay pause/cancel convergence past the 5s command drain.
                 // The offset is durable (published through durable_checkpoint), so
                 // reporting it here keeps the checkpoint honest.
+                //
+                // ARC-56: back off from this run's attempt count, not the cumulative
+                // counter — a resumed segment must not start at the 15s ceiling.
                 let backoff = error
                     .retry_after
-                    .unwrap_or_else(|| retry_delay(retry_count));
+                    .unwrap_or_else(|| retry_delay(run_retries));
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
                         send_segment_progress(&progress_tx, &segment.id, offset, 0).await?;
@@ -146,6 +162,7 @@ struct SegmentAttemptRequest<'a> {
     speed_limiter: &'a Arc<GlobalSpeedLimiter>,
     request_headers: &'a [(String, String)],
     if_range: Option<&'a str>,
+    network_policy: &'a NetworkPolicy,
     offset: i64,
 }
 
@@ -173,6 +190,7 @@ async fn download_segment_once(
         speed_limiter,
         request_headers,
         if_range,
+        network_policy,
         mut offset,
     } = request;
 
@@ -193,6 +211,12 @@ async fn download_segment_once(
         )));
     }
 
+    let parsed_url = reqwest::Url::parse(url)
+        .map_err(|error| non_retryable(segment_failure(segment, offset, &error.to_string())))?;
+    network_policy
+        .assert_literal(&parsed_url)
+        .map_err(|error| non_retryable(segment_failure(segment, offset, &error)))?;
+
     let mut http_request = apply_forwarded_headers(client.get(url), request_headers)
         .header(ACCEPT_ENCODING, "identity");
     let range_header = if use_range {
@@ -208,7 +232,8 @@ async fn download_segment_once(
     }
 
     let started_at = Instant::now();
-    let mut response = match http_request.send().await {
+    let mut response = match crate::download::http::send_request(http_request, network_policy).await
+    {
         Ok(response) => {
             let record = response_diagnostic_record(
                 task_id,
@@ -226,7 +251,7 @@ async fn download_segment_once(
             response
         }
         Err(error) => {
-            let message = format!("Could not connect to the server: {error}");
+            let message = error;
             let record = error_diagnostic_record(
                 task_id,
                 "GET",
@@ -240,14 +265,25 @@ async fn download_segment_once(
             send_request_diagnostic(progress_tx, record)
                 .await
                 .map_err(non_retryable_attempt)?;
-            return Err(retryable(segment_failure(segment, offset, &message)));
+            let failure = segment_failure(segment, offset, &message);
+            return if serde_json::from_str::<AppErrorPayload>(&message)
+                .is_ok_and(|payload| payload.recoverable)
+            {
+                Err(retryable(failure))
+            } else {
+                Err(non_retryable(failure))
+            };
         }
     };
 
     if !response.status().is_success() {
         let status = response.status();
         let retry_after = retry_after_duration(&response);
-        let failure = segment_failure(segment, offset, &format_http_status(status));
+        let failure = segment_failure(
+            segment,
+            offset,
+            &format_http_status_with_retry_after(status, retry_after_at(&response)),
+        );
         return if is_retryable_status(status) {
             Err(retryable_with_delay(failure, retry_after))
         } else {
@@ -312,18 +348,23 @@ async fn download_segment_once(
                     // resume checkpoint, so buffered bytes must land on disk
                     // before it is published.
                     let offset = durable_checkpoint(&mut file, segment).await?;
-                    return Err(retryable(segment_failure(
-                        segment,
-                        offset,
-                        &format!("The connection failed while downloading: {e}"),
-                    )));
+                    let failure_message =
+                        crate::download::probe_error::reqwest_error_to_structured(&e);
+                    let failure = segment_failure(segment, offset, &failure_message);
+                    return if crate::download::probe_error::is_transient_reqwest_error(&e) {
+                        Err(retryable(failure))
+                    } else {
+                        Err(non_retryable(failure))
+                    };
                 }
                 Err(_) => {
                     let offset = durable_checkpoint(&mut file, segment).await?;
                     return Err(retryable(segment_failure(
                         segment,
                         offset,
-                        "Connection stalled: no data received for 60 seconds.",
+                        &crate::download::probe_error::structured_timeout_error(
+                            "Connection stalled: no data received for 60 seconds.",
+                        ),
                     )));
                 }
             }

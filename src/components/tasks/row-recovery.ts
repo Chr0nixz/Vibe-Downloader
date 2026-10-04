@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import type { RecoveryAction } from "@/generated/bindings";
 import { parseAppError, recoveryActionsForError } from "@/lib/errors";
 import type { Task } from "@/types/task";
@@ -5,6 +6,21 @@ import type { Task } from "@/types/task";
 type RecoveryTask = Pick<Task, "status" | "supportsResume"> &
   Partial<Pick<Task, "errorMessage" | "recoveryActions">> &
   Partial<Pick<Task, "errorCode">>;
+
+/** The BT metadata handoff uses the existing navigation action, but its
+ * destination is the task's file-selection panel rather than the source URL.
+ * Keep this mapping tied to the stable code so other `check_url` recoveries
+ * retain their normal meaning. */
+export function torrentFileSelectionRequired(task: Partial<Pick<Task, "errorCode" | "errorMessage">>): boolean {
+  return (task.errorCode ?? parseAppError(task.errorMessage)?.code) === "bt_file_selection_required";
+}
+
+export function recoveryActionLabel(task: RecoveryTask, action: RecoveryAction, t: TFunction): string {
+  if (action === "check_url" && torrentFileSelectionRequired(task)) {
+    return t("newDownload.chooseFile");
+  }
+  return t(`recovery.${action}`);
+}
 
 const RESTART_REQUIRED_CODES = new Set([
   "remote_changed",

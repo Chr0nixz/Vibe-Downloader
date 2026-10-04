@@ -1,3 +1,5 @@
+use crate::download::lifecycle::JoinSet;
+use crate::download::owned_fs as fs;
 use std::{
     collections::{HashMap, VecDeque},
     io::SeekFrom,
@@ -21,10 +23,8 @@ use russh_sftp::protocol::StatusCode;
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 use tokio::{
-    fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter},
     sync::{mpsc, Mutex},
-    task::JoinSet,
 };
 
 use super::{
@@ -135,7 +135,12 @@ struct SegmentProgress {
     downloaded_until: i64,
     speed_bps: i64,
     status: SegmentStatus,
+    /// ARC-56: cumulative diagnostic counter persisted to task_work_units.
     retry_count: i32,
+    /// ARC-56: retry budget for the current coordinator run only. Starts at 0
+    /// even when `retry_count` carries history, so a user retry after an
+    /// exhausted budget gets the full SFTP_WORKER_RETRIES allowance again.
+    run_retry_count: i32,
     dirty: bool,
 }
 
@@ -152,6 +157,7 @@ struct WorkerRequest {
     speed_limiter: Arc<GlobalSpeedLimiter>,
     progress_tx: mpsc::UnboundedSender<WorkerProgress>,
     proxy_config: ResolvedProxyConfig,
+    network_policy: crate::download::network_policy::NetworkPolicy,
 }
 
 #[derive(Debug)]
@@ -172,6 +178,7 @@ impl SftpEngine {
         Self { proxy_config }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn probe_target(
         &self,
         pool: &SqlitePool,
@@ -179,6 +186,7 @@ impl SftpEngine {
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
         request_proxy: Option<&ResolvedProxyConfig>,
+        network_policy: &crate::download::network_policy::NetworkPolicy,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ProbeOutput, String> {
         // FUN-20: the task-resolved proxy must drive the probe too. Fall back
@@ -193,7 +201,9 @@ impl SftpEngine {
             "verifying_host_key",
             Some("sftp"),
         );
-        let connection = connect_sftp(pool, &target, &proxy_config, cancel_token).await?;
+        let connection =
+            connect_sftp_with_policy(pool, &target, &proxy_config, network_policy, cancel_token)
+                .await?;
         crate::download::engine::emit_probe_phase(
             app,
             request_id,
@@ -352,6 +362,7 @@ impl DownloadEngine for SftpEngine {
                 &request.app,
                 &request.request_id,
                 request.proxy_config.as_ref(),
+                &request.network_policy,
                 request.cancel_token.as_ref(),
             )
             .await
@@ -363,11 +374,11 @@ impl DownloadEngine for SftpEngine {
         &'a self,
         context: DownloadContext,
     ) -> EngineFuture<'a, Result<(), DownloadError>> {
-        Box::pin(async move {
+        Box::pin(crate::download::lifecycle::run_owned(async move {
             self.run_download(context)
                 .await
                 .map_err(DownloadError::Other)
-        })
+        }))
     }
 }
 
@@ -390,8 +401,35 @@ pub async fn probe_sftp_directory_url_cancellable(
     credentials: Option<&db::TaskCredentials>,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<SftpDirectoryProbe, String> {
-    let future =
-        probe_sftp_directory_inner(pool, input_url, proxy_config, credentials, cancel_token);
+    let network_policy = crate::download::network_policy::NetworkPolicy::default();
+    probe_sftp_directory_url_cancellable_with_policy(
+        pool,
+        input_url,
+        proxy_config,
+        credentials,
+        &network_policy,
+        cancel_token,
+    )
+    .await
+}
+
+/// Directory probe entry point used by task creation with a task-bound grant.
+pub async fn probe_sftp_directory_url_cancellable_with_policy(
+    pool: &SqlitePool,
+    input_url: &str,
+    proxy_config: ResolvedProxyConfig,
+    credentials: Option<&db::TaskCredentials>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<SftpDirectoryProbe, String> {
+    let future = probe_sftp_directory_inner(
+        pool,
+        input_url,
+        proxy_config,
+        credentials,
+        network_policy,
+        cancel_token,
+    );
     match crate::download::bounded_probe(future, cancel_token).await {
         crate::download::BoundedProbeOutcome::Done(probe) => Ok(probe),
         crate::download::BoundedProbeOutcome::Error(error) => Err(error),
@@ -409,6 +447,7 @@ async fn probe_sftp_directory_inner(
     input_url: &str,
     proxy_config: ResolvedProxyConfig,
     credentials: Option<&db::TaskCredentials>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<SftpDirectoryProbe, String> {
     let mut target = SftpTarget::parse_directory(input_url)?;
@@ -423,7 +462,9 @@ async fn probe_sftp_directory_inner(
         }
     }
     let mut diagnostics = Vec::new();
-    let connection = connect_sftp(pool, &target, &proxy_config, cancel_token).await?;
+    let connection =
+        connect_sftp_with_policy(pool, &target, &proxy_config, network_policy, cancel_token)
+            .await?;
     let canonical = connection.session.canonicalize(&target.path).await.ok();
     if let Some(canonical) = canonical.as_deref() {
         diagnostics.push(format!("REALPATH {canonical} succeeded"));
@@ -479,12 +520,20 @@ async fn revalidate_sftp_remote(
     proxy_config: &ResolvedProxyConfig,
     cancel_token: &tokio_util::sync::CancellationToken,
     task: &TaskRecord,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<(), String> {
     if task.downloaded_bytes <= 0 {
         // Fresh start: there are no local bytes to stitch with.
         return Ok(());
     }
-    let connection = connect_sftp(pool, target, proxy_config, Some(cancel_token)).await?;
+    let connection = connect_sftp_with_policy(
+        pool,
+        target,
+        proxy_config,
+        network_policy,
+        Some(cancel_token),
+    )
+    .await?;
     let metadata = match connection.session.metadata(&target.path).await {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -525,6 +574,7 @@ async fn run_sftp_download(
         cancel_token,
         speed_limiter,
         connection_limit,
+        network_policy,
         ..
     } = context;
 
@@ -577,7 +627,15 @@ async fn run_sftp_download(
     // ARC-42: workers seek blind on both sides of the transfer, so a remote
     // file replaced with the same size would stitch old and new bytes
     // undetected. Revalidate the remote identity before any worker starts.
-    revalidate_sftp_remote(&pool, &target, &proxy_config, &cancel_token, &task).await?;
+    revalidate_sftp_remote(
+        &pool,
+        &target,
+        &proxy_config,
+        &cancel_token,
+        &task,
+        &network_policy,
+    )
+    .await?;
 
     let mut running: HashMap<String, SegmentRuntime> = HashMap::new();
     let mut workers = JoinSet::new();
@@ -602,6 +660,7 @@ async fn run_sftp_download(
         &mut running,
         &mut workers,
         &proxy_config,
+        &network_policy,
     );
     emit_sftp_progress(
         &mut progress,
@@ -664,7 +723,10 @@ async fn run_sftp_download(
                             return Err(error);
                         };
                         segment.status = SegmentStatus::Pending;
+                        // ARC-56: cumulative counter feeds diagnostics only;
+                        // the per-run budget decides failure and backoff.
                         segment.retry_count += 1;
+                        segment.run_retry_count += 1;
                         segment.speed_bps = 0;
                         segment.dirty = false;
                         db::update_segment_retry(
@@ -692,11 +754,11 @@ async fn run_sftp_download(
                             ).await?;
                             db::insert_task_event(&pool, &task.id, "sftp_acceleration_disabled", Some(&error)).await?;
                         }
-                        if segment.retry_count > SFTP_WORKER_RETRIES {
+                        if segment.run_retry_count > SFTP_WORKER_RETRIES {
                             return Err(error);
                         }
                         let delay = retry_policy.delay_for_attempt(
-                            u32::try_from(segment.retry_count).unwrap_or(1),
+                            u32::try_from(segment.run_retry_count).unwrap_or(1),
                         );
                         if !delay.is_zero() {
                             tokio::select! {
@@ -754,6 +816,7 @@ async fn run_sftp_download(
                 &mut running,
                 &mut workers,
                 &proxy_config,
+                &network_policy,
             );
         }
 
@@ -780,6 +843,7 @@ async fn run_sftp_download(
                         speed_bps: 0,
                         status: SegmentStatus::Pending,
                         retry_count: 0,
+                        run_retry_count: 0,
                         dirty: true,
                     },
                 );
@@ -898,6 +962,7 @@ fn start_next_sftp_worker(
     running: &mut HashMap<String, SegmentRuntime>,
     workers: &mut JoinSet<WorkerFinished>,
     proxy_config: &ResolvedProxyConfig,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) {
     let Some(segment) = pending.pop_front() else {
         return;
@@ -921,6 +986,7 @@ fn start_next_sftp_worker(
         speed_limiter: speed_limiter.clone(),
         progress_tx: progress_tx.clone(),
         proxy_config: proxy_config.clone(),
+        network_policy: network_policy.clone(),
     };
     workers.spawn(async move {
         let segment_id = request.segment.id.clone();
@@ -979,10 +1045,11 @@ fn report_sftp_worker_offset(request: &WorkerRequest, offset: i64, speed_bps: i6
 async fn download_sftp_segment_inner(request: &WorkerRequest) -> Result<i64, String> {
     // Each worker establishes its own SSH channel + SFTP subsystem so that
     // multiple segments can transfer in parallel (Path A from the PoC).
-    let connection = connect_sftp(
+    let connection = connect_sftp_with_policy(
         &request.pool,
         &request.target,
         &request.proxy_config,
+        &request.network_policy,
         Some(&request.cancel_token),
     )
     .await?;
@@ -1287,7 +1354,13 @@ fn progress_from_segments(segments: &[TaskSegmentRecord]) -> HashMap<String, Seg
                     downloaded_until: segment.downloaded_until,
                     speed_bps: segment.speed_bps,
                     status: segment.status,
+                    // ARC-56: carry the cumulative counter forward for
+                    // diagnostics, but the per-run budget starts fresh so a
+                    // segment that exhausted SFTP_WORKER_RETRIES in a previous
+                    // run still gets its full retry allowance after the user
+                    // hits "Retry".
                     retry_count: segment.retry_count,
+                    run_retry_count: 0,
                     dirty: false,
                 },
             )
@@ -1404,10 +1477,11 @@ fn planned_sftp_split(segment: &SegmentProgress) -> Option<SftpSplit> {
 /// waited for the OS connect timeout per attempt.
 const SFTP_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
-async fn connect_sftp(
+async fn connect_sftp_with_policy(
     pool: &SqlitePool,
     target: &SftpTarget,
     proxy_config: &ResolvedProxyConfig,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<SftpConnection, String> {
     if target.username.is_empty() {
@@ -1426,11 +1500,21 @@ async fn connect_sftp(
     }
     // SEC-12: SFTP control connections bypass reqwest, so the client-level
     // SSRF layers never see them. Full authority pre-flight before connecting.
-    let authority = reqwest::Url::parse(&format!("sftp://{}:{}", target.host, target.port))
-        .map_err(|e| format!("Could not resolve SFTP target: {e}"))?;
-    crate::download::ssrf::assert_connectable_authority(&authority)
+    let authority = reqwest::Url::parse(&crate::download::network_policy::format_authority_url(
+        PROTOCOL_SFTP,
+        &target.host,
+        target.port,
+    ))
+    .map_err(|e| format!("Could not resolve SFTP target: {e}"))?;
+    let address = network_policy
+        .resolve(&authority)
         .await
-        .map_err(|e| engine_error("intranet_target_blocked", e, false))?;
+        .map_err(|e| engine_error("intranet_target_blocked", e, false))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            crate::download::network_policy::blocked("DNS returned no usable addresses")
+        })?;
     let connect_policy = RetryPolicy::sftp_connect();
     let connect_future = with_retry_if(
         &connect_policy,
@@ -1460,14 +1544,14 @@ async fn connect_sftp(
                         &proxy_url,
                         proxy_config.username.as_deref(),
                         proxy_config.password.as_deref(),
-                        &target_host,
-                        target_port,
+                        &address.ip().to_string(),
+                        address.port(),
                     )
                     .await
                     .map_err(|error| proxy_connect_error("SFTP", &error))?;
                     client::connect_stream(config, stream, handler).await
                 } else {
-                    client::connect(config, (target_host.as_str(), target_port), handler).await
+                    client::connect(config, address, handler).await
                 };
                 match handle_result {
                     Ok(handle) => Ok(handle),
@@ -1695,7 +1779,11 @@ impl SftpTarget {
             password,
             path,
             file_name,
-            source_key: format!("sftp://{host}:{port}"),
+            source_key: crate::download::network_policy::format_authority_url(
+                PROTOCOL_SFTP,
+                &host,
+                port,
+            ),
             private_key_data: None,
             private_key_passphrase: None,
         })
@@ -1715,14 +1803,23 @@ fn sftp_file_url(target: &SftpTarget, path: &str) -> String {
             percent_encode_segment(&target.password)
         )
     };
+    let mut authority = crate::download::network_policy::format_authority_url(
+        PROTOCOL_SFTP,
+        &target.host,
+        target.port,
+    );
     if target.port == DEFAULT_SFTP_PORT {
-        format!("sftp://{}{}{}", credentials, target.host, encoded)
-    } else {
-        format!(
-            "sftp://{}{}:{}{}",
-            credentials, target.host, target.port, encoded
-        )
+        authority = authority
+            .strip_suffix(":22")
+            .unwrap_or(&authority)
+            .to_string();
     }
+    let authority = authority
+        .strip_prefix("sftp://")
+        .expect("SFTP authority formatter must include its scheme");
+    // Keep credentials in the URL only for the in-memory handoff to the SFTP
+    // client; stored task URLs are sanitized before they reach this helper.
+    format!("sftp://{credentials}{authority}{encoded}")
 }
 
 fn encode_remote_path(path: &str) -> String {

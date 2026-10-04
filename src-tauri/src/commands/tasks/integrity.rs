@@ -32,6 +32,10 @@ pub async fn build_integrity_passport(
     let task = require_task(pool, task_id).await?;
 
     let milestones = db::task_milestones(pool, task_id).await?;
+    // U09: completion is stored on the task row so it remains available after
+    // task-event retention prunes historical `completed` events. Legacy rows
+    // remain explicitly unknown instead of falling back to `updated_at`.
+    let completed_at = db::completed_at_for_task(pool, task_id).await?;
     let resume_count = count_to_u32(db::count_task_resumes(pool, task_id).await?)?;
     let segment_retries = count_to_u32(db::sum_task_segment_retries(pool, task_id).await?)?;
     let checksums = collect_checksums(pool, &task).await?;
@@ -62,7 +66,7 @@ pub async fn build_integrity_passport(
         downloaded_bytes: Some(task.downloaded_bytes.max(0).to_string()),
         created_at: task.created_at.clone(),
         started_at: milestones.started_at,
-        completed_at: milestones.completed_at,
+        completed_at,
         resume_count,
         segment_retries,
         supports_resume: task.supports_resume,

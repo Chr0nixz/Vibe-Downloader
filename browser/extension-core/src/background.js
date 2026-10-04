@@ -237,6 +237,12 @@ async function handleBrowserDownload(download) {
       headersAvailable: headerConsent.available || headers.length > 0,
       headerConsentState: headerConsent.state,
     });
+    if (result?.status === "authorization_required") {
+      // Keep the browser download available while the desktop app asks the
+      // user to authorize this exact private target.
+      await callApi(api.downloads.resume, download.id);
+      return;
+    }
     if (result?.status === "failed") throw new Error(result.errorMessage ?? "Vibe rejected the download.");
     await callApi(api.downloads.cancel, download.id);
     try {

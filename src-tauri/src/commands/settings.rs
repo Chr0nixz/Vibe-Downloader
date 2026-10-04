@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use specta::Type;
 use tauri::{AppHandle, Manager, State};
 
@@ -12,12 +12,26 @@ use crate::{
     AppState,
 };
 
+static SETTINGS_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSettingsInput {
     pub max_active_tasks: Option<i32>,
     pub default_save_dir: Option<String>,
-    pub global_speed_limit_bps: Option<String>,
+    /// `None` keeps the current value; `Some(None)` clears the limit; an inner
+    /// string sets it. The custom deserializer preserves explicit JSON null.
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    #[specta(type = Option<String>)]
+    pub global_speed_limit_bps: Option<Option<String>>,
     pub multi_connection_threshold_bytes: Option<String>,
     pub segment_count: Option<i32>,
     pub max_connections_per_host: Option<i32>,
@@ -40,18 +54,28 @@ pub struct UpdateSettingsInput {
     pub schedule_speed_limit_window_enabled: Option<bool>,
     pub schedule_speed_limit_window_start: Option<String>,
     pub schedule_speed_limit_window_end: Option<String>,
-    pub schedule_speed_limit_bps: Option<String>,
+    /// `None` keeps the current value; `Some(None)` clears the limit; an inner
+    /// string sets it. The custom deserializer preserves explicit JSON null.
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    #[specta(type = Option<String>)]
+    pub schedule_speed_limit_bps: Option<Option<String>>,
     pub titlebar_gradient_enabled: Option<bool>,
     pub completion_action: Option<CompletionAction>,
     pub completion_countdown_seconds: Option<i32>,
     pub completion_run_command: Option<String>,
+    /// ARC-58: fire the completion action when the queue drains with failures.
+    pub completion_include_failures: Option<bool>,
     pub delete_to_trash: Option<bool>,
     pub auto_update_check_enabled: Option<bool>,
     /// Custom ffmpeg binary path. `None` leaves the value unchanged; `Some(None)`
     /// clears the setting (falls back to env/PATH lookup).
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    #[specta(type = Option<String>)]
     pub ffmpeg_path: Option<Option<String>>,
     /// F-7: Global BitTorrent upload speed limit (bytes/sec). `None` leaves
     /// the value unchanged; `Some(None)` clears the limit (unlimited).
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    #[specta(type = Option<String>)]
     pub bt_upload_limit_bps: Option<Option<String>>,
 }
 
@@ -64,6 +88,26 @@ pub async fn get_settings(
     db::get_settings(&state.pool, default_download_dir(&app)?).await
 }
 
+/// UX-41: restore every app setting to its fresh-install default. The defaults
+/// come from the backend's own derivation (empty settings table), so the result
+/// always equals what `get_settings` returns on a brand-new database — the
+/// frontend no longer keeps a second, drift-prone copy (it previously reset
+/// `multiConnectionThresholdBytes` to 1 MiB while the backend default is 16 MiB).
+/// The keyring-stored proxy password is cleared alongside the DB rows, matching
+/// the old frontend behavior of sending `clearProxyPassword: true`.
+#[tauri::command]
+#[specta::specta]
+pub async fn reset_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppSettings, String> {
+    let _update_guard = SETTINGS_UPDATE_LOCK.lock().await;
+    let settings = db::reset_settings(&state.pool, default_download_dir(&app)?).await?;
+    proxy::clear_proxy_password()?;
+    apply_settings_side_effects(app, state, &settings).await?;
+    Ok(settings)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn update_settings(
@@ -71,6 +115,7 @@ pub async fn update_settings(
     state: State<'_, AppState>,
     input: UpdateSettingsInput,
 ) -> Result<AppSettings, String> {
+    let _update_guard = SETTINGS_UPDATE_LOCK.lock().await;
     let current = db::get_settings(&state.pool, default_download_dir(&app)?).await?;
     let max_active_tasks = input
         .max_active_tasks
@@ -80,7 +125,9 @@ pub async fn update_settings(
         resolve_save_dir(&app, input.default_save_dir, current.default_save_dir)?;
     let global_speed_limit_bps = input
         .global_speed_limit_bps
-        .and_then(|value| db::normalize_speed_limit_bps(&value));
+        .unwrap_or_else(|| current.global_speed_limit_bps.clone())
+        .as_deref()
+        .and_then(db::normalize_speed_limit_bps);
     let multi_connection_threshold_bytes = input
         .multi_connection_threshold_bytes
         .and_then(|value| db::normalize_multi_connection_threshold_bytes(&value))
@@ -188,7 +235,9 @@ pub async fn update_settings(
         .unwrap_or_else(|| current.schedule_speed_limit_window_end.clone());
     let schedule_speed_limit_bps = input
         .schedule_speed_limit_bps
-        .and_then(|value| db::normalize_speed_limit_bps(&value));
+        .unwrap_or_else(|| current.schedule_speed_limit_bps.clone())
+        .as_deref()
+        .and_then(db::normalize_speed_limit_bps);
     let titlebar_gradient_enabled = input
         .titlebar_gradient_enabled
         .unwrap_or(current.titlebar_gradient_enabled);
@@ -200,6 +249,9 @@ pub async fn update_settings(
     let completion_run_command = input
         .completion_run_command
         .unwrap_or_else(|| current.completion_run_command.clone());
+    let completion_include_failures = input
+        .completion_include_failures
+        .unwrap_or(current.completion_include_failures);
     // S-4: Audit-log changes to the completion run command — this is the
     // field that drives local command execution on task completion.
     if completion_run_command != current.completion_run_command {
@@ -254,6 +306,7 @@ pub async fn update_settings(
         completion_action,
         completion_countdown_seconds,
         completion_run_command,
+        completion_include_failures,
         delete_to_trash,
         auto_update_check_enabled,
         ffmpeg_path,
@@ -261,9 +314,22 @@ pub async fn update_settings(
     };
 
     db::upsert_settings(&state.pool, &settings).await?;
+    apply_settings_side_effects(app, state, &settings).await?;
+
+    Ok(settings)
+}
+
+/// Pushes freshly persisted settings into the running app. Shared by
+/// `update_settings` and `reset_settings` (UX-41) so a new runtime effect
+/// cannot be wired into one path and forgotten on the other.
+async fn apply_settings_side_effects(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: &AppSettings,
+) -> Result<(), String> {
     state
         .engine_registry
-        .set_proxy_config(proxy::ResolvedProxyConfig::from_settings(&settings))
+        .set_proxy_config(proxy::ResolvedProxyConfig::from_settings(settings))
         .await;
     state
         .speed_limiter
@@ -271,6 +337,15 @@ pub async fn update_settings(
             settings.global_speed_limit_bps.as_deref(),
         ))
         .await;
+    let default_dir = default_download_dir(&app).unwrap_or_default();
+    if let Err(error) = state
+        .scheduler
+        .refresh_speed_limit_policies(&state.pool, default_dir)
+        .await
+    {
+        tracing::warn!(error = %error, "active speed policy refresh failed after settings change");
+    }
+    state.scheduler.notify_speed_policy_changed();
     super::floating::sync_floating_status_window(&app, settings.floating_window_enabled)?;
     emit_settings_changed(&app);
     emit_queue_changed(&app);
@@ -280,10 +355,9 @@ pub async fn update_settings(
         .dispatch(app.clone(), state.pool.clone())
         .await;
     if let Err(error) = super::tasks::check_schedule_preemption(app, state).await {
-        tracing::warn!(error = %error, "schedule preemption check failed after settings update");
+        tracing::warn!(error = %error, "schedule preemption check failed after settings change");
     }
-
-    Ok(settings)
+    Ok(())
 }
 
 #[tauri::command]
@@ -335,5 +409,50 @@ fn truncate_for_audit(value: &str) -> &str {
         value
     } else {
         &value[..100]
+    }
+}
+
+#[cfg(test)]
+mod update_input_tests {
+    use super::UpdateSettingsInput;
+
+    #[test]
+    fn nullable_speed_limits_distinguish_omitted_clear_and_set() {
+        let omitted: UpdateSettingsInput =
+            serde_json::from_value(serde_json::json!({})).expect("omitted patch");
+        assert_eq!(omitted.global_speed_limit_bps, None);
+        assert_eq!(omitted.schedule_speed_limit_bps, None);
+        assert_eq!(omitted.ffmpeg_path, None);
+        assert_eq!(omitted.bt_upload_limit_bps, None);
+
+        let cleared: UpdateSettingsInput = serde_json::from_value(serde_json::json!({
+            "globalSpeedLimitBps": null,
+            "scheduleSpeedLimitBps": null,
+            "ffmpegPath": null,
+            "btUploadLimitBps": null
+        }))
+        .expect("clear patch");
+        assert_eq!(cleared.global_speed_limit_bps, Some(None));
+        assert_eq!(cleared.schedule_speed_limit_bps, Some(None));
+        assert_eq!(cleared.ffmpeg_path, Some(None));
+        assert_eq!(cleared.bt_upload_limit_bps, Some(None));
+
+        let set: UpdateSettingsInput = serde_json::from_value(serde_json::json!({
+            "globalSpeedLimitBps": "512000",
+            "scheduleSpeedLimitBps": "256000",
+            "ffmpegPath": "C:/tools/ffmpeg.exe",
+            "btUploadLimitBps": "64000"
+        }))
+        .expect("set patch");
+        assert_eq!(set.global_speed_limit_bps, Some(Some("512000".to_string())));
+        assert_eq!(
+            set.schedule_speed_limit_bps,
+            Some(Some("256000".to_string()))
+        );
+        assert_eq!(
+            set.ffmpeg_path,
+            Some(Some("C:/tools/ffmpeg.exe".to_string()))
+        );
+        assert_eq!(set.bt_upload_limit_bps, Some(Some("64000".to_string())));
     }
 }

@@ -81,6 +81,53 @@ pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, Str
     rows.iter().map(row_to_task).collect()
 }
 
+/// U09: completion is a durable task fact, separate from the mutable update
+/// timestamp. Legacy rows may legitimately have no value.
+pub async fn completed_at_for_task(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Option<String>, String> {
+    let row = sqlx::query("SELECT completed_at FROM tasks WHERE id = ?")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(row.and_then(|row| row.get::<Option<String>, _>("completed_at")))
+}
+
+/// Batch form used by paged task queries so adding the completion field does
+/// not turn a list page into one extra query per row.
+pub async fn completed_at_for_tasks(
+    pool: &SqlitePool,
+    task_ids: &[String],
+) -> Result<std::collections::HashMap<String, Option<String>>, String> {
+    if task_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut query = QueryBuilder::<Sqlite>::new("SELECT id, completed_at FROM tasks WHERE id IN (");
+    for (index, task_id) in task_ids.iter().enumerate() {
+        if index > 0 {
+            query.push(",");
+        }
+        query.push_bind(task_id);
+    }
+    query.push(")");
+    let rows = query
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<String, _>("id"),
+                row.get::<Option<String>, _>("completed_at"),
+            )
+        })
+        .collect())
+}
+
 /// E-1: Fetch multiple task records by ID in a single query. Used by the
 /// `list_tasks_by_ids` command to support incremental queue-changed upsert
 /// — when the backend emits `QueueChangedPayload { changed_task_ids: Some(ids) }`,
@@ -679,7 +726,49 @@ pub async fn list_queued_task_records(
     pool: &SqlitePool,
     limit: i64,
 ) -> Result<Vec<TaskRecord>, String> {
-    let rows = sqlx::query(
+    list_queued_task_records_page(
+        pool,
+        limit,
+        None,
+        &crate::models::task::now_iso(),
+        &[],
+        false,
+    )
+    .await
+}
+
+/// ARC-61: keyset order survives earlier candidates leaving the queue during dispatch.
+pub struct QueuedTaskCursor {
+    priority: i64,
+    queue_position: i64,
+    created_at: String,
+    id: String,
+}
+
+impl From<&TaskRecord> for QueuedTaskCursor {
+    fn from(task: &TaskRecord) -> Self {
+        Self {
+            priority: match task.priority {
+                TaskPriority::High => 0,
+                TaskPriority::Normal => 1,
+                TaskPriority::Low => 2,
+            },
+            queue_position: task.queue_position,
+            created_at: task.created_at.clone(),
+            id: task.id.clone(),
+        }
+    }
+}
+
+pub async fn list_queued_task_records_page(
+    pool: &SqlitePool,
+    limit: i64,
+    after: Option<&QueuedTaskCursor>,
+    eligible_before: &str,
+    blocked_hosts: &[&str],
+    outside_schedule: bool,
+) -> Result<Vec<TaskRecord>, String> {
+    let mut query = QueryBuilder::<Sqlite>::new(
         r#"
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
                total_size, downloaded_bytes, status, etag, last_modified, content_type,
@@ -689,16 +778,43 @@ pub async fn list_queued_task_records(
                expected_hash_sha256, actual_hash_sha256,
                hash_status, hash_error, hash_verified_at, created_at, updated_at, files_version
         FROM tasks
-        WHERE status = 'queued' AND (retry_after_at IS NULL OR retry_after_at <= ?)
-        ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, queue_position ASC, created_at ASC
-        LIMIT ?
+        WHERE status = 'queued' AND (retry_after_at IS NULL OR retry_after_at <=
         "#,
-    )
-    .bind(crate::models::task::now_iso())
-    .bind(limit.max(0))
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    );
+    query.push_bind(eligible_before).push(")");
+    // ARC-61: exclude whole blocked groups before sorting, so a long queue
+    // on one saturated host does not require scanning every page under the scheduler lock.
+    if outside_schedule {
+        query.push(" AND obey_schedule = 0");
+    }
+    if !blocked_hosts.is_empty() {
+        query.push(" AND source_key NOT IN (");
+        let mut hosts = query.separated(", ");
+        for host in blocked_hosts {
+            hosts.push_bind(*host);
+        }
+        hosts.push_unseparated(")");
+    }
+    if let Some(after) = after {
+        query
+            .push(" AND (CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, queue_position, created_at, id) > (")
+            .push_bind(after.priority)
+            .push(", ")
+            .push_bind(after.queue_position)
+            .push(", ")
+            .push_bind(&after.created_at)
+            .push(", ")
+            .push_bind(&after.id)
+            .push(")");
+    }
+    query
+        .push(" ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, queue_position, created_at, id LIMIT ")
+        .push_bind(limit.clamp(0, MAX_TASK_PAGE_SIZE));
+    let rows = query
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     rows.iter().map(row_to_task).collect()
 }

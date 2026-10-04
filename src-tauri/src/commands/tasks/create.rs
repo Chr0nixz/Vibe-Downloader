@@ -33,8 +33,20 @@ use super::{is_bt_protocol, is_dash_url, is_metalink_url, is_torrent_url, task_p
 #[serde(rename_all = "camelCase")]
 pub struct CreateTaskInput {
     pub url: String,
+    pub request_profile: Option<crate::models::TaskRequestProfileInput>,
+    pub network_authorization_id: Option<String>,
+    /// B3: preserve the trust surface that created the task so private-target
+    /// grants cannot silently change meaning between manual, import, and
+    /// browser paths.
+    pub source_kind: Option<crate::download::network_policy::TaskSource>,
     pub save_dir: Option<String>,
     pub file_name: Option<String>,
+    /// Keep the task paused after creation when the user chose to add it without starting.
+    #[serde(default)]
+    pub start_paused: Option<bool>,
+    /// Whether the scheduler should honor the global download window for this task.
+    #[serde(default)]
+    pub obey_schedule: Option<bool>,
     /// Legacy SHA-256-only field. Prefer `expected_hash` + `expected_hash_algorithm`
     /// for multi-algorithm manual verification (F-5). Kept for backward compatibility
     /// with older callers and browser handoff payloads.
@@ -73,6 +85,9 @@ pub struct CreateTaskInput {
 #[serde(rename_all = "camelCase")]
 pub struct ProbeTaskInput {
     pub url: String,
+    pub request_profile: Option<crate::models::TaskRequestProfileInput>,
+    pub network_authorization_id: Option<String>,
+    pub source_kind: Option<crate::download::network_policy::TaskSource>,
     pub username: Option<String>,
     pub password: Option<String>,
     pub private_key_data: Option<String>,
@@ -92,9 +107,14 @@ pub struct ProbeTaskInput {
 #[serde(rename_all = "camelCase")]
 pub struct ImportUrlsInput {
     pub input: String,
+    pub network_authorization_id: Option<String>,
+    pub source_kind: Option<crate::download::network_policy::TaskSource>,
     pub save_dir: Option<String>,
     pub probe: Option<bool>,
     pub create: Option<bool>,
+    /// Apply the task's download-window preference to every created URL.
+    #[serde(default)]
+    pub obey_schedule: Option<bool>,
     /// FUN-17: shared create-draft overrides applied to every created URL.
     pub expected_hash_sha256: Option<String>,
     pub expected_hash: Option<String>,
@@ -119,6 +139,8 @@ pub struct ImportUrlsInput {
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryProbeInput {
     pub url: String,
+    pub network_authorization_id: Option<String>,
+    pub source_kind: Option<crate::download::network_policy::TaskSource>,
     pub username: Option<String>,
     pub password: Option<String>,
     pub private_key_data: Option<String>,
@@ -142,7 +164,26 @@ pub async fn probe_task(
         return Err("Enter a download URL.".to_string());
     }
 
-    let request_headers = basic_auth_headers(input.username.as_deref(), input.password.as_deref());
+    let mut request_headers = input
+        .request_profile
+        .as_ref()
+        .map(|profile| crate::models::normalize_task_request_profile(url, profile))
+        .transpose()?
+        .unwrap_or_default();
+    request_headers.extend(basic_auth_headers(
+        input.username.as_deref(),
+        input.password.as_deref(),
+    ));
+    let source = input
+        .source_kind
+        .unwrap_or(crate::download::network_policy::TaskSource::Manual);
+    let network_policy = db::draft_network_policy(
+        &state.pool,
+        source,
+        url,
+        input.network_authorization_id.as_deref(),
+    )
+    .await?;
 
     tracing::debug!(url = %sanitize_url(url), "probing download url");
     let engine = state.engine_registry.engine_for_uri(url)?;
@@ -182,6 +223,7 @@ pub async fn probe_task(
             app: Some(app),
             request_id: input.request_id,
             cancel_token: None,
+            network_policy,
         })
         .await
         .map_err(|e| ensure_structured_error(e.to_string()))?;
@@ -207,12 +249,23 @@ async fn resolve_create_probe(
     proxy_username: Option<&str>,
     proxy_password: Option<&str>,
     proxy_no_proxy: Option<&str>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<ProbeOutput, String> {
-    if let Some(probe) = snapshot.and_then(|snapshot| probe_output_from_snapshot(url, snapshot)) {
-        return Ok(probe);
+    let engine = state.engine_registry.engine_for_uri(url)?;
+    if let Some(snapshot) = snapshot {
+        if let Some(probe) = probe_output_from_snapshot(url, snapshot) {
+            // A probe snapshot crosses the IPC boundary and is therefore an
+            // untrusted cache entry. Re-check the current engine contract and
+            // every network URL it would cause us to use before accepting it.
+            if snapshot_protocol_matches_engine(engine.id(), &probe.protocol)
+                && snapshot_protocol_matches_uri(&probe.protocol, &probe.resolved_uri)
+                && snapshot_network_targets_allowed(url, &probe.resolved_uri, network_policy).await
+            {
+                return Ok(probe);
+            }
+        }
     }
 
-    let engine = state.engine_registry.engine_for_uri(url)?;
     let global_proxy = state.engine_registry.proxy_config().await;
     let proxy_config = db::resolve_probe_proxy_config(
         &global_proxy,
@@ -235,6 +288,7 @@ async fn resolve_create_probe(
             app: None,
             request_id: None,
             cancel_token: None,
+            network_policy: network_policy.clone(),
         })
         .await
         .map_err(|e| ensure_structured_error(e.to_string()))
@@ -294,6 +348,55 @@ fn probe_output_from_snapshot(url: &str, snapshot: &ProbeTaskPayload) -> Option<
         hls_subtitle_tracks: snapshot.hls_subtitle_tracks.clone(),
         metalink: None,
     })
+}
+
+fn snapshot_protocol_matches_engine(engine_id: &str, protocol: &str) -> bool {
+    match engine_id {
+        "http" => matches!(protocol, "http" | "https"),
+        "ftp" => matches!(protocol, "ftp" | "ftps"),
+        "webdav" => matches!(protocol, "webdav" | "webdavs"),
+        "bt" => protocol == "bt",
+        id => protocol == id,
+    }
+}
+
+fn snapshot_protocol_matches_uri(protocol: &str, uri: &str) -> bool {
+    let Ok(url) = Url::parse(uri) else {
+        return false;
+    };
+    match protocol {
+        "http" | "https" => matches!(url.scheme(), "http" | "https"),
+        "ftp" | "ftps" => matches!(url.scheme(), "ftp" | "ftps"),
+        "sftp" => url.scheme() == "sftp",
+        "webdav" | "webdavs" => matches!(url.scheme(), "webdav" | "webdavs"),
+        "hls" => matches!(url.scheme(), "http" | "https"),
+        "dash" | "metalink" => matches!(url.scheme(), "http" | "https" | "file"),
+        "bt" => matches!(url.scheme(), "bt" | "magnet"),
+        _ => false,
+    }
+}
+
+fn is_network_policy_scheme(scheme: &str) -> bool {
+    matches!(
+        scheme,
+        "http" | "https" | "ftp" | "ftps" | "sftp" | "webdav" | "webdavs"
+    )
+}
+
+async fn snapshot_network_targets_allowed(
+    input_url: &str,
+    final_url: &str,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
+) -> bool {
+    for raw in [input_url, final_url] {
+        let Ok(url) = Url::parse(raw) else {
+            return false;
+        };
+        if is_network_policy_scheme(url.scheme()) && network_policy.resolve(&url).await.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 fn selected_relative_paths_for_probe(
@@ -583,6 +686,15 @@ async fn import_urls_core(
                                 app: None,
                                 request_id: None,
                                 cancel_token: None,
+                                network_policy: db::draft_network_policy(
+                                    &state.pool,
+                                    input.source_kind.unwrap_or(
+                                        crate::download::network_policy::TaskSource::Import,
+                                    ),
+                                    &normalized_url,
+                                    input.network_authorization_id.as_deref(),
+                                )
+                                .await?,
                             })
                             .await
                             .map_err(|e| ensure_structured_error(e.to_string())),
@@ -640,8 +752,17 @@ async fn import_urls_core(
                 state,
                 CreateTaskInput {
                     url: normalized_url,
+                    request_profile: None,
+                    network_authorization_id: input.network_authorization_id.clone(),
+                    source_kind: Some(
+                        input
+                            .source_kind
+                            .unwrap_or(crate::download::network_policy::TaskSource::Import),
+                    ),
                     save_dir: input.save_dir.clone(),
                     file_name: item.file_name.clone(),
+                    start_paused: Some(false),
+                    obey_schedule: input.obey_schedule,
                     expected_hash_sha256: input.expected_hash_sha256.clone(),
                     expected_hash: input.expected_hash.clone(),
                     expected_hash_algorithm: input.expected_hash_algorithm,
@@ -665,6 +786,8 @@ async fn import_urls_core(
                     proxy_no_proxy: input.proxy_no_proxy.clone(),
                 },
                 Vec::new(),
+                None,
+                None,
                 None,
             )
             .await
@@ -708,7 +831,79 @@ pub(crate) async fn create_task_with_state_and_headers(
     request_headers: Vec<(String, String)>,
     source_browser: Option<BrowserKind>,
 ) -> Result<Task, String> {
-    create_task_core(Some(&app), state, input, request_headers, source_browser).await
+    create_task_core(
+        Some(&app),
+        state,
+        input,
+        request_headers,
+        source_browser,
+        None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn create_task_with_state_and_headers_until(
+    app: AppHandle,
+    state: &AppState,
+    input: CreateTaskInput,
+    request_headers: Vec<(String, String)>,
+    source_browser: Option<BrowserKind>,
+    request_profile_sensitive_expires_at: Option<String>,
+    browser_header_expires_at: Option<String>,
+) -> Result<Task, String> {
+    create_task_core(
+        Some(&app),
+        state,
+        input,
+        request_headers,
+        source_browser,
+        request_profile_sensitive_expires_at,
+        browser_header_expires_at,
+    )
+    .await
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub async fn create_task_headless_with_headers(
+    state: &AppState,
+    input: CreateTaskInput,
+    request_headers: Vec<(String, String)>,
+    source_browser: Option<BrowserKind>,
+) -> Result<Task, String> {
+    create_task_core(
+        None,
+        state,
+        input,
+        request_headers,
+        source_browser,
+        None,
+        None,
+    )
+    .await
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub async fn create_task_headless_with_headers_until(
+    state: &AppState,
+    input: CreateTaskInput,
+    request_headers: Vec<(String, String)>,
+    source_browser: Option<BrowserKind>,
+    request_profile_sensitive_expires_at: Option<String>,
+    browser_header_expires_at: Option<String>,
+) -> Result<Task, String> {
+    create_task_core(
+        None,
+        state,
+        input,
+        request_headers,
+        source_browser,
+        request_profile_sensitive_expires_at,
+        browser_header_expires_at,
+    )
+    .await
 }
 
 async fn create_task_core(
@@ -717,10 +912,35 @@ async fn create_task_core(
     input: CreateTaskInput,
     request_headers: Vec<(String, String)>,
     source_browser: Option<BrowserKind>,
+    request_profile_sensitive_expires_at: Option<String>,
+    browser_header_expires_at: Option<String>,
 ) -> Result<Task, String> {
     let url = input.url.trim();
     if url.is_empty() {
         return Err("Enter a download URL.".to_string());
+    }
+    let profile_headers = input
+        .request_profile
+        .as_ref()
+        .map(|profile| crate::models::normalize_task_request_profile(url, profile))
+        .transpose()?
+        .unwrap_or_default();
+    let prepared_profile = input
+        .request_profile
+        .as_ref()
+        .map(|profile| {
+            db::prepare_task_request_profile_with_expiry(
+                url,
+                profile,
+                request_profile_sensitive_expires_at.as_deref(),
+            )
+        })
+        .transpose()?;
+    let browser_request_headers = request_headers;
+    let mut request_headers = browser_request_headers.clone();
+    for (name, value) in profile_headers {
+        request_headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&name));
+        request_headers.push((name, value));
     }
     let captured_credentials = db::legacy_credentials_from_url(url);
     let draft_credentials = if input
@@ -769,10 +989,27 @@ async fn create_task_core(
         headers
     };
 
+    let source = input.source_kind.unwrap_or_else(|| {
+        source_browser
+            .map(|_| crate::download::network_policy::TaskSource::Browser)
+            .unwrap_or(crate::download::network_policy::TaskSource::Manual)
+    });
+    let network_policy = db::draft_network_policy(
+        &state.pool,
+        source,
+        url,
+        input.network_authorization_id.as_deref(),
+    )
+    .await?;
     let probe = resolve_create_probe(
         state,
         url,
-        input.probe_snapshot.as_ref(),
+        // Profiles change resource negotiation and authentication. Re-probe at
+        // creation so callers cannot attach a snapshot from different headers.
+        input
+            .probe_snapshot
+            .as_ref()
+            .filter(|_| input.request_profile.is_none()),
         &auth_headers,
         draft_credentials.as_ref(),
         input.proxy_mode,
@@ -780,6 +1017,7 @@ async fn create_task_core(
         input.proxy_username.as_deref(),
         input.proxy_password.as_deref(),
         input.proxy_no_proxy.as_deref(),
+        &network_policy,
     )
     .await?;
     let storage_url = captured_credentials
@@ -873,6 +1111,8 @@ async fn create_task_core(
         .as_deref()
         .and_then(db::normalize_speed_limit_bps);
     let priority = input.priority.unwrap_or(TaskPriority::Normal);
+    let start_paused = input.start_paused.unwrap_or(false);
+    let obey_schedule = input.obey_schedule.unwrap_or(true);
     let mut category_key = input
         .category_key
         .as_deref()
@@ -987,7 +1227,11 @@ async fn create_task_core(
                 final_path: Some(final_path.to_string_lossy().to_string()),
                 total_size: task_total_size,
                 downloaded_bytes: 0,
-                status: TaskStatus::Queued,
+                status: if start_paused {
+                    TaskStatus::Paused
+                } else {
+                    TaskStatus::Queued
+                },
                 etag: probe.etag.clone(),
                 last_modified: probe.last_modified.clone(),
                 content_type: probe.content_type.clone(),
@@ -1001,8 +1245,12 @@ async fn create_task_core(
                 priority,
                 queue_position,
                 category_key: category_key.clone(),
-                obey_schedule: true,
-                health_summary: Some("Queued".to_string()),
+                obey_schedule,
+                health_summary: Some(if start_paused {
+                    "Paused".to_string()
+                } else {
+                    "Queued".to_string()
+                }),
                 error_message: None,
                 error_code: None,
                 recovery_actions: Vec::new(),
@@ -1063,6 +1311,12 @@ async fn create_task_core(
             // conflict part-way through can no longer leave a committed task
             // with a truncated file list.
             let inserted = db::insert_task_with_files_in_tx(&mut tx, &record, &file_records).await;
+            if inserted.is_ok() {
+                db::save_task_network_policy(&mut *tx, &record.id, &network_policy).await?;
+                if let Some(profile) = prepared_profile.as_ref() {
+                    db::save_task_request_profile(&mut tx, &record.id, profile).await?;
+                }
+            }
             let error = match inserted {
                 Ok(()) => match tx.commit().await {
                     Ok(()) => {
@@ -1223,6 +1477,10 @@ async fn create_task_core(
         .await?;
     }
     db::insert_task_event(&state.pool, &record.id, "created", None).await?;
+    if start_paused {
+        // A pause event makes the initial state explicit to recovery and scheduler code.
+        db::insert_task_event(&state.pool, &record.id, "paused", None).await?;
+    }
     // ARC-20: `file_records` were inserted atomically with the task row above.
     if let Some(metalink) = probe.metalink.as_ref() {
         persist_metalink_probe(&state.pool, &record, &file_records, metalink).await?;
@@ -1253,20 +1511,27 @@ async fn create_task_core(
             .await?;
         }
     }
-    if !request_headers.is_empty() {
-        state
-            .request_headers
-            .lock()
-            .await
-            .insert(record.id.clone(), request_headers.clone());
-        if let Err(error) = db::upsert_task_request_headers(
+    if !browser_request_headers.is_empty() {
+        let persistence = db::upsert_task_request_headers_with_expiry(
             &state.pool,
             &record.id,
-            &request_headers,
+            &browser_request_headers,
             source_browser,
+            browser_header_expires_at.as_deref(),
         )
-        .await
-        {
+        .await;
+        // Ordinary handoff keeps its historical in-memory fallback when the
+        // encrypted row cannot be written. A copied absolute expiry is a
+        // stronger contract: only cache it after persistence succeeds, so a
+        // race with the source TTL cannot bypass the expiry check.
+        if persistence.is_ok() || browser_header_expires_at.is_none() {
+            state
+                .request_headers
+                .lock()
+                .await
+                .insert(record.id.clone(), browser_request_headers.clone());
+        }
+        if let Err(error) = persistence {
             tracing::warn!(
                 task_id = %record.id,
                 error = %error,
@@ -1311,7 +1576,7 @@ pub async fn create_task_headless(
     state: &AppState,
     input: CreateTaskInput,
 ) -> Result<Task, String> {
-    create_task_core(None, state, input, Vec::new(), None).await
+    create_task_core(None, state, input, Vec::new(), None, None, None).await
 }
 
 #[cfg(debug_assertions)]
@@ -1346,6 +1611,13 @@ fn spawn_checksum_sidecar_discovery(
                 Some(credentials.password.as_str()),
             ));
         }
+        let origin = db::get_task_record(&pool, &task_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|task| crate::download::url_origin(&task.url))
+            .unwrap_or_default();
+        let headers = crate::download::bound_headers_for_origin(&headers, &origin, &final_url);
         let checksums =
             discover_checksum_sidecars(&app, &task_id, &final_url, &headers, &timestamp).await;
         if checksums.is_empty() {
@@ -1525,10 +1797,13 @@ async fn discover_checksum_sidecars(
     else {
         return Vec::new();
     };
+    let Ok(network_policy) = db::task_network_policy(&state.pool, task_id).await else {
+        return Vec::new();
+    };
     let Ok(client) = state
         .engine_registry
         .http_engine()
-        .client_for_config(&proxy_config)
+        .client_for_network_policy(&proxy_config, &network_policy)
         .await
     else {
         return Vec::new();
@@ -1547,7 +1822,11 @@ async fn discover_checksum_sidecars(
         }
         // 3 s per request keeps best-effort discovery bounded now that the
         // factory client carries no overall timeout.
-        let Ok(response) = tokio::time::timeout(Duration::from_secs(3), request.send()).await
+        let Ok(response) = tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::download::send_request(request, &network_policy),
+        )
+        .await
         else {
             continue;
         };
@@ -1668,6 +1947,18 @@ mod tests {
     use crate::models::{EngineCapabilities, ProbedFile, TaskKind};
 
     #[test]
+    fn legacy_create_payload_defaults_new_flow_options() {
+        let input: CreateTaskInput = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/file.bin",
+            "saveDir": "C:/Downloads",
+            "fileName": "file.bin"
+        }))
+        .expect("legacy create payload should remain deserializable");
+        assert_eq!(input.start_paused, None);
+        assert_eq!(input.obey_schedule, None);
+    }
+
+    #[test]
     fn fresh_probe_snapshot_for_same_url_is_reused() {
         let snapshot = probe_snapshot("https://example.com/file.bin", chrono::Utc::now());
 
@@ -1689,6 +1980,39 @@ mod tests {
             chrono::Utc::now() - chrono::Duration::minutes(6),
         );
         assert!(probe_output_from_snapshot("https://example.com/file.bin", &expired).is_none());
+    }
+
+    #[test]
+    fn probe_snapshot_checks_engine_and_final_uri_contract() {
+        assert!(snapshot_protocol_matches_engine("http", "https"));
+        assert!(!snapshot_protocol_matches_engine("http", "ftp"));
+        assert!(snapshot_protocol_matches_engine("ftp", "ftps"));
+        assert!(snapshot_protocol_matches_engine("webdav", "webdavs"));
+
+        assert!(snapshot_protocol_matches_uri(
+            "https",
+            "https://cdn.example.com/file.bin"
+        ));
+        assert!(!snapshot_protocol_matches_uri(
+            "https",
+            "file:///private/file.bin"
+        ));
+        assert!(snapshot_protocol_matches_uri(
+            "dash",
+            "file:///media/manifest.mpd"
+        ));
+        assert!(snapshot_protocol_matches_uri(
+            "hls",
+            "https://cdn.example.com/live.m3u8"
+        ));
+        assert!(!snapshot_protocol_matches_uri(
+            "hls",
+            "file:///media/playlist.m3u8"
+        ));
+        assert!(!snapshot_protocol_matches_uri(
+            "bt",
+            "https://example.com/file.bin"
+        ));
     }
 
     #[test]

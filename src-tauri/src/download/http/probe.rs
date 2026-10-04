@@ -6,7 +6,7 @@ use reqwest::{
     Response, StatusCode,
 };
 
-use super::ProbeResult;
+use super::{segmented::diagnostics::has_strong_resume_validator, ProbeResult};
 
 pub(super) fn probe_from_response(
     original_url: &str,
@@ -23,7 +23,20 @@ pub(super) fn probe_from_response(
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<i64>().ok());
-    let total_size = content_range_size.or(content_length).unwrap_or(0);
+    let range_has_unknown_total = range_probe
+        && headers
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .rsplit_once('/')
+                    .is_some_and(|(_, total)| total.trim() == "*")
+            });
+    let total_size = if range_has_unknown_total {
+        0
+    } else {
+        content_range_size.or(content_length).unwrap_or(0)
+    };
 
     let supports_parallel = total_size > 0
         && (content_range_size.is_some()
@@ -32,6 +45,20 @@ pub(super) fn probe_from_response(
                 .get(ACCEPT_RANGES)
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| value.eq_ignore_ascii_case("bytes")));
+    // Unknown-size resources can still resume safely when the range probe
+    // proves a 206 byte range and the server supplies a stable identity. A
+    // bare 200 stream or `bytes=0-0/*` without a validator must restart so
+    // bytes from two different remote representations cannot be concatenated.
+    let supports_resume = supports_parallel
+        || (range_probe
+            && response.status() == StatusCode::PARTIAL_CONTENT
+            && has_verifiable_content_range(headers)
+            && has_strong_resume_validator(
+                headers.get(ETAG).and_then(|value| value.to_str().ok()),
+                headers
+                    .get(LAST_MODIFIED)
+                    .and_then(|value| value.to_str().ok()),
+            ));
 
     let source_key = response
         .url()
@@ -48,7 +75,7 @@ pub(super) fn probe_from_response(
         file_name: file_name_from_response(response),
         final_url,
         total_size,
-        supports_resume: supports_parallel,
+        supports_resume,
         supports_parallel,
         supports_multi_file: false,
         source_key,
@@ -215,6 +242,34 @@ fn extension_from_content_type(value: &str) -> Option<&'static str> {
 
 fn parse_content_range_total(value: &str) -> Option<i64> {
     value.rsplit_once('/')?.1.parse::<i64>().ok()
+}
+
+fn has_verifiable_content_range(headers: &reqwest::header::HeaderMap) -> bool {
+    let Some(value) = headers
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some((unit, range_and_total)) = value.trim().split_once(' ') else {
+        return false;
+    };
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return false;
+    }
+    let Some((range, total)) = range_and_total.split_once('/') else {
+        return false;
+    };
+    if total.trim() != "*" {
+        return false;
+    }
+    let Some((start, end)) = range.split_once('-') else {
+        return false;
+    };
+    let (Ok(start), Ok(end)) = (start.parse::<i64>(), end.parse::<i64>()) else {
+        return false;
+    };
+    start == 0 && end == 0
 }
 
 fn header_to_string(response: &Response, name: reqwest::header::HeaderName) -> Option<String> {

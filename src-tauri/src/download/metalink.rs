@@ -1,3 +1,4 @@
+use crate::download::owned_fs as fs;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -12,7 +13,6 @@ use reqwest::{
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 use tokio::{
-    fs,
     io::{AsyncWriteExt, BufWriter},
     sync::mpsc,
 };
@@ -27,7 +27,6 @@ use crate::{
     db,
     download::checksum::hash_file,
     download::error::engine_error,
-    download::probe_error::reqwest_error_to_structured,
     download::retry::RetryPolicy,
     events::{emit_task_updated_record, TaskProgressEmitGate},
     logging::sanitize_url,
@@ -71,17 +70,6 @@ impl MetalinkEngine {
         Self { http }
     }
 
-    async fn client(&self) -> Result<Client, String> {
-        self.http.client().await
-    }
-
-    async fn client_for_config(
-        &self,
-        config: &crate::proxy::ResolvedProxyConfig,
-    ) -> Result<Client, String> {
-        self.http.client_for_config(config).await
-    }
-
     async fn probe_metalink(
         &self,
         url: &str,
@@ -89,6 +77,7 @@ impl MetalinkEngine {
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
         proxy_config: Option<&crate::proxy::ResolvedProxyConfig>,
+        network_policy: &crate::download::network_policy::NetworkPolicy,
     ) -> Result<MetalinkProbeData, String> {
         crate::download::engine::emit_probe_phase(
             app,
@@ -97,11 +86,16 @@ impl MetalinkEngine {
             Some("metalink"),
         );
         let client = if let Some(config) = proxy_config {
-            self.client_for_config(config).await?
+            self.http
+                .client_for_network_policy(config, network_policy)
+                .await?
         } else {
-            self.client().await?
+            let config = self.http.proxy_config().await;
+            self.http
+                .client_for_network_policy(&config, network_policy)
+                .await?
         };
-        let bytes = fetch_manifest_bytes(&client, url, request_headers).await?;
+        let bytes = fetch_manifest_bytes(&client, url, request_headers, network_policy).await?;
         let text = String::from_utf8(bytes).map_err(|_| {
             engine_error(
                 "metalink_invalid_manifest",
@@ -164,6 +158,7 @@ impl DownloadEngine for MetalinkEngine {
                     &request.app,
                     &request.request_id,
                     request.proxy_config.as_ref(),
+                    &request.network_policy,
                 )
                 .await
                 .map_err(DownloadError::Other)?;
@@ -210,11 +205,11 @@ impl DownloadEngine for MetalinkEngine {
         &'a self,
         context: DownloadContext,
     ) -> EngineFuture<'a, Result<(), DownloadError>> {
-        Box::pin(async move {
+        Box::pin(crate::download::lifecycle::run_owned(async move {
             run_metalink_download(self.clone(), context)
                 .await
                 .map_err(DownloadError::Other)
-        })
+        }))
     }
 }
 
@@ -230,10 +225,14 @@ async fn run_metalink_download(
         speed_limiter,
         request_headers,
         proxy_config,
+        network_policy,
         ..
     } = context;
     // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
-    let client = engine.client_for_config(&proxy_config).await?;
+    let client = engine
+        .http
+        .client_for_network_policy(&proxy_config, &network_policy)
+        .await?;
     // FUN-01 / C5: inject Basic Auth from encrypted task credentials at runtime.
     let credentials = db::resolve_task_credentials(&pool, &task.id).await?;
     let request_headers =
@@ -274,6 +273,7 @@ async fn run_metalink_download(
             &speed_limiter,
             &cancel_token,
             completed_total,
+            &network_policy,
         )
         .await
         {
@@ -304,6 +304,7 @@ async fn download_metalink_file(
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: &tokio_util::sync::CancellationToken,
     completed_before_file: i64,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<i64, String> {
     let resources = db::list_metalink_resources_for_file(pool, &file.id).await?;
     if resources.is_empty() {
@@ -337,7 +338,7 @@ async fn download_metalink_file(
     if parallel_eligible {
         let healthy = db::list_healthy_mirrors_for_file(pool, &file.id).await?;
         if healthy.len() >= 2 {
-            return download_metalink_file_parallel(
+            return download_metalink_file_parallel_with_policy(
                 app,
                 pool,
                 task,
@@ -350,6 +351,7 @@ async fn download_metalink_file(
                 &temp_path,
                 &final_path,
                 healthy,
+                network_policy,
             )
             .await;
         }
@@ -381,6 +383,7 @@ async fn download_metalink_file(
                     speed_limiter,
                     cancel_token,
                     completed_before_file,
+                    network_policy,
                     temp_path: &temp_path,
                     final_path: &final_path,
                 },
@@ -460,10 +463,44 @@ pub async fn download_metalink_file_parallel(
     completed_before_file: i64,
     temp_path: &Path,
     final_path: &Path,
-    mut mirrors: Vec<db::MetalinkResourceRecord>,
+    mirrors: Vec<db::MetalinkResourceRecord>,
 ) -> Result<i64, String> {
+    download_metalink_file_parallel_with_policy(
+        app,
+        pool,
+        task,
+        file,
+        client,
+        request_headers,
+        speed_limiter,
+        cancel_token,
+        completed_before_file,
+        temp_path,
+        final_path,
+        mirrors,
+        &crate::download::network_policy::NetworkPolicy::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_metalink_file_parallel_with_policy(
+    app: &Option<AppHandle>,
+    pool: &SqlitePool,
+    task: &TaskRecord,
+    file: &TaskFileRecord,
+    client: &Client,
+    request_headers: &[(String, String)],
+    speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    completed_before_file: i64,
+    temp_path: &Path,
+    final_path: &Path,
+    mut mirrors: Vec<db::MetalinkResourceRecord>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
+) -> Result<i64, String> {
+    use crate::download::lifecycle::JoinSet;
     use std::collections::VecDeque;
-    use tokio::task::JoinSet;
 
     // Plan N ranges across [0, file.total_size). N is bounded by the
     // mirror count (each worker needs its own mirror) and the
@@ -489,6 +526,7 @@ pub async fn download_metalink_file_parallel(
             temp_path,
             final_path,
             mirrors,
+            network_policy,
         )
         .await;
     }
@@ -592,6 +630,7 @@ pub async fn download_metalink_file_parallel(
             part_path,
             failover_queue: failover_queue.clone(),
             progress_tx: progress_tx.clone(),
+            network_policy: network_policy.clone(),
         };
         let captured_index = index;
         workers.spawn(async move {
@@ -752,6 +791,7 @@ async fn download_metalink_file_serial(
     temp_path: &Path,
     final_path: &Path,
     resources: Vec<db::MetalinkResourceRecord>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<i64, String> {
     let mut last_error = None;
     for resource in resources {
@@ -771,6 +811,7 @@ async fn download_metalink_file_serial(
                     completed_before_file,
                     temp_path,
                     final_path,
+                    network_policy,
                 },
                 &resource,
             )
@@ -848,6 +889,7 @@ struct MetalinkRangeWorker {
     /// F-3: Sender for per-worker progress aggregation. Only the coordinator
     /// writes `update_task_file_progress`; workers report via this channel.
     progress_tx: mpsc::UnboundedSender<MetalinkWorkerProgress>,
+    network_policy: crate::download::network_policy::NetworkPolicy,
 }
 
 impl MetalinkRangeWorker {
@@ -880,7 +922,7 @@ impl MetalinkRangeWorker {
             db::mark_metalink_resource_attempted(&self.pool, &current_mirror.id)
                 .await
                 .ok();
-            let result = download_metalink_range_from_mirror(
+            let result = download_metalink_range_from_mirror_with_policy(
                 &self.pool,
                 &self.task_id,
                 &self.client,
@@ -893,6 +935,7 @@ impl MetalinkRangeWorker {
                 self.range_end,
                 &current_mirror,
                 &self.part_path,
+                &self.network_policy,
             )
             .await;
             match result {
@@ -967,12 +1010,70 @@ pub async fn download_metalink_range_from_mirror(
     mirror: &db::MetalinkResourceRecord,
     part_path: &Path,
 ) -> Result<i64, String> {
+    download_metalink_range_from_mirror_with_policy(
+        pool,
+        task_id,
+        client,
+        request_headers,
+        speed_limiter,
+        cancel_token,
+        worker_index,
+        progress_tx,
+        range_start,
+        range_end,
+        mirror,
+        part_path,
+        &crate::download::network_policy::NetworkPolicy::default(),
+    )
+    .await
+}
+
+fn mirror_headers(headers: &[(String, String)], origin: &str, url: &str) -> Vec<(String, String)> {
+    let mut bound = crate::download::http::headers_for_origin(headers, origin, url);
+    if !bound
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+    {
+        // SEC-11: task credentials intentionally authorize Metalink mirrors.
+        // Browser/profile inputs cannot supply Authorization; their secrets remain origin-bound.
+        bound.extend(
+            headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .cloned(),
+        );
+    }
+    bound
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_metalink_range_from_mirror_with_policy(
+    pool: &SqlitePool,
+    task_id: &str,
+    client: &Client,
+    request_headers: &[(String, String)],
+    speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    worker_index: usize,
+    progress_tx: &mpsc::UnboundedSender<MetalinkWorkerProgress>,
+    range_start: u64,
+    range_end: u64,
+    mirror: &db::MetalinkResourceRecord,
+    part_path: &Path,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
+) -> Result<i64, String> {
+    let origin = db::get_task_record(pool, task_id)
+        .await?
+        .and_then(|task| crate::download::http::url_origin(&task.url))
+        .unwrap_or_default();
+    let bound_headers = mirror_headers(request_headers, &origin, &mirror.url);
+    let request_headers = bound_headers.as_slice();
     let expected = (range_end - range_start + 1) as i64;
     // SEC-10: literal-authority pre-flight for the mirror target (covers the
     // initial request and the in-loop retry below).
-    crate::download::ssrf::assert_public_authority(
-        &reqwest::Url::parse(&mirror.url).map_err(|e| e.to_string())?,
-    )?;
+    network_policy
+        .resolve(&reqwest::Url::parse(&mirror.url).map_err(|e| e.to_string())?)
+        .await?;
 
     // F-2: Resume — stat the existing part file to get `already_downloaded`.
     let mut already_downloaded: u64 = fs::metadata(part_path).await.map(|m| m.len()).unwrap_or(0);
@@ -1019,10 +1120,7 @@ pub async fn download_metalink_range_from_mirror(
             request = request.header(IF_RANGE, if_range);
         }
     }
-    let mut response = request
-        .send()
-        .await
-        .map_err(|e| reqwest_error_to_structured(&e))?;
+    let mut response = crate::download::http::send_request(request, network_policy).await?;
     crate::download::diagnostics::persist_engine_diagnostic(
         crate::download::diagnostics::EngineDiagnosticContext {
             pool,
@@ -1064,10 +1162,7 @@ pub async fn download_metalink_range_from_mirror(
             retry = retry.header(name, value);
         }
         retry = retry.header(RANGE, format!("bytes={effective_start}-{range_end}"));
-        response = retry
-            .send()
-            .await
-            .map_err(|e| reqwest_error_to_structured(&e))?;
+        response = crate::download::http::send_request(retry, network_policy).await?;
         if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
             db::mark_mirror_unsupported_range(pool, &mirror.id)
                 .await
@@ -1083,7 +1178,7 @@ pub async fn download_metalink_range_from_mirror(
         }
     }
     if !response.status().is_success() {
-        return Err(super::http::format_http_status_error(response.status()));
+        return Err(super::http::format_http_response_error(&response));
     }
 
     // ARC-35: fresh start demands the same strictness as resume — a 200
@@ -1296,6 +1391,7 @@ struct DownloadFileContext<'a> {
     completed_before_file: i64,
     temp_path: &'a Path,
     final_path: &'a Path,
+    network_policy: &'a crate::download::network_policy::NetworkPolicy,
 }
 
 async fn download_from_resource(
@@ -1314,6 +1410,7 @@ async fn download_from_resource(
         completed_before_file,
         temp_path,
         final_path,
+        network_policy,
     } = context;
     let mut progress_gate = TaskProgressEmitGate::default();
     if let Some(parent) = temp_path.parent() {
@@ -1343,9 +1440,15 @@ async fn download_from_resource(
 
     let started = Instant::now();
     // SEC-10: literal-authority pre-flight for the serial mirror target.
-    crate::download::ssrf::assert_public_authority(
-        &reqwest::Url::parse(&resource.url).map_err(|e| e.to_string())?,
-    )?;
+    network_policy
+        .resolve(&reqwest::Url::parse(&resource.url).map_err(|e| e.to_string())?)
+        .await?;
+    let bound_headers = mirror_headers(
+        request_headers,
+        &crate::download::http::url_origin(&task.url).unwrap_or_default(),
+        &resource.url,
+    );
+    let request_headers = bound_headers.as_slice();
     let mut request = client.get(&resource.url);
     for (name, value) in request_headers {
         request = request.header(name, value);
@@ -1356,10 +1459,7 @@ async fn download_from_resource(
             request = request.header(IF_RANGE, if_range);
         }
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|e| reqwest_error_to_structured(&e))?;
+    let response = crate::download::http::send_request(request, network_policy).await?;
     crate::download::diagnostics::persist_engine_diagnostic(
         crate::download::diagnostics::EngineDiagnosticContext {
             pool,
@@ -1385,15 +1485,12 @@ async fn download_from_resource(
         for (name, value) in request_headers {
             retry = retry.header(name, value);
         }
-        retry
-            .send()
-            .await
-            .map_err(|e| reqwest_error_to_structured(&e))?
+        crate::download::http::send_request(retry, network_policy).await?
     } else {
         response
     };
     if !response.status().is_success() {
-        return Err(super::http::format_http_status_error(response.status()));
+        return Err(super::http::format_http_response_error(&response));
     }
 
     if resume_from > 0 {
@@ -1687,6 +1784,7 @@ async fn fetch_manifest_bytes(
     client: &Client,
     url: &str,
     request_headers: &[(String, String)],
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<Vec<u8>, String> {
     let parsed = reqwest::Url::parse(url).map_err(|_| "Metalink URL is invalid.".to_string())?;
     if parsed.scheme() == "file" {
@@ -1697,18 +1795,14 @@ async fn fetch_manifest_bytes(
             .await
             .map_err(map_metalink_limited_body_error);
     }
-    // SEC-10: literal-authority pre-flight for the network branch.
-    crate::download::ssrf::assert_public_authority(&parsed)?;
+    network_policy.resolve(&parsed).await?;
     let mut request = client.get(url);
     for (name, value) in request_headers {
         request = request.header(name, value);
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|e| reqwest_error_to_structured(&e))?;
+    let response = crate::download::http::send_request(request, network_policy).await?;
     if !response.status().is_success() {
-        return Err(super::http::format_http_status_error(response.status()));
+        return Err(super::http::format_http_response_error(&response));
     }
     read_body_limited(response, CONTROL_PLANE_MAX_BYTES, None, READ_IDLE_TIMEOUT)
         .await
@@ -2469,6 +2563,7 @@ pub mod testing {
             part_path,
             failover_queue,
             progress_tx,
+            network_policy: crate::download::network_policy::NetworkPolicy::default(),
         };
         worker.run().await
     }

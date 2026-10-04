@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use base64::Engine as _;
+use chrono::{DateTime, Utc};
 use reqwest::{
     header::{
         HeaderName, HeaderValue, ACCEPT_ENCODING, AUTHORIZATION, IF_RANGE, RANGE, RETRY_AFTER,
@@ -9,6 +10,7 @@ use reqwest::{
 };
 
 use crate::db::TaskCredentials;
+use crate::download::network_policy::NetworkPolicy;
 use crate::download::probe_error::reqwest_error_to_structured;
 use crate::download::retry::{with_retry, RetryPolicy};
 
@@ -38,27 +40,107 @@ pub(crate) fn merge_basic_auth_headers(
     headers
 }
 
+/// Follow redirects with the same origin/SSRF rules as manifest subrequests.
+/// Clients disable automatic redirects so secret custom headers cannot bypass
+/// this filter, even when a redirect changes only scheme or port.
+pub(crate) async fn send_request(
+    builder: RequestBuilder,
+    network_policy: &NetworkPolicy,
+) -> Result<Response, String> {
+    send_request_with_error_mapper(builder, network_policy, reqwest_error_to_structured).await
+}
+
+pub(crate) async fn send_request_with_error_mapper(
+    builder: RequestBuilder,
+    network_policy: &NetworkPolicy,
+    map_error: impl Fn(&reqwest::Error) -> String,
+) -> Result<Response, String> {
+    let (client, request) = builder.build_split();
+    let mut request = request.map_err(|e| map_error(&e))?;
+    for hop in 0..=10 {
+        network_policy.resolve(request.url()).await?;
+        let mut next = request
+            .try_clone()
+            .ok_or_else(|| redirect_error("Request body cannot be replayed."))?;
+        let response = client.execute(request).await.map_err(|e| map_error(&e))?;
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+            return Ok(response);
+        };
+        if hop == 10 {
+            return Err(redirect_error("Too many redirects."));
+        }
+        let location = location
+            .to_str()
+            .map_err(|_| redirect_error("Invalid redirect location."))?;
+        let target = response
+            .url()
+            .join(location)
+            .map_err(|_| redirect_error("Invalid redirect URL."))?;
+        if !matches!(target.scheme(), "http" | "https")
+            || !target.username().is_empty()
+            || target.password().is_some()
+        {
+            return Err(redirect_error("Redirect target is not an HTTP origin."));
+        }
+        if url_origin(next.url().as_str()) != url_origin(target.as_str()) {
+            let names: Vec<_> = next
+                .headers()
+                .keys()
+                .filter(|name| crate::models::is_sensitive_request_header(name.as_str()))
+                .cloned()
+                .collect();
+            for name in names {
+                next.headers_mut().remove(name);
+            }
+        }
+        if response.status() == StatusCode::SEE_OTHER && next.method() != reqwest::Method::HEAD
+            || matches!(response.status().as_u16(), 301 | 302)
+                && next.method() == reqwest::Method::POST
+        {
+            *next.method_mut() = reqwest::Method::GET;
+            *next.body_mut() = None;
+            next.headers_mut().remove(reqwest::header::CONTENT_LENGTH);
+            next.headers_mut().remove(reqwest::header::CONTENT_TYPE);
+            next.headers_mut()
+                .remove(reqwest::header::TRANSFER_ENCODING);
+        }
+        // A downgrade must not expose a Referer that contains HTTPS query data.
+        if next.url().scheme() == "https" && target.scheme() == "http" {
+            next.headers_mut().remove(reqwest::header::REFERER);
+        }
+        *next.url_mut() = target;
+        request = next;
+    }
+    unreachable!("redirect loop returns within its bounded iteration")
+}
+
+fn redirect_error(detail: &str) -> String {
+    crate::models::AppErrorPayload::new("redirect_error", detail, false, vec!["check_url"])
+        .command_error()
+}
+
 pub(super) async fn send_head_with_retry(
     client: &Client,
     url: &str,
     headers: &[(String, String)],
+    network_policy: &NetworkPolicy,
 ) -> Result<Response, String> {
     let url = url.to_owned();
     // SEC-10: IP literals bypass the connection-time resolver; reject
     // private/reserved literal targets before the first attempt.
     let parsed = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
-    crate::download::ssrf::assert_public_authority(&parsed)?;
+    // Resolve before every attempt so hostname targets are checked against the
+    // task grant as well as literal addresses. The client resolver repeats the
+    // policy filter at connection time to close DNS rebinding races.
+    network_policy.resolve(&parsed).await?;
     let headers = headers.to_owned();
     with_retry(&RetryPolicy::http_request(), |_attempt| {
         let request = apply_forwarded_headers(client.head(&url), &headers)
             .header(ACCEPT_ENCODING, "identity");
-        async move {
-            request.send().await.map_err(|e| {
-                // Convert network errors to structured error format, matching
-                // send_get_with_retry so probe-stage HEAD failures are classifiable.
-                reqwest_error_to_structured(&e)
-            })
-        }
+        async move { send_request(request, network_policy).await }
     })
     .await
 }
@@ -69,11 +151,12 @@ pub(super) async fn send_get_with_retry(
     range: Option<String>,
     if_range: Option<&str>,
     headers: &[(String, String)],
+    network_policy: &NetworkPolicy,
 ) -> Result<Response, String> {
     let url = url.to_owned();
     // SEC-10: literal-authority pre-flight, mirroring send_head_with_retry.
     let parsed = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
-    crate::download::ssrf::assert_public_authority(&parsed)?;
+    network_policy.resolve(&parsed).await?;
     let headers = headers.to_owned();
     let range = range.clone();
     let if_range = if_range.map(str::to_owned);
@@ -86,17 +169,12 @@ pub(super) async fn send_get_with_retry(
                 request = request.header(IF_RANGE, ifr.as_str());
             }
         }
-        async move {
-            request.send().await.map_err(|e| {
-                // Convert network errors to structured error format
-                reqwest_error_to_structured(&e)
-            })
-        }
+        async move { send_request(request, network_policy).await }
     })
     .await
 }
 
-pub(super) fn apply_forwarded_headers(
+pub(crate) fn apply_forwarded_headers(
     mut request: RequestBuilder,
     headers: &[(String, String)],
 ) -> RequestBuilder {
@@ -104,9 +182,10 @@ pub(super) fn apply_forwarded_headers(
         let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
             continue;
         };
-        let Ok(value) = HeaderValue::from_str(value) else {
+        let Ok(mut value) = HeaderValue::from_str(value) else {
             continue;
         };
+        value.set_sensitive(crate::models::is_sensitive_request_header(name.as_str()));
         request = request.header(name, value);
     }
     request
@@ -119,27 +198,56 @@ pub(super) fn is_retryable_status(status: StatusCode) -> bool {
 }
 
 pub(super) fn retry_after_duration(response: &Response) -> Option<Duration> {
-    response
+    let value = response
         .headers()
         .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .map(|duration| duration.min(Duration::from_secs(60)))
+        .and_then(|value| value.to_str().ok())?
+        .trim();
+    retry_after_duration_from_value(value)
 }
 
-/// SEC-11: bind credential-bearing headers to the origin that produced them.
-///
-/// Authorization/Cookie may only travel to the origin that produced them —
-/// manifest-declared mirrors and cross-source media hosts are third parties
-/// from the origin's perspective. Non-sensitive forwarded headers (User-Agent,
-/// Referer, ...) still flow. Fail-closed: when the target URL cannot be
-/// parsed, credentials are stripped.
-///
-/// `origin` is the full origin (scheme + host + port, default ports
-/// normalized) of the task URL. Comparing ports matters: a different port on
-/// the same host is a different service in the web origin model and must not
-/// receive credentials either.
+fn retry_after_duration_from_value(value: &str) -> Option<Duration> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds).min(Duration::from_secs(60)));
+    }
+    let target = parse_http_date(value)?;
+    let delay = (target - Utc::now()).num_milliseconds().max(0);
+    Some(Duration::from_millis(
+        u64::try_from(delay)
+            .ok()?
+            .min(Duration::from_secs(60).as_millis() as u64),
+    ))
+}
+
+/// Return the server's Retry-After deadline in a stable form that can travel
+/// with the task error and survive a worker restart. HTTP permits either a
+/// delta-seconds value or an RFC 7231 HTTP-date (normally RFC 1123).
+pub(super) fn retry_after_at(response: &Response) -> Option<String> {
+    let value = response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())?
+        .trim();
+    retry_after_deadline_from_value(value).map(|date| date.to_rfc3339())
+}
+
+fn retry_after_deadline_from_value(value: &str) -> Option<DateTime<Utc>> {
+    if let Ok(seconds) = value.parse::<i64>() {
+        return Utc::now().checked_add_signed(chrono::Duration::try_seconds(seconds.max(0))?);
+    }
+    parse_http_date(value)
+}
+
+fn parse_http_date(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc2822(value)
+        .or_else(|_| DateTime::parse_from_rfc3339(value))
+        .ok()
+        .map(|date| date.with_timezone(&Utc))
+}
+
+/// SEC-11: secrets belong to a full origin (scheme, host and normalized port).
+/// Unknown custom headers may carry tokens, so only public profile headers can
+/// cross an origin boundary. Unparseable targets fail closed.
 pub(crate) fn headers_for_origin(
     headers: &[(String, String)],
     origin: &str,
@@ -151,9 +259,7 @@ pub(crate) fn headers_for_origin(
     } else {
         headers
             .iter()
-            .filter(|(name, _)| {
-                !name.eq_ignore_ascii_case("authorization") && !name.eq_ignore_ascii_case("cookie")
-            })
+            .filter(|(name, _)| !crate::models::is_sensitive_request_header(name))
             .cloned()
             .collect()
     }
@@ -166,7 +272,11 @@ pub(crate) fn url_origin(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     let host = parsed.host_str()?;
     let port = parsed.port_or_known_default()?;
-    Some(format!("{}://{}:{}", parsed.scheme(), host, port))
+    Some(crate::download::network_policy::format_authority_url(
+        parsed.scheme(),
+        host,
+        port,
+    ))
 }
 
 #[cfg(test)]
@@ -233,6 +343,14 @@ mod origin_binding_tests {
         assert!(bound.iter().any(|(n, _)| n == "Authorization"));
     }
 
+    #[test]
+    fn ipv6_origin_keeps_authority_brackets() {
+        assert_eq!(
+            url_origin("https://[2001:db8::10]/file").as_deref(),
+            Some("https://[2001:db8::10]:443")
+        );
+    }
+
     /// SEC-11: fail closed — an unparseable target strips credentials too.
     #[test]
     fn unparseable_target_strips_credentials() {
@@ -273,5 +391,29 @@ mod tests {
         let base = vec![("Authorization".to_string(), "Bearer token".to_string())];
         let headers = merge_basic_auth_headers(&base, Some(&creds));
         assert_eq!(headers, base);
+    }
+
+    #[test]
+    fn retry_after_accepts_delta_seconds_and_http_date() {
+        let before = Utc::now();
+        let delta = retry_after_deadline_from_value("45").expect("delta seconds");
+        assert!(delta >= before + chrono::Duration::seconds(44));
+        assert!(delta <= Utc::now() + chrono::Duration::seconds(45));
+
+        let delayed = retry_after_duration_from_value("3600").expect("capped delta");
+        assert_eq!(delayed, Duration::from_secs(60));
+
+        let http_date = retry_after_deadline_from_value("Wed, 21 Oct 2015 07:28:00 GMT")
+            .expect("RFC 1123 date");
+        assert_eq!(http_date.to_rfc3339(), "2015-10-21T07:28:00+00:00");
+        let date_duration = retry_after_duration_from_value("Wed, 21 Oct 2015 07:28:00 GMT")
+            .expect("past date has an immediate deadline");
+        assert_eq!(date_duration, Duration::ZERO);
+
+        let rfc3339 = parse_http_date("2030-01-02T03:04:05Z");
+        assert_eq!(
+            rfc3339.map(|value| value.to_rfc3339()),
+            Some("2030-01-02T03:04:05+00:00".to_string())
+        );
     }
 }

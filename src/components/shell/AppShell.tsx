@@ -1,13 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-
+import { CloseDownloadDialog } from "@/components/shell/CloseDownloadDialog";
 import { CommandBar } from "@/components/shell/CommandBar";
 import { navFilterForDigit } from "@/components/shell/nav-shortcuts";
 import type { AttentionDialogRequest } from "@/components/shell/ResolveAttentionDialog";
 import { ShutdownOverlay } from "@/components/shell/ShutdownOverlay";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { StatusBar } from "@/components/shell/StatusBar";
-import { isOverlayKey } from "@/components/shell/shell-keys";
+import { isGlobalPasteShortcut, isOverlayKey } from "@/components/shell/shell-keys";
 import { TitleBar } from "@/components/shell/TitleBar";
 import type { ReorderAction } from "@/components/tasks/TaskContextMenu";
 import { TaskList } from "@/components/tasks/TaskList";
@@ -24,20 +24,25 @@ import {
 import { LiveRegion } from "@/components/ui/live-region";
 import { ToastViewport } from "@/components/ui/toast";
 import type {
+  CloseRequestAction,
+  CloseRequestPayload,
   CompletionAction,
   CompletionActionRequestedPayload,
   RecoveryAction,
   ResolveTaskAttentionInput,
   TaskPriority,
 } from "@/generated/bindings";
-import { useClipboardLinkMonitor } from "@/hooks/use-clipboard-link-monitor";
+import { useClipboardLinkPrompt } from "@/hooks/use-clipboard-link-prompt";
 import { useFileDropMonitor } from "@/hooks/use-file-drop-monitor";
+import { useSelectAllMatching } from "@/hooks/use-select-all-matching";
 import { useChromeLayout } from "@/hooks/use-shell-layout";
 import { useTaskEvents } from "@/hooks/use-task-events";
 import type { TranslationKey } from "@/i18n";
+import { writeClipboardText } from "@/lib/clipboard-write";
 import { localizedErrorMessage } from "@/lib/errors";
 import { bumpListQueryEpoch, isCurrentListQueryEpoch } from "@/lib/list-query-epoch";
 import { createLogger } from "@/lib/logger";
+import { isModalFocusActive } from "@/lib/modal-focus";
 import { getPlatform, type Platform, trafficLightsInsetPx } from "@/lib/platform";
 import { writeSettingsRecoveryReturn } from "@/lib/settings-recovery-return";
 import { formatBytes, sanitizeUrlForDisplay } from "@/lib/utils";
@@ -49,6 +54,7 @@ import {
   hasInlineRecovery,
   pauseWouldDiscardProgress,
   primaryRecoveryAction,
+  torrentFileSelectionRequired,
 } from "@/components/tasks/row-recovery";
 import { isSupportedLocalFile, resolveLocalFile } from "@/lib/local-file";
 import {
@@ -59,6 +65,8 @@ import {
   finishLiveRecording,
   getSettings,
   listTasksCursor,
+  onBrowserHandoffAuthorizationRequired,
+  onCloseRequested,
   onCompletionActionRequested,
   onSettingsChanged,
   onTrayNewDownloadRequested,
@@ -68,11 +76,14 @@ import {
   openTaskFolder,
   pauseTask,
   queryDiskSpace,
+  recheckTask,
+  redownloadTask,
   reorderQueuedTasks,
   requestLockScreen,
   requestSystemHibernate,
   requestSystemShutdown,
   requestSystemSleep,
+  resolveCloseRequest,
   resolveTaskAttention,
   resumeTask,
   retryTask,
@@ -196,12 +207,11 @@ export function AppShell() {
   const [bulkDeleteFilesTargets, setBulkDeleteFilesTargets] = useState<Task[]>([]);
   const [attentionRequest, setAttentionRequest] = useState<AttentionDialogRequest | null>(null);
   const [completionActionRequest, setCompletionActionRequest] = useState<CompletionActionRequestedPayload | null>(null);
+  const [closeRequest, setCloseRequest] = useState<CloseRequestPayload | null>(null);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
 
   const selectedId = useTaskUIStore((s) => s.selectedId);
   const taskIds = useTaskDataStore((s) => s.taskIds);
-  const hasMoreTasks = useTaskDataStore((s) => s.hasMore);
-  const pendingDeleteIds = useTaskUIStore((s) => s.pendingDeleteIds);
   const addPendingDelete = useTaskUIStore((s) => s.addPendingDelete);
   const addPendingDeletes = useTaskUIStore((s) => s.addPendingDeletes);
   const removePendingDelete = useTaskUIStore((s) => s.removePendingDelete);
@@ -215,7 +225,6 @@ export function AppShell() {
   const setError = useTaskDataStore((s) => s.setError);
   const selectTask = useTaskUIStore((s) => s.selectTask);
   const clearSelectedIds = useTaskUIStore((s) => s.clearSelectedIds);
-  const setSelectedIds = useTaskUIStore((s) => s.setSelectedIds);
   const setNav = useTaskUIStore((s) => s.setNav);
   const setDetailOpen = useTaskUIStore((s) => s.setDetailOpen);
   const settings = useSettingsStore((s) => s.settings);
@@ -224,6 +233,7 @@ export function AppShell() {
   const setSettingsError = useSettingsStore((s) => s.setError);
   const addToast = useToastStore((s) => s.addToast);
   const updateToast = useToastStore((s) => s.updateToast);
+  const { selectAllMatching, selectingAll } = useSelectAllMatching();
 
   // The attention view is an ordinary list now (one of the "Needs you" cause
   // filters), so it keeps search, sort, filters, and the details panel.
@@ -327,6 +337,23 @@ export function AppShell() {
     [runTaskAction],
   );
 
+  const redownload = useCallback(
+    (task: Task) => {
+      if (task.status === "completed") {
+        void runTaskAction(() => redownloadTask(task.id), undefined);
+      }
+    },
+    [runTaskAction],
+  );
+
+  const recheck = useCallback(
+    (task: Task) => {
+      if (task.status !== "completed") return;
+      void runTaskAction(() => recheckTask(task.id), task.id);
+    },
+    [runTaskAction],
+  );
+
   const handleReorder = useCallback(
     async (task: Task, action: ReorderAction) => {
       // Only same-priority Queued tasks participate in reordering. We read
@@ -403,7 +430,7 @@ export function AppShell() {
   const copyTaskUrl = useCallback(
     async (task: Task) => {
       try {
-        await navigator.clipboard?.writeText(task.url);
+        await writeClipboardText(task.url);
         addToast({ tone: "success", title: t("contextmenu.task.urlCopied") });
       } catch (err) {
         log.warn("copy url failed", err);
@@ -417,7 +444,7 @@ export function AppShell() {
     async (task: Task) => {
       const path = task.finalPath ?? `${task.saveDir}/${task.fileName}`;
       try {
-        await navigator.clipboard?.writeText(path);
+        await writeClipboardText(path);
         addToast({ tone: "success", title: t("contextmenu.task.pathCopied") });
       } catch (err) {
         log.warn("copy path failed", err);
@@ -788,7 +815,7 @@ export function AppShell() {
         addToast({
           tone: "error",
           title: t("toast.bulkFailed", { action: label }),
-          description: error instanceof Error ? error.message : String(error),
+          description: localizedErrorMessage(error, t),
           key: "bulk-delete-files",
         });
       }
@@ -809,11 +836,15 @@ export function AppShell() {
 
   const handleNewDownloadOpenChange = useCallback((open: boolean) => {
     setNewDownloadOpen(open);
-    if (open) return;
+  }, []);
+
+  const handleNewDownloadCloseAutoFocus = useCallback((event: Event) => {
     const target = newDownloadReturnFocusRef.current;
     newDownloadReturnFocusRef.current = null;
-    if (target?.isConnected) {
-      requestAnimationFrame(() => target.focus({ preventScroll: true }));
+    if (target?.isConnected && !isModalFocusActive()) {
+      // Restore only after Radix has released the dialog's focus trap.
+      event.preventDefault();
+      target.focus({ preventScroll: true });
     }
   }, []);
 
@@ -831,22 +862,42 @@ export function AppShell() {
     () => ({
       onToggleTransfer: toggleTransfer,
       onRetry: retry,
+      onRedownload: redownload,
+      onRecheck: recheck,
       onOpenFile: openFile,
       onOpenFolder: openFolder,
       onDelete: softDelete,
     }),
-    [toggleTransfer, retry, openFile, openFolder, softDelete],
+    [toggleTransfer, retry, redownload, recheck, openFile, openFolder, softDelete],
   );
 
-  const applyClipboardDownload = useCallback((sourceId: string, urls: string[]) => {
-    if (urls.length === 0) return;
-    setNewDownloadInitialState({
-      sourceId,
-      url: urls.length === 1 ? urls[0] : undefined,
-      batchInput: urls.length > 1 ? urls.join("\n") : undefined,
+  const applyClipboardDownload = useCallback(
+    (sourceId: string, urls: string[]) => {
+      if (urls.length === 0) return;
+      openNewDownload({
+        sourceId: `clipboard-${sourceId}`,
+        url: urls.length === 1 ? urls[0] : undefined,
+        batchInput: urls.length > 1 ? urls.join("\n") : undefined,
+      });
+    },
+    [openNewDownload],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void onBrowserHandoffAuthorizationRequired(({ requestId, url }) => {
+      if (cancelled) return;
+      openNewDownload({ sourceId: `browser-${requestId}`, url });
+    }).then((cleanup) => {
+      if (cancelled) cleanup();
+      else unlisten = cleanup;
     });
-    setNewDownloadOpen(true);
-  }, []);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [openNewDownload]);
 
   const pasteAndCreate = useCallback(() => {
     void (async () => {
@@ -856,7 +907,7 @@ export function AppShell() {
           .split(/\s+/)
           .map((s) => s.trim())
           .filter(Boolean);
-        applyClipboardDownload("clipboard", urls);
+        applyClipboardDownload(crypto.randomUUID(), urls);
       } else {
         openNewDownload();
       }
@@ -903,6 +954,23 @@ export function AppShell() {
           tone: "error",
           title: t("toast.actionFailed"),
           description: message,
+        });
+      }
+    },
+    [addToast, t],
+  );
+
+  const resolveCloseDecision = useCallback(
+    async (action: Exclude<CloseRequestAction, "cancel">, remember: boolean) => {
+      try {
+        await resolveCloseRequest(action, remember);
+        setCloseRequest(null);
+      } catch (err) {
+        log.error("close request resolution failed", err);
+        addToast({
+          tone: "error",
+          title: t("toast.actionFailed"),
+          description: localizedErrorMessage(err, t),
         });
       }
     },
@@ -963,8 +1031,10 @@ export function AppShell() {
         setDetailOpen(true);
         addToast({
           tone: "info",
-          title: t("recovery.checkUrlToast"),
-          description: sanitizeUrlForDisplay(task.url),
+          title: torrentFileSelectionRequired(task) ? t("newDownload.chooseFile") : t("recovery.checkUrlToast"),
+          description: torrentFileSelectionRequired(task)
+            ? t("errors.btFileSelectionRequired")
+            : sanitizeUrlForDisplay(task.url),
         });
         return;
       }
@@ -1139,33 +1209,12 @@ export function AppShell() {
   // UX-23: the dialog-state read happens inside the handler on every event, so
   // the listener registers once and never misses the await-window between
   // unlisten and re-listen.
-  useClipboardLinkMonitor((payload) => {
-    if (payload.urls.length === 0) return;
-    // UX-30: the dialog stays mounted, so a kept draft exists even while the
-    // dialog is closed — gate on the draft itself, not open state, or a
-    // handoff would silently overwrite the draft the guard promised to keep.
-    if (newDownloadDraftDirty) {
-      addToast({
-        tone: "info",
-        title:
-          payload.urls.length > 1
-            ? t("toast.clipboardLinksDetected", { count: payload.urls.length })
-            : t("toast.clipboardLinkDetected"),
-        description:
-          payload.urls.length > 1
-            ? t("toast.clipboardLinksDetectedDescription", {
-                count: payload.urls.length,
-              })
-            : sanitizeUrlForDisplay(payload.primaryUrl),
-        action: {
-          label: t("toast.useClipboardLink"),
-          onClick: () => applyClipboardDownload(payload.id, payload.urls),
-        },
-      });
-      return;
-    }
-    applyClipboardDownload(payload.id, payload.urls);
-  });
+  //
+  // UX-43: a clipboard detection only ever produces a toast (see the hook).
+  // Its "Use link" action is the user's explicit request for this link, so
+  // the dialog then probes exactly like a pasted URL; nothing reaches the
+  // network before that click.
+  useClipboardLinkPrompt((payload) => applyClipboardDownload(payload.id, payload.urls));
 
   useEffect(() => {
     let cancelled = false;
@@ -1182,6 +1231,23 @@ export function AppShell() {
     return () => {
       cancelled = true;
       unlistenCompletionAction?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    void (async () => {
+      unlisten = await onCloseRequested((payload) => {
+        if (!cancelled) setCloseRequest(payload);
+      });
+      if (cancelled) unlisten?.();
+    })();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
     };
   }, []);
 
@@ -1314,6 +1380,12 @@ export function AppShell() {
         return;
       }
 
+      if (isGlobalPasteShortcut(event, platform)) {
+        event.preventDefault();
+        pasteAndCreate();
+        return;
+      }
+
       // Details can be opened from a row, palette, or the command bar. Keep
       // Escape meaningful from the list surface as well as inside the drawer.
       if (!isInput && !inOverlay && event.key === "Escape" && detailOpen) {
@@ -1429,20 +1501,11 @@ export function AppShell() {
           return;
         }
 
-        // Select all loaded: Mod+A
-        if (matchesShortcut(event, "mod+a", platform)) {
+        // Select every task matching the current query: Mod+A. The shared
+        // loader owns cursor pagination and invalidates stale page responses.
+        if (taskSurfaceActive && matchesShortcut(event, "mod+a", platform)) {
           event.preventDefault();
-          // taskIds is the cursor-paginated loaded subset, not the full
-          // filtered result. Select what's loaded and, when more pages
-          // remain, honestly tell the user so the scope is clear.
-          const loaded = taskIds.filter((id) => !pendingDeleteIds.includes(id));
-          setSelectedIds(loaded);
-          if (hasMoreTasks) {
-            addToast({
-              tone: "info",
-              title: t("toast.selectedLoadedOnly", { loaded: loaded.length }),
-            });
-          }
+          void selectAllMatching();
           return;
         }
 
@@ -1457,25 +1520,23 @@ export function AppShell() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
-    addToast,
     clearSelectedIds,
     detailOpen,
     handleReorder,
-    hasMoreTasks,
     openFile,
     openFolder,
     openNewDownload,
-    pendingDeleteIds,
+    pasteAndCreate,
     platform,
     recoverTask,
     selectTask,
     selectedId,
-    setSelectedIds,
     setDetailOpen,
     setNav,
+    selectAllMatching,
     softDelete,
+    taskSurfaceActive,
     taskIds,
-    t,
     toggleTransfer,
     pauseAll,
     resumeAll,
@@ -1543,6 +1604,8 @@ export function AppShell() {
           <TaskList
             onToggleTransfer={toggleTransfer}
             onRetry={retry}
+            onRedownload={redownload}
+            onRecheck={recheck}
             onFinishLiveRecording={finishRecording}
             onOpenFile={openFile}
             onOpenFolder={openFolder}
@@ -1563,6 +1626,8 @@ export function AppShell() {
             onShowDetails={showTaskDetails}
             onPasteAndCreate={pasteAndCreate}
             onRefresh={refreshTaskList}
+            onSelectAll={selectAllMatching}
+            selectingAll={selectingAll}
             onReorder={handleReorder}
             onUpdateQueueOptions={updateQueueOptions}
             platform={platform}
@@ -1636,6 +1701,8 @@ export function AppShell() {
             onBulkRetry={bulkRetry}
             onBulkDelete={bulkDelete}
             onBulkOpenFolder={bulkOpenFolder}
+            onSelectAll={selectAllMatching}
+            selectingAll={selectingAll}
             onPauseAll={() => void pauseAll()}
             onResumeAll={() => void resumeAll()}
             onSetNav={(nextNav) => {
@@ -1654,6 +1721,7 @@ export function AppShell() {
         <NewDownloadDialog
           open={newDownloadOpen}
           onOpenChange={handleNewDownloadOpenChange}
+          onCloseAutoFocus={handleNewDownloadCloseAutoFocus}
           initialSourceId={newDownloadInitialState?.sourceId}
           initialUrl={newDownloadInitialState?.url}
           initialBatchInput={newDownloadInitialState?.batchInput}
@@ -1729,6 +1797,17 @@ export function AppShell() {
           onRun={runCompletionAction}
         />
       ) : null}
+      <CloseDownloadDialog
+        request={closeRequest}
+        open={!!closeRequest}
+        onCancel={() => {
+          setCloseRequest(null);
+          void resolveCloseRequest("cancel", false).catch((err) => {
+            log.warn("close request cancel failed", err);
+          });
+        }}
+        onAction={resolveCloseDecision}
+      />
       {shortcutPanelOpen ? (
         <Suspense fallback={null}>
           <ShortcutPanel open={shortcutPanelOpen} onOpenChange={setShortcutPanelOpen} platform={platform} />

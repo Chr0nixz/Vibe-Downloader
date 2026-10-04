@@ -14,47 +14,72 @@ use super::{
     MIN_SEGMENT_COUNT,
 };
 
-const SETTING_MAX_ACTIVE_TASKS: &str = "max_active_tasks";
-const SETTING_DEFAULT_SAVE_DIR: &str = "default_save_dir";
-const SETTING_GLOBAL_SPEED_LIMIT_BPS: &str = "global_speed_limit_bps";
-const SETTING_MULTI_CONNECTION_THRESHOLD_BYTES: &str = "multi_connection_threshold_bytes";
-const SETTING_SEGMENT_COUNT: &str = "segment_count";
-const SETTING_MAX_CONNECTIONS_PER_HOST: &str = "max_connections_per_host";
-const SETTING_SYSTEM_NOTIFICATIONS: &str = "system_notifications";
-const SETTING_CLOSE_TO_TRAY: &str = "close_to_tray";
-const SETTING_START_ON_BOOT: &str = "start_on_boot";
-const SETTING_AUTO_RESUME_ON_STARTUP: &str = "auto_resume_on_startup";
-const SETTING_FLOATING_WINDOW_ENABLED: &str = "floating_window_enabled";
-const SETTING_CLIPBOARD_MONITOR_ENABLED: &str = "clipboard_monitor_enabled";
-const SETTING_ACCENT_COLOR: &str = "accent_color";
-const SETTING_PROXY_MODE: &str = "proxy_mode";
-const SETTING_PROXY_URL: &str = "proxy_url";
-const SETTING_PROXY_NO_PROXY: &str = "proxy_no_proxy";
-const SETTING_PROXY_USERNAME: &str = "proxy_username";
-const SETTING_PROXY_PASSWORD_SAVED: &str = "proxy_password_saved";
-const SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED: &str = "schedule_download_window_enabled";
-const SETTING_SCHEDULE_DOWNLOAD_WINDOW_START: &str = "schedule_download_window_start";
-const SETTING_SCHEDULE_DOWNLOAD_WINDOW_END: &str = "schedule_download_window_end";
-const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED: &str = "schedule_speed_limit_window_enabled";
-const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START: &str = "schedule_speed_limit_window_start";
-const SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END: &str = "schedule_speed_limit_window_end";
-const SETTING_SCHEDULE_SPEED_LIMIT_BPS: &str = "schedule_speed_limit_bps";
-const SETTING_TITLEBAR_GRADIENT_ENABLED: &str = "titlebar_gradient_enabled";
-const SETTING_COMPLETION_ACTION: &str = "completion_action";
-const SETTING_COMPLETION_COUNTDOWN_SECONDS: &str = "completion_countdown_seconds";
-const SETTING_COMPLETION_RUN_COMMAND: &str = "completion_run_command";
-const SETTING_DELETE_TO_TRASH: &str = "delete_to_trash";
-const SETTING_AUTO_UPDATE_CHECK_ENABLED: &str = "auto_update_check_enabled";
-const SETTING_FFMPEG_PATH: &str = "ffmpeg_path";
-/// F-7: Global BitTorrent upload speed limit (bytes/sec). Empty/0 = unlimited.
-const SETTING_BT_UPLOAD_LIMIT_BPS: &str = "bt_upload_limit_bps";
+/// UX-41: declares every settings key this module owns together with
+/// `APP_SETTING_KEYS`, the exact list `reset_settings` deletes. One source for
+/// both means a new key cannot be added without "restore defaults" covering
+/// it — the previous hand-kept array could silently drift from the constants.
+macro_rules! app_setting_keys {
+    ($($(#[$meta:meta])* $name:ident = $value:literal;)*) => {
+        $($(#[$meta])* const $name: &str = $value;)*
+        const APP_SETTING_KEYS: &[&str] = &[$($name),*];
+    };
+}
+
+app_setting_keys! {
+    SETTING_MAX_ACTIVE_TASKS = "max_active_tasks";
+    SETTING_DEFAULT_SAVE_DIR = "default_save_dir";
+    SETTING_GLOBAL_SPEED_LIMIT_BPS = "global_speed_limit_bps";
+    SETTING_MULTI_CONNECTION_THRESHOLD_BYTES = "multi_connection_threshold_bytes";
+    SETTING_SEGMENT_COUNT = "segment_count";
+    SETTING_MAX_CONNECTIONS_PER_HOST = "max_connections_per_host";
+    SETTING_SYSTEM_NOTIFICATIONS = "system_notifications";
+    SETTING_CLOSE_TO_TRAY = "close_to_tray";
+    SETTING_START_ON_BOOT = "start_on_boot";
+    SETTING_AUTO_RESUME_ON_STARTUP = "auto_resume_on_startup";
+    SETTING_FLOATING_WINDOW_ENABLED = "floating_window_enabled";
+    SETTING_CLIPBOARD_MONITOR_ENABLED = "clipboard_monitor_enabled";
+    SETTING_ACCENT_COLOR = "accent_color";
+    SETTING_PROXY_MODE = "proxy_mode";
+    SETTING_PROXY_URL = "proxy_url";
+    SETTING_PROXY_NO_PROXY = "proxy_no_proxy";
+    SETTING_PROXY_USERNAME = "proxy_username";
+    SETTING_PROXY_PASSWORD_SAVED = "proxy_password_saved";
+    SETTING_SCHEDULE_DOWNLOAD_WINDOW_ENABLED = "schedule_download_window_enabled";
+    SETTING_SCHEDULE_DOWNLOAD_WINDOW_START = "schedule_download_window_start";
+    SETTING_SCHEDULE_DOWNLOAD_WINDOW_END = "schedule_download_window_end";
+    SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_ENABLED = "schedule_speed_limit_window_enabled";
+    SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_START = "schedule_speed_limit_window_start";
+    SETTING_SCHEDULE_SPEED_LIMIT_WINDOW_END = "schedule_speed_limit_window_end";
+    SETTING_SCHEDULE_SPEED_LIMIT_BPS = "schedule_speed_limit_bps";
+    SETTING_TITLEBAR_GRADIENT_ENABLED = "titlebar_gradient_enabled";
+    SETTING_COMPLETION_ACTION = "completion_action";
+    SETTING_COMPLETION_COUNTDOWN_SECONDS = "completion_countdown_seconds";
+    SETTING_COMPLETION_RUN_COMMAND = "completion_run_command";
+    /// ARC-58: fire the completion action when the queue drains with failures too.
+    SETTING_COMPLETION_INCLUDE_FAILURES = "completion_include_failures";
+    SETTING_DELETE_TO_TRASH = "delete_to_trash";
+    SETTING_AUTO_UPDATE_CHECK_ENABLED = "auto_update_check_enabled";
+    SETTING_FFMPEG_PATH = "ffmpeg_path";
+    /// F-7: Global BitTorrent upload speed limit (bytes/sec). Empty/0 = unlimited.
+    SETTING_BT_UPLOAD_LIMIT_BPS = "bt_upload_limit_bps";
+}
 
 pub async fn get_settings(
     pool: &SqlitePool,
     default_save_dir: String,
 ) -> Result<AppSettings, String> {
     let kv = load_all_settings(pool).await?;
+    settings_from_kv(kv, default_save_dir)
+}
 
+/// UX-41: derive `AppSettings` from a raw key/value snapshot. An empty `kv`
+/// yields exactly the defaults a fresh install reads, so `reset_settings`
+/// shares one source of truth with `get_settings` instead of the frontend
+/// keeping a second, drift-prone copy of the default values.
+fn settings_from_kv(
+    kv: HashMap<String, String>,
+    default_save_dir: String,
+) -> Result<AppSettings, String> {
     let max_active_tasks = parse_i32_or_default(
         kv.get(SETTING_MAX_ACTIVE_TASKS).map(String::as_str),
         DEFAULT_MAX_ACTIVE_TASKS,
@@ -90,7 +115,10 @@ pub async fn get_settings(
     let system_notifications = parse_bool_setting(&kv, SETTING_SYSTEM_NOTIFICATIONS, true)?;
     let close_to_tray = parse_bool_setting(&kv, SETTING_CLOSE_TO_TRAY, false)?;
     let start_on_boot = parse_bool_setting(&kv, SETTING_START_ON_BOOT, false)?;
-    let auto_resume_on_startup = parse_bool_setting(&kv, SETTING_AUTO_RESUME_ON_STARTUP, false)?;
+    // Resume only rows interrupted while actively downloading. Explicitly
+    // paused rows keep their state, so the safe default can recover after a
+    // crash or power loss without overriding a user's manual pause.
+    let auto_resume_on_startup = parse_bool_setting(&kv, SETTING_AUTO_RESUME_ON_STARTUP, true)?;
     let floating_window_enabled = parse_bool_setting(&kv, SETTING_FLOATING_WINDOW_ENABLED, false)?;
     let clipboard_monitor_enabled =
         parse_bool_setting(&kv, SETTING_CLIPBOARD_MONITOR_ENABLED, true)?;
@@ -165,6 +193,9 @@ pub async fn get_settings(
         .get(SETTING_COMPLETION_RUN_COMMAND)
         .cloned()
         .unwrap_or_default();
+    // ARC-58: default false preserves the historical "all succeeded" behavior.
+    let completion_include_failures =
+        parse_bool_setting(&kv, SETTING_COMPLETION_INCLUDE_FAILURES, false)?;
     let delete_to_trash = parse_bool_setting(&kv, SETTING_DELETE_TO_TRASH, true)?;
     let auto_update_check_enabled =
         parse_bool_setting(&kv, SETTING_AUTO_UPDATE_CHECK_ENABLED, true)?;
@@ -209,6 +240,7 @@ pub async fn get_settings(
         completion_action,
         completion_countdown_seconds,
         completion_run_command,
+        completion_include_failures,
         delete_to_trash,
         auto_update_check_enabled,
         ffmpeg_path,
@@ -371,6 +403,12 @@ pub async fn upsert_settings(pool: &SqlitePool, settings: &AppSettings) -> Resul
         pool,
         SETTING_COMPLETION_RUN_COMMAND,
         &settings.completion_run_command,
+    )
+    .await?;
+    upsert_setting_value(
+        pool,
+        SETTING_COMPLETION_INCLUDE_FAILURES,
+        bool_setting_value(settings.completion_include_failures),
     )
     .await?;
     upsert_setting_value(
@@ -593,6 +631,27 @@ async fn load_all_settings(pool: &SqlitePool) -> Result<HashMap<String, String>,
     Ok(map)
 }
 
+/// UX-41: restore app settings to the fresh-install defaults by deleting the
+/// owned keys; `settings_from_kv` then re-derives the same values a brand-new
+/// database would produce.
+pub async fn reset_settings(
+    pool: &SqlitePool,
+    default_save_dir: String,
+) -> Result<AppSettings, String> {
+    let placeholders = vec!["?"; APP_SETTING_KEYS.len()].join(", ");
+    // Injection-safe: the string is built from a fixed count of `?`
+    // placeholders derived from the const key array; no user input is
+    // interpolated. All keys are bound as parameters below.
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DELETE FROM settings WHERE key IN ({placeholders})"
+    )));
+    for key in APP_SETTING_KEYS {
+        query = query.bind(*key);
+    }
+    query.execute(pool).await.map_err(|e| e.to_string())?;
+    get_settings(pool, default_save_dir).await
+}
+
 fn kv_bool(kv: &HashMap<String, String>, key: &str, default: bool) -> bool {
     kv.get(key)
         .map(|v| {
@@ -706,6 +765,77 @@ mod tests {
             .await
             .expect_err("invalid bool");
         assert!(err.contains("Invalid boolean value for setting 'clipboard_monitor_enabled'"));
+    }
+
+    /// UX-41 acceptance: after reset, the settings equal what a brand-new
+    /// database produces — every field, not just the ones the frontend used to
+    /// hardcode. Also asserts unrelated keys sharing the table survive.
+    #[tokio::test]
+    async fn reset_settings_matches_fresh_database() {
+        let pool = temp_pool().await;
+        // Pollute a representative set of owned keys (valid, non-default
+        // values); key-list completeness is structural via app_setting_keys!.
+        let polluted = [
+            (SETTING_MAX_ACTIVE_TASKS, "7"),
+            (SETTING_DEFAULT_SAVE_DIR, "D:\\Somewhere"),
+            (SETTING_GLOBAL_SPEED_LIMIT_BPS, "1024"),
+            (SETTING_MULTI_CONNECTION_THRESHOLD_BYTES, "1048576"),
+            (SETTING_SEGMENT_COUNT, "8"),
+            (SETTING_MAX_CONNECTIONS_PER_HOST, "16"),
+            (SETTING_CLIPBOARD_MONITOR_ENABLED, "false"),
+            (SETTING_ACCENT_COLOR, "amber"),
+            (SETTING_PROXY_MODE, "custom"),
+            (SETTING_PROXY_URL, "http://127.0.0.1:8080"),
+            (SETTING_COMPLETION_ACTION, "exit"),
+            (SETTING_COMPLETION_COUNTDOWN_SECONDS, "120"),
+            (SETTING_FFMPEG_PATH, "D:\\ffmpeg\\bin\\ffmpeg.exe"),
+            (SETTING_BT_UPLOAD_LIMIT_BPS, "2048"),
+        ];
+        for (key, value) in polluted {
+            upsert_setting_value(&pool, key, value)
+                .await
+                .expect("pollute setting");
+        }
+        // An unrelated key sharing the table must survive the reset.
+        upsert_setting_value(&pool, "browser_capture_settings", "{\"keep\":true}")
+            .await
+            .expect("insert unrelated key");
+
+        let reset = reset_settings(&pool, "C:\\Downloads".to_string())
+            .await
+            .expect("reset settings");
+        let fresh_pool = temp_pool().await;
+        let fresh = get_settings(&fresh_pool, "C:\\Downloads".to_string())
+            .await
+            .expect("fresh settings");
+
+        let reset_json = serde_json::to_value(&reset).expect("serialize reset");
+        let fresh_json = serde_json::to_value(&fresh).expect("serialize fresh");
+        assert_eq!(
+            reset_json, fresh_json,
+            "reset settings must equal a fresh database's settings"
+        );
+        // The specific field the frontend copy had drifted on.
+        assert_eq!(
+            reset.multi_connection_threshold_bytes,
+            DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES.to_string()
+        );
+        let unrelated: String =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key = 'browser_capture_settings'")
+                .fetch_one(&pool)
+                .await
+                .expect("unrelated key must survive reset");
+        assert_eq!(unrelated, "{\"keep\":true}");
+    }
+
+    /// UX-41: the reset list is generated together with the constants, so
+    /// the remaining failure mode is two constants aliasing one row (reset
+    /// would then leave the other field's intended key behind).
+    #[test]
+    fn app_setting_keys_are_unique() {
+        let unique: std::collections::HashSet<&str> = APP_SETTING_KEYS.iter().copied().collect();
+        assert_eq!(unique.len(), APP_SETTING_KEYS.len());
+        assert!(APP_SETTING_KEYS.contains(&SETTING_COMPLETION_INCLUDE_FAILURES));
     }
 
     // ENG-04: these two decide what a user-typed speed limit / threshold

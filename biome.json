@@ -13,7 +13,9 @@
       "!**/src-tauri",
       "!**/node_modules",
       "!**/browser/extension-core/dist",
-      "!**/.claude"
+      "!**/.claude",
+      "!**/.qoder-credits",
+      "!**/.session-export"
     ]
   },
   "formatter": {

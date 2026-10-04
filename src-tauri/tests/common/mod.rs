@@ -304,6 +304,7 @@ pub fn headless_download_context(
         connection_limit: 1,
         request_headers: Vec::new(),
         proxy_config: ResolvedProxyConfig::default(),
+        network_policy: tauri_app_lib::download::network_policy::NetworkPolicy::default(),
     }
 }
 

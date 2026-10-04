@@ -8,10 +8,12 @@ export type TaskFile = Omit<GeneratedTaskFile, "totalSize" | "downloadedBytes"> 
   downloadedBytes: number;
 };
 
-export type Task = Omit<GeneratedTask, "totalSize" | "downloadedBytes" | "speedBps" | "files"> & {
+export type Task = Omit<GeneratedTask, "totalSize" | "downloadedBytes" | "speedBps" | "files" | "completedAt"> & {
   totalSize: number;
   downloadedBytes: number;
   speedBps: number;
+  /** Legacy fixtures and cached browser tasks may predate U09. */
+  completedAt?: string | null;
   files: TaskFile[];
 };
 
@@ -54,6 +56,7 @@ export function normalizeTask(task: GeneratedTask | Task): Task {
     protocol: normalizeTaskProtocol(task.protocol, task.url, task.fileName),
     recoveryActions: task.recoveryActions ?? [],
     checksums: task.checksums ?? [],
+    completedAt: task.completedAt ?? null,
     totalSize: parseByteCount(task.totalSize),
     downloadedBytes: parseByteCount(task.downloadedBytes),
     speedBps: parseByteCount(task.speedBps),

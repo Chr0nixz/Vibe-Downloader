@@ -15,6 +15,56 @@ beforeAll(() => {
 });
 
 describe("task event helpers", () => {
+  it("builds a localized desktop status with aggregate progress and error state", async () => {
+    const { buildDesktopStatusUpdate } = await loadSubject();
+    const update = buildDesktopStatusUpdate({
+      all: "4",
+      active: "2",
+      queued: "1",
+      attention: "1",
+      paused: "0",
+      waitingNetwork: "0",
+      completed: "0",
+      failed: "0",
+      totalSpeed: "2048",
+      totalDownloaded: "25",
+      totalBytes: "100",
+      featuredTaskId: null,
+    });
+
+    expect(update.progress).toBe(25);
+    expect(update.hasError).toBe(true);
+    expect(update.tooltip).toContain("2");
+    expect(update.tooltip).toContain("1");
+  });
+
+  it("omits taskbar progress when no active task has a known total", async () => {
+    const { buildDesktopStatusUpdate } = await loadSubject();
+    const update = buildDesktopStatusUpdate({
+      all: "1",
+      active: "0",
+      queued: "1",
+      attention: "0",
+      paused: "0",
+      waitingNetwork: "0",
+      completed: "0",
+      failed: "0",
+      totalSpeed: "0",
+      totalDownloaded: "0",
+      totalBytes: "0",
+      featuredTaskId: null,
+    });
+
+    expect(update.progress).toBeNull();
+    expect(update.hasError).toBe(false);
+  });
+
+  it("aggregates failure counts across the notification debounce window", async () => {
+    const { mergeFailureNotificationCounts } = await loadSubject();
+    const first = mergeFailureNotificationCounts({ failed: 0, attention: 0 }, 2, 1);
+    expect(mergeFailureNotificationCounts(first, 1, 3)).toEqual({ failed: 3, attention: 4 });
+  });
+
   it("caps remembered status notifications and preserves recent keys", async () => {
     const { rememberStatusNotification } = await loadSubject();
     const statuses = new Set(["task-1:completed", "task-2:failed"]);

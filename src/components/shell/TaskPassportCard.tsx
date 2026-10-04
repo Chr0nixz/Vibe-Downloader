@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import type { IntegrityPassport } from "@/generated/bindings";
+import { writeClipboardText } from "@/lib/clipboard-write";
 import { formatDateTime } from "@/lib/format-date";
 import {
   buildPassportJson,
@@ -80,7 +81,7 @@ export function TaskPassportCard({
   async function handleCopyReport() {
     if (!passport) return;
     try {
-      await navigator.clipboard?.writeText(buildPassportTextReport(passport, t));
+      await writeClipboardText(buildPassportTextReport(passport, t));
       addToast({ tone: "success", title: t("taskDetails.passport.copyReportSuccess") });
     } catch {
       // UX-24: report the real clipboard outcome instead of assuming success.

@@ -153,6 +153,26 @@ describe("TaskRecoveryActions", () => {
     expect(onResolve).toHaveBeenCalledWith(task, "free_disk_space");
   });
 
+  it("labels the BT metadata handoff as file selection", () => {
+    const task = makeTask({
+      protocol: "magnet",
+      status: "needs_attention",
+      errorCode: "bt_file_selection_required",
+      errorMessage: JSON.stringify({
+        code: "bt_file_selection_required",
+        message: "Choose at least one torrent file before downloading.",
+        recoverable: true,
+        actions: ["check_url"],
+      }),
+      recoveryActions: ["check_url"] as RecoveryAction[],
+    });
+
+    render(<TaskRecoveryActions task={task} onResolve={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "newDownload.chooseFile" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "recovery.check_url" })).not.toBeInTheDocument();
+  });
+
   it("renders a copy-error button alongside the error message", () => {
     const task = makeTask({
       errorMessage: "disk_write_failed: No space left on device",

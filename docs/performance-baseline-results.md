@@ -1,12 +1,47 @@
 # 性能基线实测结果（PERF-11 / E1）
 
-最后更新：2026-07-20
+最后更新：2026-10-02
 
-适用版本：Vibe Downloader `0.3.0`
+历史完整基线适用版本：Vibe Downloader `0.3.0`；本页新增的当前 smoke 适用版本为 `0.5.0`（1k 与 10k）。
 
 状态：已建立可重复 headless harness，并完成本机 1k / 10k 实测。**50k+、HLS/BT 长跑、1k 批量删除 soak、CI 绝对数值门禁仍延期。**
 
 方法与矩阵见 [performance-baseline.md](performance-baseline.md)。原始 JSON 由本地 `artifacts/perf/<ts>/` 生成（目录 gitignore）；本文保留可复核摘要。
+## 0. 2026-10-02 B7 当前 1k smoke（`0.5.0`）
+
+本次运行使用当前工作区 `611cbbc65b6ff76e8b92e1564d6538b4110e25a5`，工作区为 dirty；原始数据位于 `artifacts/perf/20261002-192007/`。这是当前版本的 1k headless smoke，只更新可复核基线，不替代真实 release UI、协议对端或长跑验收。
+
+| 字段 | 值 |
+| --- | --- |
+| Collected (UTC) | `2026-10-02T11:20:09.6366930Z` |
+| OS | Windows 11 Enterprise Insider Preview `10.0.28020` (AMD64) |
+| CPU / RAM | Intel Core i7-14700HX（20 核 / 28 逻辑）；约 63.7 GiB，总运行时约 36.7 GiB free |
+| Toolchain | rustc/cargo `1.95.0`；Node `v22.23.2` |
+| Profile | `debug`（`cargo test`） |
+| Command | `pnpm perf:baseline` |
+| Repetitions / page size | 5 / 100 |
+| Seed time | 2726.45 ms |
+
+| Case | p50 (ms) | p95 (ms) | EXPLAIN QUERY PLAN |
+| --- | ---: | ---: | --- |
+| `list_all_updated_at` | 2.46 | 3.15 | `SCAN tasks USING COVERING INDEX idx_tasks_updated_at_id` |
+| `search_filename_prefix`（`scale-file-1`） | 4.22 | 4.46 | `SCAN tasks USING INDEX idx_tasks_updated_at_id` |
+| `filter_completed` | 2.94 | 3.01 | `SEARCH tasks USING COVERING INDEX idx_tasks_status_updated_at_id (status=?)` |
+| `filter_failed_sort_size` | 2.89 | 2.99 | `SEARCH tasks USING INDEX idx_tasks_queue_order (status=?)` + `USE TEMP B-TREE FOR ORDER BY` |
+
+本次 smoke 通过。它只说明当前 headless 数据库路径在这台机器上的 1k 规模结果；冷启动、滚动、RSS、真实下载吞吐、10k/50k 复测和 HLS/BT 长跑仍按 B7 矩阵执行。
+## 0.1 2026-10-02 B7 当前 10k baseline（`0.5.0`）
+
+本次运行与 1k smoke 使用同一源码快照和机器，原始数据位于 `artifacts/perf/20261002-200606/`。10k 数据生成耗时 `104083.44 ms`，因此该场景适合作为低频基线，不纳入日常快速门禁。
+
+| Case | p50 (ms) | p95 (ms) | EXPLAIN QUERY PLAN |
+| --- | ---: | ---: | --- |
+| `list_all_updated_at` | 10.10 | 10.74 | `SCAN tasks USING COVERING INDEX idx_tasks_updated_at_id` |
+| `search_filename_prefix`（`scale-file-1`） | 22.70 | 23.43 | `SCAN tasks USING INDEX idx_tasks_updated_at_id` |
+| `filter_completed` | 9.47 | 11.53 | `SEARCH tasks USING COVERING INDEX idx_tasks_status_updated_at_id (status=?)` |
+| `filter_failed_sort_size` | 13.12 | 13.82 | `SEARCH tasks USING INDEX idx_tasks_queue_order (status=?)` + `USE TEMP B-TREE FOR ORDER BY` |
+
+10k baseline 通过。当前结果没有触发新的优化决策：查询计划与既有基线一致，仍需 release UI、50k、冷启动和长跑数据后再评估性能调整。
 
 ## 1. 运行环境
 

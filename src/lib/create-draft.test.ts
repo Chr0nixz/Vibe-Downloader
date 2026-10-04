@@ -9,6 +9,9 @@ import {
 } from "./create-draft";
 
 const sampleDraft: CreateDraftShared = {
+  requestProfile: null,
+  networkAuthorizationId: null,
+  sourceKind: null,
   username: "alice",
   password: "secret",
   privateKeyData: "-----BEGIN OPENSSH PRIVATE KEY-----\n...",
@@ -32,6 +35,8 @@ describe("FUN-17 create draft contract", () => {
     const single = applyDraftToCreateTaskInput(
       {
         url: "https://example.com/a.bin",
+        startPaused: false,
+        obeySchedule: true,
         saveDir: "/tmp",
         fileName: null,
         probeSnapshot: null,
@@ -64,6 +69,8 @@ describe("FUN-17 create draft contract", () => {
     const input = toDirectoryProbeInput("ftp://example.com/pub/", sampleDraft);
     expect(input).toEqual({
       url: "ftp://example.com/pub/",
+      networkAuthorizationId: null,
+      sourceKind: null,
       username: "alice",
       password: "secret",
       privateKeyData: sampleDraft.privateKeyData,

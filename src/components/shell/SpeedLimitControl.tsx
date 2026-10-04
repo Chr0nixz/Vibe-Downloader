@@ -56,7 +56,7 @@ export function SpeedLimitControl({ open, onOpenChange }: { open: boolean; onOpe
     if (!settings) return;
     try {
       setSaving(true);
-      setSettings(await applyGlobalSpeedLimit(settings, limit));
+      setSettings(await applyGlobalSpeedLimit(limit));
       onOpenChange(false);
     } catch (error) {
       addToast({

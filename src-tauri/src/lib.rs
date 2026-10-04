@@ -14,14 +14,17 @@ pub mod state_machine;
 
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use sqlx::SqlitePool;
 use tauri::{
     generate_handler,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    Emitter, Manager, PhysicalPosition, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tokio::{
     sync::{Mutex, OwnedMutexGuard},
@@ -39,6 +42,7 @@ pub struct DownloadControl {
     /// PERF-15: the finish command notifies this after `finish.store(true)` so
     /// the waiting HLS loop wakes immediately instead of polling the DB flag.
     pub finish_notify: Arc<tokio::sync::Notify>,
+    pub speed_limiter: Arc<download::GlobalSpeedLimiter>,
     pub handle: Option<JoinHandle<()>>,
     pub source_key: String,
     pub connection_slots: usize,
@@ -98,123 +102,307 @@ pub struct AppState {
     pub engine_registry: Arc<download::EngineRegistry>,
     pub quit_requested: Arc<AtomicBool>,
     pub task_runtime_locks: Arc<TaskRuntimeLocks>,
+    pub lifecycle_gate: Arc<Mutex<()>>,
+    pub lifecycle: Arc<AppLifecycle>,
+    pub active_supervisors: Arc<AtomicUsize>,
+    /// Prevents repeated native close events from opening competing decisions
+    /// while the close dialog or pause-and-exit action is in flight.
+    pub close_request_pending: Arc<AtomicBool>,
 }
 
-/// Cancel all active downloads and wait for checkpoint flush (up to `timeout`).
-/// Called at app exit to prevent progress loss.
-pub async fn shutdown_active_downloads(state: &AppState, timeout: std::time::Duration) {
-    let downloads = state.downloads.lock().await;
-    if downloads.is_empty() {
-        return;
-    }
-    let count = downloads.len();
-    tracing::info!(active_count = count, "shutting down active downloads");
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AppLifecyclePhase {
+    Running = 0,
+    RestartDraining = 1,
+    ExitDraining = 2,
+    RestartReady = 3,
+    ExitReady = 4,
+}
 
-    for (task_id, control) in downloads.iter() {
-        tracing::debug!(task_id, "cancelling download for shutdown");
-        control.cancel_token.cancel();
-    }
-    drop(downloads);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitClaim {
+    StartDrain,
+    ExitNow,
+    AlreadyDraining,
+}
 
-    let mut remaining = state.downloads.lock().await;
-    let mut handles: Vec<(String, JoinHandle<()>)> = Vec::new();
-    for (task_id, control) in remaining.drain() {
-        if let Some(handle) = control.handle {
-            handles.push((task_id, handle));
-        } else {
-            // R-2: pending control (worker not yet spawned) — cancel_token was
-            // already cancelled above; nothing to await.
-            tracing::debug!(task_id, "pending download control had no join handle");
+#[derive(Default)]
+pub struct AppLifecycle(AtomicU8);
+
+impl AppLifecycle {
+    pub fn phase(&self) -> AppLifecyclePhase {
+        match self.0.load(Ordering::SeqCst) {
+            1 => AppLifecyclePhase::RestartDraining,
+            2 => AppLifecyclePhase::ExitDraining,
+            3 => AppLifecyclePhase::RestartReady,
+            4 => AppLifecyclePhase::ExitReady,
+            _ => AppLifecyclePhase::Running,
         }
     }
-    drop(remaining);
 
-    drain_download_handles(handles, timeout).await;
-    tracing::info!("shutdown_active_downloads complete");
-}
+    pub fn transition(&self, from: AppLifecyclePhase, to: AppLifecyclePhase) -> bool {
+        if from == to {
+            return false;
+        }
+        self.0
+            .compare_exchange(from as u8, to as u8, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
 
-/// ARC-23: two-phase drain with a SHARED budget. The previous shape raced each
-/// handle against its own `timeout` inside an outer `timeout(join_all)` using
-/// the same duration — the outer future expired first and dropped the inner
-/// ones, making the per-handle abort branch unreachable and detaching any
-/// unfinished worker (its checkpoint/flush died with the process).
-///
-/// Phase 1: wait gracefully until the whole budget is spent. Phase 2: abort
-/// whatever is left and await each handle so nothing detaches.
-pub async fn drain_download_handles(
-    handles: Vec<(String, JoinHandle<()>)>,
-    budget: std::time::Duration,
-) {
-    // `None` marks a handle that already completed in phase 1 so phase 2 never
-    // re-polls it (JoinHandle panics when awaited twice).
-    let mut slots: Vec<(String, Option<JoinHandle<()>>)> = handles
-        .into_iter()
-        .map(|(id, handle)| (id, Some(handle)))
-        .collect();
-
-    let grace = tokio::time::timeout(
-        budget,
-        futures_util::future::join_all(slots.iter_mut().map(|(task_id, slot)| async move {
-            if let Some(handle) = slot.as_mut() {
-                match handle.await {
-                    Ok(()) => tracing::debug!(task_id, "download task exited cleanly"),
-                    Err(e) => {
-                        tracing::warn!(task_id, error = %e, "download task exited with error")
+    pub fn claim_exit(&self) -> ExitClaim {
+        loop {
+            let phase = self.phase();
+            match phase {
+                AppLifecyclePhase::Running | AppLifecyclePhase::RestartDraining => {
+                    if self.transition(phase, AppLifecyclePhase::ExitDraining) {
+                        return ExitClaim::StartDrain;
                     }
                 }
-                *slot = None;
+                AppLifecyclePhase::RestartReady => {
+                    if self.transition(phase, AppLifecyclePhase::ExitReady) {
+                        return ExitClaim::ExitNow;
+                    }
+                }
+                AppLifecyclePhase::ExitDraining => return ExitClaim::AlreadyDraining,
+                AppLifecyclePhase::ExitReady => return ExitClaim::ExitNow,
             }
-        })),
-    )
-    .await;
-    if grace.is_ok() {
-        return;
-    }
-
-    let remaining = slots.iter().filter(|(_, slot)| slot.is_some()).count();
-    tracing::warn!(
-        remaining,
-        "shutdown budget expired, aborting remaining download tasks"
-    );
-    for (_, slot) in slots.iter_mut() {
-        if let Some(handle) = slot.as_mut() {
-            handle.abort();
         }
     }
-    for (task_id, slot) in slots {
-        if let Some(handle) = slot {
-            match handle.await {
-                Ok(()) => tracing::debug!(task_id, "aborted download task joined"),
-                Err(e) => tracing::warn!(task_id, error = %e, "aborted download task join error"),
+
+    pub fn set_phase(&self, phase: AppLifecyclePhase) {
+        self.0.store(phase as u8, Ordering::SeqCst);
+    }
+}
+
+pub struct ActiveSupervisorGuard(Arc<AtomicUsize>);
+
+impl ActiveSupervisorGuard {
+    pub fn new(active: Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, Ordering::SeqCst);
+        Self(active)
+    }
+}
+
+impl Drop for ActiveSupervisorGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+pub const APP_RESTART_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Cancel active work and wait until engines, owned resources, and supervisor
+/// post-processing have all left their active lifecycle.
+pub async fn drain_download_owners(
+    downloads: &Mutex<HashMap<String, DownloadControl>>,
+    active_supervisors: &AtomicUsize,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), String> {
+    let count = {
+        let downloads = downloads.lock().await;
+        for (task_id, control) in downloads.iter() {
+            tracing::debug!(task_id, "cancelling download for app lifecycle transition");
+            control.cancel_token.cancel();
+        }
+        downloads.len()
+    };
+    if count > 0 {
+        tracing::info!(active_count = count, "draining active downloads");
+    }
+
+    let wait_for_drain = async {
+        loop {
+            let slots_empty = downloads.lock().await.is_empty();
+            if slots_empty && active_supervisors.load(Ordering::SeqCst) == 0 {
+                return;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    };
+
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, wait_for_drain)
+            .await
+            .map_err(|_| task_stop_pending_error())?,
+        None => wait_for_drain.await,
+    }
+    tracing::info!("active download owners drained");
+    Ok(())
+}
+
+/// Stops new task reservations before cancelling and waiting for all active
+/// download owners. A bounded timeout leaves the app running and fail-closed.
+pub async fn shutdown_active_downloads(
+    state: &AppState,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), String> {
+    let _lifecycle_guard = state.lifecycle_gate.clone().lock_owned().await;
+    state.quit_requested.store(true, Ordering::SeqCst);
+    drain_download_owners(&state.downloads, &state.active_supervisors, timeout).await
+}
+
+pub async fn prepare_app_relaunch(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(state) = app.try_state::<AppState>() else {
+        return Ok(());
+    };
+    let lifecycle = state.lifecycle.clone();
+    loop {
+        match lifecycle.phase() {
+            AppLifecyclePhase::Running => {
+                if lifecycle.transition(
+                    AppLifecyclePhase::Running,
+                    AppLifecyclePhase::RestartDraining,
+                ) {
+                    break;
+                }
+            }
+            AppLifecyclePhase::RestartReady => return Ok(()),
+            _ => return Err(task_stop_pending_error()),
+        }
+    }
+
+    state.quit_requested.store(true, Ordering::SeqCst);
+    match shutdown_active_downloads(state.inner(), Some(APP_RESTART_DRAIN_BUDGET)).await {
+        Ok(()) => {
+            if lifecycle.transition(
+                AppLifecyclePhase::RestartDraining,
+                AppLifecyclePhase::RestartReady,
+            ) {
+                Ok(())
+            } else {
+                Err(task_stop_pending_error())
+            }
+        }
+        Err(error) => {
+            let _lifecycle_guard = state.lifecycle_gate.clone().lock_owned().await;
+            if lifecycle.transition(
+                AppLifecyclePhase::RestartDraining,
+                AppLifecyclePhase::Running,
+            ) {
+                state.quit_requested.store(false, Ordering::SeqCst);
+            }
+            Err(error)
         }
     }
 }
 
-/// ARC-45: cancel a download worker and wait until it is actually gone before
-/// callers delete files the worker may still hold open. The previous restart
-/// path aborted without joining, so on Windows a not-yet-polled worker kept
-/// the temp file handle open: `remove_file` became delete-pending and the new
-/// worker's `create()` failed with ACCESS_DENIED. Phase 1 awaits the handle
-/// gracefully for `grace`; on expiry Phase 2 aborts AND joins (mirroring
-/// [`drain_download_handles`]) so no I/O outlives the call.
-pub async fn cancel_and_drain_control(control: DownloadControl, grace: std::time::Duration) {
-    control.cancel_token.cancel();
-    let Some(mut handle) = control.handle else {
+pub async fn cancel_prepared_app_relaunch(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(state) = app.try_state::<AppState>() else {
+        return Ok(());
+    };
+    {
+        let _lifecycle_guard = state.lifecycle_gate.clone().lock_owned().await;
+        match state.lifecycle.phase() {
+            AppLifecyclePhase::RestartReady
+                if state
+                    .lifecycle
+                    .transition(AppLifecyclePhase::RestartReady, AppLifecyclePhase::Running) =>
+            {
+                state.quit_requested.store(false, Ordering::SeqCst);
+            }
+            AppLifecyclePhase::RestartReady => return Err(task_stop_pending_error()),
+            AppLifecyclePhase::Running => return Ok(()),
+            _ => return Err(task_stop_pending_error()),
+        }
+    }
+    state
+        .scheduler
+        .dispatch_detached(app.clone(), state.pool.clone());
+    Ok(())
+}
+
+pub fn request_graceful_exit(app: tauri::AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        app.exit(0);
         return;
     };
-    // Await through `&mut` so ownership survives the timeout branch —
-    // `timeout(grace, handle)` would consume the handle on both outcomes and
-    // make the abort phase impossible (JoinHandle panics on double await).
-    if tokio::time::timeout(grace, &mut handle).await.is_ok() {
-        return;
+    let lifecycle = state.lifecycle.clone();
+    match lifecycle.claim_exit() {
+        ExitClaim::AlreadyDraining => return,
+        ExitClaim::ExitNow => {
+            app.exit(0);
+            return;
+        }
+        ExitClaim::StartDrain => {}
     }
-    tracing::warn!("restart drain budget expired, aborting the download worker");
-    handle.abort();
-    match handle.await {
-        Ok(()) => tracing::debug!("aborted download worker joined"),
-        Err(e) => tracing::warn!(error = %e, "aborted download worker join error"),
+
+    state.quit_requested.store(true, Ordering::SeqCst);
+    let _ = app.emit("app://shutting-down", ());
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        if let Err(error) = shutdown_active_downloads(state.inner(), None).await {
+            tracing::error!(error = %error, "unbounded app shutdown drain failed");
+            return;
+        }
+        state.lifecycle.set_phase(AppLifecyclePhase::ExitReady);
+        app.exit(0);
+    });
+}
+
+/// ARC-62: a deadline bounds the user action, never the lifetime of a file writer.
+/// The caller retains control on timeout and must not mutate files or restart.
+pub async fn cancel_and_drain_control(
+    control: &mut DownloadControl,
+    grace: std::time::Duration,
+) -> Result<(), String> {
+    control.cancel_token.cancel();
+    let Some(handle) = control.handle.as_mut() else {
+        return Err(task_stop_pending_error());
+    };
+    match tokio::time::timeout(grace, handle).await {
+        Ok(result) => {
+            control.handle.take();
+            if let Err(error) = result {
+                tracing::warn!(%error, "download supervisor join failed");
+            }
+            Ok(())
+        }
+        Err(_) => Err(task_stop_pending_error()),
     }
+}
+
+pub const USER_ACTION_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub fn task_stop_pending_error() -> String {
+    models::AppErrorPayload::new(
+        "task_stop_pending",
+        "The previous download is still stopping. Retry this action after its file operations finish.",
+        true,
+        Vec::new(),
+    ).command_error()
+}
+
+/// ARC-57 / ARC-62: preserve the active slot while awaiting the supervisor.
+/// The per-task lock serializes callers; the map lock must be released because
+/// the supervisor removes its own entry only after all owned resources drain.
+pub async fn remove_and_drain_control(
+    downloads: &Mutex<HashMap<String, DownloadControl>>,
+    request_headers: &Mutex<HashMap<String, RequestHeaders>>,
+    task_id: &str,
+    grace: std::time::Duration,
+) -> Result<(), String> {
+    let mut handle = {
+        let mut active = downloads.lock().await;
+        let Some(control) = active.get_mut(task_id) else {
+            return Ok(());
+        };
+        control.cancel_token.cancel();
+        control.handle.take().ok_or_else(task_stop_pending_error)?
+    };
+    if tokio::time::timeout(grace, &mut handle).await.is_err() {
+        let mut active = downloads.lock().await;
+        if let Some(control) = active.get_mut(task_id) {
+            control.handle = Some(handle);
+            return Err(task_stop_pending_error());
+        }
+        // The supervisor finished resource convergence at the deadline boundary.
+        // Its remaining tail owns no download writer.
+        return Ok(());
+    }
+    downloads.lock().await.remove(task_id);
+    request_headers.lock().await.remove(task_id);
+    Ok(())
 }
 
 /// R-4: Single source of truth for the command list shared between
@@ -252,11 +440,18 @@ macro_rules! vibe_commands_base {
             commands::tasks::get_segment_summary,
             commands::tasks::get_torrent_runtime_snapshot,
             commands::tasks::get_task_proxy_settings,
+            commands::tasks::get_task_request_profile,
+            commands::tasks::update_task_request_profile,
+            commands::tasks::create_network_authorization,
+            commands::tasks::get_task_network_policy,
+            commands::tasks::revoke_task_network_authorization,
             commands::tasks::list_task_events_page,
             commands::tasks::list_task_requests_page,
             commands::tasks::get_task_integrity_passport,
+            commands::tasks::recheck_task,
             commands::settings::get_settings,
             commands::settings::update_settings,
+            commands::settings::reset_settings,
             commands::settings::list_sftp_known_hosts,
             commands::settings::forget_sftp_known_host,
             commands::backup::create_app_backup,
@@ -304,6 +499,10 @@ macro_rules! vibe_commands_base {
             commands::system::request_system_sleep,
             commands::system::request_system_hibernate,
             commands::system::request_lock_screen,
+            commands::system::prepare_app_relaunch,
+            commands::system::cancel_prepared_app_relaunch,
+            commands::system::resolve_close_request,
+            commands::system::update_desktop_status,
             commands::system::query_disk_space,
             commands::system::extract_system_file_icon,
             commands::tasks::probe_task,
@@ -322,6 +521,7 @@ macro_rules! vibe_commands_base {
             commands::tasks::pause_task,
             commands::tasks::resume_task,
             commands::tasks::retry_task,
+            commands::tasks::redownload_task,
             commands::tasks::list_metalink_mirrors,
             commands::tasks::retry_task_with_mirror,
             commands::tasks::finish_live_recording,
@@ -370,7 +570,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::TaskProgressPayload>()
         .typ::<events::QueueChangedPayload>()
         .typ::<events::ProbePhasePayload>()
+        .typ::<events::BrowserHandoffAuthorizationRequiredPayload>()
         .typ::<events::StorageCleanupProgressPayload>()
+        .typ::<events::CloseRequestPayload>()
         .typ::<models::storage::StorageScanResult>()
         .typ::<models::storage::StorageCleanupResult>()
         .typ::<models::storage::StorageSweepRecord>()
@@ -442,6 +644,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<models::EnvironmentFixInput>()
         .typ::<models::EnvironmentFixResult>()
         .typ::<commands::tray::TrayMenuAction>()
+        .typ::<commands::system::CloseRequestAction>()
+        .typ::<commands::system::DesktopStatusUpdate>()
 }
 
 pub fn export_typescript_bindings() -> Result<(), Box<dyn std::error::Error>> {
@@ -532,10 +736,9 @@ pub fn run() {
                 let Some(state) = app.try_state::<AppState>() else {
                     return;
                 };
-                if state
-                    .quit_requested
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
+                if state.lifecycle.phase() != AppLifecyclePhase::Running {
+                    api.prevent_close();
+                    request_graceful_exit(app.clone());
                     return;
                 }
 
@@ -550,24 +753,68 @@ pub fn run() {
                 if close_to_tray {
                     api.prevent_close();
                     let _ = window.hide();
-                } else {
-                    // Window is actually closing — prevent immediate close,
-                    // signal background tasks, show shutdown overlay, wait for
-                    // checkpoint flush, then exit.
-                    api.prevent_close();
-                    state
-                        .quit_requested
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    let _ = app.emit("app://shutting-down", ());
-
-                    let app_handle = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let state = app_handle.state::<AppState>();
-                        shutdown_active_downloads(state.inner(), std::time::Duration::from_secs(3))
-                            .await;
-                        app_handle.exit(0);
-                    });
+                    return;
                 }
+
+                let stats = tauri::async_runtime::block_on(db::task_stats_snapshot(&state.pool));
+                let (active, queued, stats_unavailable) = match stats {
+                    Ok(snapshot) => {
+                        let active = snapshot.active.parse::<u32>().ok();
+                        let queued = snapshot.queued.parse::<u32>().ok();
+                        match (active, queued) {
+                            (Some(active), Some(queued)) => (active, queued, false),
+                            _ => {
+                                tracing::warn!(
+                                    "task stats snapshot contained invalid counts during close"
+                                );
+                                (0, 0, true)
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "task stats snapshot failed during close");
+                        (0, 0, true)
+                    }
+                };
+                if active == 0 {
+                    if stats_unavailable {
+                        // Keep the window open and surface the decision dialog
+                        // when ownership is unknown. Exiting here could
+                        // terminate an active download without a checkpoint.
+                        api.prevent_close();
+                        if state.close_request_pending.swap(true, Ordering::SeqCst) {
+                            return;
+                        }
+                        events::emit_close_requested(
+                            app,
+                            &events::CloseRequestPayload {
+                                active,
+                                queued,
+                                stats_unavailable,
+                            },
+                        );
+                        return;
+                    }
+                    // The lifecycle coordinator prevents repeated close events
+                    // from bypassing the owner drain when nothing needs a UI
+                    // decision.
+                    api.prevent_close();
+                    request_graceful_exit(app.clone());
+                    return;
+                }
+
+                api.prevent_close();
+                if state.close_request_pending.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                events::emit_close_requested(
+                    app,
+                    &events::CloseRequestPayload {
+                        active,
+                        queued,
+                        stats_unavailable,
+                    },
+                );
             }
         });
 
@@ -582,7 +829,7 @@ pub fn run() {
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(vibe_commands_base!(generate_handler));
 
-    builder
+    let app = builder
         .setup(|app| {
             logging::init_logging(app.handle())?;
 
@@ -615,8 +862,27 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|app_handle, event| {
+        if matches!(&event, RunEvent::Resumed) {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                state.scheduler.notify_speed_policy_changed();
+            }
+        }
+        if let RunEvent::ExitRequested { api, .. } = event {
+            let Some(state) = app_handle.try_state::<AppState>() else {
+                return;
+            };
+            if !matches!(
+                state.lifecycle.phase(),
+                AppLifecyclePhase::RestartReady | AppLifecyclePhase::ExitReady
+            ) {
+                api.prevent_exit();
+                request_graceful_exit(app_handle.clone());
+            }
+        }
+    });
 }
 
 /// Heavy startup work that runs after the main window is shown.
@@ -768,6 +1034,10 @@ async fn run_startup_init_inner(handle: &tauri::AppHandle) -> Result<(), String>
             engine_registry,
             quit_requested: Arc::new(AtomicBool::new(false)),
             task_runtime_locks,
+            lifecycle_gate: Arc::new(Mutex::new(())),
+            lifecycle: Arc::new(AppLifecycle::default()),
+            active_supervisors: Arc::new(AtomicUsize::new(0)),
+            close_request_pending: Arc::new(AtomicBool::new(false)),
         });
         startup.mark_app_state_managed();
         run_post_app_state_services(handle, settings.floating_window_enabled).await?;
@@ -825,6 +1095,7 @@ async fn run_post_app_state_services(
         commands::tasks::spawn_schedule_window_monitor(handle.clone(), app_state.inner());
         commands::tasks::spawn_request_diagnostics_cleanup(handle.clone());
         commands::tasks::spawn_wal_checkpoint_monitor(handle.clone());
+        commands::tasks::spawn_desktop_status_monitor(handle.clone());
         startup.mark_monitors_started();
     }
 
@@ -951,7 +1222,7 @@ pub(crate) fn open_downloads_dir(app: &tauri::AppHandle) {
 }
 
 fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let mut builder = TrayIconBuilder::new()
+    let mut builder = TrayIconBuilder::with_id("main-tray")
         .tooltip("Vibe Downloader")
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| match event {

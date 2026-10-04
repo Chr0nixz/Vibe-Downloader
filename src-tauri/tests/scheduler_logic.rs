@@ -361,6 +361,33 @@ async fn complete_task_does_not_overwrite_paused() {
     pool.close().await;
 }
 
+#[tokio::test]
+async fn complete_task_records_independent_completion_time() {
+    let pool = race_test_pool("completed-at").await;
+    let task_id = "completed-at-task";
+    insert_downloading_task(&pool, task_id).await;
+
+    db::complete_task(&pool, task_id)
+        .await
+        .expect("complete task");
+
+    let completed_at: Option<String> =
+        sqlx::query_scalar("SELECT completed_at FROM tasks WHERE id = ?")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read completion time");
+    assert!(completed_at.is_some(), "completion time must be persisted");
+
+    let record = db::get_task_record(&pool, task_id)
+        .await
+        .expect("query")
+        .expect("task exists");
+    assert_eq!(record.status, TaskStatus::Completed);
+    assert!(record.updated_at >= completed_at.unwrap());
+    pool.close().await;
+}
+
 // --- A-1: TransitionError variant coverage ---------------------------------
 //
 // `start_task` (scheduler/mod.rs:295-332) matches `TransitionError::Conflict`

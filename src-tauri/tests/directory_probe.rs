@@ -16,7 +16,12 @@ use std::{
 use base64::Engine as _;
 use tauri_app_lib::{
     db,
-    download::{probe_ftp_directory_url, probe_sftp_directory_url, probe_webdav_directory_url},
+    download::{
+        network_policy::{NetworkPolicy, NetworkTargetGrant, TaskSource},
+        probe_ftp_directory_url_cancellable_with_policy,
+        probe_sftp_directory_url_cancellable_with_policy,
+        probe_webdav_directory_url_cancellable_with_policy,
+    },
     models::TaskProxyMode,
     proxy::{AppProxyMode, ResolvedProxyConfig},
 };
@@ -25,6 +30,17 @@ use tokio::net::TcpListener as TokioTcpListener;
 
 fn b64(value: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(value.as_bytes())
+}
+
+fn authorized_loopback_policy(url: &str) -> NetworkPolicy {
+    // Each fixture grants its own authority so test order cannot change access.
+    let mut policy = NetworkPolicy::public(TaskSource::Manual, url);
+    policy.grants.push(NetworkTargetGrant {
+        authority: policy.root_authority.clone().expect("fixture authority"),
+        addresses: vec!["127.0.0.1".into()],
+        authorized_at: chrono::Utc::now().to_rfc3339(),
+    });
+    policy
 }
 
 // --- WebDAV password directory ---------------------------------------------
@@ -57,6 +73,10 @@ fn creation_state(pool: sqlx::SqlitePool) -> tauri_app_lib::AppState {
         scheduler,
         browser_realtime: tauri_app_lib::browser_realtime::BrowserRealtimeState::new(),
         quit_requested: Arc::default(),
+        lifecycle_gate: Arc::default(),
+        lifecycle: Arc::default(),
+        active_supervisors: Arc::default(),
+        close_request_pending: Arc::default(),
     }
 }
 
@@ -69,8 +89,26 @@ async fn exercise_authenticated_creation(
     key: Option<&str>,
 ) {
     use tauri_app_lib::commands::tasks::{create_task_headless, import_urls_headless};
+    let authorization = db::create_network_authorization(
+        &state.pool,
+        tauri_app_lib::download::network_policy::TaskSource::Manual,
+        url,
+    )
+    .await
+    .expect("create task network authorization");
     let paths = common::TestPaths::new("credential-creation");
-    let input = serde_json::json!({ "url": url, "input": url, "saveDir": paths.temp.parent().unwrap(), "username": username, "password": password, "privateKeyData": key, "allowDuplicate": true, "create": true });
+    let input = serde_json::json!({
+        "url": url,
+        "input": url,
+        "saveDir": paths.temp.parent().unwrap(),
+        "username": username,
+        "password": password,
+        "privateKeyData": key,
+        "networkAuthorizationId": authorization.id,
+        "sourceKind": "manual",
+        "allowDuplicate": true,
+        "create": true
+    });
     for proxy_mode in ["inherit", "off", "custom"] {
         // Off must bypass a broken inherited proxy. Custom must override it.
         state
@@ -225,6 +263,54 @@ async fn fun30_ftp_and_sftp_credentials_survive_creation_and_batch_reprobe() {
     pool.close().await;
 }
 
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fun39_creation_can_start_paused_and_skip_download_window() {
+    use tauri_app_lib::commands::tasks::create_task_headless;
+
+    common::install_test_secret_key();
+    common::install_intranet_test_bypass();
+    let (_guard, pool) = common::test_pool("create-paused").await;
+    let state = creation_state(pool.clone());
+    let server = common::TestServer::start(|mut stream| {
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request);
+        let body = b"fixture";
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(body);
+    });
+    let paths = common::TestPaths::new("create-paused");
+    let url = format!("{}/paused.bin", server.base_url);
+    let authorization = db::create_network_authorization(&pool, TaskSource::Manual, &url)
+        .await
+        .expect("network authorization");
+    let input = serde_json::json!({
+        "url": url,
+        "saveDir": paths.temp.parent().unwrap().to_string_lossy(),
+        "allowDuplicate": true,
+        "startPaused": true,
+        "obeySchedule": false,
+        "networkAuthorizationId": authorization.id,
+        "sourceKind": "manual"
+    });
+
+    let task = create_task_headless(&state, serde_json::from_value(input).unwrap())
+        .await
+        .expect("paused task creation");
+    assert_eq!(task.status, tauri_app_lib::models::TaskStatus::Paused);
+    assert!(!task.obey_schedule);
+
+    let events = db::list_task_events_page(&pool, &task.id, None, 20)
+        .await
+        .expect("task events");
+    assert!(events.iter().any(|event| event.event_type == "created"));
+    assert!(events.iter().any(|event| event.event_type == "paused"));
+}
+
 #[derive(Clone)]
 struct WebDavDirState {
     require_basic_auth: bool,
@@ -303,13 +389,16 @@ async fn fun04_webdav_directory_probe_uses_draft_password() {
     let observed = state.observed_authorization.clone();
     let server = start_webdav_dir_server(state);
     let url = format!("webdav://{}/dir/", server.authority());
+    let policy = authorized_loopback_policy(&url);
     let factory = tauri_app_lib::download::NetworkClientFactory::new();
     let client = factory
         .client_for(&tauri_app_lib::proxy::ResolvedProxyConfig::default())
         .await
         .expect("client");
 
-    let without = probe_webdav_directory_url(&client, &url, None).await;
+    let without =
+        probe_webdav_directory_url_cancellable_with_policy(&client, &url, None, &policy, None)
+            .await;
     assert!(without.is_err(), "missing credentials must fail auth");
 
     let credentials = db::TaskCredentials {
@@ -318,9 +407,15 @@ async fn fun04_webdav_directory_probe_uses_draft_password() {
         private_key_data: None,
         private_key_passphrase: None,
     };
-    let probe = probe_webdav_directory_url(&client, &url, Some(&credentials))
-        .await
-        .expect("directory probe with draft credentials");
+    let probe = probe_webdav_directory_url_cancellable_with_policy(
+        &client,
+        &url,
+        Some(&credentials),
+        &policy,
+        None,
+    )
+    .await
+    .expect("directory probe with draft credentials");
 
     assert!(
         !probe.directory_url.contains("alice") && !probe.directory_url.contains("s3cret"),
@@ -480,9 +575,15 @@ async fn fun04_ftp_directory_probe_uses_draft_password() {
         private_key_data: None,
         private_key_passphrase: None,
     };
-    let probe = probe_ftp_directory_url(&url, ResolvedProxyConfig::default(), Some(&credentials))
-        .await
-        .expect("ftp directory probe");
+    let probe = probe_ftp_directory_url_cancellable_with_policy(
+        &url,
+        ResolvedProxyConfig::default(),
+        Some(&credentials),
+        &authorized_loopback_policy(&url),
+        None,
+    )
+    .await
+    .expect("ftp directory probe");
     assert!(
         !probe.directory_url.contains("ftpuser") && !probe.directory_url.contains("ftppass"),
         "directory_url must not leak credentials: {}",
@@ -543,11 +644,13 @@ async fn fun04_sftp_directory_probe_uses_private_key_credentials() {
         private_key_passphrase: None,
     };
 
-    let result = probe_sftp_directory_url(
+    let result = probe_sftp_directory_url_cancellable_with_policy(
         &pool,
         &url,
         ResolvedProxyConfig::default(),
         Some(&credentials),
+        &authorized_loopback_policy(&url),
+        None,
     )
     .await
     .expect("sftp directory probe with private key must list entries");
@@ -689,9 +792,16 @@ async fn fun04_sftp_directory_probe_uses_socks5_proxy() {
         private_key_data: None,
         private_key_passphrase: None,
     };
-    let probe = probe_sftp_directory_url(&pool, &url, resolved, Some(&credentials))
-        .await
-        .expect("sftp directory probe via socks5");
+    let probe = probe_sftp_directory_url_cancellable_with_policy(
+        &pool,
+        &url,
+        resolved,
+        Some(&credentials),
+        &authorized_loopback_policy(&url),
+        None,
+    )
+    .await
+    .expect("sftp directory probe via socks5");
     assert!(
         probe
             .entries
@@ -807,9 +917,15 @@ async fn fun04_ftp_directory_probe_uses_socks5_proxy() {
         password: None,
     };
     let url = format!("ftp://127.0.0.1:{origin_port}/pub/");
-    let probe = probe_ftp_directory_url(&url, proxy_config, None)
-        .await
-        .expect("ftp directory via socks5");
+    let probe = probe_ftp_directory_url_cancellable_with_policy(
+        &url,
+        proxy_config,
+        None,
+        &authorized_loopback_policy(&url),
+        None,
+    )
+    .await
+    .expect("ftp directory via socks5");
     assert!(
         probe
             .entries
@@ -823,44 +939,70 @@ async fn fun04_ftp_directory_probe_uses_socks5_proxy() {
 
 // --- ARC-55: directory probe deadline + cancellation -----------------------
 
+#[tokio::test]
+async fn directory_probes_without_task_authorization_stay_blocked() {
+    let ftp_url = "ftp://127.0.0.1:1/dir/";
+    let ftp_policy = NetworkPolicy::public(TaskSource::Manual, ftp_url);
+    let error = probe_ftp_directory_url_cancellable_with_policy(
+        ftp_url,
+        ResolvedProxyConfig::default(),
+        None,
+        &ftp_policy,
+        None,
+    )
+    .await
+    .expect_err("unauthorized FTP target");
+    assert!(error.contains("intranet_target_blocked"), "{error}");
+    let webdav_url = "webdav://127.0.0.1:1/dir/";
+    let policy = NetworkPolicy::public(TaskSource::Manual, webdav_url);
+    let factory = tauri_app_lib::download::NetworkClientFactory::new();
+    let client = factory
+        .client_for_policy(&ResolvedProxyConfig::default(), &policy)
+        .await
+        .expect("client");
+    let error = probe_webdav_directory_url_cancellable_with_policy(
+        &client, webdav_url, None, &policy, None,
+    )
+    .await
+    .expect_err("unauthorized WebDAV target");
+    assert!(error.contains("intranet_target_blocked"), "{error}");
+}
+
 /// A server that accepts TCP and never writes a byte must not hold the probe
-/// open forever. Cancelling the token has to converge the probe immediately;
-/// without the bounded_probe wrapper the future would wait on `send()`
-/// indefinitely.
+/// open forever. Cancellation must converge while the authorized server stalls.
 #[tokio::test]
 async fn arc55_webdav_probe_cancel_converges() {
-    use tauri_app_lib::download::probe_webdav_directory_url_cancellable;
-
-    // Dials loopback directly (no fake server): install the SSRF bypass
-    // explicitly instead of relying on another test's OnceLock write.
-    common::install_intranet_test_bypass();
     let listener = TokioTcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind stall server");
     let addr = listener.local_addr().expect("addr");
-    // Accept connections and hold them open without responding.
     let server = tokio::spawn(async move {
         let mut held = Vec::new();
         while let Ok((socket, _)) = listener.accept().await {
             held.push(socket);
         }
     });
-
+    let probe_url = format!("webdav://{addr}/dir/");
+    let policy = authorized_loopback_policy(&probe_url);
     let factory = tauri_app_lib::download::NetworkClientFactory::new();
     let client = factory
-        .client_for(&tauri_app_lib::proxy::ResolvedProxyConfig::default())
+        .client_for_policy(&ResolvedProxyConfig::default(), &policy)
         .await
         .expect("client");
-
     let token = tokio_util::sync::CancellationToken::new();
-    let probe_url = format!("webdav://{addr}/dir/");
     let probe = tokio::spawn({
         let token = token.clone();
         async move {
-            probe_webdav_directory_url_cancellable(&client, &probe_url, None, Some(&token)).await
+            probe_webdav_directory_url_cancellable_with_policy(
+                &client,
+                &probe_url,
+                None,
+                &policy,
+                Some(&token),
+            )
+            .await
         }
     });
-
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     token.cancel();
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), probe)
@@ -875,30 +1017,25 @@ async fn arc55_webdav_probe_cancel_converges() {
     server.abort();
 }
 
-/// Same stall server, no cancel token: the 90s budget is too long for a unit
-/// test, so verify the smaller invariant — a *real* error still propagates
-/// instead of being flattened into a timeout.
+/// The 90s budget is too long for a unit test; an authorized closed port must
+/// produce a real connection error instead of being flattened into a timeout.
 #[tokio::test]
 async fn arc55_webdav_probe_error_not_masked_by_budget() {
-    use tauri_app_lib::download::probe_webdav_directory_url_cancellable;
-
-    // Dials loopback directly (no fake server): install the SSRF bypass
-    // explicitly instead of relying on another test's OnceLock write.
-    common::install_intranet_test_bypass();
-    // Port closed → connect fails fast; bounded_probe must surface the
-    // connect error, not wait the full budget or mislabel it.
+    let probe_url = "webdav://127.0.0.1:1/dir/";
+    let policy = authorized_loopback_policy(probe_url);
     let factory = tauri_app_lib::download::NetworkClientFactory::new();
     let client = factory
-        .client_for(&tauri_app_lib::proxy::ResolvedProxyConfig::default())
+        .client_for_policy(&ResolvedProxyConfig::default(), &policy)
         .await
         .expect("client");
     let token = tokio_util::sync::CancellationToken::new();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        probe_webdav_directory_url_cancellable(
+        probe_webdav_directory_url_cancellable_with_policy(
             &client,
-            "webdav://127.0.0.1:1/dir/",
+            probe_url,
             None,
+            &policy,
             Some(&token),
         ),
     )

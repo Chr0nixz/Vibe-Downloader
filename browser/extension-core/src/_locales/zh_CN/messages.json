@@ -5,6 +5,9 @@
   "statusReady": { "message": "就绪" },
   "statusSending": { "message": "发送中…" },
   "statusSent": { "message": "已发送" },
+  "statusAuthorizationRequired": { "message": "请在 Vibe Downloader 中授权" },
+  "statusFailed": { "message": "失败" },
+  "statusDuplicate": { "message": "已接收" },
   "statusDisconnected": { "message": "未连接" },
   "statusUnknown": { "message": "未知" },
 

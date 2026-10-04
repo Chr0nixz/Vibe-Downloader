@@ -1,22 +1,26 @@
+use crate::download::lifecycle::JoinSet;
+use crate::download::owned_fs as fs;
 use std::sync::{atomic::AtomicI64, Arc};
 
 use reqwest::{Client, StatusCode};
 use tokio::{
-    fs,
     io::{AsyncWriteExt, BufWriter},
     sync::mpsc,
-    task::JoinSet,
 };
 
 use super::{
-    error::format_http_status,
-    request::send_get_with_retry,
-    segmented::diagnostics::{if_range_header_from, parse_content_range},
+    error::format_http_status_with_retry_after,
+    request::{retry_after_at, send_get_with_retry},
+    segmented::diagnostics::{
+        has_strong_resume_validator, if_range_header_from, parse_content_range,
+        response_validator_matches,
+    },
     segmented::{download_segment_worker, SegmentMessage, SegmentWorkerRequest},
     DirectDownloadRequest, DirectSegmentedDownloadRequest, HTTP_CHUNK_READ_TIMEOUT,
 };
 use crate::{
     db,
+    download::network_policy::NetworkPolicy,
     download::{
         file_ops::{finalize_download_file, preallocate_temp_file},
         GlobalSpeedLimiter,
@@ -29,13 +33,21 @@ pub(super) async fn run_direct_download(
     request: DirectDownloadRequest,
     cancel_token: tokio_util::sync::CancellationToken,
     speed_limiter: Arc<GlobalSpeedLimiter>,
+    network_policy: &NetworkPolicy,
 ) -> Result<i64, String> {
     let resume_from = fs::metadata(&request.temp_path)
         .await
         .map(|metadata| i64::try_from(metadata.len()).unwrap_or(i64::MAX))
         .unwrap_or(0);
 
-    if resume_from > 0 && !request.supports_resume {
+    if resume_from > 0
+        && (!request.supports_resume
+            || (request.total_size <= 0
+                && !has_strong_resume_validator(
+                    request.etag.as_deref(),
+                    request.last_modified.as_deref(),
+                )))
+    {
         return Err("Resume unavailable. Restart this download from the beginning.".to_string());
     }
 
@@ -46,9 +58,16 @@ pub(super) async fn run_direct_download(
         (resume_from > 0).then(|| format!("bytes={resume_from}-")),
         (resume_from > 0).then_some(if_range.as_deref()).flatten(),
         &[],
+        network_policy,
     )
     .await?;
 
+    if !response.status().is_success() {
+        return Err(format_http_status_with_retry_after(
+            response.status(),
+            retry_after_at(&response),
+        ));
+    }
     if resume_from > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
         return Err(
             "Resume unavailable. The server did not honor the byte range request.".to_string(),
@@ -59,10 +78,18 @@ pub(super) async fn run_direct_download(
             "Resume unavailable. The server returned a mismatched Content-Range.".to_string(),
         );
     }
-    if !response.status().is_success() {
-        return Err(format_http_status(response.status()));
+    if resume_from > 0
+        && request.total_size <= 0
+        && !response_validator_matches(
+            response.headers(),
+            request.etag.as_deref(),
+            request.last_modified.as_deref(),
+        )
+    {
+        return Err(
+            "Resume unavailable. The remote resource validator changed during resume.".to_string(),
+        );
     }
-
     if let Some(parent) = request.temp_path.parent() {
         fs::create_dir_all(parent)
             .await
@@ -95,8 +122,14 @@ pub(super) async fn run_direct_download(
             chunk = tokio::time::timeout(HTTP_CHUNK_READ_TIMEOUT, response.chunk()) => match chunk {
                 Ok(Ok(Some(data))) => data,
                 Ok(Ok(None)) => break,
-                Ok(Err(e)) => return Err(format!("The connection failed while downloading: {e}")),
-                Err(_) => return Err("Connection stalled: no data received for 60 seconds.".to_string()),
+                Ok(Err(error)) => {
+                    return Err(crate::download::probe_error::reqwest_error_to_structured(&error));
+                }
+                Err(_) => {
+                    return Err(crate::download::probe_error::structured_timeout_error(
+                        "Connection stalled: no data received for 60 seconds.",
+                    ));
+                }
             }
         };
         if speed_limiter
@@ -134,6 +167,7 @@ pub(super) async fn run_direct_segmented_download(
     request: DirectSegmentedDownloadRequest,
     cancel_token: tokio_util::sync::CancellationToken,
     speed_limiter: Arc<GlobalSpeedLimiter>,
+    network_policy: &NetworkPolicy,
 ) -> Result<i64, String> {
     if request.segments.is_empty() {
         return Err("No download segments were provided.".to_string());
@@ -191,6 +225,7 @@ pub(super) async fn run_direct_segmented_download(
             speed_limiter: speed_limiter.clone(),
             request_headers: Vec::new(),
             if_range: if_range.clone(),
+            network_policy: network_policy.clone(),
         }));
     }
     drop(progress_tx);
@@ -240,6 +275,9 @@ fn valid_direct_content_range(
     resume_from: i64,
     total_size: i64,
 ) -> bool {
+    if total_size <= 0 {
+        return super::segmented::valid_unknown_size_content_range(response, resume_from);
+    }
     let Some(range) = response
         .headers()
         .get(reqwest::header::CONTENT_RANGE)
@@ -251,9 +289,5 @@ fn valid_direct_content_range(
     if range.start != resume_from {
         return false;
     }
-    if total_size > 0 {
-        range.end == total_size.saturating_sub(1) && range.total == total_size
-    } else {
-        range.end >= range.start
-    }
+    range.end == total_size.saturating_sub(1) && range.total == total_size
 }

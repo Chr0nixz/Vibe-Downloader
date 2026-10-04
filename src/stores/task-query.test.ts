@@ -4,6 +4,7 @@ import type { Task } from "@/types/task";
 
 import {
   buildTaskCursorInput,
+  failureCategoryFromCode,
   failureKind,
   filterTasks,
   mergeTasksFromServer,
@@ -176,6 +177,32 @@ describe("task query helpers", () => {
         }),
       ),
     ).toBe("disk_write");
+  });
+
+  it("uses stable error codes for legacy failure classification", () => {
+    expect(failureCategoryFromCode("task_credentials_invalid")).toBe("other");
+    expect(failureCategoryFromCode("auth_headers_expired")).toBe("auth");
+    expect(failureCategoryFromCode("http_not_found")).toBe("http");
+    expect(failureCategoryFromCode("bt_runtime_failed")).toBe("bt");
+    expect(failureCategoryFromCode("unrecognized_code")).toBe("other");
+    expect(
+      failureKind(
+        makeTask({
+          status: "failed",
+          errorCode: "disk_write_failed",
+          errorMessage: "写入失败",
+        }),
+      ),
+    ).toBe("disk_write");
+    expect(
+      failureKind(
+        makeTask({
+          status: "failed",
+          errorCode: null,
+          errorMessage: "Remote file changed",
+        }),
+      ),
+    ).toBe("other");
   });
 
   it("normalizes backend task stats snapshots for global counters", () => {

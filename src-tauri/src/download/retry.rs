@@ -7,6 +7,107 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
+use crate::models::AppErrorPayload;
+
+/// Maximum number of task-level retries after the initial download attempt.
+/// The budget is persisted per task so a restart cannot silently reset it.
+pub(crate) const MAX_TASK_AUTO_RETRIES: u32 = 10;
+pub(crate) const TASK_AUTO_RETRY_MAX_DELAY: Duration = Duration::from_secs(30 * 60);
+
+/// The stable error and schedule persisted for an automatic task retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskRetryPlan {
+    pub attempt: u32,
+    pub retry_after_at: String,
+    pub reason: String,
+    pub error: String,
+}
+
+/// Build a task-level retry plan from a worker error. Only errors whose stable
+/// code describes a transient transport/server condition are eligible; disk,
+/// authentication, remote identity, TLS, and host-key failures remain visible
+/// failures requiring user action.
+pub(crate) fn task_retry_plan(error: &str, previous_attempt: u32) -> Option<TaskRetryPlan> {
+    let (structured, payload) = if let Ok(payload) = serde_json::from_str::<AppErrorPayload>(error)
+    {
+        (error.to_string(), payload)
+    } else if let Some(classified) = crate::download::probe_error::classify_error_message(error) {
+        let payload = serde_json::from_str::<AppErrorPayload>(&classified).ok()?;
+        (classified, payload)
+    } else {
+        return None;
+    };
+
+    if !payload.recoverable || !is_task_retryable_code(&payload.code) {
+        return None;
+    }
+
+    let attempt = previous_attempt.saturating_add(1);
+    let backoff = task_retry_delay(attempt);
+    let server_hint = payload
+        .retry_after_at
+        .as_deref()
+        .and_then(parse_retry_after_at);
+    let delay = server_hint
+        .map(|hint| backoff.max(hint))
+        .unwrap_or(backoff)
+        .min(TASK_AUTO_RETRY_MAX_DELAY);
+    let retry_after_at = (Utc::now()
+        + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::minutes(30)))
+    .to_rfc3339();
+
+    Some(TaskRetryPlan {
+        attempt,
+        retry_after_at,
+        reason: payload.code,
+        error: structured,
+    })
+}
+
+fn is_task_retryable_code(code: &str) -> bool {
+    matches!(
+        code,
+        "timeout"
+            | "transport_interrupted"
+            | "connection_refused"
+            | "network_unreachable"
+            | "dns_failure"
+            | "proxy_connection_failed"
+            | "server_rate_limited"
+            | "server_error"
+    )
+}
+
+fn parse_retry_after_at(value: &str) -> Option<Duration> {
+    let target = DateTime::parse_from_rfc3339(value)
+        .ok()?
+        .with_timezone(&Utc);
+    let seconds = (target - Utc::now()).num_milliseconds().max(0);
+    Some(Duration::from_millis(u64::try_from(seconds).ok()?))
+}
+
+fn task_retry_delay(attempt: u32) -> Duration {
+    if std::env::var_os("VIBE_FAST_AUTO_RETRY_DELAYS").is_some() {
+        let shift = attempt.saturating_sub(1).min(6);
+        return Duration::from_millis(10_u64.saturating_mul(1_u64 << shift));
+    }
+
+    let shift = attempt.saturating_sub(1).min(15);
+    let base =
+        Duration::from_secs(1_u64.saturating_mul(1_u64 << shift)).min(TASK_AUTO_RETRY_MAX_DELAY);
+    // A small positive jitter prevents many tasks that failed together from
+    // reconnecting in one burst after a shared outage. Tests use the fast
+    // override above, so production timing remains deterministic enough to
+    // inspect while still spreading the queue.
+    let base_ms = base.as_millis() as u64;
+    let jitter_limit = (base_ms / 4).max(1);
+    let now_ms = Utc::now().timestamp_millis().unsigned_abs();
+    Duration::from_millis(base_ms.saturating_add(now_ms % jitter_limit))
+        .min(TASK_AUTO_RETRY_MAX_DELAY)
+}
+
 /// Backoff delay strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Backoff {
@@ -369,5 +470,68 @@ mod tests {
         assert_eq!(p.base_delay, Duration::from_millis(500));
         assert_eq!(p.max_delay, Duration::from_secs(5));
         assert_eq!(p.backoff, Backoff::Exponential);
+    }
+
+    #[test]
+    fn task_retry_classifies_transient_and_preserves_retry_deadline() {
+        let payload = AppErrorPayload::new(
+            "server_rate_limited",
+            "rate limited",
+            true,
+            vec!["retry_later"],
+        )
+        .with_retry_after_at(Some("2030-01-02T03:04:05Z".to_string()));
+        let plan = task_retry_plan(&payload.command_error(), 2).expect("retry plan");
+        assert_eq!(plan.attempt, 3);
+        assert_eq!(plan.reason, "server_rate_limited");
+        assert!(plan.error.contains("retryAfterAt"));
+    }
+
+    #[test]
+    fn task_retry_accepts_verified_transport_interruptions() {
+        let payload = AppErrorPayload::new(
+            "transport_interrupted",
+            "connection reset by peer",
+            true,
+            vec!["retry"],
+        );
+        assert!(task_retry_plan(&payload.command_error(), 0).is_some());
+    }
+
+    #[test]
+    fn task_retry_rejects_generic_network_and_malformed_body_errors() {
+        for code in ["network_error", "decode_error", "body_error"] {
+            let payload = AppErrorPayload::new(code, "opaque failure", true, vec!["retry"]);
+            assert!(
+                task_retry_plan(&payload.command_error(), 0).is_none(),
+                "{code} must not be retried without specific transient evidence"
+            );
+        }
+        let non_recoverable = AppErrorPayload::new(
+            "transport_interrupted",
+            "untrusted code without recoverable flag",
+            false,
+            vec!["check_url"],
+        );
+        assert!(task_retry_plan(&non_recoverable.command_error(), 0).is_none());
+    }
+
+    #[test]
+    fn task_retry_rejects_auth_disk_and_remote_change_errors() {
+        for code in [
+            "http_denied",
+            "disk_write_failed",
+            "remote_changed",
+            "tls_error",
+            "network_error",
+            "decode_error",
+            "body_error",
+        ] {
+            let payload = AppErrorPayload::new(code, "permanent", true, vec!["retry"]);
+            assert!(
+                task_retry_plan(&payload.command_error(), 0).is_none(),
+                "{code} must not be retried automatically"
+            );
+        }
     }
 }

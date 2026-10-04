@@ -9,10 +9,12 @@ import { Button } from "@/components/ui/button";
 import type { StartupStatus } from "@/generated/bindings";
 import { LOGO_64_DATA_URI } from "@/lib/logo";
 import {
+  cancelPreparedAppRelaunch,
   getStartupStatus,
   openDatabaseRecoveryFolder,
   openStartupDataFolder,
   openStartupLogFolder,
+  prepareAppRelaunch,
   resetDatabaseForRecovery,
   retryStartupInit,
 } from "@/lib/tauri";
@@ -192,7 +194,7 @@ function StartupFailedPage({
         onRetryStarted();
         return;
       }
-      if (action === "relaunch") await relaunch();
+      if (action === "relaunch") await relaunchAfterDrain();
     } catch (nextError) {
       setError(String(nextError));
       setBusy(null);
@@ -253,6 +255,16 @@ function StartupFailedPage({
   );
 }
 
+async function relaunchAfterDrain() {
+  await prepareAppRelaunch();
+  try {
+    await relaunch();
+  } catch (error) {
+    await cancelPreparedAppRelaunch().catch(() => undefined);
+    throw error;
+  }
+}
+
 function DatabaseRecoveryPage({ status }: { status: StartupStatus }) {
   const { t } = useTranslation();
   const [confirming, setConfirming] = useState(false);
@@ -269,10 +281,10 @@ function DatabaseRecoveryPage({ status }: { status: StartupStatus }) {
         setBusy(null);
         return;
       }
-      if (action === "retry") await relaunch();
+      if (action === "retry") await relaunchAfterDrain();
       if (action === "reset") {
         await resetDatabaseForRecovery();
-        await relaunch();
+        await relaunchAfterDrain();
       }
     } catch (nextError) {
       setError(String(nextError));

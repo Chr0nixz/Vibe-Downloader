@@ -60,6 +60,7 @@ fn probe_request(uri: String, pool: sqlx::SqlitePool) -> ProbeRequest {
         app: None,
         request_id: None,
         cancel_token: None,
+        network_policy: tauri_app_lib::download::network_policy::NetworkPolicy::default(),
     }
 }
 
@@ -359,6 +360,7 @@ async fn probe_fails_without_db_pool() {
         app: None,
         request_id: None,
         cancel_token: None,
+        network_policy: tauri_app_lib::download::network_policy::NetworkPolicy::default(),
     };
 
     let error = engine
@@ -643,6 +645,86 @@ async fn download_uses_persisted_sftp_credentials() {
         ))
         .await
         .expect("authenticated SFTP download");
+
+    assert_eq!(
+        std::fs::read(&paths.final_path).expect("read final"),
+        payload
+    );
+    pool.close().await;
+}
+
+/// ARC-56: same contract as the FTP test — segments that exhausted
+/// SFTP_WORKER_RETRIES in an earlier run (retry_count 5) must get a fresh
+/// per-run budget, so one injected read failure is retried, not fatal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arc56_retry_budget_resets_despite_persisted_retry_count() {
+    common::install_test_secret_key();
+    let payload: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();
+    let mut files = HashMap::new();
+    files.insert("/budget.bin".to_string(), payload.clone());
+    let server = start_sftp_server(SftpServerConfig {
+        files,
+        reject_auth: false,
+        required_credentials: None,
+        fail_on_read: Some(0),
+        stall_on_read: false,
+        read_chunk_delay: None,
+        deny_open: false,
+    })
+    .await;
+    let (_db, pool) = common::test_pool("sftp-arc56-budget").await;
+    seed_matching_host_key(
+        &pool,
+        &server.addr.ip().to_string(),
+        server.addr.port(),
+        &server.host_key_fingerprint,
+    )
+    .await;
+
+    let paths = common::TestPaths::new("sftp-arc56-budget");
+    let url = format!(
+        "sftp://{}:{}/budget.bin",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let task = common::download_task(
+        "sftp-arc56-budget",
+        url,
+        "sftp",
+        "budget.bin",
+        payload.len() as i64,
+        &paths,
+        false,
+    );
+    db::insert_task_record(&pool, &task)
+        .await
+        .expect("insert SFTP task");
+    db::upsert_task_credentials(&pool, &task.id, "sftp", "sftpuser", "sftppass", None, None)
+        .await
+        .expect("store SFTP credentials");
+    for segment in db::ensure_task_segments(&pool, &task)
+        .await
+        .expect("segments")
+    {
+        db::update_segment_retry(
+            &pool,
+            &segment.id,
+            segment.downloaded_until,
+            5,
+            "previous run exhausted its retries",
+        )
+        .await
+        .expect("seed exhausted retry_count");
+    }
+
+    new_engine()
+        .download(common::headless_download_context(
+            pool.clone(),
+            task,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await
+        .expect("a new run must retry the injected read failure");
 
     assert_eq!(
         std::fs::read(&paths.final_path).expect("read final"),

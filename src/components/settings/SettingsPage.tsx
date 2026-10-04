@@ -59,6 +59,7 @@ import type {
   BrowserExtensionExportResult,
   BrowserIntegrationStatus,
   CompletionAction,
+  UpdateSettingsInput,
 } from "@/generated/bindings";
 import { useAppUpdater } from "@/hooks/use-app-updater";
 import { LOCALE_LABEL_KEYS, type Locale, STABLE_LOCALES, SUPPORTED_LOCALES, setLocale } from "@/i18n";
@@ -83,6 +84,7 @@ import {
   openDirectoryPicker,
   openFilePicker,
   probeFfmpegVersion,
+  resetSettings,
   uninstallBrowserIntegration,
   updateBrowserCaptureSettings,
   updateSettings,
@@ -146,7 +148,7 @@ export function SettingsPage() {
   const [systemNotifications, setSystemNotifications] = useState(true);
   const [closeToTray, setCloseToTray] = useState(false);
   const [startOnBoot, setStartOnBoot] = useState(false);
-  const [autoResumeOnStartup, setAutoResumeOnStartup] = useState(false);
+  const [autoResumeOnStartup, setAutoResumeOnStartup] = useState(true);
   const [floatingWindowEnabled, setFloatingWindowEnabled] = useState(false);
   const [clipboardMonitorEnabled, setClipboardMonitorEnabled] = useState(true);
   const [accentColor, setAccentColor] = useState<AppAccentColor>("blue");
@@ -168,6 +170,9 @@ export function SettingsPage() {
   const [completionAction, setCompletionAction] = useState<CompletionAction>("none");
   const [completionCountdownSeconds, setCompletionCountdownSeconds] = useState(30);
   const [completionRunCommand, setCompletionRunCommand] = useState("");
+  // ARC-58: also fire the completion action when the queue drains with the
+  // last task failed/canceled, not only on all-success.
+  const [completionIncludeFailures, setCompletionIncludeFailures] = useState(false);
   const [deleteToTrash, setDeleteToTrash] = useState(true);
   const [autoUpdateCheckEnabled, setAutoUpdateCheckEnabled] = useState(true);
   const [ffmpegPath, setFfmpegPath] = useState("");
@@ -643,6 +648,7 @@ export function SettingsPage() {
     setCompletionAction(settings.completionAction);
     setCompletionCountdownSeconds(settings.completionCountdownSeconds);
     setCompletionRunCommand(settings.completionRunCommand ?? "");
+    setCompletionIncludeFailures(settings.completionIncludeFailures);
     setDeleteToTrash(settings.deleteToTrash);
     setAutoUpdateCheckEnabled(settings.autoUpdateCheckEnabled);
     setFfmpegPath(settings.ffmpegPath ?? "");
@@ -686,6 +692,7 @@ export function SettingsPage() {
       completionAction === settings.completionAction &&
       completionCountdownSeconds === settings.completionCountdownSeconds &&
       completionRunCommand === (settings.completionRunCommand ?? "") &&
+      completionIncludeFailures === settings.completionIncludeFailures &&
       deleteToTrash === settings.deleteToTrash &&
       autoUpdateCheckEnabled === settings.autoUpdateCheckEnabled &&
       ffmpegPath === (settings.ffmpegPath ?? "") &&
@@ -702,7 +709,7 @@ export function SettingsPage() {
       void saveSettings({
         defaultSaveDir,
         maxActiveTasks,
-        globalSpeedLimitBps: globalSpeedLimitBps.trim(),
+        globalSpeedLimitBps: globalSpeedLimitBps.trim() || null,
         multiConnectionThresholdBytes: multiConnectionThresholdBytes.trim(),
         segmentCount,
         maxConnectionsPerHost,
@@ -729,6 +736,7 @@ export function SettingsPage() {
         completionAction,
         completionCountdownSeconds,
         completionRunCommand,
+        completionIncludeFailures,
         deleteToTrash,
         autoUpdateCheckEnabled,
         ffmpegPath: ffmpegPath.trim() || null,
@@ -773,6 +781,7 @@ export function SettingsPage() {
     completionAction,
     completionCountdownSeconds,
     completionRunCommand,
+    completionIncludeFailures,
     deleteToTrash,
     autoUpdateCheckEnabled,
     ffmpegPath,
@@ -804,7 +813,7 @@ export function SettingsPage() {
     setSaveState("saving");
     setError(null);
     try {
-      const next = await updateSettings({
+      const nextValues: Partial<AppSettings> = {
         maxActiveTasks: nextSettings.maxActiveTasks,
         defaultSaveDir: nextSettings.defaultSaveDir,
         globalSpeedLimitBps: nextSettings.globalSpeedLimitBps,
@@ -823,8 +832,6 @@ export function SettingsPage() {
         proxyUrl: nextSettings.proxyUrl,
         proxyNoProxy: nextSettings.proxyNoProxy,
         proxyUsername: nextSettings.proxyUsername,
-        proxyPassword: proxyPassword.trim() || null,
-        clearProxyPassword,
         scheduleDownloadWindowEnabled: nextSettings.scheduleDownloadWindowEnabled,
         scheduleDownloadWindowStart: nextSettings.scheduleDownloadWindowStart,
         scheduleDownloadWindowEnd: nextSettings.scheduleDownloadWindowEnd,
@@ -835,11 +842,18 @@ export function SettingsPage() {
         completionAction: nextSettings.completionAction,
         completionCountdownSeconds: nextSettings.completionCountdownSeconds,
         completionRunCommand: nextSettings.completionRunCommand ?? "",
+        completionIncludeFailures: nextSettings.completionIncludeFailures,
         deleteToTrash: nextSettings.deleteToTrash,
         autoUpdateCheckEnabled: nextSettings.autoUpdateCheckEnabled,
         ffmpegPath: nextSettings.ffmpegPath,
         btUploadLimitBps: nextSettings.btUploadLimitBps,
-      });
+      };
+      const patch = Object.fromEntries(
+        Object.entries(nextValues).filter(([key, value]) => value !== settings?.[key as keyof AppSettings]),
+      ) as Partial<UpdateSettingsInput>;
+      if (proxyPassword.trim()) patch.proxyPassword = proxyPassword.trim();
+      if (clearProxyPassword) patch.clearProxyPassword = true;
+      const next = await updateSettings(patch);
       if (next.startOnBoot !== settings?.startOnBoot) {
         await syncAutostart(next.startOnBoot);
       }
@@ -934,42 +948,14 @@ export function SettingsPage() {
   async function handleResetDefaults() {
     setResetting(true);
     try {
-      const updated = await updateSettings({
-        maxActiveTasks: 2,
-        defaultSaveDir: null,
-        globalSpeedLimitBps: null,
-        multiConnectionThresholdBytes: "1048576",
-        segmentCount: 4,
-        maxConnectionsPerHost: 8,
-        systemNotifications: true,
-        closeToTray: false,
-        startOnBoot: false,
-        autoResumeOnStartup: false,
-        floatingWindowEnabled: false,
-        clipboardMonitorEnabled: true,
-        accentColor: "blue",
-        titlebarGradientEnabled: false,
-        proxyMode: "off",
-        proxyUrl: "",
-        proxyNoProxy: "",
-        proxyUsername: "",
-        proxyPassword: "",
-        clearProxyPassword: true,
-        scheduleDownloadWindowEnabled: false,
-        scheduleDownloadWindowStart: "00:00",
-        scheduleDownloadWindowEnd: "06:00",
-        scheduleSpeedLimitWindowEnabled: false,
-        scheduleSpeedLimitWindowStart: "18:00",
-        scheduleSpeedLimitWindowEnd: "23:00",
-        scheduleSpeedLimitBps: null,
-        completionAction: "none",
-        completionCountdownSeconds: 30,
-        completionRunCommand: "",
-        deleteToTrash: true,
-        autoUpdateCheckEnabled: true,
-        ffmpegPath: null,
-        btUploadLimitBps: null,
-      });
+      // UX-41: the backend derives defaults from an empty settings table, so
+      // the result always equals a fresh install (previously the frontend kept
+      // its own copy that had drifted — e.g. a 1 MiB multi-connection threshold
+      // against the backend's 16 MiB default).
+      const updated = await resetSettings();
+      if (settings?.startOnBoot && !updated.startOnBoot) {
+        await syncAutostart(false);
+      }
       setSettings(updated);
       setDefaultSaveDir(updated.defaultSaveDir);
       setMaxActiveTasks(updated.maxActiveTasks);
@@ -1004,6 +990,7 @@ export function SettingsPage() {
       setCompletionAction(updated.completionAction);
       setCompletionCountdownSeconds(updated.completionCountdownSeconds);
       setCompletionRunCommand(updated.completionRunCommand ?? "");
+      setCompletionIncludeFailures(updated.completionIncludeFailures);
       setDeleteToTrash(updated.deleteToTrash);
       setAutoUpdateCheckEnabled(updated.autoUpdateCheckEnabled);
       setFfmpegPath(updated.ffmpegPath ?? "");
@@ -1691,6 +1678,13 @@ export function SettingsPage() {
                     className="h-11 w-28 bg-surface-root text-center font-mono md:h-8"
                   />
                 </SettingsRow>
+                <SettingsToggle
+                  title={t("settings.completionIncludeFailures")}
+                  description={t("settings.completionIncludeFailuresTip")}
+                  checked={completionIncludeFailures}
+                  disabled={controlsDisabled || completionAction === "none"}
+                  onChange={setCompletionIncludeFailures}
+                />
               </SettingsSection>
 
               <SettingsSection {...getSectionProps("network")}>

@@ -2,7 +2,6 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     sync::atomic::Ordering,
-    time::Duration,
 };
 
 use futures_util::{stream, StreamExt};
@@ -13,13 +12,11 @@ use tauri::{AppHandle, State};
 use crate::{
     db,
     download::checksum::hash_file,
-    events::{
-        emit_queue_changed, emit_queue_changed_with_ids, emit_task_updated_record,
-        evict_task_files_version, evict_task_files_versions,
-    },
+    events::{emit_queue_changed, emit_queue_changed_with_ids, emit_task_updated_record},
     models::{
         task::now_iso, AppErrorPayload, ChecksumAlgorithm, HashVerificationState,
-        HashVerificationStatus, RecoveryAction, Task, TaskPriority, TaskStatus,
+        HashVerificationStatus, RecoveryAction, Task, TaskPriority, TaskProxyMode,
+        TaskRequestHeaderInput, TaskRequestProfileInput, TaskStatus,
     },
     platform,
     state_machine::TransitionError,
@@ -27,11 +24,15 @@ use crate::{
 };
 
 use super::{
-    delete_path, emit_task_progress_snapshot, is_bt_protocol, queue_task_for_retry_at,
+    create::{create_task_with_state, create_task_with_state_and_headers_until, CreateTaskInput},
+    delete_path, emit_task_progress_snapshot, queue_task_for_retry_at,
     queue_task_for_retry_with_event, require_task, restart_required_error_code,
     restart_task_from_beginning, task_error_code, task_from_record_with_files, task_payload,
     update_recovery_target, ResolveTaskAttentionInput,
 };
+
+#[cfg(debug_assertions)]
+use super::create::create_task_headless_with_headers_until;
 
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -100,15 +101,6 @@ pub(crate) async fn delete_paths_off_runtime(
     outcomes
 }
 
-fn push_delete_request(requests: &mut Vec<FileDeleteRequest>, path: Option<&str>, use_trash: bool) {
-    if let Some(path) = path.filter(|path| !path.trim().is_empty()) {
-        requests.push(FileDeleteRequest {
-            path: path.to_string(),
-            use_trash,
-        });
-    }
-}
-
 impl MetalinkMirrorView {
     fn from_record(r: db::MetalinkResourceRecord) -> Self {
         Self {
@@ -174,6 +166,14 @@ pub async fn update_task_transfer_options(
     )
     .await?;
     let updated = require_task(&state.pool, &input.id).await?;
+    let default_dir = super::super::settings::default_download_dir(&app).unwrap_or_default();
+    if let Err(error) = state
+        .scheduler
+        .refresh_speed_limit_policies(&state.pool, default_dir)
+        .await
+    {
+        tracing::warn!(task_id = %input.id, error = %error, "active task speed policy refresh failed");
+    }
     emit_task_updated_record(&app, &state.pool, &updated).await;
     emit_queue_changed_with_ids(&app, Some(vec![updated.id.clone()]));
     if matches!(updated.status, TaskStatus::Queued) {
@@ -226,45 +226,13 @@ pub async fn pause_task(
     // R-2.3: Serialize against start_task and other user actions on the same task.
     let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, "pausing task");
-    let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
-    if task_for_runtime
-        .as_ref()
-        .is_some_and(|task| is_bt_protocol(&task.protocol))
-    {
-        if let Some(control) = state.downloads.lock().await.remove(&id) {
-            control.cancel_token.cancel();
-            if let Some(h) = control.handle.as_ref() {
-                h.abort();
-            }
-        }
-        if let Some(task) = task_for_runtime.as_ref() {
-            state.engine_registry.delete_runtime_task(task, false).await;
-        }
-        let _ = state.request_headers.lock().await.remove(&id);
-    } else {
-        // Cancel the download and wait for the coordinator to finish its
-        // checkpoint flush before transitioning the task state.
-        //
-        // Without this wait, the coordinator's checkpoint write and
-        // transition_task can race. ARC-06 uses BEGIN IMMEDIATE + BUSY
-        // retries on transitions; draining the JoinHandle remains defense
-        // in depth so the checkpoint commit finishes first.
-        //
-        // The 5s timeout bounds the wait for slow disks; if it expires,
-        // transition_task proceeds anyway and relies on IMMEDIATE/retry.
-        let handle = {
-            let mut downloads = state.downloads.lock().await;
-            if let Some(control) = downloads.remove(&id) {
-                control.cancel_token.cancel();
-                control.handle
-            } else {
-                None
-            }
-        };
-        if let Some(handle) = handle {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-        }
-    }
+    crate::remove_and_drain_control(
+        &state.downloads,
+        &state.request_headers,
+        &id,
+        crate::USER_ACTION_DRAIN_GRACE,
+    )
+    .await?;
     match crate::state_machine::transition_task_with_runtime_state(
         &app,
         &state.pool,
@@ -314,6 +282,15 @@ pub async fn resume_task(
     // R-2.3: Serialize against start_task and other user actions on the same task.
     let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, "resuming task");
+    if state
+        .downloads
+        .lock()
+        .await
+        .get(&id)
+        .is_some_and(|control| control.cancel_token.is_cancelled())
+    {
+        return Err(crate::task_stop_pending_error());
+    }
     let task = require_task(&state.pool, &id).await?;
     if matches!(task.status, TaskStatus::Completed) {
         // ARC-30: stable code instead of free text (see pause_task).
@@ -372,24 +349,224 @@ pub async fn retry_task(
     {
         return Err("This task must be restarted before it can continue safely.".to_string());
     }
-    // ARC-06: Align with pause/cancel — drain the worker JoinHandle so any
-    // in-flight checkpoint commits before the retry transition (defense in
-    // depth alongside BEGIN IMMEDIATE).
-    let handle = {
-        let mut downloads = state.downloads.lock().await;
-        if let Some(control) = downloads.remove(&id) {
-            control.cancel_token.cancel();
-            control.handle
-        } else {
-            None
-        }
-    };
-    if let Some(handle) = handle {
-        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-    }
+    // ARC-57: drain (not detach) the worker so any in-flight checkpoint
+    // commits before the retry transition, and no detached worker can write a
+    // late `downloading` checkpoint over the new state or race the re-dispatch
+    // as a second writer. Same pattern as pause/cancel and restart (ARC-45).
+    crate::remove_and_drain_control(
+        &state.downloads,
+        &state.request_headers,
+        &id,
+        crate::USER_ACTION_DRAIN_GRACE,
+    )
+    .await?;
 
     let task = queue_task_for_retry_with_event(&app, state.inner(), &id, "retrying", None).await?;
     task_from_record_with_files(&state.pool, task).await
+}
+
+/// Create a fresh task from a completed task's persisted configuration. The
+/// original task remains immutable so its output and completion evidence stay
+/// available in history.
+#[tauri::command]
+#[specta::specta]
+pub async fn redownload_task(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Task, String> {
+    redownload_task_inner(Some(app), state.inner(), &id).await
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub async fn redownload_task_headless(state: &AppState, id: &str) -> Result<Task, String> {
+    redownload_task_inner(None, state, id).await
+}
+
+async fn redownload_task_inner(
+    app: Option<AppHandle>,
+    state: &AppState,
+    id: &str,
+) -> Result<Task, String> {
+    let task = require_task(&state.pool, id).await?;
+    if task.status != TaskStatus::Completed {
+        return Err(AppErrorPayload::new(
+            "task_not_completed",
+            "Only completed tasks can be downloaded again.",
+            false,
+            Vec::new(),
+        )
+        .command_error());
+    }
+
+    let (request_profile, request_profile_sensitive_expires_at) =
+        request_profile_for_redownload(&state.pool, &task.id).await?;
+    let (browser_request_headers, source_browser, browser_header_expires_at) =
+        db::resolve_task_request_headers_with_source(&state.pool, &task.id).await?;
+    let credentials = db::resolve_task_credentials(&state.pool, &task.id).await?;
+    let task_files = db::list_task_file_records(&state.pool, &task.id).await?;
+    let proxy = db::get_task_proxy_settings(&state.pool, &task.id).await?;
+    let (proxy_url, proxy_username, proxy_password, proxy_no_proxy) = if proxy.mode
+        == TaskProxyMode::Custom
+    {
+        let global = state.engine_registry.proxy_config().await;
+        let resolved =
+            db::resolve_task_proxy_config(&state.pool, &task.id, &task.protocol, &global).await?;
+        (
+            resolved.url,
+            resolved.username,
+            resolved.password,
+            resolved.no_proxy,
+        )
+    } else {
+        (
+            None,
+            None,
+            None,
+            (!proxy.no_proxy.is_empty()).then_some(proxy.no_proxy.clone()),
+        )
+    };
+
+    let policy = db::task_network_policy(&state.pool, &task.id).await?;
+    // Legacy tasks may have no persisted policy (or the explicit public
+    // placeholder from a revoked grant). Re-download must not manufacture an
+    // empty authorization token: creation can derive the public policy from
+    // the URL, while private targets still require their original bound grant.
+    let authorization_id = if policy.root_authority.is_some() && !policy.grants.is_empty() {
+        Some(db::create_network_authorization_for_policy(&state.pool, &policy).await?)
+    } else {
+        None
+    };
+
+    let checksums = db::list_task_checksum_records(&state.pool, &task.id).await?;
+    let primary_checksum = checksums
+        .iter()
+        .filter(|checksum| checksum.file_id.is_none())
+        .find(|checksum| checksum.is_primary)
+        .or_else(|| checksums.iter().find(|checksum| checksum.file_id.is_none()));
+    let expected_hash = primary_checksum
+        .map(|checksum| checksum.expected_hash.clone())
+        .or_else(|| task.expected_hash_sha256.clone());
+    let expected_hash_algorithm = primary_checksum.map(|checksum| checksum.algorithm);
+
+    let hls = if task.protocol == "hls" {
+        db::get_hls_task(&state.pool, &task.id).await?
+    } else {
+        None
+    };
+    let selected_hls_audio_track_uris = hls
+        .as_ref()
+        .and_then(|record| record.selected_audio_track_uris.as_deref())
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok());
+    let selected_hls_subtitle_track_uris = hls
+        .as_ref()
+        .and_then(|record| record.selected_subtitle_track_uris.as_deref())
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok());
+    let selected_file_paths = (!task_files.is_empty()).then(|| {
+        task_files
+            .iter()
+            .filter(|file| file.selected)
+            .map(|file| file.relative_path.clone())
+            .collect::<Vec<_>>()
+    });
+
+    let input = CreateTaskInput {
+        url: task.url.clone(),
+        request_profile,
+        network_authorization_id: authorization_id,
+        source_kind: Some(policy.source),
+        save_dir: Some(task.save_dir.clone()),
+        file_name: Some(task.file_name.clone()),
+        start_paused: Some(false),
+        obey_schedule: Some(task.obey_schedule),
+        expected_hash_sha256: if expected_hash_algorithm.is_none() {
+            expected_hash.clone()
+        } else {
+            None
+        },
+        expected_hash,
+        expected_hash_algorithm,
+        task_speed_limit_bps: task.task_speed_limit_bps.clone(),
+        priority: Some(task.priority),
+        category_key: task.category_key.clone(),
+        probe_snapshot: None,
+        selected_file_paths,
+        allow_duplicate: Some(true),
+        username: credentials.as_ref().map(|value| value.username.clone()),
+        password: credentials.as_ref().map(|value| value.password.clone()),
+        private_key_data: credentials
+            .as_ref()
+            .and_then(|value| value.private_key_data.clone()),
+        private_key_passphrase: credentials
+            .as_ref()
+            .and_then(|value| value.private_key_passphrase.clone()),
+        selected_hls_variant_uri: hls.as_ref().map(|record| record.media_url.clone()),
+        selected_hls_audio_track_uris,
+        selected_hls_subtitle_track_uris,
+        proxy_mode: Some(proxy.mode),
+        proxy_url,
+        proxy_username,
+        proxy_password,
+        proxy_no_proxy,
+    };
+
+    match app {
+        Some(app) => {
+            if browser_request_headers.is_empty() && request_profile_sensitive_expires_at.is_none()
+            {
+                create_task_with_state(app, state, input).await
+            } else {
+                create_task_with_state_and_headers_until(
+                    app,
+                    state,
+                    input,
+                    browser_request_headers,
+                    source_browser,
+                    request_profile_sensitive_expires_at,
+                    browser_header_expires_at,
+                )
+                .await
+            }
+        }
+        None => {
+            create_task_headless_with_headers_until(
+                state,
+                input,
+                browser_request_headers,
+                source_browser,
+                request_profile_sensitive_expires_at,
+                browser_header_expires_at,
+            )
+            .await
+        }
+    }
+}
+
+async fn request_profile_for_redownload(
+    pool: &sqlx::SqlitePool,
+    task_id: &str,
+) -> Result<(Option<TaskRequestProfileInput>, Option<String>), String> {
+    let headers = db::resolve_task_request_profile_headers(pool, task_id).await?;
+    let profile_view = db::get_task_request_profile(pool, task_id).await?;
+    if headers.is_empty() {
+        return Ok((None, profile_view.sensitive_expires_at));
+    }
+    let mut profile = TaskRequestProfileInput {
+        user_agent: None,
+        referer: None,
+        custom_headers: Vec::new(),
+    };
+    for (name, value) in headers {
+        match name.to_ascii_lowercase().as_str() {
+            "user-agent" => profile.user_agent = Some(value),
+            "referer" => profile.referer = Some(value),
+            _ => profile
+                .custom_headers
+                .push(TaskRequestHeaderInput { name, value }),
+        }
+    }
+    Ok((Some(profile), profile_view.sensitive_expires_at))
 }
 
 #[tauri::command]
@@ -420,19 +597,14 @@ pub async fn retry_task_with_mirror(
     if task.protocol != "metalink" {
         return Err("Mirror retry is only supported for Metalink tasks.".to_string());
     }
-    // ARC-06: Same checkpoint-drain pattern as pause_task / retry_task.
-    let handle = {
-        let mut downloads = state.downloads.lock().await;
-        if let Some(control) = downloads.remove(&id) {
-            control.cancel_token.cancel();
-            control.handle
-        } else {
-            None
-        }
-    };
-    if let Some(handle) = handle {
-        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-    }
+    // ARC-57: same drain (not detach) pattern as pause_task / retry_task.
+    crate::remove_and_drain_control(
+        &state.downloads,
+        &state.request_headers,
+        &id,
+        crate::USER_ACTION_DRAIN_GRACE,
+    )
+    .await?;
 
     db::reset_metalink_resource_statuses(&state.pool, &id).await?;
     // Boost the chosen mirror's priority so the Metalink engine tries it first.
@@ -493,39 +665,13 @@ pub async fn cancel_task(
     // R-2.3: Serialize against start_task and other user actions on the same task.
     let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, "canceling task");
-    let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
-    if task_for_runtime
-        .as_ref()
-        .is_some_and(|task| is_bt_protocol(&task.protocol))
-    {
-        if let Some(control) = state.downloads.lock().await.remove(&id) {
-            control.cancel_token.cancel();
-            if let Some(h) = control.handle.as_ref() {
-                h.abort();
-            }
-        }
-        if let Some(task) = task_for_runtime.as_ref() {
-            state.engine_registry.delete_runtime_task(task, false).await;
-        }
-        let _ = state.request_headers.lock().await.remove(&id);
-    } else {
-        // Same checkpoint-drain pattern as pause_task: cancel and wait for
-        // the coordinator's checkpoint flush to commit before transition_task
-        // begins. ARC-06 IMMEDIATE + retry covers residual BUSY; drain remains
-        // defense in depth.
-        let handle = {
-            let mut downloads = state.downloads.lock().await;
-            if let Some(control) = downloads.remove(&id) {
-                control.cancel_token.cancel();
-                control.handle
-            } else {
-                None
-            }
-        };
-        if let Some(handle) = handle {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-        }
-    }
+    crate::remove_and_drain_control(
+        &state.downloads,
+        &state.request_headers,
+        &id,
+        crate::USER_ACTION_DRAIN_GRACE,
+    )
+    .await?;
     match crate::state_machine::transition_task_with_runtime_state(
         &app,
         &state.pool,
@@ -565,78 +711,20 @@ pub async fn delete_task(
     id: String,
     delete_file: bool,
 ) -> Result<(), String> {
-    // R-2.3: Serialize against start_task and other user actions on the same task.
-    let _guard = state.task_runtime_locks.lock(&id).await;
-    tracing::info!(task_id = %id, delete_file, "deleting task");
-    let task_for_runtime = db::get_task_record(&state.pool, &id).await?;
-    if let Some(control) = state.downloads.lock().await.remove(&id) {
-        control.cancel_token.cancel();
-        if task_for_runtime
-            .as_ref()
-            .is_none_or(|task| !is_bt_protocol(&task.protocol))
-        {
-            if let Some(h) = control.handle.as_ref() {
-                h.abort();
-            }
-        }
+    let result = super::TaskDeletion {
+        pool: &state.pool,
+        downloads: &state.downloads,
+        request_headers: &state.request_headers,
+        runtime_locks: &state.task_runtime_locks,
+        engines: &state.engine_registry,
+        drain_grace: crate::USER_ACTION_DRAIN_GRACE,
     }
-    if let Some(task) = task_for_runtime.as_ref() {
-        state
-            .engine_registry
-            .delete_runtime_task(task, delete_file)
-            .await;
-    }
-
-    let mut delete_requests = Vec::new();
-    if delete_file {
-        let use_trash = db::delete_to_trash_enabled(&state.pool)
-            .await
-            .unwrap_or(true);
-        if let Some(task) = task_for_runtime.as_ref() {
-            for file in db::list_task_file_records(&state.pool, &id).await? {
-                push_delete_request(&mut delete_requests, file.temp_path.as_deref(), false);
-                push_delete_request(&mut delete_requests, file.final_path.as_deref(), use_trash);
-            }
-            push_delete_request(&mut delete_requests, task.temp_path.as_deref(), false);
-            push_delete_request(&mut delete_requests, task.final_path.as_deref(), use_trash);
-        }
-    }
-    // ARC-38: staging is intermediate state, not user data — remove it on task
-    // deletion even when delete_file is false. The artifact contract also
-    // enumerates metalink `.part-N` siblings, which previously leaked on task
-    // deletion because only exact temp/final paths were listed.
-    if let Some(task) = task_for_runtime.as_ref() {
-        let file_temps: Vec<String> = db::list_task_file_records(&state.pool, &id)
-            .await?
-            .iter()
-            .filter_map(|file| file.temp_path.clone())
-            .collect();
-        for artifact in
-            crate::download::artifacts::task_auxiliary_artifacts(task, &file_temps).await
-        {
-            push_delete_request(&mut delete_requests, artifact.to_str(), false);
-        }
-    }
-    let file_warnings = delete_paths_off_runtime(delete_requests).await;
-    for outcome in &file_warnings {
-        if let Err(error) = &outcome.result {
-            tracing::warn!(task_id = %id, path = %outcome.path, error, "file deletion warning during task removal");
-        }
-    }
-
-    db::delete_task_record(&state.pool, &id).await?;
-    evict_task_files_version(&id);
+    .delete(&id, delete_file)
+    .await;
+    // Refresh even on partial cleanup failure: the task may now be paused.
     emit_queue_changed(&app);
-    // ARC-32: still under the per-task runtime lock; never await dispatch here.
-    // The evict below requires the guard to be the last holder, which detached
-    // dispatch preserves — it never takes this task's runtime lock again (the
-    // row is already deleted, so dispatch cannot select it).
     state.scheduler.dispatch_detached(app, state.pool.clone());
-    // R-2.5: Evict the lock entry now that the task is deleted and the guard
-    // is about to drop. drop(_guard) first so evict sees Arc strong_count == 1.
-    drop(_guard);
-    state.task_runtime_locks.evict(&id).await;
-    Ok(())
+    result
 }
 
 #[tauri::command]
@@ -647,95 +735,20 @@ pub async fn bulk_delete_tasks(
     ids: Vec<String>,
     delete_file: bool,
 ) -> Result<u32, String> {
-    if ids.is_empty() {
-        return Ok(0);
+    let result = super::TaskDeletion {
+        pool: &state.pool,
+        downloads: &state.downloads,
+        request_headers: &state.request_headers,
+        runtime_locks: &state.task_runtime_locks,
+        engines: &state.engine_registry,
+        drain_grace: crate::USER_ACTION_DRAIN_GRACE,
     }
-    tracing::info!(count = ids.len(), delete_file, "bulk deleting tasks");
-    let use_trash = if delete_file {
-        db::delete_to_trash_enabled(&state.pool)
-            .await
-            .unwrap_or(true)
-    } else {
-        false
-    };
-
-    // Phase 1: Cancel active downloads and clean up runtime state.
-    let mut delete_requests = Vec::new();
-    for id in &ids {
-        // R-2.3: Per-task lock for the duration of this iteration.
-        let _guard = state.task_runtime_locks.lock(id).await;
-        let task_for_runtime = db::get_task_record(&state.pool, id).await?;
-        if let Some(control) = state.downloads.lock().await.remove(id) {
-            control.cancel_token.cancel();
-            if task_for_runtime
-                .as_ref()
-                .is_none_or(|task| !is_bt_protocol(&task.protocol))
-            {
-                if let Some(h) = control.handle.as_ref() {
-                    h.abort();
-                }
-            }
-        }
-        if let Some(task) = task_for_runtime.as_ref() {
-            state
-                .engine_registry
-                .delete_runtime_task(task, delete_file)
-                .await;
-        }
-
-        // Phase 2: Delete files (best-effort, filesystem ops cannot be transactional).
-        if delete_file {
-            if let Some(task) = task_for_runtime.as_ref() {
-                for file in db::list_task_file_records(&state.pool, id).await? {
-                    push_delete_request(&mut delete_requests, file.temp_path.as_deref(), false);
-                    push_delete_request(
-                        &mut delete_requests,
-                        file.final_path.as_deref(),
-                        use_trash,
-                    );
-                }
-                push_delete_request(&mut delete_requests, task.temp_path.as_deref(), false);
-                push_delete_request(&mut delete_requests, task.final_path.as_deref(), use_trash);
-            }
-        }
-        // ARC-38: staging is intermediate state — remove it for staging-based
-        // protocols even when delete_file is false (see delete_task). The
-        // artifact contract also covers metalink `.part-N` siblings, which
-        // previously leaked here.
-        if let Some(task) = task_for_runtime.as_ref() {
-            let file_temps: Vec<String> = db::list_task_file_records(&state.pool, id)
-                .await?
-                .iter()
-                .filter_map(|file| file.temp_path.clone())
-                .collect();
-            for artifact in
-                crate::download::artifacts::task_auxiliary_artifacts(task, &file_temps).await
-            {
-                push_delete_request(&mut delete_requests, artifact.to_str(), false);
-            }
-        }
-        // R-2.5: Evict the lock entry for this deleted task.
-        drop(_guard);
-        state.task_runtime_locks.evict(id).await;
-    }
-    let file_warnings = delete_paths_off_runtime(delete_requests).await;
-    for outcome in &file_warnings {
-        if let Err(error) = &outcome.result {
-            tracing::warn!(path = %outcome.path, error, "file deletion warning during bulk delete");
-        }
-    }
-
-    // Phase 3: Delete all DB records in a single transaction.
-    db::delete_task_records_batch(&state.pool, &ids).await?;
-    evict_task_files_versions(ids.iter().map(String::as_str));
-
+    .delete_many(&ids, delete_file)
+    .await;
+    // Successful rows are already deleted even when another item failed.
     emit_queue_changed(&app);
-    state
-        .scheduler
-        .clone()
-        .dispatch(app, state.pool.clone())
-        .await;
-    Ok(ids.len() as u32)
+    state.scheduler.dispatch_detached(app, state.pool.clone());
+    result
 }
 
 /// Bulk apply a transfer action (pause/resume/retry) to multiple tasks in a
@@ -1005,6 +1018,22 @@ pub async fn verify_task_hash(
     id: String,
 ) -> Result<HashVerificationState, String> {
     verify_task_hash_with_pool(&state.pool, &id).await
+}
+
+/// U09: menu-level integrity recheck reuses the existing checksum job and
+/// returns the refreshed task so every task surface updates immediately.
+#[tauri::command]
+#[specta::specta]
+pub async fn recheck_task(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Task, String> {
+    verify_task_hash_with_pool(&state.pool, &id).await?;
+    let task = require_task(&state.pool, &id).await?;
+    emit_task_updated_record(&app, &state.pool, &task).await;
+    emit_queue_changed_with_ids(&app, Some(vec![id.clone()]));
+    task_payload(&state.pool, &id).await
 }
 
 #[tauri::command]

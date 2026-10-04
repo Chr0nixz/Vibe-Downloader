@@ -1,7 +1,35 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-import { parseErrorsBlockKeys, syncLocaleErrorsBlock } from "./sync-stable-error-i18n.mjs";
+const projectRoot = fileURLToPath(new URL("../", import.meta.url));
+const scriptUrl = new URL("./sync-stable-error-i18n.mjs", import.meta.url);
+const localesRoot = path.join(projectRoot, "src/i18n/locales");
+
+function snapshotLocales(root) {
+  return fs
+    .readdirSync(root)
+    .filter((name) => name.endsWith(".ts"))
+    .sort()
+    .map((name) => {
+      const file = path.join(root, name);
+      return { name, content: fs.readFileSync(file, "utf8"), mtimeNs: fs.statSync(file, { bigint: true }).mtimeNs };
+    });
+}
+
+// Static imports run before snapshots, which would hide import-time writes from this regression check.
+const beforeImport = snapshotLocales(localesRoot);
+const { parseErrorsBlockKeys, syncLocaleErrorsBlock } = await import(scriptUrl.href);
+const afterImport = snapshotLocales(localesRoot);
+
+test("importing the helpers preserves locale contents and modification times", () => {
+  assert.equal(beforeImport.length, 7);
+  assert.deepEqual(afterImport, beforeImport);
+});
 
 const CODES = ["temp_file_missing", "temp_file_smaller_than_progress"];
 const MESSAGES = {
@@ -28,6 +56,67 @@ const SYNCED_BLOCK = errorsBlock([
   ["tempFileMissing", MESSAGES.temp_file_missing],
   ["tempFileSmallerThanProgress", MESSAGES.temp_file_smaller_than_progress],
 ]);
+
+function createSyncFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "vibe i18n sync "));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const relative of [
+    ".gitignore",
+    "biome.json",
+    "src/lib/stable-error-codes.ts",
+    "scripts/stable-error-messages.json",
+    "scripts/stable-error-causes.json",
+  ]) {
+    const destination = path.join(root, relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(path.join(projectRoot, relative), destination);
+  }
+  const locales = path.join(root, "src/i18n/locales");
+  fs.mkdirSync(locales, { recursive: true });
+  for (const { name } of beforeImport) {
+    fs.writeFileSync(path.join(locales, name), localeFile(errorsBlock([["obsolete", "Needs syncing"]])));
+  }
+  return { root, locales };
+}
+
+test("a fresh import does not sync stale locales or produce CLI output", (t) => {
+  const { root, locales } = createSyncFixture(t);
+  const before = snapshotLocales(locales);
+  for (const args of [[], ["unrelated-entry.mjs"]]) {
+    const output = execFileSync(
+      process.execPath,
+      ["--input-type=module", "--eval", `await import(${JSON.stringify(scriptUrl.href)})`, ...args],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.equal(output, "");
+    assert.deepEqual(snapshotLocales(locales), before);
+  }
+});
+
+test("direct sync writes Biome-formatted locales and leaves a second sync unchanged", (t) => {
+  const { root, locales } = createSyncFixture(t);
+  const runSync = () => execFileSync(process.execPath, [fileURLToPath(scriptUrl)], { cwd: root, encoding: "utf8" });
+  const first = runSync();
+  assert.equal(first.match(/^Updated /gm)?.length, 7);
+
+  const biome = fileURLToPath(import.meta.resolve("@biomejs/biome/bin/biome"));
+  execFileSync(process.execPath, [biome, "format", locales], { cwd: root, encoding: "utf8" });
+  for (const { content } of snapshotLocales(locales)) {
+    assert.ok(parseErrorsBlockKeys(content).includes("unsupportedUrlScheme"));
+    assert.match(content, /common: \{\n {4}ok: "OK",\n {2}\},/u);
+    assert.match(content, / {4}cause: \{/u);
+  }
+  const english = path.join(locales, "en.ts");
+  const englishText = fs.readFileSync(english, "utf8");
+  assert.match(englishText, /secretsUnavailable:\n {6}"/u);
+  fs.writeFileSync(english, englishText.replace(/\n/g, "\r\n"));
+
+  const before = snapshotLocales(locales);
+  const second = runSync();
+  assert.equal(second.match(/^Unchanged /gm)?.length, 7);
+  assert.doesNotMatch(second, /^Updated /m);
+  assert.deepEqual(snapshotLocales(locales), before);
+});
 
 test("a locale already carrying the generated block is reported unchanged", () => {
   const result = syncLocaleErrorsBlock({

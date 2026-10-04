@@ -13,10 +13,13 @@ import type {
   ClassificationRuleInput,
   CleanupMode,
   ClipboardLinkDetectedPayload,
+  CloseRequestAction,
+  CloseRequestPayload,
   CompletionActionRequestedPayload,
   CreateTaskInput,
   CursorPageInput,
   DashSegmentView,
+  DesktopStatusUpdate,
   DirectoryProbeInput,
   DiskSpaceInfo,
   EnvironmentFixInput,
@@ -33,6 +36,7 @@ import type {
   ListTasksResult,
   LocalTextFileKind,
   MetalinkMirrorView,
+  NetworkAuthorizationDraft,
   PreviewClassificationInput,
   PreviewClassificationResult,
   ProbePhasePayload,
@@ -53,8 +57,12 @@ import type {
   StorageSweepRecord,
   SystemFileIcon,
   TaskEvent,
+  TaskNetworkPolicyView,
   TaskProxySettings,
   TaskProxySettingsInput,
+  TaskRequestProfileInput,
+  TaskRequestProfileView,
+  TaskSource,
   TaskStatsSnapshot,
   TaskUpdatedPayload,
   TorrentRuntimeSnapshot,
@@ -81,10 +89,13 @@ export const EVENT_TASK_UPDATED = "task-updated";
 export const EVENT_QUEUE_CHANGED = "queue-changed";
 export const EVENT_SETTINGS_CHANGED = "settings-changed";
 export const EVENT_BROWSER_INTEGRATION_CHANGED = "browser-integration-changed";
+export const EVENT_BROWSER_HANDOFF_AUTHORIZATION_REQUIRED = "browser-handoff-authorization-required";
 export const EVENT_TRAY_NEW_DOWNLOAD_REQUESTED = "tray-new-download-requested";
 export const EVENT_TRAY_SETTINGS_REQUESTED = "tray-settings-requested";
 export const EVENT_CLIPBOARD_LINK_DETECTED = "clipboard-link-detected";
 export const EVENT_COMPLETION_ACTION_REQUESTED = "completion-action-requested";
+export const EVENT_CLOSE_REQUESTED = "app://close-requested";
+export const EVENT_DESKTOP_STATUS = "desktop-status";
 export const EVENT_PROBE_PHASE = "probe-phase";
 export const EVENT_SHUTTING_DOWN = "app://shutting-down";
 export const canSeedMockTasks = !isTauriRuntime() || import.meta.env.DEV;
@@ -153,6 +164,30 @@ export async function retryStartupInit(): Promise<void> {
   if (!isTauriRuntime()) return (await loadBrowserAdapter()).retryStartupInit();
   const commands = await loadNativeCommands();
   await runCommand("retryStartupInit", () => commands.retryStartupInit());
+}
+
+export async function prepareAppRelaunch(): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).prepareAppRelaunch();
+  const commands = await loadNativeCommands();
+  await runCommand("prepareAppRelaunch", () => commands.prepareAppRelaunch());
+}
+
+export async function cancelPreparedAppRelaunch(): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).cancelPreparedAppRelaunch();
+  const commands = await loadNativeCommands();
+  await runCommand("cancelPreparedAppRelaunch", () => commands.cancelPreparedAppRelaunch());
+}
+
+export async function resolveCloseRequest(action: CloseRequestAction, remember: boolean): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).resolveCloseRequest(action, remember);
+  const commands = await loadNativeCommands();
+  await runCommand("resolveCloseRequest", () => commands.resolveCloseRequest(action, remember));
+}
+
+export async function updateDesktopStatus(input: DesktopStatusUpdate): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).updateDesktopStatus(input);
+  const commands = await loadNativeCommands();
+  await runCommand("updateDesktopStatus", () => commands.updateDesktopStatus(input));
 }
 
 export async function listTasks(): Promise<Task[]> {
@@ -298,6 +333,24 @@ export async function getTorrentRuntimeSnapshot(taskId: string): Promise<Torrent
   return runCommand("getTorrentRuntimeSnapshot", () => commands.getTorrentRuntimeSnapshot(taskId));
 }
 
+export async function getTaskRequestProfile(taskId: string): Promise<TaskRequestProfileView> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).getTaskRequestProfile(taskId);
+  const commands = await loadNativeCommands();
+  return runCommand("getTaskRequestProfile", () => commands.getTaskRequestProfile(taskId));
+}
+
+export async function updateTaskRequestProfile(
+  taskId: string,
+  input: TaskRequestProfileInput,
+  replaceSensitive: boolean,
+): Promise<TaskRequestProfileView> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).updateTaskRequestProfile(taskId, input, replaceSensitive);
+  const commands = await loadNativeCommands();
+  return runCommand("updateTaskRequestProfile", () =>
+    commands.updateTaskRequestProfile(taskId, input, replaceSensitive),
+  );
+}
+
 export async function getTaskProxySettings(taskId: string): Promise<TaskProxySettings> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).getTaskProxySettings(taskId);
@@ -376,12 +429,20 @@ export async function getSettings(): Promise<AppSettings> {
   return runCommand("getSettings", () => commands.getSettings());
 }
 
-export async function updateSettings(input: UpdateSettingsInput): Promise<AppSettings> {
+export async function updateSettings(input: Partial<UpdateSettingsInput>): Promise<AppSettings> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).updateSettings(input);
   }
   const commands = await loadNativeCommands();
-  return runCommand("updateSettings", () => commands.updateSettings(input));
+  return runCommand("updateSettings", () => commands.updateSettings(input as UpdateSettingsInput));
+}
+
+export async function resetSettings(): Promise<AppSettings> {
+  if (!isTauriRuntime()) {
+    return (await loadBrowserAdapter()).resetSettings();
+  }
+  const commands = await loadNativeCommands();
+  return runCommand("resetSettings", () => commands.resetSettings());
 }
 
 export async function listSftpKnownHosts(): Promise<SftpKnownHost[]> {
@@ -782,6 +843,24 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   return normalizeTask(await runCommand("createTask", () => commands.createTask(input)));
 }
 
+export async function createNetworkAuthorization(url: string, source: TaskSource): Promise<NetworkAuthorizationDraft> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).createNetworkAuthorization(url, source);
+  const commands = await loadNativeCommands();
+  return runCommand("createNetworkAuthorization", () => commands.createNetworkAuthorization(url, source));
+}
+
+export async function getTaskNetworkPolicy(taskId: string): Promise<TaskNetworkPolicyView> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).getTaskNetworkPolicy(taskId);
+  const commands = await loadNativeCommands();
+  return runCommand("getTaskNetworkPolicy", () => commands.getTaskNetworkPolicy(taskId));
+}
+
+export async function revokeTaskNetworkAuthorization(taskId: string): Promise<TaskNetworkPolicyView> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).revokeTaskNetworkAuthorization(taskId);
+  const commands = await loadNativeCommands();
+  return runCommand("revokeTaskNetworkAuthorization", () => commands.revokeTaskNetworkAuthorization(taskId));
+}
+
 export async function updateTaskTransferOptions(input: UpdateTaskTransferOptionsInput): Promise<Task> {
   if (!isTauriRuntime()) {
     return (await loadBrowserAdapter()).updateTaskTransferOptions(input);
@@ -813,6 +892,12 @@ export async function verifyTaskHash(id: string): Promise<HashVerificationState>
   }
   const commands = await loadNativeCommands();
   return runCommand("verifyTaskHash", () => commands.verifyTaskHash(id));
+}
+
+export async function recheckTask(id: string): Promise<Task> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).recheckTask(id);
+  const commands = await loadNativeCommands();
+  return normalizeTask(await runCommand("recheckTask", () => commands.recheckTask(id)));
 }
 
 export async function computeFileHash(id: string, algorithm: ChecksumAlgorithm): Promise<string> {
@@ -853,6 +938,12 @@ export async function retryTask(id: string): Promise<Task> {
   }
   const commands = await loadNativeCommands();
   return normalizeTask(await runCommand("retryTask", () => commands.retryTask(id)));
+}
+
+export async function redownloadTask(id: string): Promise<Task> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).redownloadTask(id);
+  const commands = await loadNativeCommands();
+  return normalizeTask(await runCommand("redownloadTask", () => commands.redownloadTask(id)));
 }
 
 export async function listMetalinkMirrors(id: string): Promise<MetalinkMirrorView[]> {
@@ -1072,6 +1163,17 @@ export function onBrowserIntegrationChanged(handler: () => void): Promise<() => 
   );
 }
 
+export function onBrowserHandoffAuthorizationRequired(
+  handler: (payload: { requestId: string; url: string }) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) return Promise.resolve(() => {});
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<{ requestId: string; url: string }>(EVENT_BROWSER_HANDOFF_AUTHORIZATION_REQUIRED, (event) => {
+      handler(event.payload);
+    }).then((unlisten) => unlisten),
+  );
+}
+
 export function onCompletionActionRequested(
   handler: (payload: CompletionActionRequestedPayload) => void,
 ): Promise<() => void> {
@@ -1080,6 +1182,26 @@ export function onCompletionActionRequested(
   }
   return import("@tauri-apps/api/event").then(({ listen }) =>
     listen<CompletionActionRequestedPayload>(EVENT_COMPLETION_ACTION_REQUESTED, (event) => {
+      handler(event.payload);
+    }).then((unlisten) => unlisten),
+  );
+}
+
+export function onCloseRequested(handler: (payload: CloseRequestPayload) => void): Promise<() => void> {
+  if (!isTauriRuntime()) return Promise.resolve(() => {});
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<CloseRequestPayload>(EVENT_CLOSE_REQUESTED, (event) => {
+      handler(event.payload);
+    }).then((unlisten) => unlisten),
+  );
+}
+
+export function onDesktopStatus(handler: (payload: TaskStatsSnapshot) => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return import("@/lib/tauri-browser").then((adapter) => adapter.onDesktopStatus(handler));
+  }
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<TaskStatsSnapshot>(EVENT_DESKTOP_STATUS, (event) => {
       handler(event.payload);
     }).then((unlisten) => unlisten),
   );

@@ -55,6 +55,11 @@ export const commands = {
 	checksums: TaskChecksum[],
 	files: TaskFile[],
 	createdAt: string,
+	/**
+	 *  Exact completion time when this task finished in a schema-aware build.
+	 *  Legacy rows stay `None`; `updated_at` must not be used as a substitute.
+	 */
+	completedAt: string | null,
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_task", { id })),
 	getTaskStats: () => typedError<TaskStatsSnapshot, string>(__TAURI_INVOKE("get_task_stats")),
@@ -90,12 +95,32 @@ export const commands = {
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_torrent_runtime_snapshot", { taskId })),
 	getTaskProxySettings: (taskId: string) => typedError<TaskProxySettings, string>(__TAURI_INVOKE("get_task_proxy_settings", { taskId })),
+	getTaskRequestProfile: (taskId: string) => typedError<TaskRequestProfileView, string>(__TAURI_INVOKE("get_task_request_profile", { taskId })),
+	updateTaskRequestProfile: (taskId: string, input: TaskRequestProfileInput, replaceSensitive: boolean) => typedError<TaskRequestProfileView, string>(__TAURI_INVOKE("update_task_request_profile", { taskId, input, replaceSensitive })),
+	createNetworkAuthorization: (url: string, source: TaskSource) => typedError<NetworkAuthorizationDraft, string>(__TAURI_INVOKE("create_network_authorization", { url, source })),
+	getTaskNetworkPolicy: (taskId: string) => typedError<TaskNetworkPolicyView, string>(__TAURI_INVOKE("get_task_network_policy", { taskId })),
+	revokeTaskNetworkAuthorization: (taskId: string) => typedError<TaskNetworkPolicyView, string>(__TAURI_INVOKE("revoke_task_network_authorization", { taskId })),
 	listTaskEventsPage: (input: CursorPageInput) => typedError<TaskEventsPageResult, string>(__TAURI_INVOKE("list_task_events_page", { input })),
 	listTaskRequestsPage: (input: CursorPageInput) => typedError<TaskRequestsPageResult, string>(__TAURI_INVOKE("list_task_requests_page", { input })),
 	/**  Feature proposal §2.4: read-only integrity passport for one task. */
 	getTaskIntegrityPassport: (taskId: string) => typedError<IntegrityPassport, string>(__TAURI_INVOKE("get_task_integrity_passport", { taskId })),
+	/**
+	 *  U09: menu-level integrity recheck reuses the existing checksum job and
+	 *  returns the refreshed task so every task surface updates immediately.
+	 */
+	recheckTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("recheck_task", { id })),
 	getSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("get_settings")),
-	updateSettings: (input: UpdateSettingsInput) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
+	updateSettings: (input: UpdateSettingsInput_Deserialize) => typedError<AppSettings, string>(__TAURI_INVOKE("update_settings", { input })),
+	/**
+	 *  UX-41: restore every app setting to its fresh-install default. The defaults
+	 *  come from the backend's own derivation (empty settings table), so the result
+	 *  always equals what `get_settings` returns on a brand-new database — the
+	 *  frontend no longer keeps a second, drift-prone copy (it previously reset
+	 *  `multiConnectionThresholdBytes` to 1 MiB while the backend default is 16 MiB).
+	 *  The keyring-stored proxy password is cleared alongside the DB rows, matching
+	 *  the old frontend behavior of sending `clearProxyPassword: true`.
+	 */
+	resetSettings: () => typedError<AppSettings, string>(__TAURI_INVOKE("reset_settings")),
 	listSftpKnownHosts: () => typedError<SftpKnownHost[], string>(__TAURI_INVOKE("list_sftp_known_hosts")),
 	forgetSftpKnownHost: (host: string, port: number) => typedError<boolean, string>(__TAURI_INVOKE("forget_sftp_known_host", { host, port })),
 	createAppBackup: (destinationPath: string) => typedError<BackupCreateResult, string>(__TAURI_INVOKE("create_app_backup", { destinationPath })),
@@ -192,6 +217,21 @@ export const commands = {
 	requestSystemSleep: () => typedError<null, string>(__TAURI_INVOKE("request_system_sleep")),
 	requestSystemHibernate: () => typedError<null, string>(__TAURI_INVOKE("request_system_hibernate")),
 	requestLockScreen: () => typedError<null, string>(__TAURI_INVOKE("request_lock_screen")),
+	prepareAppRelaunch: () => typedError<null, string>(__TAURI_INVOKE("prepare_app_relaunch")),
+	cancelPreparedAppRelaunch: () => typedError<null, string>(__TAURI_INVOKE("cancel_prepared_app_relaunch")),
+	/**
+	 *  Resolve a close request emitted by the native window event handler.
+	 *  The pause-and-exit branch uses the same global action as the command
+	 *  palette, so it covers tasks outside the currently loaded page and leaves
+	 *  manually paused tasks untouched on the next startup.
+	 */
+	resolveCloseRequest: (action: CloseRequestAction, remember: boolean) => typedError<null, string>(__TAURI_INVOKE("resolve_close_request", { action, remember })),
+	/**
+	 *  Update the native shell affordances from a localized frontend snapshot.
+	 *  The taskbar API is desktop-only; the command remains callable on mobile so
+	 *  the generated IPC contract stays stable across targets.
+	 */
+	updateDesktopStatus: (input: DesktopStatusUpdate) => typedError<null, string>(__TAURI_INVOKE("update_desktop_status", { input })),
 	/**
 	 *  Query total and available disk space for the volume that contains `path`.
 	 *  Returns a clear error string when the path does not exist or the underlying
@@ -235,6 +275,12 @@ export const commands = {
 	pauseTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("pause_task", { id })),
 	resumeTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("resume_task", { id })),
 	retryTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("retry_task", { id })),
+	/**
+	 *  Create a fresh task from a completed task's persisted configuration. The
+	 *  original task remains immutable so its output and completion evidence stay
+	 *  available in history.
+	 */
+	redownloadTask: (id: string) => typedError<Task, string>(__TAURI_INVOKE("redownload_task", { id })),
 	listMetalinkMirrors: (id: string) => typedError<MetalinkMirrorView[], string>(__TAURI_INVOKE("list_metalink_mirrors", { id })),
 	retryTaskWithMirror: (id: string, mirrorUrl: string) => typedError<Task, string>(__TAURI_INVOKE("retry_task_with_mirror", { id, mirrorUrl })),
 	finishLiveRecording: (id: string) => typedError<Task, string>(__TAURI_INVOKE("finish_live_recording", { id })),
@@ -283,11 +329,30 @@ export const commands = {
 /* Types */
 export type AppAccentColor = "blue" | "purple" | "teal" | "green" | "orange" | "rose" | "indigo" | "amber";
 
-export type AppErrorPayload = {
+export type AppErrorPayload = AppErrorPayload_Serialize | AppErrorPayload_Deserialize;
+
+export type AppErrorPayload_Deserialize = {
 	code: string,
 	message: string,
 	recoverable: boolean,
 	actions: string[],
+	/**
+	 *  Absolute retry deadline supplied by a transient HTTP response.
+	 *  Optional so historical payloads remain valid across upgrades.
+	 */
+	retryAfterAt?: string | null,
+};
+
+export type AppErrorPayload_Serialize = {
+	code: string,
+	message: string,
+	recoverable: boolean,
+	actions: string[],
+	/**
+	 *  Absolute retry deadline supplied by a transient HTTP response.
+	 *  Optional so historical payloads remain valid across upgrades.
+	 */
+	retryAfterAt?: string | null,
 };
 
 export type AppProxyMode = "off" | "system" | "custom";
@@ -322,6 +387,13 @@ export type AppSettings = {
 	completionAction: CompletionAction,
 	completionCountdownSeconds: number,
 	completionRunCommand: string,
+	/**
+	 *  ARC-58: when true, the completion action also fires when the queue
+	 *  drains with the last task failed/canceled ("all finished"); when false
+	 *  it only fires after all-success ("all succeeded", the historical
+	 *  behavior).
+	 */
+	completionIncludeFailures: boolean,
 	deleteToTrash: boolean,
 	autoUpdateCheckEnabled: boolean,
 	/**
@@ -546,6 +618,11 @@ export type BrowserForwardedHeader = {
 	value: string,
 };
 
+export type BrowserHandoffAuthorizationRequiredPayload = {
+	requestId: string,
+	url: string,
+};
+
 /**
  *  Window + totals for the handoff history panel: `entries` is the recent
  *  window (pruned rows are gone), the counts and `last_handoff_at` cover the
@@ -757,6 +834,23 @@ export type ClipboardLinkDetectedPayload = {
 	detectedAt: string,
 };
 
+export type CloseRequestAction = "tray" | "pause_exit" | "cancel";
+
+/**
+ *  Sent when the main window close button needs a user decision because
+ *  active downloads still own network and file resources.
+ */
+export type CloseRequestPayload = {
+	active: number,
+	queued: number,
+	/**
+	 *  True when the close guard could not read the task snapshot. The UI
+	 *  must keep the decision dialog open instead of treating the failure as
+	 *  an idle queue and exiting with unknown download ownership.
+	 */
+	statsUnavailable: boolean,
+};
+
 export type CompletionAction = "none" | "exit_app" | "shutdown" | "sleep" | "hibernate" | "lock_screen" | "run_command";
 
 export type CompletionActionRequestedPayload = {
@@ -766,8 +860,20 @@ export type CompletionActionRequestedPayload = {
 
 export type CreateTaskInput = {
 	url: string,
+	requestProfile: TaskRequestProfileInput | null,
+	networkAuthorizationId: string | null,
+	/**
+	 *  B3: preserve the trust surface that created the task so private-target
+	 *  grants cannot silently change meaning between manual, import, and
+	 *  browser paths.
+	 */
+	sourceKind: TaskSource | null,
 	saveDir: string | null,
 	fileName: string | null,
+	/**  Keep the task paused after creation when the user chose to add it without starting. */
+	startPaused?: boolean | null,
+	/**  Whether the scheduler should honor the global download window for this task. */
+	obeySchedule?: boolean | null,
 	/**
 	 *  Legacy SHA-256-only field. Prefer `expected_hash` + `expected_hash_algorithm`
 	 *  for multi-algorithm manual verification (F-5). Kept for backward compatibility
@@ -830,9 +936,18 @@ export type DashSegmentsPageResult = {
 	nextCursor: string | null,
 };
 
+export type DesktopStatusUpdate = {
+	/**  Already-localized tooltip text assembled by the frontend. */
+	tooltip: string,
+	progress: number | null,
+	hasError: boolean,
+};
+
 /**  FUN-04: Directory probe input aligned with probe/create credential and proxy fields. */
 export type DirectoryProbeInput = {
 	url: string,
+	networkAuthorizationId: string | null,
+	sourceKind: TaskSource | null,
 	username: string | null,
 	password: string | null,
 	privateKeyData: string | null,
@@ -1041,9 +1156,13 @@ export type HlsVariant = {
 
 export type ImportUrlsInput = {
 	input: string,
+	networkAuthorizationId: string | null,
+	sourceKind: TaskSource | null,
 	saveDir: string | null,
 	probe: boolean | null,
 	create: boolean | null,
+	/**  Apply the task's download-window preference to every created URL. */
+	obeySchedule?: boolean | null,
 	/**  FUN-17: shared create-draft overrides applied to every created URL. */
 	expectedHashSha256: string | null,
 	expectedHash: string | null,
@@ -1163,6 +1282,24 @@ export type MetalinkMirrorView = {
 	fileId: string | null,
 };
 
+export type NetworkAuthorizationDraft = {
+	id: string,
+	policy: NetworkPolicy,
+	expiresAt: string,
+};
+
+export type NetworkPolicy = {
+	source: TaskSource,
+	rootAuthority: string | null,
+	grants: NetworkTargetGrant[],
+};
+
+export type NetworkTargetGrant = {
+	authority: string,
+	addresses: string[],
+	authorizedAt: string,
+};
+
 export type PassportChecksum = {
 	algorithm: string,
 	status: HashVerificationStatus,
@@ -1231,6 +1368,9 @@ export type ProbePhasePayload = {
 
 export type ProbeTaskInput = {
 	url: string,
+	requestProfile: TaskRequestProfileInput | null,
+	networkAuthorizationId: string | null,
+	sourceKind: TaskSource | null,
 	username: string | null,
 	password: string | null,
 	privateKeyData: string | null,
@@ -1597,6 +1737,11 @@ export type Task = {
 	checksums: TaskChecksum[],
 	files: TaskFile[],
 	createdAt: string,
+	/**
+	 *  Exact completion time when this task finished in a schema-aware build.
+	 *  Legacy rows stay `None`; `updated_at` must not be used as a substitute.
+	 */
+	completedAt: string | null,
 	updatedAt: string,
 };
 
@@ -1657,6 +1802,11 @@ export type TaskFilterOptions = {
 
 export type TaskKind = "single_file" | "multi_file" | "manifest";
 
+export type TaskNetworkPolicyView = {
+	taskId: string,
+	policy: NetworkPolicy,
+};
+
 export type TaskPriority = "low" | "normal" | "high";
 
 export type TaskProgressPayload = {
@@ -1689,6 +1839,27 @@ export type TaskProxySettingsInput = {
 	noProxy: string | null,
 };
 
+export type TaskRequestHeaderInput = {
+	name: string,
+	value: string,
+};
+
+export type TaskRequestProfileInput = {
+	userAgent: string | null,
+	referer: string | null,
+	customHeaders: TaskRequestHeaderInput[],
+};
+
+export type TaskRequestProfileView = {
+	taskId: string,
+	userAgent: string | null,
+	referer: string | null,
+	customHeaders: TaskRequestHeaderInput[],
+	sensitiveHeaderNames: string[],
+	sensitiveExpiresAt: string | null,
+	sensitiveExpired: boolean,
+};
+
 export type TaskRequestsPageResult = {
 	items: RequestDiagnostic[],
 	nextCursor: string | null,
@@ -1712,6 +1883,8 @@ export type TaskSegmentsPageResult = {
 	items: TaskSegment[],
 	nextCursor: string | null,
 };
+
+export type TaskSource = "unknown" | "manual" | "clipboard" | "browser" | "import";
 
 export type TaskStatsSnapshot = {
 	all: string,
@@ -1773,9 +1946,70 @@ export type TorrentTrackerStatus = {
 
 export type TrayMenuAction = "openApp" | "newDownload" | "openDownloads" | "settings" | "quit";
 
-export type UpdateSettingsInput = {
+export type UpdateSettingsInput = UpdateSettingsInput_Serialize | UpdateSettingsInput_Deserialize;
+
+export type UpdateSettingsInput_Deserialize = {
 	maxActiveTasks: number | null,
 	defaultSaveDir: string | null,
+	/**
+	 *  `None` keeps the current value; `Some(None)` clears the limit; an inner
+	 *  string sets it. The custom deserializer preserves explicit JSON null.
+	 */
+	globalSpeedLimitBps?: string | null,
+	multiConnectionThresholdBytes: string | null,
+	segmentCount: number | null,
+	maxConnectionsPerHost: number | null,
+	systemNotifications: boolean | null,
+	closeToTray: boolean | null,
+	startOnBoot: boolean | null,
+	autoResumeOnStartup: boolean | null,
+	floatingWindowEnabled: boolean | null,
+	clipboardMonitorEnabled: boolean | null,
+	accentColor: AppAccentColor | null,
+	proxyMode: AppProxyMode | null,
+	proxyUrl: string | null,
+	proxyNoProxy: string | null,
+	proxyUsername: string | null,
+	proxyPassword: string | null,
+	clearProxyPassword: boolean | null,
+	scheduleDownloadWindowEnabled: boolean | null,
+	scheduleDownloadWindowStart: string | null,
+	scheduleDownloadWindowEnd: string | null,
+	scheduleSpeedLimitWindowEnabled: boolean | null,
+	scheduleSpeedLimitWindowStart: string | null,
+	scheduleSpeedLimitWindowEnd: string | null,
+	/**
+	 *  `None` keeps the current value; `Some(None)` clears the limit; an inner
+	 *  string sets it. The custom deserializer preserves explicit JSON null.
+	 */
+	scheduleSpeedLimitBps?: string | null,
+	titlebarGradientEnabled: boolean | null,
+	completionAction: CompletionAction | null,
+	completionCountdownSeconds: number | null,
+	completionRunCommand: string | null,
+	/**  ARC-58: fire the completion action when the queue drains with failures. */
+	completionIncludeFailures: boolean | null,
+	deleteToTrash: boolean | null,
+	autoUpdateCheckEnabled: boolean | null,
+	/**
+	 *  Custom ffmpeg binary path. `None` leaves the value unchanged; `Some(None)`
+	 *  clears the setting (falls back to env/PATH lookup).
+	 */
+	ffmpegPath?: string | null,
+	/**
+	 *  F-7: Global BitTorrent upload speed limit (bytes/sec). `None` leaves
+	 *  the value unchanged; `Some(None)` clears the limit (unlimited).
+	 */
+	btUploadLimitBps?: string | null,
+};
+
+export type UpdateSettingsInput_Serialize = {
+	maxActiveTasks: number | null,
+	defaultSaveDir: string | null,
+	/**
+	 *  `None` keeps the current value; `Some(None)` clears the limit; an inner
+	 *  string sets it. The custom deserializer preserves explicit JSON null.
+	 */
 	globalSpeedLimitBps: string | null,
 	multiConnectionThresholdBytes: string | null,
 	segmentCount: number | null,
@@ -1799,11 +2033,17 @@ export type UpdateSettingsInput = {
 	scheduleSpeedLimitWindowEnabled: boolean | null,
 	scheduleSpeedLimitWindowStart: string | null,
 	scheduleSpeedLimitWindowEnd: string | null,
+	/**
+	 *  `None` keeps the current value; `Some(None)` clears the limit; an inner
+	 *  string sets it. The custom deserializer preserves explicit JSON null.
+	 */
 	scheduleSpeedLimitBps: string | null,
 	titlebarGradientEnabled: boolean | null,
 	completionAction: CompletionAction | null,
 	completionCountdownSeconds: number | null,
 	completionRunCommand: string | null,
+	/**  ARC-58: fire the completion action when the queue drains with failures. */
+	completionIncludeFailures: boolean | null,
 	deleteToTrash: boolean | null,
 	autoUpdateCheckEnabled: boolean | null,
 	/**

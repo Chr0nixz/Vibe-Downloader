@@ -3,7 +3,7 @@ use std::sync::Arc;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use quick_xml::{events::Event, Reader};
 use reqwest::{
-    header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
+    header::{HeaderName, AUTHORIZATION, CONTENT_TYPE},
     Client, Method, RequestBuilder, Url,
 };
 
@@ -65,7 +65,12 @@ impl WebDavEngine {
         // E-4: Reuses the shared HttpEngine client cache rather than constructing a new instance each time.
         let probe = self
             .http
-            .probe_with_headers_and_proxy(&target.http_url, &headers, request.proxy_config.as_ref())
+            .probe_with_headers_and_proxy_and_policy(
+                &target.http_url,
+                &headers,
+                request.proxy_config.as_ref(),
+                &request.network_policy,
+            )
             .await?;
         let final_url = webdav_url_from_http(&probe.final_url, &target.protocol)?;
         Ok(ProbeOutput {
@@ -158,11 +163,11 @@ impl DownloadEngine for WebDavEngine {
         &'a self,
         context: DownloadContext,
     ) -> EngineFuture<'a, Result<(), DownloadError>> {
-        Box::pin(async move {
+        Box::pin(crate::download::lifecycle::run_owned(async move {
             self.run_download(context)
                 .await
                 .map_err(DownloadError::Other)
-        })
+        }))
     }
 }
 
@@ -184,7 +189,27 @@ pub async fn probe_webdav_directory_url_cancellable(
     credentials: Option<&crate::db::TaskCredentials>,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<WebDavDirectoryProbe, String> {
-    let future = probe_webdav_directory_inner(client, input_url, credentials, cancel_token);
+    let policy = crate::download::network_policy::NetworkPolicy::default();
+    probe_webdav_directory_url_cancellable_with_policy(
+        client,
+        input_url,
+        credentials,
+        &policy,
+        cancel_token,
+    )
+    .await
+}
+
+/// Directory probe entry point used by task creation with a task-bound grant.
+pub async fn probe_webdav_directory_url_cancellable_with_policy(
+    client: &Client,
+    input_url: &str,
+    credentials: Option<&crate::db::TaskCredentials>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<WebDavDirectoryProbe, String> {
+    let future =
+        probe_webdav_directory_inner(client, input_url, credentials, network_policy, cancel_token);
     match crate::download::bounded_probe(future, cancel_token).await {
         crate::download::BoundedProbeOutcome::Done(probe) => Ok(probe),
         crate::download::BoundedProbeOutcome::Error(error) => Err(error),
@@ -201,6 +226,7 @@ async fn probe_webdav_directory_inner(
     client: &Client,
     input_url: &str,
     credentials: Option<&crate::db::TaskCredentials>,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<WebDavDirectoryProbe, String> {
     let mut target = WebDavTarget::parse_directory(input_url)?;
@@ -216,10 +242,9 @@ async fn probe_webdav_directory_inner(
         }
     }
     // SEC-10: literal-authority pre-flight for the PROPFIND target.
-    crate::download::ssrf::assert_public_authority(
-        &reqwest::Url::parse(&target.http_url)
-            .map_err(|e| format!("Could not resolve WebDAV target: {e}"))?,
-    )?;
+    let target_url = reqwest::Url::parse(&target.http_url)
+        .map_err(|e| format!("Could not resolve WebDAV target: {e}"))?;
+    network_policy.resolve(&target_url).await?;
     let credentials = target.credentials.clone();
     let headers = webdav_request_headers(&[], credentials.as_ref());
     let mut request = client
@@ -241,7 +266,7 @@ async fn probe_webdav_directory_inner(
 </d:propfind>"#,
         );
     request = apply_forwarded_headers(request, &headers);
-    let send = request.send();
+    let send = crate::download::http::send_request(request, network_policy);
     let response = match cancel_token {
         Some(token) => {
             tokio::select! {
@@ -352,19 +377,10 @@ fn webdav_request_headers(
 }
 
 fn apply_forwarded_headers(
-    mut request: RequestBuilder,
+    request: RequestBuilder,
     headers: &[(String, String)],
 ) -> RequestBuilder {
-    for (name, value) in headers {
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let Ok(value) = HeaderValue::from_str(value) else {
-            continue;
-        };
-        request = request.header(name, value);
-    }
-    request
+    crate::download::http::apply_forwarded_headers(request, headers)
 }
 
 impl WebDavTarget {
@@ -411,7 +427,8 @@ impl WebDavTarget {
             crate::download::sanitize::sanitize_single_file_name(&raw_name)
         };
         let credentials = credentials_from_url(&parsed);
-        let source_key = format!("{protocol}://{host}:{port}");
+        let source_key =
+            crate::download::network_policy::format_authority_url(&protocol, &host, port);
         Ok(Self {
             sanitized_uri,
             protocol,

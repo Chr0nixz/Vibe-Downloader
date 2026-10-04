@@ -40,6 +40,7 @@ import type {
   SftpDirectoryProbe,
   TaskPriority,
   TaskProxyMode,
+  TaskSource,
   WebDavDirectoryProbe,
 } from "@/generated/bindings";
 import type { TranslationKey } from "@/i18n";
@@ -53,8 +54,10 @@ import {
 } from "@/lib/create-draft";
 import { localizedErrorMessage, parseAppError } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
+import { EMPTY_REQUEST_PROFILE, parseRequestProfile } from "@/lib/request-profile";
 import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput, speedLimitUnitLabel } from "@/lib/speed-limit";
 import {
+  createNetworkAuthorization,
   createTask,
   importUrls,
   onProbePhase,
@@ -66,6 +69,7 @@ import {
   probeWebdavDirectory,
   queryDiskSpace,
 } from "@/lib/tauri";
+import { RequestProfileFields } from "./RequestProfileFields";
 
 const log = createLogger("new-download");
 
@@ -360,6 +364,7 @@ function fileIcon(name: string, className = "h-4 w-4") {
 export function NewDownloadDialog({
   open,
   onOpenChange,
+  onCloseAutoFocus,
   onCreated,
   initialUrl,
   initialBatchInput,
@@ -369,6 +374,7 @@ export function NewDownloadDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onCloseAutoFocus?: (event: Event) => void;
   onCreated: (task: Task) => void;
   initialUrl?: string;
   initialBatchInput?: string;
@@ -400,6 +406,7 @@ export function NewDownloadDialog({
   const [batchCreating, setBatchCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rawError, setRawError] = useState<unknown>(null);
+  const [requestProfile, setRequestProfile] = useState(EMPTY_REQUEST_PROFILE);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [privateKeyData, setPrivateKeyData] = useState("");
@@ -416,6 +423,8 @@ export function NewDownloadDialog({
   const [useCredentials, setUseCredentials] = useState(false);
   // FUN-17: shared create-draft fields reachable from both single and batch modes.
   const [priority, setPriority] = useState<TaskPriority>("normal");
+  const [startPaused, setStartPaused] = useState(false);
+  const [obeySchedule, setObeySchedule] = useState(true);
   const [categoryKey, setCategoryKey] = useState("");
   const [speedAmount, setSpeedAmount] = useState("");
   const [speedUnit, setSpeedUnit] = useState("1048576");
@@ -424,13 +433,23 @@ export function NewDownloadDialog({
   const [proxyUsername, setProxyUsername] = useState("");
   const [proxyPassword, setProxyPassword] = useState("");
   const [proxyNoProxy, setProxyNoProxy] = useState("");
+  const [networkAuthorizationId, setNetworkAuthorizationId] = useState<string | null>(null);
+  const [sourceKind, setSourceKind] = useState<TaskSource>("manual");
+  const [authorizationRequired, setAuthorizationRequired] = useState(false);
 
-  function buildSharedDraft(options?: { allowDuplicate?: boolean; skipHash?: boolean }): CreateDraftShared {
+  function buildSharedDraft(options?: {
+    allowDuplicate?: boolean;
+    skipHash?: boolean;
+    networkAuthorizationId?: string | null;
+  }): CreateDraftShared {
     const skipHash = options?.skipHash ?? false;
     const hashFields = draftHashFields(expectedHash, expectedHashAlgorithm, skipHash);
     const speedBytes = speedLimitBytesFromInput(speedAmount, speedUnit);
     const taskSpeedLimitBps = speedBytes === undefined || speedBytes == null ? null : String(speedBytes);
     return {
+      requestProfile: mode === "single" ? parseRequestProfile(requestProfile) : null,
+      networkAuthorizationId: options?.networkAuthorizationId ?? networkAuthorizationId,
+      sourceKind: mode === "batch" ? "import" : sourceKind,
       username: useCredentials ? username.trim() || null : null,
       password: useCredentials ? password || null : null,
       privateKeyData: useCredentials ? privateKeyData || null : null,
@@ -485,6 +504,7 @@ export function NewDownloadDialog({
   const isHlsProbe = probe?.protocol === "hls";
   const isDashProbe = probe?.protocol === "dash";
   const isSftpUrl = /^sftp:\/\//i.test(url.trim());
+  const hasRequestProfile = Boolean(requestProfile.userAgent || requestProfile.referer || requestProfile.customHeaders);
   const isSelectableMultiFileProbe = isTorrentProbe || isMetalinkProbe;
   const isMultiFile = probe != null && probe.files.length > 1;
   // The folder the file will actually land in: the typed path, else the default.
@@ -523,6 +543,7 @@ export function NewDownloadDialog({
     setRemoteDirectoryProbe(null);
     setProbing(false);
     setRemoteDirectoryLoading(false);
+    setAuthorizationRequired(false);
   }
 
   function changeUrl(nextUrl: string) {
@@ -537,7 +558,25 @@ export function NewDownloadDialog({
     clearAutomaticFileName();
     setSubmitStatus(null);
     setDuplicateOverrideAvailable(false);
+    setNetworkAuthorizationId(null);
     setUrl(nextUrl);
+  }
+
+  async function authorizeCurrentTarget() {
+    const target = url.trim();
+    if (!target) return;
+    setSubmitting(true);
+    clearFormError();
+    try {
+      const draft = await createNetworkAuthorization(target, sourceKind);
+      setNetworkAuthorizationId(draft.id);
+      setAuthorizationRequired(false);
+      await detect(target, false);
+    } catch (err) {
+      setFormError(err);
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   // Initialize selectedFiles when probe changes
@@ -587,6 +626,7 @@ export function NewDownloadDialog({
       if (requestId !== probeRequestId.current || latestUrlRef.current.trim() !== nextUrl.trim()) return;
       log.warn("probe failed", err);
       setFormError(err);
+      setAuthorizationRequired(parseAppError(err)?.code === "intranet_target_blocked");
       setProbePhase({ kind: "failed" });
     } finally {
       if (requestId === probeRequestId.current) {
@@ -637,6 +677,7 @@ export function NewDownloadDialog({
     } catch (err) {
       if (requestId === directoryProbeRequestId.current && latestUrlRef.current.trim() === nextUrl.trim()) {
         setError(localizedErrorMessage(err, t));
+        setAuthorizationRequired(parseAppError(err)?.code === "intranet_target_blocked");
       }
     } finally {
       if (requestId === directoryProbeRequestId.current) setRemoteDirectoryLoading(false);
@@ -644,6 +685,7 @@ export function NewDownloadDialog({
   }
 
   const probeContext = JSON.stringify([
+    requestProfile,
     open,
     mode,
     url,
@@ -676,6 +718,7 @@ export function NewDownloadDialog({
     proxyUsername,
     proxyPassword,
     proxyNoProxy,
+    obeySchedule,
   ]);
   const latestDetect = useRef(detect);
   latestDetect.current = detect;
@@ -719,14 +762,14 @@ export function NewDownloadDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await submitCurrent(false);
+    await submitCurrent(false, false);
   }
 
   async function submitDuplicateOverride() {
-    await submitCurrent(true);
+    await submitCurrent(true, startPaused);
   }
 
-  async function submitCurrent(allowDuplicate: boolean) {
+  async function submitCurrent(allowDuplicate: boolean, nextStartPaused: boolean) {
     const currentUrl = url.trim();
     // Batch mode has its own Preview/Create buttons; ignore form submits
     // (e.g. Enter pressed while focused on a non-textarea field).
@@ -756,6 +799,7 @@ export function NewDownloadDialog({
     }
 
     setSubmitting(true);
+    setStartPaused(nextStartPaused);
     setError(null);
     setDuplicateOverrideAvailable(false);
     setSubmitStatus(currentProbe ? t("newDownload.usingProbe") : t("newDownload.revalidating"));
@@ -770,6 +814,8 @@ export function NewDownloadDialog({
             url: currentUrl,
             saveDir: saveDir.trim() || null,
             fileName: fileName.trim() || null,
+            startPaused: nextStartPaused,
+            obeySchedule,
             probeSnapshot: currentProbe,
             selectedFilePaths,
             selectedHlsVariantUri: currentIsHlsProbe && selectedHlsVariantUri ? selectedHlsVariantUri : null,
@@ -788,6 +834,7 @@ export function NewDownloadDialog({
       log.error("create task failed", err);
       const appError = parseAppError(err);
       setDuplicateOverrideAvailable(appError?.code === "duplicate_task");
+      setAuthorizationRequired(appError?.code === "intranet_target_blocked");
       setError(localizedErrorMessage(err, t));
     } finally {
       setSubmitting(false);
@@ -803,6 +850,8 @@ export function NewDownloadDialog({
     fileNameEditedRef.current = false;
     latestUrlRef.current = "";
     setUrl("");
+    setNetworkAuthorizationId(null);
+    setSourceKind("manual");
     setSaveDir("");
     setFileName("");
     setExpectedHash("");
@@ -820,6 +869,7 @@ export function NewDownloadDialog({
     setSelectedLocalFile(null);
     setSelectedFiles(new Set());
     setEditingName(false);
+    setRequestProfile(EMPTY_REQUEST_PROFILE);
     setUsername("");
     setPassword("");
     setPrivateKeyData("");
@@ -830,6 +880,8 @@ export function NewDownloadDialog({
     setMode("single");
     setUseCredentials(false);
     setPriority("normal");
+    setStartPaused(false);
+    setObeySchedule(true);
     setCategoryKey("");
     setSpeedAmount("");
     setSpeedUnit("1048576");
@@ -915,8 +967,13 @@ export function NewDownloadDialog({
     }
   }
 
-  async function runBatch(create: boolean, inputOverride?: string, retry?: { batchId: string; indices: number[] }) {
+  async function runBatch(
+    create: boolean,
+    inputOverride?: string,
+    action?: { batchId: string; indices: number[]; allowDuplicate?: boolean },
+  ) {
     const input = inputOverride ?? batchInput;
+    const currentBatchInput = batchInput;
     // Refs exclude same-tick clicks and alternate entry points before React
     // renders the disabled controls. An edit can supersede a read-only preview.
     if (!input.trim() || batchCreateOwner.current || batchPreviewOwner.current) return;
@@ -931,25 +988,34 @@ export function NewDownloadDialog({
     }
     setError(null);
     try {
-      const draft = buildSharedDraft({ allowDuplicate: false });
-      const result = await importUrls(toImportUrlsInput(input, saveDir.trim() || null, create, draft));
+      const draft = buildSharedDraft({ allowDuplicate: action?.allowDuplicate ?? false });
+      const result = await importUrls(toImportUrlsInput(input, saveDir.trim() || null, create, draft, obeySchedule));
       if (create) {
         // Creation has durable side effects even if the draft changes during
         // IPC. Always retain its outcome and notify the task store.
         setBatchHistory((history) =>
-          retry
+          action
             ? history.map((batch) =>
-                batch.id !== retry.batchId
+                batch.id !== action.batchId
                   ? batch
                   : {
                       ...batch,
-                      result: mergeBatchRetry(batch.result, retry.indices, result),
+                      result: mergeBatchRetry(batch.result, action.indices, result),
                     },
               )
             : [...history, { id: crypto.randomUUID(), result }],
         );
         for (const item of result.items) if (item.task) onCreated(normalizeTask(item.task));
-        if (!retry && version === batchInputVersion.current) changeBatchInput(removeCreatedBatchLines(input, result));
+        if (!action && version === batchInputVersion.current) {
+          changeBatchInput(removeCreatedBatchLines(input, result));
+        } else if (action?.allowDuplicate && version === batchInputVersion.current) {
+          changeBatchInput(
+            removeBatchUrls(
+              currentBatchInput,
+              result.items.filter((item) => item.task).map((item) => item.inputUrl),
+            ),
+          );
+        }
       } else if (owner === batchPreviewOwner.current && version === batchInputVersion.current) {
         setBatchResult(result);
       }
@@ -978,12 +1044,20 @@ export function NewDownloadDialog({
     const nextBatchInput = initialBatchInput?.trim() ? initialBatchInput : "";
     const nextUrl = initialUrl?.trim() ? initialUrl : "";
     if (nextBatchInput) {
+      setSourceKind("import");
       changeBatchInput(nextBatchInput);
       setMode("batch");
       void runBatch(false, nextBatchInput);
       return;
     }
     if (nextUrl) {
+      setSourceKind(
+        initialSourceId === "clipboard" || initialSourceId.startsWith("clipboard-")
+          ? "clipboard"
+          : initialSourceId.startsWith("browser")
+            ? "browser"
+            : "manual",
+      );
       changeUrl(nextUrl);
       setMode("single");
     }
@@ -1000,6 +1074,9 @@ export function NewDownloadDialog({
       expectedHashAlgorithm !== "sha256" ||
       batchInput.trim() ||
       selectedLocalFile ||
+      requestProfile.userAgent ||
+      requestProfile.referer ||
+      requestProfile.customHeaders ||
       useCredentials ||
       username.trim() ||
       password ||
@@ -1013,6 +1090,7 @@ export function NewDownloadDialog({
       proxyUsername.trim() ||
       proxyPassword ||
       proxyNoProxy.trim() ||
+      !obeySchedule ||
       selectedHlsVariantUri ||
       selectedHlsAudioTrackUris.length > 0 ||
       selectedHlsSubtitleTrackUris.length > 0,
@@ -1093,7 +1171,7 @@ export function NewDownloadDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent>
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>{t("newDownload.title")}</DialogTitle>
           <DialogDescription className="sr-only">{t("newDownload.description")}</DialogDescription>
@@ -1199,6 +1277,23 @@ export function NewDownloadDialog({
                       {remoteDirectoryLoading ? t("newDownload.probing") : t("newDownload.probeDirectory")}
                     </Button>
                     <span className="text-[11px] text-text-muted">{t("newDownload.remoteDirectoryHint")}</span>
+                  </div>
+                ) : null}
+
+                {authorizationRequired ? (
+                  <div className="rounded-md border border-border-warning bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
+                    <p className="font-medium">{t("newDownload.intranetAuthorizationRequired")}</p>
+                    <p className="mt-1 text-[11px]">{t("newDownload.intranetAuthorizationHint")}</p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="mt-2 h-8"
+                      disabled={submitting || probing}
+                      onClick={() => void authorizeCurrentTarget()}
+                    >
+                      {t("newDownload.authorizeTarget")}
+                    </Button>
                   </div>
                 ) : null}
 
@@ -1501,6 +1596,23 @@ export function NewDownloadDialog({
                     id="new-download-advanced-options"
                     className="flex flex-col gap-3 rounded-md border border-border-subtle bg-surface-root/30 p-3"
                   >
+                    {hasRequestProfile ||
+                    (/^https?:\/\//i.test(url.trim()) &&
+                      !isTorrentProbe &&
+                      !/\.torrent(?:[?#].*)?$/i.test(url.trim())) ? (
+                      <RequestProfileFields
+                        idPrefix="new-download-request"
+                        value={requestProfile}
+                        disabled={submitting}
+                        onChange={(next) => {
+                          invalidateProbe();
+                          setProbeUrl("");
+                          setRequestProfile(next);
+                          setDuplicateOverrideAvailable(false);
+                          clearFormError();
+                        }}
+                      />
+                    ) : null}
                     {/* Credentials sit behind the Advanced gate like every other
                     override: most URLs are public, and probe failures that need
                     auth surface the denied hint above. The underlying state is
@@ -1673,6 +1785,22 @@ export function NewDownloadDialog({
                       proxyNoProxy={proxyNoProxy}
                       setProxyNoProxy={setProxyNoProxy}
                     />
+                    <label htmlFor="new-download-obey-schedule" className="flex cursor-pointer items-start gap-2">
+                      <Checkbox
+                        id="new-download-obey-schedule"
+                        checked={obeySchedule}
+                        onChange={(event) => setObeySchedule(event.target.checked)}
+                        aria-label={t("newDownload.obeySchedule")}
+                      />
+                      <span>
+                        <span className="block text-xs font-medium text-text-secondary">
+                          {t("newDownload.obeySchedule")}
+                        </span>
+                        <span className="block text-[11px] leading-4 text-text-muted">
+                          {t("newDownload.obeyScheduleHint")}
+                        </span>
+                      </span>
+                    </label>
                   </div>
                 ) : null}
               </>
@@ -1716,6 +1844,13 @@ export function NewDownloadDialog({
                       result={batch.result}
                       busy={batchPreviewing || batchCreating}
                       onRetry={(indices, urls) => void runBatch(true, urls.join("\n"), { batchId: batch.id, indices })}
+                      onCreateDuplicates={(indices, urls) =>
+                        void runBatch(true, urls.join("\n"), {
+                          batchId: batch.id,
+                          indices,
+                          allowDuplicate: true,
+                        })
+                      }
                     />
                   ))}
                   {batchResult && <BatchImportResults result={batchResult} busy={batchPreviewing || batchCreating} />}
@@ -1836,6 +1971,22 @@ export function NewDownloadDialog({
                       proxyNoProxy={proxyNoProxy}
                       setProxyNoProxy={setProxyNoProxy}
                     />
+                    <label htmlFor="new-download-obey-schedule-batch" className="flex cursor-pointer items-start gap-2">
+                      <Checkbox
+                        id="new-download-obey-schedule-batch"
+                        checked={obeySchedule}
+                        onChange={(event) => setObeySchedule(event.target.checked)}
+                        aria-label={t("newDownload.obeySchedule")}
+                      />
+                      <span>
+                        <span className="block text-xs font-medium text-text-secondary">
+                          {t("newDownload.obeySchedule")}
+                        </span>
+                        <span className="block text-[11px] leading-4 text-text-muted">
+                          {t("newDownload.obeyScheduleHint")}
+                        </span>
+                      </span>
+                    </label>
                   </div>
                 ) : null}
               </>
@@ -1891,27 +2042,52 @@ export function NewDownloadDialog({
               {t("newDownload.cancel")}
             </Button>
             {mode === "single" ? (
-              <Button
-                type="submit"
-                className="w-full sm:w-auto"
-                disabled={submitting || fileSelectionRequired || !url.trim()}
-              >
-                {submitting ? (
-                  <>
-                    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path
-                        className="opacity-75"
-                        fill="currentColor"
-                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                      />
-                    </svg>
-                    {t("newDownload.starting")}
-                  </>
-                ) : (
-                  t("newDownload.start")
-                )}
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full sm:w-auto"
+                  disabled={submitting || fileSelectionRequired || !url.trim()}
+                  onClick={() => void submitCurrent(false, true)}
+                >
+                  {submitting && startPaused ? (
+                    <>
+                      <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                        />
+                      </svg>
+                      {t("newDownload.adding")}
+                    </>
+                  ) : (
+                    t("newDownload.addPaused")
+                  )}
+                </Button>
+                <Button
+                  type="submit"
+                  className="w-full sm:w-auto"
+                  disabled={submitting || fileSelectionRequired || !url.trim()}
+                >
+                  {submitting && !startPaused ? (
+                    <>
+                      <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                        />
+                      </svg>
+                      {t("newDownload.starting")}
+                    </>
+                  ) : (
+                    t("newDownload.start")
+                  )}
+                </Button>
+              </>
             ) : (
               <Button
                 type="button"
@@ -2265,6 +2441,23 @@ function removeCreatedBatchLines(input: string, result: BatchImportResult): stri
       if (!line.trim()) return true;
       const item = result.items[resultIndex++];
       return !item?.task;
+    })
+    .join("\n");
+}
+
+function removeBatchUrls(input: string, urls: string[]): string {
+  const remaining = new Map<string, number>();
+  for (const url of urls) remaining.set(url, (remaining.get(url) ?? 0) + 1);
+  return input
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return true;
+      const count = remaining.get(trimmed) ?? 0;
+      if (count === 0) return true;
+      if (count === 1) remaining.delete(trimmed);
+      else remaining.set(trimmed, count - 1);
+      return false;
     })
     .join("\n");
 }

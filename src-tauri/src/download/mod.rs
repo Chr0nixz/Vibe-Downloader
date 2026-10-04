@@ -1,5 +1,6 @@
 pub mod artifacts;
 mod bt;
+mod bt_storage;
 pub(crate) mod checksum;
 mod dash;
 pub(crate) mod diagnostics;
@@ -10,8 +11,11 @@ pub(crate) mod file_ops;
 pub(crate) mod ftp;
 mod hls;
 mod http;
+pub mod lifecycle;
 mod metalink;
 pub(crate) mod net_factory;
+pub mod network_policy;
+pub mod owned_fs;
 pub(crate) mod probe_error;
 pub(crate) mod retry;
 pub(crate) mod sanitize;
@@ -28,17 +32,25 @@ pub use error::DownloadError;
 #[cfg(debug_assertions)]
 #[doc(hidden)]
 pub use file_ops::testing as publication_testing;
-pub use ftp::{probe_ftp_directory_url, probe_ftp_directory_url_cancellable, FtpEngine};
+pub use ftp::{
+    probe_ftp_directory_url, probe_ftp_directory_url_cancellable,
+    probe_ftp_directory_url_cancellable_with_policy, FtpEngine,
+};
 pub use hls::HlsEngine;
+pub(crate) use http::{headers_for_origin as bound_headers_for_origin, send_request, url_origin};
 pub use http::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine, ProbeResult};
 #[doc(hidden)]
 pub use metalink::testing;
 pub use metalink::MetalinkEngine;
 pub use net_factory::NetworkClientFactory;
-pub use sftp::{probe_sftp_directory_url, probe_sftp_directory_url_cancellable, SftpEngine};
+pub use sftp::{
+    probe_sftp_directory_url, probe_sftp_directory_url_cancellable,
+    probe_sftp_directory_url_cancellable_with_policy, SftpEngine,
+};
 pub use speed::{GlobalSpeedLimiter, ThrottleError};
 pub use webdav::{
-    probe_webdav_directory_url, probe_webdav_directory_url_cancellable, WebDavEngine,
+    probe_webdav_directory_url, probe_webdav_directory_url_cancellable,
+    probe_webdav_directory_url_cancellable_with_policy, WebDavEngine,
 };
 
 // ---------------------------------------------------------------------------

@@ -16,12 +16,13 @@ use crate::models::backup::{BackupSubsetRestoreResult, BackupSubsetSelection};
 /// task. The snapshot is migrated to the live schema version before this runs,
 /// so the column shapes match exactly and `SELECT *` is stable. Mirrors the
 /// `REFERENCES tasks` set in migrations 001 + 007.
-const TASK_SATELLITE_TABLES: [&str; 17] = [
+const TASK_SATELLITE_TABLES: [&str; 18] = [
     "task_files",
     "task_work_units",
     "task_events",
     "task_requests",
     "task_request_headers",
+    "task_request_profiles",
     "task_credentials",
     "task_proxy_settings",
     "task_checksums",
@@ -193,7 +194,7 @@ async fn restore_tasks_subset(
     result.tasks_normalized = sqlx::query(
         "UPDATE tasks SET status = 'paused', retry_after_at = NULL, error_message = NULL,
          error_code = NULL, recovery_actions = NULL, health_summary = NULL,
-         speed_bps = 0, connection_count = 0
+         speed_bps = 0, connection_count = 0, completed_at = NULL
          WHERE id IN (SELECT id FROM temp.subset_new_tasks)
            AND status NOT IN ('completed', 'failed', 'needs_attention')",
     )
@@ -233,6 +234,7 @@ async fn copy_satellite_table(
         "task_work_units" => "INSERT OR IGNORE INTO task_work_units SELECT * FROM backup_subset.task_work_units WHERE task_id IN (SELECT id FROM temp.subset_new_tasks)",
         "task_events" => "INSERT OR IGNORE INTO task_events (task_id, event_type, payload, created_at) SELECT task_id, event_type, payload, created_at FROM backup_subset.task_events WHERE task_id IN (SELECT id FROM temp.subset_new_tasks)",
         "task_requests" => "INSERT OR IGNORE INTO task_requests (task_id, method, url, range_header, if_range_header, status_code, etag, last_modified, content_length, error_message, retry_count, duration_ms, created_at) SELECT task_id, method, url, range_header, if_range_header, status_code, etag, last_modified, content_length, error_message, retry_count, duration_ms, created_at FROM backup_subset.task_requests WHERE task_id IN (SELECT id FROM temp.subset_new_tasks)",
+        "task_request_profiles" => "INSERT OR IGNORE INTO task_request_profiles SELECT * FROM backup_subset.task_request_profiles WHERE task_id IN (SELECT id FROM temp.subset_new_tasks)",
         "task_request_headers" => "INSERT OR IGNORE INTO task_request_headers SELECT * FROM backup_subset.task_request_headers WHERE task_id IN (SELECT id FROM temp.subset_new_tasks)",
         "task_credentials" => "INSERT OR IGNORE INTO task_credentials SELECT * FROM backup_subset.task_credentials WHERE task_id IN (SELECT id FROM temp.subset_new_tasks)",
         "task_proxy_settings" => "INSERT OR IGNORE INTO task_proxy_settings SELECT * FROM backup_subset.task_proxy_settings WHERE task_id IN (SELECT id FROM temp.subset_new_tasks)",

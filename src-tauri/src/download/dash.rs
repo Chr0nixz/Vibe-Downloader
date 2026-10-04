@@ -1,3 +1,5 @@
+use crate::download::lifecycle::JoinSet;
+use crate::download::owned_fs as fs;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -6,16 +8,14 @@ use std::{
 
 use quick_xml::{events::Event, Reader};
 use reqwest::{
-    header::{HeaderName, HeaderValue, ACCEPT_ENCODING, RANGE},
+    header::{ACCEPT_ENCODING, RANGE},
     Client, RequestBuilder, StatusCode,
 };
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 use tokio::{
-    fs,
     io::{AsyncWriteExt, BufWriter},
     process::Command,
-    task::JoinSet,
 };
 use uuid::Uuid;
 
@@ -67,17 +67,7 @@ impl DashEngine {
         Self { http }
     }
 
-    async fn client(&self) -> Result<Client, String> {
-        self.http.client().await
-    }
-
-    async fn client_for_config(
-        &self,
-        config: &crate::proxy::ResolvedProxyConfig,
-    ) -> Result<Client, String> {
-        self.http.client_for_config(config).await
-    }
-
+    #[allow(clippy::too_many_arguments)]
     async fn probe_dash(
         &self,
         url: &str,
@@ -86,6 +76,7 @@ impl DashEngine {
         app: &Option<tauri::AppHandle>,
         request_id: &Option<String>,
         proxy_config: Option<&crate::proxy::ResolvedProxyConfig>,
+        network_policy: &crate::download::network_policy::NetworkPolicy,
     ) -> Result<DashManifestSummary, String> {
         crate::download::engine::emit_probe_phase(app, request_id, "checking_ffmpeg", Some("dash"));
         super::ffmpeg::ensure_ffmpeg_available(
@@ -96,9 +87,14 @@ impl DashEngine {
         .await?;
         // FUN-20: task-level proxy must apply to the probe, matching probe_hls.
         let client = if let Some(config) = proxy_config {
-            self.client_for_config(config).await?
+            self.http
+                .client_for_network_policy(config, network_policy)
+                .await?
         } else {
-            self.client().await?
+            let config = self.http.proxy_config().await;
+            self.http
+                .client_for_network_policy(&config, network_policy)
+                .await?
         };
         crate::download::engine::emit_probe_phase(
             app,
@@ -106,7 +102,7 @@ impl DashEngine {
             "fetching_manifest",
             Some("dash"),
         );
-        let body = fetch_mpd_text(&client, url, request_headers).await?;
+        let body = fetch_mpd_text(&client, url, request_headers, network_policy).await?;
         crate::download::engine::emit_probe_phase(
             app,
             request_id,
@@ -168,6 +164,7 @@ impl DownloadEngine for DashEngine {
                     &request.app,
                     &request.request_id,
                     request.proxy_config.as_ref(),
+                    &request.network_policy,
                 )
                 .await
                 .map_err(DownloadError::Other)?;
@@ -213,11 +210,11 @@ impl DownloadEngine for DashEngine {
         &'a self,
         context: DownloadContext,
     ) -> EngineFuture<'a, Result<(), DownloadError>> {
-        Box::pin(async move {
+        Box::pin(crate::download::lifecycle::run_owned(async move {
             run_dash_download(self.clone(), context)
                 .await
                 .map_err(DownloadError::Other)
-        })
+        }))
     }
 }
 
@@ -1085,6 +1082,7 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
         connection_limit,
         request_headers,
         proxy_config,
+        network_policy,
         ..
     } = context;
 
@@ -1123,12 +1121,16 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
     }
 
     // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
-    let client = engine.client_for_config(&proxy_config).await?;
+    let client = engine
+        .http
+        .client_for_network_policy(&proxy_config, &network_policy)
+        .await?;
     // FUN-01 / C5: inject Basic Auth from encrypted task credentials at runtime.
     let credentials = db::resolve_task_credentials(&pool, &task.id).await?;
     let request_headers =
         super::http::merge_basic_auth_headers(&request_headers, credentials.as_ref());
-    let mpd_text = fetch_mpd_text(&client, &manifest_url, &request_headers).await?;
+    let mpd_text =
+        fetch_mpd_text(&client, &manifest_url, &request_headers, &network_policy).await?;
     let parsed = parse_dash_manifest(&manifest_url, &mpd_text)?;
     let (video_rep, audio_rep) = select_tracks(&parsed)?;
 
@@ -1242,6 +1244,7 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
             &mut progress_gate,
             first_segment_id.as_deref(),
             &mut db_write_gate,
+            &network_policy,
         )
         .await?;
         downloaded_total = downloaded;
@@ -1283,6 +1286,7 @@ async fn download_dash_segments(
     progress_gate: &mut TaskProgressEmitGate,
     first_segment_id: Option<&str>,
     db_write_gate: &mut DbWriteGate,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<i64, String> {
     // SEC-11: credential headers may only travel to the task URL origin
     // (scheme + host + port — a different port is a different origin).
@@ -1304,6 +1308,7 @@ async fn download_dash_segments(
             let speed_limiter = speed_limiter.clone();
             let cancel_token = cancel_token.clone();
             let origin = origin.clone();
+            let network_policy = network_policy.clone();
             workers.spawn(async move {
                 download_dash_segment(
                     &pool,
@@ -1313,6 +1318,7 @@ async fn download_dash_segments(
                     cancel_token,
                     plan,
                     origin,
+                    network_policy,
                 )
                 .await
             });
@@ -1373,6 +1379,7 @@ async fn download_dash_segments(
     Ok(downloaded_total)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_dash_segment(
     pool: &SqlitePool,
     client: &Client,
@@ -1381,6 +1388,7 @@ async fn download_dash_segment(
     cancel_token: tokio_util::sync::CancellationToken,
     plan: DashSegmentPlan,
     origin: String,
+    network_policy: crate::download::network_policy::NetworkPolicy,
 ) -> DashSegmentDownloadResult {
     let retry_policy = RetryPolicy::hls_segment();
     let mut retry_count = 0;
@@ -1395,6 +1403,7 @@ async fn download_dash_segment(
             &speed_limiter,
             &cancel_token,
             &plan,
+            &network_policy,
         )
         .await;
         crate::download::diagnostics::persist_engine_diagnostic(
@@ -1479,6 +1488,7 @@ async fn download_dash_segment(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_dash_segment_once(
     pool: &SqlitePool,
     client: &Client,
@@ -1487,6 +1497,7 @@ async fn download_dash_segment_once(
     speed_limiter: &Arc<crate::download::GlobalSpeedLimiter>,
     cancel_token: &tokio_util::sync::CancellationToken,
     plan: &DashSegmentPlan,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<i64, String> {
     db::update_dash_segment_status(pool, &plan.id, 0, SegmentStatus::Downloading, 0, None).await?;
     if let Some(parent) = Path::new(&plan.local_path).parent() {
@@ -1496,11 +1507,9 @@ async fn download_dash_segment_once(
         })?;
     }
 
-    // SEC-10: literal-authority pre-flight (resolver covers hostnames).
-    crate::download::ssrf::assert_public_authority(
-        &reqwest::Url::parse(&plan.uri)
-            .map_err(|e| format!("Could not request DASH segment: {e}"))?,
-    )?;
+    let parsed_uri = reqwest::Url::parse(&plan.uri)
+        .map_err(|e| format!("Could not request DASH segment: {e}"))?;
+    network_policy.resolve(&parsed_uri).await?;
     // SEC-11: strip Authorization/Cookie when the segment lives on another host.
     let bound_headers =
         crate::download::http::headers_for_origin(request_headers, origin, &plan.uri);
@@ -1509,12 +1518,9 @@ async fn download_dash_segment_once(
     if let Some(range) = &plan.byte_range {
         request = request.header(RANGE, byte_range_header(range));
     }
-    let mut response = request
-        .send()
-        .await
-        .map_err(|e| format!("Could not request DASH segment: {e}"))?;
+    let mut response = crate::download::http::send_request(request, network_policy).await?;
     if !response.status().is_success() {
-        return Err(super::http::format_http_status_error(response.status()));
+        return Err(super::http::format_http_response_error(&response));
     }
     if plan.byte_range.is_some() && response.status() != StatusCode::PARTIAL_CONTENT {
         return Err("server did not honor DASH byte range request".to_string());
@@ -1846,6 +1852,7 @@ async fn fetch_mpd_text(
     client: &Client,
     url: &str,
     headers: &[(String, String)],
+    network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url).map_err(|_| "DASH MPD URL is invalid.".to_string())?;
     if parsed.scheme() == "file" {
@@ -1858,15 +1865,18 @@ async fn fetch_mpd_text(
         return String::from_utf8(bytes)
             .map_err(|_| "DASH MPD file is not valid UTF-8.".to_string());
     }
-    // SEC-10: literal-authority pre-flight for the network branch.
-    crate::download::ssrf::assert_public_authority(&parsed)
-        .map_err(|e| format!("Could not request DASH MPD: {e}"))?;
-    let response = apply_forwarded_headers(client.get(url), headers)
-        .send()
+    network_policy
+        .resolve(&parsed)
         .await
         .map_err(|e| format!("Could not request DASH MPD: {e}"))?;
+    let response = crate::download::http::send_request(
+        apply_forwarded_headers(client.get(url), headers),
+        network_policy,
+    )
+    .await
+    .map_err(|e| format!("Could not request DASH MPD: {e}"))?;
     if !response.status().is_success() {
-        return Err(super::http::format_http_status_error(response.status()));
+        return Err(super::http::format_http_response_error(&response));
     }
     let bytes = read_body_limited(response, CONTROL_PLANE_MAX_BYTES, None, READ_IDLE_TIMEOUT)
         .await
@@ -1892,19 +1902,10 @@ fn map_dash_limited_body_error(error: LimitedBodyError) -> String {
 }
 
 fn apply_forwarded_headers(
-    mut request: RequestBuilder,
+    request: RequestBuilder,
     headers: &[(String, String)],
 ) -> RequestBuilder {
-    for (name, value) in headers {
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let Ok(value) = HeaderValue::from_str(value) else {
-            continue;
-        };
-        request = request.header(name, value);
-    }
-    request
+    crate::download::http::apply_forwarded_headers(request, headers)
 }
 
 fn attr_value(event: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {

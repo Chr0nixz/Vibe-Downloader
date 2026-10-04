@@ -8609,6 +8609,7 @@ name = "vibe-downloader"
 version = "0.5.0"
 dependencies = [
  "aes 0.9.1",
+ "anyhow",
  "axum",
  "base64 0.22.1",
  "cbc 0.2.1",
@@ -8633,6 +8634,7 @@ dependencies = [
  "reqwest 0.13.4",
  "russh",
  "russh-sftp",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "serial_test",
@@ -8665,7 +8667,6 @@ dependencies = [
  "tracing-subscriber",
  "trash",
  "uuid",
- "webpki-roots",
  "windows 0.61.3",
  "zeroize",
  "zip 8.6.0",

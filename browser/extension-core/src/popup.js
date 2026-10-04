@@ -30,7 +30,7 @@ button.addEventListener("click", async () => {
     if (!response?.ok) {
       throw new Error(response?.error ?? i18n("errHandoffRejected"));
     }
-    status.textContent = i18n("statusSent");
+    status.textContent = handoffStatusText(response.response);
     await refresh();
   } catch (error) {
     log.error("popup handoff failed", error);
@@ -145,7 +145,7 @@ function mediaCandidateItem(candidate) {
         pageUrl: candidate.pageUrl ?? candidate.url,
       });
       if (!response?.ok) throw new Error(response?.error ?? i18n("errHandoffRejected"));
-      status.textContent = i18n("statusSent");
+      status.textContent = handoffStatusText(response.response);
       await refresh();
     } catch (error) {
       log.error("media candidate download failed", error);
@@ -232,7 +232,7 @@ function recentItem(item) {
   const meta = document.createElement("div");
   meta.className = "recent-meta";
   const statusText = document.createElement("span");
-  statusText.textContent = item.status ?? "sent";
+  statusText.textContent = handoffStatusText(item);
   if (item.status === "failed") statusText.className = "recent-failed";
   const time = document.createElement("time");
   time.dateTime = item.createdAt;
@@ -249,6 +249,22 @@ function recentItem(item) {
 
   li.append(url, meta);
   return li;
+}
+
+function handoffStatusText(result) {
+  switch (result?.status) {
+    case "authorization_required":
+      return i18n("statusAuthorizationRequired");
+    case "failed":
+      return i18n("statusFailed");
+    case "duplicate":
+      return i18n("statusDuplicate");
+    case "received":
+    case "accepted":
+      return i18n("statusSent");
+    default:
+      return result?.status ?? i18n("statusUnknown");
+  }
 }
 
 function emptyItem(text) {

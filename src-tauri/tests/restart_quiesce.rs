@@ -1,9 +1,5 @@
-//! ARC-45: the restart path must quiesce the worker before deleting temp
-//! files. A bare abort takes effect at the worker's next await, so a worker
-//! that is mid-write keeps the temp handle open — on Windows the deletion
-//! becomes delete-pending and the new worker's create() fails with
-//! ACCESS_DENIED, turning "restart download" into a near-certain
-//! Access-is-denied failure seconds later.
+//! ARC-45 / ARC-62: restart and deletion retain ownership until the writer's
+//! file handle closes; a stop deadline does not authorize aborting ownership.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +39,7 @@ fn control_for(cancel: &CancellationToken, handle: tokio::task::JoinHandle<()>) 
         cancel_token: cancel.clone(),
         finish: Arc::new(AtomicBool::new(false)),
         finish_notify: Arc::new(tokio::sync::Notify::new()),
+        speed_limiter: tauri_app_lib::download::GlobalSpeedLimiter::disabled(),
         handle: Some(handle),
         source_key: "quiesce-host".to_string(),
         connection_slots: 1,
@@ -68,7 +65,9 @@ async fn arc45_quiesce_joins_worker_before_temp_removal() {
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(path.exists(), "writer should have created the temp file");
 
-    cancel_and_drain_control(control_for(&cancel, worker), Duration::from_secs(5)).await;
+    cancel_and_drain_control(&mut control_for(&cancel, worker), Duration::from_secs(5))
+        .await
+        .expect("drained");
 
     assert!(
         exited.load(Ordering::SeqCst),
@@ -87,15 +86,16 @@ async fn arc45_quiesce_joins_worker_before_temp_removal() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn arc45_quiesce_aborts_stubborn_worker_within_bounds() {
-    // A worker that never observes cancellation still holds the temp file
-    // while it runs. Phase 2 (abort + join) must bound the drain AND close
-    // the handle so the new worker can create the same path.
+async fn arc62_quiesce_retains_stubborn_worker_on_timeout() {
+    // ARC-62: an incomplete stop must remain owned, so the caller cannot
+    // treat a deadline as permission to delete or reopen the file.
     let dir = std::env::temp_dir().join(format!("vibe-arc45-stubborn-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let path = dir.join("stubborn.tmp");
 
     let cancel = CancellationToken::new();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let worker_release = release.clone();
     let worker = {
         let path = path.clone();
         tokio::spawn(async move {
@@ -104,24 +104,27 @@ async fn arc45_quiesce_aborts_stubborn_worker_within_bounds() {
                 .truncate(false)
                 .write(true)
                 .open(&path);
-            // Ignores cancellation entirely — simulates work that cannot be
-            // interrupted cooperatively (e.g. a spawn_blocking section).
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            // Deterministic release models a writer that cannot stop immediately.
+            worker_release.notified().await;
         })
     };
 
     let started = Instant::now();
-    cancel_and_drain_control(control_for(&cancel, worker), Duration::from_millis(200)).await;
+    let mut control = control_for(&cancel, worker);
+    let error = cancel_and_drain_control(&mut control, Duration::from_millis(200))
+        .await
+        .expect_err("not yet drained");
+    assert!(error.contains("task_stop_pending"));
+    assert!(!control.handle.as_ref().unwrap().is_finished());
     assert!(
         started.elapsed() < Duration::from_secs(5),
-        "abort phase must bound the drain instead of hanging on the worker"
+        "the user action must remain bounded while preserving worker ownership"
     );
-    std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .expect("new worker must be able to create the temp file after abort");
+    release.notify_one();
+    cancel_and_drain_control(&mut control, Duration::from_secs(2))
+        .await
+        .expect("second stop drains");
+    assert!(control.handle.is_none());
 
     std::fs::remove_dir_all(&dir).ok();
 }

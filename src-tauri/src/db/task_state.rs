@@ -9,9 +9,54 @@ use super::task_records::{error_state_from_message, recovery_actions_json, row_t
 // functions to avoid duplicating identical queries across transactions.
 // ---------------------------------------------------------------------------
 
+/// ARC-57: a progress writer may only push `downloading`-flavored updates
+/// while the task is still owned by a live engine run. Once a user action
+/// (pause/cancel/retry) has moved the row to Paused/Failed/Queued, a late
+/// engine write must degrade to bytes-only — resurrecting `downloading`
+/// created worker-less zombie rows that rejected the next resume.
+async fn task_status_is_live_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: &str,
+) -> sqlx::Result<bool> {
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
+        .bind(task_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(matches!(
+        status.as_deref(),
+        Some("downloading") | Some("retrying")
+    ))
+}
+
+/// Bytes-only fallback for a late progress write: keep the resume offset
+/// honest without touching status, speed or health.
+async fn update_progress_bytes_only_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: &str,
+    downloaded_bytes: i64,
+    updated_at: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET downloaded_bytes = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(downloaded_bytes)
+    .bind(updated_at)
+    .bind(task_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// UPDATE tasks: downloaded_bytes, speed_bps, connection_count, status.
 /// ARC-13: selected `task_files` are updated only when `update_files` is true.
 /// Aggregate task progress must not overwrite per-file bytes (BT/Metalink).
+/// ARC-57: `Downloading` writes are gated on the task still being live;
+/// other targets (Paused/WaitingNetwork/Completed finalization by the engine's
+/// own cancel/finish paths) remain unconditional.
 #[allow(clippy::too_many_arguments)]
 async fn update_progress_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -23,6 +68,16 @@ async fn update_progress_in_tx(
     updated_at: &str,
     update_files: bool,
 ) -> Result<(), String> {
+    if status == TaskStatus::Downloading
+        && !task_status_is_live_in_tx(tx, task_id)
+            .await
+            .map_err(|e| e.to_string())?
+    {
+        return update_progress_bytes_only_in_tx(tx, task_id, downloaded_bytes, updated_at)
+            .await
+            .map_err(|e| e.to_string());
+    }
+
     sqlx::query(
         r#"
         UPDATE tasks
@@ -207,7 +262,12 @@ pub async fn update_task_progress(
     connection_count: i32,
     status: TaskStatus,
 ) -> Result<(), String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    // ARC-57: this transaction reads the current status before writing, so it
+    // must take the write lock up front. A deferred reader that upgrades to a
+    // writer can fail with SQLITE_BUSY_SNAPSHOT under concurrency (ARC-06).
+    let mut tx = super::begin_immediate(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     let updated_at = crate::models::task::now_iso();
 
     update_progress_in_tx(
@@ -260,6 +320,24 @@ pub async fn update_task_runtime_progress(
     health_summary: Option<&str>,
 ) -> Result<(), String> {
     let updated_at = crate::models::task::now_iso();
+    // ARC-57: read-then-write; see update_task_progress for the BUSY rationale.
+    let mut tx = super::begin_immediate(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    // ARC-57: same live-owner gate as update_progress_in_tx — a late
+    // `downloading` write from an engine whose task was already paused,
+    // canceled or re-queued degrades to bytes-only.
+    if status == TaskStatus::Downloading
+        && !task_status_is_live_in_tx(&mut tx, task_id)
+            .await
+            .map_err(|e| e.to_string())?
+    {
+        update_progress_bytes_only_in_tx(&mut tx, task_id, downloaded_bytes, &updated_at)
+            .await
+            .map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        return Ok(());
+    }
     sqlx::query(
         r#"
         UPDATE tasks
@@ -275,9 +353,10 @@ pub async fn update_task_runtime_progress(
     .bind(health_summary)
     .bind(&updated_at)
     .bind(task_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -290,8 +369,38 @@ pub async fn update_task_and_segment_progress(
     connection_count: i32,
     status: TaskStatus,
 ) -> Result<(), String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    // ARC-57: read-then-write; see update_task_progress for the BUSY rationale.
+    let mut tx = super::begin_immediate(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     let updated_at = crate::models::task::now_iso();
+
+    // ARC-57: gate task and work unit together — a late write must not reset
+    // the segment status to 'downloading' after pause/cancel already moved it
+    // to pending/failed either.
+    if status == TaskStatus::Downloading
+        && !task_status_is_live_in_tx(&mut tx, task_id)
+            .await
+            .map_err(|e| e.to_string())?
+    {
+        update_progress_bytes_only_in_tx(&mut tx, task_id, downloaded_bytes, &updated_at)
+            .await
+            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            r#"
+            UPDATE task_work_units
+            SET downloaded_until = ?, speed_bps = 0
+            WHERE id = ?
+            "#,
+        )
+        .bind(downloaded_bytes)
+        .bind(segment_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        return Ok(());
+    }
 
     update_progress_in_tx(
         &mut tx,
@@ -577,7 +686,7 @@ pub async fn reset_task_download_state(pool: &SqlitePool, task_id: &str) -> Resu
         SET downloaded_bytes = 0, speed_bps = 0, connection_count = 0,
             status = 'queued', health_summary = 'Queued', error_message = NULL,
             error_code = NULL, recovery_actions = NULL, retry_after_at = NULL,
-            updated_at = ?
+            completed_at = NULL, updated_at = ?
         WHERE id = ?
         "#,
     )
@@ -626,10 +735,11 @@ pub async fn complete_task(pool: &SqlitePool, task_id: &str) -> Result<(), Strin
         SET status = 'completed', downloaded_bytes = total_size, speed_bps = 0,
             connection_count = 0, health_summary = 'Completed',
             error_message = NULL, error_code = NULL, recovery_actions = NULL,
-            retry_after_at = NULL, updated_at = ?
+            retry_after_at = NULL, completed_at = ?, updated_at = ?
         WHERE id = ? AND status = 'downloading'
         "#,
     )
+    .bind(&updated_at)
     .bind(&updated_at)
     .bind(task_id)
     .execute(&mut *tx)
@@ -678,10 +788,11 @@ pub async fn complete_task_segment(
         SET status = 'completed', downloaded_bytes = total_size, speed_bps = 0,
             connection_count = 0, health_summary = 'Completed',
             error_message = NULL, error_code = NULL, recovery_actions = NULL,
-            retry_after_at = NULL, updated_at = ?
+            retry_after_at = NULL, completed_at = ?, updated_at = ?
         WHERE id = ? AND status = 'downloading'
         "#,
     )
+    .bind(&updated_at)
     .bind(&updated_at)
     .bind(task_id)
     .execute(&mut *tx)
@@ -745,12 +856,13 @@ pub async fn complete_unknown_size_task(
         SET status = 'completed', total_size = ?, downloaded_bytes = ?, speed_bps = 0,
             connection_count = 0, health_summary = 'Completed',
             error_message = NULL, error_code = NULL, recovery_actions = NULL,
-            retry_after_at = NULL, updated_at = ?
+            retry_after_at = NULL, completed_at = ?, updated_at = ?
         WHERE id = ? AND status = 'downloading'
         "#,
     )
     .bind(final_size)
     .bind(final_size)
+    .bind(&updated_at)
     .bind(&updated_at)
     .bind(task_id)
     .execute(&mut *tx)
@@ -904,63 +1016,124 @@ pub struct TaskProgressCheckpoint<'a> {
 /// rows (when `update_files` is true), and updates each work unit in
 /// `work_units`. The caller decides which work units to include and whether
 /// file rows need updating, preserving the original checkpoint gating logic.
+///
+/// ARC-57: the header UPDATE is conditional — it only writes while the task is
+/// still in a live engine state (`downloading`/`retrying`). A checkpoint that
+/// lands after a user action (pause/cancel/retry) has already moved the row
+/// must persist byte progress on the work units but must NOT flip the status
+/// back to `downloading`, which produced worker-less "downloading" zombies
+/// that rejected the user's next resume (Downloading → Queued is illegal).
 pub async fn checkpoint_task_progress(
     pool: &SqlitePool,
     checkpoint: TaskProgressCheckpoint<'_>,
     work_units: &[(String, i64, i64, String)],
 ) -> sqlx::Result<()> {
     let updated_at = crate::models::task::now_iso();
-    let mut tx = pool.begin().await?;
+    // ARC-57: read-then-write; see update_task_progress for the BUSY rationale.
+    // The ARC-06 stress test hammers this exact function against concurrent
+    // control-plane transitions, so the upgrade race is not theoretical.
+    let mut tx = super::begin_immediate(pool).await?;
+    // Decide the gate once per transaction so the header and every work unit
+    // agree; bytes always persist so the resume offset stays honest even when
+    // the status guard rejects the write. A checkpoint requesting a terminal
+    // status is the engine's own failure/finalization write and stays
+    // unconditional — only `downloading`-flavored writes need the live-owner
+    // guard.
+    let gated = checkpoint.status == TaskStatus::Downloading.as_str()
+        && !task_status_is_live_in_tx(&mut tx, checkpoint.task_id).await?;
+    let live = !gated;
 
-    sqlx::query(
-        r#"
-        UPDATE tasks
-        SET downloaded_bytes = ?, speed_bps = ?, connection_count = ?, status = ?, updated_at = ?
-        WHERE id = ?
-        "#,
-    )
-    .bind(checkpoint.downloaded_bytes)
-    .bind(checkpoint.speed_bps)
-    .bind(checkpoint.connection_count)
-    .bind(checkpoint.status)
-    .bind(&updated_at)
-    .bind(checkpoint.task_id)
-    .execute(&mut *tx)
-    .await?;
-
-    // Only write task_files on terminal status or when file selection changed,
-    // since the downloaded_bytes/status here duplicate the task header values.
-    if checkpoint.update_files {
+    if live {
         sqlx::query(
             r#"
-            UPDATE task_files
-            SET downloaded_bytes = ?, status = ?
-            WHERE task_id = ? AND selected = 1
+            UPDATE tasks
+            SET downloaded_bytes = ?, speed_bps = ?, connection_count = ?, status = ?, updated_at = ?
+            WHERE id = ?
             "#,
         )
         .bind(checkpoint.downloaded_bytes)
+        .bind(checkpoint.speed_bps)
+        .bind(checkpoint.connection_count)
         .bind(checkpoint.status)
+        .bind(&updated_at)
         .bind(checkpoint.task_id)
         .execute(&mut *tx)
         .await?;
+    } else {
+        update_progress_bytes_only_in_tx(
+            &mut tx,
+            checkpoint.task_id,
+            checkpoint.downloaded_bytes,
+            &updated_at,
+        )
+        .await?;
+    }
+
+    // Only write task_files on terminal status or when file selection changed,
+    // since the downloaded_bytes/status here duplicate the task header values.
+    // The status column is gated the same way as the header.
+    if checkpoint.update_files {
+        if live {
+            sqlx::query(
+                r#"
+                UPDATE task_files
+                SET downloaded_bytes = ?, status = ?
+                WHERE task_id = ? AND selected = 1
+                "#,
+            )
+            .bind(checkpoint.downloaded_bytes)
+            .bind(checkpoint.status)
+            .bind(checkpoint.task_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE task_files
+                SET downloaded_bytes = ?
+                WHERE task_id = ? AND selected = 1
+                "#,
+            )
+            .bind(checkpoint.downloaded_bytes)
+            .bind(checkpoint.task_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     // Non-terminal force checkpoints still respect per-segment dirty to avoid
     // writing all segments when only a few changed. Terminal force writes all.
+    // ARC-57: when the gate rejected the header write, work units get their
+    // durable offsets only — their status belongs to whoever owns the task now
+    // (pause/cancel/retry already reset them through the state machine).
     for (work_unit_id, downloaded_until, unit_speed_bps, unit_status) in work_units {
-        sqlx::query(
-            r#"
-            UPDATE task_work_units
-            SET downloaded_until = ?, speed_bps = ?, status = ?, last_error = NULL
-            WHERE id = ?
-            "#,
-        )
-        .bind(downloaded_until)
-        .bind(unit_speed_bps)
-        .bind(unit_status)
-        .bind(work_unit_id)
-        .execute(&mut *tx)
-        .await?;
+        if live {
+            sqlx::query(
+                r#"
+                UPDATE task_work_units
+                SET downloaded_until = ?, speed_bps = ?, status = ?, last_error = NULL
+                WHERE id = ?
+                "#,
+            )
+            .bind(downloaded_until)
+            .bind(unit_speed_bps)
+            .bind(unit_status)
+            .bind(work_unit_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE task_work_units
+                SET downloaded_until = ?, speed_bps = 0
+                WHERE id = ?
+                "#,
+            )
+            .bind(downloaded_until)
+            .bind(work_unit_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     tx.commit().await?;

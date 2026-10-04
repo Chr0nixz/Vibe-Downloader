@@ -12,7 +12,7 @@ import {
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
-
+import { recoveryActionLabel } from "@/components/tasks/row-recovery";
 import {
   ErrorCodeDisclosure,
   RecoveryConcernIcon,
@@ -497,7 +497,7 @@ function RecoveryDetail({
                   >
                     <div className="flex items-center gap-2">
                       <span className="min-w-0 flex-1 text-sm font-semibold text-text-primary">
-                        {t(`recovery.${entry.action}`)}
+                        {recoveryActionLabel(task, entry.action, t)}
                       </span>
                       <Button
                         variant={entry.action === "restart" ? "danger" : "outline"}

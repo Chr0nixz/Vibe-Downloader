@@ -1,5 +1,7 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Load TS module via vitest/tsx isn't available; duplicate the minimal maps here
 // by importing the compiled source through dynamic import of the .ts via jiti-less parse.
@@ -192,38 +194,49 @@ export function syncLocaleErrorsBlock({ text, messages, report, codes = STABLE_E
   return carriesDerivedKeys ? { status: "unchanged", text: normalized } : { status: "failed", text: normalized };
 }
 
-const messageSets = {
-  en: STABLE_ERROR_MESSAGES_EN,
-  "zh-CN": requireLocalizedSet("zh-CN"),
-  "zh-TW": requireLocalizedSet("zh-TW"),
-  ja: requireLocalizedSet("ja"),
-  ko: requireLocalizedSet("ko"),
-  ru: requireLocalizedSet("ru"),
-  es: requireLocalizedSet("es"),
-};
+function main() {
+  const messageSets = {
+    en: STABLE_ERROR_MESSAGES_EN,
+    "zh-CN": requireLocalizedSet("zh-CN"),
+    "zh-TW": requireLocalizedSet("zh-TW"),
+    ja: requireLocalizedSet("ja"),
+    ko: requireLocalizedSet("ko"),
+    ru: requireLocalizedSet("ru"),
+    es: requireLocalizedSet("es"),
+  };
 
-const root = path.resolve("src/i18n/locales");
-let failed = 0;
-for (const locale of Object.keys(messageSets)) {
-  const file = path.join(root, `${locale}.ts`);
-  const text = fs.readFileSync(file, "utf8");
-  // Normalize CRLF so the errors-block regex matches on Windows checkouts.
-  const result = syncLocaleErrorsBlock({
-    text,
-    messages: messageSets[locale],
-    report: reportLocales[locale],
-    causes: requireCauseSet(locale),
-  });
-  if (result.status === "failed") {
-    console.error("Failed to replace errors block in", file);
-    failed += 1;
-    continue;
+  const biome = fileURLToPath(import.meta.resolve("@biomejs/biome/bin/biome"));
+  const root = path.resolve("src/i18n/locales");
+  let failed = 0;
+  for (const locale of Object.keys(messageSets)) {
+    const file = path.join(root, `${locale}.ts`);
+    const text = fs.readFileSync(file, "utf8");
+    const result = syncLocaleErrorsBlock({
+      text,
+      messages: messageSets[locale],
+      report: reportLocales[locale],
+      causes: requireCauseSet(locale),
+    });
+    if (result.status === "failed") {
+      console.error("Failed to replace errors block in", file);
+      failed += 1;
+      continue;
+    }
+    // Compare formatted output before writing so wrapping cannot dirty an already synced locale.
+    const formatted = execFileSync(process.execPath, [biome, "format", "--stdin-file-path", file], {
+      input: result.text,
+      encoding: "utf8",
+    });
+    if (formatted === text.replace(/\r\n/g, "\n")) {
+      console.log("Unchanged", file, "(already synced)");
+      continue;
+    }
+    fs.writeFileSync(file, formatted);
+    console.log("Updated", file, "codes=", STABLE_ERROR_CODES.length);
   }
-  if (result.status === "unchanged") {
-    console.log("Unchanged", file, "(already synced)");
-    continue;
-  }
-  fs.writeFileSync(file, result.text);
-  console.log("Updated", file, "codes=", STABLE_ERROR_CODES.length);
+  if (failed > 0) process.exitCode = 1;
 }
-if (failed > 0) process.exit(1);
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

@@ -31,7 +31,7 @@ import { useTheme } from "next-themes";
 import { type ComponentType, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { NAV_SHORTCUT_DIGITS, NAV_SHORTCUT_KEYS } from "@/components/shell/nav-shortcuts";
-import { allowedTransferActions, primaryRecoveryAction } from "@/components/tasks/row-recovery";
+import { allowedTransferActions, primaryRecoveryAction, recoveryActionLabel } from "@/components/tasks/row-recovery";
 import { recoveryActionIcon, restartCost } from "@/components/tasks/TaskRecoveryActions";
 import {
   Dialog,
@@ -114,6 +114,8 @@ export function Palette({
   onBulkRetry,
   onBulkDelete,
   onBulkOpenFolder,
+  onSelectAll,
+  selectingAll,
   onPauseAll,
   onResumeAll,
   onSetNav,
@@ -134,6 +136,8 @@ export function Palette({
   onBulkRetry: (tasks: Task[]) => void;
   onBulkDelete: (tasks: Task[]) => void;
   onBulkOpenFolder: (tasks: Task[]) => void;
+  onSelectAll: () => void | Promise<void>;
+  selectingAll?: boolean;
   onPauseAll: () => void;
   onResumeAll: () => void;
   onSetNav: (nav: NavFilter) => void;
@@ -165,7 +169,6 @@ export function Palette({
   const detailOpen = useTaskUIStore((s) => s.detailOpen);
   const setTasks = useTaskDataStore((s) => s.setTasks);
   const setError = useTaskDataStore((s) => s.setError);
-  const setSelectedIds = useTaskUIStore((s) => s.setSelectedIds);
   const clearSelectedIds = useTaskUIStore((s) => s.clearSelectedIds);
   const setSort = useTaskUIStore((s) => s.setSort);
   const setFilters = useTaskUIStore((s) => s.setFilters);
@@ -233,10 +236,11 @@ export function Palette({
         onBulkRetry,
         onBulkDelete,
         onBulkOpenFolder,
+        onSelectAll,
+        selectingAll,
         onPauseAll,
         onResumeAll,
         onSetNav,
-        setSelectedIds,
         clearSelectedIds,
         setSort,
         setFilters,
@@ -259,6 +263,7 @@ export function Palette({
       nav,
       onBulkDelete,
       onBulkOpenFolder,
+      onSelectAll,
       onBulkPause,
       onBulkResume,
       onBulkRetry,
@@ -279,11 +284,11 @@ export function Palette({
       selectedIds.length,
       selectedTask,
       selectedTasks,
+      selectingAll,
       setDetailOpen,
       setError,
       setFilters,
       setRowDensity,
-      setSelectedIds,
       setSettings,
       setSort,
       setTasks,
@@ -573,10 +578,11 @@ function buildCommands({
   onBulkRetry,
   onBulkDelete,
   onBulkOpenFolder,
+  onSelectAll,
+  selectingAll,
   onPauseAll,
   onResumeAll,
   onSetNav,
-  setSelectedIds,
   clearSelectedIds,
   setSort,
   setFilters,
@@ -617,10 +623,11 @@ function buildCommands({
   onBulkRetry: (tasks: Task[]) => void;
   onBulkDelete: (tasks: Task[]) => void;
   onBulkOpenFolder: (tasks: Task[]) => void;
+  onSelectAll: () => void | Promise<void>;
+  selectingAll?: boolean;
   onPauseAll: () => void;
   onResumeAll: () => void;
   onSetNav: (nav: NavFilter) => void;
-  setSelectedIds: (ids: string[]) => void;
   clearSelectedIds: () => void;
   setSort: (key: TaskSortKey, direction?: TaskSortDirection) => void;
   setFilters: (filters: Partial<TaskFilters>) => void;
@@ -796,7 +803,9 @@ function buildCommands({
         ? t("palette.retry")
         : recoverAction === "restart"
           ? t("palette.restart")
-          : t("palette.recoverWith", { action: t(`recovery.${recoverAction}`) }),
+          : t("palette.recoverWith", {
+              action: selectedTask ? recoveryActionLabel(selectedTask, recoverAction, t) : "",
+            }),
     description:
       recoverAction === "restart" && selectedTask
         ? (restartCost(selectedTask, t) ?? t("palette.descriptions.task", { name: selectedName }))
@@ -871,12 +880,12 @@ function buildCommands({
     description: t("palette.descriptions.selectVisible"),
     group: "bulk",
     icon: ListChecks,
-    keywords: keyword("select", "visible", "current", "选择", "当前结果"),
+    keywords: keyword("select", "matching", "current", "选择", "当前结果"),
     shortcut: `${mod}A`,
-    enabled: visibleTasks.length > 0,
-    disabledReason: noVisibleTasks,
+    enabled: visibleTasks.length > 0 && !selectingAll,
+    disabledReason: selectingAll ? t("taskList.loadingMore") : noVisibleTasks,
     featured: true,
-    run: () => setSelectedIds(visibleTasks.map((task) => task.id)),
+    run: onSelectAll,
   });
   push({
     id: "bulk.clear-selection",
@@ -1240,7 +1249,7 @@ function buildCommands({
       featured: preset.value === null || preset.value === 1024 * 1024,
       run: async () => {
         if (!settings) return;
-        setSettings(await applyGlobalSpeedLimit(settings, preset.value));
+        setSettings(await applyGlobalSpeedLimit(preset.value));
       },
     });
   });

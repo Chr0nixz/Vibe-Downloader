@@ -12,9 +12,14 @@ import type {
   ProbeTaskInput,
   TaskPriority,
   TaskProxyMode,
+  TaskRequestProfileInput,
+  TaskSource,
 } from "@/generated/bindings";
 
 export type CreateDraftShared = {
+  requestProfile: TaskRequestProfileInput | null;
+  networkAuthorizationId: string | null;
+  sourceKind: TaskSource | null;
   username: string | null;
   password: string | null;
   privateKeyData: string | null;
@@ -34,6 +39,9 @@ export type CreateDraftShared = {
 };
 
 export const EMPTY_CREATE_DRAFT: CreateDraftShared = {
+  requestProfile: null,
+  networkAuthorizationId: null,
+  sourceKind: null,
   username: null,
   password: null,
   privateKeyData: null,
@@ -55,6 +63,8 @@ export const EMPTY_CREATE_DRAFT: CreateDraftShared = {
 /** Credential + proxy subset used by probe and directory probe. */
 export function draftAuthProxyFields(draft: CreateDraftShared) {
   return {
+    networkAuthorizationId: draft.networkAuthorizationId,
+    sourceKind: draft.sourceKind,
     username: draft.username,
     password: draft.password,
     privateKeyData: draft.privateKeyData,
@@ -71,6 +81,7 @@ export function toProbeTaskInput(url: string, draft: CreateDraftShared, requestI
   return {
     url,
     requestId: requestId ?? null,
+    requestProfile: draft.requestProfile,
     ...draftAuthProxyFields(draft),
   };
 }
@@ -87,12 +98,14 @@ export function toImportUrlsInput(
   saveDir: string | null,
   create: boolean,
   draft: CreateDraftShared,
+  obeySchedule = true,
 ): ImportUrlsInput {
   return {
     input,
     saveDir,
     probe: true,
     create,
+    obeySchedule,
     expectedHashSha256: draft.expectedHashSha256,
     expectedHash: draft.expectedHash,
     expectedHashAlgorithm: draft.expectedHashAlgorithm,
@@ -110,6 +123,9 @@ export function applyDraftToCreateTaskInput(
 ): CreateTaskInput {
   return {
     ...base,
+    requestProfile: draft.requestProfile,
+    networkAuthorizationId: draft.networkAuthorizationId,
+    sourceKind: draft.sourceKind,
     expectedHashSha256: draft.expectedHashSha256,
     expectedHash: draft.expectedHash,
     expectedHashAlgorithm: draft.expectedHashAlgorithm,

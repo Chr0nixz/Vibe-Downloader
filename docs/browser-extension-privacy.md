@@ -1,6 +1,6 @@
 # Vibe Downloader Browser Extension Privacy Policy
 
-Last updated: 2026-07-10
+Last updated: 2026-10-02
 
 This policy applies to the Vibe Downloader browser extensions distributed for Chrome, Microsoft Edge, and Firefox.
 
@@ -38,7 +38,7 @@ Automatic browser-download takeover and Cookie/header forwarding are experimenta
 
 - Browser hand-off accepts only HTTP/HTTPS URLs.
 - URLs with embedded credentials are rejected.
-- Private and reserved network addresses are blocked unless the user explicitly enables intranet hand-off in the desktop application.
+- Release download engines allow private targets only after an explicit, task-bound authorization in the desktop application. The intranet hand-off setting only allows a browser candidate to reach that authorization flow; it never grants access by itself. The grant is limited to the confirmed authority and resolved addresses, while metadata, link-local, unauthorized redirects, and DNS rebinding remain blocked. Real NAS, Tailscale, enterprise DNS, and candidate-package acceptance are still external validation work tracked in the [optimization plan](optimization-plan-2026-09-29.md).
 - Authorization headers are never accepted from the browser hand-off boundary.
 - Browsers may only invoke the Native Messaging host when their installed extension ID is allowlisted by the desktop application.
 

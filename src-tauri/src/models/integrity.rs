@@ -79,7 +79,7 @@ pub struct IntegrityPassport {
     pub created_at: String,
     /// First `started` event time; `None` when pruned by event retention.
     pub started_at: Option<String>,
-    /// Last `completed` event time; `None` when pruned by event retention.
+    /// Durable completion time; legacy rows without the migration stay `None`.
     pub completed_at: Option<String>,
     /// Number of observed resumes (`resumed` events).
     pub resume_count: u32,

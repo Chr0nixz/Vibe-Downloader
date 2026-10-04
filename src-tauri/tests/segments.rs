@@ -126,6 +126,7 @@ async fn configurable_threshold_and_segment_count_plan_new_segments() {
         completion_action: CompletionAction::None,
         completion_countdown_seconds: 30,
         completion_run_command: String::new(),
+        completion_include_failures: false,
         delete_to_trash: true,
         auto_update_check_enabled: true,
         ffmpeg_path: None,
@@ -190,6 +191,7 @@ async fn ftp_task_creates_single_rest_segment_but_reserves_dynamic_slots() {
         completion_action: CompletionAction::None,
         completion_countdown_seconds: 30,
         completion_run_command: String::new(),
+        completion_include_failures: false,
         delete_to_trash: true,
         auto_update_check_enabled: true,
         ffmpeg_path: None,
@@ -384,6 +386,22 @@ async fn progress_updates_task_and_segment_together() {
         .await
         .expect("segment");
 
+    // ARC-57: live progress writes are gated on the task already being owned
+    // by a running engine (the scheduler transitions Queued -> Downloading
+    // before dispatch), so reproduce the production state here.
+    db::update_task_status(
+        &pool,
+        &task.id,
+        TaskStatus::Downloading,
+        None,
+        0,
+        0,
+        Some("Downloading"),
+        None,
+    )
+    .await
+    .expect("start transition");
+
     db::update_task_and_segment_progress(
         &pool,
         &task.id,
@@ -432,7 +450,7 @@ async fn settings_defaults_use_download_dir_and_two_active_tasks() {
     );
     assert!(!settings.floating_window_enabled);
     assert!(settings.clipboard_monitor_enabled);
-    assert!(!settings.auto_resume_on_startup);
+    assert!(settings.auto_resume_on_startup);
     assert_eq!(settings.proxy_mode, tauri_app_lib::proxy::AppProxyMode::Off);
     assert!(settings.proxy_url.is_empty());
     assert!(settings.proxy_no_proxy.is_empty());
@@ -475,6 +493,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
             completion_action: CompletionAction::None,
             completion_countdown_seconds: 30,
             completion_run_command: String::new(),
+            completion_include_failures: false,
             delete_to_trash: true,
             auto_update_check_enabled: true,
             ffmpeg_path: None,
@@ -526,6 +545,7 @@ async fn settings_upsert_and_clamp_active_task_count() {
             completion_action: CompletionAction::ExitApp,
             completion_countdown_seconds: 45,
             completion_run_command: String::new(),
+            completion_include_failures: false,
             delete_to_trash: true,
             auto_update_check_enabled: true,
             ffmpeg_path: None,

@@ -10,9 +10,12 @@ import type {
   BulkRecoveryResult,
   CleanupMode,
   ClipboardLinkDetectedPayload,
+  CloseRequestAction,
+  CloseRequestPayload,
   CompletionActionRequestedPayload,
   CreateTaskInput,
   CursorPageInput,
+  DesktopStatusUpdate,
   DirectoryProbeInput,
   FtpDirectoryProbe,
   HashVerificationState,
@@ -21,6 +24,8 @@ import type {
   ListTasksCursorInput,
   ListTasksCursorResult,
   ListTasksInput,
+  NetworkAuthorizationDraft,
+  NetworkPolicy,
   ProbePhasePayload,
   ProbeTaskInput,
   ProbeTaskPayload,
@@ -38,8 +43,11 @@ import type {
   StorageScanResult,
   StorageSweepRecord,
   TaskEvent,
+  TaskNetworkPolicyView,
   TaskProxySettings,
   TaskProxySettingsInput,
+  TaskRequestProfileInput,
+  TaskRequestProfileView,
   TaskStatsSnapshot,
   TorrentRuntimeSnapshot,
   UpdateSettingsInput,
@@ -63,6 +71,19 @@ import { normalizeTaskSegment } from "@/types/task-segment";
 const log = createLogger("browser-mock");
 const STORAGE_KEY = "vibe-browser-mock-tasks";
 const SETTINGS_STORAGE_KEY = "vibe-browser-settings";
+
+/**
+ * UX-42: the structured error the HLS engine stores next to the live-idle
+ * health summary (`engine_error("hls_live_idle", ..., true)`). The row shows
+ * the error ahead of the summary, so without it the preview rendered the raw
+ * English summary, a state the real backend never shows.
+ */
+const HLS_LIVE_IDLE_ERROR = JSON.stringify({
+  code: "hls_live_idle",
+  message: "The live HLS playlist stopped publishing new segments.",
+  recoverable: true,
+  actions: ["retry", "check_url"],
+});
 const BROWSER_CAPTURE_SETTINGS_KEY = "vibe-browser-capture-settings";
 const browserExperimentalCaptureEnabled = ["1", "true", "yes", "on"].includes(
   String(import.meta.env.VITE_BROWSER_EXPERIMENTAL_CAPTURE ?? "").toLowerCase(),
@@ -77,6 +98,9 @@ const LEGACY_HEALTH_SUMMARY_KEYS: Record<string, string> = {
   "Remote file changed. Restart download to avoid corruption.": "taskDiagnostics.remoteChanged",
   Completed: "taskDiagnostics.completed",
   "Waiting for network": "taskDiagnostics.waitingNetwork",
+  // UX-42: the real string the HLS engine writes when a live playlist goes
+  // idle — the only backend path that produces `waiting_network`.
+  "Live playlist idle - waiting for new segments": "taskDiagnostics.waitingNetwork",
   "Disk write slower than network": "taskDiagnostics.diskWriteSlow",
   Queued: "taskDiagnostics.queued",
   "Finishing HLS recording": "taskDiagnostics.finishingHls",
@@ -107,47 +131,67 @@ export async function openStartupDataFolder(): Promise<void> {}
 
 export async function retryStartupInit(): Promise<void> {}
 
+export async function prepareAppRelaunch(): Promise<void> {}
+
+export async function cancelPreparedAppRelaunch(): Promise<void> {}
+
+export async function resolveCloseRequest(_action: CloseRequestAction, _remember: boolean): Promise<void> {}
+
+export async function updateDesktopStatus(_input: DesktopStatusUpdate): Promise<void> {}
+
 type BrowserListener = (payload: TaskProgressPayload) => void;
 type TaskUpdatedListener = (task: Task) => void;
 
 let tasks: Task[] = loadStoredTasks() ?? buildBrowserMockTasks();
+const browserNetworkPolicies = new Map<string, TaskNetworkPolicyView>();
+// Preview metadata stays in memory; sensitive input values never enter localStorage.
+const browserRequestProfiles = new Map<string, TaskRequestProfileView>();
+const browserNetworkAuthorizations = new Map<string, NetworkAuthorizationDraft>();
 let taskEvents: TaskEvent[] = buildBrowserMockEvents(tasks);
 let taskRequests: RequestDiagnostic[] = [];
-let settings: AppSettings = loadStoredSettings() ?? {
-  maxActiveTasks: 2,
-  defaultSaveDir: "~/Downloads",
-  globalSpeedLimitBps: null,
-  multiConnectionThresholdBytes: String(16 * 1024 * 1024),
-  segmentCount: 4,
-  maxConnectionsPerHost: 8,
-  systemNotifications: true,
-  closeToTray: false,
-  startOnBoot: false,
-  autoResumeOnStartup: false,
-  floatingWindowEnabled: false,
-  clipboardMonitorEnabled: true,
-  accentColor: "blue",
-  titlebarGradientEnabled: false,
-  proxyMode: "off",
-  proxyUrl: "",
-  proxyNoProxy: "",
-  proxyUsername: "",
-  proxyPasswordSaved: false,
-  scheduleDownloadWindowEnabled: false,
-  scheduleDownloadWindowStart: "00:00",
-  scheduleDownloadWindowEnd: "06:00",
-  scheduleSpeedLimitWindowEnabled: false,
-  scheduleSpeedLimitWindowStart: "18:00",
-  scheduleSpeedLimitWindowEnd: "23:00",
-  scheduleSpeedLimitBps: null,
-  completionAction: "none",
-  completionCountdownSeconds: 30,
-  completionRunCommand: "",
-  deleteToTrash: true,
-  autoUpdateCheckEnabled: true,
-  ffmpegPath: null,
-  btUploadLimitBps: null,
-};
+// Mirrors the backend fresh-install defaults (db/settings.rs). Kept as one
+// factory so the mock's initial state and resetSettings() cannot drift apart
+// (UX-41: the settings page used to keep its own stale copy).
+function defaultBrowserSettings(): AppSettings {
+  return {
+    maxActiveTasks: 2,
+    defaultSaveDir: "~/Downloads",
+    globalSpeedLimitBps: null,
+    multiConnectionThresholdBytes: String(16 * 1024 * 1024),
+    segmentCount: 4,
+    maxConnectionsPerHost: 8,
+    systemNotifications: true,
+    closeToTray: false,
+    startOnBoot: false,
+    autoResumeOnStartup: true,
+    floatingWindowEnabled: false,
+    clipboardMonitorEnabled: true,
+    accentColor: "blue",
+    titlebarGradientEnabled: false,
+    proxyMode: "off",
+    proxyUrl: "",
+    proxyNoProxy: "",
+    proxyUsername: "",
+    proxyPasswordSaved: false,
+    scheduleDownloadWindowEnabled: false,
+    scheduleDownloadWindowStart: "00:00",
+    scheduleDownloadWindowEnd: "06:00",
+    scheduleSpeedLimitWindowEnabled: false,
+    scheduleSpeedLimitWindowStart: "18:00",
+    scheduleSpeedLimitWindowEnd: "23:00",
+    scheduleSpeedLimitBps: null,
+    completionAction: "none",
+    completionCountdownSeconds: 30,
+    completionRunCommand: "",
+    completionIncludeFailures: false,
+    deleteToTrash: true,
+    autoUpdateCheckEnabled: true,
+    ffmpegPath: null,
+    btUploadLimitBps: null,
+  };
+}
+
+let settings: AppSettings = loadStoredSettings() ?? defaultBrowserSettings();
 const taskProxySettings = new Map<string, TaskProxySettings>();
 let progressTimer: ReturnType<typeof setInterval> | undefined;
 const progressListeners = new Set<BrowserListener>();
@@ -289,7 +333,7 @@ function loadStoredSettings(): AppSettings | null {
         systemNotifications: typeof parsed.systemNotifications === "boolean" ? parsed.systemNotifications : true,
         closeToTray: typeof parsed.closeToTray === "boolean" ? parsed.closeToTray : false,
         startOnBoot: typeof parsed.startOnBoot === "boolean" ? parsed.startOnBoot : false,
-        autoResumeOnStartup: typeof parsed.autoResumeOnStartup === "boolean" ? parsed.autoResumeOnStartup : false,
+        autoResumeOnStartup: typeof parsed.autoResumeOnStartup === "boolean" ? parsed.autoResumeOnStartup : true,
         floatingWindowEnabled: typeof parsed.floatingWindowEnabled === "boolean" ? parsed.floatingWindowEnabled : false,
         clipboardMonitorEnabled:
           typeof parsed.clipboardMonitorEnabled === "boolean" ? parsed.clipboardMonitorEnabled : true,
@@ -451,11 +495,16 @@ function browserTask(
   speedBps: number,
   healthSummary: string | null,
   timestamp: string,
+  protocolOverride?: string,
 ): Task {
   const needsError = status === "failed" || status === "needs_attention";
-  const mockError = needsError ? mockErrorForHealthSummary(healthSummary) : { errorMessage: null, recoveryActions: [] };
+  const mockError = needsError
+    ? mockErrorForHealthSummary(healthSummary)
+    : status === "waiting_network"
+      ? { errorMessage: HLS_LIVE_IDLE_ERROR, recoveryActions: [] }
+      : { errorMessage: null, recoveryActions: [] };
   const parsed = safeUrl(url);
-  const protocol = parsed?.protocol.replace(":", "") || "https";
+  const protocol = protocolOverride ?? parsed?.protocol.replace(":", "") ?? "https";
   return normalizeTask({
     id,
     url,
@@ -495,6 +544,7 @@ function browserTask(
     hashError: null,
     hashVerifiedAt: null,
     checksums: [],
+    completedAt: status === "completed" ? timestamp : null,
     files: [
       {
         id: `${id}-file-0`,
@@ -623,18 +673,24 @@ export function buildBrowserMockTasks(): Task[] {
       "taskDiagnostics.completed",
       now,
     ),
+    // UX-42: `waiting_network` is only reachable on the real backend from an
+    // HLS live recording whose playlist stopped publishing segments — never
+    // from a plain HTTPS zip. Keep the mock honest so preview-based UI reviews
+    // see a state the backend can actually produce, with the live-idle health
+    // summary (not the misleading "network unreachable" text).
     browserTask(
-      "mock-fonts",
-      "fonts-bundle.zip",
-      "https://github.com/google/fonts/archive/refs/heads/main.zip",
-      "github.com",
+      "mock-live-stream",
+      "conference-live.mp4",
+      "https://live.example.com/hls/conference/master.m3u8",
+      "live.example.com",
       "waiting_network",
       220_000_000,
       45_000_000,
       0,
       0,
-      "taskDiagnostics.waitingNetwork",
+      "Live playlist idle - waiting for new segments",
       now,
+      "hls",
     ),
     browserTask(
       "mock-vscode",
@@ -692,7 +748,13 @@ function cloneTasks(): Task[] {
 function updateTask(id: string, patch: Partial<Task>): Task {
   const index = tasks.findIndex((task) => task.id === id);
   if (index < 0) throw new Error(`Task not found: ${id}`);
-  const next = { ...tasks[index], ...patch, updatedAt: nowIso() };
+  const next = {
+    ...tasks[index],
+    ...patch,
+    completedAt:
+      patch.status === "completed" ? (patch.completedAt ?? nowIso()) : patch.status ? null : tasks[index].completedAt,
+    updatedAt: nowIso(),
+  };
   tasks = [...tasks.slice(0, index), next, ...tasks.slice(index + 1)];
   persistTasks();
   emitQueueChanged();
@@ -1120,6 +1182,14 @@ export async function updateTaskProxySettings(input: TaskProxySettingsInput): Pr
 export async function updateTorrentFileSelection(input: UpdateTorrentFileSelectionInput): Promise<Task> {
   const task = tasks.find((entry) => entry.id === input.taskId);
   if (!task) throw new Error("Task not found.");
+  if (input.selectedFilePaths.length === 0) {
+    throw JSON.stringify({
+      code: "bt_file_selection_required",
+      message: "Choose at least one torrent file before downloading.",
+      recoverable: true,
+      actions: ["check_url"],
+    });
+  }
   const selected = new Set(input.selectedFilePaths);
   task.files = task.files.map((file) => ({
     ...file,
@@ -1283,6 +1353,16 @@ export async function getSettings(): Promise<AppSettings> {
   return { ...settings };
 }
 
+// UX-41: mirror of the backend reset_settings command — restore defaults and
+// persist, so the preview exercises the same contract the real app uses.
+export async function resetSettings(): Promise<AppSettings> {
+  settings = defaultBrowserSettings();
+  persistSettings();
+  emitSettingsChanged();
+  scheduleBrowserQueue();
+  return { ...settings };
+}
+
 export async function listSftpKnownHosts(): Promise<import("@/generated/bindings").SftpKnownHost[]> {
   return [];
 }
@@ -1291,7 +1371,7 @@ export async function forgetSftpKnownHost(_host: string, _port: number): Promise
   return false;
 }
 
-export async function updateSettings(input: UpdateSettingsInput): Promise<AppSettings> {
+export async function updateSettings(input: Partial<UpdateSettingsInput>): Promise<AppSettings> {
   const nextSaveDir =
     input.defaultSaveDir === null || input.defaultSaveDir === undefined
       ? settings.defaultSaveDir
@@ -1300,9 +1380,11 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
     maxActiveTasks: Math.min(8, Math.max(1, input.maxActiveTasks ?? settings.maxActiveTasks)),
     defaultSaveDir: nextSaveDir,
     globalSpeedLimitBps:
-      input.globalSpeedLimitBps === null || input.globalSpeedLimitBps === undefined
-        ? null
-        : normalizeSpeedLimit(input.globalSpeedLimitBps),
+      input.globalSpeedLimitBps === undefined
+        ? settings.globalSpeedLimitBps
+        : input.globalSpeedLimitBps === null
+          ? null
+          : normalizeSpeedLimit(input.globalSpeedLimitBps),
     multiConnectionThresholdBytes:
       input.multiConnectionThresholdBytes === null || input.multiConnectionThresholdBytes === undefined
         ? settings.multiConnectionThresholdBytes
@@ -1329,19 +1411,22 @@ export async function updateSettings(input: UpdateSettingsInput): Promise<AppSet
     scheduleSpeedLimitWindowStart: input.scheduleSpeedLimitWindowStart ?? settings.scheduleSpeedLimitWindowStart,
     scheduleSpeedLimitWindowEnd: input.scheduleSpeedLimitWindowEnd ?? settings.scheduleSpeedLimitWindowEnd,
     scheduleSpeedLimitBps:
-      input.scheduleSpeedLimitBps === null || input.scheduleSpeedLimitBps === undefined
+      input.scheduleSpeedLimitBps === undefined
         ? settings.scheduleSpeedLimitBps
-        : normalizeSpeedLimit(input.scheduleSpeedLimitBps),
+        : input.scheduleSpeedLimitBps === null
+          ? null
+          : normalizeSpeedLimit(input.scheduleSpeedLimitBps),
     completionAction: input.completionAction ?? settings.completionAction,
     completionCountdownSeconds: Math.min(
       300,
       Math.max(5, input.completionCountdownSeconds ?? settings.completionCountdownSeconds),
     ),
     completionRunCommand: input.completionRunCommand ?? settings.completionRunCommand,
+    completionIncludeFailures: input.completionIncludeFailures ?? settings.completionIncludeFailures,
     deleteToTrash: input.deleteToTrash ?? settings.deleteToTrash,
     autoUpdateCheckEnabled: input.autoUpdateCheckEnabled ?? settings.autoUpdateCheckEnabled,
-    ffmpegPath: input.ffmpegPath,
-    btUploadLimitBps: input.btUploadLimitBps,
+    ffmpegPath: input.ffmpegPath === undefined ? settings.ffmpegPath : input.ffmpegPath,
+    btUploadLimitBps: input.btUploadLimitBps === undefined ? settings.btUploadLimitBps : input.btUploadLimitBps,
   };
   persistSettings();
   emitSettingsChanged();
@@ -1721,6 +1806,9 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
       ? input.probeSnapshot
       : await probeTask({
           url: input.url,
+          requestProfile: input.requestProfile,
+          networkAuthorizationId: input.networkAuthorizationId ?? null,
+          sourceKind: input.sourceKind ?? null,
           username: null,
           password: null,
           privateKeyData: null,
@@ -1764,12 +1852,13 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   const taskTotalSize =
     taskFiles.reduce((sum, file) => sum + parseNumericString(file.size), 0) || parseNumericString(probe.totalSize);
   const parsed = safeUrl(input.url);
+  const initialStatus: TaskStatus = input.startPaused ? "paused" : "queued";
   const task = browserTask(
     `mock-${crypto.randomUUID()}`,
     fileName,
     input.url,
     probe.sourceKey || parsed?.host || "example.com",
-    "queued",
+    initialStatus,
     taskTotalSize,
     0,
     0,
@@ -1786,6 +1875,7 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
     supportsParallel: probe.capabilities.supportsParallel,
     supportsMultiFile: probe.capabilities.supportsMultiFile,
     sourceKey: probe.sourceKey,
+    obeySchedule: input.obeySchedule ?? true,
     saveDir: input.saveDir?.trim() || settings.defaultSaveDir,
     files: taskFiles.map((file, index) => ({
       id: `${task.id}-file-${index}`,
@@ -1798,17 +1888,112 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
       totalSize: parseNumericString(file.size),
       downloadedBytes: 0,
       selected: selectedFilePaths.size === 0 || selectedFilePaths.has(file.relativePath),
-      status: "queued" as const,
+      status: initialStatus,
       contentType: file.contentType,
     })),
   };
+  const authorization = input.networkAuthorizationId
+    ? browserNetworkAuthorizations.get(input.networkAuthorizationId)
+    : undefined;
+  if (authorization) {
+    browserNetworkPolicies.set(task.id, {
+      taskId: task.id,
+      policy: authorization.policy,
+    });
+  }
+  if (input.requestProfile) storeBrowserRequestProfile(task.id, input.requestProfile, true);
   tasks = [nextTask, ...tasks];
   logTaskEvent(task.id, "created");
+  if (initialStatus === "paused") logTaskEvent(task.id, "paused");
   persistTasks();
   scheduleBrowserQueue();
   emitQueueChanged();
   emitTaskUpdated(nextTask);
   return nextTask;
+}
+
+function storeBrowserRequestProfile(taskId: string, input: TaskRequestProfileInput, replaceSensitive: boolean) {
+  const existing = browserRequestProfiles.get(taskId);
+  const sensitive = input.customHeaders.filter(
+    ({ name }) => name.toLowerCase() === "cookie" || name.toLowerCase().startsWith("x-"),
+  );
+  const view: TaskRequestProfileView = {
+    taskId,
+    userAgent: input.userAgent,
+    referer: input.referer,
+    customHeaders: input.customHeaders.filter((header) => !sensitive.includes(header)),
+    sensitiveHeaderNames: replaceSensitive ? sensitive.map(({ name }) => name) : (existing?.sensitiveHeaderNames ?? []),
+    sensitiveExpiresAt: replaceSensitive
+      ? sensitive.length
+        ? new Date(Date.now() + 24 * 60 * 60_000).toISOString()
+        : null
+      : (existing?.sensitiveExpiresAt ?? null),
+    sensitiveExpired: replaceSensitive ? false : (existing?.sensitiveExpired ?? false),
+  };
+  browserRequestProfiles.set(taskId, view);
+  return view;
+}
+
+export async function getTaskRequestProfile(taskId: string): Promise<TaskRequestProfileView> {
+  return (
+    browserRequestProfiles.get(taskId) ?? {
+      taskId,
+      userAgent: null,
+      referer: null,
+      customHeaders: [],
+      sensitiveHeaderNames: [],
+      sensitiveExpiresAt: null,
+      sensitiveExpired: false,
+    }
+  );
+}
+
+export async function updateTaskRequestProfile(
+  taskId: string,
+  input: TaskRequestProfileInput,
+  replaceSensitive: boolean,
+): Promise<TaskRequestProfileView> {
+  return storeBrowserRequestProfile(taskId, input, replaceSensitive);
+}
+
+export async function createNetworkAuthorization(
+  url: string,
+  source: NetworkPolicy["source"],
+): Promise<NetworkAuthorizationDraft> {
+  const parsed = safeUrl(url);
+  if (!parsed) throw new Error("The URL is invalid.");
+  const authority = `${parsed.protocol}//${parsed.host}`;
+  const now = nowIso();
+  const policy: NetworkPolicy = {
+    source,
+    rootAuthority: authority,
+    grants: [{ authority, addresses: [], authorizedAt: now }],
+  };
+  const draft = {
+    id: `mock-network-${crypto.randomUUID()}`,
+    policy,
+    expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+  };
+  browserNetworkAuthorizations.set(draft.id, draft);
+  return draft;
+}
+
+export async function getTaskNetworkPolicy(taskId: string): Promise<TaskNetworkPolicyView> {
+  return (
+    browserNetworkPolicies.get(taskId) ?? {
+      taskId,
+      policy: { source: "unknown", rootAuthority: null, grants: [] },
+    }
+  );
+}
+
+export async function revokeTaskNetworkAuthorization(taskId: string): Promise<TaskNetworkPolicyView> {
+  const view: TaskNetworkPolicyView = {
+    taskId,
+    policy: { source: "unknown", rootAuthority: null, grants: [] },
+  };
+  browserNetworkPolicies.set(taskId, view);
+  return view;
 }
 
 export async function updateTaskTransferOptions(input: UpdateTaskTransferOptionsInput): Promise<Task> {
@@ -1856,6 +2041,9 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
       ? null
       : await probeTask({
           url: normalized,
+          requestProfile: null,
+          networkAuthorizationId: input.networkAuthorizationId ?? null,
+          sourceKind: input.sourceKind ?? null,
           username: input.username ?? null,
           password: input.password ?? null,
           privateKeyData: input.privateKeyData ?? null,
@@ -1873,8 +2061,13 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
       !isDuplicate && input.create
         ? await createTask({
             url: normalized,
+            requestProfile: null,
+            networkAuthorizationId: input.networkAuthorizationId ?? null,
+            sourceKind: input.sourceKind ?? null,
             saveDir: input.saveDir,
             fileName: probe?.fileName ?? null,
+            startPaused: false,
+            obeySchedule: input.obeySchedule ?? true,
             expectedHashSha256: input.expectedHashSha256 ?? null,
             expectedHash: input.expectedHash ?? null,
             expectedHashAlgorithm: input.expectedHashAlgorithm ?? null,
@@ -1947,6 +2140,13 @@ export async function verifyTaskHash(id: string): Promise<HashVerificationState>
   };
 }
 
+export async function recheckTask(id: string): Promise<Task> {
+  await verifyTaskHash(id);
+  const task = tasks.find((entry) => entry.id === id);
+  if (!task) throw new Error(`Task not found: ${id}`);
+  return task;
+}
+
 export async function getIntegrityPassport(taskId: string): Promise<IntegrityPassport> {
   const task = tasks.find((entry) => entry.id === taskId);
   if (!task) throw new Error(`Task not found: ${taskId}`);
@@ -1970,7 +2170,7 @@ export async function getIntegrityPassport(taskId: string): Promise<IntegrityPas
     downloadedBytes: String(task.downloadedBytes),
     createdAt: task.createdAt,
     startedAt: completed ? task.createdAt : null,
-    completedAt: completed ? task.updatedAt : null,
+    completedAt: completed ? (task.completedAt ?? null) : null,
     resumeCount: 0,
     segmentRetries: 0,
     supportsResume: task.supportsResume,
@@ -2228,6 +2428,62 @@ export async function retryTask(id: string): Promise<Task> {
   return resumeTask(id);
 }
 
+export async function redownloadTask(id: string): Promise<Task> {
+  const task = tasks.find((entry) => entry.id === id);
+  if (!task) throw new Error(`Task not found: ${id}`);
+  if (task.status !== "completed") throw new Error("Only completed tasks can be downloaded again.");
+  const requestProfile = browserRequestProfiles.get(task.id);
+  const networkPolicy = browserNetworkPolicies.get(task.id)?.policy;
+  const proxy = taskProxySettings.get(task.id);
+  const recreated = await createTask({
+    url: task.url,
+    requestProfile: requestProfile
+      ? {
+          userAgent: requestProfile.userAgent,
+          referer: requestProfile.referer,
+          customHeaders: requestProfile.customHeaders,
+        }
+      : null,
+    networkAuthorizationId: null,
+    sourceKind: networkPolicy?.source ?? null,
+    saveDir: task.saveDir,
+    fileName: task.fileName,
+    startPaused: false,
+    obeySchedule: task.obeySchedule,
+    expectedHashSha256: task.expectedHashSha256,
+    expectedHash: task.expectedHashSha256,
+    expectedHashAlgorithm: "sha256",
+    taskSpeedLimitBps: task.taskSpeedLimitBps == null ? null : String(task.taskSpeedLimitBps),
+    priority: task.priority,
+    categoryKey: task.categoryKey,
+    probeSnapshot: null,
+    selectedFilePaths: task.files.filter((file) => file.selected).map((file) => file.relativePath),
+    allowDuplicate: true,
+    username: null,
+    password: null,
+    privateKeyData: null,
+    privateKeyPassphrase: null,
+    selectedHlsVariantUri: null,
+    selectedHlsAudioTrackUris: null,
+    selectedHlsSubtitleTrackUris: null,
+    proxyMode: proxy?.mode ?? null,
+    proxyUrl: proxy?.proxyUrl ?? null,
+    proxyUsername: proxy?.proxyUsername ?? null,
+    proxyPassword: null,
+    proxyNoProxy: proxy?.noProxy ?? null,
+  });
+  if (networkPolicy) {
+    browserNetworkPolicies.set(recreated.id, {
+      taskId: recreated.id,
+      policy: networkPolicy,
+    });
+  }
+  if (proxy) {
+    taskProxySettings.set(recreated.id, { ...proxy, taskId: recreated.id });
+  }
+  return recreated;
+}
+
 export async function finishLiveRecording(id: string): Promise<Task> {
   const task = tasks.find((entry) => entry.id === id);
   if (!task) throw new Error(`Task not found: ${id}`);
@@ -2336,6 +2592,14 @@ export function onCompletionActionRequested(
   return Promise.resolve(() => {
     completionActionListeners.delete(handler);
   });
+}
+
+export function onCloseRequested(_handler: (payload: CloseRequestPayload) => void): Promise<() => void> {
+  return Promise.resolve(() => {});
+}
+
+export function onDesktopStatus(_handler: (payload: TaskStatsSnapshot) => void): Promise<() => void> {
+  return Promise.resolve(() => {});
 }
 
 /** UX-6: No-op mock for browser preview — probe-phase events only exist in Tauri. */

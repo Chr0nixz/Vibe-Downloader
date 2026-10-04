@@ -168,7 +168,8 @@ impl ResumeProbe for ProbeResult {
 }
 
 pub fn resume_mismatch_message<P: ResumeProbe>(task: &TaskRecord, probe: &P) -> Option<String> {
-    if task.total_size != probe.total_size() {
+    let both_unknown = task.total_size == 0 && probe.total_size() == 0;
+    if task.total_size != probe.total_size() && !both_unknown {
         return Some(resume_error(
             "remote_changed",
             "Remote file changed. Restart download to avoid corruption.",
@@ -178,6 +179,12 @@ pub fn resume_mismatch_message<P: ResumeProbe>(task: &TaskRecord, probe: &P) -> 
         return Some(resume_error(
             "resume_unavailable",
             "Server no longer supports resume. Restart this download.",
+        ));
+    }
+    if both_unknown && task.etag.is_none() && task.last_modified.is_none() {
+        return Some(resume_error(
+            "resume_unavailable",
+            "Unknown-size resources require a stable ETag or Last-Modified validator before resuming.",
         ));
     }
     if strong_etag(task.etag.as_deref())

@@ -81,20 +81,20 @@ impl GlobalSpeedLimiter {
         Arc::new(Self::new(None))
     }
 
+    /// Always creates a distinct child so a task with no initial cap can still
+    /// receive a runtime policy update without mutating its shared parent.
     pub fn with_parent(parent: Arc<Self>, limit_bps: Option<i64>) -> Arc<Self> {
-        match limit_bps {
-            Some(limit) if limit > 0 => Arc::new(Self {
-                limit_bps: AtomicI64::new(limit),
-                tokens_milli: AtomicI64::new(bucket_capacity_milli(limit)),
-                last_refill_millis: AtomicU64::new(now_millis()),
-                parent: Some(parent),
-                notify: Notify::new(),
-                ticker_handle: Mutex::new(None),
-                #[cfg(debug_assertions)]
-                ticker_count: Arc::default(),
-            }),
-            _ => parent,
-        }
+        let limit = limit_bps.unwrap_or(0).max(0);
+        Arc::new(Self {
+            limit_bps: AtomicI64::new(limit),
+            tokens_milli: AtomicI64::new(bucket_capacity_milli(limit)),
+            last_refill_millis: AtomicU64::new(now_millis()),
+            parent: Some(parent),
+            notify: Notify::new(),
+            ticker_handle: Mutex::new(None),
+            #[cfg(debug_assertions)]
+            ticker_count: Arc::default(),
+        })
     }
 
     pub async fn set_limit(&self, limit_bps: Option<i64>) {
@@ -102,6 +102,11 @@ impl GlobalSpeedLimiter {
         // cannot abort a new ticker or leave a detached handle behind.
         let mut ticker = self.ticker_handle.lock().unwrap_or_else(|e| e.into_inner());
         let limit = limit_bps.unwrap_or(0).max(0);
+        // Policy refreshes also follow unrelated settings changes. Reapplying
+        // the same cap must not mint a fresh burst budget on each refresh.
+        if self.limit_bps.load(Ordering::Relaxed) == limit {
+            return;
+        }
         self.limit_bps.store(limit, Ordering::Relaxed);
         self.tokens_milli
             .store(bucket_capacity_milli(limit), Ordering::Relaxed);
@@ -205,6 +210,25 @@ impl GlobalSpeedLimiter {
         }
     }
 
+    /// Return the cap owned by this node without applying its parent.
+    ///
+    /// BT sessions use this local cap for task and scheduled-window policy;
+    /// the shared root is charged separately at the synchronous storage
+    /// boundary so BT and HTTP-family traffic share one global budget.
+    pub fn own_limit_bps(&self) -> Option<i64> {
+        match self.limit_bps.load(Ordering::SeqCst) {
+            value if value > 0 => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Return the root limiter for cross-protocol accounting.
+    pub fn root_limiter(self: &Arc<Self>) -> Arc<Self> {
+        self.parent
+            .as_ref()
+            .map_or_else(|| self.clone(), |parent| parent.root_limiter())
+    }
+
     /// Acquire `bytes` permits from the token bucket.
     ///
     /// ARC-04: waits are cancellable so pause/delete/exit can converge under
@@ -305,6 +329,73 @@ impl GlobalSpeedLimiter {
         }
         Ok(())
     }
+
+    /// Synchronous counterpart used by librqbit's synchronous storage API.
+    ///
+    /// librqbit intentionally performs positioned writes synchronously from a
+    /// blocking worker. Charging the same atomic bucket here preserves the
+    /// aggregate budget without introducing an async runtime dependency into
+    /// the storage trait. The cancellation token is checked between bounded
+    /// waits so task stop/delete still converges.
+    pub fn throttle_blocking(
+        &self,
+        bytes: usize,
+        cancel: &CancellationToken,
+    ) -> Result<(), ThrottleError> {
+        if let Some(parent) = &self.parent {
+            self.throttle_self_blocking(bytes, cancel)?;
+            parent.throttle_self_blocking(bytes, cancel)?;
+        } else {
+            self.throttle_self_blocking(bytes, cancel)?;
+        }
+        Ok(())
+    }
+
+    fn throttle_self_blocking(
+        &self,
+        bytes: usize,
+        cancel: &CancellationToken,
+    ) -> Result<(), ThrottleError> {
+        let mut remaining = bytes as i64;
+        while remaining > 0 {
+            if cancel.is_cancelled() {
+                return Err(ThrottleError::Cancelled);
+            }
+
+            let limit = self.limit_bps.load(Ordering::Relaxed);
+            if limit <= 0 {
+                return Ok(());
+            }
+
+            self.refill_now();
+            let fair_quantum =
+                ((limit as u64).saturating_mul(TICK_INTERVAL_MS) / 1000).max(1) as i64;
+            let request_bytes = remaining.min(limit).min(fair_quantum);
+            let request_milli = request_bytes * 1000;
+            let current = self.tokens_milli.load(Ordering::Relaxed);
+
+            if current >= request_milli
+                && self
+                    .tokens_milli
+                    .compare_exchange(
+                        current,
+                        current - request_milli,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                remaining -= request_bytes;
+                std::thread::yield_now();
+                continue;
+            }
+
+            // Keep the sleep bounded so a limit change or cancellation is
+            // observed promptly even though the storage trait is synchronous.
+            std::thread::sleep(Duration::from_millis(TICK_INTERVAL_MS));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for GlobalSpeedLimiter {
@@ -376,6 +467,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unchanged_policy_does_not_refill_consumed_tokens() {
+        let limiter = GlobalSpeedLimiter::new(Some(1_000));
+        limiter.tokens_milli.store(123_000, Ordering::Relaxed);
+        let last_refill = limiter.last_refill_millis.load(Ordering::Relaxed);
+
+        for _ in 0..10 {
+            limiter.set_limit(Some(1_000)).await;
+        }
+
+        assert_eq!(limiter.tokens_milli.load(Ordering::Relaxed), 123_000);
+        assert_eq!(
+            limiter.last_refill_millis.load(Ordering::Relaxed),
+            last_refill
+        );
+    }
+
+    #[tokio::test]
     async fn throttle_cancels_during_low_rate_wait() {
         // ARC-04: 1 B/s wait must exit promptly when cancelled.
         let limiter = Arc::new(GlobalSpeedLimiter::new(Some(1)));
@@ -403,6 +511,56 @@ mod tests {
         let child = GlobalSpeedLimiter::with_parent(parent, Some(1_000_000));
         // Should return the minimum of parent and child.
         assert_eq!(child.current_limit_bps(), Some(1_000_000));
+    }
+
+    #[tokio::test]
+    async fn unlimited_child_can_receive_a_limit_without_changing_its_parent() {
+        let parent = Arc::new(GlobalSpeedLimiter::new(Some(2_000_000)));
+        let child = GlobalSpeedLimiter::with_parent(parent.clone(), None);
+
+        assert!(!Arc::ptr_eq(&child, &parent));
+        assert_eq!(child.current_limit_bps(), Some(2_000_000));
+
+        child.set_limit(Some(500_000)).await;
+
+        assert_eq!(child.current_limit_bps(), Some(500_000));
+        assert_eq!(parent.current_limit_bps(), Some(2_000_000));
+    }
+
+    #[test]
+    fn child_exposes_own_and_root_limits_separately() {
+        let parent = Arc::new(GlobalSpeedLimiter::new(Some(2_000_000)));
+        let child = GlobalSpeedLimiter::with_parent(parent.clone(), Some(500_000));
+
+        assert_eq!(child.own_limit_bps(), Some(500_000));
+        assert!(Arc::ptr_eq(&child.root_limiter(), &parent));
+    }
+
+    #[test]
+    fn blocking_waiters_share_one_bucket() {
+        let limiter = Arc::new(GlobalSpeedLimiter::new(Some(1_000)));
+        let cancel = CancellationToken::new();
+        limiter
+            .throttle_blocking(1_000, &cancel)
+            .expect("initial burst");
+
+        let waiter = limiter.clone();
+        let cancel_waiter = cancel.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            waiter
+                .throttle_blocking(1_000, &cancel_waiter)
+                .expect("second shared-budget acquire");
+            done_tx.send(()).expect("send completion");
+        });
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "a second caller must not receive another initial burst"
+        );
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("shared bucket refills");
     }
 
     #[test]

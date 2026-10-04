@@ -96,7 +96,7 @@ describe("StatusBar health", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "statusBar.summary" }));
     const summary = screen.getByRole("list", { name: "statusBar.summary" });
-    // Waiting for network has no view of its own, so it is shown, not linked.
+    // waiting_network (stream idle) has no view of its own, so it is shown, not linked.
     expect(within(summary).getByText("task.status.waiting_network").closest("button")).toBeNull();
 
     fireEvent.click(within(summary).getByRole("button", { name: /nav\.paused\s*2/ }));

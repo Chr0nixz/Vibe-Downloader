@@ -168,23 +168,71 @@ pub(crate) fn parse_content_range(value: &str) -> Option<ParsedContentRange> {
     })
 }
 
+pub(crate) fn response_validator_matches(
+    headers: &reqwest::header::HeaderMap,
+    expected_etag: Option<&str>,
+    expected_last_modified: Option<&str>,
+) -> bool {
+    let has_validator = has_strong_resume_validator(expected_etag, expected_last_modified);
+    let etag_matches = expected_etag.is_none_or(|expected| {
+        headers
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|actual| actual == expected)
+    });
+    let last_modified_matches = expected_last_modified.is_none_or(|expected| {
+        headers
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|actual| actual == expected)
+    });
+    has_validator && etag_matches && last_modified_matches
+}
+
 pub(in crate::download::http::segmented) fn if_range_header_value(
     task: &TaskRecord,
 ) -> Option<String> {
     if_range_header_from(task.etag.as_deref(), task.last_modified.as_deref())
 }
 
+pub(crate) fn has_strong_resume_validator(etag: Option<&str>, last_modified: Option<&str>) -> bool {
+    etag.is_some_and(is_strong_etag)
+        || last_modified
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc2822(value.trim()).is_ok())
+}
+
 pub(crate) fn if_range_header_from(
     etag: Option<&str>,
     last_modified: Option<&str>,
 ) -> Option<String> {
-    etag.filter(|etag| !is_weak_etag(etag))
+    etag.filter(|etag| is_strong_etag(etag))
         .map(str::to_string)
-        .or_else(|| last_modified.map(str::to_string))
+        .or_else(|| {
+            last_modified
+                .filter(|value| chrono::DateTime::parse_from_rfc2822(value.trim()).is_ok())
+                .map(str::to_string)
+        })
 }
 
 fn is_weak_etag(value: &str) -> bool {
-    value.trim_start().starts_with("W/") || value.trim_start().starts_with("w/")
+    value
+        .trim_start()
+        .get(..2)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("W/"))
+}
+
+fn is_strong_etag(value: &str) -> bool {
+    let value = value.trim();
+    if is_weak_etag(value) {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    bytes.len() >= 2
+        && bytes.first() == Some(&b'"')
+        && bytes.last() == Some(&b'"')
+        && bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|byte| *byte == 0x21 || (0x23..=0x7e).contains(byte) || *byte >= 0x80)
 }
 
 trait EmptyFallback {
@@ -251,6 +299,23 @@ mod tests {
             if_range_header_value(&task).as_deref(),
             Some("Tue, 02 Jan 2024 00:00:00 GMT")
         );
+    }
+
+    #[test]
+    fn weak_etag_alone_cannot_authorize_resume() {
+        let weak = "W/\"weak\"";
+        assert!(!has_strong_resume_validator(Some(weak), None));
+        assert!(has_strong_resume_validator(
+            Some(weak),
+            Some("Tue, 02 Jan 2024 00:00:00 GMT")
+        ));
+        assert!(!has_strong_resume_validator(Some("opaque"), None));
+        assert!(has_strong_resume_validator(Some("\"strong\""), None));
+        assert_eq!(if_range_header_from(Some(weak), None), None);
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::ETAG, weak.parse().expect("weak ETag"));
+        assert!(!response_validator_matches(&headers, Some(weak), None));
     }
 
     #[test]

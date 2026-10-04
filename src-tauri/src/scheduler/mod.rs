@@ -1,11 +1,14 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{atomic::AtomicBool, Arc},
 };
 
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
+
+mod queue;
+pub use queue::DispatchQueue;
 
 use crate::{
     commands::settings::default_download_dir,
@@ -20,8 +23,8 @@ use crate::{
     },
     logging::sanitize_url,
     models::{
-        CompletionAction, CompletionActionRequestedPayload, HashVerificationStatus, TaskRecord,
-        TaskStatus,
+        AppSettings, CompletionAction, CompletionActionRequestedPayload, HashVerificationStatus,
+        TaskRecord, TaskStatus,
     },
     platform,
     state_machine::TransitionError,
@@ -73,6 +76,16 @@ pub struct Scheduler {
     engine_registry: Arc<EngineRegistry>,
     /// R-2: Per-task runtime lock (shares the same Arc as AppState.task_runtime_locks)
     task_runtime_locks: Arc<crate::TaskRuntimeLocks>,
+    speed_policy_lock: Mutex<()>,
+    speed_policy_changed: Notify,
+    /// Wakes the long-lived retry watcher whenever a task enters or leaves
+    /// the delayed queue, so a stale deadline is never held after a manual
+    /// pause/retry or an automatic failure.
+    retry_schedule_changed: Notify,
+    /// ARC-58: the current completion-action round (see [`CompletionRound`]).
+    /// A std mutex: every critical section is a few field updates, never
+    /// held across an await.
+    completion_round: std::sync::Mutex<CompletionRound>,
 }
 
 impl Scheduler {
@@ -90,7 +103,51 @@ impl Scheduler {
             speed_limiter,
             engine_registry,
             task_runtime_locks,
+            speed_policy_lock: Mutex::new(()),
+            speed_policy_changed: Notify::new(),
+            retry_schedule_changed: Notify::new(),
+            completion_round: std::sync::Mutex::new(CompletionRound::default()),
         }
+    }
+
+    pub fn notify_speed_policy_changed(&self) {
+        self.speed_policy_changed.notify_one();
+    }
+
+    pub async fn wait_for_speed_policy_change(&self) {
+        self.speed_policy_changed.notified().await;
+    }
+
+    pub fn notify_retry_schedule_changed(&self) {
+        self.retry_schedule_changed.notify_one();
+    }
+
+    pub async fn refresh_speed_limit_policies(
+        &self,
+        pool: &SqlitePool,
+        default_dir: String,
+    ) -> Result<(), String> {
+        let _policy_guard = self.speed_policy_lock.lock().await;
+        let settings = db::get_settings(pool, default_dir).await?;
+        let scheduled_limit = active_scheduled_speed_limit(&settings);
+        let controls = self
+            .downloads
+            .lock()
+            .await
+            .iter()
+            .map(|(task_id, control)| (task_id.clone(), control.speed_limiter.clone()))
+            .collect::<Vec<_>>();
+
+        for (task_id, limiter) in controls {
+            let Some(task) = db::get_task_record(pool, &task_id).await? else {
+                continue;
+            };
+            let task_limit = db::parse_speed_limit_bps(task.task_speed_limit_bps.as_deref());
+            limiter
+                .set_limit(min_optional_limit(task_limit, scheduled_limit))
+                .await;
+        }
+        Ok(())
     }
 
     /// Scheduling entry point (formerly schedule_queued_tasks).
@@ -117,27 +174,53 @@ impl Scheduler {
 
     /// Delayed scheduling entry point (formerly the schedule branch of spawn_schedule_queued_tasks_after).
     pub async fn schedule_retry_after_wakeup(self: Arc<Self>, app: AppHandle, pool: SqlitePool) {
-        let Some(next) = (match db::next_retry_after_at(&pool).await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(error = %error, "failed to inspect retry-after queue");
-                None
+        loop {
+            if app.try_state::<crate::AppState>().is_some_and(|state| {
+                state
+                    .quit_requested
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            }) {
+                return;
             }
-        }) else {
-            return;
-        };
-        let when = chrono::DateTime::parse_from_rfc3339(&next)
-            .map(|value| value.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| chrono::Utc::now());
-        let now = chrono::Utc::now();
-        let delay = when
-            .signed_duration_since(now)
-            .to_std()
-            .unwrap_or_else(|_| std::time::Duration::from_secs(0));
-        if delay.is_zero() {
-            self.dispatch(app, pool).await;
-        } else {
-            self.spawn_dispatch_after(app, pool, delay);
+
+            let changed = self.retry_schedule_changed.notified();
+            let next = match db::next_retry_after_at(&pool).await {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to inspect retry-after queue");
+                    None
+                }
+            };
+            let delay = next.as_deref().and_then(|value| {
+                chrono::DateTime::parse_from_rfc3339(value)
+                    .ok()
+                    .map(|when| {
+                        when.with_timezone(&chrono::Utc)
+                            .signed_duration_since(chrono::Utc::now())
+                            .to_std()
+                            .unwrap_or_default()
+                    })
+            });
+
+            match delay {
+                Some(delay) => {
+                    tokio::select! {
+                        _ = changed => {}
+                        _ = tokio::time::sleep(delay) => {
+                            self.clone().dispatch(app.clone(), pool.clone()).await;
+                        }
+                    }
+                }
+                None => {
+                    // A short idle poll covers rows inserted by an older
+                    // command path that predates the Notify call, while the
+                    // notification keeps normal changes immediate.
+                    tokio::select! {
+                        _ = changed => {}
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                    }
+                }
+            }
         }
     }
 
@@ -155,8 +238,7 @@ impl Scheduler {
 
         let _guard = self.lock.lock().await;
 
-        // Read settings and queued list ONCE outside the loop.
-        // Previously these were re-fetched every iteration (~240 DB round trips per burst).
+        // Keep one settings snapshot per pass; candidate pages advance as slots fill.
         let default_dir = default_download_dir(&app).unwrap_or_default();
         let settings = match db::get_settings(&pool, default_dir).await {
             Ok(settings) => settings,
@@ -165,25 +247,14 @@ impl Scheduler {
                 return;
             }
         };
-        // Fetch enough queued tasks to potentially fill every host slot (active × per-host),
-        // but cap at one page to avoid loading the entire queue each dispatch tick.
-        // The lower clamp ensures we always fetch at least max_active_tasks candidates.
+        // ARC-61: bound each page, but continue past blocked candidates until slots fill.
         let queued_limit = i64::from(settings.max_active_tasks)
             .saturating_mul(i64::from(settings.max_connections_per_host).max(1))
             .clamp(
                 i64::from(settings.max_active_tasks).max(1),
                 db::DEFAULT_TASK_PAGE_SIZE,
             );
-        let queued = match db::list_queued_task_records(&pool, queued_limit).await {
-            Ok(tasks) => tasks,
-            Err(error) => {
-                tracing::error!(error = %error, "failed to load queued tasks");
-                return;
-            }
-        };
-        if queued.is_empty() {
-            return;
-        }
+        let mut queued = DispatchQueue::new(queued_limit);
 
         let mut active_count = self.downloads.lock().await.len();
         let available = Self::compute_available_slots(settings.max_active_tasks, active_count);
@@ -196,11 +267,7 @@ impl Scheduler {
             return;
         }
 
-        tracing::debug!(
-            available,
-            queued_count = queued.len(),
-            "scheduler dispatching queued tasks"
-        );
+        tracing::debug!(available, "scheduler dispatching queued tasks");
 
         let host_limit = usize::try_from(settings.max_connections_per_host)
             .unwrap_or(usize::try_from(db::DEFAULT_MAX_CONNECTIONS_PER_HOST).unwrap_or(8))
@@ -218,36 +285,35 @@ impl Scheduler {
             }
         }
 
-        for task in queued {
-            if active_count >= settings.max_active_tasks as usize {
+        while active_count < settings.max_active_tasks as usize {
+            if app.try_state::<crate::AppState>().is_some_and(|state| {
+                state
+                    .quit_requested
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            }) {
                 break;
             }
             let time_window_active = db::local_time_window_active(
                 &settings.schedule_download_window_start,
                 &settings.schedule_download_window_end,
             );
-            if Self::should_skip_for_schedule_window(
-                settings.schedule_download_window_enabled,
-                task.obey_schedule,
-                time_window_active,
-            ) {
-                tracing::debug!(
-                    task_id = %task.id,
-                    "scheduler deferred task outside configured download window"
-                );
-                continue;
-            }
-            let host_used = host_slot_map.get(&task.source_key).copied().unwrap_or(0);
-            if host_used >= host_limit {
-                tracing::debug!(
-                    task_id = %task.id,
-                    source_key = %task.source_key,
-                    host_used,
+            let task = match queued
+                .next(
+                    &pool,
+                    settings.schedule_download_window_enabled && !time_window_active,
                     host_limit,
-                    "scheduler deferred task because host connection limit is full"
-                );
-                continue;
-            }
+                    &host_slot_map,
+                )
+                .await
+            {
+                Ok(Some(task)) => task,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to load queued tasks");
+                    break;
+                }
+            };
+            let host_used = host_slot_map.get(&task.source_key).copied().unwrap_or(0);
             let planned = db::planned_segment_count_with_plan(
                 &task,
                 db::parse_multi_connection_threshold_bytes(
@@ -310,6 +376,30 @@ impl Scheduler {
         // Worker (download engine) does NOT hold this lock — it relies on R-1's
         // conditional DB update to avoid overwriting user-initiated state changes.
         let _runtime_guard = self.task_runtime_locks.lock(&task.id).await;
+        let (lifecycle_gate, lifecycle, quit_requested, active_supervisors) = app
+            .try_state::<crate::AppState>()
+            .map(|state| {
+                (
+                    Some(state.lifecycle_gate.clone()),
+                    Some(state.lifecycle.clone()),
+                    Some(state.quit_requested.clone()),
+                    Some(state.active_supervisors.clone()),
+                )
+            })
+            .unwrap_or((None, None, None, None));
+        let _lifecycle_guard = match lifecycle_gate {
+            Some(gate) => Some(gate.lock_owned().await),
+            None => None,
+        };
+        if lifecycle
+            .as_ref()
+            .is_some_and(|lifecycle| lifecycle.phase() != crate::AppLifecyclePhase::Running)
+            || quit_requested
+                .as_ref()
+                .is_some_and(|requested| requested.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            return Ok(StartTaskOutcome::ConflictSkipped);
+        }
 
         // Header/proxy resolution is local DB work and stays on the reservation
         // path so the worker already has the values it needs for probe+download.
@@ -319,10 +409,20 @@ impl Scheduler {
         let task_proxy_config =
             db::resolve_task_proxy_config(&pool, &task.id, &task.protocol, &global_proxy_config)
                 .await?;
+        let task_network_policy = db::task_network_policy(&pool, &task.id).await?;
         if self.downloads.lock().await.contains_key(&task.id) {
             tracing::debug!(task_id = %task.id, "download already active, skipping start");
             return Ok(StartTaskOutcome::AlreadyActive);
         }
+
+        let _speed_policy_guard = self.speed_policy_lock.lock().await;
+        let settings =
+            db::get_settings(&pool, default_download_dir(&app).unwrap_or_default()).await?;
+        let task_limit_bps = db::parse_speed_limit_bps(task.task_speed_limit_bps.as_deref());
+        let task_speed_limiter = GlobalSpeedLimiter::with_parent(
+            self.speed_limiter.clone(),
+            min_optional_limit(task_limit_bps, active_scheduled_speed_limit(&settings)),
+        );
 
         tracing::info!(
             task_id = %task.id,
@@ -352,12 +452,14 @@ impl Scheduler {
                     cancel_token: cancel_token.clone(),
                     finish: finish.clone(),
                     finish_notify: finish_notify.clone(),
+                    speed_limiter: task_speed_limiter.clone(),
                     handle: None, // pending — updated to Some(handle) after spawn
                     source_key: source_key.clone(),
                     connection_slots: connection_limit.max(1),
                 },
             );
         }
+        drop(_speed_policy_guard);
 
         match crate::state_machine::transition_task(
             &app,
@@ -371,7 +473,12 @@ impl Scheduler {
         )
         .await
         {
-            Ok(_) => {}
+            Ok(_) => {
+                // ARC-58: the queue has real work again; this opens a new
+                // completion round after a decided drain, or joins the
+                // round that is still running.
+                lock_round(&self.completion_round).record_start();
+            }
             Err(TransitionError::Conflict {
                 task_id,
                 current,
@@ -406,11 +513,12 @@ impl Scheduler {
         let task_finish = finish.clone();
         let task_finish_notify = finish_notify.clone();
         let task_pool = pool.clone();
-        let state_speed_limiter = self.speed_limiter.clone();
         let task_engine_registry = self.engine_registry.clone();
         let scheduler = self.clone();
+        let supervisor_guard = active_supervisors.map(crate::ActiveSupervisorGuard::new);
 
         let handle = tokio::spawn(async move {
+            let _supervisor_guard = supervisor_guard;
             // ARC-05: network resume validation runs here, after the scheduler
             // global lock has been released by dispatch_inner's next iteration.
             let task = match prepare_task_for_download(
@@ -426,19 +534,19 @@ impl Scheduler {
                 Err(error) => {
                     // Atomic slot release: drop pending control before any
                     // failure transition so host/active counts cannot leak.
-                    let _ = downloads_map.lock().await.remove(&task_id);
-                    let _ = scheduler.request_headers.lock().await.remove(&task_id);
-                    match db::get_task_record(&task_pool, &task_id).await {
-                        Ok(Some(current)) if current.status == TaskStatus::Downloading => {
-                            mark_download_failed(&task_app, &task_pool, &task_id, error).await;
-                        }
-                        Ok(Some(current)) => {
-                            // prepare already moved the task (NeedsAttention/Failed).
-                            emit_task_progress_snapshot(&task_app, &current);
-                            emit_task_updated_record(&task_app, &task_pool, &current).await;
-                        }
-                        _ => {}
-                    }
+                    let canceled = task_cancel_token.is_cancelled();
+                    converge_download_outcome(
+                        &downloads_map,
+                        &scheduler.request_headers,
+                        &scheduler.task_runtime_locks,
+                        Some(&task_app),
+                        &task_pool,
+                        &task_id,
+                        canceled,
+                        Err(error),
+                    )
+                    .await;
+                    scheduler.notify_retry_schedule_changed();
                     scheduler.task_runtime_locks.evict(&task_id).await;
                     scheduler
                         .clone()
@@ -450,9 +558,18 @@ impl Scheduler {
             let engine = match task_engine_registry.engine_for_uri(&task.url) {
                 Ok(engine) => engine,
                 Err(error) => {
-                    mark_download_failed(&task_app, &task_pool, &task_id, error).await;
-                    let _ = downloads_map.lock().await.remove(&task_id);
-                    let _ = scheduler.request_headers.lock().await.remove(&task_id);
+                    converge_download_outcome(
+                        &downloads_map,
+                        &scheduler.request_headers,
+                        &scheduler.task_runtime_locks,
+                        Some(&task_app),
+                        &task_pool,
+                        &task_id,
+                        task_cancel_token.is_cancelled(),
+                        Err(error),
+                    )
+                    .await;
+                    scheduler.notify_retry_schedule_changed();
                     scheduler.task_runtime_locks.evict(&task_id).await;
                     scheduler
                         .clone()
@@ -461,30 +578,6 @@ impl Scheduler {
                 }
             };
 
-            let task_limit_bps = db::parse_speed_limit_bps(task.task_speed_limit_bps.as_deref());
-            let scheduled_limit_bps = db::get_settings(
-                &task_pool,
-                default_download_dir(&task_app).unwrap_or_default(),
-            )
-            .await
-            .ok()
-            .and_then(|settings| {
-                if settings.schedule_speed_limit_window_enabled
-                    && db::local_time_window_active(
-                        &settings.schedule_speed_limit_window_start,
-                        &settings.schedule_speed_limit_window_end,
-                    )
-                {
-                    db::parse_speed_limit_bps(settings.schedule_speed_limit_bps.as_deref())
-                } else {
-                    None
-                }
-            });
-            // Per-task limit and scheduled-window limit both apply; the stricter (minimum) wins.
-            // If the scheduled window is inactive, only the per-task limit applies.
-            let effective_task_limit = min_optional_limit(task_limit_bps, scheduled_limit_bps);
-            let task_speed_limiter =
-                GlobalSpeedLimiter::with_parent(state_speed_limiter.clone(), effective_task_limit);
             // ARC-03: run the engine directly inside this supervisor task. A nested
             // tokio::spawn previously detached the engine when the outer handle was
             // aborted, leaving workers/ffmpeg running after pause/delete/shutdown.
@@ -500,6 +593,7 @@ impl Scheduler {
                 connection_limit,
                 request_headers: task_request_headers.clone(),
                 proxy_config: task_proxy_config,
+                network_policy: task_network_policy,
             });
             // ARC-40: an engine panic must not skip the convergence body below —
             // that would leak the downloads_map slot and the runtime lock, and
@@ -514,6 +608,13 @@ impl Scheduler {
                 };
             let canceled = task_cancel_token.is_cancelled();
             let failed = result.is_err();
+            // ARC-58: record the failure BEFORE convergence releases the
+            // downloads-map slot. Another supervisor can only observe the
+            // drained queue after that release, so it is guaranteed to see
+            // this failure when it decides the round.
+            if failed && !canceled {
+                lock_round(&scheduler.completion_round).record_failure(&task_id);
+            }
             converge_download_outcome(
                 &downloads_map,
                 &scheduler.request_headers,
@@ -525,11 +626,17 @@ impl Scheduler {
                 result,
             )
             .await;
+            scheduler.notify_retry_schedule_changed();
 
             if !failed && !canceled {
                 match crate::commands::tasks::verify_task_hash_with_pool(&task_pool, &task_id).await
                 {
                     Ok(state) if state.status != HashVerificationStatus::NotRequested => {
+                        // ARC-58: a checksum mismatch is a failed download for
+                        // the "only when every download succeeded" semantics.
+                        if state.status == HashVerificationStatus::Failed {
+                            lock_round(&scheduler.completion_round).record_failure(&task_id);
+                        }
                         tracing::info!(
                             task_id = %task_id,
                             status = ?state.status,
@@ -548,6 +655,15 @@ impl Scheduler {
                         );
                     }
                 }
+                scheduler
+                    .maybe_emit_completion_action(&task_app, &task_pool)
+                    .await;
+            } else if !canceled {
+                // ARC-58: a failing last task used to skip the completion
+                // action entirely. It now decides the round like a success;
+                // whether the action runs depends on the round's failures and
+                // `completion_include_failures`. A user pause/cancel is not a
+                // drain the user asked to act on, so it never decides.
                 scheduler
                     .maybe_emit_completion_action(&task_app, &task_pool)
                     .await;
@@ -629,16 +745,32 @@ impl Scheduler {
     }
 
     /// Emit the completion action when the queue is empty and no tasks are active (formerly maybe_emit_completion_action).
+    ///
+    /// ARC-58: every finishing supervisor runs this gate independently, so
+    /// two near-simultaneous completions both passed the liveness check and
+    /// fired the action twice (run_command executed twice, shutdown/exit
+    /// prompts stacked). Closing the round elects exactly one decider. The
+    /// round is closed even when the action is off or declined, so the next
+    /// batch starts from a clean slate.
     async fn maybe_emit_completion_action(&self, app: &AppHandle, pool: &SqlitePool) {
         if !should_emit_completion_action(&self.downloads, pool).await {
             return;
         }
+        let Some(round_had_failure) = decide_completion_round(&self.completion_round, pool).await
+        else {
+            tracing::debug!("completion round already decided or still growing; skipping");
+            return;
+        };
         let Ok(settings) =
             db::get_settings(pool, default_download_dir(app).unwrap_or_default()).await
         else {
             return;
         };
         if settings.completion_action == CompletionAction::None {
+            return;
+        }
+        if !completion_action_permitted(round_had_failure, settings.completion_include_failures) {
+            tracing::info!("completion action skipped: a download in this batch failed");
             return;
         }
         if settings.completion_action == CompletionAction::RunCommand {
@@ -657,20 +789,110 @@ impl Scheduler {
     }
 }
 
-/// Mark a task download as failed and update DB/events (formerly commands::tasks::mark_download_failed).
-/// Internal to the scheduler module.
-async fn mark_download_failed(app: &AppHandle, pool: &SqlitePool, task_id: &str, error: String) {
-    mark_download_failure_state(pool, task_id, &error).await;
-    if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
-        emit_task_progress_snapshot(app, &task);
-        emit_task_updated_record(app, pool, &task).await;
+/// ARC-58: one completion-action "round": every task started since the
+/// previous round was decided.
+///
+/// The round opens on the first task start after a decision and records the
+/// tasks that failed in it. The first supervisor that sees the queue drained
+/// closes it; that single winner is the dedup. Failures are re-checked against
+/// the stored task state at decision time, so a failure the user retried to
+/// success no longer blocks the action, while an earlier failure still does
+/// even though a later task happened to finish last. A round that ends in a
+/// user pause/cancel is never decided and carries its failures into the next
+/// batch, the conservative choice for shutdown/sleep actions.
+#[derive(Debug, Default)]
+struct CompletionRound {
+    open: bool,
+    /// Bumped on every start so a decision that raced a new task is dropped.
+    generation: u64,
+    failed_task_ids: HashSet<String>,
+}
+
+impl CompletionRound {
+    fn record_start(&mut self) {
+        if !self.open {
+            self.open = true;
+            self.failed_task_ids.clear();
+        }
+        self.generation = self.generation.wrapping_add(1);
     }
-    emit_queue_changed_with_ids(app, Some(vec![task_id.to_string()]));
+
+    fn record_failure(&mut self, task_id: &str) {
+        self.failed_task_ids.insert(task_id.to_string());
+    }
+
+    /// `None` when another supervisor already decided this round.
+    fn snapshot(&self) -> Option<(u64, Vec<String>)> {
+        self.open.then(|| {
+            (
+                self.generation,
+                self.failed_task_ids.iter().cloned().collect(),
+            )
+        })
+    }
+
+    /// Closes the round if no task started since `generation` was taken.
+    /// Returns true for exactly one caller per round.
+    fn close(&mut self, generation: u64) -> bool {
+        if !self.open || self.generation != generation {
+            return false;
+        }
+        self.open = false;
+        true
+    }
+}
+
+/// Poison-tolerant lock: the guarded data is plain bookkeeping that stays
+/// consistent even if a holder panicked mid-update.
+fn lock_round(
+    round: &std::sync::Mutex<CompletionRound>,
+) -> std::sync::MutexGuard<'_, CompletionRound> {
+    round
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// ARC-58: closes the current round and reports whether it still holds an
+/// unresolved failure. `None` means another supervisor decided it already,
+/// or a task started meanwhile (that task's supervisor decides later).
+async fn decide_completion_round(
+    round: &std::sync::Mutex<CompletionRound>,
+    pool: &SqlitePool,
+) -> Option<bool> {
+    let (generation, failed_ids) = lock_round(round).snapshot()?;
+    let mut had_failure = false;
+    for task_id in &failed_ids {
+        match db::get_task_record(pool, task_id).await {
+            // Deleted since it failed: nothing is left for the user to act on.
+            Ok(None) => {}
+            Ok(Some(task)) if !failure_is_unresolved(&task) => {}
+            // Still failed, or unknown: a DB error must not let a destructive
+            // action through on incomplete information.
+            _ => {
+                had_failure = true;
+                break;
+            }
+        }
+    }
+    lock_round(round).close(generation).then_some(had_failure)
+}
+
+/// A recorded failure still counts while the task is failed/needs attention
+/// or completed with a checksum mismatch. A retry that completed resolves it.
+fn failure_is_unresolved(task: &TaskRecord) -> bool {
+    matches!(task.status, TaskStatus::Failed | TaskStatus::NeedsAttention)
+        || task.hash_status == HashVerificationStatus::Failed
+}
+
+/// ARC-58: `completion_include_failures` off means "only when every download
+/// in the batch succeeded"; on means "whenever the queue drains".
+fn completion_action_permitted(round_had_failure: bool, include_failures: bool) -> bool {
+    include_failures || !round_had_failure
 }
 
 /// DB persistence half of a download failure (status write + failed event +
-/// segment failure marks) with no UI emits. Split from [`mark_download_failed`]
-/// so the supervisor convergence can run headlessly in tests (ARC-40).
+/// segment failure marks) with no UI emits. Kept separate from the convergence
+/// wrapper so the supervisor can run headlessly in tests (ARC-40).
 async fn mark_download_failure_state(pool: &SqlitePool, task_id: &str, error: &str) {
     persist_failure_state(pool, task_id, error, FailureRowScope::Active).await;
 }
@@ -846,7 +1068,7 @@ async fn should_emit_completion_action(
 // The parameters mirror the supervisor's local bindings one-to-one; a
 // parameter struct would only relocate this list without a second call site.
 #[allow(clippy::too_many_arguments)]
-async fn converge_download_outcome(
+pub(crate) async fn converge_download_outcome(
     downloads: &Arc<Mutex<HashMap<String, DownloadControl>>>,
     request_headers: &TaskRequestHeaders,
     task_runtime_locks: &Arc<crate::TaskRuntimeLocks>,
@@ -856,11 +1078,75 @@ async fn converge_download_outcome(
     canceled: bool,
     result: Result<(), String>,
 ) {
-    let _ = downloads.lock().await.remove(task_id);
-    let _ = request_headers.lock().await.remove(task_id);
+    // ARC-62: a timed-out user stop retains the slot. Converge to Paused when
+    // the engine eventually drains, even though that command already returned.
+    if canceled {
+        if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
+            if matches!(task.status, TaskStatus::Downloading | TaskStatus::Retrying) {
+                let _ = db::update_task_status(
+                    pool,
+                    task_id,
+                    TaskStatus::Paused,
+                    Some(task.status),
+                    0,
+                    0,
+                    Some("Paused"),
+                    None,
+                )
+                .await;
+                if let Some(app) = app {
+                    if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
+                        emit_task_progress_snapshot(app, &task);
+                        emit_task_updated_record(app, pool, &task).await;
+                    }
+                }
+            }
+        }
+    }
     if let Err(error) = result {
         if !canceled {
-            mark_download_failure_state(pool, task_id, &error).await;
+            let mut handled = false;
+            match db::auto_retry_attempt(pool, task_id).await {
+                Ok(previous_attempt) => {
+                    if let Some(plan) =
+                        crate::download::retry::task_retry_plan(&error, previous_attempt)
+                    {
+                        match db::schedule_auto_retry(
+                            pool,
+                            task_id,
+                            plan.attempt,
+                            &plan.retry_after_at,
+                            &plan.reason,
+                            &plan.error,
+                        )
+                        .await
+                        {
+                            Ok(db::AutoRetryOutcome::Scheduled { .. })
+                            | Ok(db::AutoRetryOutcome::Exhausted { .. })
+                            | Ok(db::AutoRetryOutcome::StateChanged) => {
+                                handled = true;
+                            }
+                            Err(db_error) => {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    error = %db_error,
+                                    "automatic retry state update failed; preserving terminal failure"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(db_error) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %db_error,
+                        "automatic retry budget lookup failed"
+                    );
+                }
+            }
+            if !handled {
+                mark_download_failure_state(pool, task_id, &error).await;
+            }
             if let Some(app) = app {
                 if let Ok(Some(task)) = db::get_task_record(pool, task_id).await {
                     emit_task_progress_snapshot(app, &task);
@@ -869,7 +1155,17 @@ async fn converge_download_outcome(
                 emit_queue_changed_with_ids(app, Some(vec![task_id.to_string()]));
             }
         }
+    } else if !canceled {
+        if let Err(db_error) = db::clear_auto_retry_state(pool, task_id).await {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %db_error,
+                "failed to clear automatic retry state after success"
+            );
+        }
     }
+    let _ = downloads.lock().await.remove(task_id);
+    let _ = request_headers.lock().await.remove(task_id);
     // A-4: Evict the runtime lock entry now that the worker has finished
     // and the downloads_map/request_headers entries are removed. If a user
     // action (pause/cancel/delete/retry) is concurrently holding the lock,
@@ -884,6 +1180,19 @@ fn min_optional_limit(left: Option<i64>, right: Option<i64>) -> Option<i64> {
         (Some(left), Some(right)) => Some(left.min(right)),
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
+    }
+}
+
+fn active_scheduled_speed_limit(settings: &AppSettings) -> Option<i64> {
+    if settings.schedule_speed_limit_window_enabled
+        && db::local_time_window_active(
+            &settings.schedule_speed_limit_window_start,
+            &settings.schedule_speed_limit_window_end,
+        )
+    {
+        db::parse_speed_limit_bps(settings.schedule_speed_limit_bps.as_deref())
+    } else {
+        None
     }
 }
 
@@ -942,7 +1251,8 @@ mod convergence_tests {
     use tokio::sync::Mutex;
     use tokio_util::sync::CancellationToken;
 
-    use super::{converge_download_outcome, describe_engine_panic};
+    use super::{converge_download_outcome, describe_engine_panic, Scheduler};
+    use crate::download::{EngineRegistry, GlobalSpeedLimiter};
     use crate::models::task::now_iso;
     use crate::models::{HashVerificationStatus, TaskKind, TaskPriority, TaskRecord, TaskStatus};
     use crate::{db, DownloadControl, TaskRequestHeaders, TaskRuntimeLocks};
@@ -1009,6 +1319,7 @@ mod convergence_tests {
             cancel_token: CancellationToken::new(),
             finish: Arc::new(AtomicBool::new(false)),
             finish_notify: Arc::new(tokio::sync::Notify::new()),
+            speed_limiter: GlobalSpeedLimiter::disabled(),
             handle: None,
             source_key: source_key.to_string(),
             connection_slots: 1,
@@ -1115,10 +1426,139 @@ mod convergence_tests {
     }
 
     #[tokio::test]
+    async fn transient_failure_after_coordinator_fail_state_is_queued_for_retry() {
+        let pool = test_pool("auto-retry").await;
+        let task = task_record("task-auto-retry", TaskStatus::Downloading);
+        db::insert_task_record(&pool, &task).await.expect("insert");
+        assert!(db::mark_task_failed_if_active(
+            &pool,
+            &task.id,
+            TaskStatus::Failed,
+            Some("Failed"),
+            Some("temporary server failure"),
+        )
+        .await
+        .expect("coordinator marks failure"));
+
+        let downloads: Arc<Mutex<HashMap<String, DownloadControl>>> = Arc::new(Mutex::new(
+            HashMap::from([(task.id.clone(), control("panic-host"))]),
+        ));
+        let request_headers: TaskRequestHeaders = Arc::new(Mutex::new(HashMap::new()));
+        let task_runtime_locks = Arc::new(TaskRuntimeLocks::default());
+        let error = crate::models::AppErrorPayload::new(
+            "server_error",
+            "The server returned HTTP 503.",
+            true,
+            vec!["retry_later"],
+        )
+        .command_error();
+
+        converge_download_outcome(
+            &downloads,
+            &request_headers,
+            &task_runtime_locks,
+            None,
+            &pool,
+            &task.id,
+            false,
+            Err(error),
+        )
+        .await;
+
+        let queued = db::get_task_record(&pool, &task.id)
+            .await
+            .expect("load retried task")
+            .expect("task exists");
+        assert_eq!(queued.status, TaskStatus::Queued);
+        assert!(queued.retry_after_at.is_some());
+        assert_eq!(db::auto_retry_attempt(&pool, &task.id).await.unwrap(), 1);
+        assert!(downloads.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_speed_policy_refresh_updates_task_and_scheduled_limits() {
+        let pool = test_pool("speed-policy").await;
+        let mut task = task_record("task-speed-policy", TaskStatus::Downloading);
+        task.task_speed_limit_bps = Some("400000".to_string());
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert task");
+
+        let mut settings = db::get_settings(&pool, std::env::temp_dir().to_string_lossy().into())
+            .await
+            .expect("load settings");
+        settings.schedule_speed_limit_window_enabled = true;
+        settings.schedule_speed_limit_window_start = "00:00".to_string();
+        settings.schedule_speed_limit_window_end = "00:00".to_string();
+        settings.schedule_speed_limit_bps = Some("200000".to_string());
+        db::upsert_settings(&pool, &settings)
+            .await
+            .expect("save scheduled limit");
+
+        let global = Arc::new(GlobalSpeedLimiter::new(Some(900_000)));
+        let task_limiter = GlobalSpeedLimiter::with_parent(global.clone(), None);
+        let downloads = Arc::new(Mutex::new(HashMap::from([(
+            task.id.clone(),
+            DownloadControl {
+                cancel_token: CancellationToken::new(),
+                finish: Arc::new(AtomicBool::new(false)),
+                finish_notify: Arc::new(tokio::sync::Notify::new()),
+                speed_limiter: task_limiter.clone(),
+                handle: None,
+                source_key: task.source_key.clone(),
+                connection_slots: 1,
+            },
+        )])));
+        let scheduler = Scheduler::new(
+            downloads,
+            Arc::new(Mutex::new(HashMap::new())),
+            global.clone(),
+            Arc::new(EngineRegistry::new().expect("engine registry")),
+            Arc::new(crate::TaskRuntimeLocks::default()),
+        );
+
+        scheduler
+            .refresh_speed_limit_policies(&pool, std::env::temp_dir().to_string_lossy().into())
+            .await
+            .expect("apply scheduled policy");
+        assert_eq!(task_limiter.current_limit_bps(), Some(200_000));
+
+        sqlx::query("UPDATE tasks SET task_speed_limit_bps = ? WHERE id = ?")
+            .bind("100000")
+            .bind(&task.id)
+            .execute(&pool)
+            .await
+            .expect("change task limit");
+        scheduler
+            .refresh_speed_limit_policies(&pool, std::env::temp_dir().to_string_lossy().into())
+            .await
+            .expect("apply task limit");
+        assert_eq!(task_limiter.current_limit_bps(), Some(100_000));
+
+        settings.schedule_speed_limit_window_enabled = false;
+        settings.schedule_speed_limit_bps = None;
+        db::upsert_settings(&pool, &settings)
+            .await
+            .expect("clear scheduled limit");
+        sqlx::query("UPDATE tasks SET task_speed_limit_bps = NULL WHERE id = ?")
+            .bind(&task.id)
+            .execute(&pool)
+            .await
+            .expect("clear task limit");
+        scheduler
+            .refresh_speed_limit_policies(&pool, std::env::temp_dir().to_string_lossy().into())
+            .await
+            .expect("clear child limit");
+        assert_eq!(task_limiter.current_limit_bps(), Some(900_000));
+
+        global.set_limit(Some(500_000)).await;
+        assert_eq!(task_limiter.current_limit_bps(), Some(500_000));
+    }
+
+    #[tokio::test]
     async fn canceled_outcome_cleans_up_without_overwriting_user_state() {
-        // R-2.4: the user owns the state machine while cancelling. The engine
-        // may still return an error during teardown — the convergence must
-        // clean up runtime state but NOT write Failed over the user's action.
+        // R-2.4 / ARC-62: after a timed-out stop drains, reflect the user's pause
+        // without allowing a teardown error to overwrite it as Failed.
         let pool = test_pool("cancel").await;
         let task = task_record("task-arc40-cancel", TaskStatus::Downloading);
         db::insert_task_record(&pool, &task).await.expect("insert");
@@ -1154,8 +1594,8 @@ mod convergence_tests {
             .expect("task exists");
         assert_eq!(
             stored.status,
-            TaskStatus::Downloading,
-            "a canceled outcome must not write Failed over user-owned state"
+            TaskStatus::Paused,
+            "a drained canceled task must settle as paused, not failed"
         );
     }
 
@@ -1353,6 +1793,132 @@ mod convergence_tests {
             stored.status,
             TaskStatus::Downloading,
             "non-queued rows must keep their state (snapshot-only branch)"
+        );
+    }
+
+    /// ARC-58: two supervisors observing the same drained queue must not both
+    /// fire; only the next task start opens a round that may fire again.
+    #[test]
+    fn arc58_round_is_decided_once_until_the_next_start() {
+        let mut round = super::CompletionRound::default();
+        assert!(
+            round.snapshot().is_none(),
+            "no task ran yet: nothing to decide"
+        );
+
+        round.record_start();
+        let (generation, _) = round.snapshot().expect("round opened by the start");
+        assert!(round.close(generation), "the first decider wins");
+        assert!(!round.close(generation), "a concurrent decider is deduped");
+        assert!(round.snapshot().is_none(), "a decided round stays decided");
+
+        round.record_start();
+        let (generation, _) = round.snapshot().expect("the next start re-arms");
+        assert!(round.close(generation), "the new round may fire once more");
+    }
+
+    /// ARC-58: a task that starts between the snapshot and the close belongs
+    /// to the round; closing on the stale snapshot would strand it.
+    #[test]
+    fn arc58_round_close_rejects_a_snapshot_that_raced_a_start() {
+        let mut round = super::CompletionRound::default();
+        round.record_start();
+        let (stale, _) = round.snapshot().expect("open");
+        round.record_start();
+        assert!(
+            !round.close(stale),
+            "the late start must keep the round open"
+        );
+        let (fresh, _) = round.snapshot().expect("still open");
+        assert!(round.close(fresh));
+    }
+
+    /// ARC-58: failures survive later starts in the same round (a failure
+    /// followed by a successful last task must still count) and are cleared
+    /// only when a new round opens after a decision.
+    #[test]
+    fn arc58_round_failures_persist_within_round_and_clear_on_next_round() {
+        let mut round = super::CompletionRound::default();
+        round.record_start();
+        round.record_failure("early-failure");
+        round.record_start();
+        let (generation, failed) = round.snapshot().expect("open");
+        assert_eq!(failed, vec!["early-failure".to_string()]);
+        assert!(round.close(generation));
+
+        round.record_start();
+        let (_, failed) = round.snapshot().expect("new round");
+        assert!(failed.is_empty(), "a new batch starts from a clean slate");
+    }
+
+    #[test]
+    fn arc58_include_failures_gates_only_rounds_with_failures() {
+        assert!(super::completion_action_permitted(false, false));
+        assert!(
+            !super::completion_action_permitted(true, false),
+            "default off: a failed download in the batch holds the action"
+        );
+        assert!(super::completion_action_permitted(true, true));
+        assert!(super::completion_action_permitted(false, true));
+    }
+
+    /// ARC-58 end to end against stored task state: an unresolved failure
+    /// blocks, a failure the user retried to completion does not, and a
+    /// checksum mismatch counts as a failure.
+    #[tokio::test]
+    async fn arc58_round_decision_rechecks_recorded_failures() {
+        let pool = test_pool("completion-round").await;
+        let failed = task_record("round-failed", TaskStatus::Failed);
+        db::insert_task_record(&pool, &failed)
+            .await
+            .expect("insert");
+        let round = std::sync::Mutex::new(super::CompletionRound::default());
+
+        super::lock_round(&round).record_start();
+        super::lock_round(&round).record_failure(&failed.id);
+        super::lock_round(&round).record_start();
+        assert_eq!(
+            super::decide_completion_round(&round, &pool).await,
+            Some(true),
+            "an earlier failure counts even when the last task succeeded"
+        );
+        assert_eq!(
+            super::decide_completion_round(&round, &pool).await,
+            None,
+            "the round was already decided"
+        );
+
+        // Retried to completion inside the next round: resolved.
+        super::lock_round(&round).record_start();
+        super::lock_round(&round).record_failure(&failed.id);
+        db::update_task_status(
+            &pool,
+            &failed.id,
+            TaskStatus::Completed,
+            None,
+            0,
+            0,
+            None,
+            None,
+        )
+        .await
+        .expect("retry completed");
+        assert_eq!(
+            super::decide_completion_round(&round, &pool).await,
+            Some(false)
+        );
+
+        // A completed download whose checksum failed is still a failure.
+        let mut mismatch = task_record("round-hash-mismatch", TaskStatus::Completed);
+        mismatch.hash_status = HashVerificationStatus::Failed;
+        db::insert_task_record(&pool, &mismatch)
+            .await
+            .expect("insert");
+        super::lock_round(&round).record_start();
+        super::lock_round(&round).record_failure(&mismatch.id);
+        assert_eq!(
+            super::decide_completion_round(&round, &pool).await,
+            Some(true)
         );
     }
 

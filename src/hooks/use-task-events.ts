@@ -1,18 +1,21 @@
 import { useEffect, useRef } from "react";
+import type { DesktopStatusUpdate, TaskStatsSnapshot } from "@/generated/bindings";
 import i18n from "@/i18n";
 import { localizedErrorMessage, localizedMessage } from "@/lib/errors";
 import { bumpListQueryEpoch, isCurrentListQueryEpoch } from "@/lib/list-query-epoch";
 import { createLogger } from "@/lib/logger";
+import { sendSystemNotification } from "@/lib/system-notification";
 import {
   getTaskStats,
-  isTauriRuntime,
   listTasksByIds,
   listTasksCursor,
+  onDesktopStatus,
   onQueueChanged,
   onTaskProgress,
   onTaskUpdated,
+  updateDesktopStatus,
 } from "@/lib/tauri";
-import { useSettingsStore } from "@/stores/settings-store";
+import { formatSpeed } from "@/lib/utils";
 import {
   mergeTasksFromServer,
   normalizeTaskStatsSnapshot,
@@ -25,6 +28,29 @@ import type { Task } from "@/types/task";
 const log = createLogger("task-events");
 const MAX_NOTIFIED_STATUS_KEYS = 600;
 const QUEUE_INCREMENTAL_ID_LIMIT = 50;
+
+export function buildDesktopStatusUpdate(stats: TaskStatsSnapshot): DesktopStatusUpdate {
+  const active = Number(stats.active) || 0;
+  const queued = Number(stats.queued) || 0;
+  const attention = Number(stats.attention) || 0;
+  const failed = Number(stats.failed) || 0;
+  const downloaded = Number(stats.totalDownloaded) || 0;
+  const total = Number(stats.totalBytes) || 0;
+  const progress = active > 0 && total > 0 ? Math.round(Math.min(100, Math.max(0, (downloaded / total) * 100))) : null;
+  const parts = [
+    active > 0
+      ? i18n.t("statusBar.downloadingAt", { count: active, speed: formatSpeed(Number(stats.totalSpeed) || 0) })
+      : i18n.t("trayMenu.status"),
+  ];
+  if (queued > 0) parts.push(i18n.t("statusBar.queuedOnly", { count: queued }));
+  if (attention > 0) parts.push(i18n.t("statusBar.attentionCount", { count: attention }));
+  if (failed > 0) parts.push(i18n.t("statusBar.failedCount", { count: failed }));
+  return {
+    tooltip: parts.join(" · "),
+    progress,
+    hasError: attention > 0 || failed > 0,
+  };
+}
 
 export function rememberStatusNotification(
   notifiedStatuses: Set<string>,
@@ -39,6 +65,20 @@ export function rememberStatusNotification(
   }
   notifiedStatuses.add(notificationKey);
   return true;
+}
+
+export type FailureNotificationCounts = { failed: number; attention: number };
+
+/** Merge transitions that arrive during the short native-notification window. */
+export function mergeFailureNotificationCounts(
+  current: FailureNotificationCounts,
+  failed: number,
+  attention: number,
+): FailureNotificationCounts {
+  return {
+    failed: current.failed + Math.max(0, failed),
+    attention: current.attention + Math.max(0, attention),
+  };
 }
 
 function clearTaskStatusNotifications(notifiedStatuses: Set<string>, taskId: string) {
@@ -127,12 +167,15 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
     let unlistenProgress: (() => void) | undefined;
     let unlistenTaskUpdated: (() => void) | undefined;
     let unlistenQueue: (() => void) | undefined;
+    let unlistenDesktopStatus: (() => void) | undefined;
     let queueRefreshTimer: ReturnType<typeof setTimeout> | undefined;
     let statsRefreshTimer: ReturnType<typeof setTimeout> | undefined;
     let statsRefreshInFlight = false;
     let recalculateStatsTimer: ReturnType<typeof setTimeout> | undefined;
     let progressFrame: number | undefined;
     let progressFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+    let failureNotificationTimer: ReturnType<typeof setTimeout> | undefined;
+    let pendingFailureCounts: FailureNotificationCounts = { failed: 0, attention: 0 };
     let pendingProgressPayloads: unknown[] = [];
     const pendingQueue = createQueueChangedAccumulator();
 
@@ -141,6 +184,8 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
     ) {
       if (!notify || transitions.length === 0) return;
       const addToast = useToastStore.getState().addToast;
+      let failedTransitions = 0;
+      let attentionTransitions = 0;
 
       for (const { taskId, previousStatus, task } of transitions) {
         if (previousStatus === task.status) continue;
@@ -161,6 +206,8 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
         }
 
         if (task.status === "failed" || task.status === "needs_attention") {
+          if (task.status === "failed") failedTransitions += 1;
+          else attentionTransitions += 1;
           addToast({
             tone: "error",
             title: i18n.t("toast.taskFailed", { name: task.fileName }),
@@ -168,6 +215,22 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
               ? localizedErrorMessage(task.errorMessage, i18n.t)
               : localizedMessage(task.healthSummary, i18n.t),
           });
+        }
+      }
+
+      if (failedTransitions > 0 || attentionTransitions > 0) {
+        pendingFailureCounts = mergeFailureNotificationCounts(
+          pendingFailureCounts,
+          failedTransitions,
+          attentionTransitions,
+        );
+        if (!failureNotificationTimer) {
+          failureNotificationTimer = setTimeout(() => {
+            failureNotificationTimer = undefined;
+            const counts = pendingFailureCounts;
+            pendingFailureCounts = { failed: 0, attention: 0 };
+            void sendFailureNotification(counts.failed, counts.attention);
+          }, 700);
         }
       }
     }
@@ -196,6 +259,9 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
           .then((stats) => {
             if (!cancelled) {
               useTaskDataStore.getState().setGlobalTaskStats(normalizeTaskStatsSnapshot(stats));
+              void updateDesktopStatus(buildDesktopStatusUpdate(stats)).catch((error) => {
+                log.debug("desktop status update failed", error);
+              });
             }
           })
           .catch((error) => {
@@ -322,6 +388,15 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
             })();
           }, 100);
         }),
+        notify
+          ? onDesktopStatus((stats) => {
+              if (!cancelled) {
+                void updateDesktopStatus(buildDesktopStatusUpdate(stats)).catch((error) => {
+                  log.debug("desktop status update failed", error);
+                });
+              }
+            })
+          : Promise.resolve(() => {}),
       ]);
 
       if (results[0].status === "fulfilled") unlistenProgress = results[0].value;
@@ -330,11 +405,14 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
       else log.warn("task updated listener registration failed", results[1].reason);
       if (results[2].status === "fulfilled") unlistenQueue = results[2].value;
       else log.warn("queue changed listener registration failed", results[2].reason);
+      if (results[3].status === "fulfilled") unlistenDesktopStatus = results[3].value;
+      else log.warn("desktop status listener registration failed", results[3].reason);
 
       if (cancelled) {
         unlistenProgress?.();
         unlistenTaskUpdated?.();
         unlistenQueue?.();
+        unlistenDesktopStatus?.();
       }
     })();
 
@@ -347,32 +425,23 @@ export function useTaskEvents(options: UseTaskEventsOptions = {}) {
       if (recalculateStatsTimer) clearTimeout(recalculateStatsTimer);
       if (progressFrame !== undefined) cancelAnimationFrame(progressFrame);
       if (progressFallbackTimer) clearTimeout(progressFallbackTimer);
+      if (failureNotificationTimer) clearTimeout(failureNotificationTimer);
       unlistenProgress?.();
       unlistenTaskUpdated?.();
       unlistenQueue?.();
+      unlistenDesktopStatus?.();
     };
   }, [notify]);
 }
 
 async function sendCompletionNotification(task: Task) {
-  if (!isTauriRuntime()) return;
-  if (!useSettingsStore.getState().settings?.systemNotifications) return;
+  await sendSystemNotification(i18n.t("toast.taskCompleted", { name: task.fileName }), task.saveDir);
+}
 
-  try {
-    const { isPermissionGranted, requestPermission, sendNotification } = await import(
-      "@tauri-apps/plugin-notification"
-    );
-    let granted = await isPermissionGranted();
-    if (!granted) {
-      const permission = await requestPermission();
-      granted = permission === "granted";
-    }
-    if (!granted) return;
-    sendNotification({
-      title: i18n.t("toast.taskCompleted", { name: task.fileName }),
-      body: task.saveDir,
-    });
-  } catch (error) {
-    log.warn("system notification failed", error);
-  }
+async function sendFailureNotification(failed: number, attention: number) {
+  const parts: string[] = [];
+  if (attention > 0) parts.push(i18n.t("statusBar.attentionCount", { count: attention }));
+  if (failed > 0) parts.push(i18n.t("statusBar.failedCount", { count: failed }));
+  if (parts.length === 0) return;
+  await sendSystemNotification(i18n.t("trayMenu.title"), parts.join(" · "));
 }

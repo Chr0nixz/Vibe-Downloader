@@ -13,9 +13,9 @@ import {
   Pause,
   PauseCircle,
   Play,
+  RadioTower,
   RefreshCw,
   TriangleAlert,
-  WifiOff,
   X,
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
@@ -135,7 +135,9 @@ export function StatusBar({
             rows={[
               { nav: "downloading", label: t("nav.downloading"), count: stats.active, icon: ArrowDownToLine },
               { nav: "queue", label: t("nav.queue"), count: stats.queued, icon: Clock },
-              { nav: null, label: t("task.status.waiting_network"), count: stats.waitingNetwork, icon: WifiOff },
+              // UX-42: only an idle HLS live stream produces waiting_network
+              // today, so the icon says "stream", not "network down".
+              { nav: null, label: t("task.status.waiting_network"), count: stats.waitingNetwork, icon: RadioTower },
               { nav: "paused", label: t("nav.paused"), count: stats.paused, icon: PauseCircle },
               { nav: "completed", label: t("nav.completed"), count: stats.completed, icon: CheckCircle2 },
             ]}

@@ -99,6 +99,8 @@ const ISSUE_NAVS = new Set<NavFilter>(["issues", "attention", "failed"]);
 export const TaskList = memo(function TaskList({
   onToggleTransfer,
   onRetry,
+  onRedownload,
+  onRecheck,
   onFinishLiveRecording,
   onOpenFile,
   onOpenFolder,
@@ -120,11 +122,15 @@ export const TaskList = memo(function TaskList({
   onShowDetails,
   onPasteAndCreate,
   onRefresh,
+  onSelectAll,
+  selectingAll = false,
   onUpdateQueueOptions,
   platform = "unknown",
 }: {
   onToggleTransfer: (task: Task) => void;
   onRetry: (task: Task) => void;
+  onRedownload?: (task: Task) => void;
+  onRecheck?: (task: Task) => void;
   onFinishLiveRecording: (task: Task) => void;
   onOpenFile: (task: Task) => void;
   onOpenFolder: (task: Task) => void;
@@ -146,6 +152,8 @@ export const TaskList = memo(function TaskList({
   onShowDetails?: (task: Task) => void;
   onPasteAndCreate?: () => void;
   onRefresh?: () => void;
+  onSelectAll?: () => void | Promise<void>;
+  selectingAll?: boolean;
   onUpdateQueueOptions: (task: Task, patch: { priority?: TaskPriority; obeySchedule?: boolean }) => Promise<boolean>;
   /** Formats the Mod+N hint so macOS shows the Command glyph, not "Ctrl". */
   platform?: Platform;
@@ -766,9 +774,11 @@ export const TaskList = memo(function TaskList({
                   onClick={() => runAfterBulkMenuClose(() => onBulkOpenFolder(selectedTasks()))}
                 />
                 <BulkMenuItem
-                  label={t("taskList.selectVisible", { count: filtered.length })}
-                  onClick={() => runAfterBulkMenuClose(() => setSelectedIds(filtered))}
-                  disabled={allVisibleSelected}
+                  label={t(selectingAll ? "taskList.loadingMore" : "taskList.selectVisible", {
+                    count: filtered.length,
+                  })}
+                  onClick={() => runAfterBulkMenuClose(() => void onSelectAll?.())}
+                  disabled={(allVisibleSelected && !hasMore) || selectingAll || !onSelectAll}
                 />
                 <BulkMenuItem
                   label={t("taskList.exportJson")}
@@ -1016,7 +1026,7 @@ export const TaskList = memo(function TaskList({
       <ListContextMenu
         onNewDownload={onNewDownload}
         onPasteAndCreate={onPasteAndCreate}
-        onSelectAll={() => setSelectedIds(filtered)}
+        onSelectAll={onSelectAll ? () => void onSelectAll() : undefined}
         onClearSelection={selectedIds.length > 0 ? clearSelectedIds : undefined}
         onRefresh={onRefresh}
         onExport={selectedIds.length > 0 ? (format) => onBulkExport(selectedTasks(), format) : undefined}
@@ -1086,6 +1096,8 @@ export const TaskList = memo(function TaskList({
                         onShiftSelect={handleShiftSelect}
                         onToggleTransfer={onToggleTransfer}
                         onRetry={onRetry}
+                        onRedownload={onRedownload}
+                        onRecheck={onRecheck}
                         onFinishLiveRecording={onFinishLiveRecording}
                         onOpenFile={onOpenFile}
                         onOpenFolder={onOpenFolder}
