@@ -357,9 +357,20 @@ async fn run_unknown_size_download(context: UnknownSizeDownloadContext<'_>) -> R
                 Ok(Ok(Some(data))) => data,
                 Ok(Ok(None)) => break,
                 Ok(Err(error)) => {
+                    // A midstream abort must not discard bytes already read:
+                    // flush so the partial file length matches `downloaded`
+                    // and a later retry can resume from it.
+                    file.flush()
+                        .await
+                        .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
                     return Err(crate::download::probe_error::reqwest_error_to_structured(&error));
                 }
                 Err(_) => {
+                    // Same durability guarantee as the transport-error path:
+                    // a stalled connection is also a midstream abort.
+                    file.flush()
+                        .await
+                        .map_err(|e| format!("Could not flush the temporary file: {e}"))?;
                     return Err(crate::download::probe_error::structured_timeout_error(
                         "Connection stalled: no data received for 60 seconds.",
                     ));

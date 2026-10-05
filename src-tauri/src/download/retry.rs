@@ -33,11 +33,10 @@ pub(crate) fn task_retry_plan(error: &str, previous_attempt: u32) -> Option<Task
     let (structured, payload) = if let Ok(payload) = serde_json::from_str::<AppErrorPayload>(error)
     {
         (error.to_string(), payload)
-    } else if let Some(classified) = crate::download::probe_error::classify_error_message(error) {
+    } else {
+        let classified = crate::download::probe_error::classify_error_message(error)?;
         let payload = serde_json::from_str::<AppErrorPayload>(&classified).ok()?;
         (classified, payload)
-    } else {
-        return None;
     };
 
     if !payload.recoverable || !is_task_retryable_code(&payload.code) {

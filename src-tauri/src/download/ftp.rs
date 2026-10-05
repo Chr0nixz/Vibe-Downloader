@@ -444,13 +444,9 @@ async fn run_ftp_download(
         pool,
         task,
         cancel_token,
-        finish: _,
-        finish_notify: _,
         speed_limiter,
         connection_limit,
         network_policy,
-        request_headers: _,
-        proxy_config: _,
         ..
     } = context;
 

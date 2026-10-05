@@ -32,8 +32,8 @@ fn bucket_capacity_milli(limit_bps: i64) -> i64 {
 
 fn refill_tokens(tokens: &AtomicI64, refill_milli: i64, max_milli: i64) {
     // Relaxed ordering is sufficient because the balance does not publish any
-    // other memory; fetch_update is required only to preserve numeric atomicity.
-    let _ = tokens.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    // other memory; try_update is required only to preserve numeric atomicity.
+    let _ = tokens.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(refill_milli).min(max_milli))
     });
 }
