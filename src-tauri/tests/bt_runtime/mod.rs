@@ -177,13 +177,12 @@ async fn run_case(failure: Failure, expected_code: Option<&str>) {
         },
     );
     let cancel = CancellationToken::new();
-    let cancel_after = cancel.clone();
-    let cancel_timer = tokio::spawn(async move {
-        if matches!(failure, Failure::None) {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            cancel_after.cancel();
-        }
-    });
+    if matches!(failure, Failure::None) {
+        // Cancel before the download starts. The 1-byte fixture can complete
+        // faster than any sleep-based timer on fast machines, which would
+        // leave the task Completed instead of Paused.
+        cancel.cancel();
+    }
     let result = tokio::time::timeout(
         Duration::from_secs(8),
         engine.download(DownloadContext {
@@ -203,7 +202,6 @@ async fn run_case(failure: Failure, expected_code: Option<&str>) {
     .await
     .expect("BT runtime must exit instead of retaining its slot")
     .map_err(String::from);
-    cancel_timer.await.unwrap();
     if let Some(expected_code) = expected_code {
         let error = result.as_ref().expect_err("injected runtime failure");
         let payload: AppErrorPayload = serde_json::from_str(error).unwrap();

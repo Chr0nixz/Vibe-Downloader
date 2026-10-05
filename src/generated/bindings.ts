@@ -1200,7 +1200,7 @@ export type IntegrityPassport = {
 	createdAt: string,
 	/**  First `started` event time; `None` when pruned by event retention. */
 	startedAt: string | null,
-	/**  Last `completed` event time; `None` when pruned by event retention. */
+	/**  Durable completion time; legacy rows without the migration stay `None`. */
 	completedAt: string | null,
 	/**  Number of observed resumes (`resumed` events). */
 	resumeCount: number,

@@ -530,15 +530,24 @@ async fn redownload_task_inner(
             }
         }
         None => {
-            create_task_headless_with_headers_until(
-                state,
-                input,
-                browser_request_headers,
-                source_browser,
-                request_profile_sensitive_expires_at,
-                browser_header_expires_at,
-            )
-            .await
+            #[cfg(debug_assertions)]
+            {
+                create_task_headless_with_headers_until(
+                    state,
+                    input,
+                    browser_request_headers,
+                    source_browser,
+                    request_profile_sensitive_expires_at,
+                    browser_header_expires_at,
+                )
+                .await
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                // The headless redownload path is a debug-only test hook;
+                // unreachable in release builds.
+                Err("Headless redownload requires a debug build.".to_string())
+            }
         }
     }
 }
