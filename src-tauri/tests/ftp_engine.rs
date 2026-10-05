@@ -232,7 +232,7 @@ fn handle_ftp_session(
             }
             if let Some(remaining) = &config.transient_retr_failures {
                 if remaining
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                         left.checked_sub(1)
                     })
                     .is_ok()
