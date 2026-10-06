@@ -32,10 +32,9 @@ impl NetworkClientFactory {
         config: &ResolvedProxyConfig,
         policy: &NetworkPolicy,
     ) -> Result<Client, String> {
-        let password_hash = format!(
-            "{:x}",
-            Sha256::digest(config.password.as_deref().unwrap_or_default().as_bytes())
-        );
+        let password_hash = hex::encode(Sha256::digest(
+            config.password.as_deref().unwrap_or_default().as_bytes(),
+        ));
         let fingerprint = format!(
             "{}:{}:{}",
             config.fingerprint(),

@@ -30,7 +30,7 @@ pub(crate) async fn hash_file(path: &Path, algorithm: ChecksumAlgorithm) -> Resu
                 }
                 Digest::update(&mut hasher, &buffer[..read]);
             }
-            format!("{:x}", hasher.finalize())
+            hex::encode(hasher.finalize())
         }};
     }
 
