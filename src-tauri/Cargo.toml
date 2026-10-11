@@ -44,7 +44,7 @@ tauri-plugin-dialog = "2.7.1"
 tauri-plugin-clipboard-manager = "2.3.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
-shlex = "1"
+shlex = "2"
 tracing-appender = "0.2"
 log = "0.4"
 tauri-plugin-log = "2"
