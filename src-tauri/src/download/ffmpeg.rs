@@ -305,6 +305,17 @@ mod tests {
     // without tripping `clippy::await_holding_lock`.
     static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
+    /// Monotonic counter for unique fixture directory names. Timestamp-based
+    /// names can collide when tests run in parallel on a coarse clock,
+    /// causing ETXTBSY when one test execs a script another is still
+    /// writing. PID + counter is unique within and across processes.
+    static FIXTURE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn unique_fixture_dir(prefix: &str) -> std::path::PathBuf {
+        let n = FIXTURE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()))
+    }
+
     /// RAII guard that saves `VIBE_FFMPEG_PATH` on construction and restores
     /// it (or removes it) on drop. Always acquire `ENV_LOCK` before
     /// constructing a guard so concurrent tests cannot race.
@@ -565,13 +576,7 @@ mod tests {
     /// A busy loop keeps the hang inside the spawned process itself, so
     /// `kill` reaps it directly with no orphaned grandchildren.
     fn hang_script() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "vibe-ffmpeg-probe-hang-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        let dir = unique_fixture_dir("vibe-ffmpeg-probe-hang");
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         #[cfg(unix)]
         let (path, body) = (
@@ -599,13 +604,7 @@ mod tests {
     /// shell's reaction to `-version` is platform-specific: dash exits 2,
     /// but macOS bash prints its own version banner and exits 0.
     fn nonzero_exit_script() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "vibe-ffmpeg-probe-nonzero-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        let dir = unique_fixture_dir("vibe-ffmpeg-probe-nonzero");
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         #[cfg(unix)]
         let (path, body) = (
@@ -679,13 +678,7 @@ mod tests {
     /// Command runs `.cmd` scripts through cmd.exe automatically, so the probe
     /// spawns either as a normal child.
     fn flood_script(lines: usize, exit_code: i32, suffix: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "vibe-ffmpeg-probe-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        let dir = unique_fixture_dir("vibe-ffmpeg-probe");
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         #[cfg(unix)]
         let (path, body) = {
@@ -717,13 +710,7 @@ mod tests {
     /// Endless-writer fixture: prints `x` forever; the probe's deadline must
     /// bound it even while output keeps arriving.
     fn endless_flood_script() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "vibe-ffmpeg-probe-loop-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        let dir = unique_fixture_dir("vibe-ffmpeg-probe-loop");
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         #[cfg(unix)]
         let (path, body) = (

@@ -120,15 +120,15 @@ impl GlobalSpeedLimiter {
         if preserve && previous > 0 && limit > 0 {
             let delta =
                 bucket_capacity_milli(limit).saturating_sub(bucket_capacity_milli(previous));
-            let _ =
-                self.tokens_milli
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |balance| {
-                        Some(
-                            balance
-                                .saturating_add(delta)
-                                .min(bucket_capacity_milli(limit)),
-                        )
-                    });
+            let _ = self
+                .tokens_milli
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |balance| {
+                    Some(
+                        balance
+                            .saturating_add(delta)
+                            .min(bucket_capacity_milli(limit)),
+                    )
+                });
         } else {
             self.tokens_milli
                 .store(bucket_capacity_milli(limit), Ordering::Relaxed);

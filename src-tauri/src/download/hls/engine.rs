@@ -2404,7 +2404,9 @@ async fn concat_validated_ts(
                         .get(8..section.len().saturating_sub(4))
                         .unwrap_or_default();
                     let entries: Vec<_> = programs
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .filter(|entry| entry[0] != 0 || entry[1] != 0)
                         .collect();
                     if entries.len() != 1 {
