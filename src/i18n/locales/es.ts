@@ -7,7 +7,8 @@ const es = {
     dash_none: "Sin subtítulos",
     hls_subtitle_output: "Los subtítulos WebVTT seleccionados se incrustarán en la salida MP4.",
     hls_missing_limit: "Tolerancia de segmentos faltantes en vivo",
-    hls_missing_hint: "0 detiene en segmentos faltantes. Se pueden registrar hasta 100 huecos; el contenido omitido no se puede recuperar.",
+    hls_missing_hint:
+      "0 detiene en segmentos faltantes. Se pueden registrar hasta 100 huecos; el contenido omitido no se puede recuperar.",
     bt_start: "Iniciar siembra",
     bt_stop: "Detener siembra",
     bt_waiting_action: "La acción de finalización está esperando a la siembra. Detenga la siembra para continuar.",
@@ -29,9 +30,12 @@ const es = {
     siteProfile: "Perfiles de solicitud del sitio",
     savedView: "Vistas guardadas",
     queueOrder: "Orden de cola",
-    presetHint: "Guardar directorio, categoría, prioridad, velocidad, ventana de descarga y punto final del proxy. Las credenciales y los hashes de archivo están excluidos. Al aplicar se reemplazan estos campos y se borran las credenciales del proxy; puede editarlos después.",
-    siteHint: "Solo se enumeran los perfiles de este origen exacto. Al guardar se excluyen las cabeceras Cookie, Authorization y X-*, y se eliminan los parámetros de consulta de Referer. Al aplicar se conservan las cabeceras confidenciales de esta tarea.",
-    viewHint: "Guarde la búsqueda, los filtros y el orden actuales. Las vistas muestran las tareas coincidentes actuales; las selecciones y las páginas están excluidas.",
+    presetHint:
+      "Guardar directorio, categoría, prioridad, velocidad, ventana de descarga y punto final del proxy. Las credenciales y los hashes de archivo están excluidos. Al aplicar se reemplazan estos campos y se borran las credenciales del proxy; puede editarlos después.",
+    siteHint:
+      "Solo se enumeran los perfiles de este origen exacto. Al guardar se excluyen las cabeceras Cookie, Authorization y X-*, y se eliminan los parámetros de consulta de Referer. Al aplicar se conservan las cabeceras confidenciales de esta tarea.",
+    viewHint:
+      "Guarde la búsqueda, los filtros y el orden actuales. Las vistas muestran las tareas coincidentes actuales; las selecciones y las páginas están excluidas.",
     choose: "Elegir una configuración guardada",
     name: "Nombre de configuración",
     apply: "Aplicar",
@@ -43,10 +47,12 @@ const es = {
     update: "Actualizar desde los campos actuales",
     updateConfirm: "Confirmar reemplazo de configuración",
     error: "No se pudo aplicar o guardar la configuración. Compruebe los campos e inténtelo de nuevo.",
-    unsupported: "Algunas configuraciones guardadas usan un formato no admitido. Se conservan pero no se pueden aplicar.",
+    unsupported:
+      "Algunas configuraciones guardadas usan un formato no admitido. Se conservan pero no se pueden aplicar.",
     reload: "Recargar",
     bulkEdit: "Editar tareas seleccionadas",
-    bulkHint: "Aplique solo los campos elegidos a {{total}} tareas seleccionadas. Las tareas completadas, canceladas o eliminadas se omiten. Los límites de velocidad en ejecución se actualizan de inmediato; la prioridad afecta a la distribución futura.",
+    bulkHint:
+      "Aplique solo los campos elegidos a {{total}} tareas seleccionadas. Las tareas completadas, canceladas o eliminadas se omiten. Los límites de velocidad en ejecución se actualizan de inmediato; la prioridad afecta a la distribución futura.",
     current: "Actual",
     mixed: "Valores mixtos",
     default: "Predeterminado / ilimitado",
@@ -2152,19 +2158,24 @@ const es = {
     },
   },
   errors: {
-    btSeedingPolicyInvalid: "Ingrese una proporción positiva y un número entero de segundos, o deje en blanco para ilimitado.",
-    hlsFinishUnavailable: "Esta grabación no se puede finalizar en su estado actual. Espere a que comience la grabación en vivo o reanude la tarea.",
+    btSeedingPolicyInvalid:
+      "Ingrese una proporción positiva y un número entero de segundos, o deje en blanco para ilimitado.",
+    hlsFinishUnavailable:
+      "Esta grabación no se puede finalizar en su estado actual. Espere a que comience la grabación en vivo o reanude la tarea.",
     btSeedingActive: "Este torrent ya está en siembra.",
     btSeedingUnavailable: "Solo los torrents completados pueden iniciar la siembra.",
     btSeedingMetadataMissing: "Los metadatos del torrent en caché no están disponibles o no coinciden.",
-    btSeedingFilesInvalid: "Faltan archivos del torrent o han cambiado. Verifique los archivos locales antes de sembrar.",
+    btSeedingFilesInvalid:
+      "Faltan archivos del torrent o han cambiado. Verifique los archivos locales antes de sembrar.",
     btSeedingLimitReached: "Se alcanzó el límite de proporción o tiempo de siembra. Aumente el límite para continuar.",
     dashTrackInvalid: "La pista DASH seleccionada no está disponible o es ambigua. Vuelva a analizar el manifiesto.",
     dashSubtitleUnsupported: "Solo se admiten subtítulos DASH WebVTT textuales.",
     dashDrmUnsupported: "No se admiten medios DASH protegidos con DRM.",
-    hlsSubtitleUnsupported: "Los subtítulos seleccionados no se pueden convertir a MP4 de forma segura. Use WebVTT textual.",
+    hlsSubtitleUnsupported:
+      "Los subtítulos seleccionados no se pueden convertir a MP4 de forma segura. Use WebVTT textual.",
     hlsTsUnsupported: "Estos segmentos no se pueden unir de forma segura sin ffmpeg. Configure ffmpeg en Ajustes.",
-    taskNetworkActive: "Pause las descargas o detenga la siembra antes de cambiar la configuración de red o la autorización.",
+    taskNetworkActive:
+      "Pause las descargas o detenga la siembra antes de cambiar la configuración de red o la autorización.",
     requestProfileActive: "Pausa la tarea antes de editar sus cabeceras.",
     requestProfileInvalid:
       "Cabeceras no válidas. Revisa los nombres permitidos, duplicados, valores y límites de tamaño.",
