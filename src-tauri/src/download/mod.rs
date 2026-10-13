@@ -1,5 +1,6 @@
 pub mod artifacts;
 mod bt;
+mod bt_seeding;
 mod bt_storage;
 pub(crate) mod checksum;
 mod dash;
@@ -12,6 +13,8 @@ pub(crate) mod ftp;
 mod hls;
 mod http;
 pub mod lifecycle;
+mod manifest_classify;
+mod media_subtitles;
 mod metalink;
 pub(crate) mod net_factory;
 pub mod network_policy;
@@ -26,6 +29,7 @@ pub mod url_classify;
 pub(crate) mod webdav;
 
 pub use bt::BtEngine;
+pub use bt_seeding::BtSeedingManager;
 pub use dash::DashEngine;
 pub use engine::{DownloadContext, DownloadEngine, EngineRegistry, ProbeOutput, ProbeRequest};
 pub use error::DownloadError;
@@ -42,7 +46,7 @@ pub use http::{DirectDownloadRequest, DirectSegmentedDownloadRequest, HttpEngine
 #[doc(hidden)]
 pub use metalink::testing;
 pub use metalink::MetalinkEngine;
-pub use net_factory::NetworkClientFactory;
+pub use net_factory::{ensure_rustls_crypto_provider, NetworkClientFactory};
 pub use sftp::{
     probe_sftp_directory_url, probe_sftp_directory_url_cancellable,
     probe_sftp_directory_url_cancellable_with_policy, SftpEngine,

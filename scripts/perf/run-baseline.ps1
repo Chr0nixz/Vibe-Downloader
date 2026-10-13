@@ -17,6 +17,7 @@ if (-not $ArtifactRoot) {
     $ts = Get-Date -Format "yyyyMMdd-HHmmss"
     $ArtifactRoot = Join-Path $repoRoot "artifacts\perf\$ts"
 }
+$ArtifactRoot = [System.IO.Path]::GetFullPath($ArtifactRoot)
 
 New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
 & "$PSScriptRoot\collect-metadata.ps1" -OutDir $ArtifactRoot
@@ -28,22 +29,44 @@ $env:VIBE_PERF_REPS = if ($env:VIBE_PERF_REPS) { $env:VIBE_PERF_REPS } else { "5
 # not test threads); the real local constraint is linker memory. -j 2 is the
 # documented setting and matches README / ROADMAP.
 Write-Host "Running PERF-11 1k smoke into $ArtifactRoot"
-cargo test -j 2 --manifest-path src-tauri/Cargo.toml --test perf_baseline -- --nocapture perf_baseline_1k_smoke
+cargo test --locked -j 2 --manifest-path src-tauri/Cargo.toml --test perf_baseline -- --nocapture perf_baseline_1k_smoke
 if ($LASTEXITCODE -ne 0) {
     throw "perf_baseline_1k_smoke failed with exit $LASTEXITCODE"
 }
 
 if ($Include10k) {
     Write-Host "Running PERF-11 10k ignored baseline"
-    cargo test -j 2 --manifest-path src-tauri/Cargo.toml --test perf_baseline -- --ignored --nocapture perf_baseline_10k
+    cargo test --locked -j 2 --manifest-path src-tauri/Cargo.toml --test perf_baseline -- --ignored --nocapture perf_baseline_10k
     if ($LASTEXITCODE -ne 0) {
         throw "perf_baseline_10k failed with exit $LASTEXITCODE"
+    }
+
+    $small = Get-Content -LiteralPath (Join-Path $ArtifactRoot "baseline-1k.json") -Raw | ConvertFrom-Json
+    $large = Get-Content -LiteralPath (Join-Path $ArtifactRoot "baseline-10k.json") -Raw | ConvertFrom-Json
+    $growth = foreach ($case in @("cachedProbeNoConflict", "cachedProbePathConflict")) {
+        $smallMs = [double]$small.creation.$case.p50Ms
+        $largeMs = [double]$large.creation.$case.p50Ms
+        # Compare within one run, with noise slack, rather than imposing a
+        # hardware-specific latency budget on CI or on slower machines.
+        $limitMs = [math]::Max($smallMs * 5, $smallMs + 10)
+        [ordered]@{
+            case = $case
+            smallP50Ms = $smallMs
+            largeP50Ms = $largeMs
+            ratio = if ($smallMs -gt 0) { $largeMs / $smallMs } else { $null }
+            sanityLimitMs = $limitMs
+            passed = $largeMs -le $limitMs
+        }
+    }
+    $growth | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $ArtifactRoot "creation-growth.json") -Encoding utf8
+    if ($growth | Where-Object { -not $_.passed }) {
+        throw "PERF-16 creation growth sanity check failed; inspect creation-growth.json"
     }
 }
 
 if ($Include50k) {
     Write-Host "Running PERF-01 50k ignored baseline"
-    cargo test -j 2 --manifest-path src-tauri/Cargo.toml --test perf_baseline -- --ignored --nocapture perf_baseline_50k
+    cargo test --locked -j 2 --manifest-path src-tauri/Cargo.toml --test perf_baseline -- --ignored --nocapture perf_baseline_50k
     if ($LASTEXITCODE -ne 0) {
         throw "perf_baseline_50k failed with exit $LASTEXITCODE"
     }
@@ -63,7 +86,7 @@ if ($CompareOptLevel) {
         Write-Host "PERF-09: release build with opt-level=$level"
         $env:CARGO_PROFILE_RELEASE_OPT_LEVEL = $level
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        cargo build --release --manifest-path src-tauri/Cargo.toml
+        cargo build --locked --release -j 2 --manifest-path src-tauri/Cargo.toml
         $buildFailed = $LASTEXITCODE
         $sw.Stop()
         Remove-Item Env:CARGO_PROFILE_RELEASE_OPT_LEVEL -ErrorAction SilentlyContinue

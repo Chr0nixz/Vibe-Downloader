@@ -72,8 +72,10 @@ pub async fn list_task_records(pool: &SqlitePool) -> Result<Vec<TaskRecord>, Str
                 ELSE 7
             END,
             updated_at DESC
+        LIMIT ?
         "#,
     )
+    .bind(MAX_TASK_PAGE_SIZE)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -140,6 +142,12 @@ pub async fn list_task_records_by_ids(
     pool: &SqlitePool,
     ids: &[String],
 ) -> Result<Vec<TaskRecord>, String> {
+    // IPC callers are untrusted input. Keep the incremental fetch bounded even
+    // when a caller bypasses the frontend page-size guard.
+    let ids = ids
+        .iter()
+        .take(MAX_TASK_PAGE_SIZE as usize)
+        .collect::<Vec<_>>();
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -259,12 +267,17 @@ pub async fn list_browser_realtime_task_records(
                 ELSE 6
             END,
             updated_at DESC
+        LIMIT ?
         "#,
     )
+    .bind(MAX_TASK_PAGE_SIZE)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
 
+    let recent_limit = MAX_TASK_PAGE_SIZE
+        .saturating_sub(active_rows.len() as i64)
+        .min(50);
     let recent_rows = sqlx::query(
         r#"
         SELECT id, url, final_url, protocol, task_kind, file_name, save_dir, temp_path, final_path,
@@ -277,9 +290,10 @@ pub async fn list_browser_realtime_task_records(
         FROM tasks
         WHERE status NOT IN ('downloading', 'retrying', 'queued', 'paused', 'waiting_network', 'needs_attention')
         ORDER BY updated_at DESC
-        LIMIT 50
+        LIMIT ?
         "#,
     )
+    .bind(recent_limit)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;

@@ -110,7 +110,7 @@ await window.__TAURI__.seedScaleTasks(
 2. 完全退出应用，确认无残留 worker 或 WebView 进程。
 3. 从进程创建开始计时，记录窗口首次显示、首屏任务出现和输入可响应时间。
 4. 记录 SQLite 文件、WAL 大小、RSS 和 CPU 峰值。
-5. 每个规模运行 5 次，第一轮冷缓存和后续暖缓存分开报告。
+5. 每个规模运行 5 次；分别记录首个进程启动、后续启动与实际缓存条件，未清空缓存时不称作冷缓存启动。
 
 ### 5.3 搜索、筛选和排序
 
@@ -131,6 +131,26 @@ await window.__TAURI__.seedScaleTasks(
 2. 每分钟记录 RSS、CPU、句柄、SQLite/WAL、task_events、request diagnostics、cache entries 和临时文件。
 3. 在运行中执行暂停、恢复、删除、网络断开、代理失败和应用退出。
 4. 结束后确认没有 ffmpeg、BT session、worker、句柄或 staging 文件残留。
+
+### 5.6 Windows 候选包原生 WebView2 采集
+
+`scripts/perf/native-ui.mjs` 在隔离 B7 identity 下创建 1k／10k 固定数据集，每个任务有一条 file record；分布为完成 50%、暂停 40%、失败 10%。本地采集需要支持 `node:sqlite` 的 Node（已验证 `22.23.2`）；普通工具测试仍可加载，缺少该能力时仅原生 fixture 测试跳过。此数据不对应实际下载文件，不进入调度队列，也不用于协议吞吐验收。脚本核对可执行文件的候选标识与运行中的测试设置，禁止覆盖既有非测试数据目录；换库前确认主程序和退出前记录的 WebView2 进程已结束，再验证 WAL／SHM 已排空。
+
+复现示例（Windows PowerShell，先构建再采样，禁止同时运行其他性能基准）：
+
+```powershell
+pnpm prepare:b7-candidate --run-id windows-20261013-ui
+$env:VIBE_BROWSER_PROFILE = 'candidate'
+$env:CARGO_BUILD_JOBS = '2'
+node node_modules/@tauri-apps/cli/tauri.js build --target x86_64-pc-windows-msvc --config logs/b7/windows-20261013-ui/tauri.b7.generated.json --bundles nsis msi -- --locked -j 2
+pnpm perf:native-ui --config logs/b7/windows-20261013-ui/tauri.b7.generated.json --exe src-tauri/target/x86_64-pc-windows-msvc/release/vibe-downloader.exe
+```
+
+每次首次执行使用新的 run ID；已有数据目录会被拒绝。复跑同一候选时可显式传 `--reuse-fixture true`，仍检查所有权标记并保存新的时间戳证据目录。默认每规模 5 次完整进程启动、5 次鼠标／方向键选择和精确搜索、10 秒滚动、5 分钟空闲采样；短跑 `--repetitions 1 --steady-seconds 0` 只用于验证 harness，不能替代完整基线。
+
+启动指标是从 `Start-Process` 时间戳到 CDP 连接后观察到首行的上界，包含调试连接和观察开销；不等同于准确首次绘制。先执行一次不计入样本的 1k 启动，设置语言与首次引导状态。系统文件缓存未清空，第一轮单列为首个测量启动，其余单列为后续启动，不能称作冷缓存。搜索从输入事件到匹配 DOM 更新后的两帧，包含产品的 300ms debounce，不能与纯数据库 100ms 预算比较。滚动报告 rAF 节奏、逐秒帧数、long task 和虚拟行 DOM 上限，不称作显示器实际呈现 FPS。
+
+内存报告主进程及其 WebView2 后代的 working-set 总和（共享页可能重复计入）、private bytes、线程／句柄和累计 CPU。进程 I/O counter 含 IPC 等逻辑传输，WAL 文件大小是净占用，二者均不直接解释为物理磁盘写入量。原始 JSON、每次退出校验和截图保存在 `logs/b7/<run-id>/native-ui/<UTC>/`；结果回填 [performance-baseline-results.md](performance-baseline-results.md)，不关闭未覆盖的跨平台、真实对端或长跑条目。
 
 ## 6. 结果记录模板
 

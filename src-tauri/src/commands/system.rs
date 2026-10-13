@@ -170,20 +170,31 @@ pub async fn query_disk_space(path: String) -> Result<DiskSpaceInfo, String> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn request_system_shutdown() -> Result<(), String> {
-    platform::shutdown_now()
+pub async fn request_system_shutdown(app: AppHandle) -> Result<(), String> {
+    crate::prepare_app_relaunch(&app).await?;
+    let result = platform::shutdown_now();
+    if result.is_err() {
+        crate::cancel_prepared_app_relaunch(&app).await?;
+    }
+    result
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn request_system_sleep() -> Result<(), String> {
-    platform::sleep_now()
+pub async fn request_system_sleep(app: AppHandle) -> Result<(), String> {
+    crate::prepare_app_relaunch(&app).await?;
+    let result = platform::sleep_now();
+    crate::cancel_prepared_app_relaunch(&app).await?;
+    result
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn request_system_hibernate() -> Result<(), String> {
-    platform::hibernate_now()
+pub async fn request_system_hibernate(app: AppHandle) -> Result<(), String> {
+    crate::prepare_app_relaunch(&app).await?;
+    let result = platform::hibernate_now();
+    crate::cancel_prepared_app_relaunch(&app).await?;
+    result
 }
 
 #[tauri::command]

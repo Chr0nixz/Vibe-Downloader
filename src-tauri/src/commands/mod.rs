@@ -14,3 +14,4 @@ pub mod task_file_planning;
 pub mod task_resume;
 pub mod tasks;
 pub mod tray;
+pub mod workflow;

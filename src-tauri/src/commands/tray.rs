@@ -30,7 +30,7 @@ pub async fn run_tray_menu_action(app: AppHandle, action: TrayMenuAction) -> Res
             focus_main_window(&app);
             emit_tray_new_download_requested(&app);
         }
-        TrayMenuAction::OpenDownloads => open_downloads_dir(&app),
+        TrayMenuAction::OpenDownloads => open_downloads_dir(&app).await,
         TrayMenuAction::Settings => {
             focus_main_window(&app);
             emit_tray_settings_requested(&app);

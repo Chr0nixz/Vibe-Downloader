@@ -5,6 +5,18 @@ import type { TranslationKey } from "@/i18n";
  * localized user-facing copy. Raw backend messages stay in diagnostics only.
  */
 export const STABLE_ERROR_CODES = [
+  "bt_seeding_policy_invalid",
+  "hls_finish_unavailable",
+  "bt_seeding_active",
+  "bt_seeding_unavailable",
+  "bt_seeding_metadata_missing",
+  "bt_seeding_files_invalid",
+  "bt_seeding_limit_reached",
+  "dash_track_invalid",
+  "dash_subtitle_unsupported",
+  "dash_drm_unsupported",
+  "hls_subtitle_unsupported",
+  "hls_ts_unsupported",
   "request_profile_active",
   "request_profile_invalid",
   "request_profile_unsupported",
@@ -134,6 +146,7 @@ export const STABLE_ERROR_CODES = [
   "task_credentials_invalid",
   "task_credentials_unavailable",
   "task_not_completed",
+  "task_network_active",
   "task_stop_pending",
   "task_state_changed",
   "temp_file_missing",
@@ -167,6 +180,19 @@ export const ERROR_CODE_I18N_MAP = Object.fromEntries(
 
 /** English user-facing copy for stable error codes. */
 export const STABLE_ERROR_MESSAGES_EN: Record<StableErrorCode, string> = {
+  bt_seeding_policy_invalid: "Enter a positive ratio and a whole number of seconds, or leave blank for unlimited.",
+  hls_finish_unavailable:
+    "This recording cannot be finished in its current state. Wait for live recording to start or resume the task.",
+  bt_seeding_active: "This torrent is already seeding.",
+  bt_seeding_unavailable: "Only completed torrents can start seeding.",
+  bt_seeding_metadata_missing: "Cached torrent metadata is unavailable or mismatched.",
+  bt_seeding_files_invalid: "Torrent files are missing or changed. Verify the local files before seeding.",
+  bt_seeding_limit_reached: "The seeding ratio or time limit has been reached. Raise the limit to continue.",
+  dash_track_invalid: "The selected DASH track is unavailable or ambiguous. Probe the manifest again.",
+  dash_subtitle_unsupported: "Only textual WebVTT DASH subtitles are supported.",
+  dash_drm_unsupported: "DRM-protected DASH media is not supported.",
+  hls_subtitle_unsupported: "The selected subtitles cannot be safely converted to MP4. Use textual WebVTT.",
+  hls_ts_unsupported: "These segments cannot be safely joined without ffmpeg. Configure ffmpeg in Settings.",
   request_profile_active: "Pause this task to edit its headers.",
   request_profile_invalid: "Invalid request headers. Check allowed names, duplicates, values and size limits.",
   request_profile_unsupported: "Request headers are supported only for HTTP/HTTPS resources.",
@@ -297,6 +323,7 @@ export const STABLE_ERROR_MESSAGES_EN: Record<StableErrorCode, string> = {
   task_credentials_invalid: "Task credentials are invalid.",
   task_credentials_unavailable: "Task credentials are unavailable.",
   task_not_completed: "This task has not completed downloading yet.",
+  task_network_active: "Pause downloads or stop seeding before changing network settings or authorization.",
   task_stop_pending: "The previous download is still stopping. Retry after its file operations finish.",
   unsupported_url_scheme:
     "This URL scheme is not supported. Use HTTP, HTTPS, FTP, SFTP, WebDAV, magnet, .torrent, Metalink, or MPEG-DASH links.",

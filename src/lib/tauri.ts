@@ -8,6 +8,8 @@ import type {
   BrowserIntegrationUpdateInput,
   BulkRecoveryAction,
   BulkRecoveryResult,
+  BulkTaskOptionsPatch,
+  BulkTaskOptionsResult,
   ChecksumAlgorithm,
   ClassificationRule,
   ClassificationRuleInput,
@@ -35,6 +37,7 @@ import type {
   ListTasksInput,
   ListTasksResult,
   LocalTextFileKind,
+  MediaTaskDetails,
   MetalinkMirrorView,
   NetworkAuthorizationDraft,
   PreviewClassificationInput,
@@ -73,6 +76,8 @@ import type {
   UpdateTorrentFileSelectionInput,
   UpdateTorrentSeedingInput,
   WebDavDirectoryProbe,
+  WorkflowEntry,
+  WorkflowLibrary,
 } from "@/generated/bindings";
 import i18n from "@/i18n";
 import { parseAppError } from "@/lib/errors";
@@ -331,6 +336,12 @@ export async function getTorrentRuntimeSnapshot(taskId: string): Promise<Torrent
   }
   const commands = await loadNativeCommands();
   return runCommand("getTorrentRuntimeSnapshot", () => commands.getTorrentRuntimeSnapshot(taskId));
+}
+
+export async function getMediaTaskDetails(taskId: string): Promise<MediaTaskDetails | null> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).getMediaTaskDetails(taskId);
+  const commands = await loadNativeCommands();
+  return runCommand("getMediaTaskDetails", () => commands.getMediaTaskDetails(taskId));
 }
 
 export async function getTaskRequestProfile(taskId: string): Promise<TaskRequestProfileView> {
@@ -867,6 +878,33 @@ export async function updateTaskTransferOptions(input: UpdateTaskTransferOptions
   }
   const commands = await loadNativeCommands();
   return normalizeTask(await runCommand("updateTaskTransferOptions", () => commands.updateTaskTransferOptions(input)));
+}
+
+export async function listWorkflowLibrary(): Promise<WorkflowLibrary> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).listWorkflowLibrary();
+  const commands = await loadNativeCommands();
+  return runCommand("listWorkflowLibrary", () => commands.listWorkflowLibrary());
+}
+
+export async function saveWorkflowEntry(entry: WorkflowEntry): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).saveWorkflowEntry(entry);
+  const commands = await loadNativeCommands();
+  await runCommand("saveWorkflowEntry", () => commands.saveWorkflowEntry(entry));
+}
+
+export async function deleteWorkflowEntry(id: string): Promise<void> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).deleteWorkflowEntry(id);
+  const commands = await loadNativeCommands();
+  await runCommand("deleteWorkflowEntry", () => commands.deleteWorkflowEntry(id));
+}
+
+export async function bulkUpdateTaskOptions(
+  ids: string[],
+  patch: BulkTaskOptionsPatch,
+): Promise<BulkTaskOptionsResult[]> {
+  if (!isTauriRuntime()) return (await loadBrowserAdapter()).bulkUpdateTaskOptions(ids, patch);
+  const commands = await loadNativeCommands();
+  return runCommand("bulkUpdateTaskOptions", () => commands.bulkUpdateTaskOptions({ ids, patch }));
 }
 
 export async function reorderQueuedTasks(taskIds: string[]): Promise<void> {

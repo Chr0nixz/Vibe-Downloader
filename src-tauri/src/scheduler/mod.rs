@@ -461,15 +461,20 @@ impl Scheduler {
         }
         drop(_speed_policy_guard);
 
-        match crate::state_machine::transition_task(
+        match crate::state_machine::transition_task_with_input(
             &app,
             &pool,
             &task.id,
-            TaskStatus::Downloading,
-            0,
-            connection_count,
-            Some("Downloading"),
-            Some("started"),
+            crate::state_machine::TaskTransitionInput {
+                target: TaskStatus::Downloading,
+                downloaded_bytes: None,
+                speed_bps: 0,
+                connection_count,
+                health_summary: Some("Downloading"),
+                error_message: None,
+                event_type: Some("started"),
+                event_message: Some("Downloading"),
+            },
         )
         .await
         {
@@ -555,7 +560,7 @@ impl Scheduler {
                 }
             };
 
-            let engine = match task_engine_registry.engine_for_uri(&task.url) {
+            let engine = match task_engine_registry.engine_for_task(&task) {
                 Ok(engine) => engine,
                 Err(error) => {
                     converge_download_outcome(
@@ -752,18 +757,29 @@ impl Scheduler {
     /// prompts stacked). Closing the round elects exactly one decider. The
     /// round is closed even when the action is off or declined, so the next
     /// batch starts from a clean slate.
-    async fn maybe_emit_completion_action(&self, app: &AppHandle, pool: &SqlitePool) {
+    pub(crate) async fn maybe_emit_completion_action(&self, app: &AppHandle, pool: &SqlitePool) {
+        let Ok(settings) =
+            db::get_settings(pool, default_download_dir(app).unwrap_or_default()).await
+        else {
+            return;
+        };
+        if completion_waits_for_seeding(
+            settings.completion_action,
+            self.engine_registry
+                .bt_engine()
+                .seeding_manager()
+                .active_count()
+                .await,
+        ) {
+            tracing::debug!("completion action waiting for background seeding");
+            return;
+        }
         if !should_emit_completion_action(&self.downloads, pool).await {
             return;
         }
         let Some(round_had_failure) = decide_completion_round(&self.completion_round, pool).await
         else {
             tracing::debug!("completion round already decided or still growing; skipping");
-            return;
-        };
-        let Ok(settings) =
-            db::get_settings(pool, default_download_dir(app).unwrap_or_default()).await
-        else {
             return;
         };
         if settings.completion_action == CompletionAction::None {
@@ -1034,7 +1050,14 @@ async fn handle_start_failure(
 /// completed row is mid-hash" is the exact window to hold the action for.
 /// A DB error is treated the same way as a non-empty queue: skip firing this
 /// tick rather than risk a destructive action on incomplete information.
-async fn should_emit_completion_action(
+fn completion_waits_for_seeding(
+    action: crate::models::CompletionAction,
+    seeding_count: usize,
+) -> bool {
+    action.is_destructive() && seeding_count > 0
+}
+
+pub(crate) async fn should_emit_completion_action(
     downloads: &Arc<Mutex<HashMap<String, DownloadControl>>>,
     pool: &SqlitePool,
 ) -> bool {
@@ -1996,5 +2019,27 @@ mod convergence_tests {
             !super::should_emit_completion_action(&downloads, &pool).await,
             "a non-empty queue holds the action"
         );
+    }
+    #[test]
+    fn destructive_completion_actions_wait_for_seed_owners_and_pending_starts() {
+        use crate::models::CompletionAction;
+        for action in [
+            CompletionAction::ExitApp,
+            CompletionAction::Shutdown,
+            CompletionAction::Sleep,
+            CompletionAction::Hibernate,
+            CompletionAction::RunCommand,
+        ] {
+            assert!(super::completion_waits_for_seeding(action, 2));
+            assert!(!super::completion_waits_for_seeding(action, 0));
+        }
+        assert!(!super::completion_waits_for_seeding(
+            CompletionAction::None,
+            2
+        ));
+        assert!(!super::completion_waits_for_seeding(
+            CompletionAction::LockScreen,
+            2
+        ));
     }
 }

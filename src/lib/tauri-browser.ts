@@ -24,6 +24,7 @@ import type {
   ListTasksCursorInput,
   ListTasksCursorResult,
   ListTasksInput,
+  MediaTaskDetails,
   NetworkAuthorizationDraft,
   NetworkPolicy,
   ProbePhasePayload,
@@ -1115,6 +1116,15 @@ export async function getSegmentSummary(taskId: string): Promise<SegmentSummary>
   };
 }
 
+const btSeedingPolicies = new Map<string, UpdateTorrentSeedingInput>();
+
+export async function getMediaTaskDetails(taskId: string): Promise<MediaTaskDetails | null> {
+  const task = tasks.find((entry) => entry.id === taskId);
+  return task && ["hls", "dash"].includes(task.protocol)
+    ? { outputFormat: "mp4", dashTracks: [], maxMissingSegments: 0, missingSegmentsJson: null }
+    : null;
+}
+
 export async function getTorrentRuntimeSnapshot(taskId: string): Promise<TorrentRuntimeSnapshot | null> {
   const task = tasks.find((entry) => entry.id === taskId);
   if (!task || (task.protocol !== "bt" && task.protocol !== "magnet")) return null;
@@ -1143,10 +1153,14 @@ export async function getTorrentRuntimeSnapshot(taskId: string): Promise<Torrent
     uploadBytes: String(uploaded),
     uploadSpeedBps: String(uploadSpeedBps),
     ratio: task.downloadedBytes > 0 ? uploaded / task.downloadedBytes : 0,
-    seedingEnabled: false,
-    seedingState: "disabled",
-    seedRatioLimit: null,
-    seedTimeLimitSeconds: null,
+    seedingEnabled: btSeedingPolicies.get(taskId)?.enabled ?? false,
+    seedingState: btSeedingPolicies.get(taskId)?.enabled && task.status === "completed" ? "seeding" : "disabled",
+    seedRatioLimit: btSeedingPolicies.get(taskId)?.ratioLimit ?? null,
+    seedTimeLimitSeconds: btSeedingPolicies.get(taskId)?.timeLimitSeconds ?? null,
+    seedingStartedAt: btSeedingPolicies.get(taskId)?.enabled ? task.updatedAt : null,
+    seedElapsedSeconds: "0",
+    seedStopReason: null,
+    waitingCompletionAction: false,
     lastErrorCode: null,
     lastErrorMessage: null,
     updatedAt: task.updatedAt,
@@ -1206,6 +1220,12 @@ export async function updateTorrentFileSelection(input: UpdateTorrentFileSelecti
 }
 
 export async function updateTorrentSeeding(input: UpdateTorrentSeedingInput): Promise<Task> {
+  const previous = btSeedingPolicies.get(input.taskId);
+  btSeedingPolicies.set(input.taskId, {
+    ...input,
+    ratioLimit: input.updateLimits ? input.ratioLimit : (previous?.ratioLimit ?? null),
+    timeLimitSeconds: input.updateLimits ? input.timeLimitSeconds : (previous?.timeLimitSeconds ?? null),
+  });
   const task = tasks.find((entry) => entry.id === input.taskId);
   if (!task) throw new Error("Task not found.");
   task.updatedAt = nowIso();
@@ -2008,6 +2028,23 @@ export async function updateTaskTransferOptions(input: UpdateTaskTransferOptions
   });
 }
 
+export async function bulkUpdateTaskOptions(
+  ids: string[],
+  patch: import("@/generated/bindings").BulkTaskOptionsPatch,
+): Promise<import("@/generated/bindings").BulkTaskOptionsResult[]> {
+  return [...new Set(ids)].map((id) => {
+    const task = tasks.find((row) => row.id === id);
+    if (!task || task.status === "completed") return { id, status: "skipped", error: null };
+    updateTask(id, {
+      priority: patch.priority ?? task.priority,
+      taskSpeedLimitBps: patch.clearSpeedLimit ? null : (patch.taskSpeedLimitBps ?? task.taskSpeedLimitBps),
+      categoryKey: patch.clearCategory ? null : (patch.categoryKey ?? task.categoryKey),
+      obeySchedule: patch.obeySchedule ?? task.obeySchedule,
+    });
+    return { id, status: "applied", error: null };
+  });
+}
+
 export async function importUrls(input: ImportUrlsInput): Promise<BatchImportResult> {
   const urls = input.input
     .split(/\r?\n/)
@@ -2084,6 +2121,9 @@ export async function importUrls(input: ImportUrlsInput): Promise<BatchImportRes
             selectedHlsVariantUri: null,
             selectedHlsAudioTrackUris: null,
             selectedHlsSubtitleTrackUris: null,
+            selectedDashVideoRepresentationId: null,
+            selectedDashAudioRepresentationId: null,
+            selectedDashSubtitleRepresentationId: null,
             proxyMode: input.proxyMode ?? null,
             proxyUrl: input.proxyUrl ?? null,
             proxyUsername: input.proxyUsername ?? null,
@@ -2226,6 +2266,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       hlsVariants: [],
       hlsAudioTracks: [],
       hlsSubtitleTracks: [],
+      dashTracks: [],
       probedAt: nowIso(),
     };
   }
@@ -2267,6 +2308,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       hlsVariants: [],
       hlsAudioTracks: [],
       hlsSubtitleTracks: [],
+      dashTracks: [],
       probedAt: nowIso(),
     };
   }
@@ -2307,6 +2349,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       ],
       hlsAudioTracks: [],
       hlsSubtitleTracks: [],
+      dashTracks: [],
       probedAt: nowIso(),
     };
   }
@@ -2320,7 +2363,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       protocol: "dash",
       taskKind: "manifest",
       capabilities: {
-        supportsResume: false,
+        supportsResume: true,
         supportsParallel: true,
         supportsMultiFile: false,
       },
@@ -2339,6 +2382,63 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
       hlsVariants: [],
       hlsAudioTracks: [],
       hlsSubtitleTracks: [],
+      dashTracks: [
+        {
+          id: "v720",
+          kind: "video",
+          language: null,
+          role: "main",
+          bandwidth: "2000000",
+          resolution: "1280x720",
+          codecs: "avc1",
+          subtitleFormat: null,
+          selected: false,
+        },
+        {
+          id: "v1080",
+          kind: "video",
+          language: null,
+          role: "main",
+          bandwidth: "4000000",
+          resolution: "1920x1080",
+          codecs: "avc1",
+          subtitleFormat: null,
+          selected: true,
+        },
+        {
+          id: "a-en",
+          kind: "audio",
+          language: "en",
+          role: "main",
+          bandwidth: "128000",
+          resolution: null,
+          codecs: "mp4a",
+          subtitleFormat: null,
+          selected: true,
+        },
+        {
+          id: "a-zh",
+          kind: "audio",
+          language: "zh-CN",
+          role: "main",
+          bandwidth: "128000",
+          resolution: null,
+          codecs: "mp4a",
+          subtitleFormat: null,
+          selected: false,
+        },
+        {
+          id: "s-zh",
+          kind: "subtitle",
+          language: "zh-CN",
+          role: "subtitle",
+          bandwidth: "0",
+          resolution: null,
+          codecs: null,
+          subtitleFormat: "text/vtt",
+          selected: false,
+        },
+      ],
       probedAt: nowIso(),
     };
   }
@@ -2371,6 +2471,7 @@ export async function probeTask(input: ProbeTaskInput): Promise<ProbeTaskPayload
     hlsVariants: [],
     hlsAudioTracks: [],
     hlsSubtitleTracks: [],
+    dashTracks: [],
     probedAt: nowIso(),
   };
 }
@@ -2466,6 +2567,9 @@ export async function redownloadTask(id: string): Promise<Task> {
     selectedHlsVariantUri: null,
     selectedHlsAudioTrackUris: null,
     selectedHlsSubtitleTrackUris: null,
+    selectedDashVideoRepresentationId: null,
+    selectedDashAudioRepresentationId: null,
+    selectedDashSubtitleRepresentationId: null,
     proxyMode: proxy?.mode ?? null,
     proxyUrl: proxy?.proxyUrl ?? null,
     proxyUsername: proxy?.proxyUsername ?? null,
@@ -2819,3 +2923,5 @@ function browserDisplayName(browser: string): string {
       return browser;
   }
 }
+
+export { deleteWorkflowEntry, listWorkflowLibrary, saveWorkflowEntry } from "@/lib/workflow-library";

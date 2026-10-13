@@ -2,6 +2,10 @@ use sqlx::{Row, SqlitePool};
 
 use crate::models::SegmentStatus;
 
+/// Keep the persisted live-recording gap budget bounded even when a task is
+/// restored from an older or externally modified database.
+pub const MAX_HLS_MISSING_SEGMENTS: i64 = 100;
+
 #[derive(Debug, Clone)]
 pub struct HlsTaskRecord {
     pub task_id: String,
@@ -19,6 +23,9 @@ pub struct HlsTaskRecord {
     pub selected_audio_track_uris: Option<String>,
     /// F-6: JSON array of selected subtitle track URIs, or NULL.
     pub selected_subtitle_track_uris: Option<String>,
+    pub max_missing_segments: i64,
+    pub missing_segments_json: Option<String>,
+    pub selected_track_catalog_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +44,9 @@ pub struct HlsTaskUpsert<'a> {
     pub selected_audio_track_uris: Option<&'a str>,
     /// F-6: JSON array of selected subtitle track URIs, or None.
     pub selected_subtitle_track_uris: Option<&'a str>,
+    pub max_missing_segments: i64,
+    pub missing_segments_json: Option<&'a str>,
+    pub selected_track_catalog_json: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +93,10 @@ pub struct HlsSegmentUpsert<'a> {
     pub key_iv: Option<&'a str>,
 }
 
-pub async fn upsert_hls_task(pool: &SqlitePool, task: HlsTaskUpsert<'_>) -> Result<(), String> {
+pub async fn upsert_hls_task<'e>(
+    pool: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    task: HlsTaskUpsert<'_>,
+) -> Result<(), String> {
     let now = crate::models::task::now_iso();
     sqlx::query(
         r#"
@@ -91,8 +104,10 @@ pub async fn upsert_hls_task(pool: &SqlitePool, task: HlsTaskUpsert<'_>) -> Resu
             task_id, input_url, media_url, playlist_kind, selected_bandwidth,
             selected_resolution, target_duration, last_media_sequence, output_format,
             staging_dir, selected_audio_track_uris, selected_subtitle_track_uris,
+            max_missing_segments, missing_segments_json,
+            selected_track_catalog_json,
             finish_requested, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
         ON CONFLICT(task_id) DO UPDATE SET
             media_url = excluded.media_url,
             playlist_kind = excluded.playlist_kind,
@@ -104,6 +119,9 @@ pub async fn upsert_hls_task(pool: &SqlitePool, task: HlsTaskUpsert<'_>) -> Resu
             staging_dir = excluded.staging_dir,
             selected_audio_track_uris = COALESCE(excluded.selected_audio_track_uris, hls_tasks.selected_audio_track_uris),
             selected_subtitle_track_uris = COALESCE(excluded.selected_subtitle_track_uris, hls_tasks.selected_subtitle_track_uris),
+            max_missing_segments = excluded.max_missing_segments,
+            missing_segments_json = COALESCE(excluded.missing_segments_json, hls_tasks.missing_segments_json),
+            selected_track_catalog_json = COALESCE(excluded.selected_track_catalog_json, hls_tasks.selected_track_catalog_json),
             updated_at = excluded.updated_at
         "#,
     )
@@ -119,6 +137,12 @@ pub async fn upsert_hls_task(pool: &SqlitePool, task: HlsTaskUpsert<'_>) -> Resu
     .bind(task.staging_dir)
     .bind(task.selected_audio_track_uris)
     .bind(task.selected_subtitle_track_uris)
+    .bind(
+        task.max_missing_segments
+            .clamp(0, MAX_HLS_MISSING_SEGMENTS),
+    )
+    .bind(task.missing_segments_json)
+    .bind(task.selected_track_catalog_json)
     .bind(&now)
     .bind(&now)
     .execute(pool)
@@ -136,7 +160,8 @@ pub async fn get_hls_task(
         SELECT task_id, input_url, media_url, playlist_kind, selected_bandwidth,
                selected_resolution, target_duration, last_media_sequence, output_format,
                staging_dir, finish_requested,
-               selected_audio_track_uris, selected_subtitle_track_uris
+               selected_audio_track_uris, selected_subtitle_track_uris,
+               max_missing_segments, missing_segments_json, selected_track_catalog_json
         FROM hls_tasks
         WHERE task_id = ?
         "#,
@@ -159,6 +184,12 @@ pub async fn get_hls_task(
         finish_requested: row.get::<i64, _>("finish_requested") != 0,
         selected_audio_track_uris: row.get("selected_audio_track_uris"),
         selected_subtitle_track_uris: row.get("selected_subtitle_track_uris"),
+        max_missing_segments: row
+            .get::<Option<i64>, _>("max_missing_segments")
+            .unwrap_or(0)
+            .clamp(0, MAX_HLS_MISSING_SEGMENTS),
+        missing_segments_json: row.get("missing_segments_json"),
+        selected_track_catalog_json: row.get("selected_track_catalog_json"),
     }))
 }
 
@@ -190,6 +221,21 @@ pub async fn hls_finish_requested(pool: &SqlitePool, task_id: &str) -> Result<bo
     .flatten()
     .unwrap_or(0);
     Ok(value != 0)
+}
+
+pub async fn update_hls_missing_segments(
+    pool: &SqlitePool,
+    task_id: &str,
+    missing_segments_json: &str,
+) -> Result<(), String> {
+    sqlx::query("UPDATE hls_tasks SET missing_segments_json = ?, updated_at = ? WHERE task_id = ?")
+        .bind(missing_segments_json)
+        .bind(crate::models::task::now_iso())
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub async fn update_hls_last_media_sequence(
@@ -489,7 +535,7 @@ pub async fn reset_hls_segments_for_task(pool: &SqlitePool, task_id: &str) -> Re
     sqlx::query(
         r#"
         UPDATE hls_tasks
-        SET last_media_sequence = NULL, finish_requested = 0, updated_at = ?
+        SET last_media_sequence = NULL, finish_requested = 0, missing_segments_json = NULL, updated_at = ?
         WHERE task_id = ?
         "#,
     )

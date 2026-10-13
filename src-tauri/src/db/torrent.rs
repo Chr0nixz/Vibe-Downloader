@@ -187,11 +187,11 @@ pub async fn upsert_torrent_runtime_snapshot(
             completed_pieces = excluded.completed_pieces,
             verified_pieces = excluded.verified_pieces,
             piece_count = excluded.piece_count,
-            piece_bitfield_base64 = excluded.piece_bitfield_base64,
+            piece_bitfield_base64 = COALESCE(excluded.piece_bitfield_base64, torrent_runtime_snapshots.piece_bitfield_base64),
             peer_count = excluded.peer_count,
             seed_count = excluded.seed_count,
             dht_status = excluded.dht_status,
-            trackers_json = excluded.trackers_json,
+            trackers_json = COALESCE(excluded.trackers_json, torrent_runtime_snapshots.trackers_json),
             upload_bytes = excluded.upload_bytes,
             upload_speed_bps = excluded.upload_speed_bps,
             ratio = excluded.ratio,
@@ -200,6 +200,17 @@ pub async fn upsert_torrent_runtime_snapshot(
             last_error_code = excluded.last_error_code,
             last_error_message = excluded.last_error_message,
             updated_at = excluded.updated_at
+        WHERE metadata_status IS NOT excluded.metadata_status
+           OR completed_pieces IS NOT excluded.completed_pieces OR verified_pieces IS NOT excluded.verified_pieces
+           OR piece_count IS NOT excluded.piece_count
+           OR (excluded.piece_bitfield_base64 IS NOT NULL AND piece_bitfield_base64 IS NOT excluded.piece_bitfield_base64)
+           OR peer_count IS NOT excluded.peer_count OR seed_count IS NOT excluded.seed_count
+           OR dht_status IS NOT excluded.dht_status
+           OR (excluded.trackers_json IS NOT NULL AND trackers_json IS NOT excluded.trackers_json)
+           OR upload_bytes IS NOT excluded.upload_bytes OR upload_speed_bps IS NOT excluded.upload_speed_bps
+           OR ratio IS NOT excluded.ratio OR seeding_enabled IS NOT excluded.seeding_enabled
+           OR seeding_state IS NOT excluded.seeding_state OR last_error_code IS NOT excluded.last_error_code
+           OR last_error_message IS NOT excluded.last_error_message
         "#,
     )
     .bind(task_id)

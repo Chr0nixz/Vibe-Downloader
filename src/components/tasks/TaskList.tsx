@@ -16,6 +16,7 @@ import {
 import { useReducedMotion } from "motion/react";
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { matchesAction } from "@/components/shell/shortcut-registry";
 import { useQueueReasons } from "@/hooks/use-queue-reasons";
 import { useRowSegments } from "@/hooks/use-row-segments";
 import { handleMenuKeyDown } from "@/lib/menu-keyboard";
@@ -56,7 +57,9 @@ const BackupCenter = lazy(() =>
   })),
 );
 
+import { BulkTaskOptionsDialog } from "@/components/tasks/BulkTaskOptionsDialog";
 import { allowedTransferActions } from "@/components/tasks/row-recovery";
+import { SavedViewsPicker } from "@/components/tasks/SavedViewsPicker";
 import { ListContextMenu, type ReorderAction } from "@/components/tasks/TaskContextMenu";
 import { TaskRow } from "@/components/tasks/TaskRow";
 import { taskRowEstimateFor } from "@/components/tasks/task-layout";
@@ -161,6 +164,7 @@ export const TaskList = memo(function TaskList({
   const { t } = useTranslation();
   const reduceMotion = !!useReducedMotion();
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
+  const [bulkEditIds, setBulkEditIds] = useState<string[] | null>(null);
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [statusAnnouncement, setStatusAnnouncement] = useState("");
   const [allSearchMatches, setAllSearchMatches] = useState<number | null>(null);
@@ -558,29 +562,29 @@ export const TaskList = memo(function TaskList({
       const list = filteredRef.current;
       if (list.length === 0) return;
 
-      if (event.key === "ArrowDown") {
+      if (event.key === "ArrowDown" && matchesAction(event, "moveFocus", platform)) {
         event.preventDefault();
         navigateRow("next");
         return;
       }
-      if (event.key === "ArrowUp") {
+      if (event.key === "ArrowUp" && matchesAction(event, "moveFocus", platform)) {
         event.preventDefault();
         navigateRow("prev");
         return;
       }
-      if (event.key === "Home") {
+      if (event.key === "Home" && matchesAction(event, "moveFocus", platform)) {
         event.preventDefault();
         virtualizer.scrollToIndex(0, { align: "start" });
         selectAndFocus(list[0]);
         return;
       }
-      if (event.key === "End") {
+      if (event.key === "End" && matchesAction(event, "moveFocus", platform)) {
         event.preventDefault();
         virtualizer.scrollToIndex(list.length - 1, { align: "end" });
         selectAndFocus(list[list.length - 1]);
       }
     },
-    [navigateRow, selectAndFocus, virtualizer],
+    [navigateRow, selectAndFocus, virtualizer, platform],
   );
 
   if (nav === "settings") {
@@ -754,6 +758,10 @@ export const TaskList = memo(function TaskList({
             >
               <div id="task-list-bulk-menu" className="space-y-0.5" role="menu" onKeyDown={handleMenuKeyDown}>
                 <BulkMenuItem
+                  label={t("workflow.bulkEdit")}
+                  onClick={() => runAfterBulkMenuClose(() => setBulkEditIds([...selectedIds]))}
+                />
+                <BulkMenuItem
                   label={t("taskList.bulkPause")}
                   disabled={pauseableSelected === 0}
                   onClick={() => runAfterBulkMenuClose(() => onBulkPause(selectedTasks()))}
@@ -914,6 +922,9 @@ export const TaskList = memo(function TaskList({
             </Button>
           </div>
           <div id="task-list-tool-panel" className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="col-span-full">
+              <SavedViewsPicker />
+            </div>
             {/* UX-12: the command bar's View menu owns Sort and row height from
                 `md` up; below it the bar hides that menu, so these are the
                 narrow window's only copies. One of each is visible at any
@@ -1023,6 +1034,13 @@ export const TaskList = memo(function TaskList({
         </div>
       ) : null}
 
+      {bulkEditIds ? (
+        <BulkTaskOptionsDialog
+          ids={bulkEditIds}
+          onClose={() => setBulkEditIds(null)}
+          onComplete={() => onRefresh?.()}
+        />
+      ) : null}
       <ListContextMenu
         onNewDownload={onNewDownload}
         onPasteAndCreate={onPasteAndCreate}
@@ -1081,6 +1099,7 @@ export const TaskList = memo(function TaskList({
                       }}
                     >
                       <TaskRow
+                        platform={platform}
                         taskId={taskId}
                         selected={taskId === selectedId}
                         multiSelected={selectedIdSet.has(taskId)}

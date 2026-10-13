@@ -2,7 +2,7 @@ import type { TFunction } from "i18next";
 import { Search, X } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { NAV_SHORTCUT_DIGITS, NAV_SHORTCUT_LABEL_KEYS } from "@/components/shell/nav-shortcuts";
+import { SHORTCUTS, shortcutLabels } from "@/components/shell/shortcut-registry";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -28,65 +28,15 @@ interface ShortcutGroup {
   shortcuts: ShortcutEntry[];
 }
 
-function modSymbol(platform: Platform): string {
-  return platform === "macos" ? "⌘" : "Ctrl+";
-}
-
 function buildGroups(t: TFunction, platform: Platform): ShortcutGroup[] {
-  const mod = modSymbol(platform);
-
-  return [
-    {
-      id: "general",
-      label: t("shortcuts.groups.general"),
-      shortcuts: [
-        { keys: [`${mod}K`], label: t("shortcuts.commandPalette") },
-        { keys: [`${mod}N`], label: t("shortcuts.newDownload") },
-        { keys: [`${mod}V`], label: t("contextmenu.list.pasteAndCreate") },
-        { keys: [`${mod}F`], label: t("shortcuts.search") },
-        { keys: [`${mod},`], label: t("shortcuts.settings") },
-        { keys: [`${mod}/`, "?"], label: t("shortcuts.showShortcuts") },
-      ],
-    },
-    {
-      id: "task",
-      label: t("shortcuts.groups.task"),
-      shortcuts: [
-        { keys: ["↑", "↓"], label: t("shortcuts.moveFocus") },
-        { keys: ["Enter"], label: t("shortcuts.openDetails") },
-        { keys: [`${mod}D`], label: t("shortcuts.toggleDetails") },
-        { keys: [`${mod}P`], label: t("shortcuts.toggleTransfer") },
-        { keys: [`${mod}R`], label: t("shortcuts.recoverTask") },
-        { keys: [`${mod}O`], label: t("shortcuts.openFolder") },
-        { keys: [`${mod}↵`], label: t("shortcuts.openFile") },
-        { keys: ["Del"], label: t("shortcuts.deleteTask") },
-        { keys: ["Shift+Del"], label: t("deleteDialog.deleteFilesToo") },
-        { keys: ["Alt+↑", "Alt+↓"], label: t("shortcuts.reorderQueue") },
-      ],
-    },
-    {
-      id: "navigation",
-      label: t("shortcuts.groups.navigation"),
-      // Derived from the same table the key handler reads; a hand-written
-      // list here once drifted and sent Mod+4 to Queue while promising Completed.
-      shortcuts: NAV_SHORTCUT_DIGITS.map((digit) => ({
-        keys: [`${mod}${digit}`],
-        label: t(NAV_SHORTCUT_LABEL_KEYS[digit]),
-      })),
-    },
-    {
-      id: "bulk",
-      label: t("shortcuts.groups.bulk"),
-      shortcuts: [
-        { keys: ["Shift+↑", "Shift+↓"], label: t("shortcuts.extendSelection") },
-        { keys: [`${mod}Space`], label: t("shortcuts.toggleSelection") },
-        { keys: [`${mod}A`], label: t("shortcuts.selectAll") },
-        { keys: [`${mod}Shift+A`], label: t("shortcuts.clearSelection") },
-        { keys: [`${mod}Shift+P`], label: t("taskList.pauseAll") },
-        { keys: [`${mod}Shift+R`], label: t("taskList.resumeAll") },
-      ],
-    },
-  ];
+  return (["general", "task", "navigation", "bulk"] as const).map((group) => ({
+    id: group,
+    label: t(`shortcuts.groups.${group}`),
+    shortcuts: SHORTCUTS.filter((entry) => entry.group === group).map((entry) => ({
+      keys: shortcutLabels(entry.id, platform),
+      label: t(entry.label),
+    })),
+  }));
 }
 
 export function ShortcutPanel({
@@ -167,10 +117,10 @@ export function ShortcutPanel({
                 {group.shortcuts.map((shortcut) => (
                   <div
                     key={`${shortcut.keys.join("|")}-${shortcut.label}`}
-                    className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-surface-base"
+                    className="grid min-w-0 grid-cols-1 items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors hover:bg-surface-base sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] sm:gap-3"
                   >
-                    <span className="text-sm text-text-secondary">{shortcut.label}</span>
-                    <span className="flex shrink-0 items-center gap-1.5">
+                    <span className="min-w-0 text-sm text-text-secondary">{shortcut.label}</span>
+                    <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 sm:justify-end">
                       {shortcut.keys.map((keys, index) => (
                         <span key={keys} className="flex items-center gap-1.5">
                           {/* A rule, not "/": the slash is itself a key here (Ctrl+/). */}

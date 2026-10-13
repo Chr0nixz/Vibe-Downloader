@@ -1,6 +1,11 @@
 //! SEC-03: the single authority for building HTTP clients in the backend.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use hickory_resolver::{config::*, TokioResolver};
 use reqwest::{Client, NoProxy, Proxy};
@@ -19,6 +24,7 @@ pub struct NetworkClientFactory {
 
 impl NetworkClientFactory {
     pub fn new() -> Self {
+        ensure_rustls_crypto_provider();
         Self::default()
     }
 
@@ -114,6 +120,7 @@ pub fn build_client_with_policy(
     config: &ResolvedProxyConfig,
     policy: NetworkPolicy,
 ) -> Result<Client, String> {
+    ensure_rustls_crypto_provider();
     let resolver = HickoryResolver::new(policy.clone())?;
     let mut builder = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -144,6 +151,19 @@ pub fn build_client_with_policy(
     builder
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", sanitize_proxy_error(e)))
+}
+
+/// Installs the single rustls provider used by the application's reqwest and
+/// platform-verifier clients. The call is idempotent and also covers tests
+/// that construct a client without going through [`NetworkClientFactory::new`].
+pub fn ensure_rustls_crypto_provider() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        // Another dependency may have installed a provider first. In that
+        // case the existing provider remains authoritative and the error is
+        // intentionally ignored.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }
 
 fn sanitize_proxy_error(error: reqwest::Error) -> String {

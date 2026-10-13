@@ -114,7 +114,7 @@
 
 共享会话以“逐 torrent 限速、代理隔离、任务删除精确性、端口/DHT 生命周期均可满足”为前提；不能为了节省资源撤回 `ARC-39` 的修复，或以近似全局限速冒充逐任务限速。若依赖不支持，保留隔离会话，先减少写库与实现统一预算。
 
-**媒体：** 先用 WebVTT fixture 复现字幕问题，交付旁挂字幕或 `mov_text` 封装；然后做 HLS 空闲后完成录制、可配置缺片容忍与缺口记录。DASH 先展示所选轨道，再开放语言/画质选择；按 Content-Type 识别无后缀清单。无 ffmpeg 降级只针对已验证的容器组合，不把任意 fMP4/多轨流承诺为可直接拼接。
+**媒体：** HLS WebVTT 字幕默认以 `mov_text` 嵌入 MP4；交付 HLS 空闲后完成录制、每任务缺片容忍与缺口记录。DASH 开放受限画质、音频语言及 WebVTT 字幕选择，选择结果持久化；按 Content-Type 识别无后缀清单。无 ffmpeg 仅降级到经过验证的单路 MPEG-TS HLS；fMP4、DASH、外部音频/字幕及需要重封装的组合继续拒绝。
 
 **验收：** 两个 BT 下载加做种任务并行，下载槽、总预算、删除与完成动作正确；完成后重启做种可控。媒体成品经 ffprobe/实际播放验证，字幕、语言、缺口与最终状态一致，不能只断言退出码为 0。
 
@@ -404,3 +404,126 @@ B5 的筛选全集操作和隐藏态剪贴板反馈已完成本地实现，登�
 - `pnpm check:i18n` 通过，7 个 locale 的新增选择/失败文案完整。
 - `pnpm check:docs` 与 `git -c core.safecrlf=false diff --check` 通过；全局 `pnpm lint` 仍会报告工作区既有 CRLF/格式差异，本批未整文件格式化。
 - 候选包、系统通知权限、托盘隐藏态的 `visibilitychange` 行为、原生剪贴板和真实批量任务仍按 B7 验收；在这些证据完成前状态保持 `Fixed locally`。
+
+## 21. 2026-10-10 B5 增强实施记录
+
+本批完成用户确认的 B5 增强首版，登记为 `UX-50`（Fixed locally）。包含按站点复用、批量编辑、任务预设（FE-01）、保存视图（FE-04）与统一快捷键；不扩张下载权限或浏览器扩展能力。
+
+- **站点配置**：显式保存与应用，按协议、主机、有效端口组成的精确 origin 匹配；只复用允许的非敏感请求头，排除 Cookie、Authorization、X-*，去掉 Referer 查询与片段。应用保留当前任务独有的敏感头，并重新走既有探测与创建校验。
+- **任务预设**：新建单任务／批量共享同一组字段，详情可从已持久化任务保存。支持另存、更新、重命名、删除及替换确认；预设不含密码、Cookie、私钥、文件摘要或网络授权。代理继承／关闭／自定义语义保留，应用清空代理凭据；之后的手动编辑优先，不修改已创建任务。
+- **批量编辑（FE-03）**：固定去重 ID 快照并排除待删除项，每批最多 100 个；优先级、限速、分类、计划开关可独立选择“不修改／设置值”，限速与分类另有明确清除。SQL 在写入边界保留省略字段，终态或不存在任务跳过；结果保留成功／跳过／失败／未处理，停止只阻止后续批次，重试只提交未完成 ID。
+- **保存视图**：保存现有导航、搜索、筛选、排序，不保存结果、cursor 或选中 ID；应用原子切换查询并推进 epoch、清除选择，复用既有分页／过时响应保护。版本不支持或内容损坏的记录只提示不可应用，保留原始数据。
+- **快捷键**：处理器、任务行、命令面板提示及帮助列表共用 registry，统一平台修饰键和 IME／已消费事件保护。修复 `Mod+Enter` 被普通 Enter 吞掉的问题；帮助面板的多组按键可换行，390px 下标签位于按键上方。
+
+配置库通过新增 SQLite 表持久化，完整数据库备份随库保存；首版没有独立配置导入／导出，也没有扩展既有选择性恢复的字段范围。文件路径仍在实际创建时按现有路径策略裁决。
+
+本地验证（Windows，基线 `HEAD = f87c200`，工作区 dirty；既有未跟踪 `biome-report.txt` 保留）：
+
+- `pnpm typecheck`、`pnpm test:frontend`：83 个文件、477/477 通过；覆盖预设实际创建参数、同源／敏感边界、部分成功重试、分块停止／卸载、视图选择重置和快捷键。
+- `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2`：库、集成与文档测试通过，两个规模基准按设计忽略；最后的稳定错误封装和重连持久化加固后，重跑 `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2 --test workflow_library --test migration_integrity`，18/18 通过。
+- `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -j 2 -- -D warnings`、`cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check` 通过。
+- `pnpm build`、`pnpm check:bundle` 通过；`pnpm test:release-tools` 通过 83 个工具测试和 19 个 i18n 检查测试。
+- `pnpm check:i18n --stable-only` 通过。新增可选参数不改变默认检查；`pnpm check:i18n` 因五种 beta locale 缺少 40 个新增键失败，本轮遵照用户的英文／简体中文维护规则，不宣称七语言或聚合门禁通过。
+- `pnpm specta` 成功，`pnpm check:bindings` 重新生成前后 SHA-256 一致（`6DD5F73D3132CD77176451C572891BF1B6210FACD6E5A0455C1440099837AA21`）；命令最终因本批未提交的 64 行新增 bindings 与 HEAD 不同返回 1，已审阅为预期 IPC／类型增量，不是生成漂移。
+- 新增配置库／批量／视图／快捷键文件的定向 `pnpm exec biome check` 通过；`pnpm lint --max-diagnostics=5` 仍报告未触碰文件的既有 CRLF／格式差异。完整 lint 和 `pnpm verify` 不作为通过结论。
+- Tabbit/Playwright 浏览器 mock 验证保存、更新、复制、重命名、删除、刷新后复用、端口不匹配不列出配置、敏感字段不进入配置库、批量成功／终态跳过、弹层阻止新建快捷键、视图应用清除选择。检查 1440×900、1280×860 和 390×844；独立审阅发现快捷键帮助横向裁切，修复后桌面与窄窗口复核为 resolved（`ship` 只覆盖该修复项）。截图是浅色浏览器预览，不能替代 Tauri、暗色或跨平台候选验收。
+
+原生 IPC、候选升级／完整备份恢复、运行时批量限速、真实同源／跨源请求及系统行为继续按 [B7 增强场景](b7-acceptance-matrix-2026-10-02.md#9-b5-增强候选包与真实环境场景) 验收。
+
+## 22. 2026-10-10 B6 实施记录
+
+B6 分成 BT 做种与媒体成品两个工作包，本地实现与自动化完成，关联 `R27-F06` → `FUN-40`、`R27-F07` → `FUN-41`、`R27-P02` → `PERF-20`，均登记为 `Fixed locally`。工作区保留原有 B5 增强改动，基线为 `HEAD = f87c200`；本节只记录本轮 B6 的实现与当前验证，历史测试数字不作为本轮证据。
+
+- **后台做种**：下载完成后把 API、独立 session 和文件租约交给 `BtSeedingManager`，普通下载 worker 返回并释放槽位。完成任务可显式开始／停止做种；开启前验证本地目录、文件大小、元数据 identity 和 piece 哈希。手动停止持久化，重启只在 `auto_resume_on_startup` 开启时恢复已启用、非手动停止、文件完整且未到限制的任务。
+- **累计策略与排空**：追加 migration 015 保存首次做种时间、累计上传／持续时间和停止原因。比例与时间限制按累计值计算；取消、删除、退出、更新及系统电源命令先取消并等待做种 owner 和 storage 租约。超时返回 `task_stop_pending` 并保留 owner，不把超时当成已经停止。
+- **完成动作与反馈**：通知／打开目录等动作按下载完成轮执行；退出、关机、睡眠、休眠及用户命令等待后台做种结束。详情显示上传状态、累计时间、停止原因和等待提示，无限做种有可见停止入口。
+- **隔离与写入**：保留每任务 session、代理和 DHT/端口隔离；逐 torrent 下载限速与 BT/HTTP 共享下载预算保留，上传改为现有 session 共用上传桶，修改上限保留已消耗的预算。普通运行快照最多每秒一次且按变化写入，piece 位图最多每 5 秒计算／持久化一次，空闲累计时间每 5 秒检查点。
+- **HLS 字幕与直播**：选中 WebVTT 先校验／合并本地字幕和时间映射，再显式映射为 `mov_text`，音视频继续复制，语言映射为 MP4 标签。直播缺片上限每任务 0–100，默认 0；仅对重试耗尽的可容忍网络／404 缺片继续，持久化媒体序号、时间范围和稳定原因。空闲进入可恢复等待；“完成录制”用保存的本地片段及选中外部轨道收尾，先检查 finish 标志，不要求源站恢复。
+- **无 ffmpeg HLS**：只允许单路 TS、无 init map、无加密／discontinuity／外部轨道的组合；成品拼接前验证 188 字节包、未加扰、完整且 CRC 有效的单节目 PAT/PMT 和一致的流布局。输出 `.ts`，使用既有持久化／无覆盖发布路径；保守拒绝不完整 PSI、布局变化或无法验证的容器。
+- **DASH 选择**：探测返回轨道 ID、类型、语言、角色、码率、分辨率、编码及默认选择。创建时重新探测、验证 ID，把视频／音频／WebVTT 字幕选择与任务放在同一事务；恢复按保存 ID 构建片段计划。静态/VOD 的受限 SegmentTemplate/SegmentList/SegmentBase 保留；live、多 Period、SegmentTimeline、DRM、TTML、fMP4 `wvtt` 和不安全轨道继续稳定拒绝。DASH 缺少 ffmpeg 不做直接拼接。
+- **清单识别**：后缀无法判断时使用共享工厂、代理、凭据、任务网络策略和 origin-safe 路径读取 Content-Type；缺失／通用二进制类型才读取最多 4 KiB 前缀，正文读取总截止 15 秒。识别 HLS、DASH、torrent、Metalink，不扫描 HTML 或网页中的视频。
+- **界面**：新建页提供 DASH 画质／音频／字幕选择和 HLS 缺片配置、字幕输出提示；详情显示媒体输出、已选轨道和缺口。新增文案只维护 `en`／`zh-CN`，符合用户语言规则。
+
+本地验证（Windows，工作区 dirty，ffmpeg／ffprobe 位于 `D:/env/ffmpeg/bin`）：
+
+- `pnpm typecheck`、`pnpm test:frontend`：最终绑定生成后的重跑通过，83 个文件、482/482；新增 DASH 键盘选择／创建参数／axe、旧探测快照缺省轨道、HLS 字幕与缺片配置、直播空闲完成、已完成 BT 停止与等待提示回归。
+- `pnpm build`、`pnpm check:bundle` 通过；首屏 gzip JS 328.3 KiB／340 KiB 预算。10 个 B6 前端目标文件的 `pnpm exec biome check` 通过。
+- `cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check`、`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -j 2 -- -D warnings` 通过。
+- `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2`：386 个库测试及全部集成、文档测试通过，3 个性能用例按设计忽略。最终重跑已包含旧探测快照缺少 `dashTracks` 的反序列化回归和 migration 015 的重连断言；本机使用 `-j 2` 限制 Windows 编译并行。
+- 完整 Rust 命令中的 `bt_seeding` 4/4、`media_b6` 7/7、`migration_integrity` 14/14 通过。两路 HTTP 下载与两个做种 owner 并行且共用下载预算；完成任务 piece 校验、手动停止／恢复、累计限制和相同快照不写库有直接断言。媒体用例实际移除子进程 PATH／ffmpeg 环境验证 TS 下载及 fMP4／外部音轨／DASH 依赖拒绝；认证 torrent／Metalink 和跨源秘密剥离通过。HLS 与 DASH 成品经 ffprobe 检查 `mov_text`／语言／容器；离线 TS 与缺片预算有直接断言。
+- `pnpm specta` 成功；`pnpm check:bindings` 再生成前后 SHA-256 均为 `63FAB63E183382B287165D196EEED4F8A15A315B822C1E3907BF7780AB7D1998`。命令因 B5／B6 未提交的 bindings 与 HEAD 相差 105 行返回 1；已审阅为预期 IPC／模型增量，生成器重复运行没有漂移。旧快照兼容默认值生成可选 `dashTracks`，前端按空列表处理。
+- `pnpm check:i18n --stable-only`：1992 个基准键通过。`pnpm check:i18n` 因五种 beta locale 各缺 76 个键（B5 40＋B6 36）失败；遵照用户范围未修改 beta locale。`pnpm lint --max-diagnostics=5` 仍报告未触碰文件的既有 CRLF／格式差异；不宣称完整 `pnpm verify` 通过。
+- Tabbit/Playwright 浏览器 mock 检查了 1280×860 的 DASH 三类选择、390×844 的选择保留与 HLS 缺片输入；选择器和对话框无横向溢出。`impeccable detect src/components/shell/NewDownloadDialog.tsx src/components/shell/TaskDetails.tsx --json` 返回 `[]`。浅色浏览器预览不能代替原生 WebView、暗色或跨平台 GUI E2E。
+- `pnpm check:docs` 与 `git -c core.safecrlf=false diff --check` 通过。
+
+隔离 session 基线命令：`cargo test --locked --manifest-path src-tauri/Cargo.toml --test bt_seeding isolated_sessions_performance_baseline -j 2 -- --ignored --nocapture`，1/1 通过。本机 Windows debug/headless 测试，每个 torrent 为已完整的 4096 字节本地文件，各规模观察 10 秒；2/5/10 组在同一进程顺序执行，RSS 包含运行时及可能保留的分配。数据库 trigger 统计 `torrent_tasks`／`torrent_runtime_snapshots` 的实际 UPDATE，会增加测量开销。
+
+### B6 加固复核（2026-10-10）
+
+- 代码审阅复核做种 owner 注册、超时后保留 owner、退出排空、破坏性完成动作门控、任务网络设置阻断，以及 HLS/DASH 重定向后的资源基址和跨源凭据剥离；未发现需要改变产品边界的新问题。
+- `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -j 2 -- -D warnings` 首次发现 `media_b6` 两处测试将同步 Mutex guard 带过异步数据库关闭。已把断言限制在独立作用域，随后 Clippy 与 fmt 检查通过；这只调整测试锁生命周期，不改运行行为。
+- 修复后 `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2` 完整通过：386 个库测试、所有集成和文档测试；B6 `bt_seeding` 4/4、`media_b6` 9/9、`migration_integrity` 14/14。Windows 首次重链耗时 16 分 49 秒；ffmpeg/ffprobe 可用。完整前端单线程复跑 83 个文件、482/482 通过，类型检查及生产构建通过。
+- `pnpm specta` 成功；`src/generated/bindings.ts` 再生成前后 SHA-256 为 `63FAB63E183382B287165D196EEED4F8A15A315B822C1E3907BF7780AB7D1998`。`pnpm check:bindings` 仍因 dirty 工作区相对 HEAD 的 105 行 B5/B6 预期 bindings 增量退出 1，连续生成无漂移。
+- `cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check`、稳定语言检查（1992 键）、`pnpm check:docs`、`git diff --check` 通过。所有命令基于 dirty Windows 工作区；真实 peer、候选包、直播站点、跨平台电源及 WebView 行为未验证，继续由 B7 验收。
+
+| 并行隔离 session | 全部移交做种耗时（ms） | 进程 RSS（字节） | 10 秒 WAL 文件净增长（字节） | 运行 UPDATE 次数 | DHT IPv4 路由表条目范围 | DHT 未完成请求范围 |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| 2 | 73 | 28,971,008 | 57,680 | 7 | 21–49 | 89–91 |
+| 5 | 194 | 33,431,552 | 140,080 | 17 | 53–70 | 53–147 |
+| 10 | 361 | 38,539,264 | 0 | 27 | 5–94 | 5–177 |
+
+各 session 的 DHT ID 不同，IPv6 路由表本次均为 0。WAL 数字是文件长度净差，会受自动检查点和已有空间复用影响；10 session 的 0 不代表零写入，实际有 27 次运行 UPDATE。本轮没有真实 torrent peer 上传／下载负载，也没有共享 session 对照，因此不据此认定隔离开销可忽略或重构为共享 session。
+
+候选包、真实 peer/DHT、真实直播、多语言 DASH、实际播放以及退出／更新／系统电源操作仍按 [B7 B6 场景](b7-acceptance-matrix-2026-10-02.md#10-b6-真实做种与媒体候选包场景) 验收，不据本地 fixture 改为 `Closed`。旧版已完成 BT 若未缓存 torrent 元数据，会明确提示元数据缺失；首版不会后台重新解析网页或从不可信来源补齐。
+
+## 23. 2026-10-10 后置开发项收尾
+
+本批针对审计中仍可在本地完成的架构与性能项收尾，保持 B7 的真实环境边界不变。
+
+- **PERF-16 路径预留**：创建事务不再先读取所有活动任务及文件的 `final_path`。路径规划只携带当前尝试已知的冲突候选，最终由既有 partial UNIQUE 索引裁决并在冲突后重新规划；`list_task_records` 与浏览器实时活动快照均限制为 `MAX_TASK_PAGE_SIZE`（500）。这样创建路径不再随活动任务总量物化整表字符串，no-clobber 与并发回滚合同保持不变。
+- **ARC-66 状态字段**：新增显式 `TaskTransitionInput` 与 runtime 变体，生产迁移调用分别传递已下载字节、瞬时速度、健康摘要、错误信息和事件消息。兼容包装保留给旧测试/外部调用；HTTP 分段失败会保存当前进度，错误分类仍统一由稳定错误解析器生成。
+- **ARC-67 UI 回调**：窗口关闭回调只做快速状态检查、原子 pending 去重和异步任务派发；设置与任务统计通过 Tauri runtime 查询。托盘“打开下载目录”命令改为异步读取设置后再打开路径，避免 SQLite busy 阻塞 UI 线程。
+- **PERF-13 依赖复核与收敛**：reqwest 改用 `rustls-no-provider`，russh 改用 `ring`，应用启动时显式安装统一的 rustls `ring` provider。当前 `cargo tree -e features -i aws-lc-rs` 只剩 librqbit 的 `sha1-ring`/`librqbit-sha1-wrapper` 路径及为其提供 Windows `prebuilt-nasm` 的直接 feature；reqwest、russh 和 FTPS 不再引入 aws-lc 的 rustls provider。由于 librqbit 仍需要 aws-lc-rs 做 torrent SHA-1，不能在本地安全移除该 crate；`PERF-13` 继续保持 Open，后续需等待上游哈希 feature 收敛或经验证的 Cargo patch。
+- **稳定错误文案门禁**：补齐 B6 新增 13 个 `zh-CN` 稳定错误码源，并让同步脚本只生成 `en`／`zh-CN`，明确跳过 beta locale；新增回归断言保证 beta 文件不被改写。`pnpm test:release-tools` 重新覆盖 83 个工具测试，beta 完整性仍由 `pnpm check:i18n` 单独报告。
+
+本地验证（Windows dirty 工作区）：清理 `src-tauri/target` 后执行 `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2`，386 个库测试、全部集成测试和文档测试通过，3 个性能基准按设计忽略；随后定向 `test_db_guard` 1/1、`bt_seeding` 4/4（另有 1 个显式 ignored 基准）与 `workflow_library` 4/4 通过。`cargo check --all-targets`、Clippy `--all-targets -D warnings` 和 Rust fmt 检查通过。守卫现在先尝试删除，再释放池句柄并重试；current-thread 测试 runtime 结束时仍可能留下由直接 `db::connect` 或后台句柄持有的文件，因此 `ENG-03` 继续保持 Partial。稳定错误同步器定向回归与 `pnpm test:release-tools` 83/83 通过；`pnpm check:i18n --stable-only` 通过，beta 完整性仍单独报告。`cargo tree -e features -i aws-lc-rs`、`-i ring` 与四条协议定向测试确认 provider 收敛；真实 1 万任务创建曲线、慢 SQLite UI 响应、SSH/BT TLS 握手和候选包仍归 B7/发布验收，不能由本地构建改记为 Closed。
+
+## 24. 2026-10-12 B7 本机候选包与性能执行
+
+本轮先建立独立的本机候选身份和证据目录：`scripts/prepare-b7-candidate.mjs --run-id windows-20261012` 生成被 `.gitignore` 忽略的 Tauri overlay，使用 `com.vibe.downloader.b7.windows-20261012`、关闭 updater artifacts，并把 NSIS 安装模式限定为 current-user。`logs/b7/windows-20261012/prepare-native-fixture.py` 在该数据目录写入 migration 013 的完成／暂停任务，自动更新、剪贴板、通知和托盘设置均关闭；它不会触碰日常 `com.vibe.downloader` 数据目录。
+
+`pnpm test:release-tools` 重新通过 86/86（包含候选 overlay 测试）；`pnpm verify:extensions` 通过 3 个 candidate 浏览器包，capture=false；`pnpm check:bundle` 通过，首屏 JS gzip 328.3 KiB / 340 KiB，CSS gzip 15.9 KiB / 18 KiB；`pnpm check:docs`、`pnpm check:i18n --stable-only`、`pnpm verify:protocol-matrix` 和 `git diff --check` 通过。`pnpm typecheck` 和 `pnpm test:frontend` 通过，前端为 83 个文件、482 项断言。
+
+PERF-16 harness 已加入 1k／10k 活动路径创建、同名冲突、全量路径读取对照和 500 条快照上限；本机 debug 的列表／搜索重复 5 次、创建路径各重复 25 次，原始路径和摘要见 [性能基线摘要](performance-baseline-results.md#05-2026-10-12-b7-创建路径与运行快照-050)。该数据只支持本机趋势判断，真实慢盘和 release UI 仍待候选环境。
+
+本轮加固还把 `list_task_records_by_ids` 的 IPC 与数据库入口限制为最多 500 个任务 ID，浏览器实时快照限制为最多 500 条总记录；HLS 缺片容忍值在创建、持久化读写和运行时消费处统一限制为 `0..100`。新增路径快照、实时快照和 HLS 持久化边界回归，避免调用方绕过前端校验后重新引入无界输入。
+
+候选包构建使用 `VIBE_BROWSER_PROFILE=candidate`、Rust `--locked -j 2` 和 Windows x64 目标；原生 host 自检与包哈希已和主程序、MSI、NSIS 一并回填 [B7 矩阵](b7-acceptance-matrix-2026-10-02.md#6-候选安装包和升级验收)。NSIS 已在工作区隔离目录完成静默安装、启动 smoke 和静默卸载，安装器返回码均为 0 且目录已移除；这不等同于 MSI 服务安装或生产数据目录验收。本机没有 `TAURI_SIGNING_PRIVATE_KEY` 或 Windows 代码签名配置，因此不生成 updater artifacts，也不宣称签名分发。`rc.0 → rc.1`、跨平台包、真实 BT／HLS／DASH、系统电源动作和 WebView 走查保持未执行。
+
+完成候选与加固后的最后 Rust 回归：`cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2` 在 Windows dirty 工作区通过 386 个库测试、全部集成／文档测试；3 个规模基准按设计 ignored。随后 `cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check`、`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -j 2 -- -D warnings` 和 `cargo test --locked --manifest-path src-tauri/Cargo.toml --test media_b6 -j 2`（10/10）通过。
+
+## 25. 2026-10-13 B7 原生候选与短性能基线
+
+本轮刷新 Windows x64 独立 candidate，包含上一轮最后的输入／快照／HLS 加固。使用 `VIBE_BROWSER_PROFILE=candidate`、`--locked -j 2` 和 release/LTO，生成并归档 NSIS／MSI、主程序和 host；哈希、源码指纹及 Code Signing `NotSigned` 状态见 [B7 矩阵 6.2](b7-acceptance-matrix-2026-10-02.md#62-2026-10-13-windows-候选刷新与原生-ui-基线)。Cargo 输出的 host 与打包使用的 staged host 分别记录，避免错误绑定包内哈希。NSIS 在工作区隔离安装与卸载均返回 `0`，安装目录已移除；应用内／包内 native-host 自检、schema 15 的 10k 备份验证和 capture=false 检查通过。
+
+新增 `pnpm perf:native-ui` 与隔离数据、Windows 进程采样脚本，按身份、所有权、进程退出、WAL 检查点／完整性限制换库；适配 Windows MSIX Roaming 虚拟化和 PowerShell 5.1，保留每次检查点数据库及失败短跑日志。工具的 3 项回归验证拒绝生产／错误 identity、不改普通数据、拒绝活进程／busy／损坏 WAL，以及小样本 percentile 定义；Node 内置 SQLite 为可选加载，采集使用已验证的 Node 22.23.2。
+
+正式 1k／10k 各 5 次进程启动与鼠标／方向键选择／搜索、10 秒滚动和 5 分钟空闲采样完成；所有测量退出记录的 7 个进程均结束。首屏观察上界 p50/p95 为 `1944/2007`、`1842/2346 ms`，搜索含防抖为 `345.4/348.2`、`365.4/377.1 ms`；DOM 最多 22 行，单次滚动 rAF 均值 `90.94`／`54.45`，5 分钟主进程 working set `50.77`／`72.13 MiB`。完整表、CPU、WAL、共享内存口径及原始样本见 [性能摘要](performance-baseline-results.md#4-2026-10-13-windows-原生-release-ui-短基线)。不把 CDP 观察称作精确 first paint，不把 rAF 称作实际呈现 FPS，也不以短基线关闭外部验收。
+
+本轮新发现已登记：`PERF-21`（NSIS 多带约 23.1 MiB bindings 导出器）、`UX-51`（系统图标 PNG 被 CSP 阻断且缺少加载失败回退），在该快照时均为 Open；后续修复见第 26 节。本机后续还需补冷缓存／滚动 trace、1 小时空闲、NTFS 预分配与检查点压力；MSI 实际安装、updater／签名、跨平台、真实协议源和系统电源动作仍未执行。
+
+本轮命令与门禁（Windows `10.0.28020`、dirty 工作区）：上述 candidate 构建和 `pnpm perf:native-ui --config logs/b7/windows-20261013-ui/tauri.b7.generated.json --exe logs/b7/windows-20261013-ui/installed-nsis/vibe-downloader.exe --reuse-fixture true` 通过；`pnpm test:release-tools` 为 JS 89/89、i18n 工具 19/19，`pnpm check:bundle`、`pnpm verify:extensions`（candidate、3 包、capture=false）、`pnpm check:i18n --stable-only`、`pnpm check:docs`、定向 `pnpm exec biome check scripts/perf/native-ui.mjs scripts/perf/native-ui-fixture.mjs scripts/native-ui.test.mjs package.json` 和 `git -c core.safecrlf=false diff --check` 通过。最后补上 CDP 连接失败时仍保留已启动 PID、清理失败记录 `cleanupPending`；重新隔离安装、核对主程序／包内 host 哈希并以 `--repetitions 1 --steady-seconds 0 --reuse-fixture true` 短跑两组验证，报告单独保留，没有替换正式五次基线。再次卸载成功、目录移除。此轮只增加采集脚本和文档；全量 Rust／前端测试证据沿用上一节同一产品代码快照，不报告为本轮重跑。
+
+## 26. 2026-10-13 B7 候选图标与包装修复
+
+`UX-51`：CSP 仅在图片来源中增加 `data:`，系统 PNG 可使用既有提取／缓存路径；`TaskRow` 对失败 URL 保留文件类型图标回退，进度更新不会重新挂载该破图，新图标 URL 仍可加载。新增 2 项组件回归，保留空 alt／隐藏装饰图标、原有尺寸和协议提示。
+
+`PERF-21`：bindings 导出器新增显式 feature 和 `required-features`，默认 Cargo／Tauri 产品构建不启用。`pnpm specta` 显式启用并锁定依赖；实际导出成功，生成前后 SHA-256 均为 `63FAB63E183382B287165D196EEED4F8A15A315B822C1E3907BF7780AB7D1998`。`pnpm check:bindings` 首次执行导出成功后因工作区已有 B5/B6 bindings diff 返回 `1`，已逐项复核，没有本次新增漂移。提交准备阶段将这些合法生成变更纳入暂存基线，在 Windows dirty 工作区重新执行同一命令返回 `0`，生成哈希仍一致；未手改生成文件。
+
+第一次新候选构建的主程序、Native Host 和 NSIS 完成，但 MSI 的 WiX ICE30 拒绝 Native Host 同时作为普通 Cargo bin 和 externalBin 安装到同一路径。verbose 重试与中间 MSI 的只读 File 表确认两份 host，保留失败记录，未跳过 ICE 验证。追加 `native-host`／`required-features`，仅独立 staging 脚本启用；产品 Tauri 默认只选主程序，sidecar 由 externalBin 纳入一次。`pnpm test:rust`／`pnpm verify:rust` 同步启用 host feature，CI Windows 包检查新增一份 host／无 exporter／自检返回码断言。新增 feature 的全目标 Clippy 和 host 7/7 单测本机通过；未执行远程 CI。
+
+失败的 MSI 封装使 Tauri 未走到恢复主程序类型标识的步骤；确认生成主程序 `NotSigned` 后，仅恢复 SDK 的 25 字节标记中的 3 个字符，原文件和前后哈希保留在 `failed-msi-main.exe`／`bundle-marker-recovery.json`。最后修改仅是 bin 选取、构建脚本、测试与 CI 边界，主程序 Rust／前端源码及默认 enabled features 仍相同；重建 featured staged host 后复用已编译主程序执行 `tauri bundle`，不把重封装称为再次全量编译。
+
+本轮 Windows dirty 工作区的 `pnpm typecheck`、`pnpm test:frontend`（83 文件、484 测试）、`pnpm build`、`pnpm test:release-tools`（JS 89／i18n 工具 19）、`pnpm check:bundle`、`pnpm check:i18n --stable-only`、`pnpm verify:extensions`（candidate、capture=false）、定向 Biome、`cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check`、`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -j 2 -- -D warnings` 与 `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2` 已通过。Rust 本轮重新执行，库测试 386、全部集成／文档通过，3 个规模基准按设计 ignored；Windows 测试重编译／链接为 15m54s。最后只调整 bin 构建边界，Rust 源码未变；最终补跑 featured host 全目标 Clippy 和 7/7 单测，release 工具重跑通过。Impeccable 机械检查对修改后的 TaskRow 无发现。
+
+新包已完成验收：MSI File 表与 NSIS 安装清单均无 exporter／只有一份 host；NSIS 安装／卸载返回 `0`，目录已移除，host 自检与 capture=false 通过。实际原生 PNG 为 40×40，坏图回退且无重复提取 IPC；内联脚本／跨域连接继续被 CSP 拒绝，500px 视口无横向溢出／破图，截图人工复核通过，退出的 7 个进程均结束。`pnpm perf:native-ui --config logs/b7/windows-20261013-fixes/tauri.b7.generated.json --exe logs/b7/windows-20261013-fixes/installed-nsis/vibe-downloader.exe --repetitions 1 --steady-seconds 0` 与 `node logs/b7/windows-20261013-fixes/native-fixes-smoke.mjs` 通过；短跑只作功能复核。NSIS／MSI 较 6.2 快照体积减少 33.12%／33.31%，完整哈希、重封装来源、SDK 警告、截图和局限见 [B7 矩阵 6.3](b7-acceptance-matrix-2026-10-02.md#63-2026-10-13-图标与二进制包装修复验收)。两项记为 Fixed locally；远程 CI、MSI 服务安装、签名／updater、跨平台和真实协议验收仍未执行。

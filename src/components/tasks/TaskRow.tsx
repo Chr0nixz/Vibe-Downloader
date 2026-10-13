@@ -28,7 +28,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { type MouseEventHandler, memo, type ReactNode, useCallback, useMemo } from "react";
+import { type MouseEventHandler, memo, type ReactNode, useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   hasInlineRecovery,
@@ -102,6 +102,7 @@ interface TaskRowProps {
    * 2px bar and a single-line rail, and reveals checkbox/actions on hover or
    * focus. Distinct from `shellCompact`, which is a viewport-width tier. */
   compact: boolean;
+  platform?: Platform;
 }
 
 const EMPTY_SPEED_HISTORY: SpeedSample[] = [];
@@ -425,6 +426,7 @@ export const TaskRow = memo(function TaskRow({
   queueReason,
   segments,
   compact,
+  platform = "windows",
 }: TaskRowProps) {
   const { t } = useTranslation();
   const task = useTaskDataStore((s) => s.taskById[taskId]);
@@ -434,6 +436,9 @@ export const TaskRow = memo(function TaskRow({
   // Called before the `if (!task)` guard would violate the Rules of Hooks,
   // so we pass the file name defensively (empty string yields null safely).
   const systemIcon = useSystemFileIcon(task?.fileName ?? "");
+  // UX-51: a failed URL stays on the fallback across progress updates, while
+  // a new icon can still load when a virtualized row changes file type.
+  const [failedSystemIcon, setFailedSystemIcon] = useState<string | null>(null);
   const onSelect = useCallback(
     (source: "pointer" | "keyboard") => {
       onSelectTask(taskId, source);
@@ -590,28 +595,38 @@ export const TaskRow = memo(function TaskRow({
         onKeyDown={(event) => {
           if ((event.target as HTMLElement).closest("[data-row-action]")) return;
 
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          const keyPlatform = platform;
+          if (
+            (event.key === "ArrowDown" || event.key === "ArrowUp") &&
+            (matchesAction(event, "moveFocus", keyPlatform) || matchesAction(event, "extendSelection", keyPlatform))
+          ) {
             event.preventDefault();
             const direction = event.key === "ArrowDown" ? "next" : "prev";
             // Shift+Arrow grows the selection the way Shift+click does, so a
             // subset can be picked without leaving the keyboard.
-            if (event.shiftKey && onExtendSelection) {
+            if (
+              matchesAction({ ...event, defaultPrevented: false }, "extendSelection", keyPlatform) &&
+              onExtendSelection
+            ) {
               onExtendSelection(direction);
               return;
             }
             onNavigate(direction);
             return;
           }
-          if (event.key === "Enter") {
+          if (matchesAction(event, "openDetails", keyPlatform)) {
             event.preventDefault();
             onShowDetails?.(task);
             return;
           }
-          if (event.key === " ") {
+          if (
+            event.key === " " &&
+            (matchesAction(event, "toggleSelection", keyPlatform) || matchesAction(event, "moveFocus", keyPlatform))
+          ) {
             event.preventDefault();
             // Ctrl/⌘+Space toggles this row in the multi-selection (the
             // Windows list convention); plain Space only moves the focus.
-            if (event.ctrlKey || event.metaKey) {
+            if (matchesAction({ ...event, defaultPrevented: false }, "toggleSelection", keyPlatform)) {
               onToggleSelected(task.id, !multiSelected);
               return;
             }
@@ -678,10 +693,12 @@ export const TaskRow = memo(function TaskRow({
                 title={`${t(labelKey)} · ${task.protocol.toUpperCase()}`}
                 className="flex shrink-0 select-none items-center justify-center text-text-secondary transition-colors duration-ui group-hover:text-text-primary"
               >
-                {systemIcon ? (
+                {systemIcon && systemIcon !== failedSystemIcon ? (
                   <img
+                    key={systemIcon}
                     src={systemIcon}
                     alt=""
+                    onError={() => setFailedSystemIcon(systemIcon)}
                     className={cn("object-contain", compact ? "h-8 w-8 md:h-7 md:w-7" : "h-11 w-11 md:h-8 md:w-8")}
                     draggable={false}
                   />
@@ -1530,3 +1547,6 @@ const InlineRecovery = memo(function InlineRecovery({
     </div>
   );
 });
+
+import { matchesAction } from "@/components/shell/shortcut-registry";
+import type { Platform } from "@/lib/platform";

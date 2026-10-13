@@ -21,7 +21,7 @@ function Get-GitDirty {
         $status = git -C (Resolve-Path "$PSScriptRoot\..\..") status --porcelain
         return [bool]$status
     } catch {
-        return $false
+        return $null
     }
 }
 
@@ -30,6 +30,8 @@ $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 $rustc = try { (rustc --version).Trim() } catch { "unknown" }
 $cargo = try { (cargo --version).Trim() } catch { "unknown" }
 $node = try { (node --version).Trim() } catch { "unknown" }
+$repoDrive = (Get-Item -LiteralPath (Resolve-Path "$PSScriptRoot\..\..")).PSDrive.Name
+$volume = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($repoDrive):'" -ErrorAction SilentlyContinue
 
 function Get-AppVersion {
     try {
@@ -62,6 +64,12 @@ $meta = [ordered]@{
     ram = [ordered]@{
         totalBytes = [int64]$os.TotalVisibleMemorySize * 1024
         freeBytes  = [int64]$os.FreePhysicalMemory * 1024
+    }
+    workspaceVolume = [ordered]@{
+        drive = $repoDrive
+        fileSystem = $volume.FileSystem
+        sizeBytes = $volume.Size
+        freeBytes = $volume.FreeSpace
     }
     toolchain = [ordered]@{
         rustc = $rustc

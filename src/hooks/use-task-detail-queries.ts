@@ -268,7 +268,11 @@ export function useTaskDetailQueries(options: { task: Task; activeTab: string })
           setTorrentSnapshotError(errorMessage(error));
         }),
     DETAIL_REFRESH_MS,
-    { enabled: torrentSnapshotEnabled, poll: isLiveStatus(task.status), reloadKey: task.id },
+    {
+      enabled: torrentSnapshotEnabled,
+      poll: isLiveStatus(task.status) || task.status === "completed",
+      reloadKey: `${task.id}:${task.updatedAt}`,
+    },
   );
 
   // FTP/SFTP Overview: segment summary + recent events (acceleration) + SFTP known hosts.

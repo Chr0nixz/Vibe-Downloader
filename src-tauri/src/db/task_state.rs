@@ -441,6 +441,63 @@ pub async fn update_task_status_in_tx(
     health_summary: Option<&str>,
     error_message: Option<&str>,
 ) -> Result<Option<TaskRecord>, String> {
+    update_task_status_fields_in_tx(
+        tx,
+        task_id,
+        status,
+        expected_current_status,
+        None,
+        speed_bps,
+        connection_count,
+        health_summary,
+        error_message,
+    )
+    .await
+}
+
+/// Updates a semantic task transition while keeping downloaded bytes and
+/// speed as separate values. The legacy `update_task_status_in_tx` API above
+/// intentionally retains its historical speed-only contract for older
+/// callers; lifecycle transitions use this explicit form so a resume offset
+/// can never be written into `speed_bps` (ARC-66).
+#[allow(clippy::too_many_arguments)]
+pub async fn update_task_progress_status_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: &str,
+    status: TaskStatus,
+    expected_current_status: Option<TaskStatus>,
+    downloaded_bytes: Option<i64>,
+    speed_bps: i64,
+    connection_count: i32,
+    health_summary: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<Option<TaskRecord>, String> {
+    update_task_status_fields_in_tx(
+        tx,
+        task_id,
+        status,
+        expected_current_status,
+        downloaded_bytes,
+        speed_bps,
+        connection_count,
+        health_summary,
+        error_message,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_task_status_fields_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: &str,
+    status: TaskStatus,
+    expected_current_status: Option<TaskStatus>,
+    downloaded_bytes: Option<i64>,
+    speed_bps: i64,
+    connection_count: i32,
+    health_summary: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<Option<TaskRecord>, String> {
     let updated_at = crate::models::task::now_iso();
     let (error_code, recovery_actions) = error_state_from_message(error_message);
     let recovery_actions = recovery_actions_json(&recovery_actions)?;
@@ -452,7 +509,7 @@ pub async fn update_task_status_in_tx(
     let row = sqlx::query(
         r#"
         UPDATE tasks
-        SET status = ?, speed_bps = ?, connection_count = ?,
+        SET status = ?, downloaded_bytes = COALESCE(?, downloaded_bytes), speed_bps = ?, connection_count = ?,
             health_summary = ?, error_message = ?, error_code = ?, recovery_actions = ?,
             retry_after_at = CASE WHEN ? IS NULL THEN NULL ELSE retry_after_at END,
             updated_at = ?
@@ -461,6 +518,7 @@ pub async fn update_task_status_in_tx(
         "#,
     )
     .bind(status.as_str())
+    .bind(downloaded_bytes)
     .bind(speed_bps)
     .bind(connection_count)
     .bind(health_summary)

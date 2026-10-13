@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,8 +16,25 @@ import {
   localeHasFailures,
   placeholderNames,
   pluralCategories,
+  runCompletenessCheck,
   visibleEnglishWords,
 } from "./check-i18n-completeness.ts";
+
+test("stable-only verifies both stable locales while the default still rejects missing beta keys", async (context) => {
+  const dir = mkdtempSync(join(tmpdir(), "i18n-stable-"));
+  context.mock.method(console, "log", () => {});
+  context.mock.method(console, "error", () => {});
+  try {
+    copyFileSync(new URL("../src/i18n/locales/en.ts", import.meta.url), join(dir, "en.ts"));
+    assert.equal(await runCompletenessCheck(dir, true), 1);
+    copyFileSync(new URL("../src/i18n/locales/zh-CN.ts", import.meta.url), join(dir, "zh-CN.ts"));
+    writeFileSync(join(dir, "ja.ts"), "export default {};");
+    assert.equal(await runCompletenessCheck(dir, true), 0);
+    assert.equal(await runCompletenessCheck(dir), 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("flattenLeaves walks nested string leaves", () => {
   assert.deepEqual(flattenLeaves({ a: { b: "x", c: "y" }, d: "z" }), { "a.b": "x", "a.c": "y", d: "z" });

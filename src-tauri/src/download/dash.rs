@@ -35,7 +35,7 @@ use crate::{
     events::{emit_task_updated_record, DbWriteGate, TaskProgressEmitGate},
     logging::sanitize_url,
     models::{
-        AppErrorPayload, EngineCapabilities, ProbedFile, SegmentStatus, TaskKind,
+        AppErrorPayload, DashTrack, EngineCapabilities, ProbedFile, SegmentStatus, TaskKind,
         TaskProgressPayload, TaskRecord, TaskStatus,
     },
 };
@@ -55,6 +55,7 @@ const DASH_SEGMENT_RETRIES: i32 = 2;
 const DASH_MAX_SEGMENTS_PER_REPRESENTATION: i64 = 100_000;
 const TRACK_KIND_VIDEO: &str = "video";
 const TRACK_KIND_AUDIO: &str = "audio";
+const TRACK_KIND_SUBTITLE: &str = "subtitle";
 
 #[derive(Debug, Clone)]
 pub struct DashEngine {
@@ -102,17 +103,21 @@ impl DashEngine {
             "fetching_manifest",
             Some("dash"),
         );
-        let body = fetch_mpd_text(&client, url, request_headers, network_policy).await?;
+        let (body, resolved_uri) =
+            fetch_mpd_text(&client, url, request_headers, network_policy).await?;
         crate::download::engine::emit_probe_phase(
             app,
             request_id,
             "parsing_manifest",
             Some("dash"),
         );
-        let parsed = parse_dash_manifest(url, &body)?;
+        let parsed = parse_dash_manifest(&resolved_uri, &body)?;
         let (_video, _audio) = select_tracks(&parsed)?;
+        validate_track_catalog(&parsed, &resolved_uri)?;
         Ok(DashManifestSummary {
+            resolved_uri,
             display_name: dash_output_name(url),
+            tracks: dash_track_catalog(&parsed),
         })
     }
 }
@@ -181,7 +186,7 @@ impl DownloadEngine for DashEngine {
             Ok(ProbeOutput {
                 protocol: PROTOCOL_DASH.to_string(),
                 task_kind: TaskKind::Manifest,
-                resolved_uri: request.uri.clone(),
+                resolved_uri: summary.resolved_uri,
                 display_name: summary.display_name.clone(),
                 total_size: 0,
                 source_key,
@@ -201,6 +206,7 @@ impl DownloadEngine for DashEngine {
                 hls_variants: Vec::new(),
                 hls_audio_tracks: Vec::new(),
                 hls_subtitle_tracks: Vec::new(),
+                dash_tracks: summary.tracks,
                 metalink: None,
             })
         })
@@ -220,7 +226,9 @@ impl DownloadEngine for DashEngine {
 
 #[derive(Debug, Clone)]
 struct DashManifestSummary {
+    resolved_uri: String,
     display_name: String,
+    tracks: Vec<DashTrack>,
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +249,9 @@ struct ParsedPeriod {
 struct ParsedAdaptationSet {
     content_type: Option<String>,
     mime_type: Option<String>,
+    language: Option<String>,
+    role: Option<String>,
+    codecs: Option<String>,
     representations: Vec<ParsedRepresentation>,
 }
 
@@ -249,6 +260,8 @@ struct ParsedRepresentation {
     id: String,
     bandwidth: i64,
     codecs: Option<String>,
+    width: Option<i64>,
+    height: Option<i64>,
     segment_source: SegmentSource,
 }
 
@@ -469,6 +482,18 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
             Ok(Event::Start(event)) => {
                 let name = local_name(event.name().as_ref());
                 match name.as_str() {
+                    "contentprotection" => {
+                        return Err(engine_error(
+                            "dash_drm_unsupported",
+                            "Protected DASH tracks are not supported.",
+                            false,
+                        ))
+                    }
+                    "role" => {
+                        if let Some(adapt) = current_adaptation.as_mut() {
+                            adapt.role = attr_value(&event, "value").or_else(|| adapt.role.clone());
+                        }
+                    }
                     "mpd" => {
                         saw_mpd = true;
                         if attr_value(&event, "type")
@@ -498,9 +523,14 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                     "adaptationset" => {
                         let content_type = attr_value(&event, "contentType");
                         let mime_type = attr_value(&event, "mimeType");
+                        let language = attr_value(&event, "lang");
+                        let role = attr_value(&event, "role");
                         current_adaptation = Some(ParsedAdaptationSet {
                             content_type,
                             mime_type,
+                            language,
+                            role,
+                            codecs: attr_value(&event, "codecs"),
                             representations: Vec::new(),
                         });
                     }
@@ -509,11 +539,19 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
                         let bandwidth = attr_value(&event, "bandwidth")
                             .and_then(|v| v.parse::<i64>().ok())
                             .unwrap_or(0);
-                        let codecs = attr_value(&event, "codecs");
+                        let codecs = attr_value(&event, "codecs").or_else(|| {
+                            current_adaptation
+                                .as_ref()
+                                .and_then(|adapt| adapt.codecs.clone())
+                        });
+                        let width = attr_value(&event, "width").and_then(|v| v.parse().ok());
+                        let height = attr_value(&event, "height").and_then(|v| v.parse().ok());
                         current_representation = Some(ParsedRepresentation {
                             id,
                             bandwidth,
                             codecs,
+                            width,
+                            height,
                             segment_source: SegmentSource::Base {
                                 base_url: String::new(),
                                 initialization_range: None,
@@ -593,6 +631,19 @@ fn parse_dash_manifest(manifest_url: &str, text: &str) -> Result<ParsedMpd, Stri
             Ok(Event::Empty(event)) => {
                 let name = local_name(event.name().as_ref());
                 match name.as_str() {
+                    "contentprotection" => {
+                        return Err(engine_error(
+                            "dash_drm_unsupported",
+                            "Protected DASH tracks are not supported.",
+                            false,
+                        ))
+                    }
+                    "role" => {
+                        if let Some(adapt) = current_adaptation.as_mut() {
+                            adapt.role = attr_value(&event, "value").or_else(|| adapt.role.clone());
+                        }
+                    }
+
                     "segmenturl" => {
                         if let Some(state) = segment_list_state.as_mut() {
                             absorb_segment_url_event(state, &event);
@@ -855,6 +906,162 @@ fn select_tracks(
         ));
     }
     Ok((best_video, best_audio))
+}
+
+fn dash_track_catalog(mpd: &ParsedMpd) -> Vec<DashTrack> {
+    let mut tracks = Vec::new();
+    for period in &mpd.periods {
+        for adapt in &period.adaptation_sets {
+            let Some(kind) = adaptation_kind(adapt) else {
+                continue;
+            };
+            for rep in &adapt.representations {
+                tracks.push(DashTrack {
+                    id: rep.id.clone(),
+                    kind: kind.to_string(),
+                    language: adapt.language.clone(),
+                    role: adapt.role.clone(),
+                    bandwidth: rep.bandwidth.to_string(),
+                    resolution: rep.width.zip(rep.height).map(|(w, h)| format!("{w}x{h}")),
+                    codecs: rep.codecs.clone(),
+                    subtitle_format: (kind == "subtitle")
+                        .then(|| adapt.mime_type.clone())
+                        .flatten(),
+                    selected: false,
+                });
+            }
+        }
+    }
+    if let Ok((video, audio)) = select_tracks(mpd) {
+        for track in &mut tracks {
+            track.selected = (track.kind == TRACK_KIND_VIDEO
+                && video.as_ref().is_some_and(|rep| rep.id == track.id))
+                || (track.kind == TRACK_KIND_AUDIO
+                    && audio.as_ref().is_some_and(|rep| rep.id == track.id));
+        }
+    }
+    tracks
+}
+
+fn validate_track_catalog(mpd: &ParsedMpd, url: &str) -> Result<(), String> {
+    let tracks = dash_track_catalog(mpd);
+    if tracks.len() > 512 {
+        return Err(engine_error(
+            "dash_invalid_manifest",
+            "Too many DASH representations.",
+            false,
+        ));
+    }
+    let mut ids = std::collections::HashSet::new();
+    for track in tracks {
+        if track.id.is_empty() || !ids.insert(track.id.clone()) {
+            return Err(engine_error(
+                "dash_track_invalid",
+                "Representation IDs must be present and unique.",
+                false,
+            ));
+        }
+        if track.kind == TRACK_KIND_SUBTITLE
+            && !matches!(
+                track.subtitle_format.as_deref(),
+                Some("text/vtt" | "application/webvtt")
+            )
+        {
+            return Err(engine_error(
+                "dash_subtitle_unsupported",
+                "Only raw WebVTT subtitles are supported.",
+                false,
+            ));
+        }
+        let rep = select_representation_by_id(mpd, Some(&track.id), &track.kind)?
+            .ok_or_else(|| engine_error("dash_track_invalid", "Missing representation.", false))?;
+        build_segment_plans(url, Path::new("."), "probe", &track.kind, &rep)?;
+    }
+    Ok(())
+}
+
+fn adaptation_kind(adapt: &ParsedAdaptationSet) -> Option<&'static str> {
+    // Subtitle application MIME types do not have to declare contentType="text".
+    // Include encoded subtitles so validation rejects them instead of silently hiding them.
+    let subtitle_codec = |codecs: &str| {
+        codecs
+            .split(',')
+            .any(|codec| matches!(codec.trim().split('.').next(), Some("wvtt" | "stpp")))
+    };
+    if adapt
+        .mime_type
+        .as_deref()
+        .is_some_and(|mime| matches!(mime, "application/webvtt" | "application/ttml+xml"))
+        || adapt.codecs.as_deref().is_some_and(subtitle_codec)
+        || adapt
+            .representations
+            .iter()
+            .any(|rep| rep.codecs.as_deref().is_some_and(subtitle_codec))
+    {
+        return Some(TRACK_KIND_SUBTITLE);
+    }
+    if adapt.content_type.as_deref() == Some("video")
+        || adapt
+            .mime_type
+            .as_deref()
+            .is_some_and(|m| m.starts_with("video"))
+    {
+        Some(TRACK_KIND_VIDEO)
+    } else if adapt.content_type.as_deref() == Some("audio")
+        || adapt
+            .mime_type
+            .as_deref()
+            .is_some_and(|m| m.starts_with("audio"))
+    {
+        Some(TRACK_KIND_AUDIO)
+    } else if adapt.content_type.as_deref() == Some("text")
+        || adapt
+            .mime_type
+            .as_deref()
+            .is_some_and(|m| m.starts_with("text/"))
+    {
+        Some(TRACK_KIND_SUBTITLE)
+    } else {
+        None
+    }
+}
+
+fn select_representation_by_id(
+    mpd: &ParsedMpd,
+    id: Option<&str>,
+    kind: &str,
+) -> Result<Option<ParsedRepresentation>, String> {
+    let Some(id) = id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    for period in &mpd.periods {
+        for adapt in &period.adaptation_sets {
+            if adaptation_kind(adapt) != Some(kind) {
+                continue;
+            }
+            if let Some(rep) = adapt.representations.iter().find(|rep| rep.id == id) {
+                if kind == TRACK_KIND_SUBTITLE {
+                    let is_webvtt = adapt.mime_type.as_deref().is_some_and(|mime| {
+                        mime.eq_ignore_ascii_case("text/vtt")
+                            || mime.eq_ignore_ascii_case("application/webvtt")
+                    });
+                    if !is_webvtt {
+                        return Err(engine_error(
+                            "dash_subtitle_unsupported",
+                            "Only WebVTT DASH subtitles can be embedded.",
+                            false,
+                        ));
+                    }
+                }
+                return Ok(Some(rep.clone()));
+            }
+        }
+    }
+    Err(engine_error(
+        "dash_track_invalid",
+        format!("Selected DASH {kind} representation '{id}' was not found in the manifest."),
+        false,
+    ))
 }
 
 /// Generate concrete segment download plans for a selected representation.
@@ -1129,10 +1336,40 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
     let credentials = db::resolve_task_credentials(&pool, &task.id).await?;
     let request_headers =
         super::http::merge_basic_auth_headers(&request_headers, credentials.as_ref());
-    let mpd_text =
-        fetch_mpd_text(&client, &manifest_url, &request_headers, &network_policy).await?;
+    let manifest_headers = super::http::headers_for_origin(
+        &request_headers,
+        &super::http::url_origin(&task.url).unwrap_or_default(),
+        &manifest_url,
+    );
+    let (mpd_text, manifest_url) =
+        fetch_mpd_text(&client, &manifest_url, &manifest_headers, &network_policy).await?;
     let parsed = parse_dash_manifest(&manifest_url, &mpd_text)?;
-    let (video_rep, audio_rep) = select_tracks(&parsed)?;
+    let persisted = db::get_dash_task(&pool, &task.id).await?;
+    validate_track_catalog(&parsed, &manifest_url)?;
+    let (default_video, default_audio) = select_tracks(&parsed)?;
+    let video_rep = select_representation_by_id(
+        &parsed,
+        persisted
+            .as_ref()
+            .and_then(|state| state.video_representation_id.as_deref()),
+        TRACK_KIND_VIDEO,
+    )?
+    .or(default_video);
+    let audio_rep = select_representation_by_id(
+        &parsed,
+        persisted
+            .as_ref()
+            .and_then(|state| state.audio_representation_id.as_deref()),
+        TRACK_KIND_AUDIO,
+    )?
+    .or(default_audio);
+    let subtitle_rep = select_representation_by_id(
+        &parsed,
+        persisted
+            .as_ref()
+            .and_then(|state| state.selected_subtitle_representation_id.as_deref()),
+        TRACK_KIND_SUBTITLE,
+    )?;
 
     // Build segment plans for each selected track.
     let mut all_plans: Vec<DashSegmentPlan> = Vec::new();
@@ -1154,6 +1391,15 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
             rep,
         )?);
     }
+    if let Some(rep) = &subtitle_rep {
+        all_plans.extend(build_segment_plans(
+            &manifest_url,
+            &staging_dir,
+            &task.id,
+            TRACK_KIND_SUBTITLE,
+            rep,
+        )?);
+    }
     if all_plans.is_empty() {
         return Err(engine_error(
             "dash_no_segments",
@@ -1163,6 +1409,7 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
     }
 
     // Persist dash_task metadata.
+    let track_catalog_json = serde_json::to_string(&dash_track_catalog(&parsed)).ok();
     db::upsert_dash_task(
         &pool,
         db::DashTaskUpsert {
@@ -1176,6 +1423,8 @@ async fn run_dash_download(engine: DashEngine, context: DownloadContext) -> Resu
             audio_representation_id: audio_rep.as_ref().map(|r| r.id.as_str()),
             audio_bandwidth: audio_rep.as_ref().map(|r| r.bandwidth),
             audio_codecs: audio_rep.as_ref().and_then(|r| r.codecs.as_deref()),
+            selected_subtitle_representation_id: subtitle_rep.as_ref().map(|r| r.id.as_str()),
+            track_catalog_json: track_catalog_json.as_deref(),
             output_format: "mp4",
             segment_count: i64::try_from(all_plans.len()).unwrap_or(0),
         },
@@ -1671,7 +1920,7 @@ async fn finalize_dash_task(
     if !still_active || cancel_token.is_cancelled() {
         return Err("Download canceled.".to_string());
     }
-    // Generate ffconcat files for video and audio tracks.
+    // Generate ffconcat files for selected tracks.
     let segments = db::list_dash_segments(pool, &task.id).await?;
     let video_segments: Vec<_> = segments
         .iter()
@@ -1680,6 +1929,10 @@ async fn finalize_dash_task(
     let audio_segments: Vec<_> = segments
         .iter()
         .filter(|s| s.track_kind == TRACK_KIND_AUDIO && s.status == SegmentStatus::Completed)
+        .collect();
+    let subtitle_segments: Vec<_> = segments
+        .iter()
+        .filter(|s| s.track_kind == TRACK_KIND_SUBTITLE && s.status == SegmentStatus::Completed)
         .collect();
 
     let video_concat = if !video_segments.is_empty() {
@@ -1692,6 +1945,22 @@ async fn finalize_dash_task(
     } else {
         None
     };
+    let subtitle_concat = if !subtitle_segments.is_empty() {
+        let files = subtitle_segments
+            .iter()
+            .map(|segment| PathBuf::from(&segment.local_path))
+            .collect::<Vec<_>>();
+        Some(
+            super::media_subtitles::merge_webvtt(
+                &files,
+                &staging_dir.join("subtitles.vtt"),
+                "dash_subtitle_unsupported",
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     if video_concat.is_none() && audio_concat.is_none() {
         return Err(engine_error(
@@ -1701,10 +1970,29 @@ async fn finalize_dash_task(
         ));
     }
 
+    let state = db::get_dash_task(pool, &task.id).await?;
+    let catalog: Vec<DashTrack> = state
+        .as_ref()
+        .and_then(|state| state.track_catalog_json.as_deref())
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    let audio_language = state
+        .as_ref()
+        .and_then(|state| state.audio_representation_id.as_ref())
+        .and_then(|id| catalog.iter().find(|track| &track.id == id))
+        .and_then(|track| track.language.as_deref());
+    let subtitle_language = state
+        .as_ref()
+        .and_then(|state| state.selected_subtitle_representation_id.as_ref())
+        .and_then(|id| catalog.iter().find(|track| &track.id == id))
+        .and_then(|track| track.language.as_deref());
     run_ffmpeg_remux(
         ffmpeg,
         video_concat.as_deref(),
         audio_concat.as_deref(),
+        subtitle_concat.as_deref(),
+        audio_language,
+        subtitle_language,
         temp_path,
         cancel_token,
     )
@@ -1769,10 +2057,14 @@ async fn write_ffconcat(
     Ok(path)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ffmpeg_remux(
     ffmpeg: &Path,
     video_concat: Option<&Path>,
     audio_concat: Option<&Path>,
+    subtitle_concat: Option<&Path>,
+    audio_language: Option<&str>,
+    subtitle_language: Option<&str>,
     output: &Path,
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
@@ -1782,6 +2074,13 @@ async fn run_ffmpeg_remux(
             .map_err(|e| format!("Could not reset DASH MP4 output: {e}"))?;
     }
     let mut command = Command::new(ffmpeg);
+    if let Some(dir) = video_concat
+        .or(audio_concat)
+        .or(subtitle_concat)
+        .and_then(Path::parent)
+    {
+        command.current_dir(dir);
+    }
     command
         .arg("-y")
         .arg("-hide_banner")
@@ -1801,17 +2100,50 @@ async fn run_ffmpeg_remux(
             .arg("-i")
             .arg(audio.file_name().unwrap_or(audio.as_os_str()));
     }
-    match (video_concat, audio_concat) {
-        (Some(_), Some(_)) => {
-            command.arg("-map").arg("0:v").arg("-map").arg("1:a");
-        }
-        _ => {
-            command.arg("-map").arg("0");
-        }
+    if let Some(subtitle) = subtitle_concat {
+        command
+            .arg("-i")
+            .arg(subtitle.file_name().unwrap_or(subtitle.as_os_str()));
+    }
+    if video_concat.is_some() {
+        command.arg("-map").arg("0:v:0");
+    }
+    if audio_concat.is_some() {
+        command.arg("-map").arg(if video_concat.is_some() {
+            "1:a:0"
+        } else {
+            "0:a:0"
+        });
+    }
+    if subtitle_concat.is_some() {
+        let index = if video_concat.is_some() && audio_concat.is_some() {
+            2
+        } else if video_concat.is_some() || audio_concat.is_some() {
+            1
+        } else {
+            0
+        };
+        command.arg("-map").arg(format!("{index}:s:0"));
+    }
+    if let Some(language) = audio_language {
+        command.arg("-metadata:s:a:0").arg(format!(
+            "language={}",
+            super::media_subtitles::mp4_language(language)
+        ));
+    }
+    if let Some(language) = subtitle_language {
+        command.arg("-metadata:s:s:0").arg(format!(
+            "language={}",
+            super::media_subtitles::mp4_language(language)
+        ));
     }
     command
-        .arg("-c")
+        .arg("-c:v")
         .arg("copy")
+        .arg("-c:a")
+        .arg("copy")
+        .arg("-c:s")
+        .arg("mov_text")
         .arg("-movflags")
         .arg("+faststart")
         .arg("-f")
@@ -1853,7 +2185,7 @@ async fn fetch_mpd_text(
     url: &str,
     headers: &[(String, String)],
     network_policy: &crate::download::network_policy::NetworkPolicy,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let parsed = reqwest::Url::parse(url).map_err(|_| "DASH MPD URL is invalid.".to_string())?;
     if parsed.scheme() == "file" {
         let path = parsed
@@ -1863,6 +2195,7 @@ async fn fetch_mpd_text(
             .await
             .map_err(map_dash_limited_body_error)?;
         return String::from_utf8(bytes)
+            .map(|text| (text, url.to_string()))
             .map_err(|_| "DASH MPD file is not valid UTF-8.".to_string());
     }
     network_policy
@@ -1878,10 +2211,13 @@ async fn fetch_mpd_text(
     if !response.status().is_success() {
         return Err(super::http::format_http_response_error(&response));
     }
+    let resolved_url = response.url().to_string();
     let bytes = read_body_limited(response, CONTROL_PLANE_MAX_BYTES, None, READ_IDLE_TIMEOUT)
         .await
         .map_err(map_dash_limited_body_error)?;
-    String::from_utf8(bytes).map_err(|_| "DASH MPD response is not valid UTF-8.".to_string())
+    String::from_utf8(bytes)
+        .map(|text| (text, resolved_url))
+        .map_err(|_| "DASH MPD response is not valid UTF-8.".to_string())
 }
 
 fn map_dash_limited_body_error(error: LimitedBodyError) -> String {
@@ -2211,6 +2547,8 @@ mod tests {
             id: "v0".to_string(),
             bandwidth: 500_000,
             codecs: None,
+            width: None,
+            height: None,
             segment_source: SegmentSource::List {
                 initialization: None,
                 initialization_range: None,
@@ -2653,6 +2991,30 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("dash_no_duration"));
     }
+    #[test]
+    fn application_subtitles_are_catalogued_or_explicitly_rejected() {
+        for (mime, codecs, supported) in [
+            ("application/webvtt", "", true),
+            ("application/ttml+xml", "", false),
+            ("application/mp4", "wvtt", false),
+            ("application/mp4", "stpp.ttml.im1t", false),
+        ] {
+            let body = format!(
+                r#"<MPD type="static"><Period><AdaptationSet mimeType="{mime}"><Representation id="sub" codecs="{codecs}" bandwidth="0"><SegmentList><SegmentURL media="sub.vtt"/></SegmentList></Representation></AdaptationSet></Period></MPD>"#
+            );
+            let mpd = parse_dash_manifest("https://example.com/manifest", &body).unwrap();
+            let tracks = dash_track_catalog(&mpd);
+            assert_eq!(tracks.len(), 1);
+            assert_eq!(tracks[0].kind, TRACK_KIND_SUBTITLE);
+            let result = validate_track_catalog(&mpd, "https://example.com/manifest");
+            if supported {
+                result.unwrap();
+            } else {
+                assert!(result.unwrap_err().contains("dash_subtitle_unsupported"));
+            }
+        }
+    }
+
     /// ARC-30: remux cancellation must be decided by the token, not by
     /// message text. The old guard matched `error.contains("canceled")`, so
     /// a real ffmpeg failure echoing that word was misreported as a clean

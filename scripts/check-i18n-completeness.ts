@@ -11,7 +11,7 @@
  * 3. Verifies every literal `t("...")` key in `src/**` exists in the English
  *    bundle, which the locale-to-locale diff cannot see.
  *
- * Usage: pnpm check:i18n
+ * Usage: pnpm check:i18n [--stable-only]
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -303,7 +303,7 @@ export function findMissingSourceKeys(enLeaves: Record<string, string>, sourceRo
   return hits.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
 
-export async function runCompletenessCheck(localesDir = DEFAULT_LOCALES_DIR): Promise<number> {
+export async function runCompletenessCheck(localesDir = DEFAULT_LOCALES_DIR, stableOnly = false): Promise<number> {
   const files = readdirSync(localesDir).filter((f) => f.endsWith(".ts"));
   if (files.length === 0) {
     console.error(`No locale files found in ${localesDir}`);
@@ -315,6 +315,10 @@ export async function runCompletenessCheck(localesDir = DEFAULT_LOCALES_DIR): Pr
     console.error(`Reference locale 'en.ts' not found in ${localesDir}`);
     return 1;
   }
+  if (stableOnly && !files.includes("zh-CN.ts")) {
+    console.error(`Stable locale 'zh-CN.ts' not found in ${localesDir}`);
+    return 1;
+  }
 
   const enLeaves = flattenLeaves(await loadLocale(localesDir, enFile));
   let hasFailures = false;
@@ -322,6 +326,7 @@ export async function runCompletenessCheck(localesDir = DEFAULT_LOCALES_DIR): Pr
   for (const file of files.sort()) {
     if (file === "en.ts") continue;
     const localeName = file.replace(/\.ts$/, "");
+    if (stableOnly && localeName !== "zh-CN") continue;
     const localeLeaves = flattenLeaves(await loadLocale(localesDir, file));
     const result = checkLocale(localeName, enLeaves, localeLeaves);
     const failed = localeHasFailures(result);
@@ -390,5 +395,5 @@ export async function runCompletenessCheck(localesDir = DEFAULT_LOCALES_DIR): Pr
 const invoked = process.argv[1] ? resolve(process.argv[1]) : "";
 const thisFile = resolve(fileURLToPath(import.meta.url));
 if (invoked === thisFile) {
-  process.exit(await runCompletenessCheck());
+  process.exit(await runCompletenessCheck(DEFAULT_LOCALES_DIR, process.argv.includes("--stable-only")));
 }

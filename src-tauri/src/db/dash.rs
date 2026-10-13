@@ -16,6 +16,8 @@ pub struct DashTaskRecord {
     pub audio_representation_id: Option<String>,
     pub audio_bandwidth: Option<i64>,
     pub audio_codecs: Option<String>,
+    pub selected_subtitle_representation_id: Option<String>,
+    pub track_catalog_json: Option<String>,
     pub output_format: String,
     pub segment_count: i64,
     pub finish_requested: bool,
@@ -33,6 +35,8 @@ pub struct DashTaskUpsert<'a> {
     pub audio_representation_id: Option<&'a str>,
     pub audio_bandwidth: Option<i64>,
     pub audio_codecs: Option<&'a str>,
+    pub selected_subtitle_representation_id: Option<&'a str>,
+    pub track_catalog_json: Option<&'a str>,
     pub output_format: &'a str,
     pub segment_count: i64,
 }
@@ -71,7 +75,10 @@ pub struct DashSegmentUpsert<'a> {
     pub duration_ms: i64,
 }
 
-pub async fn upsert_dash_task(pool: &SqlitePool, task: DashTaskUpsert<'_>) -> Result<(), String> {
+pub async fn upsert_dash_task<'e>(
+    pool: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    task: DashTaskUpsert<'_>,
+) -> Result<(), String> {
     let now = crate::models::task::now_iso();
     sqlx::query(
         r#"
@@ -79,8 +86,9 @@ pub async fn upsert_dash_task(pool: &SqlitePool, task: DashTaskUpsert<'_>) -> Re
             task_id, input_url, manifest_url, staging_dir,
             video_representation_id, video_bandwidth, video_codecs,
             audio_representation_id, audio_bandwidth, audio_codecs,
+            selected_subtitle_representation_id, track_catalog_json,
             output_format, segment_count, finish_requested, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
         ON CONFLICT(task_id) DO UPDATE SET
             input_url = excluded.input_url,
             manifest_url = excluded.manifest_url,
@@ -91,6 +99,8 @@ pub async fn upsert_dash_task(pool: &SqlitePool, task: DashTaskUpsert<'_>) -> Re
             audio_representation_id = excluded.audio_representation_id,
             audio_bandwidth = excluded.audio_bandwidth,
             audio_codecs = excluded.audio_codecs,
+            selected_subtitle_representation_id = excluded.selected_subtitle_representation_id,
+            track_catalog_json = excluded.track_catalog_json,
             output_format = excluded.output_format,
             segment_count = excluded.segment_count,
             updated_at = excluded.updated_at
@@ -106,6 +116,8 @@ pub async fn upsert_dash_task(pool: &SqlitePool, task: DashTaskUpsert<'_>) -> Re
     .bind(task.audio_representation_id)
     .bind(task.audio_bandwidth)
     .bind(task.audio_codecs)
+    .bind(task.selected_subtitle_representation_id)
+    .bind(task.track_catalog_json)
     .bind(task.output_format)
     .bind(task.segment_count)
     .bind(&now)
@@ -125,6 +137,7 @@ pub async fn get_dash_task(
         SELECT task_id, input_url, manifest_url, staging_dir,
                video_representation_id, video_bandwidth, video_codecs,
                audio_representation_id, audio_bandwidth, audio_codecs,
+               selected_subtitle_representation_id, track_catalog_json,
                output_format, segment_count, finish_requested
         FROM dash_tasks
         WHERE task_id = ?
@@ -145,6 +158,8 @@ pub async fn get_dash_task(
         audio_representation_id: row.get("audio_representation_id"),
         audio_bandwidth: row.get("audio_bandwidth"),
         audio_codecs: row.get("audio_codecs"),
+        selected_subtitle_representation_id: row.get("selected_subtitle_representation_id"),
+        track_catalog_json: row.get("track_catalog_json"),
         output_format: row.get("output_format"),
         segment_count: row.get("segment_count"),
         finish_requested: row.get::<i64, _>("finish_requested") != 0,

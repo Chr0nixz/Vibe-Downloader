@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   }),
   updateTaskRequestProfile: vi.fn(),
   getTorrentRuntimeSnapshot: vi.fn(),
+  getMediaTaskDetails: vi.fn().mockResolvedValue(null),
   listDashSegmentsPage: vi.fn(),
   listHlsSegmentsPage: vi.fn(),
   listMetalinkMirrors: vi.fn(),
@@ -65,6 +66,7 @@ vi.mock("@/lib/tauri", () => ({
   getTaskRequestProfile: mocks.getTaskRequestProfile,
   updateTaskRequestProfile: mocks.updateTaskRequestProfile,
   getTorrentRuntimeSnapshot: mocks.getTorrentRuntimeSnapshot,
+  getMediaTaskDetails: mocks.getMediaTaskDetails,
   listDashSegmentsPage: mocks.listDashSegmentsPage,
   listHlsSegmentsPage: mocks.listHlsSegmentsPage,
   listMetalinkMirrors: mocks.listMetalinkMirrors,
@@ -683,6 +685,53 @@ describe("TaskDetails", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "second.zip" })).toBeInTheDocument());
     await waitFor(() =>
       expect(screen.getByRole("tab", { name: "taskDetails.overview" })).toHaveAttribute("data-state", "active"),
+    );
+  });
+
+  it("finishes an idle HLS recording from its waiting state", async () => {
+    const task = makeTask("idle-hls", "recording.mp4", { protocol: "hls", status: "waiting_network" });
+    seedTasks([task]);
+    mocks.finishLiveRecording.mockResolvedValue(task);
+    renderDetails(task.id);
+    await userEvent.setup().click(screen.getByRole("button", { name: "actions.finishRecording" }));
+    expect(mocks.finishLiveRecording).toHaveBeenCalledWith(task.id);
+  });
+
+  it("keeps an unlimited completed seed stoppable and explains the waiting completion action", async () => {
+    const task = makeTask("completed-seed", "seed.bin", { protocol: "bt", status: "completed" });
+    seedTasks([task]);
+    mocks.getTorrentRuntimeSnapshot.mockResolvedValue({
+      taskId: task.id,
+      metadataStatus: "seeding",
+      completedPieces: "1",
+      verifiedPieces: "1",
+      pieceCount: "1",
+      pieceBitfieldBase64: null,
+      peerCount: "0",
+      seedCount: null,
+      dhtStatus: null,
+      trackers: [],
+      uploadBytes: "4096",
+      uploadSpeedBps: "0",
+      ratio: 1,
+      seedingEnabled: true,
+      seedingState: "seeding",
+      seedRatioLimit: null,
+      seedTimeLimitSeconds: null,
+      seedingStartedAt: null,
+      seedElapsedSeconds: "10",
+      seedStopReason: null,
+      waitingCompletionAction: true,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      updatedAt: task.updatedAt,
+    });
+    mocks.updateTorrentSeeding.mockResolvedValue(task);
+    renderDetails(task.id);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("b6.bt_waiting_action"));
+    await userEvent.setup().click(screen.getByRole("button", { name: "b6.bt_stop" }));
+    expect(mocks.updateTorrentSeeding).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: task.id, enabled: false, updateLimits: false }),
     );
   });
 

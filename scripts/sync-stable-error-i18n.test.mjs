@@ -32,6 +32,7 @@ test("importing the helpers preserves locale contents and modification times", (
 });
 
 const CODES = ["temp_file_missing", "temp_file_smaller_than_progress"];
+const STABLE_LOCALES = new Set(["en.ts", "zh-CN.ts"]);
 const MESSAGES = {
   temp_file_missing: "Temp file is missing",
   temp_file_smaller_than_progress: "Temp file is smaller than progress",
@@ -97,11 +98,16 @@ test("direct sync writes Biome-formatted locales and leaves a second sync unchan
   const { root, locales } = createSyncFixture(t);
   const runSync = () => execFileSync(process.execPath, [fileURLToPath(scriptUrl)], { cwd: root, encoding: "utf8" });
   const first = runSync();
-  assert.equal(first.match(/^Updated /gm)?.length, 7);
+  assert.equal(first.match(/^Updated /gm)?.length, 2);
+  assert.equal(first.match(/^Skipped /gm)?.length, 5);
 
   const biome = fileURLToPath(import.meta.resolve("@biomejs/biome/bin/biome"));
   execFileSync(process.execPath, [biome, "format", locales], { cwd: root, encoding: "utf8" });
-  for (const { content } of snapshotLocales(locales)) {
+  for (const { name, content } of snapshotLocales(locales)) {
+    if (!STABLE_LOCALES.has(name)) {
+      assert.ok(parseErrorsBlockKeys(content).includes("obsolete"));
+      continue;
+    }
     assert.ok(parseErrorsBlockKeys(content).includes("unsupportedUrlScheme"));
     assert.match(content, /common: \{\n {4}ok: "OK",\n {2}\},/u);
     assert.match(content, / {4}cause: \{/u);
@@ -113,7 +119,8 @@ test("direct sync writes Biome-formatted locales and leaves a second sync unchan
 
   const before = snapshotLocales(locales);
   const second = runSync();
-  assert.equal(second.match(/^Unchanged /gm)?.length, 7);
+  assert.equal(second.match(/^Unchanged /gm)?.length, 2);
+  assert.equal(second.match(/^Skipped /gm)?.length, 5);
   assert.doesNotMatch(second, /^Updated /m);
   assert.deepEqual(snapshotLocales(locales), before);
 });

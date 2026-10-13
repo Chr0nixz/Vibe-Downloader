@@ -374,6 +374,12 @@ pub async fn list_tasks_by_ids(
     state: State<'_, AppState>,
     ids: Vec<String>,
 ) -> Result<Vec<Task>, String> {
+    // Keep the IPC payload bounded before it reaches the SQL builder. The DB
+    // helper repeats this cap for callers outside this command.
+    let ids = ids
+        .into_iter()
+        .take(usize::try_from(db::MAX_TASK_PAGE_SIZE).unwrap_or(500))
+        .collect::<Vec<_>>();
     let records = db::list_task_records_by_ids(&state.pool, &ids).await?;
     tasks_from_records_with_files(&state.pool, records).await
 }
@@ -644,8 +650,75 @@ pub async fn get_torrent_runtime_snapshot(
         let (ratio_limit, time_limit) = db::torrent_seeding_policy(&state.pool, &task_id).await?;
         snapshot.seed_ratio_limit = ratio_limit;
         snapshot.seed_time_limit_seconds = time_limit.map(|seconds| seconds.to_string());
+        if let Some(seed) = db::bt_seeding_status(&state.pool, &task_id).await? {
+            snapshot.seeding_enabled = seed.enabled;
+            snapshot.seeding_started_at = seed.started_at;
+            snapshot.seed_elapsed_seconds = Some(seed.elapsed_seconds.to_string());
+            snapshot.seed_stop_reason = seed.stop_reason;
+            snapshot.waiting_completion_action = state
+                .engine_registry
+                .bt_engine()
+                .seeding_manager()
+                .contains(&task_id)
+                .await
+                && db::get_settings(&state.pool, String::new())
+                    .await?
+                    .completion_action
+                    .is_destructive()
+                && crate::scheduler::should_emit_completion_action(&state.downloads, &state.pool)
+                    .await;
+        }
     }
     Ok(snapshot)
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaTaskDetails {
+    pub output_format: String,
+    pub dash_tracks: Vec<crate::models::DashTrack>,
+    pub max_missing_segments: i32,
+    pub missing_segments_json: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_media_task_details(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<Option<MediaTaskDetails>, String> {
+    if let Some(hls) = db::get_hls_task(&state.pool, &task_id).await? {
+        return Ok(Some(MediaTaskDetails {
+            output_format: hls.output_format,
+            dash_tracks: Vec::new(),
+            max_missing_segments: hls.max_missing_segments.clamp(0, 100) as i32,
+            missing_segments_json: hls.missing_segments_json,
+        }));
+    }
+    if let Some(dash) = db::get_dash_task(&state.pool, &task_id).await? {
+        let mut tracks: Vec<crate::models::DashTrack> = dash
+            .track_catalog_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| format!("{e}"))?
+            .unwrap_or_default();
+        for track in &mut tracks {
+            track.selected = match track.kind.as_str() {
+                "video" => dash.video_representation_id.as_ref() == Some(&track.id),
+                "audio" => dash.audio_representation_id.as_ref() == Some(&track.id),
+                "subtitle" => dash.selected_subtitle_representation_id.as_ref() == Some(&track.id),
+                _ => false,
+            };
+        }
+        return Ok(Some(MediaTaskDetails {
+            output_format: dash.output_format,
+            dash_tracks: tracks,
+            max_missing_segments: 0,
+            missing_segments_json: None,
+        }));
+    }
+    Ok(None)
 }
 
 #[tauri::command]

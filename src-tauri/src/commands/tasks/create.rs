@@ -73,6 +73,16 @@ pub struct CreateTaskInput {
     pub selected_hls_audio_track_uris: Option<Vec<String>>,
     /// F-6: Selected subtitle track URIs from `#EXT-X-MEDIA TYPE=SUBTITLES`.
     pub selected_hls_subtitle_track_uris: Option<Vec<String>>,
+    /// B6: missing live media fragments tolerated over the whole recording (0-100).
+    #[serde(default)]
+    pub hls_max_missing_segments: Option<i32>,
+    /// B6: explicit DASH representation choices captured from the probe.
+    #[serde(default)]
+    pub selected_dash_video_representation_id: Option<String>,
+    #[serde(default)]
+    pub selected_dash_audio_representation_id: Option<String>,
+    #[serde(default)]
+    pub selected_dash_subtitle_representation_id: Option<String>,
     /// FUN-02: Optional per-task proxy override at create time.
     pub proxy_mode: Option<TaskProxyMode>,
     pub proxy_url: Option<String>,
@@ -211,7 +221,8 @@ pub async fn probe_task(
     } else {
         None
     };
-    let probe = engine
+    let probe = state
+        .engine_registry
         .probe(ProbeRequest {
             uri: url.to_string(),
             source: None,
@@ -252,7 +263,9 @@ async fn resolve_create_probe(
     network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<ProbeOutput, String> {
     let engine = state.engine_registry.engine_for_uri(url)?;
-    if let Some(snapshot) = snapshot {
+    if let Some(snapshot) =
+        snapshot.filter(|snapshot| !matches!(snapshot.protocol.as_str(), "dash" | "hls"))
+    {
         if let Some(probe) = probe_output_from_snapshot(url, snapshot) {
             // A probe snapshot crosses the IPC boundary and is therefore an
             // untrusted cache entry. Re-check the current engine contract and
@@ -276,7 +289,8 @@ async fn resolve_create_probe(
         proxy_password,
         proxy_no_proxy,
     )?;
-    engine
+    state
+        .engine_registry
         .probe(ProbeRequest {
             uri: url.to_string(),
             source: None,
@@ -311,6 +325,7 @@ fn probe_payload_from_output(input_url: &str, probe: ProbeOutput) -> ProbeTaskPa
         hls_variants: probe.hls_variants,
         hls_audio_tracks: probe.hls_audio_tracks,
         hls_subtitle_tracks: probe.hls_subtitle_tracks,
+        dash_tracks: probe.dash_tracks,
         probed_at: now_iso(),
     }
 }
@@ -346,6 +361,7 @@ fn probe_output_from_snapshot(url: &str, snapshot: &ProbeTaskPayload) -> Option<
         hls_variants: snapshot.hls_variants.clone(),
         hls_audio_tracks: snapshot.hls_audio_tracks.clone(),
         hls_subtitle_tracks: snapshot.hls_subtitle_tracks.clone(),
+        dash_tracks: snapshot.dash_tracks.clone(),
         metalink: None,
     })
 }
@@ -674,7 +690,8 @@ async fn import_urls_core(
                         input.proxy_no_proxy.as_deref(),
                     );
                     match proxy_config {
-                        Ok(proxy_config) => engine
+                        Ok(proxy_config) => state
+                            .engine_registry
                             .probe(ProbeRequest {
                                 uri: normalized_url.clone(),
                                 source: None,
@@ -779,6 +796,10 @@ async fn import_urls_core(
                     selected_hls_variant_uri: None,
                     selected_hls_audio_track_uris: None,
                     selected_hls_subtitle_track_uris: None,
+                    hls_max_missing_segments: None,
+                    selected_dash_video_representation_id: None,
+                    selected_dash_audio_representation_id: None,
+                    selected_dash_subtitle_representation_id: None,
                     proxy_mode: input.proxy_mode,
                     proxy_url: input.proxy_url.clone(),
                     proxy_username: input.proxy_username.clone(),
@@ -1169,13 +1190,12 @@ async fn create_task_core(
     let queue_position = db::next_queue_position(&state.pool).await?;
     let task_id = Uuid::new_v4().to_string();
 
-    let task_url = match input.selected_hls_variant_uri.as_deref() {
+    let selected_hls_media_url = match input.selected_hls_variant_uri.as_deref() {
         Some(variant_uri) if probe.protocol == "hls" => reqwest::Url::parse(&storage_url)
             .ok()
             .and_then(|base| base.join(variant_uri).ok())
-            .map(|u| u.to_string())
-            .unwrap_or_else(|| storage_url.clone()),
-        _ => storage_url.clone(),
+            .map(|u| u.to_string()),
+        _ => None,
     };
 
     // ARC-02: reserve final/temp paths inside the create transaction so concurrent
@@ -1184,9 +1204,14 @@ async fn create_task_core(
     // `final_path` / `file_name` are not unpacked here: after ARC-20 moved the
     // file-row planning inside the transaction, the only remaining consumers
     // read them from `record`.
-    let (record, temp_path, file_records) = {
+    let (record, _temp_path, file_records) = {
         const MAX_PATH_RESERVE_ATTEMPTS: usize = 32;
         let mut last_error = None;
+        // ARC-02/PERF-16: the partial UNIQUE indexes are the authoritative
+        // reservation check. Keep only candidates that this creator has
+        // already lost to a concurrent insert; never materialize every active
+        // task path into memory before opening the write transaction.
+        let mut database_conflicts = HashSet::new();
         let mut outcome = None;
         // ARC-21: BUSY retries get their own budget. Sharing the path-conflict
         // budget would let a contended database burn through the attempts that
@@ -1202,7 +1227,7 @@ async fn create_task_core(
             // The snapshot can be stale by the time we insert. That is intended:
             // the partial UNIQUE indexes reject the loser, the whole transaction
             // rolls back, and the next attempt re-plans against a fresh snapshot.
-            let mut reserved = db::list_reserved_final_paths(&state.pool).await?;
+            let mut reserved = database_conflicts.clone();
             let final_path =
                 unique_final_path_among(&effective_save_dir, requested_file_name, &reserved);
             let file_name = final_path
@@ -1217,8 +1242,13 @@ async fn create_task_core(
 
             let record = TaskRecord {
                 id: task_id.clone(),
-                url: task_url.clone(),
-                final_url: Some(storage_final_url.clone()),
+                // A variant choice must not rebind credentials or request profiles.
+                url: storage_url.clone(),
+                final_url: Some(
+                    selected_hls_media_url
+                        .clone()
+                        .unwrap_or_else(|| storage_final_url.clone()),
+                ),
                 protocol: probe.protocol.clone(),
                 task_kind: probe.task_kind,
                 file_name: file_name.clone(),
@@ -1278,6 +1308,16 @@ async fn create_task_core(
                 selected_relative_paths.as_ref(),
                 &mut reserved,
             )?;
+            let planned_paths = record
+                .final_path
+                .iter()
+                .chain(
+                    file_records
+                        .iter()
+                        .filter_map(|file| file.final_path.as_ref()),
+                )
+                .cloned()
+                .collect::<HashSet<_>>();
 
             // ARC-21: IMMEDIATE takes the write lock up front. The duplicate
             // lookup below reads before we write, which under a DEFERRED
@@ -1316,6 +1356,157 @@ async fn create_task_core(
                 if let Some(profile) = prepared_profile.as_ref() {
                     db::save_task_request_profile(&mut tx, &record.id, profile).await?;
                 }
+                // F-6: Store the user's selected HLS audio/subtitle track URIs. Uses
+                // `upsert_hls_task` with placeholder values for fields that will be
+                // filled in by `run_hls_download` when it probes the media playlist.
+                // The COALESCE in the ON CONFLICT clause preserves these values when
+                // `run_hls_download` passes `None`.
+                if probe.protocol == "hls" {
+                    // FUN-10: persist absolute track URIs so download never sees relative
+                    // paths even if an older client submitted them.
+                    let resolve_track_uris = |uris: &Vec<String>| -> Vec<String> {
+                        uris.iter()
+                            .map(|uri| {
+                                reqwest::Url::parse(uri)
+                                    .map(|url| url.to_string())
+                                    .or_else(|_| {
+                                        reqwest::Url::parse(&probe.resolved_uri)
+                                            .and_then(|base| base.join(uri))
+                                            .map(|url| url.to_string())
+                                    })
+                                    .or_else(|_| {
+                                        reqwest::Url::parse(&record.url)
+                                            .and_then(|base| base.join(uri))
+                                            .map(|url| url.to_string())
+                                    })
+                                    .unwrap_or_else(|_| uri.clone())
+                            })
+                            .collect()
+                    };
+                    let audio_json = input
+                        .selected_hls_audio_track_uris
+                        .as_ref()
+                        .filter(|uris| !uris.is_empty())
+                        .map(resolve_track_uris)
+                        .and_then(|uris| serde_json::to_string(&uris).ok());
+                    let subtitle_json = input
+                        .selected_hls_subtitle_track_uris
+                        .as_ref()
+                        .filter(|uris| !uris.is_empty())
+                        .map(resolve_track_uris)
+                        .and_then(|uris| serde_json::to_string(&uris).ok());
+                    let catalog = probe
+                        .hls_audio_tracks
+                        .iter()
+                        .chain(probe.hls_subtitle_tracks.iter())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let catalog_json =
+                        serde_json::to_string(&catalog).map_err(|error| error.to_string())?;
+                    {
+                        let staging = temp_path.to_string_lossy();
+                        db::upsert_hls_task(
+                            &mut *tx,
+                            db::HlsTaskUpsert {
+                                task_id: &record.id,
+                                input_url: &record.url,
+                                media_url: selected_hls_media_url
+                                    .as_deref()
+                                    .unwrap_or(&probe.resolved_uri),
+                                playlist_kind: "vod",
+                                selected_bandwidth: None,
+                                selected_resolution: None,
+                                target_duration: 0,
+                                last_media_sequence: None,
+                                output_format: if probe
+                                    .files
+                                    .first()
+                                    .and_then(|file| file.content_type.as_deref())
+                                    == Some("video/mp2t")
+                                {
+                                    "ts"
+                                } else {
+                                    "mp4"
+                                },
+                                staging_dir: &staging,
+                                selected_audio_track_uris: audio_json.as_deref(),
+                                selected_subtitle_track_uris: subtitle_json.as_deref(),
+                                max_missing_segments: i64::from(
+                                    input
+                                        .hls_max_missing_segments
+                                        .unwrap_or(0)
+                                        .clamp(0, db::MAX_HLS_MISSING_SEGMENTS as i32),
+                                ),
+                                missing_segments_json: None,
+                                selected_track_catalog_json: Some(&catalog_json),
+                            },
+                        )
+                        .await?;
+                    }
+                }
+                if probe.protocol == "dash" {
+                    let tracks = &probe.dash_tracks;
+                    let validate =
+                        |id: &Option<String>, kind: &str| -> Result<Option<String>, String> {
+                            let Some(id) = id.as_deref().map(str::trim).filter(|id| !id.is_empty())
+                            else {
+                                return Ok(None);
+                            };
+                            let Some(track) = tracks
+                                .iter()
+                                .find(|track| track.id == id && track.kind == kind)
+                            else {
+                                return Err(crate::download::error::engine_error(
+                                    "dash_track_invalid",
+                                    format!(
+                                    "Selected {kind} representation was not returned by the probe"
+                                ),
+                                    false,
+                                ));
+                            };
+                            if kind == "subtitle"
+                                && !track.subtitle_format.as_deref().is_some_and(|format| {
+                                    format.eq_ignore_ascii_case("text/vtt")
+                                        || format.eq_ignore_ascii_case("application/webvtt")
+                                })
+                            {
+                                return Err(crate::download::error::engine_error(
+                                    "dash_subtitle_unsupported",
+                                    "Only WebVTT DASH subtitles can be embedded",
+                                    false,
+                                ));
+                            }
+                            Ok(Some(id.to_string()))
+                        };
+                    let selected_video =
+                        validate(&input.selected_dash_video_representation_id, "video")?;
+                    let selected_audio =
+                        validate(&input.selected_dash_audio_representation_id, "audio")?;
+                    let selected_subtitle =
+                        validate(&input.selected_dash_subtitle_representation_id, "subtitle")?;
+                    let catalog_json = serde_json::to_string(&probe.dash_tracks).ok();
+                    let staging = temp_path.to_string_lossy();
+                    db::upsert_dash_task(
+                        &mut *tx,
+                        db::DashTaskUpsert {
+                            task_id: &record.id,
+                            input_url: &record.url,
+                            manifest_url: &probe.resolved_uri,
+                            staging_dir: &staging,
+                            video_representation_id: selected_video.as_deref(),
+                            video_bandwidth: None,
+                            video_codecs: None,
+                            audio_representation_id: selected_audio.as_deref(),
+                            audio_bandwidth: None,
+                            audio_codecs: None,
+                            selected_subtitle_representation_id: selected_subtitle.as_deref(),
+                            track_catalog_json: catalog_json.as_deref(),
+                            output_format: "mp4",
+                            segment_count: 0,
+                        },
+                    )
+                    .await?;
+                }
             }
             let error = match inserted {
                 Ok(()) => match tx.commit().await {
@@ -1329,6 +1520,7 @@ async fn create_task_core(
                 Err(error) => error,
             };
             if is_final_path_unique_conflict(&error) {
+                database_conflicts.extend(planned_paths);
                 last_error = Some(error);
                 continue;
             }
@@ -1354,67 +1546,6 @@ async fn create_task_core(
             })
         })?
     };
-    // F-6: Store the user's selected HLS audio/subtitle track URIs. Uses
-    // `upsert_hls_task` with placeholder values for fields that will be
-    // filled in by `run_hls_download` when it probes the media playlist.
-    // The COALESCE in the ON CONFLICT clause preserves these values when
-    // `run_hls_download` passes `None`.
-    if probe.protocol == "hls" {
-        // FUN-10: persist absolute track URIs so download never sees relative
-        // paths even if an older client submitted them.
-        let resolve_track_uris = |uris: &Vec<String>| -> Vec<String> {
-            uris.iter()
-                .map(|uri| {
-                    reqwest::Url::parse(uri)
-                        .map(|url| url.to_string())
-                        .or_else(|_| {
-                            reqwest::Url::parse(&probe.resolved_uri)
-                                .and_then(|base| base.join(uri))
-                                .map(|url| url.to_string())
-                        })
-                        .or_else(|_| {
-                            reqwest::Url::parse(&record.url)
-                                .and_then(|base| base.join(uri))
-                                .map(|url| url.to_string())
-                        })
-                        .unwrap_or_else(|_| uri.clone())
-                })
-                .collect()
-        };
-        let audio_json = input
-            .selected_hls_audio_track_uris
-            .as_ref()
-            .filter(|uris| !uris.is_empty())
-            .map(resolve_track_uris)
-            .and_then(|uris| serde_json::to_string(&uris).ok());
-        let subtitle_json = input
-            .selected_hls_subtitle_track_uris
-            .as_ref()
-            .filter(|uris| !uris.is_empty())
-            .map(resolve_track_uris)
-            .and_then(|uris| serde_json::to_string(&uris).ok());
-        if audio_json.is_some() || subtitle_json.is_some() {
-            let staging = temp_path.to_string_lossy();
-            db::upsert_hls_task(
-                &state.pool,
-                db::HlsTaskUpsert {
-                    task_id: &record.id,
-                    input_url: &record.url,
-                    media_url: &probe.resolved_uri,
-                    playlist_kind: "vod",
-                    selected_bandwidth: None,
-                    selected_resolution: None,
-                    target_duration: 0,
-                    last_media_sequence: None,
-                    output_format: "mp4",
-                    staging_dir: &staging,
-                    selected_audio_track_uris: audio_json.as_deref(),
-                    selected_subtitle_track_uris: subtitle_json.as_deref(),
-                },
-            )
-            .await?;
-        }
-    }
     if let Some((algorithm, expected_hash)) = manual_hash.as_ref() {
         let checksum = TaskChecksumRecord {
             id: Uuid::new_v4().to_string(),
@@ -1956,6 +2087,20 @@ mod tests {
         .expect("legacy create payload should remain deserializable");
         assert_eq!(input.start_paused, None);
         assert_eq!(input.obey_schedule, None);
+        assert_eq!(input.hls_max_missing_segments, None);
+        assert_eq!(input.selected_dash_subtitle_representation_id, None);
+    }
+
+    #[test]
+    fn legacy_probe_snapshot_defaults_the_dash_catalog() {
+        let mut value = serde_json::to_value(probe_snapshot(
+            "https://example.com/file.bin",
+            chrono::Utc::now(),
+        ))
+        .unwrap();
+        value.as_object_mut().unwrap().remove("dashTracks");
+        let snapshot: ProbeTaskPayload = serde_json::from_value(value).unwrap();
+        assert!(snapshot.dash_tracks.is_empty());
     }
 
     #[test]
@@ -2144,6 +2289,7 @@ mod tests {
             hls_variants: Vec::new(),
             hls_audio_tracks: Vec::new(),
             hls_subtitle_tracks: Vec::new(),
+            dash_tracks: Vec::new(),
             probed_at: probed_at.to_rfc3339(),
         }
     }
@@ -2172,6 +2318,7 @@ mod tests {
             hls_variants: Vec::new(),
             hls_audio_tracks: Vec::new(),
             hls_subtitle_tracks: Vec::new(),
+            dash_tracks: Vec::new(),
             metalink: None,
         }
     }

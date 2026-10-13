@@ -29,7 +29,7 @@ async fn full_migration_on_fresh_database() {
         .fetch_one(&pool)
         .await
         .expect("count migrations");
-    assert_eq!(count, 13, "expected exactly 13 migrations, got {count}");
+    assert_eq!(count, 15, "expected exactly 15 migrations, got {count}");
 
     pool.close().await;
 }
@@ -58,6 +58,7 @@ async fn key_tables_exist_after_migration() {
         "storage_sweeps",
         "recovery_history",
         "task_auto_retry_state",
+        "workflow_library",
     ];
     for table in &tables {
         let exists: bool = sqlx::query_scalar(
@@ -127,6 +128,28 @@ async fn baseline_contains_all_evolved_columns() {
             ],
         ),
         ("task_requests", &["if_range_header"]),
+        (
+            "torrent_tasks",
+            &[
+                "seeding_started_at",
+                "seed_uploaded_bytes",
+                "seed_stop_reason",
+                "seed_manual_stop",
+                "seed_elapsed_seconds",
+            ],
+        ),
+        (
+            "hls_tasks",
+            &[
+                "max_missing_segments",
+                "missing_segments_json",
+                "selected_track_catalog_json",
+            ],
+        ),
+        (
+            "dash_tasks",
+            &["selected_subtitle_representation_id", "track_catalog_json"],
+        ),
         (
             "hls_segments",
             &[
@@ -615,8 +638,8 @@ async fn migration_idempotent_on_reconnect() {
         .await
         .expect("count");
     assert_eq!(
-        count, 13,
-        "expected exactly 13 migrations on reconnect, got {count}"
+        count, 15,
+        "expected exactly 15 migrations on reconnect, got {count}"
     );
     pool2.close().await;
 

@@ -94,6 +94,8 @@ pnpm check:docs                # version, audit IDs, blocker wording, source-com
 
 On Windows, if Rust linking exhausts page-file or PDB resources, lower Cargo build parallelism, for example `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2`. `-j` controls compilation parallelism; it does not serialize test threads. Use `-- --test-threads=1` only when the test itself requires serialized execution.
 
+Keep `native-host` and `export-bindings` disabled in product Tauri builds; bundle profiles include the staged sidecar exactly once. `pnpm prepare:native-host`, `pnpm test:rust` and `pnpm verify:rust` enable the host feature; `pnpm specta` enables the exporter. See [bin boundaries and package evidence](docs/b7-acceptance-matrix-2026-10-02.md#63-2026-10-13-图标与二进制包装修复验收).
+
 Run `pnpm build:extensions` and `pnpm verify:extensions` when changing extension code, Native Messaging, browser permissions, or related documentation. Candidate/release builds must keep experimental capture disabled.
 
 ## Architecture Contracts

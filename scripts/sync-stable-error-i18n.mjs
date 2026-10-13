@@ -54,6 +54,12 @@ function requireCauseSet(locale) {
 
 const localizedMessages = JSON.parse(fs.readFileSync(path.resolve("scripts/stable-error-messages.json"), "utf8"));
 
+// Stable error copy is maintained only for the two supported stable locales.
+// Beta locale completeness is reported by check-i18n-completeness and must not
+// block adding a new stable error code to the product.
+const STABLE_ERROR_LOCALES = ["en", "zh-CN"];
+const BETA_ERROR_LOCALES = ["zh-TW", "ja", "ko", "ru", "es"];
+
 function requireLocalizedSet(locale) {
   const messages = localizedMessages[locale];
   if (!messages) throw new Error(`Missing localized error set for ${locale}`);
@@ -198,17 +204,12 @@ function main() {
   const messageSets = {
     en: STABLE_ERROR_MESSAGES_EN,
     "zh-CN": requireLocalizedSet("zh-CN"),
-    "zh-TW": requireLocalizedSet("zh-TW"),
-    ja: requireLocalizedSet("ja"),
-    ko: requireLocalizedSet("ko"),
-    ru: requireLocalizedSet("ru"),
-    es: requireLocalizedSet("es"),
   };
 
   const biome = fileURLToPath(import.meta.resolve("@biomejs/biome/bin/biome"));
   const root = path.resolve("src/i18n/locales");
   let failed = 0;
-  for (const locale of Object.keys(messageSets)) {
+  for (const locale of STABLE_ERROR_LOCALES) {
     const file = path.join(root, `${locale}.ts`);
     const text = fs.readFileSync(file, "utf8");
     const result = syncLocaleErrorsBlock({
@@ -233,6 +234,9 @@ function main() {
     }
     fs.writeFileSync(file, formatted);
     console.log("Updated", file, "codes=", STABLE_ERROR_CODES.length);
+  }
+  for (const locale of BETA_ERROR_LOCALES) {
+    console.log("Skipped", path.join(root, `${locale}.ts`), "(beta locale)");
   }
   if (failed > 0) process.exitCode = 1;
 }

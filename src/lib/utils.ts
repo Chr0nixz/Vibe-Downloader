@@ -55,6 +55,10 @@ export function formatBytes(bytes: number, options?: NumberFormatOptions): strin
   return `${formatted} ${i18n.t(BYTE_UNIT_KEYS[index])}`;
 }
 
+export function formatNumber(value: number, fractionDigits = 0): string {
+  return numberFormatter(i18n.language, fractionDigits).format(value);
+}
+
 export function formatSpeed(bps: number, options?: NumberFormatOptions): string {
   if (bps <= 0) return "—";
   const index = Math.min(Math.floor(Math.log(bps) / Math.log(1024)), BYTE_UNIT_KEYS.length - 1);

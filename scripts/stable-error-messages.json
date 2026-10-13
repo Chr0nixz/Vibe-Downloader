@@ -1,5 +1,18 @@
 {
   "zh-CN": {
+    "bt_seeding_policy_invalid": "请输入正数比例和整数秒数，留空表示不限。",
+    "hls_finish_unavailable": "当前状态无法完成录制。请等待直播录制开始或继续此任务。",
+    "bt_seeding_active": "此任务正在做种。",
+    "bt_seeding_unavailable": "仅已完成的 BT 任务可以开始做种。",
+    "bt_seeding_metadata_missing": "缓存的种子元数据缺失或与任务不匹配。",
+    "bt_seeding_files_invalid": "BT 文件缺失或已变化。请检查本地文件后再做种。",
+    "bt_seeding_limit_reached": "已达到做种比例或时长限制。提高限制后可继续。",
+    "dash_track_invalid": "所选 DASH 轨道不可用或标识重复。请重新探测清单。",
+    "dash_subtitle_unsupported": "DASH 字幕仅支持文本 WebVTT。",
+    "dash_drm_unsupported": "不支持 DRM 保护的 DASH 媒体。",
+    "hls_subtitle_unsupported": "所选字幕无法安全转换并嵌入 MP4，请使用文本 WebVTT 字幕。",
+    "hls_ts_unsupported": "这些片段无法在没有 ffmpeg 的情况下安全拼接。请在设置中配置 ffmpeg。",
+    "task_network_active": "请先暂停下载或停止做种，再修改网络设置或撤销授权。",
     "auth_headers_expired": "认证凭据已过期。请检查 URL 后重试。",
     "auth_headers_unavailable": "无法使用认证凭据。请提供凭据后重试。",
     "body_error": "无法读取响应内容。请重试下载。",

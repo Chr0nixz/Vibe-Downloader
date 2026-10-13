@@ -233,19 +233,21 @@ pub async fn pause_task(
         crate::USER_ACTION_DRAIN_GRACE,
     )
     .await?;
-    match crate::state_machine::transition_task_with_runtime_state(
+    match crate::state_machine::transition_task_with_runtime_input(
         &app,
         &state.pool,
         &id,
-        TaskStatus::Paused,
-        0,
-        0,
-        Some("Paused"),
-        Some("paused"),
-        Some("Paused"),
-        crate::models::SegmentStatus::Pending,
-        None,
-        None,
+        crate::state_machine::TaskTransitionInput {
+            target: TaskStatus::Paused,
+            downloaded_bytes: None,
+            speed_bps: 0,
+            connection_count: 0,
+            health_summary: Some("Paused"),
+            error_message: None,
+            event_type: Some("paused"),
+            event_message: Some("Paused"),
+        },
+        Some((crate::models::SegmentStatus::Pending, None, None)),
     )
     .await
     {
@@ -504,6 +506,18 @@ async fn redownload_task_inner(
         selected_hls_variant_uri: hls.as_ref().map(|record| record.media_url.clone()),
         selected_hls_audio_track_uris,
         selected_hls_subtitle_track_uris,
+        hls_max_missing_segments: hls
+            .as_ref()
+            .map(|record| record.max_missing_segments as i32),
+        selected_dash_video_representation_id: db::get_dash_task(&state.pool, &task.id)
+            .await?
+            .and_then(|dash| dash.video_representation_id),
+        selected_dash_audio_representation_id: db::get_dash_task(&state.pool, &task.id)
+            .await?
+            .and_then(|dash| dash.audio_representation_id),
+        selected_dash_subtitle_representation_id: db::get_dash_task(&state.pool, &task.id)
+            .await?
+            .and_then(|dash| dash.selected_subtitle_representation_id),
         proxy_mode: Some(proxy.mode),
         proxy_url,
         proxy_username,
@@ -637,18 +651,34 @@ pub async fn finish_live_recording(
     id: String,
 ) -> Result<Task, String> {
     tracing::info!(task_id = %id, "finishing HLS live recording");
+    let _guard = state.task_runtime_locks.lock(&id).await;
     let task = require_task(&state.pool, &id).await?;
     if task.protocol != "hls" {
-        return Err("Only HLS live recordings can be finished.".to_string());
+        return Err(crate::download::error::engine_error(
+            "hls_finish_unavailable",
+            "Only HLS live recordings can be finished.",
+            false,
+        ));
     }
     let Some(hls_task) = db::get_hls_task(&state.pool, &id).await? else {
-        return Err("HLS recording state is not ready yet.".to_string());
+        return Err(crate::download::error::engine_error(
+            "hls_finish_unavailable",
+            "HLS recording state is not ready yet.",
+            false,
+        ));
     };
     if hls_task.playlist_kind == "vod" {
-        return Err("VOD HLS tasks finish automatically.".to_string());
+        return Err(crate::download::error::engine_error(
+            "hls_finish_unavailable",
+            "VOD HLS tasks finish automatically.",
+            false,
+        ));
     }
-    if !matches!(task.status, TaskStatus::Downloading | TaskStatus::Retrying) {
-        return Err("The HLS recording must be downloading before it can be finished.".to_string());
+    if !matches!(
+        task.status,
+        TaskStatus::Downloading | TaskStatus::Retrying | TaskStatus::WaitingNetwork
+    ) {
+        return Err(crate::download::error::engine_error("hls_finish_unavailable", "The HLS recording must be active or waiting for the network before it can be finished.", false));
     }
     db::request_hls_finish(&state.pool, &id).await?;
     if let Some(control) = state.downloads.lock().await.get(&id) {
@@ -656,6 +686,19 @@ pub async fn finish_live_recording(
         // PERF-15: wake the waiting HLS loop immediately — the DB flag is its
         // 2 s fallback, not the prompt path.
         control.finish_notify.notify_waiters();
+    }
+    if task.status == TaskStatus::WaitingNetwork {
+        // No worker is resident while a live source is idle. Requeue once so
+        // the HLS engine can observe the persisted finish flag and finalize
+        // the fragments already on disk without waiting for the source.
+        let _ = queue_task_for_retry_with_event(
+            &app,
+            state.inner(),
+            &id,
+            "hls_finish_requested",
+            Some("Finishing the recording from downloaded segments"),
+        )
+        .await?;
     }
     db::update_task_health_summary(&state.pool, &id, Some("Finishing HLS recording")).await?;
     db::insert_task_event(&state.pool, &id, "hls_finish_requested", None).await?;
@@ -674,6 +717,28 @@ pub async fn cancel_task(
     // R-2.3: Serialize against start_task and other user actions on the same task.
     let _guard = state.task_runtime_locks.lock(&id).await;
     tracing::info!(task_id = %id, "canceling task");
+    state
+        .engine_registry
+        .bt_engine()
+        .seeding_manager()
+        .stop(&id, "manual", Some(crate::USER_ACTION_DRAIN_GRACE))
+        .await?;
+    let current = require_task(&state.pool, &id).await?;
+    if current.status == TaskStatus::Completed && current.protocol == "bt" {
+        db::update_torrent_seeding(&state.pool, &id, false, None, None, false).await?;
+        if let Some(seed) = db::bt_seeding_status(&state.pool, &id).await? {
+            db::checkpoint_bt_seeding(
+                &state.pool,
+                &id,
+                seed.uploaded_bytes,
+                seed.elapsed_seconds,
+                Some("manual"),
+            )
+            .await?;
+        }
+        emit_task_updated_record(&app, &state.pool, &current).await;
+        return task_payload(&state.pool, &id).await;
+    }
     crate::remove_and_drain_control(
         &state.downloads,
         &state.request_headers,
@@ -681,19 +746,25 @@ pub async fn cancel_task(
         crate::USER_ACTION_DRAIN_GRACE,
     )
     .await?;
-    match crate::state_machine::transition_task_with_runtime_state(
+    match crate::state_machine::transition_task_with_runtime_input(
         &app,
         &state.pool,
         &id,
-        TaskStatus::Failed,
-        0,
-        0,
-        Some("Canceled by user."),
-        Some("failed"),
-        Some("Canceled by user."),
-        crate::models::SegmentStatus::Failed,
-        Some("Canceled by user."),
-        None,
+        crate::state_machine::TaskTransitionInput {
+            target: TaskStatus::Failed,
+            downloaded_bytes: None,
+            speed_bps: 0,
+            connection_count: 0,
+            health_summary: Some("Canceled by user."),
+            error_message: Some("Canceled by user."),
+            event_type: Some("failed"),
+            event_message: Some("Canceled by user."),
+        },
+        Some((
+            crate::models::SegmentStatus::Failed,
+            Some("Canceled by user."),
+            None,
+        )),
     )
     .await
     {

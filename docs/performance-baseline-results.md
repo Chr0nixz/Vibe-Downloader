@@ -1,12 +1,23 @@
 # 性能基线实测结果（PERF-11 / E1）
 
-最后更新：2026-10-02
+最后更新：2026-10-13
 
 历史完整基线适用版本：Vibe Downloader `0.3.0`；本页新增的当前 smoke 适用版本为 `0.5.0`（1k 与 10k）。
 
-状态：已建立可重复 headless harness，并完成本机 1k / 10k 实测。**50k+、HLS/BT 长跑、1k 批量删除 soak、CI 绝对数值门禁仍延期。**
+状态：已建立可重复 headless harness，完成当前本机 1k / 10k 实测及 Windows 原生候选短基线。**当前版本 50k+、真实冷缓存与呈现帧率、HLS/BT 长跑、1k 批量删除 soak、CI 绝对数值门禁仍延期。**
 
-方法与矩阵见 [performance-baseline.md](performance-baseline.md)。原始 JSON 由本地 `artifacts/perf/<ts>/` 生成（目录 gitignore）；本文保留可复核摘要。
+## 0.5. 2026-10-12 B7 创建路径与运行快照（`0.5.0`）
+
+本次使用 Windows dirty 工作区、debug profile；列表／搜索各重复 5 次，创建／冲突／旧全量读取／运行快照各重复 25 次（harness 对创建路径设置了最低样本数）。原始 JSON 位于 `logs/b7/20261012-windows/perf-corrected/`（本地证据目录，未纳入版本库）。除列表／搜索外，harness 先把种子任务补成真实活动路径，再测缓存 probe 创建、同名冲突重试、旧的全量路径读取和运行时快照上限。该对照用于复核 `PERF-16`，不把本机数字当作跨机器门禁。
+
+| 活动任务数 | 创建 p50/p95 (ms) | 同名冲突 p50/p95 (ms) | 全量路径读取 p50/p95 (ms) | 快照 p50/p95 (ms) | 快照返回 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 3.43 / 21.97 | 4.24 / 20.72 | 5.97 / 8.99 | 15.18 / 16.55 | 500 |
+| 10,000 | 4.50 / 18.17 | 5.17 / 7.44 | 107.26 / 124.02 | 26.43 / 28.56 | 500 |
+
+结果：当前创建路径的 p95 没有随活动任务数线性增长，快照稳定截断为 500；保留全量路径读取作为历史对照，证明移除预读的收益。WAL 净增长在这组 SQLite 检查点后为 0，不解释为“无写入”。
+
+方法与矩阵见 [performance-baseline.md](performance-baseline.md)。历史 1k／10k JSON 仍由本地 `artifacts/perf/<ts>/` 生成（目录 gitignore）；本次 PERF-16 创建路径 JSON 保存在上文的 B7 证据目录，本文保留可复核摘要。
 ## 0. 2026-10-02 B7 当前 1k smoke（`0.5.0`）
 
 本次运行使用当前工作区 `611cbbc65b6ff76e8b92e1564d6538b4110e25a5`，工作区为 dirty；原始数据位于 `artifacts/perf/20261002-192007/`。这是当前版本的 1k headless smoke，只更新可复核基线，不替代真实 release UI、协议对端或长跑验收。
@@ -108,22 +119,39 @@ seed 耗时 ≈ 182 s（debug）。**决策**：50k search p95 = 6.90 ms ≪ 100
 - 三字段 `LOWER(...) LIKE '%term%'` 搜索在 50k 仍为全表相关 SCAN（对齐原 `PERF-01` 证据）；p95 仍远低于预算，故不引入 FTS。
 - `file_size` 排序对 failed 子集使用临时 B-Tree。
 
-## 4. 手动 release UI 清单（本批未测）
+## 4. 2026-10-13 Windows 原生 release UI 短基线
 
-以下需在未签名 release candidate 上人工填写；本批只交付清单与 headless 数字，**不假装已有冷启动/FPS 数据**：
+本次使用 NSIS 隔离安装后的 `0.5.0`，identity `com.vibe.downloader.b7.windows-20261013-ui`，主程序 SHA-256 `579976d2011389513c23ae3b9428aee4e332f950de1edff02c446f17c0c1d0d5`。源码 HEAD `f87c2007e52d026265472e2f2efd6c80ab3d3642`、dirty；release `opt-level="s"`、LTO。机器为 Windows 11 Enterprise、i7-14700HX、28 逻辑 CPU、约 63.7 GiB RAM；Node 22.23.2、WebView2 `Edg/156.0.4314.15`。可见 viewport 固定 `1200×830`、DPR `1.25`、英文／comfortable 行密度；宿主是 Codex Windows MSIX，数据目录虚拟化按 [矩阵 6.2](b7-acceptance-matrix-2026-10-02.md#62-2026-10-13-windows-候选刷新与原生-ui-基线) 单独记录。
 
-| 指标 | 1k | 10k | 备注 |
-| --- | --- | --- | --- |
-| 冷启动 → 首屏任务可见 | _待测_ | _待测_ | 完全退出后启动 5 次，分冷/暖缓存 |
-| 可交互时间 | _待测_ | _待测_ | |
-| 连续滚动 10s 平均/最低 FPS | _待测_ | _待测_ | 固定窗口尺寸 |
-| 稳态 RSS | _待测_ | _待测_ | 空闲 5 分钟后采样 |
+每组 5 个启动／鼠标／键盘／搜索样本，p95 为 nearest-rank，因此这组小样本的 p95 等于最大值；每组仅 1 次 10 秒滚动、1 次 5 分钟空闲（11 个进程采样）。任务为完成 50%、暂停 40%、失败 10%，每任务一条 file record；没有实际下载文件或网络传输。原始 JSON、截图和逐次退出记录为 `logs/b7/windows-20261013-ui/native-ui/2026-10-12T18-03-07-276Z/`，汇总为 `native-summary.json`。
 
-复现 headless：
+| 指标 | 1k | 10k | 方法／限制 |
+| --- | ---: | ---: | --- |
+| 首屏任务观察上界 p50/p95 (ms) | 1944 / 2007 | 1842 / 2346 | 从 Start-Process 到 CDP 观察，非真实 first paint／冷缓存 |
+| 首次测量启动 (ms) | 1944 | 1816 | 有一次不计入样本的 1k primer；OS 缓存未清空 |
+| 后续 4 次首屏 p50/p95 (ms) | 1892 / 2007 | 1842 / 2346 | 完整退出后重启 |
+| 启动到首行选择成功 p50/p95 (ms) | 1989 / 2084 | 1914 / 2445 | 含元数据查询与输入验证开销，为可交互观察上界 |
+| 鼠标选行 p50/p95 (ms) | 13.6 / 26.9 | 22.4 / 32.1 | 输入事件到匹配 DOM 后两帧 |
+| 方向键选行 p50/p95 (ms) | 21.9 / 22.7 | 21.1 / 26.3 | 另核对焦点落在下一行 |
+| 精确搜索 p50/p95 (ms) | 345.4 / 348.2 | 365.4 / 377.1 | 包含 300ms debounce，非纯 DB 耗时 |
+| 滚动 rAF 平均/最少完整秒计数 | 90.94 / 68 | 54.45 / 36 | CDP wheel 10 秒；非 compositor／显示器呈现 FPS |
+| 滚动 long task (≥50ms) | 0 | 0 | 单次记录；不能替代长跑或所有交互 |
+| 最大虚拟行 DOM / 已加载页行数 | 22 / 300 | 22 / 300 | 只滚动到部分分页，未遍历整个数据集 |
+| 5 分钟主进程 working set (MiB) | 50.77 | 72.13 | 最后一次采样 |
+| 主程序＋WebView2 working set 总和 (MiB) | 622.48 | 606.06 | 7 进程；共享页可能重复计入，不是去重 RSS |
+| 同一进程族 private bytes 总和 (MiB) | 327.03 | 332.93 | 最后一次采样，非峰值 |
+| 空闲 CPU 均值（按 28 逻辑 CPU 归一化） | 0.075% | 0.101% | 进程族 CPU counter 差值；单核口径约 2.11% / 2.83% |
+| 进程族句柄 / 线程 | 4133 / 211 | 4119 / 210 | 最后一次采样 |
+| WAL 文件占用 (bytes) | 61,832 | 61,832 | 11 次空闲采样中保持同值，不代表无写入 |
 
-```bash
-pnpm perf:baseline
-pnpm perf:baseline:10k
+两组任务数量与查询结果正确，所有测量退出前记录的 7 个进程都结束。内存从滚动／截图后的高点下降，但 5 分钟不能证明一小时／长跑无泄漏。10k 的 rAF 单次均值低于 1k，且进程逻辑读取差值为 706,977,196 字节（1k 为 22,643,483）；逻辑 I/O 含 IPC，不是物理磁盘吞吐，需要在后续空闲／SQLite profile 中拆分。未据此调整 `55 FPS` 等既有预算，也未推出跨机器或 50k 的结论。
+
+该快照的原生截图发现系统 PNG 被 CSP 阻断且缺少图片错误回退，登记 `UX-51`；NSIS 包含多余 `export-bindings.exe`，登记 `PERF-21`。随后修复的 NSIS／MSI 已排除 exporter 和重复 sidecar，实际原生图标／坏图回退／CSP 验收通过，详见 [矩阵 6.3](b7-acceptance-matrix-2026-10-02.md#63-2026-10-13-图标与二进制包装修复验收)；两项为 Fixed locally。新包 1k／10k 各 1 次短跑仅作功能 smoke，不能替换本节五次基线或证明性能提升。候选 UI 全面走查、真实冷缓存、50k 实际帧率、NTFS 预分配、检查点压力、1 小时空闲与真实协议长跑继续列入 B7。
+
+复现入口与计时定义见 [采集方法 5.6](performance-baseline.md#56-windows-候选包原生-webview2-采集)：
+
+```powershell
+pnpm perf:native-ui --config logs/b7/windows-20261013-ui/tauri.b7.generated.json --exe <重新隔离安装后的程序路径> --reuse-fixture true
 ```
 
 ## 5. Bundle 体积门禁（PERF-10）

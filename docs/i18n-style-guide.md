@@ -127,8 +127,8 @@ Vibe Downloader 目前支持 7 种语言，划分为两种保障等级：
 1. **Rust 错误码注册契约**：
    - 凡在 `src-tauri/` 中通过 `engine_error("new_code", ...)` 或 `AppErrorPayload::new("new_code", ...)` 抛出新错误码：
    - 必须在 `src/lib/stable-error-codes.ts` 的 `STABLE_ERROR_CODES` 中登记该错误码。
-   - 必须在 `scripts/stable-error-messages.json` 和 `scripts/stable-error-causes.json` 中配置 7 种语言文案。
-   - 必须运行 `node scripts/sync-stable-error-i18n.mjs` 自动同步并生成至所有语言包文件。
+   - 稳定发布文案只在 `scripts/stable-error-messages.json` 和 `scripts/stable-error-causes.json` 中维护 `en` 与 `zh-CN`；beta locale 的缺口由 `pnpm check:i18n` 单独报告，不阻塞稳定错误码添加。
+   - 运行 `node scripts/sync-stable-error-i18n.mjs` 自动同步 `en` 与 `zh-CN`；脚本会明确跳过 beta locale，避免生成未经审核的占位翻译。
 2. **任务历史事件本地化契约**：
    - 凡在 Rust 中写入 `task_events` 表的新 `event_type`，必须同步在各语言包的 `taskEvent.<event_type>` 补充对应文案，杜绝界面出现下划线原始英文。
 

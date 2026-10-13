@@ -7,6 +7,21 @@ license = "GPL-3.0-only"
 edition = "2021"
 default-run = "vibe-downloader"
 
+[[bin]]
+name = "export-bindings"
+path = "src/bin/export-bindings.rs"
+required-features = ["export-bindings"]
+
+[[bin]]
+name = "vibe-native-host"
+path = "src/bin/vibe-native-host.rs"
+required-features = ["native-host"]
+
+[features]
+# Tauri must bundle the staged sidecar only once, without development tools.
+export-bindings = []
+native-host = []
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
@@ -27,12 +42,17 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "socks", "stream", "system-proxy"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "socks", "stream", "system-proxy"] }
 hls_m3u8 = "0.7.0"
 aes = "0.9.1"
 cbc = { version = "0.2.1", features = ["alloc"] }
 suppaftp = { version = "10.0.2", default-features = false, features = ["tokio-rustls-ring", "deprecated"] }
 rustls-platform-verifier = "0.7.0"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+# librqbit's `sha1-ring` feature still uses aws-lc-rs for torrent hashing.
+# Keep its bundled Windows assembler path available after removing aws-lc-rs
+# from the application's rustls provider feature set.
+aws-lc-rs = { version = "1.18.1", default-features = false, features = ["prebuilt-nasm"] }
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "migrate"] }
 tokio = { version = "1.52.3", features = ["fs", "io-util", "net", "process", "sync", "time", "macros", "rt-multi-thread"] }
 specta = { version = "2.0.0-rc.25", features = ["derive", "chrono", "uuid"] }
@@ -66,7 +86,7 @@ zeroize = { version = "1", features = ["derive"] }
 keyring = "4"
 librqbit = { version = "9.0.0-rc.0", default-features = false, features = ["rust-tls"] }
 quick-xml = "0.41.0"
-russh = "0.61.2"
+russh = { version = "0.61.2", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.3.0"
 trash = "5.2.6"
 hickory-resolver = { version = "0.26.1", features = ["tokio"] }

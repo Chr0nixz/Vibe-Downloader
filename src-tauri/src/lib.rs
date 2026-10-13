@@ -239,7 +239,13 @@ pub async fn shutdown_active_downloads(
 ) -> Result<(), String> {
     let _lifecycle_guard = state.lifecycle_gate.clone().lock_owned().await;
     state.quit_requested.store(true, Ordering::SeqCst);
-    drain_download_owners(&state.downloads, &state.active_supervisors, timeout).await
+    drain_download_owners(&state.downloads, &state.active_supervisors, timeout).await?;
+    state
+        .engine_registry
+        .bt_engine()
+        .seeding_manager()
+        .drain(timeout)
+        .await
 }
 
 pub async fn prepare_app_relaunch(app: &tauri::AppHandle) -> Result<(), String> {
@@ -439,6 +445,7 @@ macro_rules! vibe_commands_base {
             commands::tasks::list_dash_segments_page,
             commands::tasks::get_segment_summary,
             commands::tasks::get_torrent_runtime_snapshot,
+            commands::tasks::get_media_task_details,
             commands::tasks::get_task_proxy_settings,
             commands::tasks::get_task_request_profile,
             commands::tasks::update_task_request_profile,
@@ -512,6 +519,10 @@ macro_rules! vibe_commands_base {
             commands::tasks::create_task,
             commands::tasks::import_urls,
             commands::tasks::update_task_transfer_options,
+            commands::workflow::list_workflow_library,
+            commands::workflow::save_workflow_entry,
+            commands::workflow::delete_workflow_entry,
+            commands::workflow::bulk_update_task_options,
             commands::tasks::reorder_queued_tasks,
             commands::tasks::update_torrent_file_selection,
             commands::tasks::update_torrent_seeding,
@@ -663,6 +674,10 @@ pub fn export_typescript_bindings() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // reqwest is configured with rustls-no-provider so every HTTP client uses
+    // the same explicit ring provider as FTPS and the updater plugin.
+    download::ensure_rustls_crypto_provider();
+
     #[cfg(debug_assertions)]
     {
         export_typescript_bindings().expect("Failed to export TypeScript bindings");
@@ -736,85 +751,78 @@ pub fn run() {
                 let Some(state) = app.try_state::<AppState>() else {
                     return;
                 };
-                if state.lifecycle.phase() != AppLifecyclePhase::Running {
-                    api.prevent_close();
-                    request_graceful_exit(app.clone());
-                    return;
-                }
-
-                let close_to_tray = tauri::async_runtime::block_on(async {
-                    let default_dir =
-                        commands::settings::default_download_dir(app).unwrap_or_default();
-                    db::get_settings(&state.pool, default_dir)
-                        .await
-                        .map(|settings| settings.close_to_tray)
-                        .unwrap_or(false)
-                });
-                if close_to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
-                    return;
-                }
-
-                let stats = tauri::async_runtime::block_on(db::task_stats_snapshot(&state.pool));
-                let (active, queued, stats_unavailable) = match stats {
-                    Ok(snapshot) => {
-                        let active = snapshot.active.parse::<u32>().ok();
-                        let queued = snapshot.queued.parse::<u32>().ok();
-                        match (active, queued) {
-                            (Some(active), Some(queued)) => (active, queued, false),
-                            _ => {
-                                tracing::warn!(
-                                    "task stats snapshot contained invalid counts during close"
-                                );
-                                (0, 0, true)
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(error = %error, "task stats snapshot failed during close");
-                        (0, 0, true)
-                    }
-                };
-                if active == 0 {
-                    if stats_unavailable {
-                        // Keep the window open and surface the decision dialog
-                        // when ownership is unknown. Exiting here could
-                        // terminate an active download without a checkpoint.
-                        api.prevent_close();
-                        if state.close_request_pending.swap(true, Ordering::SeqCst) {
-                            return;
-                        }
-                        events::emit_close_requested(
-                            app,
-                            &events::CloseRequestPayload {
-                                active,
-                                queued,
-                                stats_unavailable,
-                            },
-                        );
-                        return;
-                    }
-                    // The lifecycle coordinator prevents repeated close events
-                    // from bypassing the owner drain when nothing needs a UI
-                    // decision.
-                    api.prevent_close();
-                    request_graceful_exit(app.clone());
-                    return;
-                }
-
                 api.prevent_close();
+                if state.lifecycle.phase() != AppLifecyclePhase::Running {
+                    request_graceful_exit(app.clone());
+                    return;
+                }
                 if state.close_request_pending.swap(true, Ordering::SeqCst) {
                     return;
                 }
-                events::emit_close_requested(
-                    app,
-                    &events::CloseRequestPayload {
-                        active,
-                        queued,
-                        stats_unavailable,
-                    },
-                );
+                // ARC-67: CloseRequested is delivered on the native UI thread.
+                // Read settings and task counts asynchronously so a busy SQLite
+                // connection cannot freeze painting or input handling.
+                let app = app.clone();
+                let pool = state.pool.clone();
+                let pending = state.close_request_pending.clone();
+                tauri::async_runtime::spawn(async move {
+                    let default_dir =
+                        commands::settings::default_download_dir(&app).unwrap_or_default();
+                    let (settings, stats) = tokio::join!(
+                        db::get_settings(&pool, default_dir),
+                        db::task_stats_snapshot(&pool),
+                    );
+                    let close_to_tray = settings
+                        .map(|settings| settings.close_to_tray)
+                        .unwrap_or_else(|error| {
+                            tracing::warn!(error = %error, "failed to load close-to-tray setting");
+                            false
+                        });
+                    if close_to_tray {
+                        pending.store(false, Ordering::SeqCst);
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                        return;
+                    }
+
+                    let (active, queued, stats_unavailable) = match stats {
+                        Ok(snapshot) => {
+                            let active = snapshot.active.parse::<u32>().ok();
+                            let queued = snapshot.queued.parse::<u32>().ok();
+                            match (active, queued) {
+                                (Some(active), Some(queued)) => (active, queued, false),
+                                _ => {
+                                    tracing::warn!(
+                                        "task stats snapshot contained invalid counts during close"
+                                    );
+                                    (0, 0, true)
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "task stats snapshot failed during close"
+                            );
+                            (0, 0, true)
+                        }
+                    };
+                    if active == 0 && !stats_unavailable {
+                        pending.store(false, Ordering::SeqCst);
+                        request_graceful_exit(app);
+                        return;
+                    }
+
+                    events::emit_close_requested(
+                        &app,
+                        &events::CloseRequestPayload {
+                            active,
+                            queued,
+                            stats_unavailable,
+                        },
+                    );
+                });
             }
         });
 
@@ -1076,6 +1084,78 @@ async fn run_post_app_state_services(
     }
 
     if !startup.scheduler_started() {
+        if db::get_settings(
+            &app_state.pool,
+            commands::settings::default_download_dir(handle).unwrap_or_default(),
+        )
+        .await?
+        .auto_resume_on_startup
+        {
+            let restore_app = handle.clone();
+            let restore_pending = app_state
+                .engine_registry
+                .bt_engine()
+                .seeding_manager()
+                .begin_start();
+            tauri::async_runtime::spawn(async move {
+                let _restore_pending = restore_pending;
+                let state = restore_app.state::<AppState>();
+                let tasks = match db::bt_seeding_restore_candidates(&state.pool).await {
+                    Ok(tasks) => tasks,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "could not read seeding restore candidates");
+                        return;
+                    }
+                };
+                for task in tasks {
+                    let _lifecycle_guard = state.lifecycle_gate.lock().await;
+                    if state.quit_requested.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let _guard = state.task_runtime_locks.lock(&task.id).await;
+                    if !db::bt_seeding_status(&state.pool, &task.id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|state| state.enabled && !state.manual_stop)
+                    {
+                        continue;
+                    }
+                    let proxy = db::resolve_task_proxy_config(
+                        &state.pool,
+                        &task.id,
+                        &task.protocol,
+                        &state.engine_registry.proxy_config().await,
+                    )
+                    .await;
+                    let result = match proxy {
+                        Ok(proxy) => {
+                            state
+                                .engine_registry
+                                .bt_engine()
+                                .start_completed_seeding(
+                                    Some(restore_app.clone()),
+                                    state.pool.clone(),
+                                    task.clone(),
+                                    proxy,
+                                    state.speed_limiter.clone(),
+                                )
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let _ = db::insert_task_event(
+                            &state.pool,
+                            &task.id,
+                            "bt_seeding_restore_skipped",
+                            Some(&error),
+                        )
+                        .await;
+                    }
+                }
+            });
+        }
         let handle_clone = handle.clone();
         let scheduler = app_state.scheduler.clone();
         let pool_clone = app_state.pool.clone();
@@ -1184,7 +1264,7 @@ pub(crate) fn focus_main_window(app: &tauri::AppHandle) {
     }
 }
 
-pub(crate) fn open_downloads_dir(app: &tauri::AppHandle) {
+pub(crate) async fn open_downloads_dir(app: &tauri::AppHandle) {
     let default_dir = match commands::settings::default_download_dir(app) {
         Ok(path) => path,
         Err(error) => {
@@ -1193,15 +1273,13 @@ pub(crate) fn open_downloads_dir(app: &tauri::AppHandle) {
         }
     };
     let state = app.state::<AppState>();
-    let save_dir = tauri::async_runtime::block_on(async {
-        db::get_settings(&state.pool, default_dir.clone())
-            .await
-            .map(|settings| settings.default_save_dir)
-    })
-    .unwrap_or_else(|error| {
-        tracing::warn!(error = %error, "failed to load configured downloads directory");
-        default_dir
-    });
+    let save_dir = db::get_settings(&state.pool, default_dir.clone())
+        .await
+        .map(|settings| settings.default_save_dir)
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "failed to load configured downloads directory");
+            default_dir
+        });
 
     let path = std::path::PathBuf::from(save_dir);
     if let Err(error) = std::fs::create_dir_all(&path) {

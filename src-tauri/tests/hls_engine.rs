@@ -1071,6 +1071,9 @@ video.m3u8\n";
             staging_dir: &staging,
             selected_audio_track_uris: Some(&audio_json),
             selected_subtitle_track_uris: None,
+            max_missing_segments: 0,
+            missing_segments_json: None,
+            selected_track_catalog_json: None,
         },
     )
     .await
@@ -1197,6 +1200,9 @@ async fn fun10_selected_track_404_fails_visibly() {
             staging_dir: &staging,
             selected_audio_track_uris: Some(&audio_json),
             selected_subtitle_track_uris: None,
+            max_missing_segments: 0,
+            missing_segments_json: None,
+            selected_track_catalog_json: None,
         },
     )
     .await
@@ -1940,6 +1946,9 @@ video.m3u8\n";
             staging_dir: &staging,
             selected_audio_track_uris: Some(&audio_json),
             selected_subtitle_track_uris: None,
+            max_missing_segments: 0,
+            missing_segments_json: None,
+            selected_track_catalog_json: None,
         },
     )
     .await

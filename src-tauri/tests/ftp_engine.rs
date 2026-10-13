@@ -1024,6 +1024,7 @@ async fn arc31_parallel_cancel_drains_workers_before_checkpoint() {
 /// download, cancel it once a partial offset is checkpointed, and return the
 /// artifacts needed for the resume leg.
 struct Arc42FtpFixture {
+    _db: common::TestDbGuard,
     server: FtpTestServer,
     pool: sqlx::SqlitePool,
     paths: common::TestPaths,
@@ -1041,7 +1042,7 @@ async fn pause_ftp_download_mid_transfer(task_id: &str, payload_len: i64) -> Arc
         data_chunk_delay: Some(Duration::from_millis(10)),
         ..FtpServerConfig::default()
     });
-    let (_db, pool) = common::test_pool("ftp-arc42").await;
+    let (db_guard, pool) = common::test_pool("ftp-arc42").await;
     let paths = common::TestPaths::new("ftp-arc42");
     let mut task = common::download_task(
         task_id,
@@ -1118,6 +1119,7 @@ async fn pause_ftp_download_mid_transfer(task_id: &str, payload_len: i64) -> Arc
     .expect("persist FTP pause");
 
     Arc42FtpFixture {
+        _db: db_guard,
         server,
         pool,
         paths,

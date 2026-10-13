@@ -58,6 +58,45 @@ fn is_retryable_sqlite_busy(error: &TransitionError) -> bool {
     db::is_sqlite_busy_message(message)
 }
 
+/// Values written by a semantic task transition. Keeping the health summary,
+/// error text, byte offset and instantaneous speed separate prevents a
+/// lifecycle caller from accidentally publishing one field in another
+/// column (ARC-66).
+#[derive(Debug, Clone, Copy)]
+pub struct TaskTransitionInput<'a> {
+    pub target: TaskStatus,
+    pub downloaded_bytes: Option<i64>,
+    pub speed_bps: i64,
+    pub connection_count: i32,
+    pub health_summary: Option<&'a str>,
+    pub error_message: Option<&'a str>,
+    pub event_type: Option<&'a str>,
+    pub event_message: Option<&'a str>,
+}
+
+impl<'a> TaskTransitionInput<'a> {
+    pub fn legacy(
+        target: TaskStatus,
+        downloaded_bytes: i64,
+        connection_count: i32,
+        message: Option<&'a str>,
+        event_type: Option<&'a str>,
+    ) -> Self {
+        Self {
+            target,
+            downloaded_bytes: None,
+            speed_bps: downloaded_bytes,
+            connection_count,
+            health_summary: message,
+            error_message: matches!(target, TaskStatus::Failed | TaskStatus::NeedsAttention)
+                .then_some(message)
+                .flatten(),
+            event_type,
+            event_message: message,
+        }
+    }
+}
+
 /// Unified state transition entry point.
 ///
 /// - Validates transition legality (returns `TransitionError::Illegal` if invalid, no DB write)
@@ -87,19 +126,31 @@ pub async fn transition_task<T: DownloadEventTarget + ?Sized>(
     message: Option<&str>,
     event_type: Option<&str>,
 ) -> Result<TaskRecord, TransitionError> {
-    transition_task_inner(
+    transition_task_with_input(
         app,
         pool,
         task_id,
-        target,
-        downloaded_bytes,
-        connection_count,
-        message,
-        event_type,
-        None,
-        None,
+        TaskTransitionInput::legacy(
+            target,
+            downloaded_bytes,
+            connection_count,
+            message,
+            event_type,
+        ),
     )
     .await
+}
+
+/// Explicit transition entry point for new lifecycle code. The compatibility
+/// wrapper above remains for older integration callers while production paths
+/// migrate to named fields.
+pub async fn transition_task_with_input<T: DownloadEventTarget + ?Sized>(
+    app: &T,
+    pool: &SqlitePool,
+    task_id: &str,
+    input: TaskTransitionInput<'_>,
+) -> Result<TaskRecord, TransitionError> {
+    transition_task_inner(app, pool, task_id, input, None).await
 }
 
 /// Transition a task while atomically resetting its work units and retry schedule.
@@ -121,51 +172,48 @@ pub async fn transition_task_with_runtime_state<T: DownloadEventTarget + ?Sized>
     work_unit_error: Option<&str>,
     retry_after_at: Option<&str>,
 ) -> Result<TaskRecord, TransitionError> {
-    transition_task_inner(
+    transition_task_with_runtime_input(
         app,
         pool,
         task_id,
-        target,
-        downloaded_bytes,
-        connection_count,
-        message,
-        event_type,
-        Some(event_message),
+        TaskTransitionInput {
+            event_message,
+            ..TaskTransitionInput::legacy(
+                target,
+                downloaded_bytes,
+                connection_count,
+                message,
+                event_type,
+            )
+        },
         Some((work_unit_status, work_unit_error, retry_after_at)),
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Explicit transition entry point that also updates work-unit and retry
+/// state in the same transaction.
+pub async fn transition_task_with_runtime_input<T: DownloadEventTarget + ?Sized>(
+    app: &T,
+    pool: &SqlitePool,
+    task_id: &str,
+    input: TaskTransitionInput<'_>,
+    runtime_state: Option<(SegmentStatus, Option<&str>, Option<&str>)>,
+) -> Result<TaskRecord, TransitionError> {
+    transition_task_inner(app, pool, task_id, input, runtime_state).await
+}
+
 async fn transition_task_inner<T: DownloadEventTarget + ?Sized>(
     app: &T,
     pool: &SqlitePool,
     task_id: &str,
-    target: TaskStatus,
-    downloaded_bytes: i64,
-    connection_count: i32,
-    message: Option<&str>,
-    event_type: Option<&str>,
-    event_message_override: Option<Option<&str>>,
+    input: TaskTransitionInput<'_>,
     runtime_state: Option<(SegmentStatus, Option<&str>, Option<&str>)>,
 ) -> Result<TaskRecord, TransitionError> {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        match transition_task_once(
-            app,
-            pool,
-            task_id,
-            target,
-            downloaded_bytes,
-            connection_count,
-            message,
-            event_type,
-            event_message_override,
-            runtime_state,
-        )
-        .await
-        {
+        match transition_task_once(app, pool, task_id, input, runtime_state).await {
             Ok(record) => return Ok(record),
             Err(error)
                 if is_retryable_sqlite_busy(&error) && attempt < TRANSITION_BUSY_MAX_ATTEMPTS =>
@@ -185,17 +233,11 @@ async fn transition_task_inner<T: DownloadEventTarget + ?Sized>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn transition_task_once<T: DownloadEventTarget + ?Sized>(
     app: &T,
     pool: &SqlitePool,
     task_id: &str,
-    target: TaskStatus,
-    downloaded_bytes: i64,
-    connection_count: i32,
-    message: Option<&str>,
-    event_type: Option<&str>,
-    event_message_override: Option<Option<&str>>,
+    input: TaskTransitionInput<'_>,
     runtime_state: Option<(SegmentStatus, Option<&str>, Option<&str>)>,
 ) -> Result<TaskRecord, TransitionError> {
     // ARC-06 + R-1: IMMEDIATE write lock + conditional UPDATE in one transaction.
@@ -207,16 +249,16 @@ async fn transition_task_once<T: DownloadEventTarget + ?Sized>(
         .await?
         .ok_or_else(|| TransitionError::NotFound(task_id.to_string()))?;
 
-    if !current.status.can_transition_to(target) {
+    if !current.status.can_transition_to(input.target) {
         tracing::warn!(
             task_id = %task_id,
             from = ?current.status,
-            to = ?target,
+            to = ?input.target,
             "rejecting illegal state transition"
         );
         return Err(TransitionError::Illegal {
             from: current.status,
-            to: target,
+            to: input.target,
         });
     }
 
@@ -224,15 +266,16 @@ async fn transition_task_once<T: DownloadEventTarget + ?Sized>(
     // If another path changed the status concurrently, this returns None and
     // we surface a Conflict error so the caller can re-evaluate.
     let expected = current.status;
-    let updated = db::update_task_status_in_tx(
+    let updated = db::update_task_progress_status_in_tx(
         &mut tx,
         task_id,
-        target,
+        input.target,
         Some(expected),
-        downloaded_bytes,
-        connection_count,
-        message,
-        message,
+        input.downloaded_bytes,
+        input.speed_bps,
+        input.connection_count,
+        input.health_summary,
+        input.error_message,
     )
     .await?;
 
@@ -246,20 +289,19 @@ async fn transition_task_once<T: DownloadEventTarget + ?Sized>(
                 task_id = %task_id,
                 expected = ?expected,
                 actual = ?actual_status,
-                attempted = ?target,
+                attempted = ?input.target,
                 "state transition conflict: status changed concurrently"
             );
             return Err(TransitionError::Conflict {
                 task_id: task_id.to_string(),
                 current: actual_status,
-                attempted: target,
+                attempted: input.target,
             });
         }
     };
 
-    if let Some(event_type) = event_type {
-        let event_message = event_message_override.unwrap_or(message);
-        db::insert_task_event_in_tx(&mut tx, task_id, event_type, event_message).await?;
+    if let Some(event_type) = input.event_type {
+        db::insert_task_event_in_tx(&mut tx, task_id, event_type, input.event_message).await?;
     }
 
     if let Some((work_unit_status, work_unit_error, retry_after_at)) = runtime_state {

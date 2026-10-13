@@ -713,7 +713,24 @@ pub struct ProbeTaskPayload {
     pub hls_audio_tracks: Vec<HlsMediaTrack>,
     /// F-6: Subtitle renditions from `#EXT-X-MEDIA TYPE=SUBTITLES`.
     pub hls_subtitle_tracks: Vec<HlsMediaTrack>,
+    /// B6: the bounded DASH track catalog returned by the static/VOD probe.
+    #[serde(default)]
+    pub dash_tracks: Vec<DashTrack>,
     pub probed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DashTrack {
+    pub id: String,
+    pub kind: String,
+    pub language: Option<String>,
+    pub role: Option<String>,
+    pub bandwidth: String,
+    pub resolution: Option<String>,
+    pub codecs: Option<String>,
+    pub subtitle_format: Option<String>,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -865,6 +882,10 @@ pub struct TorrentRuntimeSnapshot {
     pub seed_ratio_limit: Option<f64>,
     /// FUN-11: configured seed time limit in seconds (None = unlimited).
     pub seed_time_limit_seconds: Option<String>,
+    pub seeding_started_at: Option<String>,
+    pub seed_elapsed_seconds: Option<String>,
+    pub seed_stop_reason: Option<String>,
+    pub waiting_completion_action: bool,
     pub last_error_code: Option<String>,
     pub last_error_message: Option<String>,
     pub updated_at: String,
@@ -936,6 +957,10 @@ impl From<TorrentRuntimeSnapshotRecord> for TorrentRuntimeSnapshot {
             seeding_state: record.seeding_state,
             seed_ratio_limit: None,
             seed_time_limit_seconds: None,
+            seeding_started_at: None,
+            seed_elapsed_seconds: None,
+            seed_stop_reason: None,
+            waiting_completion_action: false,
             last_error_code: record.last_error_code,
             last_error_message: record.last_error_message,
             updated_at: record.updated_at,
@@ -1023,6 +1048,12 @@ pub struct CompletionActionRequestedPayload {
 }
 
 impl CompletionAction {
+    pub fn is_destructive(self) -> bool {
+        matches!(
+            self,
+            Self::ExitApp | Self::Shutdown | Self::Sleep | Self::Hibernate | Self::RunCommand
+        )
+    }
     pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",

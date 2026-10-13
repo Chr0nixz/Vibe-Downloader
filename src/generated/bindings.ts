@@ -90,10 +90,20 @@ export const commands = {
 	seedRatioLimit: number | null,
 	/**  FUN-11: configured seed time limit in seconds (None = unlimited). */
 	seedTimeLimitSeconds: string | null,
+	seedingStartedAt: string | null,
+	seedElapsedSeconds: string | null,
+	seedStopReason: string | null,
+	waitingCompletionAction: boolean,
 	lastErrorCode: string | null,
 	lastErrorMessage: string | null,
 	updatedAt: string,
 } | null, string>(__TAURI_INVOKE("get_torrent_runtime_snapshot", { taskId })),
+	getMediaTaskDetails: (taskId: string) => typedError<{
+	outputFormat: string,
+	dashTracks: DashTrack[],
+	maxMissingSegments: number,
+	missingSegmentsJson: string | null,
+} | null, string>(__TAURI_INVOKE("get_media_task_details", { taskId })),
 	getTaskProxySettings: (taskId: string) => typedError<TaskProxySettings, string>(__TAURI_INVOKE("get_task_proxy_settings", { taskId })),
 	getTaskRequestProfile: (taskId: string) => typedError<TaskRequestProfileView, string>(__TAURI_INVOKE("get_task_request_profile", { taskId })),
 	updateTaskRequestProfile: (taskId: string, input: TaskRequestProfileInput, replaceSensitive: boolean) => typedError<TaskRequestProfileView, string>(__TAURI_INVOKE("update_task_request_profile", { taskId, input, replaceSensitive })),
@@ -259,6 +269,10 @@ export const commands = {
 	createTask: (input: CreateTaskInput) => typedError<Task, string>(__TAURI_INVOKE("create_task", { input })),
 	importUrls: (input: ImportUrlsInput) => typedError<BatchImportResult, string>(__TAURI_INVOKE("import_urls", { input })),
 	updateTaskTransferOptions: (input: UpdateTaskTransferOptionsInput) => typedError<Task, string>(__TAURI_INVOKE("update_task_transfer_options", { input })),
+	listWorkflowLibrary: () => typedError<WorkflowLibrary, string>(__TAURI_INVOKE("list_workflow_library")),
+	saveWorkflowEntry: (entry: WorkflowEntry) => typedError<null, string>(__TAURI_INVOKE("save_workflow_entry", { entry })),
+	deleteWorkflowEntry: (id: string) => typedError<null, string>(__TAURI_INVOKE("delete_workflow_entry", { id })),
+	bulkUpdateTaskOptions: (input: BulkTaskOptionsInput) => typedError<BulkTaskOptionsResult[], string>(__TAURI_INVOKE("bulk_update_task_options", { input })),
 	/**
 	 *  Reassign `queue_position` for the given task ids based on their order in
 	 *  the input slice. Only `Queued` tasks should be included; the caller (UI)
@@ -769,6 +783,26 @@ export type BulkTaskActionResult = {
 	failed: number,
 };
 
+export type BulkTaskOptionsInput = {
+	ids: string[],
+	patch: BulkTaskOptionsPatch,
+};
+
+export type BulkTaskOptionsPatch = {
+	priority: TaskPriority | null,
+	taskSpeedLimitBps: string | null,
+	clearSpeedLimit: boolean,
+	categoryKey: string | null,
+	clearCategory: boolean,
+	obeySchedule: boolean | null,
+};
+
+export type BulkTaskOptionsResult = {
+	id: string,
+	status: string,
+	error: string | null,
+};
+
 export type ChecksumAlgorithm = "sha256" | "sha512" | "sha1" | "md5";
 
 export type ClassificationMatchKind = 
@@ -906,6 +940,12 @@ export type CreateTaskInput = {
 	selectedHlsAudioTrackUris: string[] | null,
 	/**  F-6: Selected subtitle track URIs from `#EXT-X-MEDIA TYPE=SUBTITLES`. */
 	selectedHlsSubtitleTrackUris: string[] | null,
+	/**  B6: missing live media fragments tolerated over the whole recording (0-100). */
+	hlsMaxMissingSegments?: number | null,
+	/**  B6: explicit DASH representation choices captured from the probe. */
+	selectedDashVideoRepresentationId?: string | null,
+	selectedDashAudioRepresentationId?: string | null,
+	selectedDashSubtitleRepresentationId?: string | null,
 	/**  FUN-02: Optional per-task proxy override at create time. */
 	proxyMode: TaskProxyMode | null,
 	proxyUrl: string | null,
@@ -934,6 +974,18 @@ export type DashSegmentView = {
 export type DashSegmentsPageResult = {
 	items: DashSegmentView[],
 	nextCursor: string | null,
+};
+
+export type DashTrack = {
+	id: string,
+	kind: string,
+	language: string | null,
+	role: string | null,
+	bandwidth: string,
+	resolution: string | null,
+	codecs: string | null,
+	subtitleFormat: string | null,
+	selected: boolean,
 };
 
 export type DesktopStatusUpdate = {
@@ -1270,6 +1322,13 @@ export type ListTasksResult = {
 
 export type LocalTextFileKind = "batch_text" | "ssh_key";
 
+export type MediaTaskDetails = {
+	outputFormat: string,
+	dashTracks: DashTrack[],
+	maxMissingSegments: number,
+	missingSegmentsJson: string | null,
+};
+
 export type MetalinkMirrorView = {
 	id: string,
 	url: string,
@@ -1406,6 +1465,8 @@ export type ProbeTaskPayload = {
 	hlsAudioTracks: HlsMediaTrack[],
 	/**  F-6: Subtitle renditions from `#EXT-X-MEDIA TYPE=SUBTITLES`. */
 	hlsSubtitleTracks: HlsMediaTrack[],
+	/**  B6: the bounded DASH track catalog returned by the static/VOD probe. */
+	dashTracks?: DashTrack[],
 	probedAt: string,
 };
 
@@ -1535,6 +1596,17 @@ export type SaveDirOverview = {
 	truncated: boolean,
 };
 
+export type SavedView = {
+	nav: string,
+	search: string,
+	sortKey: string,
+	sortDirection: string,
+	fileType: string,
+	source: string,
+	failure: string,
+	resume: string,
+};
+
 /**
  *  Parameter for the debug-only `seed_scale_tasks` command. Each field is the
  *  exact number of tasks to generate in that state. Uses `i32` (not `i64`) so
@@ -1599,6 +1671,11 @@ export type SftpKnownHost = {
 	fingerprintSha256: string,
 	firstSeenAt: string,
 	lastSeenAt: string,
+};
+
+export type SiteProfile = {
+	origin: string,
+	profile: TaskRequestProfileInput,
 };
 
 export type StartupStatus = {
@@ -1807,6 +1884,17 @@ export type TaskNetworkPolicyView = {
 	policy: NetworkPolicy,
 };
 
+export type TaskPreset = {
+	saveDir: string,
+	categoryKey: string | null,
+	priority: TaskPriority,
+	taskSpeedLimitBps: string | null,
+	obeySchedule: boolean,
+	proxyMode: TaskProxyMode,
+	proxyUrl: string | null,
+	proxyNoProxy: string | null,
+};
+
 export type TaskPriority = "low" | "normal" | "high";
 
 export type TaskProgressPayload = {
@@ -1928,6 +2016,10 @@ export type TorrentRuntimeSnapshot = {
 	seedRatioLimit: number | null,
 	/**  FUN-11: configured seed time limit in seconds (None = unlimited). */
 	seedTimeLimitSeconds: string | null,
+	seedingStartedAt: string | null,
+	seedElapsedSeconds: string | null,
+	seedStopReason: string | null,
+	waitingCompletionAction: boolean,
 	lastErrorCode: string | null,
 	lastErrorMessage: string | null,
 	updatedAt: string,
@@ -2110,6 +2202,19 @@ export type WebDavDirectoryProbe = {
 	directoryUrl: string,
 	entries: WebDavDirectoryEntry[],
 	diagnostics: string[],
+};
+
+export type WorkflowData = { kind: "task_preset"; value: TaskPreset } | { kind: "site_profile"; value: SiteProfile } | { kind: "saved_view"; value: SavedView };
+
+export type WorkflowEntry = {
+	id: string,
+	name: string,
+	data: WorkflowData,
+};
+
+export type WorkflowLibrary = {
+	entries: WorkflowEntry[],
+	unsupportedCount: number,
 };
 
 /* Tauri Specta runtime */

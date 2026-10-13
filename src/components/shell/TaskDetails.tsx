@@ -29,6 +29,7 @@ import { useTranslation } from "react-i18next";
 import { ChunkMap, ChunkMapSummary } from "@/components/shell/ChunkMap";
 import { TaskPassportCard } from "@/components/shell/TaskPassportCard";
 import { TaskTimeline } from "@/components/shell/TaskTimeline";
+import { WorkflowPicker } from "@/components/shell/WorkflowPicker";
 import { rowShowsRetry, rowTransferMode, torrentFileSelectionRequired } from "@/components/tasks/row-recovery";
 import { SpeedSparkline } from "@/components/tasks/SpeedSparkline";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
@@ -47,6 +48,7 @@ import type {
   DashSegmentView,
   HashVerificationState,
   HlsSegmentView,
+  MediaTaskDetails,
   MetalinkMirrorView,
   RecoveryAction,
   RequestDiagnostic,
@@ -62,6 +64,7 @@ import type {
 } from "@/generated/bindings";
 import { useIsCompactShell } from "@/hooks/use-shell-layout";
 import { useTaskDetailQueries } from "@/hooks/use-task-detail-queries";
+import { useVisibilityGatedPoll } from "@/hooks/use-visibility-gated-poll";
 import type { TranslationKey } from "@/i18n";
 import { chunkMapCells, hasByteRangeSegments } from "@/lib/chunk-map";
 import { writeClipboardText } from "@/lib/clipboard-write";
@@ -91,6 +94,7 @@ import {
 import {
   computeFileHash,
   finishLiveRecording,
+  getMediaTaskDetails,
   getTaskNetworkPolicy,
   getTaskProxySettings,
   listMetalinkMirrors,
@@ -103,7 +107,8 @@ import {
   updateTorrentSeeding,
   verifyTaskHash,
 } from "@/lib/tauri";
-import { cn, formatBytes, formatEta, formatPercent, formatSpeed } from "@/lib/utils";
+import { cn, formatBytes, formatEta, formatNumber, formatPercent, formatSpeed } from "@/lib/utils";
+import { safePreset } from "@/lib/workflow-library";
 import { type SpeedSample, useSpeedHistoryStore } from "@/stores/speed-history-store";
 import { useTaskDataStore } from "@/stores/task-store";
 import { useToastStore } from "@/stores/toast-store";
@@ -569,7 +574,8 @@ function TaskDetailsPanel({
   const isTorrentTask = isTorrentProtocol(task.protocol);
   const isHlsTask = isHlsProtocol(task.protocol);
   const isDashTask = isDashProtocol(task.protocol);
-  const canFinishLiveRecording = isHlsTask && (task.status === "downloading" || task.status === "retrying");
+  const canFinishLiveRecording =
+    isHlsTask && (task.status === "downloading" || task.status === "retrying" || task.status === "waiting_network");
 
   const {
     segments,
@@ -832,6 +838,7 @@ function TaskDetailsPanel({
               />
             ) : null}
             <CapabilityChips task={task} />
+            {isHlsTask || isDashProtocol(task.protocol) ? <MediaOutputPanel task={task} /> : null}
           </div>
           {showsTransferRates(task.status) ? (
             <div className="space-y-0.5">
@@ -1366,7 +1373,7 @@ function TorrentRuntimePanel({
   }, [snapshot]);
   if (task.protocol !== "bt" && task.protocol !== "magnet") return null;
 
-  const canEditFiles = taskFiles.length > 1 && task.status !== "downloading" && task.status !== "retrying";
+  const canEditFiles = taskFiles.length > 1 && !["downloading", "retrying", "completed"].includes(task.status);
   const requiresFileSelection = torrentFileSelectionRequired(task);
   const completedPieces = snapshot ? parseSnapshotNumber(snapshot.completedPieces) : 0;
   const pieceCount = snapshot ? Math.max(0, parseSnapshotNumber(snapshot.pieceCount)) : 0;
@@ -1401,6 +1408,8 @@ function TorrentRuntimePanel({
         timeLimitSeconds: null,
         updateLimits: false,
       });
+    } catch (error) {
+      useToastStore.getState().addToast({ tone: "error", title: localizedErrorMessage(error, t) });
     } finally {
       setSaving(false);
     }
@@ -1410,6 +1419,14 @@ function TorrentRuntimePanel({
     setSaving(true);
     try {
       const ratio = ratioLimitDraft.trim() === "" ? null : Number(ratioLimitDraft);
+      const seconds = timeLimitDraft.trim();
+      if (
+        (ratio !== null && (!Number.isFinite(ratio) || ratio <= 0)) ||
+        (seconds !== "" &&
+          (!/^[0-9]+$/.test(seconds) || BigInt(seconds) <= 0n || BigInt(seconds) > 9223372036854775807n))
+      ) {
+        throw JSON.stringify({ code: "bt_seeding_policy_invalid", message: "", recoverable: false, actions: [] });
+      }
       await updateTorrentSeeding({
         taskId: task.id,
         enabled: snapshot?.seedingEnabled ?? false,
@@ -1417,6 +1434,8 @@ function TorrentRuntimePanel({
         timeLimitSeconds: timeLimitDraft.trim() === "" ? null : timeLimitDraft.trim(),
         updateLimits: true,
       });
+    } catch (error) {
+      useToastStore.getState().addToast({ tone: "error", title: localizedErrorMessage(error, t) });
     } finally {
       setSaving(false);
     }
@@ -1615,6 +1634,45 @@ function TorrentRuntimePanel({
             aria-labelledby="bt-seeding-label"
           />
         </div>
+        {task.status === "completed" ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={saving}
+            onClick={() => void toggleSeeding(snapshot.seedingState !== "seeding")}
+          >
+            {t(snapshot.seedingState === "seeding" ? "b6.bt_stop" : "b6.bt_start")}
+          </Button>
+        ) : null}
+        {snapshot.waitingCompletionAction ? (
+          <p role="status" className="text-xs text-status-warning">
+            {t("b6.bt_waiting_action")}
+          </p>
+        ) : null}
+        {snapshot.seedingStartedAt ? (
+          <Row label={t("b6.bt_started")} value={formatDateTime(snapshot.seedingStartedAt, "dateTime")} />
+        ) : null}
+        {snapshot.seedElapsedSeconds ? (
+          <Row label={t("b6.bt_elapsed")} value={formatEta(0, Number(snapshot.seedElapsedSeconds), 1)} />
+        ) : null}
+        {snapshot.seedStopReason ? (
+          <p className="text-xs text-text-muted">
+            {t("b6.bt_stopped", {
+              reason: t(
+                (`b6.bt_reason_${snapshot.seedStopReason}` in
+                {
+                  "b6.bt_reason_manual": 1,
+                  "b6.bt_reason_limit": 1,
+                  "b6.bt_reason_shutdown": 1,
+                  "b6.bt_reason_deleted": 1,
+                }
+                  ? `b6.bt_reason_${snapshot.seedStopReason}`
+                  : "b6.bt_reason_runtime_error") as TranslationKey,
+              ),
+            })}
+          </p>
+        ) : null}
         <div className="space-y-2 rounded-md bg-surface-root/50 px-3 py-2">
           <div className="text-xs font-medium text-text-muted">{t("taskDetails.btSeedingLimits")}</div>
           <p className="text-[11px] text-text-muted">{t("taskDetails.btSeedingLimitsHint")}</p>
@@ -1648,6 +1706,98 @@ function TorrentRuntimePanel({
         </div>
         {fileSelectionPanel}
       </div>
+    </div>
+  );
+}
+
+function MediaOutputPanel({ task }: { task: Task }) {
+  const { t } = useTranslation();
+  const [details, setDetails] = useState<MediaTaskDetails | null>(null);
+  const [failed, setFailed] = useState(false);
+  useVisibilityGatedPoll(
+    (isStale) =>
+      getMediaTaskDetails(task.id)
+        .then((value) => {
+          if (!isStale()) {
+            setDetails(value);
+            setFailed(false);
+          }
+        })
+        .catch(() => {
+          if (!isStale()) setFailed(true);
+        }),
+    5000,
+    { enabled: true, poll: ["downloading", "retrying"].includes(task.status), reloadKey: `${task.id}:${task.status}` },
+  );
+  if (failed)
+    return (
+      <p role="status" className="text-xs text-status-danger">
+        {t("b6.media_load_failed")}
+      </p>
+    );
+  if (!details) return null;
+  let gaps: { mediaSequence: number; startMs: number; endMs: number; reason: string }[] = [];
+  try {
+    const parsed: unknown = JSON.parse(details.missingSegmentsJson ?? "[]");
+    if (!Array.isArray(parsed)) throw new Error("Invalid gaps checkpoint");
+    gaps = parsed
+      .filter(
+        (gap): gap is (typeof gaps)[number] =>
+          gap !== null &&
+          typeof gap === "object" &&
+          Number.isFinite(gap.mediaSequence) &&
+          Number.isFinite(gap.startMs) &&
+          Number.isFinite(gap.endMs) &&
+          typeof gap.reason === "string",
+      )
+      .slice(0, 100);
+  } catch {
+    return (
+      <p role="status" className="text-xs text-status-danger">
+        {t("b6.media_load_failed")}
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-1 border-t border-border-subtle pt-2 text-xs text-text-secondary">
+      <Row label={t("b6.media_output")} value={details.outputFormat.toUpperCase()} />
+      {details.dashTracks
+        .filter((track) => track.selected)
+        .map((track) => (
+          <Row
+            key={track.id}
+            label={t(
+              track.kind === "video" ? "b6.dash_video" : track.kind === "audio" ? "b6.dash_audio" : "b6.dash_subtitle",
+            )}
+            value={[track.id, track.language, track.role, track.resolution].filter(Boolean).join(" · ")}
+          />
+        ))}
+      {details.maxMissingSegments > 0 || gaps.length > 0 ? (
+        <p>{t("b6.media_gaps", { count: gaps.length, limit: details.maxMissingSegments })}</p>
+      ) : null}
+      {gaps.length > 0 ? (
+        <details>
+          <summary className="cursor-pointer">
+            {t("b6.media_gaps", { count: gaps.length, limit: details.maxMissingSegments })}
+          </summary>
+          <ul className="space-y-1 pt-1">
+            {gaps.map((gap, index) => (
+              <li key={index}>
+                {t("b6.media_gap", {
+                  sequence: formatNumber(gap.mediaSequence),
+                  start: formatNumber(gap.startMs / 1000, 3),
+                  end: formatNumber(gap.endMs / 1000, 3),
+                })}{" "}
+                ·{" "}
+                {localizedErrorMessage(
+                  JSON.stringify({ code: gap.reason, message: "", recoverable: false, actions: [] }),
+                  t,
+                )}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
     </div>
   );
 }
@@ -1723,7 +1873,7 @@ function TaskNetworkAuthorizationPanel({ task }: { task: Task }) {
       setView(await revokeTaskNetworkAuthorization(task.id));
       addToast({ tone: "success", title: t("taskDetails.networkAuthorizationRevoked") });
     } catch (err) {
-      setError(errorMessage(err));
+      setError(localizedErrorMessage(err, t));
     } finally {
       setSaving(false);
     }
@@ -1947,7 +2097,7 @@ function TaskProxyPanel({ task }: { task: Task }) {
       setSettings(next);
       setProxyPassword("");
     } catch (err) {
-      setError(errorMessage(err));
+      setError(localizedErrorMessage(err, t));
     } finally {
       setSaving(false);
     }
@@ -1961,6 +2111,25 @@ function TaskProxyPanel({ task }: { task: Task }) {
           {settings?.proxyPasswordSaved ? t("taskDetails.proxyPasswordSaved") : t("taskDetails.proxyPasswordNotSaved")}
         </span>
       </div>
+      <WorkflowPicker
+        kind="task_preset"
+        allowApply={false}
+        onApply={() => {}}
+        disabled={!settings || saving}
+        getData={() => ({
+          kind: "task_preset",
+          value: safePreset({
+            saveDir: task.saveDir,
+            categoryKey: task.categoryKey,
+            priority: task.priority,
+            taskSpeedLimitBps: task.taskSpeedLimitBps,
+            obeySchedule: task.obeySchedule,
+            proxyMode: settings?.mode ?? "inherit",
+            proxyUrl: settings?.mode === "custom" ? settings.proxyUrl : null,
+            proxyNoProxy: settings?.mode === "custom" ? settings.noProxy || null : null,
+          }),
+        })}
+      />
       <Select value={mode} onValueChange={(value) => setMode(value as TaskProxyMode)} disabled={!editable || saving}>
         <SelectTrigger className="h-8" aria-label={t("taskDetails.taskProxy")}>
           <SelectValue />

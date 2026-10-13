@@ -116,9 +116,17 @@ pub async fn revoke_task_network_authorization(
     state: tauri::State<'_, AppState>,
     task_id: String,
 ) -> Result<TaskNetworkPolicyView, String> {
+    let _runtime_guard = state.task_runtime_locks.lock(&task_id).await;
     let task = require_task(&state.pool, &task_id).await?;
-    if matches!(task.status, TaskStatus::Downloading | TaskStatus::Retrying) {
-        return Err("Pause the task before revoking its network authorization.".to_string());
+    let download_owned = state.downloads.lock().await.contains_key(&task_id);
+    let seed_owned = state
+        .engine_registry
+        .bt_engine()
+        .seeding_manager()
+        .contains(&task_id)
+        .await;
+    if task_network_change_blocked(task.status, download_owned, seed_owned) {
+        return Err(task_network_active_error());
     }
     db::revoke_task_network_policy(&state.pool, &task_id).await?;
     db::insert_task_event(&state.pool, &task_id, "network_authorization_revoked", None).await?;
@@ -227,15 +235,20 @@ pub async fn update_torrent_file_selection(
     db::update_task_file_selection_in_tx(&mut tx, &task.id, &selected).await?;
     db::insert_task_event_in_tx(&mut tx, &task.id, "bt_file_selection_updated", None).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    crate::state_machine::transition_task(
+    crate::state_machine::transition_task_with_input(
         &app,
         &state.pool,
         &task.id,
-        TaskStatus::Queued,
-        0,
-        0,
-        Some("Queued"),
-        None,
+        crate::state_machine::TaskTransitionInput {
+            target: TaskStatus::Queued,
+            downloaded_bytes: None,
+            speed_bps: 0,
+            connection_count: 0,
+            health_summary: Some("Queued"),
+            error_message: None,
+            event_type: None,
+            event_message: None,
+        },
     )
     .await
     .map_err(String::from)?;
@@ -255,6 +268,21 @@ pub async fn update_torrent_seeding(
     state: tauri::State<'_, AppState>,
     input: UpdateTorrentSeedingInput,
 ) -> Result<Task, String> {
+    let _lifecycle_guard = state.lifecycle_gate.lock().await;
+    if state
+        .quit_requested
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err(crate::task_stop_pending_error());
+    }
+    let _guard = state.task_runtime_locks.lock(&input.task_id).await;
+    let _seeding_start = input.enabled.then(|| {
+        state
+            .engine_registry
+            .bt_engine()
+            .seeding_manager()
+            .begin_start()
+    });
     let task = require_task(&state.pool, &input.task_id).await?;
     if task.protocol != "bt" {
         return Err("Seeding is only available for BitTorrent tasks.".to_string());
@@ -264,11 +292,29 @@ pub async fn update_torrent_seeding(
         .as_deref()
         .and_then(|value| value.trim().parse::<i64>().ok())
         .filter(|value| *value > 0);
+    if input.update_limits
+        && (input
+            .ratio_limit
+            .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            || input
+                .time_limit_seconds
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                && time_limit_seconds.is_none())
+    {
+        return Err(crate::download::error::engine_error(
+            "bt_seeding_policy_invalid",
+            "Invalid seeding ratio or duration",
+            false,
+        ));
+    }
     db::update_torrent_seeding(
         &state.pool,
         &task.id,
         input.enabled,
-        input.ratio_limit.filter(|value| *value > 0.0),
+        input
+            .ratio_limit
+            .filter(|value| value.is_finite() && *value > 0.0),
         time_limit_seconds,
         input.update_limits,
     )
@@ -287,8 +333,43 @@ pub async fn update_torrent_seeding(
     if !input.enabled {
         state
             .engine_registry
-            .delete_runtime_task(&task, false)
-            .await;
+            .bt_engine()
+            .seeding_manager()
+            .stop(&task.id, "manual", Some(crate::USER_ACTION_DRAIN_GRACE))
+            .await?;
+        if let Some(seeding) = db::bt_seeding_status(&state.pool, &task.id).await? {
+            db::checkpoint_bt_seeding(
+                &state.pool,
+                &task.id,
+                seeding.uploaded_bytes,
+                seeding.elapsed_seconds,
+                Some("manual"),
+            )
+            .await?;
+        }
+    } else if task.status == TaskStatus::Completed {
+        let proxy = db::resolve_task_proxy_config(
+            &state.pool,
+            &task.id,
+            &task.protocol,
+            &state.engine_registry.proxy_config().await,
+        )
+        .await?;
+        if let Err(error) = state
+            .engine_registry
+            .bt_engine()
+            .start_completed_seeding(
+                Some(app.clone()),
+                state.pool.clone(),
+                task.clone(),
+                proxy,
+                state.speed_limiter.clone(),
+            )
+            .await
+        {
+            db::update_torrent_seeding(&state.pool, &task.id, false, None, None, false).await?;
+            return Err(error);
+        }
     }
     if let Some(updated) = db::get_task_record(&state.pool, &task.id).await? {
         emit_task_updated_record(&app, &state.pool, &updated).await;
@@ -312,9 +393,17 @@ pub async fn update_task_proxy_settings(
     state: tauri::State<'_, AppState>,
     input: TaskProxySettingsInput,
 ) -> Result<TaskProxySettings, String> {
+    let _runtime_guard = state.task_runtime_locks.lock(&input.task_id).await;
     let task = require_task(&state.pool, &input.task_id).await?;
-    if matches!(task.status, TaskStatus::Downloading | TaskStatus::Retrying) {
-        return Err("Pause the task before changing its proxy settings.".to_string());
+    let download_owned = state.downloads.lock().await.contains_key(&task.id);
+    let seed_owned = state
+        .engine_registry
+        .bt_engine()
+        .seeding_manager()
+        .contains(&task.id)
+        .await;
+    if task_network_change_blocked(task.status, download_owned, seed_owned) {
+        return Err(task_network_active_error());
     }
     if input.mode == crate::models::TaskProxyMode::Custom {
         if let Some(url) = input
@@ -331,6 +420,20 @@ pub async fn update_task_proxy_settings(
         emit_task_updated_record(&app, &state.pool, &updated).await;
     }
     Ok(settings)
+}
+
+fn task_network_change_blocked(status: TaskStatus, download_owned: bool, seed_owned: bool) -> bool {
+    download_owned || seed_owned || matches!(status, TaskStatus::Downloading | TaskStatus::Retrying)
+}
+
+fn task_network_active_error() -> String {
+    AppErrorPayload::new(
+        "task_network_active",
+        "Pause downloads or stop seeding before changing network settings or authorization.",
+        false,
+        vec![],
+    )
+    .command_error()
 }
 
 #[tauri::command]
@@ -520,19 +623,21 @@ pub async fn resume_schedule_paused_tasks(
     let app_handle = app.cloned();
     for task_id in &paused_ids {
         tracing::info!(task_id = %task_id, "resuming task: schedule pause cleared");
-        match crate::state_machine::transition_task_with_runtime_state(
+        match crate::state_machine::transition_task_with_runtime_input(
             &app_handle,
             pool,
             task_id,
-            TaskStatus::Queued,
-            0,
-            0,
-            Some("Queued"),
-            Some("resumed"),
-            None,
-            crate::models::SegmentStatus::Pending,
-            None,
-            None,
+            crate::state_machine::TaskTransitionInput {
+                target: TaskStatus::Queued,
+                downloaded_bytes: None,
+                speed_bps: 0,
+                connection_count: 0,
+                health_summary: Some("Queued"),
+                error_message: None,
+                event_type: Some("resumed"),
+                event_message: None,
+            },
+            Some((crate::models::SegmentStatus::Pending, None, None)),
         )
         .await
         {
@@ -882,19 +987,21 @@ pub(crate) async fn queue_task_for_retry_at(
     event_type: Option<&str>,
     event_message: Option<&str>,
 ) -> Result<TaskRecord, String> {
-    match crate::state_machine::transition_task_with_runtime_state(
+    match crate::state_machine::transition_task_with_runtime_input(
         app,
         &state.pool,
         id,
-        TaskStatus::Queued,
-        0,
-        0,
-        Some("Queued"),
-        event_type,
-        event_message,
-        crate::models::SegmentStatus::Pending,
-        None,
-        retry_after_at,
+        crate::state_machine::TaskTransitionInput {
+            target: TaskStatus::Queued,
+            downloaded_bytes: None,
+            speed_bps: 0,
+            connection_count: 0,
+            health_summary: Some("Queued"),
+            error_message: None,
+            event_type,
+            event_message,
+        },
+        Some((crate::models::SegmentStatus::Pending, None, retry_after_at)),
     )
     .await
     {
@@ -1170,15 +1277,20 @@ pub(crate) async fn prepare_task_for_download(
             })
             .await?;
         if let Some(message) = resume_mismatch_message(&task, &probe) {
-            crate::state_machine::transition_task(
+            crate::state_machine::transition_task_with_input(
                 app,
                 pool,
                 &task.id,
-                TaskStatus::NeedsAttention,
-                0,
-                0,
-                Some(&message),
-                Some("resume_blocked"),
+                crate::state_machine::TaskTransitionInput {
+                    target: TaskStatus::NeedsAttention,
+                    downloaded_bytes: None,
+                    speed_bps: 0,
+                    connection_count: 0,
+                    health_summary: Some(&message),
+                    error_message: Some(&message),
+                    event_type: Some("resume_blocked"),
+                    event_message: Some(&message),
+                },
             )
             .await
             .map_err(String::from)?;
@@ -1263,15 +1375,20 @@ async fn fail_task_and_segments(
     task_id: &str,
     message: &str,
 ) -> Result<(), String> {
-    crate::state_machine::transition_task(
+    crate::state_machine::transition_task_with_input(
         app,
         pool,
         task_id,
-        TaskStatus::Failed,
-        0,
-        0,
-        Some(message),
-        None,
+        crate::state_machine::TaskTransitionInput {
+            target: TaskStatus::Failed,
+            downloaded_bytes: None,
+            speed_bps: 0,
+            connection_count: 0,
+            health_summary: Some(message),
+            error_message: Some(message),
+            event_type: None,
+            event_message: None,
+        },
     )
     .await
     .map_err(String::from)?;
@@ -1410,6 +1527,23 @@ mod request_header_tests {
     use super::merge_request_header_sources;
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::Mutex;
+
+    #[test]
+    fn network_edits_allow_idle_completed_tasks_but_block_resident_owners() {
+        use crate::models::TaskStatus;
+        for status in [
+            TaskStatus::Completed,
+            TaskStatus::Paused,
+            TaskStatus::WaitingNetwork,
+        ] {
+            assert!(!super::task_network_change_blocked(status, false, false));
+            assert!(super::task_network_change_blocked(status, true, false));
+            assert!(super::task_network_change_blocked(status, false, true));
+        }
+        for status in [TaskStatus::Downloading, TaskStatus::Retrying] {
+            assert!(super::task_network_change_blocked(status, false, false));
+        }
+    }
 
     #[test]
     fn browser_cache_fills_persistence_gap_and_profile_wins_by_name() {

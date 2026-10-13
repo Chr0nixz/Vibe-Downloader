@@ -105,6 +105,7 @@ async fn run_case(failure: Failure, expected_code: Option<&str>) {
         &ResolvedProxyConfig::default(),
         &crate::download::NetworkClientFactory::new(),
         &crate::download::network_policy::NetworkPolicy::default(),
+        &[],
     )
     .await;
     let output = output.expect("valid local torrent");
@@ -174,6 +175,7 @@ async fn run_case(failure: Failure, expected_code: Option<&str>) {
         BtSessionEntry {
             api: api.clone(),
             active_task_count: 0,
+            upload_active: Arc::new(AtomicBool::new(false)),
         },
     );
     let cancel = CancellationToken::new();

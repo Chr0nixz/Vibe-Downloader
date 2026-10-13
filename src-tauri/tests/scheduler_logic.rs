@@ -6,6 +6,8 @@
 //! segment planner (`db::planned_segment_count_with_plan`). No database or
 //! Tauri runtime is required.
 
+mod common;
+
 use tauri_app_lib::db;
 use tauri_app_lib::models::task::now_iso;
 use tauri_app_lib::models::{
@@ -184,18 +186,8 @@ fn segment_count_falls_back_to_single_when_below_threshold() {
 // Each test simulates the race by performing the "user action" (B) BEFORE
 // the "worker terminal write" (A), then asserting A is a no-op.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-async fn race_test_pool(label: &str) -> sqlx::SqlitePool {
-    let id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("vibe-race-{label}-{id}.sqlite"));
-    db::connect(&path)
-        .await
-        .expect("database connect with migrations")
-        .pool
+async fn race_test_pool(label: &str) -> (common::TestDbGuard, sqlx::SqlitePool) {
+    common::test_pool(&format!("race-{label}")).await
 }
 
 /// Inserts a task in `Downloading` state for race-condition tests.
@@ -234,7 +226,7 @@ async fn fetch_task_status(pool: &sqlx::SqlitePool, id: &str) -> TaskStatus {
 /// Failed, silently discarding the user's pause.
 #[tokio::test]
 async fn mark_task_failed_if_active_skips_when_status_changed() {
-    let pool = race_test_pool("markfail-skip").await;
+    let (_db, pool) = race_test_pool("markfail-skip").await;
     let task_id = "race-markfail-task";
 
     insert_downloading_task(&pool, task_id).await;
@@ -309,7 +301,7 @@ async fn mark_task_failed_if_active_skips_when_status_changed() {
 /// downloaded file as complete.
 #[tokio::test]
 async fn complete_task_does_not_overwrite_paused() {
-    let pool = race_test_pool("complete-skip").await;
+    let (_db, pool) = race_test_pool("complete-skip").await;
     let task_id = "race-complete-task";
 
     insert_downloading_task(&pool, task_id).await;
@@ -363,7 +355,7 @@ async fn complete_task_does_not_overwrite_paused() {
 
 #[tokio::test]
 async fn complete_task_records_independent_completion_time() {
-    let pool = race_test_pool("completed-at").await;
+    let (_db, pool) = race_test_pool("completed-at").await;
     let task_id = "completed-at-task";
     insert_downloading_task(&pool, task_id).await;
 

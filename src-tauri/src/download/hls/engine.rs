@@ -27,7 +27,7 @@ use super::playlist::{
     choose_master_variant, clamp_hls_target_duration, hls_variants_from_master,
     init_map_local_name, is_master_playlist, parse_ext_x_media, parse_media_playlist,
     reject_unsupported_media_playlist, resolve_url, validate_playlist_syntax, ByteRange, HlsKey,
-    HlsSegment, PlaylistKind,
+    HlsSegment, MediaPlaylist, PlaylistKind,
 };
 use crate::download::error::engine_error;
 use crate::download::retry::RetryPolicy;
@@ -179,6 +179,7 @@ struct ProbePlan {
     audio_tracks: Vec<HlsMediaTrack>,
     subtitle_tracks: Vec<HlsMediaTrack>,
     display_name: String,
+    output_format: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +200,96 @@ struct SegmentDownloadPlan {
 struct SelectedExternalTrack {
     kind: String,
     url: String,
+}
+
+struct ExtraMediaInput {
+    path: PathBuf,
+    kind: String,
+    language: Option<String>,
+}
+
+async fn prepare_hls_extra_inputs(
+    pool: &SqlitePool,
+    task_id: &str,
+    inputs: &[PathBuf],
+) -> Result<Vec<ExtraMediaInput>, String> {
+    let state = db::get_hls_task(pool, task_id).await?;
+    let catalog: Vec<HlsMediaTrack> = state
+        .as_ref()
+        .and_then(|state| state.selected_track_catalog_json.as_deref())
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| engine_error("hls_state_read_failed", e.to_string(), true))?
+        .unwrap_or_default();
+    let mut result = Vec::new();
+    for path in inputs {
+        let parent = path.parent().ok_or_else(|| {
+            engine_error("hls_track_failed", "Missing local track directory", false)
+        })?;
+        let folder = parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let kind = if folder.starts_with("subtitle_") {
+            "subtitle"
+        } else {
+            "audio"
+        };
+        let language = catalog
+            .iter()
+            .find(|track| {
+                track.uri.as_ref().is_some_and(|url| {
+                    let selected = SelectedExternalTrack {
+                        kind: kind.into(),
+                        url: url.clone(),
+                    };
+                    folder == format!("{kind}_{}", selected.safe_name())
+                })
+            })
+            .and_then(|track| track.language.clone());
+        let path = if kind == "subtitle" {
+            let body = crate::download::read_local_file_limited(path, CONTROL_PLANE_MAX_BYTES)
+                .await
+                .map_err(|e| engine_error("hls_subtitle_unsupported", format!("{e:?}"), false))?;
+            let body = std::str::from_utf8(&body).map_err(|_| {
+                engine_error(
+                    "hls_subtitle_unsupported",
+                    "Invalid local subtitle playlist",
+                    false,
+                )
+            })?;
+            let playlist = parse_media_playlist(body)?;
+            let mut files = Vec::new();
+            for segment in playlist.segments {
+                if Path::new(&segment.uri)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    != Some(segment.uri.as_str())
+                {
+                    return Err(engine_error(
+                        "hls_subtitle_unsupported",
+                        "Invalid local subtitle fragment path",
+                        false,
+                    ));
+                }
+                files.push(parent.join(segment.uri));
+            }
+            crate::download::media_subtitles::merge_webvtt(
+                &files,
+                &parent.join("subtitles.vtt"),
+                "hls_subtitle_unsupported",
+            )
+            .await?
+        } else {
+            path.clone()
+        };
+        result.push(ExtraMediaInput {
+            path,
+            kind: kind.into(),
+            language,
+        });
+    }
+    Ok(result)
 }
 
 impl SelectedExternalTrack {
@@ -249,6 +340,7 @@ struct ResolvedHlsInitMap {
 
 #[derive(Debug)]
 struct SegmentDownloadResult {
+    segment_id: String,
     media_sequence: i64,
     bytes: i64,
     result: Result<(), String>,
@@ -271,12 +363,7 @@ impl HlsEngine {
         network_policy: &crate::download::network_policy::NetworkPolicy,
     ) -> Result<ProbePlan, String> {
         crate::download::engine::emit_probe_phase(app, request_id, "checking_ffmpeg", Some("hls"));
-        crate::download::ffmpeg::ensure_ffmpeg_available(
-            pool,
-            "hls_ffmpeg_missing",
-            "ffmpeg was not found. Install ffmpeg or configure its path in Settings before creating HLS tasks.",
-        )
-        .await?;
+        let ffmpeg_available = crate::download::ffmpeg::ffmpeg_path(pool).await.is_some();
         let client = if let Some(config) = proxy_config {
             self.http
                 .client_for_network_policy(config, network_policy)
@@ -293,7 +380,7 @@ impl HlsEngine {
             "fetching_manifest",
             Some("hls"),
         );
-        let body = fetch_text(
+        let (body, playlist_url) = fetch_text(
             &client,
             url,
             request_headers,
@@ -303,14 +390,17 @@ impl HlsEngine {
         .await?;
         validate_playlist_syntax(&body)?;
         crate::download::engine::emit_probe_phase(app, request_id, "parsing_manifest", Some("hls"));
-        let media_tracks = parse_ext_x_media(&body, url);
+        let media_tracks = parse_ext_x_media(&body, &playlist_url);
         let (media_url, selected_bandwidth, selected_resolution, variants, media_body) =
             if is_master_playlist(&body) {
                 let variant = choose_master_variant(&body)?;
                 let selected_uri = variant.uri.clone();
-                let variants = hls_variants_from_master(&body, &selected_uri);
-                let media_url = resolve_url(url, &variant.uri)?;
-                let media_body = fetch_text(
+                let mut variants = hls_variants_from_master(&body, &selected_uri);
+                for variant in &mut variants {
+                    variant.uri = resolve_url(&playlist_url, &variant.uri)?;
+                }
+                let media_url = resolve_url(&playlist_url, &variant.uri)?;
+                let (media_body, media_url) = fetch_text(
                     &client,
                     &media_url,
                     request_headers,
@@ -329,7 +419,7 @@ impl HlsEngine {
                     media_body,
                 )
             } else {
-                (url.to_string(), None, None, Vec::new(), body.clone())
+                (playlist_url, None, None, Vec::new(), body.clone())
             };
         let media = parse_media_playlist(&media_body)?;
         reject_unsupported_media_playlist(&media_body)?;
@@ -343,6 +433,24 @@ impl HlsEngine {
             .filter(|t| t.kind == "SUBTITLES")
             .cloned()
             .collect::<Vec<_>>();
+        if !ffmpeg_available
+            && (!safe_ts_playlist(&media) || media_tracks.iter().any(|track| track.uri.is_some()))
+        {
+            return Err(engine_error(
+                "hls_ffmpeg_missing",
+                "ffmpeg is required for this HLS container or external tracks",
+                true,
+            ));
+        }
+        let output_format = if ffmpeg_available { "mp4" } else { "ts" };
+        let display_name = if ffmpeg_available {
+            hls_output_name(url)
+        } else {
+            Path::new(&hls_output_name(url))
+                .with_extension("ts")
+                .to_string_lossy()
+                .into_owned()
+        };
         Ok(ProbePlan {
             media_url,
             kind: media.kind,
@@ -352,7 +460,8 @@ impl HlsEngine {
             variants,
             audio_tracks,
             subtitle_tracks,
-            display_name: hls_output_name(url),
+            display_name,
+            output_format,
         })
     }
 }
@@ -427,7 +536,14 @@ impl DownloadEngine for HlsEngine {
                 files: vec![ProbedFile {
                     relative_path: plan.display_name,
                     size: "0".to_string(),
-                    content_type: Some("video/mp4".to_string()),
+                    content_type: Some(
+                        if plan.output_format == "ts" {
+                            "video/mp2t"
+                        } else {
+                            "video/mp4"
+                        }
+                        .to_string(),
+                    ),
                 }],
                 etag: None,
                 last_modified: None,
@@ -435,6 +551,7 @@ impl DownloadEngine for HlsEngine {
                 hls_variants: plan.variants.clone(),
                 hls_audio_tracks: plan.audio_tracks.clone(),
                 hls_subtitle_tracks: plan.subtitle_tracks.clone(),
+                dash_tracks: Vec::new(),
                 metalink: None,
             })
         })
@@ -467,12 +584,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         network_policy,
     } = context;
     // Resolve once so a settings change cannot switch binaries midway through a task.
-    let ffmpeg = crate::download::ffmpeg::ensure_ffmpeg_available(
-        Some(&pool),
-        "hls_ffmpeg_missing",
-        "ffmpeg was not found. Install ffmpeg or configure its path in Settings before creating HLS tasks.",
-    )
-    .await?;
+    let ffmpeg = crate::download::ffmpeg::ffmpeg_path(Some(&pool)).await;
     // FUN-02: honor per-task proxy instead of the global SharedProxyConfig client.
     let client = engine
         .http
@@ -494,22 +606,6 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
             .command_error()
     })?;
 
-    let plan = engine
-        .probe_hls(
-            &task.url,
-            &request_headers,
-            Some(&pool),
-            &None,
-            &None,
-            Some(&proxy_config),
-            &network_policy,
-        )
-        .await?;
-    // FUN-27: read the persisted hls_tasks row BEFORE this session's upsert —
-    // the row carries the creation-time track selection, and a failed read
-    // must fail the task instead of silently completing without the selected
-    // tracks. The row only exists when tracks were selected, so Ok(None) is
-    // the normal no-external-tracks shape and stays legal.
     let hls_state = db::get_hls_task(&pool, &task.id).await.map_err(|error| {
         engine_error(
             "hls_state_read_failed",
@@ -517,6 +613,72 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
             true,
         )
     })?;
+    // A finish request is a local operation: idle recordings must not depend
+    // on their manifest or any selected track coming back online.
+    if hls_state
+        .as_ref()
+        .is_some_and(|state| state.finish_requested)
+        || finish.load(Ordering::SeqCst)
+    {
+        let mut extra_inputs = Vec::new();
+        if let Some(state) = hls_state.as_ref() {
+            for track in collect_selected_external_tracks(state)? {
+                let playlist = staging_dir
+                    .join(format!("{}_{}", track.kind, track.safe_name()))
+                    .join("local.m3u8");
+                if !fs::try_exists(&playlist).await.unwrap_or(false) {
+                    return Err(engine_error(
+                        "hls_track_failed",
+                        "Selected track has no local recording",
+                        true,
+                    ));
+                }
+                extra_inputs.push(playlist);
+            }
+        }
+        let (downloaded, _) = existing_hls_progress(&pool, &task.id).await?;
+        let ffmpeg = if hls_state
+            .as_ref()
+            .is_some_and(|state| state.output_format == "ts")
+        {
+            None
+        } else {
+            ffmpeg.as_deref()
+        };
+        return finalize_hls_task(
+            &app,
+            &pool,
+            &task,
+            &staging_dir,
+            downloaded,
+            ffmpeg,
+            &extra_inputs,
+            &cancel_token,
+        )
+        .await;
+    }
+    let probe_url = hls_state
+        .as_ref()
+        .map(|state| state.media_url.as_str())
+        .filter(|url| !url.is_empty())
+        .unwrap_or(&task.url);
+    // The selected variant is a resource, not a new credential origin.
+    let probe_headers = crate::download::http::headers_for_origin(
+        &request_headers,
+        &crate::download::http::url_origin(&task.url).unwrap_or_default(),
+        probe_url,
+    );
+    let plan = engine
+        .probe_hls(
+            probe_url,
+            &probe_headers,
+            Some(&pool),
+            &None,
+            &None,
+            Some(&proxy_config),
+            &network_policy,
+        )
+        .await?;
     db::upsert_hls_task(
         &pool,
         db::HlsTaskUpsert {
@@ -528,10 +690,23 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
             selected_resolution: plan.selected_resolution.as_deref(),
             target_duration: plan.target_duration,
             last_media_sequence: None,
-            output_format: "mp4",
+            output_format: hls_state
+                .as_ref()
+                .map(|state| state.output_format.as_str())
+                .unwrap_or(plan.output_format),
             staging_dir: &staging_dir.to_string_lossy(),
             selected_audio_track_uris: None,
             selected_subtitle_track_uris: None,
+            max_missing_segments: hls_state
+                .as_ref()
+                .map(|s| s.max_missing_segments)
+                .unwrap_or(0),
+            missing_segments_json: hls_state
+                .as_ref()
+                .and_then(|s| s.missing_segments_json.as_deref()),
+            selected_track_catalog_json: hls_state
+                .as_ref()
+                .and_then(|s| s.selected_track_catalog_json.as_deref()),
         },
     )
     .await?;
@@ -548,14 +723,14 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     // are visible - never warn-and-complete with missing tracks.
     let mut extra_inputs: Vec<PathBuf> = Vec::new();
     let mut live_tracks: Vec<LiveExternalTrack> = Vec::new();
-    if let Some(hls_task) = hls_state {
-        let selected = collect_selected_external_tracks(&hls_task)?;
+    if let Some(ref hls_task) = hls_state {
+        let selected = collect_selected_external_tracks(hls_task)?;
         for track in selected {
             if cancel_token.is_cancelled() {
                 pause_hls_task(&app, &pool, &task, 0).await?;
                 return Ok(());
             }
-            let body = fetch_text(
+            let (body, track_base_url) = fetch_text(
                 &client,
                 &track.url,
                 &request_headers,
@@ -600,7 +775,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                     &cancel_token,
                     connection_limit.max(1),
                     &task.id,
-                    &track.url,
+                    &track_base_url,
                     &track_dir,
                     media.segments,
                     fetch_cache.clone(),
@@ -629,6 +804,34 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
     // from one `list_hls_segments` round-trip instead of two.
     let (mut downloaded_total, mut seen) = existing_hls_progress(&pool, &task.id).await?;
     let mut idle_polls = 0_usize;
+    let max_missing_segments = hls_state
+        .as_ref()
+        .map(|state| state.max_missing_segments)
+        .unwrap_or(0)
+        .clamp(0, db::MAX_HLS_MISSING_SEGMENTS) as usize;
+    let mut missing_segments: Vec<serde_json::Value> = hls_state
+        .as_ref()
+        .and_then(|state| state.missing_segments_json.as_deref())
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| engine_error("hls_state_read_failed", error.to_string(), true))?
+        .unwrap_or_default();
+    if !plan.kind.is_live_like() && max_missing_segments > 0 {
+        tracing::debug!(task_id = %task.id, "missing-fragment tolerance applies only to live HLS");
+    }
+    let max_missing_segments = if plan.kind.is_live_like() {
+        max_missing_segments
+    } else {
+        0
+    };
+    for gap in &missing_segments {
+        if let (Some(disc), Some(sequence)) = (
+            gap.get("discontinuitySequence").and_then(|v| v.as_i64()),
+            gap.get("mediaSequence").and_then(|v| v.as_i64()),
+        ) {
+            seen.insert((disc, sequence));
+        }
+    }
     let mut progress_gate = TaskProgressEmitGate::default();
     // E-4: Cache first segment ID once and throttle per-segment DB writes.
     let first_segment_id: Option<String> = db::get_first_segment_record(&pool, &task.id)
@@ -646,14 +849,19 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
             break;
         }
 
-        let media_body = fetch_text(
+        let origin = crate::download::http::url_origin(&task.url).unwrap_or_default();
+        let media_fetch = fetch_text(
             &client,
             &plan.media_url,
             &request_headers,
-            &crate::download::http::url_origin(&task.url).unwrap_or_default(),
+            &origin,
             &network_policy,
-        )
-        .await?;
+        );
+        let (media_body, media_base_url) = tokio::select! {
+            result = media_fetch => result?,
+            _ = wait_hls_finish_signal(&finish, Some(&finish_notify), &pool, &task.id, HLS_FINISH_DB_FALLBACK) => break,
+            _ = cancel_token.cancelled() => { pause_hls_task(&app, &pool, &task, downloaded_total).await?; return Ok(()); }
+        };
         validate_playlist_syntax(&media_body)?;
         reject_unsupported_media_playlist(&media_body)?;
         let media = parse_media_playlist(&media_body)?;
@@ -672,7 +880,7 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                 &pool,
                 &task,
                 &staging_dir,
-                &plan.media_url,
+                &media_base_url,
                 new_segments,
             )
             .await?;
@@ -692,6 +900,8 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
                 &mut db_write_gate,
                 fetch_cache.clone(),
                 &network_policy,
+                max_missing_segments,
+                &mut missing_segments,
             )
             .await?;
             downloaded_total = downloaded;
@@ -730,6 +940,9 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         // already breaks at the top of the loop). Empty polls alone release
         // the scheduler slot into WaitingNetwork so resume can poll again.
         if plan.kind.is_live_like() && idle_polls >= HLS_LIVE_MAX_IDLE_POLLS {
+            for track in &live_tracks {
+                write_external_track_playlist(&track.staging_dir, &track.completed).await?;
+            }
             waiting_network_hls_task(&app, &pool, &task, downloaded_total).await?;
             progress_gate.flush(&app);
             return Ok(());
@@ -777,7 +990,14 @@ async fn run_hls_download(engine: HlsEngine, context: DownloadContext) -> Result
         &task,
         &staging_dir,
         downloaded_total,
-        &ffmpeg,
+        if hls_state
+            .as_ref()
+            .is_some_and(|state| state.output_format == "ts")
+        {
+            None
+        } else {
+            ffmpeg.as_deref()
+        },
         &extra_inputs,
         &cancel_token,
     )
@@ -918,6 +1138,8 @@ async fn download_hls_segments(
     db_write_gate: &mut DbWriteGate,
     fetch_cache: Arc<HlsTaskFetchCache>,
     network_policy: &crate::download::network_policy::NetworkPolicy,
+    max_missing_segments: usize,
+    missing_segments: &mut Vec<serde_json::Value>,
 ) -> Result<i64, String> {
     // SEC-11: credential headers may only travel to the task URL origin
     // (scheme + host + port — a different port is a different origin).
@@ -986,6 +1208,46 @@ async fn download_hls_segments(
             Err(_) if cancel_token.is_cancelled() => {
                 workers.abort_all();
                 break;
+            }
+            Err(error)
+                if max_missing_segments > 0
+                    && missing_segments.len() < max_missing_segments
+                    && tolerable_missing_fragment(&error) =>
+            {
+                let segments = db::list_hls_segments(pool, &task.id).await?;
+                let mut start_ms = 0_i64;
+                let segment = segments
+                    .iter()
+                    .find(|segment| segment.id == result.segment_id);
+                let Some(segment) = segment else {
+                    return Err(error);
+                };
+                for previous in &segments {
+                    if previous.id == segment.id {
+                        break;
+                    }
+                    start_ms = start_ms.saturating_add(previous.duration_ms);
+                }
+                missing_segments.push(serde_json::json!({
+                    "mediaSequence": result.media_sequence,
+                    "discontinuitySequence": segment.discontinuity_sequence,
+                    "startMs": start_ms,
+                    "endMs": start_ms.saturating_add(segment.duration_ms),
+                    "reason": crate::models::AppErrorPayload::code_from_stored(None, Some(&error)).unwrap_or_else(|| "hls_segment_failed".into()),
+                }));
+                db::update_hls_missing_segments(
+                    pool,
+                    &task.id,
+                    &serde_json::to_string(missing_segments).map_err(|e| e.to_string())?,
+                )
+                .await?;
+                db::insert_task_event(
+                    pool,
+                    &task.id,
+                    "hls_fragment_gap",
+                    Some(&result.media_sequence.to_string()),
+                )
+                .await?;
             }
             Err(error) => {
                 // ARC-37: the task token belongs to the scheduler and signals
@@ -1069,6 +1331,7 @@ async fn download_hls_segment(
                 )
                 .await;
                 return SegmentDownloadResult {
+                    segment_id: plan.id.clone(),
                     media_sequence: plan.media_sequence,
                     bytes,
                     result: Ok(()),
@@ -1076,6 +1339,7 @@ async fn download_hls_segment(
             }
             Err(error) if cancel_token.is_cancelled() => {
                 return SegmentDownloadResult {
+                    segment_id: plan.id.clone(),
                     media_sequence: plan.media_sequence,
                     bytes: 0,
                     result: Err(error),
@@ -1098,6 +1362,7 @@ async fn download_hls_segment(
                     tokio::select! {
                         _ = cancel_token.cancelled() => {
                             return SegmentDownloadResult {
+                    segment_id: plan.id.clone(),
                                 media_sequence: plan.media_sequence,
                                 bytes: 0,
                                 result: Err(last_error.unwrap_or(error)),
@@ -1119,6 +1384,7 @@ async fn download_hls_segment(
                 )
                 .await;
                 return SegmentDownloadResult {
+                    segment_id: plan.id.clone(),
                     media_sequence: plan.media_sequence,
                     bytes: 0,
                     result: Err(message),
@@ -1718,15 +1984,16 @@ async fn poll_live_external_track(
         .await?
         .and_then(|task| crate::download::http::url_origin(&task.url))
         .unwrap_or_default();
-    let body = fetch_text(client, &track.url, request_headers, &origin, network_policy)
-        .await
-        .map_err(|e| {
-            engine_error(
-                "hls_track_failed",
-                format!("Could not poll selected {} track: {e}", track.kind),
-                true,
-            )
-        })?;
+    let (body, track_base_url) =
+        fetch_text(client, &track.url, request_headers, &origin, network_policy)
+            .await
+            .map_err(|e| {
+                engine_error(
+                    "hls_track_failed",
+                    format!("Could not poll selected {} track: {e}", track.kind),
+                    true,
+                )
+            })?;
     validate_playlist_syntax(&body).map_err(|e| {
         engine_error(
             "hls_track_failed",
@@ -1753,7 +2020,8 @@ async fn poll_live_external_track(
         AppErrorPayload::disk_write_failed(format!("Could not create HLS track folder: {e}"))
             .command_error()
     })?;
-    let plans = build_hls_segment_plans(task_id, &track.staging_dir, &track.url, new_segments)?;
+    let plans =
+        build_hls_segment_plans(task_id, &track.staging_dir, &track_base_url, new_segments)?;
     let completed = download_hls_rendition_segments(
         pool,
         client,
@@ -1926,7 +2194,7 @@ async fn finalize_hls_task(
     task: &TaskRecord,
     staging_dir: &Path,
     downloaded_total: i64,
-    ffmpeg: &Path,
+    ffmpeg: Option<&Path>,
     extra_inputs: &[PathBuf],
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
@@ -1937,17 +2205,41 @@ async fn finalize_hls_task(
     if !still_active || cancel_token.is_cancelled() {
         return Err("Download canceled.".to_string());
     }
-    db::update_task_health_summary(pool, &task.id, Some("Converting HLS stream to MP4")).await?;
+    db::update_task_health_summary(pool, &task.id, Some("Finalizing HLS media")).await?;
     let local_playlist = write_local_hls_playlist(pool, &task.id, staging_dir).await?;
-    let mp4_temp = staging_dir.join("output.mp4");
-    run_ffmpeg(
-        &local_playlist,
-        &mp4_temp,
-        ffmpeg,
-        extra_inputs,
-        cancel_token,
-    )
-    .await?;
+    let output_ext = if ffmpeg.is_some() { "mp4" } else { "ts" };
+    let mp4_temp = staging_dir.join(format!("output.{output_ext}"));
+    if let Some(ffmpeg) = ffmpeg {
+        let extra_inputs = prepare_hls_extra_inputs(pool, &task.id, extra_inputs).await?;
+        run_ffmpeg(
+            &local_playlist,
+            &mp4_temp,
+            ffmpeg,
+            &extra_inputs,
+            cancel_token,
+        )
+        .await?;
+    } else {
+        let segments = db::list_hls_segments(pool, &task.id).await?;
+        if !extra_inputs.is_empty()
+            || segments.is_empty()
+            || segments.iter().any(|segment| {
+                segment.init_map_uri.is_some()
+                    || segment
+                        .key_method
+                        .as_deref()
+                        .is_some_and(|method| !method.eq_ignore_ascii_case("NONE"))
+                    || segment.discontinuity_sequence != segments[0].discontinuity_sequence
+            })
+        {
+            return Err(engine_error(
+                "hls_ffmpeg_missing",
+                "ffmpeg is required for fMP4, encrypted, multi-track, or discontinuous HLS output",
+                true,
+            ));
+        }
+        concat_validated_ts(&segments, &mp4_temp, cancel_token).await?;
+    }
     if cancel_token.is_cancelled() {
         let _ = fs::remove_file(&mp4_temp).await;
         return Err("Download canceled.".to_string());
@@ -1964,6 +2256,11 @@ async fn finalize_hls_task(
         .as_deref()
         .map(PathBuf::from)
         .ok_or_else(|| "HLS task is missing a final path.".to_string())?;
+    let final_path = if ffmpeg.is_none() {
+        final_path.with_extension("ts")
+    } else {
+        final_path
+    };
     let completed_path =
         crate::download::file_ops::finalize_download_file(&mp4_temp, &final_path).await?;
     crate::download::file_ops::persist_completed_path(pool, &task.id, &completed_path).await?;
@@ -1983,6 +2280,178 @@ async fn finalize_hls_task(
     if let Some(current) = db::get_task_record(pool, &task.id).await? {
         emit_task_updated_record(app, pool, &current).await;
     }
+    Ok(())
+}
+
+fn tolerable_missing_fragment(error: &str) -> bool {
+    matches!(
+        AppErrorPayload::code_from_stored(None, Some(error)).as_deref(),
+        Some("http_not_found" | "hls_segment_stalled" | "http_timeout" | "http_connection_failed")
+    )
+}
+
+fn safe_ts_playlist(media: &MediaPlaylist) -> bool {
+    !media.segments.is_empty()
+        && media.segments.iter().all(|segment| {
+            segment.init_map.is_none()
+                && segment
+                    .key
+                    .as_ref()
+                    .is_none_or(|key| key.method.eq_ignore_ascii_case("NONE"))
+                && reqwest::Url::parse(&segment.uri)
+                    .map(|url| url.path().to_ascii_lowercase().ends_with(".ts"))
+                    .unwrap_or_else(|_| {
+                        segment
+                            .uri
+                            .split('?')
+                            .next()
+                            .unwrap_or("")
+                            .to_ascii_lowercase()
+                            .ends_with(".ts")
+                    })
+                && segment.discontinuity_sequence == media.segments[0].discontinuity_sequence
+        })
+}
+
+/// The fallback accepts complete, CRC-checked PSI sections contained in one packet.
+fn ts_section(packet: &[u8; 188]) -> Option<(u16, &[u8])> {
+    if packet[1] & 0x40 == 0 || packet[3] & 0x10 == 0 {
+        return None;
+    }
+    let payload = if packet[3] & 0x20 != 0 {
+        5 + packet[4] as usize
+    } else {
+        4
+    };
+    let pointer = *packet.get(payload)? as usize;
+    let section = packet.get(payload + 1 + pointer..)?;
+    if section.len() < 12 {
+        return None;
+    }
+    let length = 3 + (((section[1] & 15) as usize) << 8 | section[2] as usize);
+    let section = section.get(..length)?;
+    if section.len() < 12 {
+        return None;
+    }
+    let mut crc = 0xffff_ffff_u32;
+    for byte in section {
+        crc ^= (*byte as u32) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04c1_1db7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    (crc == 0).then_some(((((packet[1] & 31) as u16) << 8) | packet[2] as u16, section))
+}
+
+async fn concat_validated_ts(
+    segments: &[db::HlsSegmentRecord],
+    output: &Path,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(), String> {
+    use tokio::io::AsyncReadExt;
+    let mut writer =
+        BufWriter::new(fs::File::create(output).await.map_err(|error| {
+            AppErrorPayload::disk_write_failed(error.to_string()).command_error()
+        })?);
+    let mut expected_program = None;
+    for segment in segments
+        .iter()
+        .filter(|segment| segment.status == SegmentStatus::Completed)
+    {
+        let mut pmt_pid = None;
+        let mut program = None;
+        let size = fs::metadata(&segment.local_path)
+            .await
+            .map_err(|e| e.to_string())?
+            .len();
+        if size < 376 || size % 188 != 0 {
+            return Err(engine_error(
+                "hls_ffmpeg_missing",
+                "HLS fallback requires verified 188-byte MPEG-TS packets",
+                true,
+            ));
+        }
+        let mut input = fs::File::open(&segment.local_path)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut packet = [0_u8; 188];
+        for _ in 0..size / 188 {
+            if cancel.is_cancelled() {
+                return Err("Download canceled.".into());
+            }
+            input
+                .read_exact(&mut packet)
+                .await
+                .map_err(|e| e.to_string())?;
+            if packet[0] != 0x47
+                || packet[1] & 0x80 != 0
+                || packet[3] & 0xc0 != 0
+                || packet[3] & 0x30 == 0
+            {
+                return Err(engine_error(
+                    "hls_ffmpeg_missing",
+                    "HLS fallback rejected invalid or scrambled MPEG-TS packets",
+                    true,
+                ));
+            }
+            if let Some((pid, section)) = ts_section(&packet) {
+                if pid == 0 {
+                    let programs = section
+                        .get(8..section.len().saturating_sub(4))
+                        .unwrap_or_default();
+                    let entries: Vec<_> = programs
+                        .chunks_exact(4)
+                        .filter(|entry| entry[0] != 0 || entry[1] != 0)
+                        .collect();
+                    if entries.len() != 1 {
+                        return Err(engine_error(
+                            "hls_ts_unsupported",
+                            "Fallback requires a single MPEG-TS program",
+                            true,
+                        ));
+                    }
+                    pmt_pid = Some(((entries[0][2] as u16 & 0x1f) << 8) | entries[0][3] as u16);
+                } else if Some(pid) == pmt_pid && section[0] == 2 {
+                    // Ignore CRC/version; stream layout must agree across fragments.
+                    program = Some(section[..section.len() - 4].to_vec());
+                }
+            }
+            writer.write_all(&packet).await.map_err(|error| {
+                AppErrorPayload::disk_write_failed(error.to_string()).command_error()
+            })?;
+        }
+        let program = program.ok_or_else(|| {
+            engine_error(
+                "hls_ts_unsupported",
+                "Fallback requires complete PAT/PMT tables in each fragment",
+                true,
+            )
+        })?;
+        if expected_program
+            .as_ref()
+            .is_some_and(|expected| expected != &program)
+        {
+            return Err(engine_error(
+                "hls_ts_unsupported",
+                "MPEG-TS stream layout changed; ffmpeg is required",
+                true,
+            ));
+        }
+        expected_program = Some(program);
+    }
+    writer
+        .flush()
+        .await
+        .map_err(|error| AppErrorPayload::disk_write_failed(error.to_string()).command_error())?;
+    writer
+        .get_ref()
+        .sync_all()
+        .await
+        .map_err(|error| AppErrorPayload::disk_write_failed(error.to_string()).command_error())?;
     Ok(())
 }
 
@@ -2062,7 +2531,7 @@ async fn run_ffmpeg(
     input: &Path,
     output: &Path,
     ffmpeg: &Path,
-    extra_inputs: &[PathBuf],
+    extra_inputs: &[ExtraMediaInput],
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
     if fs::try_exists(output).await.unwrap_or(false) {
@@ -2081,13 +2550,44 @@ async fn run_ffmpeg(
         .arg(input);
     // F-6: Add extra audio/subtitle track inputs.
     for extra in extra_inputs {
-        cmd.arg("-i").arg(extra);
+        if extra.kind == "audio" {
+            cmd.arg("-allowed_extensions").arg("ALL");
+        }
+        cmd.arg("-i").arg(&extra.path);
     }
-    cmd.arg("-c").arg("copy").arg("-movflags").arg("+faststart");
-    // F-6: Map all streams from all inputs so audio/subtitle tracks are muxed.
-    if !extra_inputs.is_empty() {
-        for i in 0..=extra_inputs.len() {
-            cmd.arg("-map").arg(format!("{i}"));
+    // B6: external WebVTT inputs need MP4's mov_text codec; video/audio stay lossless.
+    cmd.arg("-c:v")
+        .arg("copy")
+        .arg("-c:a")
+        .arg("copy")
+        .arg("-c:s")
+        .arg("mov_text")
+        .arg("-movflags")
+        .arg("+faststart");
+    cmd.arg("-map").arg("0:v?");
+    if !extra_inputs.iter().any(|input| input.kind == "audio") {
+        cmd.arg("-map").arg("0:a?");
+    }
+    let mut subtitle_index = 0;
+    let mut audio_index = 0;
+    for (index, extra) in extra_inputs.iter().enumerate() {
+        let stream = if extra.kind == "subtitle" { "s" } else { "a" };
+        cmd.arg("-map").arg(format!("{}:{stream}:0", index + 1));
+        let stream_index = if stream == "s" {
+            let current = subtitle_index;
+            subtitle_index += 1;
+            current
+        } else {
+            let current = audio_index;
+            audio_index += 1;
+            current
+        };
+        if let Some(language) = extra.language.as_deref() {
+            cmd.arg(format!("-metadata:s:{stream}:{stream_index}"))
+                .arg(format!(
+                    "language={}",
+                    super::super::media_subtitles::mp4_language(language)
+                ));
         }
     }
     cmd.arg(output);
@@ -2293,15 +2793,17 @@ async fn fetch_text(
     headers: &[(String, String)],
     origin: &str,
     network_policy: &crate::download::network_policy::NetworkPolicy,
-) -> Result<String, String> {
-    let bytes = fetch_bytes(client, url, headers, None, origin, network_policy).await?;
-    String::from_utf8(bytes).map_err(|_| {
+) -> Result<(String, String), String> {
+    let (bytes, resolved_url) =
+        fetch_bytes_with_url(client, url, headers, None, origin, network_policy).await?;
+    let text = String::from_utf8(bytes).map_err(|_| {
         engine_error(
             "hls_invalid_playlist",
             "HLS playlist is not valid UTF-8.",
             false,
         )
-    })
+    })?;
+    Ok((text, resolved_url))
 }
 
 async fn fetch_bytes(
@@ -2312,6 +2814,19 @@ async fn fetch_bytes(
     origin: &str,
     network_policy: &crate::download::network_policy::NetworkPolicy,
 ) -> Result<Vec<u8>, String> {
+    fetch_bytes_with_url(client, url, headers, range, origin, network_policy)
+        .await
+        .map(|(bytes, _)| bytes)
+}
+
+async fn fetch_bytes_with_url(
+    client: &Client,
+    url: &str,
+    headers: &[(String, String)],
+    range: Option<String>,
+    origin: &str,
+    network_policy: &crate::download::network_policy::NetworkPolicy,
+) -> Result<(Vec<u8>, String), String> {
     let parsed =
         reqwest::Url::parse(url).map_err(|e| format!("Could not request HLS resource: {e}"))?;
     network_policy.resolve(&parsed).await?;
@@ -2326,9 +2841,10 @@ async fn fetch_bytes(
     if !response.status().is_success() {
         return Err(crate::download::http::format_http_response_error(&response));
     }
+    let resolved_url = response.url().to_string();
     // ARC-10: stream with a hard cap so chunked bodies cannot OOM the worker.
     match read_body_limited(response, HLS_INIT_MAX_BYTES, None, READ_IDLE_TIMEOUT).await {
-        Ok(bytes) => Ok(bytes),
+        Ok(bytes) => Ok((bytes, resolved_url)),
         Err(LimitedBodyError::TooLarge) => Err(engine_error(
             "hls_init_too_large",
             format!("HLS resource exceeds the {HLS_INIT_MAX_BYTES} byte safety limit."),
@@ -2472,6 +2988,9 @@ mod tests {
                 staging_dir: "staging",
                 selected_audio_track_uris: None,
                 selected_subtitle_track_uris: None,
+                max_missing_segments: 0,
+                missing_segments_json: None,
+                selected_track_catalog_json: None,
             },
         )
         .await

@@ -1034,6 +1034,8 @@ async fn fun25_signed_url_change_preserves_completed_segments() {
             audio_representation_id: None,
             audio_bandwidth: None,
             audio_codecs: None,
+            selected_subtitle_representation_id: None,
+            track_catalog_json: None,
             output_format: "mp4",
             segment_count: 0,
         },

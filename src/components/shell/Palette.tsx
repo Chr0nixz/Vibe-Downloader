@@ -31,6 +31,7 @@ import { useTheme } from "next-themes";
 import { type ComponentType, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { NAV_SHORTCUT_DIGITS, NAV_SHORTCUT_KEYS } from "@/components/shell/nav-shortcuts";
+import { shortcutLabels } from "@/components/shell/shortcut-registry";
 import { allowedTransferActions, primaryRecoveryAction, recoveryActionLabel } from "@/components/tasks/row-recovery";
 import { recoveryActionIcon, restartCost } from "@/components/tasks/TaskRecoveryActions";
 import {
@@ -647,7 +648,6 @@ function buildCommands({
   const settingsUnavailable = t("palette.disabled.settingsUnavailable");
   const selectedName = selectedTask?.fileName ?? "";
   const currentLimit = Number(settings?.globalSpeedLimitBps ?? 0);
-  const mod = platform === "macos" ? "\u2318" : "Ctrl+";
 
   const selectedActions = selectedTask ? allowedTransferActions(selectedTask) : [];
   const canStart = selectedActions.includes("resume");
@@ -680,7 +680,7 @@ function buildCommands({
     group: "app",
     icon: Plus,
     keywords: keyword("new", "download", "add", "url", "新建", "下载", "添加"),
-    shortcut: `${mod}N`,
+    shortcut: shortcutLabels("newDownload", platform)[0],
     enabled: true,
     featured: true,
     run: onNewDownload,
@@ -728,7 +728,7 @@ function buildCommands({
     group: "app",
     icon: Settings,
     keywords: keyword("settings", "preferences", "配置", "设置"),
-    shortcut: `${mod},`,
+    shortcut: shortcutLabels("settings", platform)[0],
     enabled: true,
     active: nav === "settings",
     featured: true,
@@ -813,7 +813,7 @@ function buildCommands({
     group: "task",
     icon: recoverAction ? recoveryActionIcon(recoverAction) : RotateCcw,
     keywords: keyword("retry", "again", "restart", "recover", "fix", "重试", "重新开始", "恢复"),
-    shortcut: `${mod}R`,
+    shortcut: shortcutLabels("recoverTask", platform)[0],
     enabled: recoverAction !== null,
     disabledReason: selectedTask ? t("palette.disabled.cannotRetry") : noTask,
     featured: true,
@@ -827,7 +827,7 @@ function buildCommands({
     group: "task",
     icon: File,
     keywords: keyword("open", "file", "打开", "文件"),
-    shortcut: `${mod}\u21B5`,
+    shortcut: shortcutLabels("openFile", platform)[0],
     enabled: canOpenFile,
     disabledReason: selectedTask ? t("palette.disabled.completedOnly") : noTask,
     featured: true,
@@ -840,7 +840,7 @@ function buildCommands({
     group: "task",
     icon: FolderOpen,
     keywords: keyword("open", "folder", "directory", "打开", "文件夹", "目录"),
-    shortcut: `${mod}O`,
+    shortcut: shortcutLabels("openFolder", platform)[0],
     enabled: !!selectedTask,
     disabledReason: noTask,
     featured: true,
@@ -853,7 +853,7 @@ function buildCommands({
     group: "task",
     icon: detailOpen ? EyeOff : Eye,
     keywords: keyword("details", "drawer", "inspect", "详情", "详细"),
-    shortcut: `${mod}D`,
+    shortcut: shortcutLabels("toggleDetails", platform)[0],
     enabled: !!selectedTask,
     disabledReason: noTask,
     featured: true,
@@ -866,7 +866,7 @@ function buildCommands({
     group: "task",
     icon: Trash2,
     keywords: keyword("delete", "remove", "删除", "移除"),
-    shortcut: "Del",
+    shortcut: shortcutLabels("deleteTask", platform)[0],
     enabled: !!selectedTask,
     disabledReason: noTask,
     danger: true,
@@ -881,7 +881,7 @@ function buildCommands({
     group: "bulk",
     icon: ListChecks,
     keywords: keyword("select", "matching", "current", "选择", "当前结果"),
-    shortcut: `${mod}A`,
+    shortcut: shortcutLabels("selectAll", platform)[0],
     enabled: visibleTasks.length > 0 && !selectingAll,
     disabledReason: selectingAll ? t("taskList.loadingMore") : noVisibleTasks,
     featured: true,
@@ -894,7 +894,7 @@ function buildCommands({
     group: "bulk",
     icon: ListChecks,
     keywords: keyword("clear", "selection", "unselect", "清除", "取消选择"),
-    shortcut: `${mod}Shift+A`,
+    shortcut: shortcutLabels("clearSelection", platform)[0],
     enabled: selectedCount > 0,
     disabledReason: noSelection,
     featured: true,
@@ -1033,7 +1033,7 @@ function buildCommands({
       group: "views",
       icon: details?.icon ?? ListChecks,
       keywords: [...keyword("view", "filter", nextNav, "视图", "导航"), ...(details?.keywords ?? [])],
-      shortcut: `${mod}${digit}`,
+      shortcut: shortcutLabels(`nav${digit}`, platform)[0],
       enabled: true,
       active: nav === nextNav || (nextNav === "issues" && (nav === "attention" || nav === "failed")),
       featured: true,

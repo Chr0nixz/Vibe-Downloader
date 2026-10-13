@@ -98,6 +98,15 @@ impl GlobalSpeedLimiter {
     }
 
     pub async fn set_limit(&self, limit_bps: Option<i64>) {
+        self.set_limit_internal(limit_bps, false);
+    }
+
+    /// Changing a live upload cap must preserve bytes already charged.
+    pub async fn set_limit_preserving_budget(&self, limit_bps: Option<i64>) {
+        self.set_limit_internal(limit_bps, true);
+    }
+
+    fn set_limit_internal(&self, limit_bps: Option<i64>, preserve: bool) {
         // Serialize disable/re-enable with ticker installation so an old stop
         // cannot abort a new ticker or leave a detached handle behind.
         let mut ticker = self.ticker_handle.lock().unwrap_or_else(|e| e.into_inner());
@@ -107,9 +116,23 @@ impl GlobalSpeedLimiter {
         if self.limit_bps.load(Ordering::Relaxed) == limit {
             return;
         }
-        self.limit_bps.store(limit, Ordering::Relaxed);
-        self.tokens_milli
-            .store(bucket_capacity_milli(limit), Ordering::Relaxed);
+        let previous = self.limit_bps.swap(limit, Ordering::Relaxed);
+        if preserve && previous > 0 && limit > 0 {
+            let delta =
+                bucket_capacity_milli(limit).saturating_sub(bucket_capacity_milli(previous));
+            let _ =
+                self.tokens_milli
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |balance| {
+                        Some(
+                            balance
+                                .saturating_add(delta)
+                                .min(bucket_capacity_milli(limit)),
+                        )
+                    });
+        } else {
+            self.tokens_milli
+                .store(bucket_capacity_milli(limit), Ordering::Relaxed);
+        }
         self.last_refill_millis
             .store(now_millis(), Ordering::Relaxed);
         if limit <= 0 {
@@ -481,6 +504,18 @@ mod tests {
             limiter.last_refill_millis.load(Ordering::Relaxed),
             last_refill
         );
+    }
+
+    #[tokio::test]
+    async fn upload_limit_changes_preserve_consumed_budget() {
+        let limiter = GlobalSpeedLimiter::new(Some(1_000));
+        limiter.tokens_milli.store(100_000, Ordering::Relaxed);
+        limiter.set_limit_preserving_budget(Some(2_000)).await;
+        assert_eq!(limiter.tokens_milli.load(Ordering::Relaxed), 1_100_000);
+        limiter.set_limit_preserving_budget(Some(500)).await;
+        assert_eq!(limiter.tokens_milli.load(Ordering::Relaxed), -400_000);
+        limiter.set_limit_preserving_budget(Some(500)).await;
+        assert_eq!(limiter.tokens_milli.load(Ordering::Relaxed), -400_000);
     }
 
     #[tokio::test]

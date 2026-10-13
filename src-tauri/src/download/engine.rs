@@ -8,6 +8,7 @@ use sqlx::SqlitePool;
 use tauri::AppHandle;
 
 use super::network_policy::NetworkPolicy;
+use super::DownloadError;
 use super::{
     BtEngine, DashEngine, FtpEngine, GlobalSpeedLimiter, HlsEngine, HttpEngine, MetalinkEngine,
     SftpEngine, WebDavEngine,
@@ -138,6 +139,7 @@ pub struct ProbeOutput {
     pub hls_audio_tracks: Vec<crate::models::HlsMediaTrack>,
     /// F-6: Subtitle renditions from `#EXT-X-MEDIA TYPE=SUBTITLES`.
     pub hls_subtitle_tracks: Vec<crate::models::HlsMediaTrack>,
+    pub dash_tracks: Vec<crate::models::DashTrack>,
     pub metalink: Option<MetalinkProbeData>,
 }
 
@@ -242,8 +244,52 @@ impl EngineRegistry {
         &self.http_engine
     }
 
+    pub fn bt_engine(&self) -> &Arc<BtEngine> {
+        &self.bt_engine
+    }
+
     pub async fn proxy_config(&self) -> ResolvedProxyConfig {
         self.proxy_config.read().await.clone()
+    }
+
+    pub fn engine_for_task(&self, task: &TaskRecord) -> Result<Arc<dyn DownloadEngine>, String> {
+        let id = match task.protocol.as_str() {
+            "https" => "http",
+            "magnet" => "bt",
+            "ftps" => "ftp",
+            "webdavs" => "webdav",
+            id => id,
+        };
+        self.engines
+            .iter()
+            .find(|engine| engine.id() == id)
+            .cloned()
+            .ok_or_else(|| format!("Unsupported task protocol: {id}"))
+    }
+
+    pub async fn probe(&self, request: ProbeRequest) -> Result<ProbeOutput, DownloadError> {
+        let mut engine = self
+            .engine_for_uri(&request.uri)
+            .map_err(DownloadError::Other)?;
+        if engine.id() == "http" {
+            let identify = super::manifest_classify::identify(self, &request);
+            let kind = match request.cancel_token.as_ref() {
+                Some(cancel) => tokio::select! {
+                    _ = cancel.cancelled() => return Err(DownloadError::Canceled),
+                    result = identify => result.map_err(DownloadError::Other)?,
+                },
+                None => identify.await.map_err(DownloadError::Other)?,
+            };
+            if let Some(id) = kind {
+                engine = self
+                    .engines
+                    .iter()
+                    .find(|engine| engine.id() == id)
+                    .cloned()
+                    .ok_or_else(|| DownloadError::Other("Manifest engine is unavailable".into()))?;
+            }
+        }
+        engine.probe(request).await
     }
 
     pub fn engine_for_uri(&self, uri: &str) -> Result<Arc<dyn DownloadEngine>, String> {
@@ -270,6 +316,14 @@ impl EngineRegistry {
 
     pub async fn delete_runtime_task(&self, task: &TaskRecord, delete_files: bool) {
         if matches!(task.protocol.as_str(), "bt" | "magnet") {
+            if let Err(error) = self
+                .bt_engine
+                .seeding_manager()
+                .stop(&task.id, "deleted", None)
+                .await
+            {
+                tracing::error!(task_id = %task.id, error = %error, "seeding drain failed");
+            }
             self.bt_engine
                 .delete_runtime_task(&task.id, &task.source_key, delete_files)
                 .await;

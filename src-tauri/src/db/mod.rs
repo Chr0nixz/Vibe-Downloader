@@ -2,6 +2,7 @@ mod backup;
 mod backup_contents;
 mod backup_subset;
 mod browser_messages;
+mod bt_seeding;
 mod classification_rules;
 mod connection;
 mod dash;
@@ -72,8 +73,9 @@ pub use self::hash::{any_completed_task_hash_pending, update_hash_verification};
 pub use self::hls::{
     bulk_upsert_hls_segments, get_hls_task, hls_finish_requested, hls_segment_cursor,
     list_hls_segments, list_hls_segments_page, request_hls_finish, reset_hls_segments_for_task,
-    update_hls_last_media_sequence, update_hls_segment_status, upsert_hls_segment, upsert_hls_task,
-    HlsSegmentRecord, HlsSegmentUpsert, HlsTaskRecord, HlsTaskUpsert,
+    update_hls_last_media_sequence, update_hls_missing_segments, update_hls_segment_status,
+    upsert_hls_segment, upsert_hls_task, HlsSegmentRecord, HlsSegmentUpsert, HlsTaskRecord,
+    HlsTaskUpsert, MAX_HLS_MISSING_SEGMENTS,
 };
 pub use self::integrity::{
     count_task_resumes, sum_task_segment_retries, task_milestones, TaskMilestones,
@@ -172,9 +174,9 @@ pub use self::task_state::{
     delete_task_record, delete_task_records_batch, mark_task_failed_if_active,
     mark_task_failed_if_queued, reset_interrupted_tasks, reset_task_download_state,
     update_task_and_segment_progress, update_task_final_path, update_task_health_summary,
-    update_task_progress, update_task_retry_after, update_task_retry_after_in_tx,
-    update_task_runtime_progress, update_task_save_target, update_task_status,
-    update_task_status_in_tx, TaskProgressCheckpoint,
+    update_task_progress, update_task_progress_status_in_tx, update_task_retry_after,
+    update_task_retry_after_in_tx, update_task_runtime_progress, update_task_save_target,
+    update_task_status, update_task_status_in_tx, TaskProgressCheckpoint,
 };
 pub use self::torrent::{
     get_torrent_runtime_snapshot, torrent_seed_ratio_limit, torrent_seed_time_limit_seconds,
@@ -182,6 +184,10 @@ pub use self::torrent::{
     update_task_torrent_metadata, update_torrent_seeding, upsert_torrent_runtime_snapshot,
     upsert_torrent_task, TaskRemoteMetadataUpdate, TaskTorrentMetadataUpdate,
     TorrentRuntimeSnapshotUpsert, TorrentTaskUpsert,
+};
+pub use bt_seeding::{
+    begin_bt_seeding, bt_seeding_restore_candidates, bt_seeding_state, bt_seeding_status,
+    checkpoint_bt_seeding, persist_torrent_blob, BtSeedingState, BtSeedingStatus,
 };
 
 pub const DEFAULT_MULTI_CONNECTION_THRESHOLD_BYTES: i64 = 16 * 1024 * 1024;
@@ -205,3 +211,4 @@ pub use self::request_profiles::{
     prepare_task_request_profile_with_expiry, resolve_task_request_profile_headers,
     save_task_request_profile, update_task_request_profile,
 };
+pub mod workflow;

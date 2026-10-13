@@ -1,4 +1,5 @@
 import type { Platform } from "@/lib/platform";
+import { matchesAction } from "./shortcut-registry";
 
 const OVERLAY_SELECTOR = '[role="dialog"], [role="alertdialog"], [role="menu"]';
 
@@ -26,15 +27,10 @@ export function isTextInputTarget(target: EventTarget | null): boolean {
 /** Global paste is available from the task surface, but never from a text
  * editor or a Radix overlay that owns the key event. */
 export function isGlobalPasteShortcut(event: KeyboardEvent, platform: Platform): boolean {
-  const modifier = platform === "macos" ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
   return (
-    modifier &&
-    !event.shiftKey &&
-    !event.altKey &&
-    !event.isComposing &&
+    matchesAction(event, "paste", platform) &&
     !event.repeat &&
     !event.defaultPrevented &&
-    event.key.toLowerCase() === "v" &&
     !isTextInputTarget(event.target) &&
     !isOverlayKey(event)
   );

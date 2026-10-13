@@ -1,6 +1,6 @@
 # 项目改进审计
 
-最后更新：2026-10-02
+最后更新：2026-10-13
 
 适用版本：Vibe Downloader `0.5.0`
 
@@ -1145,6 +1145,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复**：新增 [`src-tauri/tests/perf_baseline.rs`](../src-tauri/tests/perf_baseline.rs)（1k 默认 smoke，`#[ignore]` 10k）、`scripts/perf/*.ps1`、`pnpm perf:baseline`；本机填入 [`docs/performance-baseline-results.md`](performance-baseline-results.md)（含 p50/p95 与 `EXPLAIN QUERY PLAN`）。
 - **验收**：有硬件/OS/commit/profile 元数据与可重复编排；50k+、UI 冷启动/FPS、HLS/BT soak、CI 绝对门禁明确延期，不假装 Closed。
 - **验证**：`cargo test -j 1 --manifest-path src-tauri/Cargo.toml --test perf_baseline`；本地 `pnpm perf:baseline:10k`。
+- **2026-10-13 补充证据**：NSIS 隔离安装的原生 Windows/WebView2 已完成 1k／10k、各 5 次启动与输入、10 秒滚动、5 分钟空闲采样及进程退出复核，见 [原生短基线](performance-baseline-results.md#4-2026-10-13-windows-原生-release-ui-短基线)。其启动数字是 CDP 观察上界，rAF 是帧节奏；真实冷缓存、50k 实际呈现帧率、活动下载与长跑按 B7 矩阵另测。
 
 ### PERF-12（P1，Closed）：日志保留策略使现场排障不可行
 
@@ -1161,6 +1162,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复方向**：用 `cargo tree -e features -i aws-lc-rs` 定位启用方，显式声明 `rustls = { default-features = false, features = ["ring", "std", "logging", "tls12"] }` 统一到 `ring`。改完必须验证 HTTPS / FTPS / SFTP / BT 四条 TLS 路径的握手仍正常。
 - **验收**：`cargo tree -d` 不再出现两个密码学后端；四个协议的 TLS 集成测试通过；在 `deny.toml` 的 `[bans]` 中加入 `aws-lc-rs` 防回归。
 - **2026-08-26 复核**：`cargo tree -e features -i` 确认 ring 经 suppaftp（`tokio-rustls-ring`）与 hyper-rustls → reqwest 生效；aws-lc-rs 除 reqwest 通用 `rustls` feature 外还被**直依赖** russh 与 librqbit-sha1-wrapper 无条件拉入，且 rustls 自身同时启用了两套 provider feature——统一到单一后端必须同时处理这三条来源，仅改 suppaftp 的 feature 不够。`deny.toml` 的 `[bans] multiple-versions = "warn"` 使 CI 的 `cargo deny check bans` 永不可能因此变红，问题会存续到有人主动收敛为止。
+- **2026-10-10 本地收敛（Open 保持）**：reqwest 改用 `rustls-no-provider`，russh 改用 `ring`，应用启动及网络工厂显式安装 rustls `ring` provider；`cargo tree -e features -i aws-lc-rs` 当前只显示 librqbit 的 `sha1-ring`/`librqbit-sha1-wrapper` 哈希路径，以及应用为该路径启用的 `prebuilt-nasm`，不再显示 reqwest、russh 或 FTPS 的 aws-lc rustls provider。HTTPS/FTPS/SFTP/BT 相关本地测试与完整 Rust 测试通过。librqbit 仍固定依赖 aws-lc-rs 做 torrent SHA-1，因此不能在不改上游哈希实现的情况下删除该 crate；未做真实 SSH/BT TLS 握手、release 体积对照或候选包验收，状态继续为 Open。
 
 ### PERF-14（P2，Closed）：前端渲染热路径上的冗余订阅
 
@@ -1183,12 +1185,14 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-09-13 修复**：按修复方向主路落地——`DownloadControl`（lib.rs）与 `DownloadContext`（engine.rs）各加 `finish_notify: Arc<Notify>`（同一实例，scheduler 在 start_task 注册时创建接线）；`finish_live_recording` 在 `finish.store(true)` 后 `notify_waiters()`。`wait_hls_finish_signal` 重构为「finish 标志 → DB 检查 → `select!{ notified, sleep(fallback) }`」——notify 即时唤醒，DB 兜底间隔 100ms→2s（常量 `HLS_FINISH_DB_FALLBACK`，函数参数化便于测试注入）。非 HLS 引擎的 context 解构以 `finish_notify: _` 吸收新字段。
 - **验证测试**：`hls/engine.rs` 内两条单测——notify 触发（fallback=60s）下 waiter 5s 内返回（证明走的是 Notify 而非轮询）；无 notify 时 DB 置位 + 200ms fallback 下 2s 内返回。敏感性验证：临时禁用 notify 分支 → 首条用例 5s 超时失败。验收映射：live 轮询的 DB 查询从「每 100ms 一次」（每 target-duration 轮询 60-100 次）降为「每 2s 兜底一次 + finish 即时唤醒」，查询次数与轮询次数同阶达成。
 
-### PERF-16（P2，Open）：路径预留全表扫描与若干无 LIMIT 查询
+### PERF-16（P2，Fixed locally）：路径预留全表扫描与若干无 LIMIT 查询
 
 - **证据**：[`task_records.rs`](../src-tauri/src/db/task_records.rs#L585) 的 `list_reserved_final_paths` 无 `LIMIT`，把所有活动任务及其全部文件的 `final_path` 拉进一个 `HashSet<String>`，且在 `create.rs` 的 DEFERRED 事务内被调用（最多重试 32 次），创建流程中另有一次调用。此外 `list_task_records` 与 `list_browser_realtime_task_records` 的 active 分支都没有 LIMIT。
 - **影响**：1 万活动任务 / 每任务 100 个文件的场景下，单次创建要在事务持锁期间物化上百万条路径字符串，直接放大 `ARC-21` 的锁冲突窗口。
 - **修复方向**：不要「读全集到内存再判断」。改为循环内做一次 `SELECT 1 FROM tasks WHERE final_path = ? AND status IN (...)` 点查（该列已有部分唯一索引），或干脆去掉预读、完全依赖唯一索引冲突加重试。`list_tasks` 复用已定义的 `MAX_TASK_PAGE_SIZE`，WS 快照 active 分支加 `LIMIT 500`。
 - **验收**：`perf_baseline` 中加入大量活动任务下的创建耗时用例，断言不随活动任务数线性增长。
+- **2026-10-10 本地修复与验证**：创建流程移除 `list_reserved_final_paths` 的全量预读，仅保留本轮已发生唯一冲突的候选路径，并让活动任务/浏览器实时快照读取复用 `MAX_TASK_PAGE_SIZE`（500）上限；partial UNIQUE 索引继续作为并发裁决和 no-clobber 保证。`path_reservation` 4/4、`cargo check --all-targets`、全目标 Clippy 和 Rust fmt 通过。真实 1 万任务创建曲线仍需补入 B7 性能环境，因此保持 Fixed locally。
+- **2026-10-12 B7 本机性能证据**：dirty Windows 工作区的 debug harness 以 5 次重复完成 1k/10k 活动路径创建、同名冲突、旧全量路径读取对照和 500 条快照限制；创建 p95 为 21.97/18.17 ms，冲突 p95 为 20.72/7.44 ms，快照 p95 为 16.55/28.56 ms。`list_task_records_by_ids` 的 IPC／数据库入口也限制为最多 500 个 ID，HLS 缺片容忍值在持久化边界限制为 `0..100`；对应路径快照、实时快照和 HLS 恢复回归通过。`creation-growth.json` 的 p50 增长 sanity check 通过；原始数据在本地 `logs/b7/20261012-windows/perf-corrected/`，只支持本机趋势判断，真实慢盘与 release UI 仍待外部环境。
 
 ## 九、安全边界
 
@@ -1353,6 +1357,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **2026-08-26 复核**：`zz_dump_schema.rs` 仍在树中且无 `#[ignore]`，固定路径 `temp_dir()/vibe_schema_new.txt` + `.expect("write dump")` 每次全量测试执行并遗留产物。一点更正：Windows 上 Rust std 以 FILE_SHARE_READ|WRITE|DELETE 打开文件，两进程并发 `fs::write` 同一路径通常表现为交错写入而非 sharing-violation panic——早先「并发必炸」的推断过强；卫生缺陷本身（一次性诊断、固定路径、残留产物、ENG-03 Open 登记属实）成立。
 - **2026-09-14 修复**（`9d7b1ff`，Partial）：① `install_test_secret_key` / `install_intranet_test_bypass` 改走库内 debug 门控的进程内钩子（`secure_headers::install_test_secret_key`、`download::ssrf::install_test_intranet_bypass`），集成套件不再调用 `std::env::set_var`；env 回退保留给 lib 自身单元测试，bt.rs 单元测试一并迁移。② `TestPaths` 实现 Drop 自清理——目录从 `temp.parent()` 推导、不新增字段，6 处结构体字面量构造点（含并行在途文件内的）零改动兼容。③ 删除 `zz_dump_schema.rs`（文件头自述"验证后删除"）；删除 metalink_engine.rs 中紧邻无条件 cooldown 覆盖的多余 1100ms 阻塞 sleep。④ README 的 `-j 1` 按本条 2026-08-13 实证结论改写为 `-j 2` 并注明真实根因（链接阶段页面文件耗尽，非测试干扰）。保持 Partial 的残余：`test_pool` 的 .sqlite/-wal/-shm 仍随进程遗留——175 个调用点，改签名会与并行在途的 6 个测试文件冲突，待其落地后迁移 `(pool, TempDir)`；`db/task_credentials.rs` 单元 helper 仍用 set_var（该文件被并行占用）；ROADMAP 的 `-j 1` 说明同因待改。验证：暂存树 checkout-index 物化后独立 `cargo check --tests` 通过；metalink 34 / webdav 15 / sftp 22 / hls 20 全绿。
 - **2026-09-15 修复（尾巴收尾，Partial 保持）**：并行工作流落地后三项尾巴完成。①`test_pool` 迁移为 `(TestDbGuard, SqlitePool)`——17 个逐文件本地副本收敛为委托、153 个调用点解构守卫，Drop 删除 .sqlite/-wal/-shm；②`db::task_credentials` 单元 helper 迁到进程内密钥钩子，本条证据中的 set_var 站点全部清零；③ROADMAP 的 `-j 1` 说明按 README 同款改写为 `-j 2`。残余如实记录：sqlx 池的关闭在最后一个句柄 drop 后是异步的，current-thread `#[tokio::test]` 结束时 runtime 不再 poll 关闭任务，同步 Drop 无法等待它（scratch-runtime close 与池内部任务死锁，运行时上下文内再入被拒）；守卫以短重试 + 分离线程尽力回收，multi-thread 套件全清，Windows 上一次全量运行仍残留约 61 个文件（迁移前每轮 2000+）。彻底清零需要测试体内显式 `pool.close().await` 或 nextest 进程级隔离，留作后续方向。实测：TestPaths 临时目录零泄漏保持；全量 cargo test 与 clippy --all-targets -D warnings 通过。
+- **2026-10-10 后置加固复核（Partial 保持）**：`TestDbGuard` 持有共享池句柄，Drop 先尝试删除 SQLite 主文件及 `-wal`/`-shm`，失败后释放守卫句柄并在后台短重试；新增未显式 `pool.close()` 的回归测试，定向 `test_db_guard` 1/1、`workflow_library` 4/4 通过。清理 `target` 后的 `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2` 通过 386 个库测试、全部集成／文档测试（3 个性能用例忽略）。当前仍有少量直接 `db::connect` 重开和测试 runtime 结束竞态，不能把本地全量通过写成“零残留”；彻底清零仍需测试体内显式关闭或 nextest 进程级隔离。
 
 ### ENG-04（P2，Closed）：没有任何覆盖率度量
 
@@ -1403,6 +1408,7 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
   - **连带发现（比原问题更严重）**：`scripts/stable-error-messages.json` 缺少 `ARC-30`（2026-09-16）新增的两个稳定码 `task_already_completed` 与 `task_state_changed`，而 `STABLE_ERROR_CODES` 与 7 个 locale 的 `errors.*` 都已有它们。结果是脚本在 `requireLocalizedSet` 阶段就以 `zh-CN is missing 2 error translations` **退出 1 —— 该脚本自 ARC-30 起完全不可用**，本条原先却只登记了哨兵键问题。已按各 locale 现有 `errors.*` 的取值补齐 JSON（六 locale × 2 码，en 走 `STABLE_ERROR_MESSAGES_EN` 不经 JSON）。修复后 `node scripts/sync-stable-error-i18n.mjs` 对 7 个 locale 全部报 `Unchanged` 且不改写任何文件。
   - **实现要点**：`buildBlockFrom(messages, report, codes)` 把码表参数化（原先硬编码模块级 `STABLE_ERROR_CODES`，导致纯函数无法用自定义码表测试）；新增 `ERRORS_BLOCK_PATTERN` / `parseErrorsBlockKeys` / `syncLocaleErrorsBlock`，返回 `updated | unchanged | failed` 三态供调用方与测试消费。`unchanged` 的判据是「能解析出 errors 块，且块内仍含由当前码表派生的键」，不再依赖任何具体键名；只有「完全定位不到 errors 块」（即 block regex 漂移、文件结构损坏）才判 `failed`——这才是真正需要响亮失败的条件。
   - **验证**：新增 [`scripts/sync-stable-error-i18n.test.mjs`](../scripts/sync-stable-error-i18n.test.mjs) 6 项——已同步 → `Unchanged`；改值 → `Updated` 且写入含新值；**码表删减后已同步 locale → `Unchanged`**（本条验收原话，旧实现在此场景必然 `Failed`）；无 errors 块 → `Failed`；CRLF 检出 → `Unchanged`；`parseErrorsBlockKeys` 返回 null 的边界。经 `test:release-tools` 的 `scripts/*.test.mjs` glob 自动纳入，`node --test scripts/*.test.mjs` 60/60 通过。
+- **2026-10-10 稳定语言范围加固**：B6 新增 13 个稳定错误码后，补齐 `zh-CN` JSON 源并将同步器的默认写入范围收窄为 `en` 与 `zh-CN`；5 个 beta locale 明确输出 `Skipped`，缺口继续由 `check:i18n` 报告，不再因为未审核的 beta 文案阻断稳定错误码发布。回归测试覆盖 2 个稳定 locale 更新／幂等和 5 个 beta locale 保持不变；`pnpm test:release-tools` 83/83 通过。
 
 ### ENG-09（P2，Closed）：`direct_download_can_resume_from_temp_file` 依赖挂钟时序，同一份代码时过时挂
 
@@ -1758,17 +1764,19 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **验收**：省略字段保持，显式 `null` 清除，数字文本设值；状态栏更新与设置页其他字段保存并发时两项都保留；重置设置仍应用完整默认值。
 - **2026-09-29 实现与本地验收**：全局/计划限速、ffmpeg 路径及 BT 上传限速字段使用保持/清除/设值三态反序列化；设置更新与重置由共享互斥锁串行读取、合并、保存；设置自动保存仅发送变化字段，状态栏快捷入口仅提交全局限速补丁。三态 Rust 测试通过，完整设置页前端测试和门禁通过；Specta 已按最新 Rust 类型重新生成。候选应用中的快速并发操作仍建议作为 B7 手工走查。
 
-### ARC-66（P3，Open）：任务状态转换把健康消息、错误消息与速度参数混为一体（R27-A09）
+### ARC-66（P3，Fixed locally）：任务状态转换把健康消息、错误消息与速度参数混为一体（R27-A09）
 
 - **证据／影响**：`transition_task` 将 `message` 同时写入 `health_summary` 和 `error_message`，且名为 `downloaded_bytes` 的参数实际写入 `speed_bps`，调用处容易传错语义。
 - **修复合同**：状态转换输入独立表达健康摘要、错误信息、已下载字节和速度；现有调用逐一迁移，历史诊断语义保持可解释。
 - **验收**：对暂停、开始、失败和完成分别断言状态、健康摘要、错误信息、字节与速度列；错误码与恢复动作保持原有语义。
+- **2026-10-10 本地修复与验证**：新增 `TaskTransitionInput`/runtime 变体，生产状态迁移调用改为显式传递 `downloaded_bytes`、`speed_bps`、健康摘要、错误信息和事件消息；兼容入口保留给外部测试/旧调用。HTTP worker 失败路径现在保存实际已下载字节；回归测试 `arc66_transition_keeps_progress_health_and_error_fields_distinct`、`state_machine_busy` 3/3 通过，错误码/恢复动作仍由公共解析器生成。
 
-### ARC-67（P3，Open）：窗口和托盘回调在 UI 线程同步等待数据库（R27-A09）
+### ARC-67（P3，Fixed locally）：窗口和托盘回调在 UI 线程同步等待数据库（R27-A09）
 
 - **证据／影响**：主窗口关闭与托盘“打开下载目录”路径在主线程 `block_on` 读取数据库；SQLite 忙时会阻塞界面线程直到 busy timeout。
 - **修复合同**：事件回调读取已缓存的设置/路径快照，或把数据库操作转入异步任务；退出排空和托盘行为保持确定。
 - **验收**：注入慢数据库查询时窗口仍可绘制和响应；关闭、托盘退出及打开目录流程不丢失、不重复执行。
+- **2026-10-10 本地修复与验证**：主窗口 `CloseRequested` 先阻止关闭并把设置/统计读取放到 Tauri 异步 runtime，托盘“打开下载目录”改为异步命令；关闭请求使用原子 pending 门避免并发重复提示，close-to-tray、统计失败和排空路径保持原语义。`cargo check --all-targets`、全目标 Clippy、Rust fmt 及状态机/路径回归通过。慢 SQLite、原生 WebView 绘制和跨平台托盘仍需 B7 实机验收。
 
 ### FUN-35（P1，Fixed locally）：多个 BT 会话各自套用全局上限，混合协议总流量可能超限（FUN-33 残项）
 
@@ -1855,6 +1863,53 @@ Rust 测试挂起的根因值得单独记录，因为它是一个由测试暴露
 - **修复合同**：全选必须固定当前查询快照并继续加载游标到队尾，所有实体先进入既有缓存再发布选择；查询变化、卸载、重复游标和待删除任务必须 fail-closed。快捷键、右键菜单和命令面板必须调用同一实现，当前页全选但仍有后续页时不能误禁用。隐藏窗口只保留最新剪贴板 payload，系统通知通用且限频，不包含 URL；恢复可见后仍需用户点击确认才进入探测/创建。
 - **验收**：跨页、空页、重复游标、查询过时和卸载回归；已加载页全选/仍有后续页的菜单状态；三种入口行为一致；隐藏态最新 payload、通知合并、可见恢复和权限失败分支；前端类型、定向测试、i18n 和构建通过。真实 WebView 托盘可见性、通知权限、系统剪贴板和候选包仍属于 B7。
 - **2026-10-05 实现与本地验收**：新增 `src/lib/select-all-matching.ts` 及 hook，复用 `taskById`、列表查询 epoch 和稳定 cursor 输入；`TaskList`、`AppShell`、`Palette` 三处入口统一到分页选择器，并增加重复 cursor、过时响应以及每页推进 epoch 的并发保护。新增 `src/lib/system-notification.ts`，隐藏剪贴板检测以 5 秒窗口发送不含 URL 的通用通知。Windows dirty 工作区执行 `pnpm typecheck`、定向 Vitest（4 文件 20/20）、`pnpm test:frontend`（79 文件 464/464）、`pnpm build`、`pnpm check:i18n`、`pnpm check:docs` 和 `git -c core.safecrlf=false diff --check` 均通过；全局 `pnpm lint` 仍受既有 CRLF/格式差异影响，未整文件格式化。候选包和实机证据未完成，状态保持 `Fixed locally`。
+
+### UX-50（P3，Fixed locally）：配置缺少命名复用与批量属性编辑，快捷键定义分散（B5 增强）
+
+- **证据／影响**：此前新建与详情能编辑单任务参数，多选只提供传输动作；请求配置、预设和查询条件没有命名持久化入口。快捷键处理、命令面板提示和帮助列表分别定义，修饰键及按键优先级可能漂移。
+- **修复合同**：按用户确认范围，仅手动复用精确 origin 的非敏感站点请求头；预设保存目录、分类、优先级、限速、计划开关和非敏感代理设置，不保存凭据、固定摘要或网络授权。批量编辑只修改显式 ID 快照的优先级、限速、分类、计划开关；省略字段保持、清除字段明确，运行状态变化逐项裁决。保存视图仅保存实际支持的动态查询与排序，切换清除选择并使旧请求失效。快捷键处理、命令提示和帮助共用定义。
+- **验收**：配置持久化、复制、更新、重命名、删除及未知格式保留；站点协议／主机／端口隔离与敏感头排除；预设单任务／批量实际创建参数及手动覆盖；100 个混合状态任务只更新指定字段、终态／删除跳过、分块停止及部分失败重试；视图恢复搜索／筛选／排序且不存 cursor 或选中 ID；Windows/macOS 修饰键、输入和弹层保护；桌面与窄窗口无裁切。原生 IPC、运行中限速收敛、候选升级／迁移及跨平台行为按 B7 验收。
+- **2026-10-10 实现与本地验收**：新增 migration `014_workflow_library.sql`、类型化配置库 IPC 与逐项批量 patch，复用任务运行锁和共享策略刷新；SQLite 条件 UPDATE 在写入时保留未编辑字段，派发在锁外执行。浏览器预览使用版本化存储，损坏／未来格式记录保持原样；新建、详情、列表筛选及批量菜单复用折叠入口。前端／Rust 回归覆盖上述范围；验证命令与当前 dirty 工作区证据详见 [B5 增强实施记录](optimization-plan-2026-09-29.md#21-2026-10-10-b5-增强实施记录)。本轮按 owner 规则只维护 `en` 与 `zh-CN`，稳定语言检查通过；默认七语言检查仍因 beta locale 缺少新增键失败，未放宽默认门禁。候选包／真实环境未完成，状态为 `Fixed locally`。
+
+### FUN-40（P1，Fixed locally）：BT 做种占用普通下载生命周期且完成后不可可靠恢复（R27-F06）
+
+- **历史风险**：做种循环位于下载 worker 内，长期占用下载槽；完成后的启动／停止、累计策略、重启恢复和破坏性完成动作缺少一致 owner。
+- **验收条件**：后台做种与下载槽分离；完成任务开启前验证元数据与文件 piece；显式停止、删除、退出和更新等待 session／storage 排空；手动停止不自动恢复，总开关、比例／时间限制及累计上传跨重启保留；无限做种有停止和等待提示。两路下载与两个做种并发、上传预算更新、精确停止和超时 owner 保留必须有回归证据。
+- **本地实现**：独立 `BtSeedingManager` 移交并持有 session／storage，migration 015 与 `db/bt_seeding.rs` 保存累计状态；完成任务 piece 校验、恢复筛选、稳定错误和详情入口已接入。通知／目录动作即时，破坏性完成动作等待做种；电源命令、退出与更新走既有排空入口。
+- **2026-10-10 本地验收及加固复核**：Windows dirty 工作区 `cargo test --locked --manifest-path src-tauri/Cargo.toml -j 2` 通过 386 个库测试及全部集成／文档测试（3 个规模用例忽略）；`bt_seeding` 4/4 覆盖两个 HTTP 下载与两个做种并行、共享预算、精确停止、完成文件校验、手动停止／恢复、累计限制和快照写入。manager 超时保留 owner、storage 上传预算和完成动作门控有库测试；Clippy 全目标／fmt 通过。Clippy 首次发现 `media_b6` 测试的同步 Mutex guard 跨越异步关闭，已收窄锁作用域；完整 Rust 测试随后通过。`pnpm typecheck`／`pnpm test:frontend` 83 个文件、482/482 通过。命令、环境与 bindings 限制详见 [B6 实施记录](optimization-plan-2026-09-29.md#22-2026-10-10-b6-实施记录)。真实 peer 流量、跨平台关闭／升级、电源行为和候选迁移继续归 [B7 第 10 节](b7-acceptance-matrix-2026-10-02.md#10-b6-真实做种与媒体候选包场景)。
+
+### FUN-41（P1，Fixed locally）：HLS/DASH 媒体轨道、直播收尾与无后缀清单缺少完整成品合同（R27-F07）
+
+- **历史风险**：外部字幕 `-c copy` 难以生成 MP4 字幕流；直播空闲后不能离线完成；缺片无显式预算；DASH 自动选轨且选择未持久化；媒体路由仅依赖后缀。
+- **验收条件**：WebVTT 成品由 ffprobe 验证 `mov_text`／语言／容器；默认零缺片和有限预算均有集成覆盖，缺口可查；空闲直接使用本地片段收尾；无 ffmpeg 仅验证过的单路 TS，其他组合明确拒绝。DASH 显式画质／语言／WebVTT 选择持久化并恢复，DRM／TTML／live／timeline 等边界拒绝；无后缀 Content-Type 和有界前缀路由继续使用凭据／代理／SSRF 公共路径。
+- **本地实现**：HLS 本地字幕校验、`mov_text`、缺片记录、离线 finish 和 TS 包／PAT／PMT 验证；DASH catalog／默认值／显式选择／事务持久化；共享 4 KiB 清单识别及详情、新建页控件已接入。
+- **2026-10-10 本地验收及加固复核**：上述完整 Rust 门禁中的 `media_b6` 9/9 通过，ffmpeg／ffprobe 可用；验证 HLS／DASH MP4 的 `mov_text`、语言及容器、DASH 保存 ID 与未选轨道不下载、直播缺片及离线完成、无后缀认证 torrent／Metalink、重定向基址和跨源秘密剥离。子进程实际移除 ffmpeg 环境验证 TS 成品和其他组合稳定拒绝。Clippy 指出的测试锁作用域已修正；新增选择器键盘、axe、创建参数及旧探测快照回归；浏览器 mock 桌面／390px 走查详见 [B6 实施记录](optimization-plan-2026-09-29.md#22-2026-10-10-b6-实施记录)。静态/VOD 受限模板外的格式仍为 Boundary，真实播放、直播、多语言源和候选包继续归 [B7 第 10 节](b7-acceptance-matrix-2026-10-02.md#10-b6-真实做种与媒体候选包场景)。
+
+### PERF-20（P2，Fixed locally）：隔离 BT session 的多任务开销缺少基线且运行快照写入过密（R27-P02）
+
+- **历史风险**：每任务 session 的 RSS、DHT／端口成本缺少 2/5/10 torrent 数据；持续快照和 piece 位图放大 SQLite/WAL 开销。
+- **验收条件**：普通运行快照至多 1 秒且值变化才写，piece 位图至多 5 秒；同值 upsert 不改 `updated_at`。记录 2/5/10 session 启动、RSS、WAL、实际写次数和 DHT。共享 session 只有在逐任务限速、代理隔离、精确删除、DHT／端口生命周期和实测收益同时满足时另立评估。
+- **本地实现**：piece 与普通快照分开节流，SQL 条件 upsert 与 COALESCE 保留原位图；累计做种时间低频检查点。增加显式 ignored 的 2/5/10 隔离 session 基准，数据库 trigger 记录运行 UPDATE。
+- **2026-10-10 本地验收**：显式执行 `cargo test --locked --manifest-path src-tauri/Cargo.toml --test bt_seeding isolated_sessions_performance_baseline -j 2 -- --ignored --nocapture`，1/1 通过。Windows dirty/debug、每个 4096 字节本地完整 torrent、每组 10 秒：2/5/10 session 启动耗时 73/194/361 ms，RSS 28,971,008/33,431,552/38,539,264 字节，运行 UPDATE 7/17/27 次，WAL 净增长 57,680/140,080/0 字节；各 DHT ID 独立，路由表和未完成请求实值见 [B6 基线表](optimization-plan-2026-09-29.md#22-2026-10-10-b6-实施记录)。WAL 文件净差受检查点／空间复用影响，0 不代表无写入；同值 upsert／位图保留回归通过。首版保留隔离 session，本轮没有共享对照、真实 peer 负载或长跑，后续环境继续归 B7。
+
+### PERF-21（P2，Fixed locally）：Windows 候选包包含开发导出器且重复打包 Native Host
+
+- **2026-10-13 本机证据**：以 `VIBE_BROWSER_PROFILE=candidate`、独立 identity 和当前 dirty 工作区构建并隔离安装 NSIS，安装目录除主程序、Native Host 和资源外还含 `export-bindings.exe`（24,207,872 字节）。原始清单为 `logs/b7/windows-20261013-ui/nsis-install.json`；候选包和主程序哈希见 [B7 矩阵 6.2](b7-acceptance-matrix-2026-10-02.md#62-2026-10-13-windows-候选刷新与原生-ui-基线)。
+- **范围补充**：修复期间只读查询同一旧 MSI 的 File 表，也存在 `export-bindings.exe`；记录为 `logs/b7/windows-20261013-fixes/msi-prior-read-probe.json`，未调用 MSI 安装服务。
+- **重封装发现**：排除 exporter 后，WiX ICE30 检出 Native Host 同时由 Cargo bin 和 externalBin 安装到同一目标，属于 MSI 组件引用计数错误。verbose 日志为 `msi-bundle-retry.log`，只读 File 表能见两份不同长度的 host，见 `msi-intermediate-file-table.json`；因此本项由 P3 提升 P2，不能绕过 ICE 校验出包。
+- **影响**：普通安装多带约 23.1 MiB 开发工具；重复 host 会破坏 MSI 组件引用计数并被 ICE30 拒绝。后续候选体积有对照，但没有单变量的构建耗时收益结论。
+- **修复合同／验收**：候选／发布包只包含产品运行所需二进制与资源；开发环境的 Specta 命令仍可正常导出。调整构建或 feature 边界后通过 `pnpm specta`、bindings 校验和实际安装文件清单复核；其他平台分别确认。不因本轮 UI 性能采集而标记已修复。
+- **本地修复**：为 exporter 和 Native Host 分别设置 `export-bindings`／`native-host` 的 `required-features`，默认 Tauri 产品构建只选主程序，再打包独立 staged sidecar。host 构建脚本显式启用自身 feature，保留移除嵌套 `TAURI_CONFIG` 的隔离；`pnpm test:rust`／`pnpm verify:rust` 启用 host feature，避免漏掉 7 项 host 单测。CI 的 Windows 包检查增加恰好一份 host／无 exporter／自检返回码断言，尚未运行远程 CI。
+- **2026-10-13 验收**：featured host 全目标 Clippy、7/7 单测、实际 release staging 与未跳过 ICE 校验的双包封装通过；最终 MSI File 表和 NSIS 安装清单都只有一份 host，均无 exporter，构建目录旧 exporter 仍保留。NSIS 安装／卸载均 `0`，应用内／包内 self-check 成功。NSIS／MSI 为 14,050,409／19,091,456 字节，相比 6.2 快照减少 33.12%／33.31%；这不是构建参数的单变量性能对照。最终 `pnpm specta` 导出正常且生成哈希不变，`pnpm check:bindings` 仍因既有 B5/B6 未提交 diff 返回 `1`。命令、哈希和失败复盘见 [矩阵 6.3](b7-acceptance-matrix-2026-10-02.md#63-2026-10-13-图标与二进制包装修复验收)；其他平台、CI、MSI 实际安装和 updater 仍待验证，状态保留 Fixed locally。
+
+- **提交准备复核**：上述合法 B5/B6 生成变更纳入暂存基线后，在 Windows dirty 工作区重新执行 `pnpm check:bindings` 返回 `0`，生成 SHA-256 不变；保留暂存前返回 `1` 的历史快照。未手改 bindings，外部验收状态不变。
+
+### UX-51（P2，Fixed locally）：候选 CSP 阻断系统文件图标，加载失败后没有回退
+
+- **2026-10-13 本机证据**：最新 Windows NSIS 原生列表中的 PDF 图标显示破图。`extract_system_file_icon` 返回合法的 PNG data URL，导出的 PNG 可正常读取；原生 `<img>` 为 `complete=true`、`naturalWidth=0`。当前 `tauri.conf.json` 的 `img-src` 不允许 `data:`，而 `TaskRow` 只根据非空 URL 选择 `<img>`、没有 `onError` 回退。截图与诊断为 `logs/b7/windows-20261013-ui/native-ui/2026-10-12T18-03-07-276Z/10000-first-screen.png`、`final-native-smoke.json`、`native-pdf-icon.png`；不是下载文件缺失导致，因为 Windows 提取使用 `SHGFI_USEFILEATTRIBUTES`。
+- **修复合同／验收**：为受控系统 PNG 选择允许的图像载入路径，保留 script／connect 等其他 CSP 边界；图片失败时恢复通用文件类型图标，不留破图、不重复请求。新增组件回归，并在实际候选包中验证 `naturalWidth > 0` 和异常图片回退；浏览器开发服务的成功不能替代原生 CSP 验收。
+- **本地修复**：仅在 `img-src` 增加 `data:`；其他配置指令不变。`TaskRow` 按失败 URL 保留通用文件类型回退，新图标 URL 可重新加载。新增 2 项回归覆盖加载错误／进度更新不重试及复用行的新图标；`pnpm typecheck`、`pnpm test:frontend`（83 文件、484 测试）、`pnpm build` 在 Windows dirty 工作区通过。
+- **2026-10-13 原生验收**：新 NSIS 实际安装后的 4 个 PNG 均 `complete=true`、`naturalWidth=40`／`naturalHeight=40`；强制坏图后显示通用 SVG，选行重渲染不留 `<img>`、额外提取 IPC 为 0。实际触发并观察内联脚本／外域 fetch 的 CSP 拒绝，500px 布局无横向溢出或破图；桌面、回退与窄窗口截图已人工查看。7 个应用／WebView2 进程退出后全部结束，详情见 [矩阵 6.3](b7-acceptance-matrix-2026-10-02.md#63-2026-10-13-图标与二进制包装修复验收)。只覆盖 Windows／当前 WebView2／测试 profile，其他平台与正式环境继续 B7，保留 Fixed locally。
 
 ## 十一、统一修复顺序
 

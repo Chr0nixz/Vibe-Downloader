@@ -295,3 +295,44 @@ async fn arc06_transition_conflict_still_surfaces() {
 
     pool.close().await;
 }
+
+#[tokio::test]
+async fn arc66_transition_keeps_progress_health_and_error_fields_distinct() {
+    let (_db, pool) = test_pool("arc66-explicit-fields").await;
+    let task = sample_task_record("arc66-fields", TaskStatus::Queued);
+    db::insert_task_record(&pool, &task).await.expect("insert");
+
+    let app: Option<tauri::AppHandle> = None;
+    state_machine::transition_task_with_input(
+        &app,
+        &pool,
+        &task.id,
+        state_machine::TaskTransitionInput {
+            target: TaskStatus::Failed,
+            downloaded_bytes: Some(512),
+            speed_bps: 0,
+            connection_count: 0,
+            health_summary: Some("Needs attention"),
+            error_message: Some("http_request_failed"),
+            event_type: Some("failed"),
+            event_message: Some("http_request_failed"),
+        },
+    )
+    .await
+    .expect("explicit transition");
+
+    let updated = db::get_task_record(&pool, &task.id)
+        .await
+        .expect("query")
+        .expect("exists");
+    assert_eq!(updated.status, TaskStatus::Failed);
+    assert_eq!(updated.downloaded_bytes, 512);
+    assert_eq!(updated.speed_bps, 0);
+    assert_eq!(updated.health_summary.as_deref(), Some("Needs attention"));
+    assert_eq!(
+        updated.error_message.as_deref(),
+        Some("http_request_failed")
+    );
+
+    pool.close().await;
+}

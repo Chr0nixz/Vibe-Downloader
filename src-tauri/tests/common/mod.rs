@@ -148,54 +148,88 @@ pub fn install_test_secret_key() {
     );
 }
 
-/// Deletes the test database files on drop (ENG-03). sqlite keeps the main
-/// db plus `-wal`/`-shm` sidecars; removing them while connections are still
-/// open is safe (Unix unlink / Windows delete-pending) and no new connections
-/// are opened after the test body returns.
+/// Releases the shared test pool and removes its SQLite files on drop (ENG-03).
 #[allow(dead_code)]
 pub struct TestDbGuard {
     path: PathBuf,
+    pool: Option<SqlitePool>,
 }
 
 #[allow(dead_code)]
 impl TestDbGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    fn new(path: PathBuf, pool: SqlitePool) -> Self {
+        Self {
+            path,
+            pool: Some(pool),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn database_path(&self) -> &Path {
+        &self.path
     }
 }
 
 impl TestDbGuard {
     #[allow(dead_code)]
     fn remove_files(path: &Path) -> bool {
-        // Main db first; sqlite deletes its own -wal/-shm on a clean close,
-        // so a missing sidecar is not an error.
-        let mut name = path.as_os_str().to_os_string();
-        name.push("");
-        let main_removed = std::fs::remove_file(PathBuf::from(name)).is_ok();
-        for suffix in ["-wal", "-shm"] {
+        let mut removed = true;
+        for suffix in ["", "-wal", "-shm"] {
             let mut name = path.as_os_str().to_os_string();
             name.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(name));
+            match std::fs::remove_file(PathBuf::from(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => removed = false,
+            }
         }
-        main_removed
+        removed
     }
 }
 
 impl Drop for TestDbGuard {
     fn drop(&mut self) {
-        // Dropping the last pool handle only schedules sqlx's asynchronous
-        // shutdown on the ambient runtime, which stops being polled when the
-        // test future returns — so a synchronous removal here usually races
-        // an open handle on Windows. Retry briefly, then keep trying on a
-        // detached thread for the rest of the test binary's lifetime.
-        for _ in 0..5 {
-            if Self::remove_files(&self.path) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let pool = self.pool.take();
+        // SQLite opens files with delete sharing on Windows. Try the cheap
+        // path before waiting for any asynchronous pool shutdown; this also
+        // handles pools whose last connection is still owned by a worker
+        // that is already on its way out.
+        if Self::remove_files(&self.path) {
+            return;
         }
+
+        // A caller normally closes the returned pool explicitly. Keep a
+        // shared handle in the guard so an omitted close still drops an
+        // additional pool owner before the best-effort file retries.
+        if pool.as_ref().is_none_or(SqlitePool::is_closed) && Self::remove_files(&self.path) {
+            return;
+        }
+
+        // The pool may have been closed by a caller between the first
+        // attempt and this check. Avoid creating a cleanup thread when the
+        // files are already gone.
+        if Self::remove_files(&self.path) {
+            return;
+        }
+
+        // Dropping the last pool handle schedules sqlx's asynchronous
+        // shutdown on the ambient runtime, which may stop being polled when
+        // the test future returns. Do not try to await that future on a new
+        // runtime: its connection task belongs to the original runtime and
+        // the cross-runtime wait can hang the cleanup thread forever.
         let path = self.path.clone();
         std::thread::spawn(move || {
+            drop(pool);
+
+            for _ in 0..5 {
+                if TestDbGuard::remove_files(&path) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+
+            // Windows can keep a SQLite sidecar open briefly after close;
+            // continue best-effort cleanup without blocking the test thread.
             for _ in 0..240 {
                 if TestDbGuard::remove_files(&path) {
                     return;
@@ -208,9 +242,10 @@ impl Drop for TestDbGuard {
 
 /// Opens an isolated migrated database for a real engine integration test.
 ///
-/// Returns a guard that closes the pool and removes the database files on
+/// Returns a guard that releases the pool and removes the database files on
 /// drop; destructure and keep it alive for the test body (binding as `_db`
-/// suffices).
+/// suffices). Callers may still close the pool explicitly when they need to
+/// reopen or inspect the database after shutdown.
 #[allow(dead_code)]
 pub async fn test_pool(label: &str) -> (TestDbGuard, SqlitePool) {
     let id = SystemTime::now()
@@ -222,7 +257,7 @@ pub async fn test_pool(label: &str) -> (TestDbGuard, SqlitePool) {
         .await
         .expect("database connect with migrations")
         .pool;
-    (TestDbGuard::new(path), pool)
+    (TestDbGuard::new(path, pool.clone()), pool)
 }
 
 /// Builds the single-file task shape consumed by protocol download engines.

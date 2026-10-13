@@ -1278,6 +1278,7 @@ async fn arc26_sftp_probe_with_cancelled_token_converges_immediately() {
 
 /// Shared pause-mid-transfer setup for the ARC-42 tests.
 struct Arc42SftpFixture {
+    _db: common::TestDbGuard,
     server: common::sftp_server::TestSftpServer,
     pool: sqlx::SqlitePool,
     paths: common::TestPaths,
@@ -1297,7 +1298,7 @@ async fn pause_sftp_download_mid_transfer(task_id: &str) -> Arc42SftpFixture {
         ..Default::default()
     })
     .await;
-    let (_db, pool) = common::test_pool("sftp-arc42").await;
+    let (db_guard, pool) = common::test_pool("sftp-arc42").await;
     seed_matching_host_key(
         &pool,
         &server.addr.ip().to_string(),
@@ -1389,6 +1390,7 @@ async fn pause_sftp_download_mid_transfer(task_id: &str) -> Arc42SftpFixture {
     .expect("persist pause");
 
     Arc42SftpFixture {
+        _db: db_guard,
         server,
         pool,
         paths,

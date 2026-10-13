@@ -326,15 +326,20 @@ impl<'a> SegmentCoordinator<'a> {
                                 Some(&failure.error),
                             )
                             .await?;
-                            crate::state_machine::transition_task(
+                            crate::state_machine::transition_task_with_input(
                                 &self.app,
                                 &self.pool,
                                 &self.task.id,
-                                TaskStatus::Failed,
-                                0,
-                                0,
-                                Some(&failure.error),
-                                Some("failed"),
+                                crate::state_machine::TaskTransitionInput {
+                                    target: TaskStatus::Failed,
+                                    downloaded_bytes: Some(runtime_progress.total_downloaded()),
+                                    speed_bps: 0,
+                                    connection_count: 0,
+                                    health_summary: Some(&failure.error),
+                                    error_message: Some(&failure.error),
+                                    event_type: Some("failed"),
+                                    event_message: Some(&failure.error),
+                                },
                             )
                             .await
                             .map_err(String::from)?;
@@ -359,15 +364,20 @@ impl<'a> SegmentCoordinator<'a> {
                             )
                             .await?;
                             let message = format!("A download worker stopped unexpectedly: {error}");
-                            crate::state_machine::transition_task(
+                            crate::state_machine::transition_task_with_input(
                                 &self.app,
                                 &self.pool,
                                 &self.task.id,
-                                TaskStatus::Failed,
-                                0,
-                                0,
-                                Some(&message),
-                                Some("failed"),
+                                crate::state_machine::TaskTransitionInput {
+                                    target: TaskStatus::Failed,
+                                    downloaded_bytes: Some(runtime_progress.total_downloaded()),
+                                    speed_bps: 0,
+                                    connection_count: 0,
+                                    health_summary: Some(&message),
+                                    error_message: Some(&message),
+                                    event_type: Some("failed"),
+                                    event_message: Some(&message),
+                                },
                             )
                             .await
                             .map_err(String::from)?;

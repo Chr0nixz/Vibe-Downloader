@@ -1,7 +1,8 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useSystemFileIcon } from "@/hooks/use-system-file-icon";
 import { useSpeedHistoryStore } from "@/stores/speed-history-store";
 import { useTaskDataStore } from "@/stores/task-store";
 import type { Task } from "@/types/task";
@@ -23,8 +24,12 @@ vi.mock("@/components/tasks/TaskContextMenu", () => ({
 }));
 
 vi.mock("@/hooks/use-system-file-icon", () => ({
-  useSystemFileIcon: () => null,
+  useSystemFileIcon: vi.fn(() => null),
 }));
+
+beforeEach(() => {
+  vi.mocked(useSystemFileIcon).mockReturnValue(null);
+});
 
 function makeTask(): Task {
   const now = "2026-01-01T00:00:00.000Z";
@@ -145,6 +150,40 @@ function segment(overrides: Partial<TaskSegment> & Pick<TaskSegment, "id" | "ran
 describe("TaskRow interaction semantics", () => {
   beforeEach(() => {
     useSpeedHistoryStore.setState({ history: {} });
+  });
+
+  it("falls back after an image error and does not retry on task progress", () => {
+    vi.mocked(useSystemFileIcon).mockReturnValue("data:image/png;base64,invalid");
+    renderRow();
+    const row = screen.getByRole("listitem");
+    const image = row.querySelector("img");
+    expect(image).toHaveAttribute("alt", "");
+    const iconContainer = image?.parentElement;
+
+    fireEvent.error(image as HTMLImageElement);
+    expect(iconContainer?.querySelector("img")).toBeNull();
+    expect(iconContainer?.querySelector("svg")).not.toBeNull();
+
+    act(() => {
+      useTaskDataStore.setState({ taskById: { "task-1": { ...makeTask(), downloadedBytes: 50 } } });
+    });
+    expect(iconContainer?.querySelector("img")).toBeNull();
+    expect(iconContainer?.querySelector("svg")).not.toBeNull();
+  });
+
+  it("loads a different system icon after a reused row's previous image failed", () => {
+    vi.mocked(useSystemFileIcon).mockReturnValue("data:image/png;base64,invalid");
+    renderRow();
+    const row = screen.getByRole("listitem");
+    fireEvent.error(row.querySelector("img") as HTMLImageElement);
+
+    const nextIcon = "data:image/png;base64,new-icon";
+    vi.mocked(useSystemFileIcon).mockReturnValue(nextIcon);
+    act(() => {
+      useTaskDataStore.setState({ taskById: { "task-1": { ...makeTask(), fileName: "file.pdf" } } });
+    });
+    expect(row.querySelector("img")).toHaveAttribute("src", nextIcon);
+    expect(row.querySelector("img")?.parentElement?.querySelector("svg")).toBeNull();
   });
 
   it("uses list-item semantics for a row that contains independent controls", () => {

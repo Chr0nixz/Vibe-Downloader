@@ -1,20 +1,23 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { axe } from "jest-axe";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type {
   BatchImportResult,
   Task as GeneratedTask,
   ProbePhasePayload,
   ProbeTaskPayload,
+  WorkflowLibrary,
 } from "@/generated/bindings";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
+import { useWorkflowStore } from "@/stores/workflow-store";
 import type { Task } from "@/types/task";
 import { NewDownloadDialog } from "./NewDownloadDialog";
 
 const mocks = vi.hoisted(() => ({
   createTask: vi.fn(),
+  listWorkflowLibrary: vi.fn(async (): Promise<WorkflowLibrary> => ({ entries: [], unsupportedCount: 0 })),
   importUrls: vi.fn(),
   onProbePhase: vi.fn(),
   openDirectoryPicker: vi.fn(),
@@ -58,6 +61,10 @@ vi.mock("@/lib/tauri", () => ({
   probeWebdavDirectory: mocks.probeWebdavDirectory,
 }));
 
+vi.mock("@/lib/workflow-library", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/workflow-library")>()),
+  listWorkflowLibrary: mocks.listWorkflowLibrary,
+}));
 vi.mock("@/lib/runtime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: mocks.save }));
 
@@ -82,6 +89,7 @@ function makeProbe(url: string, fileName: string): ProbeTaskPayload {
     hlsVariants: [],
     hlsAudioTracks: [],
     hlsSubtitleTracks: [],
+    dashTracks: [],
     probedAt: "2026-07-14T00:00:00.000Z",
   };
 }
@@ -1040,5 +1048,218 @@ describe("NewDownloadDialog picker failure feedback", () => {
 
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(mocks.openDirectoryPicker).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("NewDownloadDialog reusable configurations", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    useWorkflowStore.setState({ entries: [], loading: false, error: false, unsupportedCount: 0 });
+    mocks.onProbePhase.mockResolvedValue(() => {});
+    useSettingsStore.setState({ settings: null, loading: false, error: null });
+  });
+  afterEach(() => {
+    mocks.listWorkflowLibrary.mockResolvedValue({ entries: [], unsupportedCount: 0 });
+    vi.useRealTimers();
+  });
+  it.each([
+    "single",
+    "batch",
+  ])("applies a preset to actual %s creation fields and preserves later overrides", async (mode) => {
+    const id = crypto.randomUUID();
+    mocks.listWorkflowLibrary.mockResolvedValue({
+      entries: [
+        {
+          id,
+          name: "Models",
+          data: {
+            kind: "task_preset",
+            value: {
+              saveDir: "D:/Models",
+              categoryKey: "archive",
+              priority: "high",
+              taskSpeedLimitBps: "2048",
+              obeySchedule: false,
+              proxyMode: "off",
+              proxyUrl: null,
+              proxyNoProxy: null,
+            },
+          },
+        },
+      ],
+      unsupportedCount: 0,
+    });
+    mocks.probeTask.mockImplementation(async ({ url }) => makeProbe(url, "file.zip"));
+    mocks.createTask.mockResolvedValue({ id: "created" });
+    mocks.importUrls.mockResolvedValue({
+      items: [],
+      totalCount: 0,
+      createdCount: 0,
+      validCount: 0,
+      duplicateCount: 0,
+      invalidCount: 0,
+    });
+    renderDialog();
+    const details = screen.getByText("workflow.taskPreset").closest("details") as HTMLDetailsElement;
+    await act(async () => {
+      details.open = true;
+      fireEvent(details, new Event("toggle"));
+    });
+    fireEvent.change(within(details).getByRole("combobox"), { target: { value: id } });
+    fireEvent.click(within(details).getByRole("button", { name: "workflow.apply" }));
+    fireEvent.click(within(details).getByRole("button", { name: "workflow.applyReplace" }));
+    if (mode === "single") {
+      await startAutomaticProbe("https://example.com/file.zip");
+      fireEvent.change(screen.getByLabelText("newDownload.saveDir"), { target: { value: "D:/Override" } });
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "newDownload.start" })));
+      expect(mocks.createTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saveDir: "D:/Override",
+          priority: "high",
+          taskSpeedLimitBps: "2048",
+          obeySchedule: false,
+          proxyMode: "off",
+        }),
+      );
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "newDownload.modeBatch" }));
+      fireEvent.change(screen.getByLabelText("newDownload.batchUrls"), {
+        target: { value: "https://example.com/file.zip" },
+      });
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "newDownload.createBatch" })));
+      expect(mocks.importUrls).toHaveBeenCalledWith(
+        expect.objectContaining({
+          saveDir: "D:/Models",
+          priority: "high",
+          taskSpeedLimitBps: "2048",
+          obeySchedule: false,
+          proxyMode: "off",
+          create: true,
+        }),
+      );
+    }
+  });
+});
+
+describe("NewDownloadDialog B6 media selections", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+    mocks.onProbePhase.mockResolvedValue(() => {});
+    mocks.listWorkflowLibrary.mockResolvedValue({ entries: [], unsupportedCount: 0 });
+    useWorkflowStore.setState({ entries: [], loading: false, error: false, unsupportedCount: 0 });
+    useSettingsStore.setState({ settings: null, loading: false, error: null });
+  });
+  it("accepts legacy probe snapshots without a DASH track catalog", async () => {
+    const url = "https://example.com/legacy.mpd";
+    const { dashTracks: _catalog, ...legacyProbe } = makeProbe(url, "legacy.mp4");
+    mocks.probeTask.mockResolvedValue({ ...legacyProbe, protocol: "dash" });
+    mocks.createTask.mockResolvedValue({ id: "legacy", files: [] });
+    renderDialog();
+    fireEvent.change(screen.getByLabelText("newDownload.url"), { target: { value: url } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "newDownload.start" })).toBeEnabled());
+    expect(screen.queryByRole("combobox", { name: "b6.dash_video" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.start" }));
+    await waitFor(() =>
+      expect(mocks.createTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selectedDashVideoRepresentationId: null,
+          selectedDashAudioRepresentationId: null,
+          selectedDashSubtitleRepresentationId: null,
+        }),
+      ),
+    );
+  });
+  it("keeps DASH choices keyboard accessible and submits the chosen track IDs", async () => {
+    const url = "https://example.com/manifest.mpd";
+    const probe = {
+      ...makeProbe(url, "movie.mp4"),
+      protocol: "dash",
+      dashTracks: [
+        {
+          id: "v720",
+          kind: "video",
+          language: null,
+          role: "main",
+          bandwidth: "2000000",
+          resolution: "1280x720",
+          codecs: "avc1",
+          subtitleFormat: null,
+          selected: true,
+        },
+        {
+          id: "a-en",
+          kind: "audio",
+          language: "en",
+          role: "main",
+          bandwidth: "128000",
+          resolution: null,
+          codecs: "mp4a",
+          subtitleFormat: null,
+          selected: true,
+        },
+        {
+          id: "sub",
+          kind: "subtitle",
+          language: "zh-CN",
+          role: "subtitle",
+          bandwidth: "0",
+          resolution: null,
+          codecs: null,
+          subtitleFormat: "text/vtt",
+          selected: false,
+        },
+      ],
+    } as ProbeTaskPayload;
+    mocks.probeTask.mockResolvedValue(probe);
+    mocks.createTask.mockResolvedValue({ id: "new", files: [] });
+    const view = renderDialog();
+    fireEvent.change(screen.getByLabelText("newDownload.url"), { target: { value: url } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "b6.dash_video" })).toBeInTheDocument());
+    const subtitles = screen.getByRole("combobox", { name: "b6.dash_subtitle" });
+    subtitles.focus();
+    fireEvent.keyDown(subtitles, { key: "ArrowDown" });
+    await waitFor(() => expect(screen.getByRole("option", { name: /sub · zh-CN/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("option", { name: /sub · zh-CN/ }));
+    expect((await axe(document.body)).violations).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "newDownload.start" }));
+    await waitFor(() =>
+      expect(mocks.createTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selectedDashVideoRepresentationId: "v720",
+          selectedDashAudioRepresentationId: "a-en",
+          selectedDashSubtitleRepresentationId: "sub",
+        }),
+      ),
+    );
+    expect(view.onCreated).toHaveBeenCalled();
+  });
+  it("clamps the live missing-fragment allowance and exposes subtitle output copy", async () => {
+    const url = "https://example.com/live.m3u8";
+    mocks.probeTask.mockResolvedValue({
+      ...makeProbe(url, "live.mp4"),
+      protocol: "hls",
+      hlsSubtitleTracks: [
+        {
+          kind: "SUBTITLES",
+          groupId: "sub",
+          name: "Chinese",
+          language: "zh-CN",
+          default: true,
+          autoSelect: true,
+          uri: "https://example.com/subs.m3u8",
+        },
+      ],
+    });
+    renderDialog();
+    fireEvent.change(screen.getByLabelText("newDownload.url"), { target: { value: url } });
+    await waitFor(() => expect(screen.getByLabelText("b6.hls_missing_limit")).toBeInTheDocument());
+    const limit = screen.getByLabelText("b6.hls_missing_limit");
+    expect(limit).toHaveValue(0);
+    fireEvent.change(limit, { target: { value: "500" } });
+    expect(limit).toHaveValue(100);
+    expect(screen.getByText("b6.hls_subtitle_output")).toBeInTheDocument();
   });
 });

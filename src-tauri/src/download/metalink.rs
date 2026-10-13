@@ -196,6 +196,7 @@ impl DownloadEngine for MetalinkEngine {
                 hls_variants: Vec::new(),
                 hls_audio_tracks: Vec::new(),
                 hls_subtitle_tracks: Vec::new(),
+                dash_tracks: Vec::new(),
                 metalink: Some(data),
             })
         })

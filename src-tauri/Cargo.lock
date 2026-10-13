@@ -5326,7 +5326,6 @@ version = "0.11.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
 dependencies = [
- "aws-lc-rs",
  "bytes",
  "getrandom 0.3.4",
  "lru-slab",
@@ -5592,7 +5591,6 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
@@ -5712,7 +5710,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbf893f64684e58da8a68d56a5e84d1cf0440226274c515770fe267707a7d0b0"
 dependencies = [
  "aes 0.9.1",
- "aws-lc-rs",
  "bitflags 2.13.0",
  "block-padding 0.4.2",
  "byteorder",
@@ -5756,6 +5753,7 @@ dependencies = [
  "polyval",
  "rand 0.10.1",
  "rand_core 0.10.1",
+ "ring",
  "rsa",
  "russh-cryptovec",
  "russh-util",
@@ -5865,7 +5863,6 @@ version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
- "aws-lc-rs",
  "log",
  "once_cell",
  "ring",
@@ -5930,7 +5927,6 @@ version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
- "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted 0.9.0",
@@ -8338,6 +8334,7 @@ version = "0.5.0"
 dependencies = [
  "aes 0.9.1",
  "anyhow",
+ "aws-lc-rs",
  "axum",
  "base64 0.22.1",
  "cbc 0.2.1",
@@ -8363,6 +8360,7 @@ dependencies = [
  "reqwest 0.13.4",
  "russh",
  "russh-sftp",
+ "rustls",
  "rustls-platform-verifier",
  "serde",
  "serde_json",

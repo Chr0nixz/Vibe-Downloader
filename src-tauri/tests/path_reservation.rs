@@ -152,6 +152,56 @@ async fn concurrent_same_name_creates_reserve_unique_final_paths() {
     pool.close().await;
 }
 
+#[tokio::test]
+async fn task_snapshots_are_bounded_to_the_shared_page_limit() {
+    let (_db, pool) = test_pool("bounded-snapshots").await;
+    let root = std::env::temp_dir().join("vibe-bounded-snapshots");
+    std::fs::create_dir_all(&root).expect("create dir");
+
+    for index in 0..510 {
+        let final_path = root.join(format!("task-{index}.bin"));
+        let task = queued_task(
+            &format!("bounded-{index}"),
+            &final_path.to_string_lossy(),
+            &root
+                .join(format!("task-{index}.bin.vibe-downloading"))
+                .to_string_lossy(),
+        );
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert bounded task");
+    }
+
+    assert_eq!(
+        db::list_task_records(&pool)
+            .await
+            .expect("list bounded tasks")
+            .len(),
+        500
+    );
+    assert_eq!(
+        db::list_browser_realtime_task_records(&pool)
+            .await
+            .expect("list realtime tasks")
+            .len(),
+        500
+    );
+
+    let ids = (0..510)
+        .map(|index| format!("bounded-{index}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        db::list_task_records_by_ids(&pool, &ids)
+            .await
+            .expect("list bounded ids")
+            .len(),
+        500
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    pool.close().await;
+}
+
 /// Build a file row whose `final_path` is intentionally independent of the task
 /// id, so several tasks planning the same output collide on
 /// `idx_task_files_final_path_selected`.

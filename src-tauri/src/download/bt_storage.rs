@@ -16,14 +16,23 @@ use tokio_util::sync::CancellationToken;
 pub(super) struct OwnedFilesystemFactory {
     lease: Option<Arc<Lease>>,
     shared_limiter: Arc<GlobalSpeedLimiter>,
+    upload_limiter: Arc<GlobalSpeedLimiter>,
+    upload_active: Arc<std::sync::atomic::AtomicBool>,
     cancel_token: CancellationToken,
 }
 
 impl OwnedFilesystemFactory {
-    pub fn new(shared_limiter: Arc<GlobalSpeedLimiter>, cancel_token: CancellationToken) -> Self {
+    pub fn new(
+        shared_limiter: Arc<GlobalSpeedLimiter>,
+        upload_limiter: Arc<GlobalSpeedLimiter>,
+        upload_active: Arc<std::sync::atomic::AtomicBool>,
+        cancel_token: CancellationToken,
+    ) -> Self {
         Self {
             lease: Resources::current().map(|owner| Arc::new(owner.lease())),
             shared_limiter,
+            upload_limiter,
+            upload_active,
             cancel_token,
         }
     }
@@ -40,6 +49,8 @@ impl StorageFactory for OwnedFilesystemFactory {
             inner: Box::new(FilesystemStorageFactory::default().create(shared, metadata)?),
             lease: self.lease.clone(),
             shared_limiter: self.shared_limiter.clone(),
+            upload_limiter: self.upload_limiter.clone(),
+            upload_active: self.upload_active.clone(),
             cancel_token: self.cancel_token.clone(),
         })
     }
@@ -53,6 +64,8 @@ pub(super) struct OwnedStorage {
     inner: Box<dyn TorrentStorage>,
     lease: Option<Arc<Lease>>,
     shared_limiter: Arc<GlobalSpeedLimiter>,
+    upload_limiter: Arc<GlobalSpeedLimiter>,
+    upload_active: Arc<std::sync::atomic::AtomicBool>,
     cancel_token: CancellationToken,
 }
 
@@ -65,6 +78,14 @@ impl TorrentStorage for OwnedStorage {
         self.inner.init(shared, metadata)
     }
     fn pread_exact(&self, file_id: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()> {
+        if self
+            .upload_active
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.upload_limiter
+                .throttle_blocking(buf.len(), &self.cancel_token)
+                .map_err(|_| anyhow::anyhow!("BT upload throttling cancelled"))?;
+        }
         self.inner.pread_exact(file_id, offset, buf)
     }
     fn pwrite_all(&self, file_id: usize, offset: u64, buf: &[u8]) -> anyhow::Result<()> {
@@ -103,6 +124,8 @@ impl TorrentStorage for OwnedStorage {
             inner: self.inner.take()?,
             lease: self.lease.clone(),
             shared_limiter: self.shared_limiter.clone(),
+            upload_limiter: self.upload_limiter.clone(),
+            upload_active: self.upload_active.clone(),
             cancel_token: self.cancel_token.clone(),
         }))
     }
@@ -152,6 +175,8 @@ mod tests {
             inner: Box::new(TestStorage),
             lease: None,
             shared_limiter: limiter,
+            upload_limiter: GlobalSpeedLimiter::disabled(),
+            upload_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancel_token: CancellationToken::new(),
         }
     }
@@ -184,6 +209,30 @@ mod tests {
         done_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("shared root budget refills");
+    }
+
+    #[test]
+    fn uploads_share_a_budget_and_verification_reads_are_exempt() {
+        let limiter = Arc::new(GlobalSpeedLimiter::new(Some(1_000)));
+        let mut first = test_storage(GlobalSpeedLimiter::disabled());
+        first.upload_limiter = limiter.clone();
+        let mut second = test_storage(GlobalSpeedLimiter::disabled());
+        second.upload_limiter = limiter;
+        first.pread_exact(0, 0, &mut [0; 1_000]).unwrap();
+        first
+            .upload_active
+            .store(true, std::sync::atomic::Ordering::Release);
+        second
+            .upload_active
+            .store(true, std::sync::atomic::Ordering::Release);
+        first.pread_exact(0, 0, &mut [0; 1_000]).unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            second.pread_exact(0, 0, &mut [0; 1_000]).unwrap();
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

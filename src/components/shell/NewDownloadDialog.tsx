@@ -16,6 +16,7 @@ import {
 import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { WorkflowPicker } from "@/components/shell/WorkflowPicker";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -55,7 +56,12 @@ import {
 import { localizedErrorMessage, parseAppError } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import { EMPTY_REQUEST_PROFILE, parseRequestProfile } from "@/lib/request-profile";
-import { SPEED_LIMIT_UNITS, speedLimitBytesFromInput, speedLimitUnitLabel } from "@/lib/speed-limit";
+import {
+  SPEED_LIMIT_UNITS,
+  speedLimitBytesFromInput,
+  speedLimitInputFromBytes,
+  speedLimitUnitLabel,
+} from "@/lib/speed-limit";
 import {
   createNetworkAuthorization,
   createTask,
@@ -69,12 +75,13 @@ import {
   probeWebdavDirectory,
   queryDiskSpace,
 } from "@/lib/tauri";
+import { applySiteProfile, publicSiteProfile, safePreset, siteOrigin } from "@/lib/workflow-library";
 import { RequestProfileFields } from "./RequestProfileFields";
 
 const log = createLogger("new-download");
 
 import { getLocalFileKind, pathToFileUrl, readFileAsText } from "@/lib/local-file";
-import { cn, formatBytes } from "@/lib/utils";
+import { cn, formatBytes, formatSpeed } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useToastStore } from "@/stores/toast-store";
 import type { Task } from "@/types/task";
@@ -489,6 +496,10 @@ export function NewDownloadDialog({
   const [selectedHlsVariantUri, setSelectedHlsVariantUri] = useState<string | null>(null);
   const [selectedHlsAudioTrackUris, setSelectedHlsAudioTrackUris] = useState<string[]>([]);
   const [selectedHlsSubtitleTrackUris, setSelectedHlsSubtitleTrackUris] = useState<string[]>([]);
+  const [hlsMissingLimit, setHlsMissingLimit] = useState(0);
+  const [selectedDashVideoId, setSelectedDashVideoId] = useState<string | null>(null);
+  const [selectedDashAudioId, setSelectedDashAudioId] = useState<string | null>(null);
+  const [selectedDashSubtitleId, setSelectedDashSubtitleId] = useState<string | null>(null);
 
   const probeRequestId = useRef("");
   const directoryProbeRequestId = useRef("");
@@ -597,6 +608,9 @@ export function NewDownloadDialog({
     setSelectedHlsAudioTrackUris(defaultAudio.map((t) => t.uri as string));
     const defaultSubs = probe?.hlsSubtitleTracks.filter((t) => t.default && t.uri) ?? [];
     setSelectedHlsSubtitleTrackUris(defaultSubs.map((t) => t.uri as string));
+    setSelectedDashVideoId(probe?.dashTracks?.find((track) => track.kind === "video" && track.selected)?.id ?? null);
+    setSelectedDashAudioId(probe?.dashTracks?.find((track) => track.kind === "audio" && track.selected)?.id ?? null);
+    setSelectedDashSubtitleId(null);
   }, [probe]);
 
   async function detect(nextUrl = url.trim(), automatic = false) {
@@ -823,6 +837,10 @@ export function NewDownloadDialog({
               currentIsHlsProbe && selectedHlsAudioTrackUris.length > 0 ? selectedHlsAudioTrackUris : null,
             selectedHlsSubtitleTrackUris:
               currentIsHlsProbe && selectedHlsSubtitleTrackUris.length > 0 ? selectedHlsSubtitleTrackUris : null,
+            hlsMaxMissingSegments: currentIsHlsProbe ? hlsMissingLimit : null,
+            selectedDashVideoRepresentationId: currentIsDashProbe ? selectedDashVideoId : null,
+            selectedDashAudioRepresentationId: currentIsDashProbe ? selectedDashAudioId : null,
+            selectedDashSubtitleRepresentationId: currentIsDashProbe ? selectedDashSubtitleId : null,
           },
           draft,
         ),
@@ -874,6 +892,10 @@ export function NewDownloadDialog({
     setPassword("");
     setPrivateKeyData("");
     setPrivateKeyPassphrase("");
+    setHlsMissingLimit(0);
+    setSelectedDashVideoId(null);
+    setSelectedDashAudioId(null);
+    setSelectedDashSubtitleId(null);
     setSelectedHlsVariantUri(null);
     setSelectedHlsAudioTrackUris([]);
     setSelectedHlsSubtitleTrackUris([]);
@@ -1208,6 +1230,59 @@ export function NewDownloadDialog({
                 {t("newDownload.modeBatch")}
               </button>
             </fieldset>
+
+            <WorkflowPicker
+              kind="task_preset"
+              disabled={submitting || batchCreating || batchPreviewing}
+              getData={() => {
+                const bytes = speedLimitBytesFromInput(speedAmount, speedUnit);
+                if (bytes === undefined) throw new Error("workflow_invalid");
+                return {
+                  kind: "task_preset",
+                  value: safePreset({
+                    saveDir,
+                    categoryKey: categoryKey.trim() || null,
+                    priority,
+                    taskSpeedLimitBps: bytes == null ? null : String(bytes),
+                    obeySchedule,
+                    proxyMode,
+                    proxyUrl: proxyMode === "custom" ? proxyUrl : null,
+                    proxyNoProxy: proxyMode === "custom" ? proxyNoProxy || null : null,
+                  }),
+                };
+              }}
+              onApply={(data) => {
+                if (data.kind !== "task_preset") return;
+                const preset = safePreset(data.value);
+                setSaveDir(preset.saveDir);
+                setCategoryKey(preset.categoryKey ?? "");
+                setPriority(preset.priority);
+                setObeySchedule(preset.obeySchedule);
+                const speed = speedLimitInputFromBytes(preset.taskSpeedLimitBps);
+                setSpeedAmount(speed.amount);
+                setSpeedUnit(speed.unit);
+                setProxyMode(preset.proxyMode);
+                setProxyUrl(preset.proxyUrl ?? "");
+                setProxyNoProxy(preset.proxyNoProxy ?? "");
+                setProxyUsername("");
+                setProxyPassword("");
+              }}
+            />
+
+            {mode === "single" ? (
+              <WorkflowPicker
+                kind="site_profile"
+                disabled={submitting || !siteOrigin(url)}
+                accepts={(entry) => entry.data.kind === "site_profile" && entry.data.value.origin === siteOrigin(url)}
+                getData={() => ({ kind: "site_profile", value: publicSiteProfile(url, requestProfile) })}
+                onApply={(data) => {
+                  if (data.kind === "site_profile") {
+                    setRequestProfile(applySiteProfile(url, requestProfile, data.value));
+                    setAdvancedOpen(true);
+                  }
+                }}
+              />
+            ) : null}
 
             {mode === "single" ? (
               <>
@@ -1574,6 +1649,98 @@ export function NewDownloadDialog({
                     onToggle={setSelectedHlsSubtitleTrackUris}
                     idPrefix="new-download-hls-subtitle"
                   />
+                ) : null}
+
+                {isHlsProbe ? (
+                  <div className="space-y-2">
+                    {selectedHlsSubtitleTrackUris.length > 0 ? (
+                      <p className="text-xs text-text-muted">{t("b6.hls_subtitle_output")}</p>
+                    ) : null}
+                    <label htmlFor="hls-missing-limit" className="block text-xs text-text-secondary">
+                      {t("b6.hls_missing_limit")}
+                    </label>
+                    <Input
+                      id="hls-missing-limit"
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={hlsMissingLimit}
+                      aria-describedby="hls-missing-hint"
+                      onChange={(event) =>
+                        setHlsMissingLimit(Math.max(0, Math.min(100, Math.trunc(Number(event.target.value) || 0))))
+                      }
+                    />
+                    <p id="hls-missing-hint" className="text-xs text-text-muted">
+                      {t("b6.hls_missing_hint")}
+                    </p>
+                  </div>
+                ) : null}
+                {isDashProbe && probe && (probe.dashTracks?.length ?? 0) > 0 ? (
+                  <fieldset className="space-y-2 border-t border-border-subtle pt-3">
+                    <legend className="text-xs font-medium text-text-secondary">{t("b6.dash_tracks")}</legend>
+                    {(["video", "audio", "subtitle"] as const).map((kind) => {
+                      const tracks = probe.dashTracks?.filter((track) => track.kind === kind) ?? [];
+                      if (tracks.length === 0) return null;
+                      const value =
+                        kind === "video"
+                          ? selectedDashVideoId
+                          : kind === "audio"
+                            ? selectedDashAudioId
+                            : selectedDashSubtitleId;
+                      const setter =
+                        kind === "video"
+                          ? setSelectedDashVideoId
+                          : kind === "audio"
+                            ? setSelectedDashAudioId
+                            : setSelectedDashSubtitleId;
+                      let noneValue = "__none__";
+                      while (tracks.some((track) => track.id === noneValue)) noneValue += "_";
+                      return (
+                        <div key={kind} className="space-y-1">
+                          <label htmlFor={`dash-track-${kind}`} className="block text-xs text-text-muted">
+                            {t(`b6.dash_${kind}`)}
+                          </label>
+                          <Select
+                            value={value ?? (kind === "subtitle" ? noneValue : "")}
+                            onValueChange={(next) => {
+                              if (next) setter(kind === "subtitle" && next === noneValue ? null : next);
+                            }}
+                          >
+                            <SelectTrigger id={`dash-track-${kind}`} className="h-8 w-full min-w-0 text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {kind === "subtitle" ? (
+                                <SelectItem value={noneValue}>{t("b6.dash_none")}</SelectItem>
+                              ) : null}
+                              {tracks.map((track) => (
+                                <SelectItem
+                                  key={track.id}
+                                  value={track.id}
+                                  disabled={
+                                    kind === "subtitle" &&
+                                    !["text/vtt", "application/webvtt"].includes(track.subtitleFormat ?? "")
+                                  }
+                                >
+                                  {[
+                                    track.id,
+                                    track.language,
+                                    track.role,
+                                    track.resolution,
+                                    track.codecs,
+                                    Number(track.bandwidth) > 0 ? formatSpeed(Number(track.bandwidth) / 8) : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" · ")}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      );
+                    })}
+                  </fieldset>
                 ) : null}
 
                 {/* Advanced options toggle */}

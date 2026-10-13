@@ -24,8 +24,9 @@ The current `check_url` and `restart` actions do not attach newly forwarded brow
 
 These codes surface on the Storage & Cleanup Center commands (scan, cleanup,
 abandon-resume). They are command-level errors and carry no task
-`failure_category`. English copy lives in `STABLE_ERROR_MESSAGES_EN`; localized
-copy is generated into `errors.*` by `scripts/sync-stable-error-i18n.mjs`.
+`failure_category`. English copy lives in `STABLE_ERROR_MESSAGES_EN`; stable
+Chinese copy is generated into `errors.*` by `scripts/sync-stable-error-i18n.mjs`.
+Beta locale gaps remain visible through the separate i18n completeness check.
 
 | Code | Recoverable | User Message | Source |
 | --- | --- | --- | --- |

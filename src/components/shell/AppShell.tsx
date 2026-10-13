@@ -7,7 +7,8 @@ import type { AttentionDialogRequest } from "@/components/shell/ResolveAttention
 import { ShutdownOverlay } from "@/components/shell/ShutdownOverlay";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { StatusBar } from "@/components/shell/StatusBar";
-import { isGlobalPasteShortcut, isOverlayKey } from "@/components/shell/shell-keys";
+import { isGlobalPasteShortcut, isOverlayKey, isTextInputTarget } from "@/components/shell/shell-keys";
+import { matchesAction } from "@/components/shell/shortcut-registry";
 import { TitleBar } from "@/components/shell/TitleBar";
 import type { ReorderAction } from "@/components/tasks/TaskContextMenu";
 import { TaskList } from "@/components/tasks/TaskList";
@@ -175,18 +176,6 @@ const OnboardingDialog = lazy(() =>
     default: module.OnboardingDialog,
   })),
 );
-
-function matchesShortcut(event: KeyboardEvent, shortcut: string, platform: Platform): boolean {
-  const parts = shortcut.toLowerCase().split("+");
-  const key = parts[parts.length - 1];
-  if (parts.includes("mod")) {
-    const modOk = platform === "macos" ? event.metaKey : event.ctrlKey;
-    if (!modOk) return false;
-  }
-  if (parts.includes("shift") && !event.shiftKey) return false;
-  if (!parts.includes("shift") && event.shiftKey) return false;
-  return event.key.toLowerCase() === key;
-}
 
 export function AppShell() {
   const { t } = useTranslation();
@@ -1324,11 +1313,12 @@ export function AppShell() {
     const onKeyDown = (event: KeyboardEvent) => {
       // IME composition guard: when a CJK input method is composing (e.g. typing
       // pinyin), keystrokes should go to the IME, not trigger app shortcuts.
-      if (event.isComposing) return;
+      if (event.isComposing || event.defaultPrevented) return;
       const target = event.target as HTMLElement;
       const isCheckbox = target instanceof HTMLInputElement && target.type === "checkbox";
-      const isInput = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+      const isInput = isTextInputTarget(target);
       const inOverlay = isOverlayKey(event);
+      if (inOverlay) return;
 
       // Read selected task imperatively — not a subscription, so AppShell
       // stays off the per-tick re-render path.
@@ -1336,45 +1326,45 @@ export function AppShell() {
 
       // ── Always-active shortcuts ──
 
-      if (matchesShortcut(event, "mod+k", platform)) {
+      if (matchesAction(event, "commandPalette", platform)) {
         event.preventDefault();
         setPaletteOpen(true);
         return;
       }
 
       // UX-3: mod+f focuses the search input for keyboard-first users.
-      if (matchesShortcut(event, "mod+f", platform)) {
+      if (matchesAction(event, "search", platform)) {
         event.preventDefault();
         searchInputRef.current?.focus();
         searchInputRef.current?.select();
         return;
       }
 
-      if (matchesShortcut(event, "mod+/", platform)) {
+      if ((event.ctrlKey || event.metaKey) && matchesAction(event, "showShortcuts", platform)) {
         event.preventDefault();
         setShortcutPanelOpen((prev) => !prev);
         return;
       }
 
-      if (matchesShortcut(event, "mod+n", platform)) {
+      if (matchesAction(event, "newDownload", platform)) {
         event.preventDefault();
         openNewDownload();
         return;
       }
 
-      if (matchesShortcut(event, "mod+,", platform)) {
+      if (matchesAction(event, "settings", platform)) {
         event.preventDefault();
         setNav("settings");
         setDetailOpen(false);
         return;
       }
 
-      if (matchesShortcut(event, "mod+shift+p", platform)) {
+      if (matchesAction(event, "pauseAll", platform)) {
         event.preventDefault();
         void pauseAll();
         return;
       }
-      if (matchesShortcut(event, "mod+shift+r", platform)) {
+      if (matchesAction(event, "resumeAll", platform)) {
         event.preventDefault();
         void resumeAll();
         return;
@@ -1399,7 +1389,7 @@ export function AppShell() {
       // Checkboxes are row selection controls, not text-entry surfaces. Keep
       // bulk and delete shortcuts available while one has focus.
       if ((!isInput || isCheckbox) && !inOverlay) {
-        if (event.key === "?") {
+        if (matchesAction(event, "showShortcuts", platform)) {
           event.preventDefault();
           setShortcutPanelOpen((prev) => !prev);
           return;
@@ -1407,14 +1397,14 @@ export function AppShell() {
 
         // Navigation: Mod+1–7 follows the sidebar order in nav-shortcuts.ts.
         const navTarget = navFilterForDigit(event.key);
-        if (navTarget && matchesShortcut(event, `mod+${event.key}`, platform)) {
+        if (navTarget && matchesAction(event, `nav${event.key}`, platform)) {
           event.preventDefault();
           setNav(navTarget);
           return;
         }
 
         // Task selection: Mod+Up / Mod+Down
-        if (matchesShortcut(event, "mod+arrowup", platform)) {
+        if (matchesAction(event, "moveFocus", platform) && event.key === "ArrowUp") {
           event.preventDefault();
           const idx = selectedId ? taskIds.indexOf(selectedId) : -1;
           if (idx > 0) selectTask(taskIds[idx - 1]!);
@@ -1422,7 +1412,7 @@ export function AppShell() {
           return;
         }
 
-        if (matchesShortcut(event, "mod+arrowdown", platform)) {
+        if (matchesAction(event, "moveFocus", platform) && event.key === "ArrowDown") {
           event.preventDefault();
           const idx = selectedId ? taskIds.indexOf(selectedId) : -1;
           if (idx >= 0 && idx < taskIds.length - 1) selectTask(taskIds[idx + 1]!);
@@ -1431,21 +1421,21 @@ export function AppShell() {
         }
 
         // Toggle detail: Mod+D
-        if (matchesShortcut(event, "mod+d", platform)) {
+        if (matchesAction(event, "toggleDetails", platform)) {
           event.preventDefault();
           setDetailOpen(!detailOpen);
           return;
         }
 
         // Open folder: Mod+O
-        if (matchesShortcut(event, "mod+o", platform) && selected) {
+        if (matchesAction(event, "openFolder", platform) && selected) {
           event.preventDefault();
           openFolder(selected);
           return;
         }
 
         // Open file: Mod+Enter
-        if (matchesShortcut(event, "mod+enter", platform) && selected) {
+        if (matchesAction(event, "openFile", platform) && selected) {
           event.preventDefault();
           openFile(selected);
           return;
@@ -1454,7 +1444,7 @@ export function AppShell() {
         // Recover the selected task: Mod+R. Swallowed even when there is
         // nothing to recover — the WebView would otherwise reload the whole
         // app, and a silent no-op read as a broken shortcut.
-        if (matchesShortcut(event, "mod+r", platform) && selected) {
+        if (matchesAction(event, "recoverTask", platform) && selected) {
           event.preventDefault();
           recoverTask(selected);
           return;
@@ -1465,7 +1455,7 @@ export function AppShell() {
         // success criterion; before this binding the only keyboard path was
         // Mod+R (retry-only). toggleTransfer itself no-ops on completed and
         // needs_attention states, so the shortcut is safe to fire universally.
-        if (matchesShortcut(event, "mod+p", platform) && selected) {
+        if (matchesAction(event, "toggleTransfer", platform) && selected) {
           if (allowedTransferActions(selected).some((action) => action === "pause" || action === "resume")) {
             event.preventDefault();
             toggleTransfer(selected);
@@ -1474,7 +1464,7 @@ export function AppShell() {
         }
 
         // Delete (metadata only, undoable): Del
-        if (event.key === "Delete" && event.shiftKey === false && selected) {
+        if (matchesAction(event, "deleteTask", platform) && selected) {
           event.preventDefault();
           softDelete(selected);
           return;
@@ -1482,9 +1472,7 @@ export function AppShell() {
 
         // UX-5: Queue reorder via keyboard: Alt+Up/Down (only for queued tasks)
         if (
-          event.altKey &&
-          !event.metaKey &&
-          !event.ctrlKey &&
+          matchesAction(event, "reorderQueue", platform) &&
           selected &&
           selected.status === "queued" &&
           (event.key === "ArrowUp" || event.key === "ArrowDown")
@@ -1495,7 +1483,7 @@ export function AppShell() {
         }
 
         // Delete task and files (irreversible, hard confirm): Shift+Del
-        if (event.key === "Delete" && event.shiftKey === true && selected) {
+        if (matchesAction(event, "deleteFiles", platform) && selected) {
           event.preventDefault();
           setDeleteFilesTarget(selected);
           return;
@@ -1503,14 +1491,14 @@ export function AppShell() {
 
         // Select every task matching the current query: Mod+A. The shared
         // loader owns cursor pagination and invalidates stale page responses.
-        if (taskSurfaceActive && matchesShortcut(event, "mod+a", platform)) {
+        if (taskSurfaceActive && matchesAction(event, "selectAll", platform)) {
           event.preventDefault();
           void selectAllMatching();
           return;
         }
 
         // Clear selection: Mod+Shift+A
-        if (matchesShortcut(event, "mod+shift+a", platform)) {
+        if (matchesAction(event, "clearSelection", platform)) {
           event.preventDefault();
           clearSelectedIds();
           return;

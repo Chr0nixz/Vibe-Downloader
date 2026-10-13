@@ -34,16 +34,11 @@ const PROTOCOL_BT: &str = "bt";
 const SOURCE_BT_PREFIX: &str = "bt:";
 const BT_METADATA_STATUS_INTERVAL: Duration = Duration::from_secs(10);
 const BT_METADATA_TIMEOUT: Duration = Duration::from_secs(90);
-/// F-1: Interval between seed-ratio limit checks during the seeding phase.
-/// Matches the BT metadata/progress cadence (10s).
-const BT_SEEDING_TICK_INTERVAL: Duration = Duration::from_secs(10);
-
 /// E-3: Maximum .torrent file size we are willing to buffer in memory for
 /// private-flag pre-parsing. 32 MiB is generous (a typical .torrent is under
 /// 1 MiB; even multi-track packs rarely exceed 10 MiB) while capping the
 /// memory impact of a malicious or misconfigured URL. When this limit is
-/// exceeded, the caller falls back to `AddTorrent::from_url`, letting
-/// librqbit stream the torrent directly without buffering in our process.
+/// exceeded, reject through the shared network path; librqbit must not fetch it itself.
 const TORRENT_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -53,11 +48,14 @@ pub struct BtEngine {
     /// SEC-03: `.torrent` fetches go through the shared network factory so
     /// proxy Off means `no_proxy()` and the SSRF guards always apply.
     factory: Arc<crate::download::net_factory::NetworkClientFactory>,
+    seeding: Arc<super::BtSeedingManager>,
+    upload_limiter: Arc<GlobalSpeedLimiter>,
 }
 
 struct BtSessionEntry {
     api: Arc<Api>,
     active_task_count: usize,
+    upload_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct BtStoragePolicy {
@@ -70,35 +68,54 @@ struct BtStoragePolicy {
 /// `release_session_ref` is async (uses `tokio::sync::Mutex`), so `Drop` cannot
 /// await it directly. On drop we spawn the release on the async runtime; on the
 /// normal completion path callers can use `release()` to release synchronously.
-struct SessionRefGuard {
+pub(super) struct SessionRefGuard {
     engine: BtEngine,
     session_key: Option<String>,
+    resources: super::lifecycle::Resources,
+    storage_cancel: tokio_util::sync::CancellationToken,
 }
 
 impl SessionRefGuard {
-    fn new(engine: BtEngine, session_key: String) -> Self {
+    fn new(
+        engine: BtEngine,
+        session_key: String,
+        resources: super::lifecycle::Resources,
+        storage_cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
         Self {
             engine,
             session_key: Some(session_key),
+            resources,
+            storage_cancel,
         }
     }
 
-    /// Release the session reference synchronously (normal completion path).
-    async fn release(mut self) {
+    /// Wake storage waiters before asking librqbit to stop its peer workers.
+    pub(super) fn cancel_storage(&self) {
+        self.storage_cancel.cancel();
+    }
+
+    /// Release the session reference and wait for storage to close.
+    pub(super) async fn release(mut self) {
+        self.storage_cancel.cancel();
         if let Some(key) = self.session_key.take() {
             self.engine.release_session_ref(&key).await;
         }
+        self.resources.drain().await;
     }
 }
 
 impl Drop for SessionRefGuard {
     fn drop(&mut self) {
         if let Some(key) = self.session_key.take() {
+            self.storage_cancel.cancel();
             let engine = self.engine.clone();
+            let resources = self.resources.clone();
             let lease = super::lifecycle::Resources::current().map(|owner| owner.lease());
             tauri::async_runtime::spawn(async move {
                 let _lease = lease;
                 engine.release_session_ref(&key).await;
+                resources.drain().await;
             });
         }
     }
@@ -114,6 +131,222 @@ impl Default for BtEngine {
 }
 
 impl BtEngine {
+    async fn activate_session_uploads(&self, task_id: &str) {
+        for (key, entry) in self.sessions.lock().await.iter() {
+            if key.ends_with(&format!("|task:{task_id}")) {
+                entry
+                    .upload_active
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+
+    pub fn seeding_manager(&self) -> Arc<super::BtSeedingManager> {
+        self.seeding.clone()
+    }
+
+    pub async fn start_completed_seeding(
+        &self,
+        app: Option<tauri::AppHandle>,
+        pool: sqlx::SqlitePool,
+        task: crate::models::TaskRecord,
+        proxy: ResolvedProxyConfig,
+        limiter: Arc<GlobalSpeedLimiter>,
+    ) -> Result<(), String> {
+        if task.status != TaskStatus::Completed
+            || !matches!(task.protocol.as_str(), "bt" | "magnet")
+        {
+            return Err(engine_error(
+                "bt_seeding_unavailable",
+                "Only completed torrents can start seeding",
+                false,
+            ));
+        }
+        if self.seeding.contains(&task.id).await {
+            return Ok(());
+        }
+        let _pending = self.seeding.begin_start();
+        let state = db::bt_seeding_state(&pool, &task.id)
+            .await?
+            .ok_or_else(|| {
+                engine_error(
+                    "bt_seeding_metadata_missing",
+                    "Torrent metadata is unavailable",
+                    true,
+                )
+            })?;
+        let blob = state
+            .torrent_blob
+            .as_ref()
+            .filter(|blob| !blob.is_empty())
+            .ok_or_else(|| {
+                engine_error(
+                    "bt_seeding_metadata_missing",
+                    "Cached torrent metadata is unavailable",
+                    true,
+                )
+            })?;
+        let ratio = if task.total_size > 0 {
+            state.uploaded_bytes as f64 / task.total_size as f64
+        } else {
+            0.0
+        };
+        if seeding_limit_reached(
+            ratio,
+            state.ratio_limit,
+            Duration::from_secs(state.elapsed_seconds as u64),
+            state
+                .time_limit_seconds
+                .filter(|s| *s > 0)
+                .map(|s| Duration::from_secs(s as u64)),
+        ) {
+            return Err(engine_error(
+                "bt_seeding_limit_reached",
+                "Seeding limits have already been reached",
+                true,
+            ));
+        }
+        let root = tokio::fs::canonicalize(&task.save_dir).await.map_err(|_| {
+            engine_error(
+                "bt_seeding_files_invalid",
+                "The torrent output directory is unavailable",
+                true,
+            )
+        })?;
+        let files = db::list_task_file_records(&pool, &task.id).await?;
+        if files.iter().all(|file| !file.selected) {
+            return Err(engine_error(
+                "bt_seeding_files_invalid",
+                "No selected torrent files are available",
+                true,
+            ));
+        }
+        for file in files.iter().filter(|file| file.selected) {
+            let expected = root.join(sanitize_relative_path(&file.relative_path));
+            let actual = tokio::fs::canonicalize(&expected).await.map_err(|_| {
+                engine_error(
+                    "bt_seeding_files_invalid",
+                    "A selected torrent file is missing",
+                    true,
+                )
+            })?;
+            let metadata = tokio::fs::metadata(&actual)
+                .await
+                .map_err(|e| engine_error("bt_seeding_files_invalid", e.to_string(), true))?;
+            if !actual.starts_with(&root)
+                || !metadata.is_file()
+                || metadata.len() != file.total_size.max(0) as u64
+            {
+                return Err(engine_error(
+                    "bt_seeding_files_invalid",
+                    "A selected torrent file changed or escaped its output directory",
+                    true,
+                ));
+            }
+        }
+        let selected_paths = selected_torrent_paths(&pool, &task).await?;
+        let resources = super::lifecycle::Resources::default();
+        let storage_cancel = tokio_util::sync::CancellationToken::new();
+        let (api, key) = resources
+            .scope(self.api_for_output_folder_with_limiter(
+                &task.save_dir,
+                &task.id,
+                None,
+                db::get_bt_upload_limit_bps_setting(&pool).await,
+                &proxy,
+                BtStoragePolicy {
+                    shared_limiter: limiter.root_limiter(),
+                    cancel_token: storage_cancel.clone(),
+                },
+            ))
+            .await?;
+        let guard = SessionRefGuard::new(self.clone(), key, resources, storage_cancel);
+        let prepared = async {
+            let response = api
+                .api_add_torrent(
+                    AddTorrent::from_bytes(blob.clone()),
+                    Some(AddTorrentOptions {
+                        paused: true,
+                        // Reuse verified existing files; librqbit hashes their pieces before start.
+                        overwrite: true,
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .map_err(|e| engine_error("bt_seeding_metadata_missing", format!("{e:#}"), true))?;
+            if !response
+                .details
+                .info_hash
+                .eq_ignore_ascii_case(&state.info_hash)
+                || task.source_key != format!("bt:{}", response.details.info_hash)
+            {
+                return Err(engine_error(
+                    "bt_seeding_metadata_missing",
+                    "Torrent metadata does not match the completed task",
+                    false,
+                ));
+            }
+            let id = TorrentIdOrHash::try_from(response.details.info_hash.as_str())
+                .map_err(|e| e.to_string())?;
+            if let Some(indices) =
+                selected_torrent_indices(selected_paths.as_ref(), &response.details)?
+            {
+                api.api_torrent_action_update_only_files(id, &indices)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            {
+                let handle = api.mgr_handle(id).map_err(|e| e.to_string())?;
+                tokio::time::timeout(BT_METADATA_TIMEOUT, handle.wait_until_initialized())
+                    .await
+                    .map_err(|_| {
+                        engine_error(
+                            "bt_seeding_files_invalid",
+                            "Torrent file verification timed out",
+                            true,
+                        )
+                    })?
+                    .map_err(|e| {
+                        engine_error("bt_seeding_files_invalid", format!("{e:#}"), true)
+                    })?;
+            }
+            let stats = api.api_stats_v1(id).map_err(|e| e.to_string())?;
+            if !stats.finished {
+                return Err(engine_error(
+                    "bt_seeding_files_invalid",
+                    "Torrent piece verification found missing or changed data",
+                    true,
+                ));
+            }
+            api.api_torrent_action_start(id)
+                .await
+                .map_err(|e| e.to_string())?;
+            self.activate_session_uploads(&task.id).await;
+            Ok::<_, String>(id)
+        }
+        .await;
+        match prepared {
+            Ok(torrent_id) => {
+                self.seeding
+                    .register(super::bt_seeding::BtSeedRuntime {
+                        api,
+                        torrent_id,
+                        guard,
+                        pool,
+                        task,
+                        app,
+                        uploaded_base: state.uploaded_bytes,
+                        upload_limiter: self.upload_limiter.clone(),
+                    })
+                    .await
+            }
+            Err(error) => {
+                drop(api);
+                guard.release().await;
+                Err(error)
+            }
+        }
+    }
     pub fn new(
         proxy_config: SharedProxyConfig,
         factory: Arc<crate::download::net_factory::NetworkClientFactory>,
@@ -122,6 +355,8 @@ impl BtEngine {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             _proxy_config: proxy_config,
             factory,
+            seeding: Arc::new(super::BtSeedingManager::default()),
+            upload_limiter: GlobalSpeedLimiter::disabled(),
         }
     }
 
@@ -253,6 +488,9 @@ impl BtEngine {
         storage_policy: BtStoragePolicy,
     ) -> Result<(Arc<Api>, String), String> {
         let key = Self::compute_session_key(output_folder, task_proxy_config, task_id).await;
+        self.upload_limiter
+            .set_limit_preserving_budget(upload_limit_bps)
+            .await;
 
         // Fast path: reuse under a short lock (no await while held).
         {
@@ -262,7 +500,6 @@ impl BtEngine {
                 sync_session_download_limit(&entry.api, download_limit_bps);
                 // F-7: Re-apply the global upload limit on session reuse so settings
                 // changes take effect for the next acquire without a restart.
-                sync_session_upload_limit(&entry.api, upload_limit_bps);
                 return Ok((entry.api.clone(), key));
             }
         }
@@ -275,9 +512,12 @@ impl BtEngine {
         let output_path = output_folder.to_string();
         let mut options = SessionOptions::default();
         use librqbit::storage::StorageFactoryExt;
+        let upload_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
         options.default_storage_factory = Some(
             super::bt_storage::OwnedFilesystemFactory::new(
                 storage_policy.shared_limiter,
+                self.upload_limiter.clone(),
+                upload_active.clone(),
                 storage_policy.cancel_token,
             )
             .boxed(),
@@ -290,7 +530,7 @@ impl BtEngine {
         }
         options.ratelimits = LimitsConfig {
             // F-7: Apply the global BT upload limit at session creation.
-            upload_bps: non_zero_u32(upload_limit_bps),
+            upload_bps: None,
             download_bps: non_zero_u32(download_limit_bps),
         };
         // ARC-39: isolate each task's DHT persistence file. Sessions default to
@@ -316,7 +556,6 @@ impl BtEngine {
         if let Some(entry) = sessions.get_mut(&key) {
             entry.active_task_count += 1;
             sync_session_download_limit(&entry.api, download_limit_bps);
-            sync_session_upload_limit(&entry.api, upload_limit_bps);
             return Ok((entry.api.clone(), key));
         }
         sessions.insert(
@@ -324,6 +563,7 @@ impl BtEngine {
             BtSessionEntry {
                 api: api.clone(),
                 active_task_count: 1,
+                upload_active,
             },
         );
         Ok((api, key))
@@ -354,7 +594,14 @@ impl DownloadEngine for BtEngine {
         request: ProbeRequest,
     ) -> EngineFuture<'a, Result<ProbeOutput, DownloadError>> {
         Box::pin(async move {
-            let proxy_config = request.proxy_config.clone().unwrap_or_default();
+            let proxy_config = match request.proxy_config.as_ref() {
+                Some(proxy) => proxy.clone(),
+                None => self._proxy_config.read().await.clone(),
+            };
+            let headers = super::http::merge_basic_auth_headers(
+                &request.request_headers,
+                request.credentials.as_ref(),
+            );
             probe_torrent(
                 &request.uri,
                 &request.app,
@@ -362,6 +609,7 @@ impl DownloadEngine for BtEngine {
                 &proxy_config,
                 &self.factory,
                 &request.network_policy,
+                &headers,
             )
             .await
             .map_err(DownloadError::Other)
@@ -380,6 +628,7 @@ impl DownloadEngine for BtEngine {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn probe_torrent(
     uri: &str,
     app: &Option<tauri::AppHandle>,
@@ -387,6 +636,7 @@ async fn probe_torrent(
     proxy_config: &ResolvedProxyConfig,
     factory: &crate::download::net_factory::NetworkClientFactory,
     network_policy: &crate::download::network_policy::NetworkPolicy,
+    request_headers: &[(String, String)],
 ) -> Result<ProbeOutput, String> {
     if uri.trim_start().starts_with("magnet:") {
         crate::download::engine::emit_probe_phase(app, request_id, "parsing_magnet", Some("bt"));
@@ -398,7 +648,9 @@ async fn probe_torrent(
     // no DHT socket, no temp dir. The fixed shared probe directory previously
     // made concurrent probes fight over librqbit's persistent DHT port
     // (os error 10048); now only downloads touch sessions.
-    let bytes = fetch_torrent_source_bytes(uri, proxy_config, factory, network_policy).await?;
+    let bytes =
+        fetch_torrent_source_bytes(uri, proxy_config, factory, network_policy, request_headers)
+            .await?;
     crate::download::engine::emit_probe_phase(app, request_id, "inspecting_metadata", Some("bt"));
     probe_from_torrent_bytes(uri, &bytes)
 }
@@ -409,6 +661,7 @@ async fn fetch_torrent_source_bytes(
     proxy_config: &ResolvedProxyConfig,
     factory: &crate::download::net_factory::NetworkClientFactory,
     network_policy: &crate::download::network_policy::NetworkPolicy,
+    request_headers: &[(String, String)],
 ) -> Result<Vec<u8>, String> {
     let trimmed = uri.trim();
     let parsed = Url::parse(trimmed).map_err(|_| "Torrent URL is invalid.".to_string())?;
@@ -417,7 +670,14 @@ async fn fetch_torrent_source_bytes(
             let client = factory
                 .client_for_policy(proxy_config, network_policy)
                 .await?;
-            download_torrent_bytes(&client, trimmed, proxy_config, network_policy).await
+            download_torrent_bytes(
+                &client,
+                trimmed,
+                proxy_config,
+                network_policy,
+                request_headers,
+            )
+            .await
         }
         "file" => {
             let path = parsed
@@ -514,6 +774,7 @@ fn probe_from_torrent_bytes(uri: &str, bytes: &[u8]) -> Result<ProbeOutput, Stri
         hls_variants: Vec::new(),
         hls_audio_tracks: Vec::new(),
         hls_subtitle_tracks: Vec::new(),
+        dash_tracks: Vec::new(),
         metalink: None,
     })
 }
@@ -557,6 +818,7 @@ fn probe_magnet(uri: &str) -> Result<ProbeOutput, String> {
         hls_variants: Vec::new(),
         hls_audio_tracks: Vec::new(),
         hls_subtitle_tracks: Vec::new(),
+        dash_tracks: Vec::new(),
         metalink: None,
     })
 }
@@ -570,8 +832,13 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         speed_limiter,
         proxy_config,
         network_policy,
+        request_headers,
         ..
     } = context;
+
+    let credentials = db::resolve_task_credentials(&pool, &task.id).await?;
+    let request_headers =
+        super::http::merge_basic_auth_headers(&request_headers, credentials.as_ref());
 
     let mut progress_gate = TaskProgressEmitGate::default();
 
@@ -581,8 +848,20 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     // the global cap is charged separately at the storage boundary.
     let bt_upload_limit_bps = db::get_bt_upload_limit_bps_setting(&pool).await;
 
-    let (api, session_key) = engine
-        .api_for_output_folder_with_limiter(
+    let session_resources = super::lifecycle::Resources::default();
+    let storage_cancel = tokio_util::sync::CancellationToken::new();
+    let uploaded_base = db::bt_seeding_status(&pool, &task.id)
+        .await?
+        .map(|state| state.uploaded_bytes)
+        .unwrap_or(0)
+        .max(
+            db::get_torrent_runtime_snapshot(&pool, &task.id)
+                .await?
+                .map(|snapshot| snapshot.upload_bytes)
+                .unwrap_or(0),
+        );
+    let (api, session_key) = session_resources
+        .scope(engine.api_for_output_folder_with_limiter(
             &task.save_dir,
             &task.id,
             speed_limiter.own_limit_bps(),
@@ -590,22 +869,32 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             &proxy_config,
             BtStoragePolicy {
                 shared_limiter: speed_limiter.root_limiter(),
-                cancel_token: cancel_token.clone(),
+                cancel_token: storage_cancel.clone(),
             },
-        )
+        ))
         .await?;
-    let session_guard = SessionRefGuard::new(engine.clone(), session_key);
+    let session_guard = SessionRefGuard::new(
+        engine.clone(),
+        session_key,
+        session_resources,
+        storage_cancel,
+    );
     let source_started = Instant::now();
-    let source_result =
-        add_torrent_source_with_policy(&task.url, &proxy_config, &engine.factory, &network_policy)
-            .await
-            .map_err(|error| {
-                engine_error(
-                    "bt_source_failed",
-                    format!("Could not load the torrent source: {error}"),
-                    true,
-                )
-            });
+    let source_result = add_torrent_source_with_policy(
+        &task.url,
+        &proxy_config,
+        &engine.factory,
+        &network_policy,
+        &request_headers,
+    )
+    .await
+    .map_err(|error| {
+        engine_error(
+            "bt_source_failed",
+            format!("Could not load the torrent source: {error}"),
+            true,
+        )
+    });
     crate::download::diagnostics::persist_engine_diagnostic(
         crate::download::diagnostics::EngineDiagnosticContext {
             pool: &pool,
@@ -698,6 +987,12 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
         &configured_trackers,
     )
     .await?;
+    let torrent_blob = api
+        .mgr_handle(torrent_id)
+        .map_err(|error| error.to_string())?
+        .with_metadata(|metadata| metadata.torrent_bytes.to_vec())
+        .map_err(|error| error.to_string())?;
+    db::persist_torrent_blob(&pool, &task.id, &torrent_blob).await?;
 
     // For magnet sources, the private flag cannot be parsed before metadata is
     // fetched, and TorrentDetailsResponse does not expose it. librqbit handles
@@ -765,12 +1060,17 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     let mut last_health_summary = Some("Fetching torrent metadata".to_string());
     let mut last_tick = Instant::now();
     let mut last_limit_sync = Instant::now();
+    let mut last_piece_update = Instant::now()
+        .checked_sub(Duration::from_secs(5))
+        .unwrap_or_else(Instant::now);
+    let mut cached_piece_count = 0;
     let mut last_file_progress_emit = Instant::now()
         .checked_sub(Duration::from_secs(10))
         .unwrap_or_else(Instant::now);
 
     loop {
         if cancel_token.is_cancelled() {
+            session_guard.cancel_storage();
             let _ = api.api_torrent_action_pause(torrent_id).await;
             db::update_task_progress(&pool, &task.id, last_progress, 0, 0, TaskStatus::Paused)
                 .await?;
@@ -835,9 +1135,17 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             .await;
             let _ = api.api_torrent_action_forget(torrent_id).await;
             progress_gate.flush(&app);
+            drop(api);
             session_guard.release().await;
             return Err(error);
         }
+        if stats.live.is_some() {
+            engine.activate_session_uploads(&task.id).await;
+        }
+        engine
+            .upload_limiter
+            .set_limit_preserving_budget(db::get_bt_upload_limit_bps_setting(&pool).await)
+            .await;
         let downloaded = i64::try_from(stats.progress_bytes).unwrap_or(i64::MAX);
         let total = i64::try_from(stats.total_bytes).unwrap_or(i64::MAX);
         let speed = stats
@@ -857,7 +1165,8 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             .as_ref()
             .map(|live| i64::try_from(live.upload_speed.as_bytes()).unwrap_or(i64::MAX))
             .unwrap_or(0);
-        let uploaded = i64::try_from(stats.uploaded_bytes).unwrap_or(i64::MAX);
+        let uploaded =
+            uploaded_base.saturating_add(i64::try_from(stats.uploaded_bytes).unwrap_or(i64::MAX));
         let ratio = if downloaded > 0 {
             uploaded as f64 / downloaded as f64
         } else {
@@ -875,7 +1184,15 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 i64::try_from(live.snapshot.downloaded_and_checked_pieces).unwrap_or(i64::MAX)
             })
             .unwrap_or(0);
-        let (piece_bitfield_base64, piece_count) = torrent_piece_bitfield(&api, torrent_id);
+        let piece_bitfield_base64 = if last_piece_update.elapsed() >= Duration::from_secs(5) {
+            let (bitfield, count) = torrent_piece_bitfield(&api, torrent_id);
+            cached_piece_count = count;
+            last_piece_update = Instant::now();
+            bitfield
+        } else {
+            None
+        };
+        let piece_count = cached_piece_count;
         let dht_status = torrent_dht_status(&api);
         let trackers_json = configured_trackers_json.clone();
         let seeding_enabled = db::torrent_seeding_enabled(&pool, &task.id)
@@ -981,128 +1298,33 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
                 db::complete_segment(&pool, &segment.id).await?;
             }
             db::complete_task(&pool, &task.id).await?;
-            if seeding_enabled {
-                db::upsert_torrent_runtime_snapshot(
-                    &pool,
-                    &task.id,
-                    db::TorrentRuntimeSnapshotUpsert {
-                        metadata_status: "seeding",
-                        completed_pieces,
-                        verified_pieces: completed_pieces,
-                        piece_count,
-                        piece_bitfield_base64: piece_bitfield_base64.as_deref(),
-                        peer_count,
-                        seed_count: 0,
-                        dht_status: dht_status.as_deref(),
-                        trackers_json: trackers_json.as_deref(),
-                        upload_bytes: uploaded,
-                        upload_speed_bps: upload_speed,
-                        ratio,
-                        seeding_enabled: true,
-                        seeding_state: "seeding",
-                        last_error_code: None,
-                        last_error_message: None,
-                    },
-                )
-                .await?;
-                if let Some(current) = db::get_task_record(&pool, &task.id).await? {
-                    emit_task_updated_record(&app, &pool, &current).await;
-                }
-                progress_gate.flush(&app);
-
-                // F-1 / FUN-11: Seeding monitoring — ratio OR time limit stops
-                // seeding. When neither is set, seed until cancelled.
-                let seeding_started = Instant::now();
-                loop {
-                    tokio::time::sleep(BT_SEEDING_TICK_INTERVAL).await;
-                    if cancel_token.is_cancelled() {
-                        break;
-                    }
-                    let seed_stats = api.api_stats_v1(torrent_id).map_err(|e| {
-                        format!("Could not read torrent stats during seeding: {e:#}")
-                    })?;
-                    let seed_uploaded =
-                        i64::try_from(seed_stats.uploaded_bytes).unwrap_or(i64::MAX);
-                    let seed_ratio = if downloaded > 0 {
-                        seed_uploaded as f64 / downloaded as f64
-                    } else {
-                        0.0
-                    };
-                    let seed_upload_speed = seed_stats
-                        .live
-                        .as_ref()
-                        .map(|live| i64::try_from(live.upload_speed.as_bytes()).unwrap_or(i64::MAX))
-                        .unwrap_or(0);
-
-                    let seed_ratio_limit = db::torrent_seed_ratio_limit(&pool, &task.id)
-                        .await
-                        .unwrap_or(None);
-                    let seed_time_limit = db::torrent_seed_time_limit_seconds(&pool, &task.id)
-                        .await
-                        .unwrap_or(None)
-                        .map(|seconds| Duration::from_secs(u64::try_from(seconds).unwrap_or(0)));
-                    let limit_reached = seeding_limit_reached(
-                        seed_ratio,
-                        seed_ratio_limit,
-                        seeding_started.elapsed(),
-                        seed_time_limit,
-                    );
-
-                    if limit_reached {
-                        let _ = api.api_torrent_action_forget(torrent_id).await;
-                        db::upsert_torrent_runtime_snapshot(
-                            &pool,
-                            &task.id,
-                            db::TorrentRuntimeSnapshotUpsert {
-                                metadata_status: "completed",
-                                completed_pieces,
-                                verified_pieces: completed_pieces,
-                                piece_count,
-                                piece_bitfield_base64: piece_bitfield_base64.as_deref(),
-                                peer_count,
-                                seed_count: 0,
-                                dht_status: dht_status.as_deref(),
-                                trackers_json: trackers_json.as_deref(),
-                                upload_bytes: seed_uploaded,
-                                upload_speed_bps: seed_upload_speed,
-                                ratio: seed_ratio,
-                                seeding_enabled: true,
-                                seeding_state: "completed",
-                                last_error_code: None,
-                                last_error_message: None,
-                            },
-                        )
-                        .await?;
-                        break;
-                    }
-
-                    // Still seeding — update snapshot with current ratio/upload.
-                    db::upsert_torrent_runtime_snapshot(
-                        &pool,
-                        &task.id,
-                        db::TorrentRuntimeSnapshotUpsert {
-                            metadata_status: "seeding",
-                            completed_pieces,
-                            verified_pieces: completed_pieces,
-                            piece_count,
-                            piece_bitfield_base64: piece_bitfield_base64.as_deref(),
-                            peer_count,
-                            seed_count: 0,
-                            dht_status: dht_status.as_deref(),
-                            trackers_json: trackers_json.as_deref(),
-                            upload_bytes: seed_uploaded,
-                            upload_speed_bps: seed_upload_speed,
-                            ratio: seed_ratio,
-                            seeding_enabled: true,
-                            seeding_state: "seeding",
-                            last_error_code: None,
-                            last_error_message: None,
-                        },
-                    )
+            let elapsed = db::bt_seeding_status(&pool, &task.id)
+                .await?
+                .map(|state| state.elapsed_seconds)
+                .unwrap_or(0);
+            db::checkpoint_bt_seeding(&pool, &task.id, uploaded, elapsed, None).await?;
+            if seeding_enabled && !cancel_token.is_cancelled() {
+                let completed_task = db::get_task_record(&pool, &task.id)
+                    .await?
+                    .ok_or_else(|| "Completed torrent task disappeared".to_string())?;
+                engine
+                    .seeding
+                    .register(super::bt_seeding::BtSeedRuntime {
+                        api,
+                        torrent_id,
+                        guard: session_guard,
+                        pool: pool.clone(),
+                        task: completed_task,
+                        app: app.clone(),
+                        uploaded_base,
+                        upload_limiter: engine.upload_limiter.clone(),
+                    })
                     .await?;
-                }
             } else {
+                session_guard.cancel_storage();
                 let _ = api.api_torrent_action_forget(torrent_id).await;
+                drop(api);
+                session_guard.release().await;
             }
             if let Some(current) = db::get_task_record(&pool, &task.id).await? {
                 emit_task_updated_record(&app, &pool, &current).await;
@@ -1124,7 +1346,7 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
     }
 }
 
-fn torrent_runtime_error(
+pub(super) fn torrent_runtime_error(
     api: &Api,
     torrent_id: TorrentIdOrHash,
     stats: &librqbit::TorrentStats,
@@ -1185,6 +1407,7 @@ fn effective_bt_session_limit(speed_limiter: &GlobalSpeedLimiter) -> Option<i64>
 /// F-7: Apply the global BT upload limit to an existing session. `None` clears
 /// the limit (unlimited). Called on session reuse so settings changes take
 /// effect without restarting the session.
+#[cfg(test)]
 fn sync_session_upload_limit(api: &Api, limit_bps: Option<i64>) {
     let limits = &api.session().ratelimits;
     let limit = non_zero_u32(limit_bps);
@@ -1213,7 +1436,7 @@ fn dht_persistence_file_name(session_key: &str) -> String {
 }
 
 /// FUN-11: pure seeding-stop predicate for ratio and/or time limits.
-fn seeding_limit_reached(
+pub(super) fn seeding_limit_reached(
     ratio: f64,
     ratio_limit: Option<f64>,
     seeded_for: Duration,
@@ -1539,7 +1762,10 @@ fn peer_label(count: u32) -> String {
     }
 }
 
-fn torrent_piece_bitfield(api: &Api, torrent_id: TorrentIdOrHash) -> (Option<String>, i64) {
+pub(super) fn torrent_piece_bitfield(
+    api: &Api,
+    torrent_id: TorrentIdOrHash,
+) -> (Option<String>, i64) {
     match api.api_dump_haves(torrent_id) {
         Ok((bitfield, count)) => (
             Some(STANDARD.encode(bitfield.into_boxed_slice())),
@@ -1552,7 +1778,7 @@ fn torrent_piece_bitfield(api: &Api, torrent_id: TorrentIdOrHash) -> (Option<Str
     }
 }
 
-fn torrent_dht_status(api: &Api) -> Option<String> {
+pub(super) fn torrent_dht_status(api: &Api) -> Option<String> {
     api.api_dht_stats()
         .ok()
         .and_then(|stats| serde_json::to_string(&stats).ok())
@@ -1842,6 +2068,7 @@ async fn add_torrent_source(
         proxy_config,
         factory,
         &crate::download::network_policy::NetworkPolicy::default(),
+        &[],
     )
     .await
 }
@@ -1851,6 +2078,7 @@ async fn add_torrent_source_with_policy(
     proxy_config: &ResolvedProxyConfig,
     factory: &crate::download::net_factory::NetworkClientFactory,
     network_policy: &crate::download::network_policy::NetworkPolicy,
+    request_headers: &[(String, String)],
 ) -> Result<(AddTorrent<'static>, Option<bool>, Vec<TorrentTrackerStatus>), String> {
     let trimmed = uri.trim();
     if trimmed.starts_with("magnet:") {
@@ -1875,7 +2103,15 @@ async fn add_torrent_source_with_policy(
             let client = factory
                 .client_for_policy(proxy_config, network_policy)
                 .await?;
-            match download_torrent_bytes(&client, trimmed, proxy_config, network_policy).await {
+            match download_torrent_bytes(
+                &client,
+                trimmed,
+                proxy_config,
+                network_policy,
+                request_headers,
+            )
+            .await
+            {
                 Ok(bytes) => {
                     let private = parse_torrent_private_flag(&bytes);
                     let trackers = tracker_statuses_from_torrent_bytes(&bytes);
@@ -1947,6 +2183,7 @@ async fn download_torrent_bytes(
     url: &str,
     proxy_config: &ResolvedProxyConfig,
     network_policy: &crate::download::network_policy::NetworkPolicy,
+    request_headers: &[(String, String)],
 ) -> Result<Vec<u8>, String> {
     // The factory client has no overall timeout (streaming downloads); this is
     // a bounded control-plane fetch, so keep the previous 60 s budget here.
@@ -1956,8 +2193,12 @@ async fn download_torrent_bytes(
     let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
     network_policy.resolve(&parsed).await?;
     let response = tokio::time::timeout(Duration::from_secs(60), async {
+        let mut request = client.get(url);
+        for (name, value) in request_headers {
+            request = request.header(name, value);
+        }
         let response = crate::download::http::send_request_with_error_mapper(
-            client.get(url),
+            request,
             network_policy,
             |error| classify_torrent_download_error(error, proxy_config),
         )

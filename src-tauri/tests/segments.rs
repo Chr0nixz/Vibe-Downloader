@@ -1013,6 +1013,33 @@ async fn browser_realtime_task_query_returns_active_plus_recent() {
 }
 
 #[tokio::test]
+async fn browser_realtime_snapshot_has_a_hard_total_limit() {
+    let (_db, pool) = test_pool("browser-realtime-total-limit").await;
+    for index in 0..500 {
+        let mut task = sample_task(&format!("browser-active-{index:03}"), 100);
+        task.status = TaskStatus::Downloading;
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert active");
+    }
+    for index in 0..50 {
+        let mut task = sample_task(&format!("browser-recent-{index:02}"), 100);
+        task.status = TaskStatus::Completed;
+        db::insert_task_record(&pool, &task)
+            .await
+            .expect("insert recent");
+    }
+
+    let records = db::list_browser_realtime_task_records(&pool)
+        .await
+        .expect("browser realtime records");
+    assert_eq!(records.len(), 500);
+    assert!(records
+        .iter()
+        .all(|task| task.status == TaskStatus::Downloading));
+}
+
+#[tokio::test]
 async fn reset_interrupted_tasks_pauses_active_records() {
     let (_db, pool) = test_pool("reset-interrupted").await;
     let mut downloading = sample_task("task-downloading", 100);
