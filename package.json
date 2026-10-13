@@ -77,7 +77,7 @@
     "react-error-boundary": "^6.1.6",
     "react-i18next": "^17.0.8",
     "tailwind-merge": "^3.6.0",
-    "zustand": "^5.0.14"
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",
