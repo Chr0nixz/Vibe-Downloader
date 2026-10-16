@@ -1293,7 +1293,15 @@ async fn run_torrent_download(engine: BtEngine, context: DownloadContext) -> Res
             false,
         );
 
-        if stats.finished || (total > 0 && downloaded >= total) {
+        // ARC-60: while librqbit is still initializing, progress_bytes is the
+        // initial-check scan cursor (checked_bytes), not validated have-bytes:
+        // every scanned piece advances it even when the hash mismatches. The
+        // byte-count fallback may therefore fire before async init finishes
+        // (e.g. before a storage failure surfaces as the Error state) and mark
+        // the task complete. Only trust the fallback after init, when
+        // progress_bytes comes from the validated chunk tracker.
+        let initialized = !matches!(stats.state, librqbit::TorrentStatsState::Initializing);
+        if stats.finished || (initialized && total > 0 && downloaded >= total) {
             if let Some(segment) = db::get_first_segment_record(&pool, &task.id).await? {
                 db::complete_segment(&pool, &segment.id).await?;
             }
