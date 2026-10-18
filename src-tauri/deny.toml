@@ -32,6 +32,19 @@ ignore = [
     # plain network buffers there. Accept until librqbit releases a
     # version that allows ringbuf 0.5.
     "RUSTSEC-2026-0293",
+    # TEMPORARY (added 2026-10-18, approved by Chen): zip 4.6.1
+    # vulnerabilities via tauri-plugin-updater's `zip ^4` requirement.
+    # GHSA-vv5m-jxxh-4627, GHSA-4v9h-p7m9-rh26, GHSA-4684-h2q9-2vcp:
+    # SUID/SGID preservation, symlink target escape, and permission
+    # application through symlinks during ZIP extraction.
+    # Our direct zip dep is 9.0.4 (not flagged). The 4.6.1 copy is only
+    # used by tauri-plugin-updater for extracting update artifacts.
+    # REMOVE once tauri-plugin-updater releases a version requiring
+    # zip 9 (or a patched 4.x). Upstream has not reacted as of 2026-10-18;
+    # zip maintainers temporarily unyanked 4.6.1 until 2026-10-30.
+    "GHSA-vv5m-jxxh-4627",
+    "GHSA-4v9h-p7m9-rh26",
+    "GHSA-4684-h2q9-2vcp",
 ]
 
 [licenses]
