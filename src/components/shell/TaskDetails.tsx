@@ -35,6 +35,7 @@ import { SpeedSparkline } from "@/components/tasks/SpeedSparkline";
 import { TaskRecoveryActions } from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { IconSwap } from "@/components/ui/icon-swap";
 import { Input } from "@/components/ui/input";
 import { MenuItem, MenuSeparator, RegionContextMenu } from "@/components/ui/menu-item";
 import { ProgressBar } from "@/components/ui/progress-bar";
@@ -326,11 +327,13 @@ function TaskDetailsActions({ task, actions }: { task: Task; actions?: TaskDetai
           className={buttonClass}
           onClick={() => actions.onToggleTransfer(task)}
         >
-          {transferMode === "resume" ? (
-            <Play className="h-3.5 w-3.5" aria-hidden />
-          ) : (
-            <Pause className="h-3.5 w-3.5" aria-hidden />
-          )}
+          <IconSwap swapKey={transferMode} className="h-3.5 w-3.5">
+            {transferMode === "resume" ? (
+              <Play className="h-3.5 w-3.5" aria-hidden />
+            ) : (
+              <Pause className="h-3.5 w-3.5" aria-hidden />
+            )}
+          </IconSwap>
           {transferMode === "resume" ? t("actions.resume") : t("actions.pause")}
         </Button>
       ) : null}
@@ -434,11 +437,14 @@ function TaskDetailsDrawer({
       }}
     >
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-x-0 bottom-0 top-[var(--titlebar-height)] z-40 bg-surface-scrim motion-safe:animate-[fade-in_180ms_ease-out]" />
-        {/* Keep window chrome reachable on Windows/macOS custom titlebars (Linux token is 0). */}
+        <Dialog.Overlay className="fixed inset-x-0 bottom-0 top-[var(--titlebar-height)] z-40 bg-surface-scrim motion-safe:animate-[fade-in_180ms_ease-out] md:bottom-[var(--statusbar-height)]" />
+        {/* Keep window chrome reachable on Windows/macOS custom titlebars (Linux
+            token is 0), and from `md` up stop above the status bar so download
+            health and failure counts stay on screen while the drawer is open. */}
         <Dialog.Content
           className={cn(
             "fixed right-0 bottom-0 top-[var(--titlebar-height)] z-50 flex h-[calc(100dvh-var(--titlebar-height))] w-full max-w-sm flex-col border-l border-border-subtle bg-surface-base shadow-xl",
+            "md:bottom-[var(--statusbar-height)] md:h-[calc(100dvh-var(--titlebar-height)-var(--statusbar-height))]",
             "motion-safe:animate-[drawer-enter_220ms_cubic-bezier(0.16,1,0.3,1)_both]",
             "focus:outline-none",
           )}
@@ -814,12 +820,20 @@ function TaskDetailsPanel({
           <div className="space-y-2">
             <OverviewDiagnosis task={task} />
             {chunkCells ? (
-              <ChunkMap cells={chunkCells} segments={segments} percent={overallPercent} taskStatus={task.status} />
+              <ChunkMap
+                cells={chunkCells}
+                segments={segments}
+                percent={overallPercent}
+                taskStatus={task.status}
+                live={task.status === "downloading" && task.speedBps > 0}
+              />
             ) : (
               <ProgressBar
                 value={task.totalSize > 0 ? task.downloadedBytes / task.totalSize : 0}
                 label={formatPercent(task.downloadedBytes, task.totalSize)}
                 active={task.status === "downloading" || task.status === "retrying"}
+                smooth
+                live={task.status === "downloading" && task.speedBps > 0}
                 size="lg"
                 tone={task.status === "completed" ? "success" : task.status === "failed" ? "danger" : "primary"}
               />

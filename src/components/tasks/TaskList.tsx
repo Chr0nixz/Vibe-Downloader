@@ -657,7 +657,8 @@ export const TaskList = memo(function TaskList({
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-root">
-      <h1 className="sr-only">{t("taskList.aria")}</h1>
+      {/* Names the current view, so heading navigation says where the user is. */}
+      <h1 className="sr-only">{scopeLabel}</h1>
       {error ? (
         <div
           className="flex flex-wrap items-center gap-2 border-b border-border-danger bg-status-danger/10 px-3 py-2 text-sm text-status-danger md:px-4"
@@ -1050,7 +1051,7 @@ export const TaskList = memo(function TaskList({
         onExport={selectedIds.length > 0 ? (format) => onBulkExport(selectedTasks(), format) : undefined}
         hasSelection={selectedIds.length > 0}
       >
-        <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto bg-surface-list-well">
+        <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto">
           {loading && !initialLoadDoneRef.current ? (
             <TaskListLoadingSkeleton label={t("taskList.loading")} />
           ) : filtered.length === 0 ? (
@@ -1095,7 +1096,9 @@ export const TaskList = memo(function TaskList({
                       style={{
                         top: 0,
                         transform: `translateY(calc(${virtualRow.start}px + var(--lp, 16px)))`,
-                        paddingBottom: virtualRow.index < filtered.length - 1 ? 2 : 0,
+                        // Rows carry no dividers, so this gap is what separates
+                        // them; it also keeps two adjacent selection plates apart.
+                        paddingBottom: virtualRow.index < filtered.length - 1 ? 4 : 0,
                       }}
                     >
                       <TaskRow
@@ -1148,14 +1151,14 @@ export const TaskList = memo(function TaskList({
 
 function TaskListLoadingSkeleton({ label }: { label: string }) {
   return (
-    <div className="px-2.5 sm:px-3 md:px-4" role="status" aria-live="polite" aria-label={label}>
+    <div className="px-2.5 pt-2.5 sm:px-3 sm:pt-3 md:px-4 md:pt-4" role="status" aria-live="polite" aria-label={label}>
       <span className="sr-only">{label}</span>
-      <div>
+      <div className="space-y-1">
         {Array.from({ length: 5 }).map((_, index) => (
-          <div key={index} className="overflow-hidden border-b border-border-subtle/70 px-2.5 py-3.5 sm:px-3 md:py-3">
+          <div key={index} className="overflow-hidden rounded-lg px-2.5 py-3.5 sm:px-3 md:py-3">
             <div className="skeleton-shimmer">
               <div className="flex min-w-0 gap-3">
-                <div className="mt-0.5 h-8 w-8 shrink-0 rounded bg-surface-raised" />
+                <div className="mt-0.5 h-8 w-8 shrink-0 rounded-lg bg-surface-raised" />
                 <div className="min-w-0 flex-1 space-y-3">
                   <div className="flex items-center gap-2">
                     <div className="h-4 w-44 max-w-[52%] rounded bg-surface-raised" />
@@ -1395,16 +1398,32 @@ function TaskListEmptyState({
     view: { title: t("taskList.empty"), hint: t("taskList.emptyHint", { shortcut }) },
   }[kind];
   const Icon = kind === "search" ? Search : kind === "issues" ? CheckCircle2 : Plus;
+  const firstRun = kind === "firstRun";
 
   return (
-    <div className="flex flex-col items-center justify-center gap-4 px-6 py-20 text-center">
-      <Icon
+    <div
+      className={cn(
+        "flex flex-col items-center justify-center gap-4 text-center motion-safe:animate-[view-enter_320ms_var(--ease-emphasized)_both]",
+        // A first run has nothing to show yet, so the empty canvas doubles as
+        // the drop target it really is: dragging a file onto the window works.
+        firstRun
+          ? "mx-3 mt-10 rounded-2xl border border-dashed border-border-subtle px-6 py-12 sm:mx-auto sm:mt-16 sm:w-full sm:max-w-md"
+          : "px-6 py-20",
+      )}
+    >
+      <span
         className={cn(
-          "h-8 w-8",
-          kind === "issues" ? "text-status-success" : kind === "search" ? "text-text-muted" : "text-accent-primary",
+          "flex h-12 w-12 items-center justify-center rounded-2xl ring-1 ring-inset",
+          kind === "issues"
+            ? "bg-status-success/12 text-status-success ring-border-success"
+            : kind === "search"
+              ? "bg-surface-hover/70 text-text-muted ring-border-divider"
+              : "bg-accent-primary/12 text-accent-primary ring-border-accent-subtle",
         )}
         aria-hidden
-      />
+      >
+        <Icon className="h-6 w-6" />
+      </span>
       <div className="space-y-1.5">
         <p className="text-sm font-medium text-text-primary">{copy.title}</p>
         {kind === "search" && allSearchMatches && allSearchMatches > 0 ? (
@@ -1443,6 +1462,7 @@ function TaskListEmptyState({
           </Button>
         ) : null}
       </div>
+      {firstRun ? <p className="max-w-sm text-xs text-text-muted">{t("toast.dropHere")}</p> : null}
     </div>
   );
 }

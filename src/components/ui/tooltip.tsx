@@ -20,7 +20,9 @@ const TooltipContent = React.forwardRef<
       // rule in globals.css applies --shadow-popover (24px blur layer) to radix
       // tooltip content; pairing that with a literal border trips the ban.
       // Sibling popover.tsx and dialog.tsx already use ring-1 for this reason.
-      "z-50 rounded-md bg-surface-popover px-2 py-1 text-xs text-text-primary shadow-md ring-1 ring-border-subtle",
+      // `ui-tooltip` carries the open animation (globals.css); Radix gives
+      // tooltips none, so they used to blink into place.
+      "ui-tooltip z-50 rounded-md bg-surface-popover px-2 py-1 text-xs text-text-primary shadow-md ring-1 ring-border-subtle",
       className,
     )}
     {...props}

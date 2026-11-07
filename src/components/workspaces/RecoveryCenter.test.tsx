@@ -161,11 +161,11 @@ describe("RecoveryCenter", () => {
 
     renderList();
     // Only the http group has auto-retryable tasks, so it is the only group
-    // whose "retry all" button is enabled.
+    // that offers "retry all".
     const retryButtons = screen.getAllByRole("button", { name: "recoveryCenter.group.retryAll" });
-    const enabled = retryButtons.filter((button) => !button.hasAttribute("disabled"));
-    expect(enabled).toHaveLength(1);
-    fireEvent.click(enabled[0]);
+    expect(retryButtons).toHaveLength(1);
+    expect(retryButtons[0]).toBeEnabled();
+    fireEvent.click(retryButtons[0]);
 
     await waitFor(() => expect(bulkResolveAttention).toHaveBeenCalledTimes(1));
     expect(bulkResolveAttention).toHaveBeenCalledWith(["http-1"], "retry");
@@ -277,7 +277,8 @@ describe("RecoveryCenter", () => {
 
     renderList();
     expect(screen.getByText("recoveryCenter.playbook.title")).toBeInTheDocument();
-    const runButtons = screen.getAllByRole("button", { name: "recoveryCenter.playbook.run" });
+    // Each "Run" button is named with its action, so the two stay distinct.
+    const runButtons = screen.getAllByRole("button", { name: /^recoveryCenter\.playbook\.run \S/ });
     expect(runButtons).toHaveLength(2);
     // The restart entry documents the destructive consequence.
     expect(screen.getByText("recoveryCenter.playbook.restart.deletes")).toBeInTheDocument();

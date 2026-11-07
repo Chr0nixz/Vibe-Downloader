@@ -83,7 +83,7 @@ const DialogContent = React.forwardRef<
         <motion.div
           ref={ref}
           className={cn(
-            "fixed left-1/2 z-50 flex w-[calc(100%-1.5rem)] max-w-lg -translate-x-1/2 flex-col overflow-hidden rounded-lg bg-surface-popover shadow-md ring-1 ring-border-subtle focus:outline-none",
+            "fixed left-1/2 z-50 flex w-[calc(100%-1.5rem)] max-w-lg -translate-x-1/2 flex-col overflow-hidden rounded-xl bg-surface-popover shadow-md ring-1 ring-border-subtle focus:outline-none",
             "top-1/2 max-h-[calc(100dvh-1.5rem)] -translate-y-1/2",
             "md:top-[16%] md:max-h-[min(40rem,calc(100dvh-2rem))] md:translate-y-0",
             className,
@@ -103,17 +103,19 @@ const DialogContent = React.forwardRef<
 DialogContent.displayName = DialogPrimitive.Content.displayName;
 
 const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
-  <div className={cn("shrink-0 border-b border-border-subtle px-4 py-3", className)} {...props} />
+  <div className={cn("shrink-0 border-b border-border-divider px-4 py-3", className)} {...props} />
 );
 
 const DialogBody = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
   <div className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4", className)} {...props} />
 );
 
+// The action row sits on a recessed band, so where the decision lives reads
+// as a separate zone from the content above it.
 const DialogFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     className={cn(
-      "flex shrink-0 flex-col-reverse gap-2 border-t border-border-subtle px-4 py-3 sm:flex-row sm:justify-end",
+      "flex shrink-0 flex-col-reverse gap-2 border-t border-border-divider bg-surface-base/45 px-4 py-3 sm:flex-row sm:justify-end",
       className,
     )}
     {...props}

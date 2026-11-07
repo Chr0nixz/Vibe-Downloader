@@ -4,6 +4,7 @@
 //! the energy accent, so the strip is quiet unless the engine is busy.
 
 import type { TFunction } from "i18next";
+import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -25,12 +26,15 @@ export function ChunkMap({
   segments,
   percent,
   taskStatus,
+  live = false,
 }: {
   cells: ChunkCell[];
   segments: readonly TaskSegment[];
   /** Whole-task progress, 0..100, for the progressbar value. */
   percent: number;
   taskStatus: TaskStatus;
+  /** Bytes are arriving right now: writing ranges glide and carry a sheen. */
+  live?: boolean;
 }) {
   const { t } = useTranslation();
   const summary = chunkSummaryForStatus(segments, taskStatus, t);
@@ -45,7 +49,10 @@ export function ChunkMap({
       aria-valuetext={`${percent}% · ${summary}`}
       className="relative h-2.5 overflow-hidden rounded-full bg-surface-track"
     >
-      {cells.map((cell) => {
+      {cells.map((cell, index) => {
+        const writing = cell.tone === "live" && cell.fill < 1;
+        // Same timing as the task row, so the strip and the row move together.
+        const motionClass = writing ? "duration-[var(--motion-progress)] ease-linear" : "duration-ui ease-out";
         const length = cell.segment.rangeEnd - cell.segment.rangeStart + 1;
         const tooltip = t("taskDetails.chunkTooltip", {
           range: `${formatBytes(cell.segment.rangeStart)} – ${formatBytes(cell.segment.rangeEnd + 1)}`,
@@ -64,19 +71,29 @@ export function ChunkMap({
             <div
               aria-hidden
               className={cn(
-                "h-full w-full origin-left transition-transform duration-ui ease-out motion-reduce:transition-none",
+                "relative h-full w-full origin-left transition-transform motion-reduce:transition-none",
+                motionClass,
+                writing && live && "progress-sheen",
                 taskStatus === "retrying" && (cell.tone === "live" || cell.tone === "done")
                   ? "bg-status-warning"
                   : TONE_FILL[cell.tone],
               )}
-              style={{ transform: `scaleX(${cell.fill})` }}
+              style={
+                {
+                  transform: `scaleX(${cell.fill})`,
+                  "--sheen-delay": `${(index % 5) * 0.37}s`,
+                } as CSSProperties
+              }
             />
-            {cell.tone === "live" && cell.fill < 1 ? (
+            {writing ? (
               // The write head: a bright edge where this connection is
               // writing. Moved by transform so progress ticks never relayout.
               <div
                 aria-hidden
-                className="absolute inset-0 border-r-2 border-text-primary/70 transition-transform duration-ui ease-out motion-reduce:transition-none"
+                className={cn(
+                  "absolute inset-0 border-r-2 border-text-primary/70 transition-transform motion-reduce:transition-none",
+                  motionClass,
+                )}
                 style={{ transform: `translateX(${(cell.fill - 1) * 100}%)` }}
               />
             ) : null}

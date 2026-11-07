@@ -64,7 +64,9 @@ export function TitleBar({ platform, onOpenPalette, onNewDownload, onOpenShortcu
       {/* biome-ignore lint/a11y/noStaticElementInteractions: Window dragging is a pointer-only native title-bar gesture; keyboard window controls remain buttons. */}
       <header
         className={cn(
-          "titlebar relative flex h-[var(--titlebar-height)] shrink-0 items-center bg-surface-base/90",
+          // Same opaque frame layer as the command bar and sidebar below it, so
+          // the chrome reads as one surface around the canvas.
+          "titlebar relative flex h-[var(--titlebar-height)] shrink-0 items-center bg-surface-frame",
           titlebarGradient && "titlebar-gradient",
           platform === "macos" && "pl-[var(--traffic-lights-inset)]",
         )}
@@ -140,6 +142,9 @@ function WindowControl({
             className,
           )}
           aria-label={label}
+          // Caption buttons are not Tab stops on Windows (Alt+F4 and Win+Up/Down
+          // cover them); in the Tab order they came before New Download.
+          tabIndex={-1}
           onClick={onClick}
         >
           {children}

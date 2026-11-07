@@ -1,6 +1,11 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
+/* `dark:` follows the app's theme class (what tokens.css keys on), not the
+   OS media query: with the app set to dark on a light OS, every `dark:`
+   utility used to stay on its light value. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   --vibe-font-sans:
     "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", "Source Han Sans CN", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic", "MS PGothic", sans-serif;
@@ -16,6 +21,7 @@
 
 @theme inline {
   --color-surface-root: var(--surface-root);
+  --color-surface-frame: var(--surface-frame);
   --color-surface-base: var(--surface-base);
   --color-surface-raised: var(--surface-raised);
   --color-surface-track: var(--surface-track);
@@ -24,8 +30,6 @@
   --color-surface-popover: var(--surface-popover);
   --color-surface-scrim: var(--surface-scrim);
   --color-surface-hover: var(--surface-hover);
-  --color-surface-list-well: var(--surface-list-well);
-  --color-surface-row: var(--surface-row);
   --color-border-subtle: var(--border-subtle);
   --color-border-divider: var(--border-divider);
   --color-border-panel: var(--border-panel);
@@ -42,8 +46,6 @@
   --color-border-accent: var(--border-accent);
   --color-border-accent-subtle: var(--border-accent-subtle);
   --color-border-hover: var(--border-hover);
-  --color-row-border: var(--row-border);
-  --color-row-border-hover: var(--row-border-hover);
   --color-text-primary: var(--text-primary);
   --color-text-secondary: var(--text-secondary);
   --color-text-muted: var(--text-muted);
@@ -59,6 +61,7 @@
   --shadow-popover: var(--shadow-popover);
   --shadow-overlay: var(--shadow-overlay);
   --shadow-toast: var(--shadow-toast);
+  --shadow-canvas: var(--shadow-canvas);
   --duration-ui: var(--motion-ui);
   --ease-ui: ease-out;
   --font-sans: var(--vibe-font-sans);
@@ -97,6 +100,26 @@
     color: var(--text-muted);
   }
 
+  /* Browser-drawn surfaces take the palette too: the default blue selection,
+     black caret and grey scrollbar were the parts no theme reached. Width
+     stays the platform's thin variant, not a custom-drawn bar. */
+  ::selection {
+    background-color: color-mix(in oklch, var(--accent-primary) 28%, transparent);
+  }
+
+  input,
+  textarea {
+    caret-color: var(--accent-primary);
+  }
+
+  html {
+    scrollbar-color: color-mix(in oklch, var(--text-muted) 40%, transparent) transparent;
+  }
+
+  * {
+    scrollbar-width: thin;
+  }
+
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;
@@ -129,22 +152,19 @@
   }
 }
 
+/* Completion: the row lights up once in the success hue and settles back.
+   Drawn on a pseudo-element so the flash never fights the row's own hover or
+   selection fill, and leaves nothing behind when the class is removed. It is
+   a fade with no movement, so reduced motion keeps it. */
 @keyframes completion-glow {
   0% {
-    box-shadow: 0 0 0 0 transparent;
-    border-color: var(--row-border);
+    opacity: 0;
   }
   18% {
-    box-shadow:
-      0 0 0 2px color-mix(in oklch, var(--status-success) 22%, transparent),
-      0 0 10px color-mix(in oklch, var(--status-success) 14%, transparent);
-    border-color: color-mix(in oklch, var(--status-success) 55%, var(--row-border));
+    opacity: 1;
   }
-  /* Must return to the neutral border: the animation uses fill-mode `both`, so
-     whatever this frame holds becomes the row's permanent state. */
   100% {
-    box-shadow: 0 0 0 0 transparent;
-    border-color: var(--row-border);
+    opacity: 0;
   }
 }
 
@@ -160,8 +180,125 @@
   }
 }
 
-.completion-flash {
-  animation: completion-glow 1.1s cubic-bezier(0.16, 1, 0.3, 1) both;
+.completion-flash::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background-color: color-mix(in oklch, var(--status-success) 9%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--status-success) 50%, transparent);
+  opacity: 0;
+  animation: completion-glow 1.2s var(--ease-emphasized);
+}
+
+/* Live transfer sheen: a soft highlight travels along a fill while bytes are
+   arriving, the way a native progress bar shows it is not frozen. Only rows
+   that are actually receiving data get it; paused, stalled and retrying fills
+   stay still. Each chunk sets its own delay so parallel connections do not
+   pulse in lockstep. */
+@keyframes progress-sheen {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+
+.progress-sheen {
+  overflow: hidden;
+}
+
+.progress-sheen::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 40%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, oklch(1 0 0 / 0.5), transparent);
+  animation: progress-sheen 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  animation-delay: var(--sheen-delay, 0s);
+}
+
+/* The app sits beside an editor for hours, so a list of live fills must not
+   shimmer in peripheral vision. In the task list the sheen runs only on the
+   row being looked at (hovered, focused or selected); the details panel shows
+   the selected task and keeps it. */
+[data-task-row]:not(:hover, :focus-within, [aria-current="true"]) .progress-sheen::after {
+  display: none;
+}
+
+/* Status-bar live marker: a soft ring expands from the dot three times when
+   transfers start, then the dot holds still; it is absent when idle. */
+@keyframes live-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.6;
+  }
+  80%,
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+
+.live-dot {
+  position: relative;
+}
+
+.live-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: inherit;
+  animation: live-ping 2s cubic-bezier(0, 0, 0.2, 1) 3;
+}
+
+/* While the window is in the background (the user is working in another app)
+   nothing in it moves; the static fill and dot still report the state. */
+:root[data-window-inactive] .progress-sheen::after,
+:root[data-window-inactive] .live-dot::after {
+  display: none;
+}
+
+/* Arrival of a view or an empty state: settles from a few pixels below,
+   starting already half visible so nothing waits on the animation. */
+@keyframes view-enter {
+  from {
+    opacity: 0.4;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Radix tooltips and context menus have no motion of their own. They grow
+   from the trigger side using Radix's computed origin. */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.ui-tooltip[data-state="delayed-open"],
+.ui-tooltip[data-state="instant-open"] {
+  transform-origin: var(--radix-tooltip-content-transform-origin);
+  animation: pop-in 140ms var(--ease-emphasized);
+}
+
+.ui-menu[data-state="open"] {
+  transform-origin: var(--radix-context-menu-content-transform-origin);
+  animation: pop-in 150ms var(--ease-emphasized);
 }
 
 .completion-flash-progress {
@@ -169,10 +306,21 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .completion-flash,
   .completion-flash-progress {
     animation: none;
     transition: none;
+  }
+
+  /* Spatial movement goes; the fades above that carry state stay. */
+  .progress-sheen::after,
+  .live-dot::after {
+    animation: none;
+    display: none;
+  }
+
+  .ui-tooltip[data-state],
+  .ui-menu[data-state] {
+    animation: none;
   }
 
   /* Tailwind animate-pulse is used by a few skeletons; disable globally. */
@@ -276,11 +424,9 @@
   }
 }
 
-/* ── Titlebar ── */
-
-.titlebar {
-  box-shadow: 0 1px 0 0 var(--border-subtle);
-}
+/* ── Titlebar ──
+   No divider of its own: titlebar, command bar and sidebar are one frame,
+   and the inset canvas edge is what separates chrome from content. */
 
 .titlebar-gradient::after {
   content: "";
@@ -429,6 +575,20 @@
   opacity: 1;
 }
 
+/* The check lands with a small settle so a toggle is felt, not just seen. */
+@keyframes check-pop {
+  from {
+    transform: scale(0.4);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+.ui-checkbox:checked::after {
+  animation: check-pop 180ms var(--ease-emphasized);
+}
+
 /* Box fill for the indeterminate state — explicit so we don't depend on the
    Tailwind `indeterminate:` variant being available. */
 .ui-checkbox:indeterminate {
@@ -449,6 +609,10 @@
 @media (prefers-reduced-motion: reduce) {
   .ui-checkbox::after {
     transition: none;
+  }
+
+  .ui-checkbox:checked::after {
+    animation: none;
   }
 
   .ui-switch,

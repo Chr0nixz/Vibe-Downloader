@@ -1,6 +1,14 @@
 # Vibe Downloader Product Context
 
+<!-- impeccable:product-schema 1 -->
+
 register: product
+
+## Platform
+
+web
+
+The interface is React rendered in a Tauri 2 desktop webview, not native iOS or Android UI. Windows is the primary target; macOS and Linux stay portable.
 
 ## Product Purpose
 
@@ -14,6 +22,51 @@ The product should feel fast, reliable, and visually polished without becoming n
 - Power users who often download large files such as system images, developer tools, game packages, archives, datasets, and model files.
 - Users on shared home or office networks who need global speed limits and predictable queue control.
 - Users disappointed by old download managers that feel visually dated, cluttered, or hard to trust after crashes.
+
+Today the builds reach a small group of early testers through GitHub candidate packages and source. Vibe Downloader is not yet publicly released.
+
+## Positioning
+
+Vibe Downloader competes on trust the user can check, not on speed claims or protocol count. A resume never puts the file at risk. Crashes and network failures recover. Every failure names its cause, a concrete recovery, and what that recovery costs, such as the bytes a restart throws away. The Integrity Passport reports only what the evidence supports: a missing remote checksum is shown as "not provided", never as "verified".
+
+Speed and protocol breadth are real, but they come second. Dynamic connections are explained through measurable state, and lower-maturity protocols state their limits instead of hiding them.
+
+## Operating Context
+
+- The app stays open beside a browser or code editor for hours while large files download. It also runs in the tray with close-to-tray, a floating status window, notifications, completion actions, and scheduled download windows.
+- Downloads arrive through browser extension handoff (Native Messaging and a local WebSocket bridge, HTTP/HTTPS only), clipboard link detection, the New Download dialog, batch import, and dragging `.torrent`, `.metalink`, `.mpd`, or text files onto the window.
+- On shared networks, users rely on global and per-task speed limits, per-host connection slots, priorities, and the queue.
+- The window may be maximized, snapped to half a screen, or kept narrow. Phone-width layouts exist for small windows, but the product is a desktop app.
+- Release stage: `0.5.0`, in active development, used by a small group of early testers. There is no OS code signing or notarization and no browser-store identity yet, and candidate packages are not public releases.
+
+## Capabilities and Constraints
+
+- HTTP/HTTPS is the most mature path. FTP/FTPS, SFTP, BitTorrent, HLS, static DASH, WebDAV, and Metalink work to different depths, and each has documented boundaries in `docs/protocol-reliability-matrix.md`.
+- Stable boundaries:
+  - Browser handoff accepts HTTP/HTTPS only. It rejects embedded URL credentials and browser-controlled save paths.
+  - Header forwarding stays explicit, allowlisted, local-only, and encrypted when persisted.
+  - Intranet targets need per-task authorization.
+  - HLS AES-128 support does not imply DRM.
+  - An unsupported proxy and protocol combination fails explicitly instead of silently bypassing the proxy.
+- Automatic browser capture and Cookie/header forwarding are experimental, development-profile features. They are excluded from candidate and release packages.
+- Deferred, not promised:
+  - cloud-drive parsing
+  - complete media sniffing
+  - plugin protocols
+  - CLI, JSON-RPC, or REST automation
+  - PAC/WPAD proxy support
+  - Safari distribution
+- Languages: English and Simplified Chinese are the stable, maintained locales. Traditional Chinese, Japanese, Korean, Russian, and Spanish ship as beta and are only maintained when that is explicitly requested.
+- Product terms used in the UI and docs:
+  - Needs you
+  - Recovery Center
+  - Queue Center
+  - Attention Center
+  - Storage & Cleanup Center
+  - Backup & Migration Center
+  - Integrity Passport
+  - chunk map
+- License: GPL-3.0-only. Commercial licensing is available separately from the copyright holder.
 
 ## Core Promise
 
@@ -40,6 +93,11 @@ Users should understand download health at a glance. The app should automaticall
 
 The product may feel energetic during high-speed download moments, but it should not feel like a game launcher, crypto dashboard, or generic neon admin template.
 
+## Brand Commitments
+
+- The name is Vibe Downloader. The logo is the ring mark in `public/logo-48.png`, `public/logo-64.png`, and `public/favicon.png`.
+- The README discloses that the project is developed mainly with AI assistance, with human review of direction and acceptance. Capability claims follow the current implementation and its evidence.
+
 ## Tone Of Voice
 
 Use short, clear, action-oriented copy.
@@ -58,6 +116,29 @@ Avoid:
 - Marketing claims such as "AI accelerated"
 - Raw technical codes without explanation
 - Overly playful copy during failures
+
+## Evidence on Hand
+
+Citable, with its limits stated:
+
+- **Local performance baseline:** `docs/performance-baseline-results.md` has headless 1k and 10k task measurements on `0.5.0`, taken on one Windows development machine. These are local measurements, not cross-machine guarantees.
+- **Automated protocol evidence:** `docs/protocol-reliability-matrix.md` covers local fake servers and integration tests.
+- **Candidate-package evidence:** `docs/b7-acceptance-matrix-2026-10-02.md` records candidate-package smoke tests and real-environment acceptance status. Neither document is field-verified reliability.
+
+Absent, and must not be fabricated or implied:
+
+- testimonials, reviews, user counts, case studies, or press
+- cross-machine speed benchmarks, or comparisons such as "faster than IDM"
+- field-verified protocol reliability
+- signed or notarized distribution, store listings, or completed upgrade validation
+
+## Product Principles
+
+1. Correctness before capability. Anything that risks a corrupt file or a silently wrong state waits, however much it is wanted. Reliability outranks new protocols and service entry points.
+2. Claims match evidence. The product says only what the engine can prove and names its boundaries. Early-tester builds are never presented as a finished IDM replacement.
+3. Every failure leads somewhere. A stopped task names its cause, the recovery, and that recovery's cost before the user commits.
+4. The browser is the front door. Handoff from the browser is a first-class daily path, and its permissions never quietly widen into download permission.
+5. Problems stay visible. Calm is the default state, but anything waiting on the user is always findable from chrome that stays on screen.
 
 ## Strategic Priorities
 
@@ -83,3 +164,10 @@ Avoid:
 - A failed task explains what happened and offers a concrete recovery path.
 - A large interrupted download can resume without file corruption.
 - The interface looks modern to mainstream users while still rewarding expert inspection.
+
+## Accessibility & Inclusion
+
+- Target WCAG AA contrast in both light and dark themes.
+- Every primary workflow is reachable from the keyboard. The command palette speeds things up but is never the only path.
+- State is never carried by color alone, and state changes have accessible text equivalents.
+- Reduced-motion preferences are honored.

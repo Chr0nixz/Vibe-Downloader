@@ -18,6 +18,7 @@ import {
   Settings,
   TriangleAlert,
 } from "lucide-react";
+import { motion, useReducedMotion } from "motion/react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -159,7 +160,9 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
       <div className="order-2 flex shrink-0 flex-col md:order-1 md:w-[var(--shell-nav-width-compact)] lg:w-auto">
         <nav
           className={cn(
-            "hidden min-h-0 flex-1 flex-col items-stretch justify-between gap-1 border-r border-border-subtle bg-surface-base p-1.5 md:flex",
+            // No right rule: the rail is frame, and the canvas edge beside it
+            // separates navigation from content.
+            "hidden min-h-0 flex-1 flex-col items-stretch justify-between gap-1 bg-surface-frame p-1.5 md:flex",
             !collapsed && "lg:w-[var(--shell-nav-width)] lg:p-2",
           )}
           aria-label={t("app.navAria")}
@@ -203,8 +206,8 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
                   aria-controls="other-task-views"
                   onClick={() => setOtherViewsExpanded((expanded) => !expanded)}
                   className={cn(
-                    "relative h-10 w-full flex-none flex-col items-center justify-start gap-1 px-1 text-xs",
-                    "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-2 lg:px-3",
+                    "relative h-auto min-h-12 w-full flex-none flex-col items-center justify-center gap-0.5 px-0 py-1.5 text-[11px] leading-tight",
+                    "lg:h-9 lg:min-h-0 lg:flex-row lg:items-center lg:justify-start lg:gap-2 lg:px-3 lg:py-0 lg:text-xs",
                     collapsed && "lg:justify-center lg:px-0",
                     otherViewsActive && [
                       "bg-accent-primary/15 dark:bg-accent-primary/20",
@@ -216,7 +219,11 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
                 >
                   <MoreHorizontal className="h-[18px] w-[18px] shrink-0" aria-hidden />
                   <span
-                    className={cn("hidden truncate lg:inline lg:text-sm lg:leading-normal", collapsed && "lg:hidden")}
+                    className={cn(
+                      "max-w-full whitespace-normal text-center line-clamp-2",
+                      "lg:inline lg:truncate lg:whitespace-nowrap lg:text-left lg:text-sm lg:leading-normal",
+                      collapsed && "lg:hidden",
+                    )}
                   >
                     {t("nav.otherViews")}
                   </span>
@@ -230,7 +237,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
                   />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="right" className="hidden md:block lg:hidden">
+              <TooltipContent side="right" className={cn("hidden", collapsed && "lg:block")}>
                 {t("nav.otherViews")}
               </TooltipContent>
             </Tooltip>
@@ -316,7 +323,7 @@ export function Sidebar({ onNewDownload }: { onNewDownload?: () => void }) {
         </nav>
 
         <nav
-          className="order-2 flex h-14 w-full items-stretch justify-around border-t border-border-subtle bg-surface-base px-1 pb-[env(safe-area-inset-bottom)] md:hidden"
+          className="order-2 flex h-14 w-full items-stretch justify-around bg-surface-frame px-1 pb-[env(safe-area-inset-bottom)] md:hidden"
           aria-label={t("app.navAria")}
         >
           {mobilePrimaryItems.map((item) => (
@@ -414,32 +421,34 @@ function NavItem({
           aria-current={active ? "page" : undefined}
           aria-label={showBadge ? `${label} (${count})` : label}
           className={cn(
-            // ── Compact rail: full-width row, icon stacked over the label ──
-            "relative h-10 w-full flex-none flex-col items-start justify-start gap-1 px-1 text-xs",
-            "lg:h-9 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3",
+            // ── Tablet rail: icon stacked over an 11px label, as in the bottom
+            // bar. `isolate` lets the sliding plate sit at -z-10: above the
+            // button's own hover fill, below the icon and label.
+            "relative isolate h-auto min-h-12 w-full flex-none flex-col items-center justify-center gap-0.5 px-0 py-1.5 text-[11px] leading-tight",
+            "lg:h-9 lg:min-h-0 lg:flex-row lg:items-center lg:justify-start lg:gap-3 lg:px-3 lg:py-0 lg:text-xs",
             // ── Collapsed (lg): label and badge are hidden, so center the
             // lone icon within the compact nav column instead of left-aligning it.
             compact && "lg:justify-center lg:px-0",
-            // ── Override button transition ──
-            "transition-[color,background-color,box-shadow,border-color] duration-[var(--motion-ui)] ease-out",
-            // ── Active: anchored indicator (no side-stripe; uses inset ring + stronger tint) ──
-            active && [
-              // Layer 1 — stronger accent fill (15%, was 10%) so the active item reads
-              "bg-accent-primary/15 dark:bg-accent-primary/20",
-              // Layer 2 — inset accent ring anchors the item (replaces the prior invisible 6% overlay)
-              "shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
-              // Layer 3 — accent text + medium weight
-              "font-medium text-accent-primary",
-            ],
+            // ── Override button transition (no box-shadow: the focus ring is one) ──
+            "transition-[color,background-color,border-color] duration-[var(--motion-ui)] ease-out",
+            // ── Active: accent text on the shared sliding plate below ──
+            active && "font-medium text-accent-primary hover:bg-transparent",
             // ── Inactive ──
             !active && ["text-text-secondary", "hover:bg-surface-raised hover:text-text-primary"],
           )}
         >
-          {/* Icon — left-aligned (no mx-auto) */}
+          {active ? <ActivePlate layoutId="sidebar-active-plate" /> : null}
           <Icon className="h-[18px] w-[18px] shrink-0" aria-hidden />
 
-          {/* The tablet rail keeps only icons; expanded desktop restores labels. */}
-          <span className={cn("hidden truncate lg:inline lg:text-sm lg:leading-normal", compact && "lg:hidden")}>
+          {/* Every tier names its destinations except the collapsed desktop
+              rail, which the user chose and which keeps a tooltip. */}
+          <span
+            className={cn(
+              "max-w-full whitespace-normal text-center line-clamp-2",
+              "lg:inline lg:truncate lg:whitespace-nowrap lg:text-left lg:text-sm lg:leading-normal",
+              compact && "lg:hidden",
+            )}
+          >
             {label}
           </span>
 
@@ -459,8 +468,8 @@ function NavItem({
           )}
         </Button>
       </TooltipTrigger>
-      {/* The tablet rail has no inline labels; collapsed desktop keeps the same hint. */}
-      <TooltipContent side="right" className="hidden md:block lg:hidden">
+      {/* Only the collapsed desktop rail hides its labels, so only it needs the hint. */}
+      <TooltipContent side="right" className={cn("hidden", compact && "lg:block")}>
         {label}
         {showBadge ? ` (${count})` : null}
       </TooltipContent>
@@ -471,6 +480,25 @@ function NavItem({
   // settings/about fall through to the outer <nav> context menu.
   if (!contextMenuItems) return button;
   return <RegionContextMenu items={contextMenuItems}>{button}</RegionContextMenu>;
+}
+
+/** The current view's plate. Each nav shares one layoutId, so changing views
+ * slides the plate from the old entry to the new one instead of blinking it
+ * off and on — the one place navigation itself is allowed to move. */
+function ActivePlate({ layoutId, className }: { layoutId: string; className?: string }) {
+  const reduceMotion = useReducedMotion();
+  return (
+    <motion.span
+      layoutId={layoutId}
+      aria-hidden
+      className={cn(
+        "absolute -z-10 rounded-md bg-accent-primary/15 dark:bg-accent-primary/20",
+        "shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
+        className ?? "inset-0",
+      )}
+      transition={reduceMotion ? { duration: 0 } : { duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+    />
+  );
 }
 
 function MobileBottomItem({
@@ -498,10 +526,11 @@ function MobileBottomItem({
       aria-current={active ? "page" : undefined}
       aria-label={showBadge ? `${label} (${count})` : label}
       className={cn(
-        "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 text-[11px] leading-tight",
-        active ? "bg-accent-primary/12 font-medium text-accent-primary" : "text-text-secondary",
+        "relative isolate flex h-full min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 text-[11px] leading-tight",
+        active ? "font-medium text-accent-primary hover:bg-transparent" : "text-text-secondary",
       )}
     >
+      {active ? <ActivePlate layoutId="bottom-nav-active-plate" className="inset-x-1 inset-y-1.5" /> : null}
       <Icon className="h-5 w-5 shrink-0" aria-hidden />
       <span className="max-w-full whitespace-normal text-center leading-tight line-clamp-2">{label}</span>
       {showBadge ? (

@@ -48,6 +48,8 @@ Recommended dark tokens:
 
 - `surface.root`: `oklch(0.145 0.006 255)`
 - `surface.base`: `oklch(0.18 0.008 255)`
+- `surface.frame`: `surface.base` mixed with 3% of `accent.primary` (titlebar, command bar, sidebar, status bar)
+- `canvas.edge`: `oklch(0.27 0.011 255)` (1px stroke around the content canvas)
 - `surface.raised`: `oklch(0.25 0.011 255)`
 - `surface.overlay`: `oklch(0.255 0.013 255 / 0.82)` (floating status window and tray menu only; they sit over the desktop)
 - `surface.popover`: `oklch(0.255 0.013 255)` (dialogs, palette, toasts, menus, tooltips: opaque, because nothing blurs behind them and the task list would read through the copy)
@@ -66,6 +68,8 @@ Recommended light tokens:
 
 - `surface.root`: `oklch(0.975 0.004 255)`
 - `surface.base`: `oklch(0.955 0.006 255)`
+- `surface.frame`: `surface.base` mixed with 3% of `accent.primary`
+- `canvas.edge`: `oklch(0.87 0.009 255)`, plus a soft drop shadow so the light canvas lifts off the frame
 - `surface.raised`: `oklch(1 0.002 255)`
 - `surface.overlay`: `oklch(1 0.002 255 / 0.94)`
 - `surface.popover`: `oklch(1 0.002 255)`
@@ -76,7 +80,7 @@ Recommended light tokens:
 - `accent.primary`: `oklch(0.4 0.18 235)`
 - `accent.energy`: `oklch(0.38 0.15 165)`
 - `status.success`: `oklch(0.27 0.14 150)`
-- `status.warning`: `oklch(0.52 0.13 65)` (reads as amber; the earlier `oklch(0.3 0.14 75)` rendered olive-brown)
+- `status.warning`: `oklch(0.48 0.13 65)` (reads as amber; the earlier `oklch(0.3 0.14 75)` rendered olive-brown, and `oklch(0.52 0.13 65)` fell to 4.3:1 for a 12px badge on its tint)
 - `status.danger`: `oklch(0.38 0.18 25)`
 
 ## Typography
@@ -113,10 +117,14 @@ Primary structure:
 - Optional right detail panel.
 - Bottom global status bar.
 
+Frame and canvas: the titlebar, command bar, sidebar, and status bar are one `surface.frame` layer with no dividers between them. The content (task list, centers, settings) sits on an inset `surface.root` canvas with a 12px leading radius and a `canvas.edge` stroke; that stroke is the only line between chrome and content. On narrow windows the canvas runs edge to edge.
+
+Task rows have no rules between them. A 4px gap separates rows; hover and selection draw a rounded plate (selection adds an inset accent outline), and failed or waiting rows keep a hairline outline in their status hue, with the recovery band as the row's lower section.
+
 Responsive behavior:
 
 - Wide window: navigation, task list, and detail panel can be visible together.
-- Medium window (560–1199px, including a window snapped to half a screen): detail panel becomes an overlay drawer; below 1024px, or under 600px tall, the command bar moves into the titlebar so the list keeps the height.
+- Medium window (560–1199px, including a window snapped to half a screen): detail panel becomes an overlay drawer that stops above the status bar, and a docked panel closes instead of turning into a drawer when the window shrinks; below 1024px, or under 600px tall, the command bar moves into the titlebar so the list keeps the height. Below 1024px the navigation is a 5rem rail with an 11px label under every icon, never icons alone.
 - Narrow window (below 560px, the `md` breakpoint): task rows become compact single-column cards with 44px targets and bottom navigation, but the default task model remains list-based. A snapped desktop window with a mouse is not a narrow window.
 
 Do not use a default grid of large task cards for the main task manager. It reduces scan speed and weakens comparison between tasks.
@@ -171,6 +179,17 @@ Timing:
 - Command palette: 120 to 180 ms.
 - Detail expansion: 180 to 260 ms.
 - Progress visual interpolation can be continuous, but real engine events should be batched.
+- Active progress fills glide linearly over `--motion-progress` (800 ms) between ticks; idle fills settle in 150 ms.
+
+Motion vocabulary (each one carries a state change):
+
+- Navigation: the selected item's plate slides between entries (shared layout, 280 ms); a view settles in from 6px below at 40% opacity (220 ms) without remounting the list.
+- Live transfer: a sheen travels along a fill only while bytes arrive (downloading with speed above zero), offset per chunk so parallel connections do not pulse together. In the task list it runs only on the row being looked at (hovered, focused, or selected), because the app sits beside other work for hours. The status bar shows an energy dot while anything transfers; it pings three times when transfers start, then holds still. Nothing moves while the window is in the background.
+- State flips: a row's status badge re-enters when its state changes, Pause/Resume glyphs cross-rotate, and a checkbox check settles in.
+- Completion: a success-tinted fade over the row (opacity only, so reduced motion keeps it).
+- Surfaces: popovers, menus, and tooltips grow from their trigger side.
+
+Reduced motion removes the sheen, the ping, the slide, the view settle, and the glyph rotation; fades that report state stay.
 
 ## Glass And Mica
 

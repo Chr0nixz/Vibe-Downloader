@@ -28,7 +28,15 @@ import {
   Trash2,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { type MouseEventHandler, memo, type ReactNode, useCallback, useMemo, useState } from "react";
+import {
+  type CSSProperties,
+  type MouseEventHandler,
+  memo,
+  type ReactNode,
+  useCallback,
+  useMemo,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import {
   hasInlineRecovery,
@@ -43,6 +51,7 @@ import { type ReorderAction, TaskContextMenu } from "@/components/tasks/TaskCont
 import { recoveryActionIcon, recoveryTone, restartCost } from "@/components/tasks/TaskRecoveryActions";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { IconSwap } from "@/components/ui/icon-swap";
 import { Popover, PopoverClose, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -136,14 +145,16 @@ function statusBadge(status: Task["status"]): string {
       return "bg-surface-hover text-text-primary";
     // Moving but fighting errors is the state a glance has to catch, so it
     // takes the warning tint instead of looking like a healthy download.
+    // Warning badges keep a 10% tint in both themes: 15% under 12px amber text
+    // fell below 4.5:1 in a selected light row.
     case "retrying":
-      return "bg-status-warning/15 dark:bg-status-warning/10 text-status-warning";
+      return "bg-status-warning/10 text-status-warning";
     case "completed":
       return "bg-status-success/15 dark:bg-status-success/10 text-status-success";
     case "failed":
       return "bg-status-danger/15 dark:bg-status-danger/10 text-status-danger";
     case "needs_attention":
-      return "bg-status-warning/15 dark:bg-status-warning/10 text-status-warning";
+      return "bg-status-warning/10 text-status-warning";
     case "paused":
       return "text-text-muted";
     case "queued":
@@ -563,6 +574,7 @@ export const TaskRow = memo(function TaskRow({
       {/* biome-ignore lint/a11y/useSemanticElements: The virtualizer inserts a measured div between the list and each row, so an explicit listitem role preserves the accessibility tree. */}
       <div
         id={`task-row-${task.id}`}
+        data-task-row
         role="listitem"
         aria-current={selected ? "true" : undefined}
         aria-posinset={position}
@@ -634,25 +646,39 @@ export const TaskRow = memo(function TaskRow({
           }
         }}
         className={cn(
-          // Normal rows stay quiet and aligned; stateful rows add only a tint and
-          // inset focus ring so the list scans as one surface instead of a stack of cards.
-          "group relative overflow-hidden border-b border-border-subtle/70 bg-transparent transition-[background-color,border-color] duration-ui ease-out hover:bg-surface-hover/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary sm:px-3",
+          // One surface, no rules between rows: a few pixels of canvas separate
+          // them, and hover or selection draws a rounded plate under the row —
+          // a native list, not a ruled table and not a stack of cards.
+          "group relative overflow-hidden rounded-lg bg-transparent transition-[background-color,box-shadow] duration-150 ease-out hover:bg-surface-hover/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary sm:px-3",
           compact ? "px-2.5 py-1" : "px-2.5 py-2 md:py-1.5",
-          "grid gap-x-3 md:grid-cols-[minmax(0,1fr)_minmax(12rem,14rem)]",
+          // The single phone column is `minmax(0,1fr)`, not the implicit `auto`:
+          // an auto track grew to the recovery band's untruncated cause text
+          // and pushed its Restart button past the clipped edge at 375px.
+          "grid grid-cols-[minmax(0,1fr)] gap-x-3 md:grid-cols-[minmax(0,1fr)_minmax(12rem,14rem)]",
           // Compact parks the actions beside the content from `sm` up, the same
           // trick the desktop rail uses. Below `sm` there is no room for both a
           // readable filename and three 36px touch targets, so it stays stacked.
           compact && "sm:grid-cols-[minmax(0,1fr)_auto]",
           compact ? "gap-y-1" : "gap-y-2",
           completionFlash && "completion-flash",
-          // Selected: stronger accent fill + inset accent ring so the row anchors.
+          // Selected: accent fill + an inset accent outline so the row anchors.
           selected &&
-            "border-border-accent bg-accent-primary/10 shadow-[inset_0_1px_0_color-mix(in_oklch,var(--accent-primary)_35%,transparent)]",
-          multiSelected && !selected && "border-border-accent-subtle bg-accent-primary/[0.06]",
+            "bg-accent-primary/10 shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_32%,transparent)] hover:bg-accent-primary/[0.13]",
+          multiSelected &&
+            !selected &&
+            "bg-accent-primary/[0.06] shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--accent-primary)_16%,transparent)] hover:bg-accent-primary/[0.09]",
           // Shift-select anchor: bump the tint so users can see the range origin.
           isShiftAnchor && (selected || multiSelected) && "bg-accent-primary/[0.14]",
-          task.status === "failed" && !selected && "border-border-danger-subtle",
-          task.status === "needs_attention" && !selected && "border-border-warning-subtle",
+          // A stopped row keeps a hairline outline in its own hue, so trouble
+          // is framed before the eye even reaches the badge.
+          task.status === "failed" &&
+            !selected &&
+            !multiSelected &&
+            "shadow-[inset_0_0_0_1px_var(--border-danger-subtle)]",
+          task.status === "needs_attention" &&
+            !selected &&
+            !multiSelected &&
+            "shadow-[inset_0_0_0_1px_var(--border-warning-subtle)]",
         )}
       >
         <div className="flex min-w-0 gap-2.5">
@@ -703,7 +729,18 @@ export const TaskRow = memo(function TaskRow({
                     draggable={false}
                   />
                 ) : (
-                  <Icon className={compact ? "h-7 w-7 md:h-6 md:w-6" : "h-10 w-10 md:h-7 md:w-7"} />
+                  // The line-art fallback sits on a soft tile the size of a
+                  // system icon, so rows keep one rhythm whichever source wins;
+                  // the tile takes the accent when its row is the current one.
+                  <span
+                    className={cn(
+                      "flex items-center justify-center rounded-lg transition-colors duration-ui",
+                      compact ? "h-8 w-8 md:h-7 md:w-7" : "h-11 w-11 md:h-8 md:w-8",
+                      selected ? "bg-accent-primary/15 text-accent-primary" : "bg-surface-hover/70",
+                    )}
+                  >
+                    <Icon className={compact ? "h-4 w-4" : "h-5 w-5 md:h-4 md:w-4"} />
+                  </span>
                 )}
               </span>
             );
@@ -726,11 +763,14 @@ export const TaskRow = memo(function TaskRow({
                     const badgeIcon = statusBadgeIcon(task.status);
                     return (
                       <motion.span
+                        // Keyed by state, so a transition (downloading → done,
+                        // → failed) re-enters the badge and the change is seen.
+                        key={isFinalizing ? "finishing" : task.status}
                         id={statusId}
                         title={queueReasonLabel ?? undefined}
-                        initial={reduceMotion ? false : { opacity: 0, scale: 0.96 }}
+                        initial={reduceMotion ? false : { opacity: 0, scale: 0.85 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                        transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
                         className={cn(
                           "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-xs font-semibold leading-none",
                           statusBadge(task.status),
@@ -911,6 +951,9 @@ const RowProgress = memo(function RowProgress({
     return base ? interpolateChunkCells(base, task.downloadedBytes) : null;
   }, [segments, task.totalSize, task.status, task.downloadedBytes]);
   const retrying = task.status === "retrying";
+  // Only a transfer that is actually receiving bytes shows motion; a stalled,
+  // retrying or finishing one keeps a still fill so the sheen never lies.
+  const live = task.status === "downloading" && task.speedBps > 0 && progress < 1;
 
   if (!cells || !segments) {
     return (
@@ -918,7 +961,8 @@ const RowProgress = memo(function RowProgress({
         value={progress}
         label={label}
         active={isActive}
-        smooth={!isActive}
+        smooth
+        live={live}
         tone={retrying ? "warning" : "primary"}
         size={compact ? "compact" : "default"}
         className={flash ? "completion-flash-progress" : undefined}
@@ -933,6 +977,7 @@ const RowProgress = memo(function RowProgress({
       percent={percent}
       summary={chunkSummaryForStatus(segments, task.status, t)}
       retrying={retrying}
+      live={live}
       compact={compact}
     />
   );
@@ -944,6 +989,7 @@ function RowChunkBar({
   percent,
   summary,
   retrying,
+  live,
   compact,
 }: {
   cells: readonly ChunkCell[];
@@ -951,8 +997,12 @@ function RowChunkBar({
   percent: number;
   summary: string;
   retrying: boolean;
+  live: boolean;
   compact: boolean;
 }) {
+  // Live ranges glide between ticks like the single bar does; the write head
+  // shares the duration so it stays on the fill's edge.
+  const liveMotion = "duration-[var(--motion-progress)] ease-linear";
   return (
     <div
       role="progressbar"
@@ -964,33 +1014,49 @@ function RowChunkBar({
       data-chunk-bar
       className={cn("relative overflow-hidden rounded-full bg-surface-track", compact ? "h-0.5" : "h-1.5")}
     >
-      {cells.map((cell) => (
-        <div
-          key={cell.id}
-          // The 1px seam in the track colour is what makes adjacent ranges
-          // read as separate connections instead of one fill.
-          className="absolute inset-y-0 overflow-hidden shadow-[inset_-1px_0_0_var(--surface-track)]"
-          style={{ left: `${cell.leftPct}%`, width: `${cell.widthPct}%` }}
-        >
+      {cells.map((cell, index) => {
+        const writing = cell.tone === "live" && cell.fill > 0 && cell.fill < 1;
+        return (
           <div
-            aria-hidden
-            className={cn(
-              "h-full w-full origin-left transition-transform duration-ui ease-out motion-reduce:transition-none",
-              retrying && (cell.tone === "live" || cell.tone === "done") ? "bg-status-warning" : CHUNK_FILL[cell.tone],
-            )}
-            style={{ transform: `scaleX(${cell.fill})` }}
-          />
-          {cell.tone === "live" && cell.fill > 0 && cell.fill < 1 ? (
-            // Write head: where this connection is writing right now. Moved by
-            // transform so progress ticks never relayout the row.
+            key={cell.id}
+            // The 1px seam in the track colour is what makes adjacent ranges
+            // read as separate connections instead of one fill.
+            className="absolute inset-y-0 overflow-hidden shadow-[inset_-1px_0_0_var(--surface-track)]"
+            style={{ left: `${cell.leftPct}%`, width: `${cell.widthPct}%` }}
+          >
             <div
               aria-hidden
-              className="absolute inset-0 border-r border-text-primary/80 transition-transform duration-ui ease-out motion-reduce:transition-none"
-              style={{ transform: `translateX(${(cell.fill - 1) * 100}%)` }}
+              className={cn(
+                "relative h-full w-full origin-left transition-transform motion-reduce:transition-none",
+                writing ? liveMotion : "duration-ui ease-out",
+                writing && live && "progress-sheen",
+                retrying && (cell.tone === "live" || cell.tone === "done")
+                  ? "bg-status-warning"
+                  : CHUNK_FILL[cell.tone],
+              )}
+              // Staggered so parallel connections shimmer independently.
+              style={
+                {
+                  transform: `scaleX(${cell.fill})`,
+                  "--sheen-delay": `${(index % 5) * 0.37}s`,
+                } as CSSProperties
+              }
             />
-          ) : null}
-        </div>
-      ))}
+            {writing ? (
+              // Write head: where this connection is writing right now. Moved by
+              // transform so progress ticks never relayout the row.
+              <div
+                aria-hidden
+                className={cn(
+                  "absolute inset-0 border-r border-text-primary/80 transition-transform motion-reduce:transition-none",
+                  liveMotion,
+                )}
+                style={{ transform: `translateX(${(cell.fill - 1) * 100}%)` }}
+              />
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1226,7 +1292,9 @@ function RowActions({
             onToggleTransfer(task);
           }}
         >
-          {transferMode === "resume" ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+          <IconSwap swapKey={transferMode}>
+            {transferMode === "resume" ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+          </IconSwap>
         </ActionButton>
       ) : null}
       {showRetry ? (
@@ -1422,16 +1490,18 @@ const InlineRecovery = memo(function InlineRecovery({
   return (
     // Keep the recovery context attached to the row while using a flat divider;
     // the error tint distinguishes it without creating another nested card.
+    // It bleeds to the row's edges (negative margins = the row's padding), so
+    // it reads as the row's own lower band, clipped by the row's corners.
     // Capped at one line (verdict · cause) plus the price of a restart, so a
     // failed row is at most one text line taller than a healthy one; the full
     // wording stays in the title and in the details panel.
     <div
       className={cn(
-        "col-span-full flex flex-wrap items-center gap-x-2 gap-y-1 border-t px-2.5",
+        "col-span-full -mx-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t px-2.5 sm:-mx-3 sm:px-3",
         tone === "danger"
           ? "border-border-danger-subtle bg-status-danger/[0.06]"
           : "border-border-warning-subtle bg-status-warning/[0.06]",
-        compact ? "mt-0.5 py-1" : "mt-1 py-1.5",
+        compact ? "-mb-1 mt-0.5 py-1" : "-mb-2 mt-1 py-1.5 md:-mb-1.5",
       )}
       data-row-action
       data-no-drag

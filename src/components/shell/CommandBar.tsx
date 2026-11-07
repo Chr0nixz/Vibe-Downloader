@@ -112,6 +112,10 @@ export function CommandBar({
   }, [tipEligible, tipDone]);
   const firstRunTip = tipEligible && !tipDone;
 
+  // The titlebar-embedded field is capped narrow; a hint there would eat the
+  // placeholder.
+  const showSearchHint = !embedded && !narrowShell;
+
   const clearSearch = () => {
     committedSearchRef.current = "";
     setSearchInput("");
@@ -122,9 +126,9 @@ export function CommandBar({
     <section
       className={cn(
         "flex min-w-0 items-center",
-        embedded
-          ? "h-full flex-1 gap-1.5 px-1"
-          : "gap-1.5 border-b border-border-subtle bg-surface-base px-2 py-1.5 md:gap-2.5 md:px-3 md:py-2",
+        // No bottom rule: the bar is part of the frame, and the canvas edge
+        // below it does the separating.
+        embedded ? "h-full flex-1 gap-1.5 px-1" : "gap-1.5 bg-surface-frame px-2 py-1.5 md:gap-2.5 md:px-3 md:py-2",
       )}
       aria-label={t("commandBar.toolbarAria")}
     >
@@ -210,10 +214,25 @@ export function CommandBar({
               narrowShell || embedded ? "commandBar.searchPlaceholderShort" : "commandBar.searchPlaceholder",
             )}
             // The clear button's gutter is reserved only while there is text to
-            // clear; an idle field keeps that width for the placeholder.
-            className={cn("h-11 pl-8 md:h-8", searchInput ? "pr-8" : "pr-2")}
+            // clear; an idle field keeps that width for the placeholder, less
+            // the shortcut hint on desktop widths.
+            // A filled well rather than an outlined box: it reads as the
+            // frame's one text field and gains its edge only on hover/focus.
+            className={cn(
+              "peer h-11 rounded-lg border-transparent bg-surface-root/75 pl-8 transition-[background-color,border-color,box-shadow] hover:border-border-subtle focus-visible:bg-surface-root md:h-8",
+              searchInput ? "pr-8" : showSearchHint ? "pr-2 md:pr-16" : "pr-2",
+            )}
             aria-label={t("commandBar.searchAria")}
           />
+          {!searchInput && showSearchHint ? (
+            // Where the field's own shortcut lives; gone once typing starts.
+            <kbd
+              aria-hidden
+              className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded border border-border-subtle bg-surface-base px-1.5 py-0.5 font-mono text-[10px] font-semibold text-text-muted transition-opacity duration-ui peer-focus-visible:opacity-0 md:block"
+            >
+              {formatShortcut("mod+F", platform)}
+            </kbd>
+          ) : null}
           {searchInput ? (
             <Button
               type="button"

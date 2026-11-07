@@ -7,6 +7,7 @@ import type { AttentionDialogRequest } from "@/components/shell/ResolveAttention
 import { ShutdownOverlay } from "@/components/shell/ShutdownOverlay";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { StatusBar } from "@/components/shell/StatusBar";
+import { selectionSuccessor } from "@/components/shell/selection-successor";
 import { isGlobalPasteShortcut, isOverlayKey, isTextInputTarget } from "@/components/shell/shell-keys";
 import { matchesAction } from "@/components/shell/shortcut-registry";
 import { TitleBar } from "@/components/shell/TitleBar";
@@ -36,8 +37,9 @@ import type {
 import { useClipboardLinkPrompt } from "@/hooks/use-clipboard-link-prompt";
 import { useFileDropMonitor } from "@/hooks/use-file-drop-monitor";
 import { useSelectAllMatching } from "@/hooks/use-select-all-matching";
-import { useChromeLayout } from "@/hooks/use-shell-layout";
+import { useChromeLayout, useIsCompactShell } from "@/hooks/use-shell-layout";
 import { useTaskEvents } from "@/hooks/use-task-events";
+import { useWindowActivityAttribute } from "@/hooks/use-window-activity";
 import type { TranslationKey } from "@/i18n";
 import { writeClipboardText } from "@/lib/clipboard-write";
 import { localizedErrorMessage } from "@/lib/errors";
@@ -177,6 +179,24 @@ const OnboardingDialog = lazy(() =>
   })),
 );
 
+// Moves keyboard focus to a task row only when nothing else holds it: the
+// deleted row unmounting drops focus to <body>, and Undo pressed in a toast
+// leaves it on a button that is about to disappear. Focus in a field, a dialog,
+// or anywhere else the user put it stays where it is.
+function focusTaskRowIfFocusLost(taskId: string, { fromToast = false }: { fromToast?: boolean } = {}) {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const active = document.activeElement;
+      const lost =
+        !active ||
+        active === document.body ||
+        active.closest('[id^="task-row-"]') !== null ||
+        (fromToast && active.closest('[role="status"], [role="alert"]') !== null);
+      if (lost) document.getElementById(`task-row-${taskId}`)?.focus();
+    });
+  });
+}
+
 export function AppShell() {
   const { t } = useTranslation();
   const [platform, setPlatform] = useState<Platform>("unknown");
@@ -198,6 +218,7 @@ export function AppShell() {
   const [completionActionRequest, setCompletionActionRequest] = useState<CompletionActionRequestedPayload | null>(null);
   const [closeRequest, setCloseRequest] = useState<CloseRequestPayload | null>(null);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
+  useWindowActivityAttribute();
 
   const selectedId = useTaskUIStore((s) => s.selectedId);
   const taskIds = useTaskDataStore((s) => s.taskIds);
@@ -209,6 +230,29 @@ export function AppShell() {
   // re-render path (task object changes every 250ms progress tick).
   const nav = useTaskUIStore((s) => s.nav);
   const detailOpen = useTaskUIStore((s) => s.detailOpen);
+  // A short settle when the view changes, so switching a filter or a page
+  // reads as arriving somewhere instead of the list silently swapping. Driven
+  // through the Web Animations API: keying the subtree to replay a CSS
+  // animation would remount the list and drop its scroll and virtualizer state.
+  const viewRef = useRef<HTMLDivElement>(null);
+  const previousNavRef = useRef(nav);
+  useEffect(() => {
+    if (previousNavRef.current === nav) return;
+    previousNavRef.current = nav;
+    const view = viewRef.current;
+    if (!view || typeof view.animate !== "function") return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
+    view.animate(
+      [
+        { opacity: 0.4, transform: "translateY(6px)" },
+        { opacity: 1, transform: "none" },
+      ],
+      {
+        duration: 220,
+        easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+      },
+    );
+  }, [nav]);
   const setTaskCursorPage = useTaskDataStore((s) => s.setTaskCursorPage);
   const upsertTask = useTaskDataStore((s) => s.upsertTask);
   const setError = useTaskDataStore((s) => s.setError);
@@ -662,6 +706,32 @@ export function AppShell() {
     [addToast, t],
   );
 
+  // Hiding the selected row used to leave focus on <body> and `selectedId` on
+  // the hidden task, so a second Del did nothing and Mod+O opened the deleted
+  // file's folder. Selection and focus pass to the neighbouring row instead;
+  // the returned callback hands them back on Undo if the user has not moved on.
+  const handOffSelection = useCallback(
+    (removedIds: readonly string[]) => {
+      const ui = useTaskUIStore.getState();
+      const previousId = ui.selectedId;
+      if (!previousId || !removedIds.includes(previousId)) return () => undefined;
+      const successor = selectionSuccessor(
+        useTaskDataStore.getState().taskIds,
+        previousId,
+        new Set(removedIds),
+        new Set(ui.pendingDeleteIds),
+      );
+      selectTask(successor);
+      if (successor) focusTaskRowIfFocusLost(successor);
+      return () => {
+        if (useTaskUIStore.getState().selectedId !== successor) return;
+        selectTask(previousId);
+        focusTaskRowIfFocusLost(previousId, { fromToast: true });
+      };
+    },
+    [selectTask],
+  );
+
   // ── Soft-delete (metadata only) with undo ──
   // Hides the task immediately via pendingDeleteIds and commits the hard delete
   // when the undo toast settles without Undo (timeout, dismiss, or clear). The
@@ -670,6 +740,7 @@ export function AppShell() {
     (task: Task) => {
       const id = task.id;
       if (useTaskUIStore.getState().pendingDeleteIds.includes(id)) return;
+      const restoreSelection = handOffSelection([id]);
       addPendingDelete(id);
       let settled = false;
       const commit = () => {
@@ -697,6 +768,7 @@ export function AppShell() {
         if (settled) return;
         settled = true;
         removePendingDelete(id);
+        restoreSelection();
       };
       addToast({
         tone: "info",
@@ -711,7 +783,7 @@ export function AppShell() {
         },
       });
     },
-    [addPendingDelete, addToast, removePendingDelete, t],
+    [addPendingDelete, addToast, handOffSelection, removePendingDelete, t],
   );
 
   const softDeleteBulk = useCallback(
@@ -721,6 +793,7 @@ export function AppShell() {
       const fresh = selectedTasks.filter((task) => !alreadyPending.has(task.id));
       if (fresh.length === 0) return;
       const freshIds = fresh.map((task) => task.id);
+      const restoreSelection = handOffSelection(freshIds);
       addPendingDeletes(freshIds);
       const label = t("taskList.bulkDelete", { count: fresh.length });
       let settled = false;
@@ -753,6 +826,7 @@ export function AppShell() {
         if (settled) return;
         settled = true;
         for (const id of freshIds) removePendingDelete(id);
+        restoreSelection();
       };
       addToast({
         tone: "info",
@@ -767,7 +841,7 @@ export function AppShell() {
         },
       });
     },
-    [addPendingDeletes, addToast, removePendingDelete, t],
+    [addPendingDeletes, addToast, handOffSelection, removePendingDelete, t],
   );
 
   const bulkDelete = useCallback(
@@ -1255,6 +1329,21 @@ export function AppShell() {
   const chromeLayout = useChromeLayout();
   const mergedChrome = chromeLayout === "merged" && platform !== "linux";
 
+  // Below 1200px the docked details panel becomes a modal drawer. Snapping a
+  // wide window to half the screen used to carry `detailOpen` across and drop
+  // a scrimmed drawer over the list unasked; close it, and give the selected
+  // row focus if the panel that held it is gone.
+  const compactShell = useIsCompactShell();
+  const wasCompactShellRef = useRef(compactShell);
+  useEffect(() => {
+    const becameCompact = compactShell && !wasCompactShellRef.current;
+    wasCompactShellRef.current = compactShell;
+    if (!becameCompact || !useTaskUIStore.getState().detailOpen) return;
+    setDetailOpen(false);
+    const focusId = useTaskUIStore.getState().selectedId;
+    if (focusId) focusTaskRowIfFocusLost(focusId);
+  }, [compactShell, setDetailOpen]);
+
   const applyDroppedFile = useCallback((initialState: NewDownloadInitialState) => {
     setNewDownloadInitialState(initialState);
     setNewDownloadOpen(true);
@@ -1584,42 +1673,50 @@ export function AppShell() {
           lets it retain the available height in every tier. */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
         <Sidebar onNewDownload={openNewDownload} />
+        {/* The content canvas: inset into the frame with a rounded leading
+            edge and its own stroke, which is what separates it from the
+            titlebar, command bar, sidebar and status bar around it. `z-[1]`
+            keeps the stroke above the status bar that follows it in the DOM;
+            `overflow-clip` (not hidden) rounds the pages without making the
+            canvas a programmatic scroll target. */}
         <main
           id="main-content"
           tabIndex={-1}
-          className="order-1 flex min-h-0 min-w-0 flex-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary md:order-2"
+          className="relative z-[1] order-1 flex min-h-0 min-w-0 flex-1 overflow-clip bg-surface-root shadow-[var(--shadow-canvas)] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary md:order-2 md:rounded-l-[var(--radius-canvas)]"
         >
-          <TaskList
-            onToggleTransfer={toggleTransfer}
-            onRetry={retry}
-            onRedownload={redownload}
-            onRecheck={recheck}
-            onFinishLiveRecording={finishRecording}
-            onOpenFile={openFile}
-            onOpenFolder={openFolder}
-            onResolveAttention={resolveAttention}
-            onDelete={softDelete}
-            onDeleteFiles={requestDeleteFiles}
-            onNewDownload={openNewDownload}
-            onBulkPause={bulkPause}
-            onBulkResume={bulkResume}
-            onBulkRetry={bulkRetry}
-            onBulkDelete={bulkDelete}
-            onBulkDeleteFiles={bulkDeleteFiles}
-            onBulkOpenFolder={bulkOpenFolder}
-            onBulkExport={bulkExport}
-            onOpenOnboarding={openOnboarding}
-            onCopyUrl={copyTaskUrl}
-            onCopyLocalPath={copyTaskLocalPath}
-            onShowDetails={showTaskDetails}
-            onPasteAndCreate={pasteAndCreate}
-            onRefresh={refreshTaskList}
-            onSelectAll={selectAllMatching}
-            selectingAll={selectingAll}
-            onReorder={handleReorder}
-            onUpdateQueueOptions={updateQueueOptions}
-            platform={platform}
-          />
+          <div ref={viewRef} className="flex min-h-0 min-w-0 flex-1">
+            <TaskList
+              onToggleTransfer={toggleTransfer}
+              onRetry={retry}
+              onRedownload={redownload}
+              onRecheck={recheck}
+              onFinishLiveRecording={finishRecording}
+              onOpenFile={openFile}
+              onOpenFolder={openFolder}
+              onResolveAttention={resolveAttention}
+              onDelete={softDelete}
+              onDeleteFiles={requestDeleteFiles}
+              onNewDownload={openNewDownload}
+              onBulkPause={bulkPause}
+              onBulkResume={bulkResume}
+              onBulkRetry={bulkRetry}
+              onBulkDelete={bulkDelete}
+              onBulkDeleteFiles={bulkDeleteFiles}
+              onBulkOpenFolder={bulkOpenFolder}
+              onBulkExport={bulkExport}
+              onOpenOnboarding={openOnboarding}
+              onCopyUrl={copyTaskUrl}
+              onCopyLocalPath={copyTaskLocalPath}
+              onShowDetails={showTaskDetails}
+              onPasteAndCreate={pasteAndCreate}
+              onRefresh={refreshTaskList}
+              onSelectAll={selectAllMatching}
+              selectingAll={selectingAll}
+              onReorder={handleReorder}
+              onUpdateQueueOptions={updateQueueOptions}
+              platform={platform}
+            />
+          </div>
           <Suspense fallback={null}>
             <TaskDetails
               taskId={taskSurfaceActive ? selectedId : null}

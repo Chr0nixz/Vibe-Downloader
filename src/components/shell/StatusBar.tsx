@@ -95,7 +95,8 @@ export function StatusBar({
     >
       <footer
         className={cn(
-          "order-2 flex h-8 shrink-0 flex-nowrap items-center justify-between gap-2 border-t border-border-subtle bg-surface-base px-2 text-[11px] sm:px-3 md:order-none md:px-4 md:text-xs",
+          // Frame, not a separate strip: the canvas edge above draws the line.
+          "order-2 flex h-8 shrink-0 flex-nowrap items-center justify-between gap-2 bg-surface-frame px-2 text-[11px] sm:px-3 md:order-none md:px-4 md:text-xs",
           className,
         )}
         role="contentinfo"
@@ -358,6 +359,10 @@ function ActivitySentence({ active, queued, speed }: { active: number; queued: n
   const speedLabel = formatSpeed(speed, { fixed: true });
   return (
     <span className="flex min-w-0 items-center text-text-secondary">
+      {/* Live marker: present only while something transfers, in the energy
+          hue DESIGN.md reserves for active speed. The sentence beside it is
+          the accessible equivalent. */}
+      <span aria-hidden className="live-dot mr-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent-energy max-sm:hidden" />
       <span className="min-w-0 truncate max-sm:sr-only">{withSpeedSlot(before, after, speedLabel)}</span>
       {/* A phone-width bar truncated the sentence right before the speed, the
           one number worth keeping; it shows icon + speed and leaves the

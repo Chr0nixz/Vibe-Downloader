@@ -23,9 +23,10 @@
   --text-on-danger: oklch(0.98 0.004 255);
   --status-success: oklch(0.27 0.14 150);
   /* Amber, not olive: at L 0.3 hue 75 fell outside sRGB and rendered as a dark
-     olive-brown that no longer read as a warning. L 0.52 hue 65 keeps
-     5.3:1 on the root surface and 4.8:1 on the list well. */
-  --status-warning: oklch(0.52 0.13 65);
+     olive-brown that no longer read as a warning. L 0.48 hue 65 keeps 6.3:1 on
+     the root surface and 4.6:1 for a 12px badge on its 10% tint inside a
+     selected row (L 0.52 measured 4.3:1 on the old 15% tint). */
+  --status-warning: oklch(0.48 0.13 65);
   --status-danger: oklch(0.38 0.18 25);
   --shadow-idle-ball: 0 0 8px oklch(0.12 0.01 255 / 0.15);
 
@@ -59,10 +60,28 @@
     var(--accent-peak) 100%
   );
 
+  /* Window frame: titlebar, command bar, sidebar and status bar are one
+     Mica-like layer around an inset content canvas. A trace of the accent
+     tints it, so the chosen theme reads in the chrome without colouring any
+     content. The canvas stroke replaces the dividers the frame used to draw
+     between each of its regions. */
+  --surface-frame: color-mix(in oklch, var(--surface-base) 97%, var(--accent-primary));
+  --canvas-edge: oklch(0.87 0.009 255);
+  --shadow-canvas:
+    0 0 0 1px var(--canvas-edge), 0 1px 2px oklch(0.15 0.01 255 / 0.04), 0 8px 24px -12px oklch(0.15 0.01 255 / 0.12);
+  --radius-canvas: 0.75rem;
+
   --titlebar-height: 2.25rem;
-  --shell-nav-width-compact: 3.75rem;
+  --statusbar-height: 2rem;
+  /* Tablet rail (a window snapped to half a screen): wide enough for an 11px
+     label under each icon, so the ten destinations are read, not recalled. */
+  --shell-nav-width-compact: 5rem;
   --shell-nav-width: 13rem;
   --motion-ui: 220ms;
+  /* Progress fills glide between engine ticks (250 ms–1 s apart) instead of
+     jumping; linear so a steady transfer reads as steady motion. */
+  --motion-progress: 800ms;
+  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
   --traffic-lights-inset: 0px;
 
   /* Accent — blue (default) */
@@ -88,23 +107,14 @@
   --border-danger: oklch(0.38 0.18 25 / 0.3);
   --border-danger-strong: oklch(0.38 0.18 25 / 0.45);
   --border-danger-subtle: oklch(0.38 0.18 25 / 0.25);
-  --border-warning: oklch(0.52 0.13 65 / 0.3);
-  --border-warning-strong: oklch(0.52 0.13 65 / 0.45);
-  --border-warning-subtle: oklch(0.52 0.13 65 / 0.25);
+  --border-warning: oklch(0.48 0.13 65 / 0.3);
+  --border-warning-strong: oklch(0.48 0.13 65 / 0.45);
+  --border-warning-subtle: oklch(0.48 0.13 65 / 0.25);
   --border-success: oklch(0.27 0.14 150 / 0.25);
   --border-success-strong: oklch(0.27 0.14 150 / 0.35);
   --border-accent: color-mix(in oklch, var(--accent-primary) 30%, transparent);
   --border-accent-subtle: color-mix(in oklch, var(--accent-primary) 20%, transparent);
   --border-hover: oklch(0.39 0.01 255 / 0.4);
-
-  /* Task-list row elevation: the list sits in a recessed well and each row is a
-     raised card, giving light mode a real figure/ground split instead of two
-     near-identical greys. Hover is carried by border + shadow rather than a
-     background shift — a white row has nowhere lighter to go. */
-  --surface-list-well: oklch(0.945 0.007 255);
-  --surface-row: oklch(1 0.002 255);
-  --row-border: oklch(0.87 0.009 255);
-  --row-border-hover: oklch(0.72 0.012 255);
 }
 
 /* ── Light accent overrides ── */
@@ -206,6 +216,11 @@
     0 32px 64px -16px oklch(0 0 0 / 0.55);
   --shadow-toast: 0 1px 2px oklch(0 0 0 / 0.35), 0 10px 24px -8px oklch(0 0 0 / 0.55);
 
+  /* The dark canvas sits below the frame, so a lighter stroke (not a drop
+     shadow) is what lifts its edge. */
+  --canvas-edge: oklch(0.27 0.011 255);
+  --shadow-canvas: 0 0 0 1px var(--canvas-edge);
+
   /* Semantic borders — dark mode */
   --border-divider: oklch(0.33 0.012 255 / 0.7);
   --border-panel: oklch(0.33 0.012 255 / 0.75);
@@ -222,12 +237,6 @@
   --border-accent: color-mix(in oklch, var(--accent-primary) 30%, transparent);
   --border-accent-subtle: color-mix(in oklch, var(--accent-primary) 20%, transparent);
   --border-hover: oklch(0.78 0.008 255 / 0.4);
-
-  /* Dark counterparts of the row elevation tokens — same ~5.5% L well/row delta. */
-  --surface-list-well: oklch(0.16 0.007 255);
-  --surface-row: oklch(0.215 0.01 255);
-  --row-border: oklch(0.3 0.012 255);
-  --row-border-hover: oklch(0.45 0.014 255);
 
   /* Accent — blue (default) */
   --accent-primary: oklch(0.76 0.14 235);
@@ -326,8 +335,8 @@
 }
 
 :root[data-accent="amber"]:not(.dark) {
-  --status-warning: oklch(0.5 0.13 48);
-  --border-warning: oklch(0.5 0.13 48 / 0.3);
-  --border-warning-strong: oklch(0.5 0.13 48 / 0.45);
-  --border-warning-subtle: oklch(0.5 0.13 48 / 0.25);
+  --status-warning: oklch(0.47 0.13 48);
+  --border-warning: oklch(0.47 0.13 48 / 0.3);
+  --border-warning-strong: oklch(0.47 0.13 48 / 0.45);
+  --border-warning-subtle: oklch(0.47 0.13 48 / 0.25);
 }

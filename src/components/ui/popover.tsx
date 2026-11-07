@@ -19,9 +19,12 @@ const PopoverContent = React.forwardRef<
       <PopoverPrimitive.Content ref={ref} align={align} sideOffset={sideOffset} asChild {...props}>
         <motion.div
           className={cn(
-            "z-50 min-w-[8rem] rounded-lg bg-surface-popover p-1.5 shadow-md ring-1 ring-border-subtle",
+            // 12px outer radius = 6px item radius + 6px padding, so corners nest.
+            "z-50 min-w-[8rem] rounded-xl bg-surface-popover p-1.5 shadow-md ring-1 ring-border-subtle",
             className,
           )}
+          // Grow out of the trigger rather than the popover's own centre.
+          style={{ transformOrigin: "var(--radix-popover-content-transform-origin)" }}
           initial={reduceMotion ? false : { opacity: 0, y: -4, scale: 0.97 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -2, scale: 0.97 }}

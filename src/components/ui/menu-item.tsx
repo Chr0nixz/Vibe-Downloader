@@ -63,8 +63,8 @@ export function MenuContent({
     <ContextMenu.Content
       alignOffset={alignOffset ?? 4}
       className={cn(
-        "min-w-48 overflow-hidden rounded-lg bg-surface-popover p-1.5 shadow-md ring-1 ring-border-subtle",
-        "data-[state=open]:animate-[fade-in_120ms_ease-out]",
+        // 12px outer radius = 6px item radius + 6px padding, so corners nest.
+        "ui-menu min-w-48 overflow-hidden rounded-xl bg-surface-popover p-1.5 shadow-md ring-1 ring-border-subtle",
         className,
       )}
     >
@@ -100,13 +100,14 @@ export function RegionContextMenu({
   className?: string;
   alignOffset?: number;
 }) {
-  // WCAG 2.1.1: Radix only opens via Shift+F10 / ContextMenu when the trigger
-  // is focusable. Region shells (nav/footer/aside) often are not — promote the
-  // single child into the tab order without adding a layout wrapper.
+  // WCAG 2.1.1: Shift+F10 and the Menu key fire `contextmenu` on the focused
+  // control, and the event bubbles to this trigger, so a region menu opens from
+  // any button inside the region. The region itself stays out of the Tab
+  // order: a focusable <header>/<nav>/<footer> was an unnamed stop that did
+  // nothing on Enter, three times in every Tab cycle.
   const child = Children.only(children);
   const trigger = isValidElement(child)
-    ? cloneElement(child as ReactElement<{ tabIndex?: number; className?: string }>, {
-        tabIndex: (child.props as { tabIndex?: number }).tabIndex ?? 0,
+    ? cloneElement(child as ReactElement<{ className?: string }>, {
         className: cn(
           (child.props as { className?: string }).className,
           "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-primary/50",

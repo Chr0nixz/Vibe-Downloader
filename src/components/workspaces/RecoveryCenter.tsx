@@ -289,20 +289,25 @@ export function RecoveryCenter({
                             {t("recoveryCenter.group.needsInputCount", { count: group.needsInput })}
                           </span>
                         </span>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 px-2 text-xs"
-                          disabled={group.autoRecoverable === 0 || busyConcern !== null}
-                          onClick={() => void runGroupRetry(group)}
-                        >
-                          {busyConcern === group.concern ? (
-                            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
-                          ) : (
-                            <RotateCcw className="h-3 w-3" aria-hidden />
-                          )}
-                          {t("recoveryCenter.group.retryAll")}
-                        </Button>
+                        {/* A group with nothing auto-retryable gets no button: a
+                            disabled "Retry all" gave no reason, while the
+                            "0 auto" count beside it already says why. */}
+                        {group.autoRecoverable > 0 ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            disabled={busyConcern !== null}
+                            onClick={() => void runGroupRetry(group)}
+                          >
+                            {busyConcern === group.concern ? (
+                              <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                            ) : (
+                              <RotateCcw className="h-3 w-3" aria-hidden />
+                            )}
+                            {t("recoveryCenter.group.retryAll")}
+                          </Button>
+                        ) : null}
                       </div>
                       {/* UX-18: list/listitem semantics with container key
                           handling, same as TaskList/QueueCenter/AttentionCenter. */}
@@ -496,10 +501,17 @@ function RecoveryDetail({
                     className="rounded-lg border border-border-divider bg-surface-base/60 px-3 py-2.5"
                   >
                     <div className="flex items-center gap-2">
-                      <span className="min-w-0 flex-1 text-sm font-semibold text-text-primary">
+                      <span
+                        id={`recovery-playbook-${entry.action}`}
+                        className="min-w-0 flex-1 text-sm font-semibold text-text-primary"
+                      >
                         {recoveryActionLabel(task, entry.action, t)}
                       </span>
+                      {/* Every entry's button reads "Run"; naming it with its
+                          action keeps them distinct for a screen reader. */}
                       <Button
+                        id={`recovery-playbook-run-${entry.action}`}
+                        aria-labelledby={`recovery-playbook-run-${entry.action} recovery-playbook-${entry.action}`}
                         variant={entry.action === "restart" ? "danger" : "outline"}
                         size="sm"
                         className="h-7"

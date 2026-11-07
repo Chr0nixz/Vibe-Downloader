@@ -4,8 +4,12 @@ interface ProgressBarProps {
   value: number;
   label: string;
   active?: boolean;
-  /** When false, skip transform transitions during frequent progress updates. */
+  /** When false, skip transform transitions during frequent progress updates.
+   * When true, an active fill glides linearly across the gap between engine
+   * ticks and an idle one settles with the shorter UI ease. */
   smooth?: boolean;
+  /** Bytes are arriving right now: a sheen travels along the fill. */
+  live?: boolean;
   tone?: "primary" | "success" | "warning" | "danger" | "neutral";
   /** Increase height for prominence; "default" keeps the slim row variant and
    * "compact" is a 2px hairline for the dense row preset. */
@@ -51,6 +55,7 @@ export function ProgressBar({
   label,
   active = true,
   smooth = false,
+  live = false,
   tone = "primary",
   size = "default",
   className,
@@ -81,7 +86,12 @@ export function ProgressBar({
         aria-hidden
         className={cn(
           "absolute inset-y-0 left-0 w-full origin-left rounded-full",
-          smooth ? "transition-transform duration-ui ease-out motion-reduce:transition-none" : "transition-none",
+          !smooth
+            ? "transition-none"
+            : active
+              ? "transition-transform duration-[var(--motion-progress)] ease-linear motion-reduce:transition-none"
+              : "transition-transform duration-ui ease-out motion-reduce:transition-none",
+          live && active && "progress-sheen",
           useGradient ? lgGradientFill : active ? toneFill[tone] : toneFill.neutral,
           active && tone !== "neutral" && size === "lg" && !useGradient && toneGlow[tone],
           useGradient && "shadow-[0_0_8px_color-mix(in_oklch,var(--accent-primary)_40%,transparent)]",
