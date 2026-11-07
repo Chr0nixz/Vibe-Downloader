@@ -3,30 +3,33 @@
 # the recurring "LF will be replaced by CRLF" noise and the mojibake incidents
 # in RELEASE.md and download/hls/engine.rs.
 #
-# Existing files are intentionally left alone: adding this file does not
-# rewrite anything. Run `git add --renormalize .` only in a dedicated commit
-# with a clean working tree.
+# Text is stored and checked out as LF on every platform, Windows included.
+# Biome's formatter requires LF, so a CRLF checkout made `pnpm lint` report a
+# format error on all 299 checked files even though the committed blobs were
+# already LF: a red check that said nothing about the code. An existing CRLF
+# working tree is converted by `git rm --cached -r . && git reset --hard`,
+# which rewrites no content because the index was already LF.
 
-* text=auto
+* text=auto eol=lf
 
 # Shell scripts must keep LF even when checked out on Windows, otherwise
 # git-bash, WSL and the Linux CI runners fail with "bad interpreter".
 *.sh text eol=lf
 
-# Source and config: store LF, let git convert on checkout.
-*.rs text
-*.ts text
-*.tsx text
-*.js text
-*.mjs text
-*.json text
-*.css text
-*.html text
-*.md text
-*.toml text
-*.yml text
-*.yaml text
-*.sql text
+# Source and config: store LF, check out LF.
+*.rs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sql text eol=lf
 
 # Binary assets: never convert line endings, never attempt a text diff.
 *.png binary
